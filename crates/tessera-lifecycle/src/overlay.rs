@@ -69,15 +69,26 @@ impl Overlay {
     }
 
     /// Apply one disposition change to `entity`. The three facts are updated independently —
-    /// see this module's doc. `descriptors` (already resolved to `TermId`s) is used only for
+    /// see this module's doc. `terms` (already resolved to `TermId`s) is used only for
     /// `ChangeOp::Predicate`; ignored (should be `None`) for the other three ops.
+    ///
+    /// **`Predicate` always *sets* `evaluate_terms` to `Some(_)`, never `None`** — R5 makes
+    /// `access` optional on `/control/changes`, so a `predicate` change with no descriptors is a
+    /// representable, reachable request; treating it as "leave `evaluate_terms` unset" would be
+    /// fail-open in exactly the dangerous direction: a prior `predicate` that excluded this
+    /// entity (an unsatisfied term set) would be silently undone by a later, descriptor-less
+    /// `predicate`, falling back to the fragment's original verdict and potentially re-exposing
+    /// it. `terms: None` here is therefore folded to `Some(Vec::new())` — a term set that can
+    /// never intersect any `satisfied` set, i.e. the entity stays excluded, matching "sets
+    /// `evaluate_terms`", never "unsets" it (a case the brief never defines and this method
+    /// therefore refuses to invent a permissive answer for).
     pub fn apply(&mut self, entity: EntityId, op: ChangeOp, terms: Option<Vec<TermId>>) {
         let entry = self.entries.entry(entity).or_default();
         match op {
             ChangeOp::Delete => entry.deleted = true,
             ChangeOp::Suppress => entry.suppressed = true,
             ChangeOp::Unsuppress => entry.suppressed = false,
-            ChangeOp::Predicate => entry.evaluate_terms = terms,
+            ChangeOp::Predicate => entry.evaluate_terms = Some(terms.unwrap_or_default()),
         }
     }
 }
@@ -205,6 +216,34 @@ mod tests {
         let entry = overlay.get(e).unwrap();
         assert!(entry.deleted);
         assert_eq!(entry.evaluate_terms, Some(vec![TermId::new(9)]));
+    }
+
+    /// Review finding #1: a `predicate` change with no descriptors (R5's `access` is optional)
+    /// must not silently clear a prior evaluate verdict — that would be fail-open (an entity
+    /// excluded by an earlier unsatisfied predicate re-exposed by a later, descriptor-less one).
+    #[test]
+    fn predicate_with_no_terms_does_not_clear_a_prior_evaluate_verdict() {
+        let mut overlay = Overlay::new();
+        let e = EntityId::new(4);
+
+        // First predicate: an unsatisfied term set (excludes the entity).
+        overlay.apply(e, ChangeOp::Predicate, Some(vec![TermId::new(77)]));
+        assert_eq!(
+            overlay.get(e).unwrap().evaluate_terms,
+            Some(vec![TermId::new(77)])
+        );
+
+        // A later predicate change with no descriptors at all (`terms: None`) must not unset
+        // `evaluate_terms` back to `None` — that would fall back to the fragment's original
+        // verdict, which may have included this entity.
+        overlay.apply(e, ChangeOp::Predicate, None);
+        let entry = overlay.get(e).unwrap();
+        assert_eq!(
+            entry.evaluate_terms,
+            Some(Vec::new()),
+            "a descriptor-less predicate must still set evaluate_terms, to an empty (always \
+             fail-closed) set — never leave it unset"
+        );
     }
 
     #[test]

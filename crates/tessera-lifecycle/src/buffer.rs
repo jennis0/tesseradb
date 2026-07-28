@@ -16,6 +16,19 @@
 //! *auth* side knows about — an in-memory-only *data*-side term id is never handed to a viewer's
 //! credential evaluation), so this is fail-closed, not fail-open: a novel descriptor can buffer
 //! an item, but cannot make it visible, until the next build assigns it a durable term id.
+//!
+//! **Extension ids are allocated from the top of the `u32` range downward** (review finding #2),
+//! never from `dict.len()` upward: a downward-from-`u32::MAX` extension id can never collide with
+//! a *future* dictionary ordinal the way an upward one could. An upward scheme's "unsatisfiable"
+//! property was prose-only and silently broken by growth: extension id `N == dict.len()` at
+//! replay time is exactly the ordinal the *next* `tessera build` would assign to some unrelated,
+//! real descriptor; if the overlay/buffer ever survived a bundle swap without a fresh replay
+//! against the new dictionary (not true in Phase 1's walking skeleton, but not guaranteed by
+//! anything in this module either), a stale extension-tagged entity would silently start
+//! evaluating against whatever real term inherited that ordinal — a viewer legitimately holding
+//! that term would then expose it. Reserving the top of the id space (`R6`'s
+//! `max_distinct_terms` bound is 200,000,000, vanishingly far from `u32::MAX`'s ~4.29 billion)
+//! makes that collision structurally impossible rather than merely unlikely-so-far.
 
 use rustc_hash::FxHashMap;
 
@@ -36,19 +49,33 @@ pub struct DescriptorResolver<'a> {
     next_extension_id: u32,
 }
 
+/// Extension ids count down from here — see this module's doc for why the top of the range,
+/// never `dict.len()` upward. `R6`'s `declared_bounds().max_distinct_terms` (200,000,000) is the
+/// largest a real dictionary is sized for; this leaves a margin of roughly 4.09 billion ids
+/// between the highest extension id ever handed out in a single session and the highest ordinal
+/// a dictionary could plausibly reach, so exhausting it would require an implausible number of
+/// distinct novel descriptors in one session, not merely dictionary growth over time.
+const EXTENSION_ID_START: u32 = u32::MAX;
+
+/// Compile-time guarantee that the extension range starts strictly above R6's declared
+/// `max_distinct_terms` bound (200,000,000) — a real dictionary is never sized to reach anywhere
+/// near this range, so an extension id can never be mistaken for one.
+const _: () = assert!(EXTENSION_ID_START > 200_000_000);
+
 impl<'a> DescriptorResolver<'a> {
     pub fn new(dict: &'a Dict) -> Self {
         DescriptorResolver {
             dict,
             extension: FxHashMap::default(),
-            next_extension_id: dict.len(),
+            next_extension_id: EXTENSION_ID_START,
         }
     }
 
     /// Resolve one descriptor: a dictionary hit returns the durable, bundle-relative `TermId`
-    /// unchanged; a miss is interned into the in-memory extension (assigning the next ordinal
-    /// past the dictionary's own range) and that assignment is reused for any repeat of the same
-    /// descriptor within this resolver's lifetime.
+    /// unchanged; a miss is interned into the in-memory extension (assigning the next id counting
+    /// down from [`EXTENSION_ID_START`] — never colliding with a dictionary ordinal, however much
+    /// the dictionary grows) and that assignment is reused for any repeat of the same descriptor
+    /// within this resolver's lifetime.
     pub fn resolve(&mut self, descriptor: &[u8]) -> TermId {
         if let Some(id) = self.dict.lookup(descriptor) {
             return id;
@@ -57,7 +84,12 @@ impl<'a> DescriptorResolver<'a> {
             return id;
         }
         let id = TermId::new(self.next_extension_id);
-        self.next_extension_id += 1;
+        debug_assert!(
+            self.next_extension_id > self.dict.len(),
+            "descriptor extension id space exhausted down to the dictionary's own range — an \
+             implausible number of distinct novel descriptors in one session"
+        );
+        self.next_extension_id -= 1;
         self.extension.insert(descriptor.to_vec(), id);
         id
     }
@@ -158,11 +190,35 @@ mod tests {
 
         assert_eq!(resolver.resolve(b"1207"), TermId::new(0));
         assert_eq!(resolver.resolve(b"9"), TermId::new(1));
-        // Novel descriptor: extension starts at dict.len() == 2.
-        assert_eq!(resolver.resolve(b"novel"), TermId::new(2));
+        // Novel descriptor: extension counts down from `u32::MAX`, never up from `dict.len()`.
+        assert_eq!(resolver.resolve(b"novel"), TermId::new(u32::MAX));
         // Repeat resolves to the same extension id.
-        assert_eq!(resolver.resolve(b"novel"), TermId::new(2));
-        // A second distinct novel descriptor gets the next ordinal.
-        assert_eq!(resolver.resolve(b"novel-2"), TermId::new(3));
+        assert_eq!(resolver.resolve(b"novel"), TermId::new(u32::MAX));
+        // A second distinct novel descriptor gets the next (one lower) id.
+        assert_eq!(resolver.resolve(b"novel-2"), TermId::new(u32::MAX - 1));
+    }
+
+    /// Review finding #2: extension ids must never be able to collide with a dictionary ordinal,
+    /// however large the dictionary grows — encoded as a property over dictionaries up to R6's
+    /// declared `max_distinct_terms` bound (200,000,000), far below where extension ids start.
+    #[test]
+    fn extension_ids_never_collide_with_a_dictionary_sized_up_to_the_declared_bound() {
+        const MAX_DISTINCT_TERMS: u32 = 200_000_000; // R6 declared_bounds().max_distinct_terms
+
+        // The compile-time assertion next to `EXTENSION_ID_START`'s definition already proves
+        // `EXTENSION_ID_START > MAX_DISTINCT_TERMS` unconditionally; a real dictionary this large
+        // would be expensive to build in a unit test, so exercise the property that actually
+        // depends on runtime behaviour: resolving several novel descriptors against a small real
+        // dictionary never produces an id anywhere near dictionary-ordinal range.
+        let (dict, _temp) = dict_with(&[b"a", b"b", b"c"]);
+        let mut resolver = DescriptorResolver::new(&dict);
+        for (i, descriptor) in [b"x".as_slice(), b"y", b"z"].iter().enumerate() {
+            let id = resolver.resolve(descriptor).raw();
+            assert!(
+                id > MAX_DISTINCT_TERMS,
+                "extension id {id} (descriptor #{i}) collides with the declared-bound dictionary \
+                 ordinal range"
+            );
+        }
     }
 }

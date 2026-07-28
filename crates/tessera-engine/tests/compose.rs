@@ -568,3 +568,77 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     assert!(!mask.contains_row(ENTITY_Y as u32));
     assert!(mask.check_structural_invariants());
 }
+
+/// Review finding #1, end to end: an unsatisfied `predicate` excludes an in-fragment entity; a
+/// later `predicate` change carrying no descriptors (`terms: None`, representable per R5's
+/// optional `access`) must not fall back to the fragment's original (included) verdict.
+#[test]
+fn predicate_with_no_terms_does_not_reopen_a_prior_evaluate_exclusion() {
+    let fx = build_fixture();
+    assert!(fx.fragment_entities.contains(&(EVAL_NARROW as u32)));
+    assert!(fx.base.bitmap().contains(EVAL_NARROW as u32));
+
+    let mut overlay = Overlay::new();
+    overlay.apply(
+        e(EVAL_NARROW),
+        ChangeOp::Predicate,
+        Some(vec![TermId::new(UNSATISFIED_TERM)]),
+    );
+    let buffer = IngestBuffer::new();
+
+    let mask = compose_with(&fx, &overlay, &buffer);
+    assert!(
+        !mask.contains_row(EVAL_NARROW as u32),
+        "first predicate must exclude the entity"
+    );
+
+    // A second, descriptor-less predicate change must not restore visibility.
+    overlay.apply(e(EVAL_NARROW), ChangeOp::Predicate, None);
+    let mask = compose_with(&fx, &overlay, &buffer);
+    assert!(
+        !mask.contains_row(EVAL_NARROW as u32),
+        "a descriptor-less predicate must not re-expose an entity a prior predicate excluded"
+    );
+    assert!(mask.check_structural_invariants());
+}
+
+/// Review finding #2, end to end: a term id from `DescriptorResolver`'s in-memory extension
+/// (top-of-`u32`-range, per the fix in `tessera_lifecycle::buffer`) must never satisfy a
+/// session's `satisfied` set built the ordinary way (from real, small dictionary ordinals) — the
+/// "unsatisfiable until the next build" property is exercised here, not just asserted in prose.
+#[test]
+fn extension_only_term_never_passes_compose() {
+    let fx = build_fixture();
+
+    // A genuinely novel descriptor, resolved against an otherwise-empty dictionary, lands at
+    // `u32::MAX` (top of the extension range) — nowhere near any id in `fx.satisfied`.
+    let dict_dir = TempDir::new().unwrap();
+    let dict_writer = tessera_authz::DictWriter::new(dict_dir.path());
+    let dict_paths = dict_writer.finish().unwrap();
+    let dict = tessera_authz::Dict::load(&dict_paths).unwrap();
+    let mut resolver = tessera_lifecycle::DescriptorResolver::new(&dict);
+    let extension_term = resolver.resolve(b"never-built-yet");
+    assert!(!fx.satisfied.contains(&extension_term));
+
+    // Outside the fragment, so any pass would show up as `plus`.
+    assert!(!fx.fragment_entities.contains(&(EVAL_WIDEN as u32)));
+
+    let mut overlay = Overlay::new();
+    overlay.apply(
+        e(EVAL_WIDEN),
+        ChangeOp::Predicate,
+        Some(vec![extension_term]),
+    );
+    let buffer = IngestBuffer::new();
+
+    let mask = compose_with(&fx, &overlay, &buffer);
+    assert!(
+        !mask.contains_row(EVAL_WIDEN as u32),
+        "an extension-only term must never intersect a session's satisfied set"
+    );
+    assert_eq!(
+        mask.count_range(full_range()),
+        fx.base.bitmap().cardinality()
+    );
+    assert!(mask.check_structural_invariants());
+}
