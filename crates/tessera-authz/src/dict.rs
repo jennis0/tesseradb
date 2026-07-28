@@ -33,6 +33,20 @@ impl DictWriter {
         }
     }
 
+    /// The number of distinct descriptors interned so far — equivalently, the number of records
+    /// `finish` will write, and the next term ID that would be assigned. Callers sizing a
+    /// term-indexed array (the postings writer's `per_term`) must use this rather than
+    /// `max(term_id) + 1` over the items they happen to hold: the two agree only when every
+    /// interned term is still reachable from some item, which is an assumption, not a guarantee.
+    pub fn len(&self) -> u32 {
+        self.next_term_id
+    }
+
+    /// Whether nothing has been interned yet.
+    pub fn is_empty(&self) -> bool {
+        self.next_term_id == 0
+    }
+
     /// Finish writing: persist the dictionary to `terms-0.dict` and return the paths written.
     pub fn finish(self) -> io::Result<Vec<PathBuf>> {
         let dict_path = self.dir.join("terms-0.dict");

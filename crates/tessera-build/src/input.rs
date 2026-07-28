@@ -25,6 +25,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
+use tessera_spatial::Extent;
 
 use crate::error::{BuildError, Result};
 
@@ -36,17 +37,29 @@ pub struct PointRow {
     pub y: f32,
 }
 
+/// The only extent under which the Morton input branch is meaningful: the grid's own
+/// coordinates, `[0, 65536)` on both axes (contracts §2.5 — the grid is 2^16 x 2^16).
+pub const IDENTITY_EXTENT: Extent = Extent {
+    x_min: 0.0,
+    x_max: 65536.0,
+    y_min: 0.0,
+    y_max: 65536.0,
+};
+
 /// Read `points`, keeping rows with `source_id < limit` when `limit` is `Some`.
 ///
 /// Accepted schemas (checked in this order):
-/// 1. `entity_id` + `x` + `y` — coordinates used as given.
+/// 1. `entity_id` + `x` + `y` — coordinates used as given, quantised against `extent`.
 /// 2. `entity_id` + `morton` — the 32-bit Morton code is de-interleaved into its `(x_cell,
-///    y_cell)` grid coordinates and those are returned as the coordinates. Quantising cell
-///    coordinates against the extent `[0, 65536)` reproduces the original code exactly
-///    (`cell(v) = floor(v / 65536 × 65536) = v` for an integer `v`), so a bundle built this way
-///    carries the source corpus's own Morton ranking rather than a re-derived approximation of
-///    it. The caller is responsible for passing that extent.
-pub fn read_points(path: &Path, limit: Option<u64>) -> Result<Vec<PointRow>> {
+///    y_cell)` grid coordinates and those are returned as the coordinates. This reproduces the
+///    source corpus's own Morton codes **exactly** — but only against [`IDENTITY_EXTENT`], where
+///    `cell(v) = floor(v / 65536 × 65536) = v` for an integer `v ≤ 65535`. Under any other
+///    extent the cell indices would be re-quantised as if they were coordinates in that extent's
+///    units, silently collapsing or stretching the grid while `MANIFEST.json` went on declaring
+///    the extent the caller passed — a bundle whose geometry and whose declared quantisation
+///    disagree. So this branch **requires** the identity extent and errors otherwise; a corpus
+///    with real coordinates must ship `x`/`y` and take branch 1.
+pub fn read_points(path: &Path, extent: &Extent, limit: Option<u64>) -> Result<Vec<PointRow>> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
@@ -60,6 +73,18 @@ pub fn read_points(path: &Path, limit: Option<u64>) -> Result<Vec<PointRow>> {
         if schema.column_with_name("x").is_some() && schema.column_with_name("y").is_some() {
             vec!["entity_id", "x", "y"]
         } else if schema.column_with_name("morton").is_some() {
+            if *extent != IDENTITY_EXTENT {
+                return Err(BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "this points file stores Morton codes rather than coordinates, which is \
+                         exact only against the grid's own extent (0,65536,0,65536); \
+                         ({},{},{},{}) was given. Pass the identity extent, or supply a points \
+                         file with 'x' and 'y' columns.",
+                        extent.x_min, extent.x_max, extent.y_min, extent.y_max
+                    ),
+                });
+            }
             vec!["entity_id", "morton"]
         } else {
             return Err(BuildError::Schema {

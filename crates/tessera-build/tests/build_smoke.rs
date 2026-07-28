@@ -76,6 +76,35 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
+/// The Morton code item `e` carries in the `morton`-column fixture — chosen to spread across the
+/// grid, including both clamp corners.
+fn source_morton(e: u64) -> u64 {
+    let cx = ((e * 613) % 65536) as u16;
+    let cy = ((e * 977) % 65536) as u16;
+    tessera_spatial::interleave(cx, cy).raw() as u64
+}
+
+/// A points file in the shape the Phase 0 corpus uses: `entity_id` + `morton`, no coordinates.
+fn write_morton_points(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("morton", DataType::UInt64, false),
+    ]));
+    let ids: Vec<u64> = (0..N_ITEMS).collect();
+    let codes: Vec<u64> = ids.iter().map(|e| source_morton(*e)).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(UInt64Array::from(codes)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
 fn write_pairs(path: &Path) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
@@ -189,15 +218,36 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     );
     assert_eq!(part.manifest.external_id_extents.len(), 1);
 
-    // Every file named by either manifest exists (open_bundle already checked size+sha256 of
-    // the entries; this catches a manifest that simply omits a file it should list).
-    for rel in ["terms/postings.arrow", "terms/pairs.parquet"] {
-        let key = format!("partitions/default/{rel}");
+    // Contracts §2.2/§2.3: `MANIFEST.files` covers every file present at build time;
+    // `SEGMENTS-<n>.files` covers only what was added *since* — which at build is nothing.
+    // open_bundle already checked size+sha256 of each listed entry; this catches a manifest that
+    // simply omits a file it should list, or that puts it in the wrong map.
+    assert!(
+        part.manifest.files.is_empty(),
+        "a batch build adds nothing after MANIFEST.json, so SEGMENTS-0.json's files map must be \
+         empty, got {:?}",
+        part.manifest.files
+    );
+    for rel in [
+        "dictionary/terms-0.dict",
+        "partitions/default/terms/postings.arrow",
+        "partitions/default/terms/pairs.parquet",
+        "partitions/default/entities/external-ids-0.arrow",
+        "partitions/default/slices/s0/permutation.bin",
+        "partitions/default/slices/s0/segments/seg-0/columns.arrow",
+        "partitions/default/slices/s0/segments/seg-0/morton.u64",
+    ] {
         assert!(
-            part.manifest.files.contains_key(&key),
-            "SEGMENTS-0.json must list {key}"
+            bundle.manifest.files.contains_key(rel),
+            "MANIFEST.json must list {rel}, got {:?}",
+            bundle.manifest.files.keys().collect::<Vec<_>>()
         );
     }
+    assert_eq!(
+        bundle.manifest.files.len(),
+        7,
+        "MANIFEST.json must list every build-written file and nothing else"
+    );
 
     let prefix = &report.prefix;
     let pdir = partition_dir(&out, prefix);
@@ -432,6 +482,78 @@ fn build_rejects_an_empty_selection() {
         limit: Some(0),
     })
     .is_err());
+}
+
+/// A points file storing Morton codes is exact only against the grid's own extent. Any other
+/// extent would re-quantise the cell indices as if they were coordinates in that extent's units,
+/// while `MANIFEST.json` went on declaring the caller's extent — geometry and declared
+/// quantisation silently disagreeing. The Morton branch must refuse.
+#[test]
+fn morton_input_requires_the_identity_extent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("points.parquet");
+    let pairs = tmp.path().join("pairs.parquet");
+    write_morton_points(&points);
+    write_pairs(&pairs);
+
+    let args = |extent| BuildArgs {
+        points: points.clone(),
+        pairs: pairs.clone(),
+        out: tmp
+            .path()
+            .join(format!("bundle-{extent:?}").replace(['/', ' '], "_")),
+        extent,
+        slice_id: "s0".to_string(),
+        limit: None,
+    };
+
+    // The caller's own extent, which the x/y branch would happily accept, must be rejected here.
+    let err = build(&args(extent())).expect_err("non-identity extent must be refused");
+    assert!(
+        format!("{err}").contains("0,65536,0,65536"),
+        "the error must name the extent required, got: {err}"
+    );
+    // A near-miss on one bound is still a miss.
+    assert!(build(&args(Extent {
+        x_min: 0.0,
+        x_max: 65536.0,
+        y_min: 0.0,
+        y_max: 65535.0,
+    }))
+    .is_err());
+
+    // The identity extent builds, and the bundle's Morton codes are the source codes verbatim.
+    let identity = Extent {
+        x_min: 0.0,
+        x_max: 65536.0,
+        y_min: 0.0,
+        y_max: 65536.0,
+    };
+    let out = tmp.path().join("bundle-ok");
+    build(&BuildArgs {
+        points,
+        pairs,
+        out: out.clone(),
+        extent: identity,
+        slice_id: "s0".to_string(),
+        limit: None,
+    })
+    .unwrap();
+    let bundle = open_bundle(&out).unwrap();
+    let mut got: Vec<u64> =
+        std::fs::read(out.join("v00000/partitions/default/slices/s0/segments/seg-0/morton.u64"))
+            .unwrap()
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+    got.sort_unstable();
+    let mut want: Vec<u64> = (0..N_ITEMS).map(source_morton).collect();
+    want.sort_unstable();
+    assert_eq!(
+        got, want,
+        "the bundle must reproduce the source Morton codes exactly"
+    );
+    assert_eq!(bundle.manifest.quantisation.x_max, 65536.0);
 }
 
 #[test]

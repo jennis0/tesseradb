@@ -117,11 +117,14 @@ pub fn priority_of(entity_id: EntityId) -> u16 {
 }
 
 /// One item after labelling, before entity-ID assignment.
+///
+/// The item's term set is held only as its `signature` — [`signature_sort_key`]'s sorted,
+/// deduplicated term-ID list. That is both the ordering key and the postings input, so keeping a
+/// second, unsorted copy alongside it would only create a way for the two to disagree.
 struct StagedItem {
     source_id: u64,
     x: f32,
     y: f32,
-    terms: Vec<TermId>,
     signature: Vec<u32>,
 }
 
@@ -155,7 +158,7 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
     }
 
     // ---- 1. read inputs --------------------------------------------------------------
-    let mut points = input::read_points(&args.points, args.limit)?;
+    let mut points = input::read_points(&args.points, &args.extent, args.limit)?;
     if points.is_empty() {
         return Err(BuildError::Invalid(
             "no points selected — a bundle with no items has no expressible entity range".into(),
@@ -201,13 +204,11 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
             over_bound_items += 1;
         }
         let terms: Vec<TermId> = descriptors.iter().map(|d| dict.intern(d)).collect();
-        let signature = signature_sort_key(&terms);
         staged.push(StagedItem {
             source_id: point.source_id,
             x: point.x,
             y: point.y,
-            terms,
-            signature,
+            signature: signature_sort_key(&terms),
         });
     }
     if !pairs_by_source.is_empty() {
@@ -238,13 +239,10 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
         )));
     }
 
-    let term_count = staged
-        .iter()
-        .flat_map(|s| s.terms.iter())
-        .map(|t| t.raw())
-        .max()
-        .map(|m| m as u64 + 1)
-        .unwrap_or(0);
+    // The dictionary is the authority on how many terms exist — `max(term_id) + 1` over the
+    // items would agree only as long as every interned term is still carried by some item, and
+    // a postings file shorter than the dictionary would silently make its tail terms unaskable.
+    let term_count = dict.len() as u64;
 
     // ---- 4/5. postings, pairs, external ids ------------------------------------------
     // Built by walking items in new-entity-ID order, so every per-term list comes out sorted
@@ -254,7 +252,8 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
     let mut pair_count = 0u64;
     for (position, item) in staged.iter().enumerate() {
         let new_id = position as u32;
-        for term in signature_sort_key(&item.terms) {
+        // `signature` is already the sorted, deduplicated term-id list computed at staging.
+        for &term in &item.signature {
             per_term[term as usize].push(new_id);
             pair_count += 1;
         }
@@ -317,6 +316,13 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
     fsync_file(&permutation_path)?;
 
     // ---- 7. manifests ----------------------------------------------------------------
+    // Contracts §2.2 / §2.3 divide the two `files` maps by *when* a file appeared:
+    // `MANIFEST.files` covers every file present at build time, and `SEGMENTS-<n>.files` covers
+    // only what has been added *since* that manifest was written (streamed segments, later
+    // deltas). A batch build produces everything at build time, so every file it writes belongs
+    // in `MANIFEST.files` and `SEGMENTS-0.json`'s map is legitimately empty. (`open_bundle`
+    // accepts a file verified via either map, so both splits load — but the spec's wording is
+    // what the Python oracle and the conformance byte-scanner will be written against.)
     let prefix_dir = args.out.join(PREFIX);
     let mut manifest_files: BTreeMap<String, FileDigest> = BTreeMap::new();
     let mut dict_extents = Vec::new();
@@ -328,8 +334,6 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
             records: dict_records,
         });
     }
-
-    let mut segment_files: BTreeMap<String, FileDigest> = BTreeMap::new();
     for path in [
         &postings_path,
         &pairs_path,
@@ -338,14 +342,10 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
         &segment_dir.join("columns.arrow"),
         &segment_dir.join("morton.u64"),
     ] {
-        segment_files.insert(relative_to(&prefix_dir, path)?, digest_file(path)?);
+        manifest_files.insert(relative_to(&prefix_dir, path)?, digest_file(path)?);
     }
 
-    let bundle_bytes: u64 = manifest_files
-        .values()
-        .chain(segment_files.values())
-        .map(|f| f.size)
-        .sum();
+    let bundle_bytes: u64 = manifest_files.values().map(|f| f.size).sum();
 
     let segments = SegmentsManifest {
         segments_version: 0,
@@ -365,7 +365,8 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
         external_id_extents: vec![relative_to(&prefix_dir, &external_ids_path)?],
         tombstones: Vec::new(),
         deny: Vec::new(),
-        files: segment_files,
+        // Nothing has been added since MANIFEST.json — see the note above.
+        files: BTreeMap::new(),
     };
     let segments_path = partition_dir.join("SEGMENTS-0.json");
     write_json(&segments_path, &segments)?;

@@ -118,12 +118,12 @@ fn tiler_and_segment_writers_round_trip() {
         .unwrap();
     assert_eq!(priority_col.value(0), items[0].priority);
 
-    for i in 0..items.len() {
-        assert_eq!(entity_id_col.value(i), items[i].entity_id.raw());
-        assert_eq!(x_col.value(i), items[i].x);
-        assert_eq!(y_col.value(i), items[i].y);
-        assert_eq!(node_id_col.value(i), items[i].node_id);
-        assert_eq!(priority_col.value(i), items[i].priority);
+    for (i, item) in items.iter().enumerate() {
+        assert_eq!(entity_id_col.value(i), item.entity_id.raw());
+        assert_eq!(x_col.value(i), item.x);
+        assert_eq!(y_col.value(i), item.y);
+        assert_eq!(node_id_col.value(i), item.node_id);
+        assert_eq!(priority_col.value(i), item.priority);
     }
 
     // (c) permutation.bin: header, then perm[entity_id[i]] == i for every row, and a
