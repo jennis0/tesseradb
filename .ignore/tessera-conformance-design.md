@@ -1,0 +1,94 @@
+# Tessera — Conformance Suite Design
+
+**Status:** Draft r3 — r2 verified finding-by-finding (ready-with-minor-fixes); residual gaps closed here
+**Owns:** the design of `conformance/` and `reference/` — harness architecture, oracle interfaces, fixtures, the invariant matrix's concrete test forms, the interleaving machinery, and what "pass" means. The plan (§10.1) is blunt that the suite is the deliverable; this document exists so it is designed, not accreted. r1's review found its two central mechanisms unimplementable as specified; r2's forms are the corrected ones.
+
+**Two principles.** *Test the served surface*: spawn the real binary, build real bundles, speak the real API; internal access only where interleaving control requires it, behind a `conformance` feature CI proves absent from release builds. *Invent no framework*: cargo test/proptest/trybuild + pytest/hypothesis; the bespoke machinery is the pause-point-and-command harness (§5) and the byte-scanner (§4.3), each reviewable by reading.
+
+**One build caveat, stated rather than fudged:** wire-shape and byte-scan tests run against a **feature-free build**; interleaving tests run against the `conformance` build. The differential families run against both nightly. The two-binary split is a documented limitation, not an accident.
+
+---
+
+## 1. Components
+
+```
+reference/            the oracle: brute-force Python implementing the DEFINITIONS
+conformance/
+  fixtures/           deterministic corpus/policy/query generators + the control journal
+  differential/       engine vs oracle over generated cases
+  invariants/         the §10.2 matrix, one module per invariant
+  lifecycle/          interleaving + crash tests
+  oracles/            CI-only: accumulo-access (JVM), DuckDB — never shipped
+  compile-fail/       trybuild: I4 and I8 as compile errors
+```
+
+**The oracle implements definitions, not algorithms** (per-entity visibility walks, literal subset tests, sort-and-take-k; no bitmaps, no caching). **Its inputs are two, and the distinction is load-bearing:** the bundle (read only through the contracts spec — every differential run doubles as a contract check) for build-time state; and the **fixture-owned journal of acked control operations** for runtime state, because predicate changes and unflushed entities live in the overlay/WAL, which is out of contract and invisible in any bundle file. A 500'd control call is *not* journalled as applied. **Barriers cover the asynchronous operations only.** Overlay changes need none: the 200 follows the generation swap (lifecycle §4), so the caller's next query observes its own change by the ack contract. Flush and compaction are `202`-async, and there the fixture polls `/control/status` until the per-partition `segments_version`/`watermark` reflect the operation — fields the contract already exposes — before querying. "Bundle-only" is claimed for build-time families exactly, and for nothing else.
+
+## 2. Fixtures
+
+Deterministic from seeds in test names. Small by policy — probes cover scale; conformance covers *shape* at 10³–10⁵ items where failures are hand-inspectable.
+
+**Adversarial mask catalogue:** empty; single item; ~0.01% coverage; 100%; straddling the ~5% crossover; **container-boundary masks, achieved by deliberately sparse entity allocation** (`/control/allocate-ids` gaps spread IDs across 2¹⁶ boundaries at fixture scale — stated because at 10⁴ dense IDs no mask straddles anything); all-in-one-tile; watermark-straddling; overlay-heavy; post-deletion states at every ledger stage.
+
+**Join-key scalars.** Every fixture item carries a unique planted declared scalar (`fx_key`). This is the legitimate handle-resolution mechanism: the points batch serves it, so the harness joins handle→item without any reverse map, extra endpoint, or external ID on the viewer plane. (r1's "test-only reverse map" contradicted the byte-scan; this replaces it.)
+
+**Canary items** (I2) with allocation rules that guarantee zero *legitimate* influence: canary entity IDs allocated after all real IDs (no displacement of hash-derived priorities), coordinates at the Morton-maximal corner (sort last; no rank shifts), canary terms interned last (no term-ID displacement), and **canaries belong to no cluster node and no generating set** — a canary in a generating set makes a label *legitimately* withheld in the canary state (containment fails), and one in a node perturbs build-time geometry; either would make the comparator flag fixture perturbation as disclosure. Without these rules the canary test measures fixture perturbation, not disclosure.
+
+## 3. The differential harness
+
+Engine vs oracle, five families (viewport, region, labels, drill-down, authorise-effective-visibility), **exact equality** — no floating-point exists in the counting path. Selections compare as sets of `fx_key`s; ties are broken by entity ID in both implementations by definition. Property-based generation with shrinking; overlay mutations drive the I1 differential across randomised acked-journal states.
+
+## 4. The invariant matrix, concretely
+
+**4.1 Compile-time (I4, I8).** trybuild compile-fail: EntityId↔RowId conversion attempts and generating-set mutation must fail to compile.
+
+**4.2 Canary aggregates (I2), with a canonicalisation procedure.** Two fixture states differing only in canaries; **logically identical query streams** — request parameters that carry handles (drill-down, label filters) are resolved per state via `fx_key` and label text, since handle bytes cannot match across sessions; compare **canonicalised** responses: strip `x-tessera-pin` and transport artifacts; rewrite each item handle to its `fx_key`; rewrite each `node_handle` to the **fixture-unique planted label text served in the same row** (nodes are not items and carry no `fx_key` — their label text is the join key); **sort rows by their canonical key** before comparison (batch emission order under a parallel gather is not contract, and a flaking byte-compare gets "fixed" by weakening); then byte-compare — **explicitly including the points batches (the per-user sample) and the labels batches (the ladder output)**, alongside tile counts, density, region breakdowns, frontier depth and node geometry. r1 compared raw wire bytes, which per-session handle and pin bytes make impossible; canonicalise-then-compare preserves the "no aggregate moves by any amount" strength (plan §10.2) on every surface. The extractive tier gets the same treatment against its fixed reference corpus (C5).
+
+**4.3 The byte-scanner (I10) — with positive controls and a correlation check.** Fixtures plant distinctive-encoding entity IDs; the scanner sweeps all wire payloads and log output from a full feature-free differential run for any encoding of them, plus external IDs on the viewer plane and token bytes outside `Authorization`. **Positive controls (r1 finding 8):** every run includes a harness-injected planted-ID emission (a synthetic log line and a synthetic payload) that the scanner *must* flag — a scanner that cannot fail proves nothing. **Correlation check:** two sessions with identical visibility resolve the same items (via `fx_key`); assert handle values are uncorrelated across sessions (no equality, no fixed offset) — the byte-scan cannot see a weakly-keyed handle scheme; this can.
+
+**4.4 Behavioural rows.** *I3, both halves, black-box:* the containment property across masks and tiers; and the cache half **behaviourally, not by hook**: warm every §8.5 cache tier (servable labels, fragments, `M_sel`) on a token, apply an overlay change deleting a generating-set member, re-query the *same token and pin* immediately, assert the label is withheld — repeated across cache-warming orders. A green run proves no cache above the check outlived the change, which is the plan's demand without enumerating internals. *I6:* plugin sandbox denied all capabilities; a module requesting any import fails instantiation. *I7:* sampler differential across the catalogue + cross-zoom nesting. *I9:* allocator fuzz incl. crash-replay and router-journal divergence. *I11:* drained pins return `410` everywhere; the "row-space artifact across a compaction" clause restated in its drivable form — hold a pin, drive compaction and retirement via §5, assert `410` and never wrong rows (no client can present a row-space artifact; the pin *is* the presentable proxy). *I12:* frontier-depth property under filters. *I13:* both directions of the asymmetry. **Canary/comparator positive control:** a third fixture state whose extra items are *visible* to the test principal must produce differing canonicalised responses — proving the comparator can fail.
+
+**4.5 External oracles (I5).** accumulo-access differential (native parser vs JVM); DuckDB semi-join vs engine postings union — two formulations and two implementations. CI-only; dependency-graph check enforced.
+
+## 5. Interleavings, commands, and crashes
+
+**Pause points park a thread holding no lock.** `before_fragment_insert` in particular sits outside the cache's insert critical section and its single-flight guard — a pause inside either would wedge the lifecycle thread's `ledger_state()` and retirement scan, and a compaction force-refresh landing on the same key. This is a rule on the hook implementation, stated because the deadlock is otherwise discovered in CI.
+
+**Pause points** (park a named thread on a channel): `after_wal_fsync` · `before_generation_swap` · `before_deny_retire` · `compaction_snapshot_taken` · `before_manifest_publish` · `before_current_flip` · **`before_fragment_insert`** (request thread — the point r1 lacked; it is where the retirement-floor refusal is exercisable) · **`before_fragment_acquire`** (request thread; drives the §1.1 request-ordering interleaving).
+
+**Commands** (conformance-feature RPCs, distinct from pauses, because a pause can only wait — r1 conflated the two): `evict_fragment(key)` · `ledger_state()` (epoch_counts, retirement_floor, overlay entry states — so retirement is *observed*, not assumed; a deny-retirement test that cannot see retirement passes vacuously) · `fsync_offset()` (the WAL's last-synced position — required by the crash tests below).
+
+**The scripts** (the plan's seven, plus one):
+1. **Restart-replay, two variants** (r1's single script deadlocked — the ack follows the swap, so "kill after ack at `before_generation_swap`" cannot occur): (a) kill −9 after the observed 200, no pause; restart; assert every acked deny survives. (b) pause at `before_generation_swap`, kill; restart; assert replay applies the deny *and* no 200 was ever emitted.
+2. **Deny-retirement window** — delete; hold a pre-deletion fragment via a live token; compact; `ledger_state()` confirms retirement actually occurred; assert invisibility throughout.
+3. **Suppression persistence** — suppress; `evict_fragment` everything and force refresh; compact; `ledger_state()` confirms the entry never retired; assert invisible until unsuppress.
+4. **Epoch regression, two tests** (r2's single script confirmed retirement before the pause *and* completed it during the pause, and in that order the floor refusal can never fire — fragments build from current postings, so post-retirement builds already sit at or above the floor): **(a) rebuild-excludes** — delete → retirement confirmed via `ledger_state()` → `evict_fragment` → pinned request misses the cache → assert the rebuilt fragment excludes the item (no pause needed). **(b) floor refusal** — `evict_fragment` → a request begins its build at epoch *e*, paused at `before_fragment_insert` → delete (tombstone *d* > *e*) → force-refresh so no live fragment predates *d* → retirement raises the floor (confirmed) → release → assert the insertion is **refused**, the builder retries against current postings, and the item is excluded. The paused, not-yet-inserted fragment is correctly absent from `epoch_counts`, so retirement proceeds without it.
+5. **Fold-variant of 4(b)** (lifecycle r3): predicate change → compaction folds at *f* → entry retires → the paused pre-fold build's insertion at epoch < *f* must be refused; the retried build reflects the changed terms.
+6. **Post-snapshot tombstone** — pause at `compaction_snapshot_taken`; delete; resume; assert survival of the deletion through the fold.
+7. **Positional CRC** — corrupt one byte **within [last Flush record, `fsync_offset()`]** (r1's "below the fsync point" could land before the replay start and assert nothing); assert recovery fails closed. Corrupt past `fsync_offset()`; assert clean truncation.
+8. **Request ordering (lifecycle §1.1)** — pause a request at `before_fragment_acquire`; evict, retire, swap; release; assert the request's own generation still governs and the response is correct — the eviction-while-held window driven explicitly, as the lifecycle design promises.
+
+**Crash realism (r1's sharpest finding):** SIGKILL loses nothing — the page cache survives process death — so kill-based tests alone verify replay logic, not durability *ordering*; an engine that acked before fsync would pass them all. The falsifying variant: after the kill, **truncate the WAL to `fsync_offset()`** before restart — simulating lost unsynced writes — and assert no *acked* operation is missing. Environment: because power-loss is simulated by truncation rather than depended on, CI may run on any filesystem including tmpfs; that reasoning is recorded here so the first flake doesn't relitigate it.
+
+## 6. What pass means, and where
+
+**Every PR:** compile-fail rows, matrix at one seed batch, the eight scripts (conformance build), and the byte-scan with positive controls (feature-free build — the parenthetical binds to the byte-scan only). **Nightly:** full catalogue × rotating seeds on both builds; time-boxed fuzzing (wire decoder, manifest parser, plugin boundary); external oracles. **Release gate:** all green on the release commit + dependency-graph assertions (no JVM, no DuckDB, no `conformance` feature) + criterion budgets.
+
+A differential failure is a defect until proven fixture bug. The oracle changes only alongside a design/contracts revision, under review. **C4 (timing)** is measured nightly (per-query distributions split by mask sparsity) and published; a threshold waits for its Appendix C owner.
+
+## 7. Decisions
+
+1. Black-box first; hooks are pause points + a three-command introspection RPC, feature-gated; **wire tests certify the feature-free build** — the two-binary split is documented, not hidden.
+2. The oracle implements definitions; its inputs are bundle + acked-control journal, behind explicit barriers.
+3. **Canonicalise-then-compare** for I2 — handle→`fx_key` rewriting keeps "no aggregate moves" enforceable on the sample and labels, the two surfaces raw byte-comparison would have silently dropped.
+4. `fx_key` join scalars replace any handle reverse map — no extra endpoint, no I10 tension.
+5. Positive controls for both pass-only tests: the scanner must catch a planted emission; the comparator must flag a visible-items state.
+6. Pause points + commands + **truncate-to-fsync-offset** over a simulation framework — the truncation variant is what makes ack ordering falsifiable.
+7. Exact equality; ties broken identically by definition.
+8. The oracle is the second implementation of record, versioned with the design corpus.
+
+## Appendix R — Review record
+
+A third-party verification pass on r2 (ready-with-minor-fixes; ten of twelve resolutions confirmed) produced r3's fixes: the epoch-regression script split into its two coherent tests with the order that actually exercises the floor refusal, the pause-outside-locks rule, the labels-batch canonicalisation key (planted label text), logically-identical query streams, sort-before-compare, two further canary allocation clauses (no node, no generating set), the barrier scoped to async operations only (overlay changes need none by the ack ordering), and the §6 build-binding clarification.
+
+r1 was independently reviewed (verdict: needs-rework — architecture right; the two central mechanisms unimplementable as specified). r2 resolved all twelve findings: canonicalisation replaces raw byte-comparison with canary allocation rules stated (finding 1); `fx_key` join replaces the reverse map and the build split is explicit (2); oracle inputs split into bundle + acked journal with barriers (3); restart-replay split into its two coherent variants (4); two request-path pause points, three commands, and the eighth script added — with `ledger_state()` making retirement observable and eviction an explicit command (5); truncate-to-fsync-offset makes durability ordering falsifiable and the environment reasoning is recorded (6); I3's cache half given its behavioural black-box form (7); positive controls added for scanner and comparator (8); I11's second clause restated in drivable form (9); CRC corruption bounded to the live replay range (10); container-boundary masks achieved via sparse allocation (11); the cross-session handle correlation check added (12).
