@@ -2,3 +2,13 @@
 name = "tessera-lifecycle"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+tessera-types = { path = "../tessera-types" }
+postcard = { workspace = true }
+crc32fast = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
