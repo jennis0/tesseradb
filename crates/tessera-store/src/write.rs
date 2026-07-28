@@ -43,6 +43,11 @@ pub fn write_segment(
         ));
     }
 
+    debug_assert!(
+        codes.windows(2).all(|w| w[0] <= w[1]),
+        "write_segment: codes must be non-decreasing (caller must pass sort_batch's output)"
+    );
+
     write_columns_arrow(&dir.join("columns.arrow"), items, scalar_schema)?;
     write_morton_u64(&dir.join("morton.u64"), codes)?;
     Ok(())
@@ -233,7 +238,30 @@ pub fn write_permutation(
                 format!("write_permutation: row index {row} does not fit in u32"),
             )
         })?;
-        slots[entity_id.raw() as usize] = row_u32;
+        // Closes a format ambiguity permanently: a row index equal to the row-absent
+        // sentinel would be indistinguishable on disk from "entity has no row".
+        if row_u32 == PERMUTATION_ABSENT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "write_permutation: row index {row} collides with the row-absent sentinel \
+                     (0xFFFF_FFFF)"
+                ),
+            ));
+        }
+        let slot = entity_id.raw() as usize;
+        if slots[slot] != PERMUTATION_ABSENT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "write_permutation: entity id {} appears at both row {} and row {}",
+                    entity_id.raw(),
+                    slots[slot],
+                    row
+                ),
+            ));
+        }
+        slots[slot] = row_u32;
     }
 
     let mut writer = BufWriter::new(File::create(path)?);

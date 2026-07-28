@@ -231,6 +231,24 @@ fn write_permutation_rejects_entity_id_not_fitting_u32() {
 }
 
 #[test]
+fn write_permutation_rejects_duplicate_entity_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("permutation.bin");
+    // Entity 3 occupies both row 0 and row 2 — must be rejected, not silently overwritten.
+    let entities = vec![EntityId::new(3), EntityId::new(4), EntityId::new(3)];
+    let result = write_permutation(&path, &entities, 10);
+    assert!(
+        result.is_err(),
+        "a duplicate entity id across rows must be rejected"
+    );
+    let message = result.unwrap_err().to_string();
+    assert!(
+        message.contains('3'),
+        "error should name the duplicate entity id, got: {message}"
+    );
+}
+
+#[test]
 fn write_segment_scalars_round_trip() {
     use tessera_spatial::tiler::ScalarValue;
 
@@ -290,11 +308,22 @@ fn write_segment_scalars_round_trip() {
         .downcast_ref::<arrow::array::StringArray>()
         .unwrap();
     for (i, item) in items.iter().enumerate() {
-        if let ScalarValue::U64(v) = &item.scalars[0] {
-            assert_eq!(count_col.value(i), *v);
-        }
-        if let ScalarValue::Utf8(v) = &item.scalars[1] {
-            assert_eq!(label_col.value(i), v.as_str());
-        }
+        let ScalarValue::U64(v) = &item.scalars[0] else {
+            panic!(
+                "expected ScalarValue::U64 at scalars[0] for entity {}, got {:?}",
+                item.entity_id.raw(),
+                item.scalars[0]
+            );
+        };
+        assert_eq!(count_col.value(i), *v);
+
+        let ScalarValue::Utf8(v) = &item.scalars[1] else {
+            panic!(
+                "expected ScalarValue::Utf8 at scalars[1] for entity {}, got {:?}",
+                item.entity_id.raw(),
+                item.scalars[1]
+            );
+        };
+        assert_eq!(label_col.value(i), v.as_str());
     }
 }
