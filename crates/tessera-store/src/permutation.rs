@@ -23,6 +23,7 @@ const HEADER_LEN: usize = 4 + 2 + 2 + 8; // magic, version, reserved, bound
 pub struct Permutation {
     mmap: Mmap,
     bound: u64,
+    bound_usize: usize,
     path: PathBuf,
 }
 
@@ -68,8 +69,14 @@ impl Permutation {
             });
         }
         let bound = u64::from_le_bytes(mmap[8..16].try_into().expect("8-byte slice"));
+        // Checked, not `as usize`: on a 32-bit target (or an adversarial 64-bit `bound` value)
+        // a truncating cast would silently shrink `bound` instead of failing closed.
+        let bound_usize = usize::try_from(bound).map_err(|_| StoreError::InvalidPermutation {
+            path: path.to_path_buf(),
+            detail: format!("bound {bound} does not fit in usize on this platform"),
+        })?;
 
-        let expected_len = (bound as usize)
+        let expected_len = bound_usize
             .checked_mul(4)
             .and_then(|slots_len| slots_len.checked_add(HEADER_LEN))
             .ok_or_else(|| StoreError::InvalidPermutation {
@@ -89,6 +96,7 @@ impl Permutation {
         Ok(Permutation {
             mmap,
             bound,
+            bound_usize,
             path: path.to_path_buf(),
         })
     }
@@ -100,12 +108,50 @@ impl Permutation {
 
     fn slots(&self) -> &[u32] {
         let bytes = &self.mmap[HEADER_LEN..];
-        debug_assert_eq!(bytes.len(), self.bound as usize * 4);
+        debug_assert_eq!(bytes.len(), self.bound_usize * 4);
         // SAFETY: `bytes` starts at a fixed offset (HEADER_LEN = 16) into a page-aligned mmap
         // base, and 16 is a multiple of 4, so `bytes.as_ptr()` is 4-byte aligned regardless of
         // file content — no adversarial input can misalign this cast. Length is exactly
         // `bound * 4` bytes, checked once at `load`.
-        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u32, self.bound as usize) }
+        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u32, self.bound_usize) }
+    }
+
+    /// Validate that every non-sentinel slot addresses a row within `row_count`, and that no
+    /// two entities claim the same row (a permutation is a bijection onto `[0, row_count)`,
+    /// not merely a function into it). Called once per slice at bundle open, against the row
+    /// count of the single build segment this permutation addresses (R4) — **not** on any
+    /// per-viewport path (this is an `O(bound)` scan, same cost class as [`Self::project`]).
+    /// A corrupt or hand-edited `permutation.bin` that points rows out of range, or that
+    /// aliases two entities onto one row, must fail bundle open rather than let `row_of` or
+    /// `project` later hand out a `RowId` that indexes `columns.arrow` out of bounds (I4/I11).
+    pub fn validate_rows(&self, row_count: u32) -> Result<()> {
+        let row_count_usize = row_count as usize;
+        let mut seen = vec![false; row_count_usize];
+        for (entity, &slot) in self.slots().iter().enumerate() {
+            if slot == ROW_ABSENT {
+                continue;
+            }
+            if slot >= row_count {
+                return Err(StoreError::InvalidPermutation {
+                    path: self.path.clone(),
+                    detail: format!(
+                        "entity {entity} maps to row {slot}, out of bound for row_count \
+                         {row_count}"
+                    ),
+                });
+            }
+            let idx = slot as usize;
+            if seen[idx] {
+                return Err(StoreError::InvalidPermutation {
+                    path: self.path.clone(),
+                    detail: format!(
+                        "row {slot} is claimed by more than one entity (not a bijection)"
+                    ),
+                });
+            }
+            seen[idx] = true;
+        }
+        Ok(())
     }
 
     /// Row ID currently occupied by `e` in this segment, or `None` if `e` is out of bound or

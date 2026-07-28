@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
@@ -114,16 +114,27 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
 
     let mut partitions = HashMap::with_capacity(manifest.partitions.len());
     for partition_desc in &manifest.partitions {
+        sanitize_component("partition phash", &partition_desc.phash)?;
         let partition_dir = prefix_dir.join("partitions").join(&partition_desc.phash);
         let segments_manifest = load_verifying_segments_manifest(&prefix_dir, &partition_dir)?;
 
         let mut slices: HashMap<String, SliceData> = HashMap::new();
         for seg_desc in &segments_manifest.segments {
+            sanitize_component("slice id", &seg_desc.slice)?;
+            sanitize_component("segment id", &seg_desc.seg_id)?;
+
             let slice_dir = partition_dir.join("slices").join(&seg_desc.slice);
+            let is_new_slice = !slices.contains_key(&seg_desc.slice);
             let slice_entry = match slices.get_mut(&seg_desc.slice) {
                 Some(entry) => entry,
                 None => {
-                    let permutation = Permutation::load(&slice_dir.join("permutation.bin"))?;
+                    let perm_path = slice_dir.join("permutation.bin");
+                    let perm_rel = format!(
+                        "partitions/{}/slices/{}/permutation.bin",
+                        partition_desc.phash, seg_desc.slice
+                    );
+                    ensure_verified(&perm_rel, &segments_manifest, &manifest.files, &perm_path)?;
+                    let permutation = Permutation::load(&perm_path)?;
                     slices.insert(
                         seg_desc.slice.clone(),
                         SliceData {
@@ -136,8 +147,31 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
             };
 
             let seg_dir = slice_dir.join("segments").join(&seg_desc.seg_id);
-            let morton = MortonSlice::load(&seg_dir.join("morton.u64"))?;
-            let columns = ColumnsRef::load(&seg_dir.join("columns.arrow"))?;
+            let morton_path = seg_dir.join("morton.u64");
+            let columns_path = seg_dir.join("columns.arrow");
+            let morton_rel = format!(
+                "partitions/{}/slices/{}/segments/{}/morton.u64",
+                partition_desc.phash, seg_desc.slice, seg_desc.seg_id
+            );
+            let columns_rel = format!(
+                "partitions/{}/slices/{}/segments/{}/columns.arrow",
+                partition_desc.phash, seg_desc.slice, seg_desc.seg_id
+            );
+            ensure_verified(
+                &morton_rel,
+                &segments_manifest,
+                &manifest.files,
+                &morton_path,
+            )?;
+            ensure_verified(
+                &columns_rel,
+                &segments_manifest,
+                &manifest.files,
+                &columns_path,
+            )?;
+
+            let morton = MortonSlice::load(&morton_path)?;
+            let columns = ColumnsRef::load(&columns_path)?;
 
             if morton.len() as u32 != seg_desc.row_count
                 || columns.row_count() != seg_desc.row_count
@@ -153,6 +187,14 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
                         columns.row_count()
                     ),
                 });
+            }
+
+            // `permutation.bin` addresses this slice's single build segment (R4); validate its
+            // row bound against that segment's `row_count` the first time we see it (I11/I4 —
+            // a corrupt permutation must never hand out a `RowId` that indexes `columns.arrow`
+            // out of range). Only meaningful once, against the one segment a Phase-1 slice has.
+            if is_new_slice {
+                slice_entry.permutation.validate_rows(seg_desc.row_count)?;
             }
 
             slice_entry.segments.push(SegmentData {
@@ -178,6 +220,49 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
     })
 }
 
+/// Reject a single opaque path component (`phash`, slice id, seg id) that could otherwise
+/// escape the bundle root once joined: empty, `.`, `..`, containing a path separator, or
+/// absolute. Manifest JSON is trusted for shape (it was digest-verified before we get here)
+/// but never for path safety — a digest only proves the bytes weren't tampered with, not that
+/// the *values inside* are safe to join onto a filesystem path.
+fn sanitize_component(what: &str, value: &str) -> Result<()> {
+    let is_safe = !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !Path::new(value).is_absolute();
+    if is_safe {
+        Ok(())
+    } else {
+        Err(StoreError::UnsafePath {
+            what: what.to_string(),
+            value: value.to_string(),
+        })
+    }
+}
+
+/// Before opening `full_path`, confirm its prefix-relative form `rel` is a verified entry in
+/// either the chosen `SEGMENTS-<n>.json`'s `files` map or `MANIFEST.json`'s. `verify_files` only
+/// checked the entries a manifest *does* list — a manifest with an empty or partial `files` map
+/// verifies vacuously, and without this check the loader would go on to mmap files no digest
+/// ever covered. This is the second half of that check: every file the loader is about to
+/// *read* must have appeared in the set that was actually verified.
+fn ensure_verified(
+    rel: &str,
+    segments_manifest: &SegmentsManifest,
+    manifest_files: &BTreeMap<String, FileDigest>,
+    full_path: &Path,
+) -> Result<()> {
+    if segments_manifest.files.contains_key(rel) || manifest_files.contains_key(rel) {
+        Ok(())
+    } else {
+        Err(StoreError::UnverifiedFile {
+            path: full_path.to_path_buf(),
+        })
+    }
+}
+
 /// Find the highest-numbered `SEGMENTS-<n>.json` under `partition_dir` whose own `files` all
 /// verify by size and SHA-256, stepping down through lower `n` on failure. Errors (fail-closed)
 /// if none verify.
@@ -198,21 +283,36 @@ fn load_verifying_segments_manifest(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| partition_dir.display().to_string());
 
+    let mut last_error: Option<String> = None;
+
     for n in candidates {
         let path = partition_dir.join(format!("SEGMENTS-{n}.json"));
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                last_error = Some(format!("{}: {e}", path.display()));
+                continue;
+            }
         };
-        let Ok(segments_manifest) = serde_json::from_slice::<SegmentsManifest>(&bytes) else {
-            continue;
+        let segments_manifest = match serde_json::from_slice::<SegmentsManifest>(&bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                last_error = Some(format!("{}: invalid JSON: {e}", path.display()));
+                continue;
+            }
         };
-        if verify_files(prefix_dir, &segments_manifest.files).is_ok() {
-            return Ok(segments_manifest);
+        match verify_files(prefix_dir, &segments_manifest.files) {
+            Ok(()) => return Ok(segments_manifest),
+            Err(e) => {
+                last_error = Some(e.to_string());
+                continue;
+            }
         }
     }
 
     Err(StoreError::NoVerifyingSegmentsManifest {
         partition: partition_label,
+        last_error,
     })
 }
 
@@ -247,11 +347,50 @@ fn list_segments_manifests(partition_dir: &Path) -> Result<Vec<u64>> {
     Ok(found)
 }
 
+/// Join a manifest-supplied, forward-slash `files`-map key onto `base` one component at a
+/// time, rejecting anything that could escape `base`: a leading `/` (absolute), a backslash
+/// (not R1's convention and a Windows path-separator ambiguity), or any `.`/`..`/empty
+/// component. `Path::join` on an absolute-looking argument silently *replaces* the base
+/// instead of erroring, and a naive `.replace('/', separator)` would happily turn
+/// `"../../etc/passwd"` into a working traversal — this walks the split path so no single
+/// string ever reaches `PathBuf::join` unchecked.
+fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
+    if rel.is_empty() || rel.starts_with('/') || rel.contains('\\') {
+        return Err(StoreError::UnsafePath {
+            what: "files map path".to_string(),
+            value: rel.to_string(),
+        });
+    }
+    let mut path = base.to_path_buf();
+    for component in rel.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(StoreError::UnsafePath {
+                what: "files map path component".to_string(),
+                value: rel.to_string(),
+            });
+        }
+        path.push(component);
+    }
+    Ok(path)
+}
+
 /// Verify every entry of `files` (path relative to `base`, forward slashes per R1) by exact
 /// size and SHA-256 hex digest. Any missing, mis-sized or mismatched file is a hard error.
+///
+/// **TOCTOU note:** this reads each file's bytes once, here, to check size+digest; the loader
+/// (`Permutation::load`, `MortonSlice::load`, `ColumnsRef::load`) then separately mmaps the
+/// same path. These two accesses are not atomic. That gap is accepted, not overlooked: every
+/// file a manifest names is contractually immutable once published (contracts §2.1 — "every
+/// other file is immutable; the prefix grows only by whole new files named in a newer
+/// side-manifest"), so a well-behaved bundle publisher never mutates a file after naming it in
+/// a digest-verified manifest. A concurrent adversarial rewrite between these two reads is the
+/// same class of hazard as any other mmap-of-a-file-another-process-can-touch situation in this
+/// codebase (see `tessera-authz`'s postings reader) — it is an operational/deployment concern
+/// (read-only bundle storage, no writer with access to a serving replica's files), not one this
+/// module's checks can close from inside a single process.
 fn verify_files(base: &Path, files: &BTreeMap<String, FileDigest>) -> Result<()> {
     for (rel_path, digest) in files {
-        let path = base.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let path = safe_join(base, rel_path)?;
         let bytes = std::fs::read(&path).map_err(|source| StoreError::Io {
             path: path.clone(),
             source,
@@ -317,7 +456,17 @@ impl MortonSlice {
                 ),
             });
         }
-        Ok(MortonSlice { mmap })
+        let slice = MortonSlice { mmap };
+        // `tile_ranges`'s binary search is only sound over an ascending array (contracts
+        // §2.5/§2.6: "Morton order"); a hand-corrupted or wrongly-built `morton.u64` that isn't
+        // sorted would make `partition_point` silently return a wrong (not merely imprecise)
+        // range instead of erroring — checked once here, fail-closed, rather than trusted.
+        if !slice.u64().windows(2).all(|w| w[0] <= w[1]) {
+            return Err(StoreError::MalformedBundle {
+                detail: format!("{}: codes are not sorted ascending", path.display()),
+            });
+        }
+        Ok(slice)
     }
 
     /// The number of codes (rows) in this segment.
@@ -499,8 +648,20 @@ fn validate_schema(batch: &RecordBatch, path: &Path) -> Result<()> {
                 ),
             });
         }
+        reject_nulls(batch, idx, field.name(), field.is_nullable(), path)?;
     }
-    for field in schema.fields().iter().skip(FIXED_COLUMNS.len()) {
+    let fixed_names: std::collections::HashSet<&str> =
+        FIXED_COLUMNS.iter().map(|(name, _)| *name).collect();
+    for (idx, field) in schema.fields().iter().enumerate().skip(FIXED_COLUMNS.len()) {
+        if fixed_names.contains(field.name().as_str()) {
+            return Err(StoreError::InvalidColumns {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "declared scalar '{}' shadows a fixed column name",
+                    field.name()
+                ),
+            });
+        }
         if !matches!(
             field.data_type(),
             DataType::UInt64 | DataType::Float32 | DataType::Utf8
@@ -514,6 +675,37 @@ fn validate_schema(batch: &RecordBatch, path: &Path) -> Result<()> {
                 ),
             });
         }
+        reject_nulls(batch, idx, field.name(), field.is_nullable(), path)?;
+    }
+    Ok(())
+}
+
+/// Reject a column that either declares itself nullable in the schema, or (belt and braces)
+/// actually carries a null in its data — every column in `columns.arrow` is contractually
+/// non-nullable (R4's field table has no "nullable" column; accessors here hand back flat
+/// `&[T]` slices with no validity bitmap, so a null would silently read as a garbage/zero
+/// value rather than surface as an error anywhere else).
+fn reject_nulls(
+    batch: &RecordBatch,
+    idx: usize,
+    name: &str,
+    is_nullable: bool,
+    path: &Path,
+) -> Result<()> {
+    if is_nullable {
+        return Err(StoreError::InvalidColumns {
+            path: path.to_path_buf(),
+            detail: format!("column '{name}' is declared nullable; all columns must be non-null"),
+        });
+    }
+    if batch.column(idx).null_count() != 0 {
+        return Err(StoreError::InvalidColumns {
+            path: path.to_path_buf(),
+            detail: format!(
+                "column '{name}' contains {} null(s)",
+                batch.column(idx).null_count()
+            ),
+        });
     }
     Ok(())
 }
@@ -610,13 +802,20 @@ fn reject_if_compressed(path: &Path, data: &Buffer, meta_len: usize) -> Result<(
     };
     let message = root_as_message(stripped)
         .map_err(|e| invalid_columns(path, &format!("invalid message metadata: {e}")))?;
-    if let Some(record_batch) = message.header_as_record_batch() {
-        if record_batch.compression().is_some() {
-            return Err(invalid_columns(
-                path,
-                "compressed record batches are not supported (uncompressed buffers only, R4)",
-            ));
-        }
+    let record_batch = message.header_as_record_batch().ok_or_else(|| {
+        invalid_columns(
+            path,
+            &format!(
+                "expected a RecordBatch message, found header type {:?}",
+                message.header_type()
+            ),
+        )
+    })?;
+    if record_batch.compression().is_some() {
+        return Err(invalid_columns(
+            path,
+            "compressed record batches are not supported (uncompressed buffers only, R4)",
+        ));
     }
     Ok(())
 }

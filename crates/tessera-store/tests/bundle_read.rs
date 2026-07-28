@@ -283,6 +283,20 @@ fn tile_ranges_agrees_with_linear_scan_of_morton_array() {
     }
 }
 
+/// Read `partitions/default/SEGMENTS-0.json` under `root`'s bundle prefix, apply `edit` to its
+/// parsed JSON, and rewrite it — the standard way these tests attack the manifest layer without
+/// touching the real segment files or breaking the `MANIFEST.json` digest chain (SEGMENTS
+/// manifests carry no digest of their own; only the `files` entries *inside* them are
+/// verified).
+fn edit_segments_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = root.join("v00000/partitions/default/SEGMENTS-0.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read SEGMENTS-0.json"))
+            .expect("parse SEGMENTS-0.json");
+    edit(&mut value);
+    fs::write(&path, serde_json::to_vec_pretty(&value).expect("serialise")).expect("rewrite");
+}
+
 #[test]
 fn open_bundle_fails_closed_on_a_corrupted_columns_arrow_byte() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -299,14 +313,122 @@ fn open_bundle_fails_closed_on_a_corrupted_columns_arrow_byte() {
     fs::write(&columns_path, &bytes).expect("rewrite corrupted columns.arrow");
 
     let err = open_bundle(dir.path()).expect_err("corrupted columns.arrow must fail open_bundle");
+    // With only one SEGMENTS-<n>.json candidate (n=0), the outer error is always
+    // `NoVerifyingSegmentsManifest` — but it must carry the *specific* reason the candidate
+    // failed, not silently swallow it (the bug this replaces: `FileVerificationFailed` was
+    // previously unreachable from `open_bundle`, since the step-down loop discarded every
+    // per-candidate error).
     match err {
-        StoreError::FileVerificationFailed { path, .. } => {
-            assert_eq!(path, columns_path);
+        StoreError::NoVerifyingSegmentsManifest {
+            last_error: Some(reason),
+            ..
+        } => {
+            assert!(
+                reason.contains("columns.arrow"),
+                "reason should name columns.arrow, got: {reason}"
+            );
+            assert!(
+                reason.to_ascii_lowercase().contains("sha-256")
+                    || reason.to_ascii_lowercase().contains("digest"),
+                "reason should describe a digest mismatch, got: {reason}"
+            );
         }
-        StoreError::NoVerifyingSegmentsManifest { .. } => {
-            // Also acceptable: stepping down through candidates and finding none verify is the
-            // same fail-closed outcome the read protocol calls for.
+        other => panic!(
+            "expected NoVerifyingSegmentsManifest with a digest-mismatch reason, got: {other}"
+        ),
+    }
+}
+
+#[test]
+fn open_bundle_rejects_a_segments_manifest_that_omits_columns_arrow_from_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 40);
+
+    // The segment files on disk are all still byte-for-byte correct — only the SEGMENTS-0.json
+    // `files` map is edited to drop the `columns.arrow` entry. `verify_files` alone would treat
+    // this SEGMENTS manifest as fully verifying (there's nothing left in `files` that doesn't
+    // check out) — that vacuous-verification gap is exactly what `ensure_verified` at the
+    // loader call sites must close.
+    edit_segments_manifest(dir.path(), |value| {
+        value["files"]
+            .as_object_mut()
+            .expect("files is an object")
+            .remove("partitions/default/slices/main/segments/seg0/columns.arrow");
+    });
+
+    let err = open_bundle(dir.path())
+        .expect_err("a SEGMENTS manifest omitting columns.arrow from files must be rejected");
+    match err {
+        StoreError::UnverifiedFile { path } => {
+            assert!(
+                path.ends_with("columns.arrow"),
+                "expected the unverified path to be columns.arrow, got: {}",
+                path.display()
+            );
         }
-        other => panic!("expected a digest-verification failure, got: {other}"),
+        other => panic!("expected UnverifiedFile, got: {other}"),
+    }
+}
+
+#[test]
+fn open_bundle_rejects_a_permutation_slot_pointing_past_row_count() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 60);
+
+    let perm_path = dir
+        .path()
+        .join("v00000/partitions/default/slices/main/permutation.bin");
+    let mut bytes = fs::read(&perm_path).expect("read permutation.bin");
+
+    // Header is 16 bytes (magic + version + reserved + bound); slot 0 starts right after.
+    // Overwrite it with a row index far past this segment's row_count (60) — still a
+    // structurally valid `u32`, not the sentinel, just out of range.
+    let corrupt_slot = 9_999u32.to_le_bytes();
+    bytes[16..20].copy_from_slice(&corrupt_slot);
+    fs::write(&perm_path, &bytes).expect("rewrite corrupted permutation.bin");
+
+    // Recompute the digest so this reaches content validation (`Permutation::validate_rows`)
+    // rather than being caught earlier by the plain size+SHA-256 check — the two are different
+    // defences (one catches bit-flips, the other catches internally-consistent-but-wrong data).
+    let corrected = file_digest(&perm_path);
+    edit_segments_manifest(dir.path(), |value| {
+        let entry = &mut value["files"]["partitions/default/slices/main/permutation.bin"];
+        entry["size"] = serde_json::json!(corrected.size);
+        entry["sha256"] = serde_json::json!(corrected.sha256);
+    });
+
+    let err =
+        open_bundle(dir.path()).expect_err("a permutation slot past row_count must be rejected");
+    match err {
+        StoreError::InvalidPermutation { detail, .. } => {
+            assert!(
+                detail.contains("out of bound"),
+                "expected an out-of-bound detail, got: {detail}"
+            );
+        }
+        other => panic!("expected InvalidPermutation, got: {other}"),
+    }
+}
+
+#[test]
+fn open_bundle_rejects_a_path_traversing_segment_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 20);
+
+    // The real `seg0` files are untouched; only the SEGMENTS-0.json entry that names them is
+    // edited to claim a traversal-shaped seg_id. This must be rejected before any path is ever
+    // joined onto the bundle root and opened — a digest-verified manifest is safe from content
+    // tampering, not from carrying unsafe *values*.
+    edit_segments_manifest(dir.path(), |value| {
+        value["segments"][0]["seg_id"] = serde_json::json!("../../evil");
+    });
+
+    let err =
+        open_bundle(dir.path()).expect_err("a path-traversing seg_id must be rejected before use");
+    match err {
+        StoreError::UnsafePath { value, .. } => {
+            assert_eq!(value, "../../evil");
+        }
+        other => panic!("expected UnsafePath, got: {other}"),
     }
 }

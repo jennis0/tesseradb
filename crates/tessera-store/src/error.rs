@@ -26,15 +26,31 @@ pub enum StoreError {
     /// A file named in a manifest's `files` map failed size or SHA-256 verification.
     FileVerificationFailed { path: PathBuf, reason: String },
     /// No `SEGMENTS-<n>.json` for a partition verified, at any `n` — the bundle is unusable
-    /// for that partition (and therefore, fail-closed, unusable at all).
-    NoVerifyingSegmentsManifest { partition: String },
+    /// for that partition (and therefore, fail-closed, unusable at all). `last_error` carries
+    /// the reason the highest (most recently tried) candidate failed, so a caller isn't left
+    /// with only "nothing verified" when there's a more specific, actionable cause.
+    NoVerifyingSegmentsManifest {
+        partition: String,
+        last_error: Option<String>,
+    },
     /// A manifest referenced a partition/slice/segment directory structure that doesn't exist
     /// or doesn't match the expected `columns.arrow` / `morton.u64` / `permutation.bin` shape.
     MalformedBundle { detail: String },
+    /// A file the loader is about to open has no corresponding entry in either the chosen
+    /// `SEGMENTS-<n>.json`'s `files` map or `MANIFEST.json`'s — i.e. its bytes were never
+    /// digest-verified. Reading it anyway would defeat the entire read protocol (a manifest
+    /// with an empty or partial `files` map would otherwise verify vacuously). Fail closed
+    /// rather than open a file the manifest never vouched for.
+    UnverifiedFile { path: PathBuf },
+    /// A manifest-derived path component (partition `phash`, slice/segment id, or a `files`
+    /// map key) was rejected before ever being joined onto a filesystem path — empty, `.`,
+    /// `..`, absolute, or containing a path separator where a single opaque component was
+    /// expected. Bundle contents are trusted for shape but never for path escape.
+    UnsafePath { what: String, value: String },
     /// `columns.arrow` failed Arrow IPC / schema validation (wrong column count, name, type,
     /// more than one record batch, compressed buffers, or misaligned buffers).
     InvalidColumns { path: PathBuf, detail: String },
-    /// `permutation.bin` failed header/length validation.
+    /// `permutation.bin` failed header/length/content validation.
     InvalidPermutation { path: PathBuf, detail: String },
 }
 
@@ -65,11 +81,30 @@ impl fmt::Display for StoreError {
                     path.display()
                 )
             }
-            StoreError::NoVerifyingSegmentsManifest { partition } => write!(
-                f,
-                "no verifying SEGMENTS-<n>.json found for partition '{partition}'"
-            ),
+            StoreError::NoVerifyingSegmentsManifest {
+                partition,
+                last_error,
+            } => match last_error {
+                Some(reason) => write!(
+                    f,
+                    "no verifying SEGMENTS-<n>.json found for partition '{partition}' \
+                     (highest candidate failed: {reason})"
+                ),
+                None => write!(
+                    f,
+                    "no verifying SEGMENTS-<n>.json found for partition '{partition}' \
+                     (no SEGMENTS-<n>.json present)"
+                ),
+            },
             StoreError::MalformedBundle { detail } => write!(f, "malformed bundle: {detail}"),
+            StoreError::UnverifiedFile { path } => write!(
+                f,
+                "refusing to open {} — not covered by any verified `files` entry",
+                path.display()
+            ),
+            StoreError::UnsafePath { what, value } => {
+                write!(f, "unsafe path in manifest ({what}): '{value}'")
+            }
             StoreError::InvalidColumns { path, detail } => {
                 write!(f, "invalid columns.arrow at {}: {detail}", path.display())
             }
