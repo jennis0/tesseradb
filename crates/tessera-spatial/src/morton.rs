@@ -6,6 +6,7 @@
 use tessera_types::MortonCode;
 
 /// The spatial extent (bounding box) used to quantise `(x, y)` coordinates into cells.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Extent {
     pub x_min: f64,
     pub x_max: f64,
@@ -13,11 +14,44 @@ pub struct Extent {
     pub y_max: f64,
 }
 
+impl Extent {
+    /// Reject degenerate/non-finite extents. `cell`/`morton_of`/`tiles_for_bbox` are defined
+    /// only over a valid extent (all four bounds finite, both axes non-empty) — a `min == max`
+    /// or infinite bound would make `cell`'s division produce NaN/±inf silently, diverging from
+    /// the Python oracle, which raises instead.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(self.x_min.is_finite()
+            && self.x_max.is_finite()
+            && self.y_min.is_finite()
+            && self.y_max.is_finite())
+        {
+            return Err("Extent bounds must be finite".to_string());
+        }
+        if self.x_max <= self.x_min {
+            return Err("Extent requires x_max > x_min".to_string());
+        }
+        if self.y_max <= self.y_min {
+            return Err("Extent requires y_max > y_min".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// Quantise a coordinate value into a 16-bit cell index.
 ///
 /// `cell(v) = clamp( floor( (v - min) / (max - min) * 65536 ), 0, 65535 )`, computed in f64.
 /// Cells are half-open; `v = max` lands in cell 65535 (contracts §2.5, Reference Sheet R2).
+///
+/// Behaviour is defined only for finite `v` over a valid extent (`min < max`, both finite) —
+/// callers that quantise against user-controlled bounds must validate the [`Extent`] first via
+/// [`Extent::validate`]. This function only asserts in debug builds; it does not itself reject
+/// degenerate input, since it takes bare `min`/`max` rather than an `Extent`.
 pub fn cell(v: f64, min: f64, max: f64) -> u16 {
+    debug_assert!(v.is_finite(), "cell(): v must be finite, got {v}");
+    debug_assert!(
+        min.is_finite() && max.is_finite() && max > min,
+        "cell(): invalid extent [{min}, {max})"
+    );
     let scaled = (v - min) / (max - min) * 65536.0;
     let floored = scaled.floor();
     if floored <= 0.0 {
@@ -50,6 +84,7 @@ pub fn interleave(x_cell: u16, y_cell: u16) -> MortonCode {
 
 /// Quantise `(x, y)` against `extent` and interleave into a Morton code.
 pub fn morton_of(x: f64, y: f64, e: &Extent) -> MortonCode {
+    debug_assert!(e.validate().is_ok(), "morton_of(): invalid extent {e:?}");
     let xc = cell(x, e.x_min, e.x_max);
     let yc = cell(y, e.y_min, e.y_max);
     interleave(xc, yc)
@@ -61,6 +96,14 @@ pub fn morton_of(x: f64, y: f64, e: &Extent) -> MortonCode {
 /// only the low `d` bits of each coordinate, producing a prefix in `[0, 4^d)` — the value used
 /// directly as [`Tile::prefix`] at depth `d`.
 pub fn interleave_bits(tx: u32, ty: u32, d: u8) -> u64 {
+    debug_assert!(
+        d <= 16,
+        "interleave_bits(): depth {d} exceeds grid depth 16"
+    );
+    debug_assert!(
+        tx >> d == 0 && ty >> d == 0,
+        "interleave_bits(): tx/ty must fit in {d} bits, got tx={tx}, ty={ty}"
+    );
     let mut prefix: u64 = 0;
     for i in 0..d as u64 {
         let xb = ((tx as u64) >> i) & 1;
@@ -72,6 +115,13 @@ pub fn interleave_bits(tx: u32, ty: u32, d: u8) -> u64 {
 }
 
 /// A tile in the Morton quadtree: a `depth`-deep prefix over the 32-bit code space.
+///
+/// Fields are public so `Tile { prefix, depth }` literal construction stays available (used
+/// throughout `tiles_for_bbox` and by callers), but `depth` must be `<= 16` — the grid is
+/// 2^16 x 2^16 and codes are 32-bit, so a deeper prefix has no meaning. Out-of-range depth is
+/// caught by `debug_assert!` in [`Tile::code_range`], not by construction, since there is no
+/// checked constructor to bypass.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tile {
     pub prefix: u64,
     pub depth: u8,
@@ -80,7 +130,15 @@ pub struct Tile {
 impl Tile {
     /// The half-open range of `u64`-widened Morton codes covered by this tile:
     /// `[prefix << (32 - 2*depth), (prefix + 1) << (32 - 2*depth))`.
+    ///
+    /// Debug-asserts `depth <= 16`: at greater depth `32 - 2*depth` underflows (debug panic) or
+    /// silently wraps (release), since the grid has only 32 bits of code space.
     pub fn code_range(&self) -> (u64, u64) {
+        debug_assert!(
+            self.depth <= 16,
+            "Tile::code_range(): depth {} exceeds grid depth 16",
+            self.depth
+        );
         let shift = 32 - 2 * self.depth as u32;
         (self.prefix << shift, (self.prefix + 1) << shift)
     }
@@ -94,6 +152,14 @@ impl Tile {
 /// ([`interleave_bits`]) — not the 16-bit [`interleave`] applied to shifted inputs, which would
 /// spread over the wrong number of bits. Depth 0 yields a single tile (prefix 0, whole grid).
 pub fn tiles_for_bbox(bbox: [f64; 4], depth: u8, e: &Extent) -> Vec<Tile> {
+    debug_assert!(
+        depth <= 16,
+        "tiles_for_bbox(): depth {depth} exceeds grid depth 16"
+    );
+    debug_assert!(
+        e.validate().is_ok(),
+        "tiles_for_bbox(): invalid extent {e:?}"
+    );
     let [x0, y0, x1, y1] = bbox;
     if depth == 0 {
         return vec![Tile {
@@ -147,5 +213,22 @@ mod tests {
         let (lo, hi) = t.code_range();
         assert_eq!(lo, 3u64 << 30);
         assert_eq!(hi, 4u64 << 30);
+    }
+
+    #[test]
+    fn tiles_for_bbox_at_max_depth_pinpoints_single_cell() {
+        let e = Extent {
+            x_min: 0.0,
+            x_max: 1.0,
+            y_min: 0.0,
+            y_max: 1.0,
+        };
+        let (px, py) = (0.31415, 0.27182);
+        let code = morton_of(px, py, &e).raw() as u64;
+
+        let tiles = tiles_for_bbox([px, py, px, py], 16, &e);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].prefix, code);
+        assert_eq!(tiles[0].code_range(), (code, code + 1));
     }
 }
