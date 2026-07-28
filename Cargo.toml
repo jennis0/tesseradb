@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tessera-types",
+    "crates/tessera-plugin",
+    "crates/tessera-authz",
+    "crates/tessera-store",
+    "crates/tessera-spatial",
+    "crates/tessera-lifecycle",
+    "crates/tessera-engine",
+    "crates/tessera-wire",
+    "crates/tessera-server",
+    "crates/tessera-build",
+    "crates/tessera-cli",
+]
+
+[workspace.dependencies]
+croaring = "2"

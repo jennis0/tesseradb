@@ -1,0 +1,10 @@
+target/
+data/
+*.venv
+.venv/
+__pycache__/
+/bundles/
+.superpowers/
+.ignore/analysis-models/
+analysis-models/
+.vscode/
