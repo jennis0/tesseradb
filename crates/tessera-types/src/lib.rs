@@ -28,16 +28,16 @@ define_id_newtype!(Priority, u16);
 define_id_newtype!(MortonCode, u32);
 
 /// String newtype for slice identifiers
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SliceId(pub String);
 
 /// String newtype for segment identifiers
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SegId(pub String);
 
 /// Pin identity: geometry anchor (invariant I11).
 /// Pinned to (prefix, segments_version, watermark); row-space artifacts identified by this tuple.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PinId {
     pub prefix: String,
     pub segments_version: u64,
