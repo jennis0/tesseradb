@@ -16,3 +16,4 @@ members = [
 
 [workspace.dependencies]
 croaring = "2"
+proptest = "1"
