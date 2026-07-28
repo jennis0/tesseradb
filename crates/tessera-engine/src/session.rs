@@ -86,6 +86,15 @@ pub enum EngineError {
     PinExpired,
     /// A viewport request named a slice this bundle doesn't have.
     UnknownSlice(String),
+    /// A slice with more than one segment. `tile_ranges` returns **segment-local** row indices
+    /// (Reference Sheet R1), while the slice's mask is built from one `Permutation` addressing
+    /// exactly one segment's row space (Phase 1's build always produces exactly one segment per
+    /// (partition, slice) — R4). Summing `count_range`/`iter_range` over a second segment's
+    /// ranges through that same row space would silently mis-count or mis-index rows belonging to
+    /// a different segment; there is no segment-row offset table to fold them together correctly
+    /// yet, so this fails closed rather than produce a wrong (not even necessarily *obviously*
+    /// wrong) answer.
+    MultiSegmentSlice(String),
     /// A bundle-level file (`CURRENT`, a plugin hash) was not the shape this engine expects.
     Malformed(String),
 }
@@ -100,6 +109,11 @@ impl std::fmt::Display for EngineError {
             EngineError::Io(e) => write!(f, "io error: {e}"),
             EngineError::PinExpired => write!(f, "pin expired"),
             EngineError::UnknownSlice(slice) => write!(f, "unknown slice '{slice}'"),
+            EngineError::MultiSegmentSlice(slice) => write!(
+                f,
+                "slice '{slice}' has more than one segment, which this engine's row-space \
+                 handling does not yet support (see EngineError::MultiSegmentSlice's doc)"
+            ),
             EngineError::Malformed(detail) => write!(f, "malformed: {detail}"),
         }
     }

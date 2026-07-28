@@ -109,6 +109,17 @@ impl Engine {
             .find_map(|partition| partition.slices.get(slice))
             .ok_or_else(|| EngineError::UnknownSlice(slice.to_string()))?;
 
+        // Fail closed on more than one segment (see `EngineError::MultiSegmentSlice`'s doc):
+        // `tile_ranges` returns segment-local row indices, but `mask` is built from the slice's
+        // single `Permutation`, which addresses exactly one segment's row space. Phase 1's build
+        // never produces more than one, so this is not reachable today — but silently iterating
+        // "just in case" would mis-count/mis-index the moment it became reachable, which is worse
+        // than refusing outright.
+        if slice_data.segments.len() > 1 {
+            return Err(EngineError::MultiSegmentSlice(slice.to_string()));
+        }
+        let segment = slice_data.segments.first();
+
         let cache_key = (
             session.token_id,
             slice.to_string(),
@@ -156,21 +167,13 @@ impl Engine {
         let mut tile_counts = Vec::new();
         let mut points = Vec::new();
 
+        // A slice with zero segments (an empty build) has nothing visible in any tile; the loop
+        // below simply never finds a non-empty range in that case.
         for tile in tiles {
-            // Engine-level, a tile resolves to one range per segment sharing its slice (task
-            // brief) — Phase 1 always has exactly one segment per slice, but this iterates all
-            // of them, not just the first.
-            let ranges: Vec<(usize, Range<u32>)> = slice_data
-                .segments
-                .iter()
-                .enumerate()
-                .map(|(idx, seg)| (idx, tile_ranges(seg, &tile)))
-                .collect();
+            let Some(segment) = segment else { continue };
 
-            let visible: u64 = ranges
-                .iter()
-                .map(|(_, r)| mask.count_range(r.clone()))
-                .sum();
+            let range = tile_ranges(segment, &tile);
+            let visible = mask.count_range(range.clone());
             if visible == 0 {
                 // Skip empty: no count row, no sampling work for a tile with nothing visible.
                 continue;
@@ -183,14 +186,7 @@ impl Engine {
                 matched: visible,
             });
 
-            sample_tile(
-                &mask,
-                &ranges,
-                &slice_data.segments,
-                declared_scalars,
-                k,
-                &mut points,
-            );
+            sample_tile(&mask, segment, range, declared_scalars, k, &mut points);
         }
 
         Ok(ViewportOut {
@@ -202,33 +198,26 @@ impl Engine {
 }
 
 /// **Placeholder sampler (I7) — deliberately wrong.** Takes the first `k` visible row IDs in
-/// ascending row order across `ranges` (which are already in Morton order within — and, for
-/// Phase 1's one-segment-per-slice layout, across — the tile). This is *not* the priority-sample
-/// definition (Reference Sheet R3: `priority(e) = splitmix64(e) >> 48`); it exists only so the
-/// walking skeleton has an end-to-end query path to test against, and Phase 2's differential
-/// oracle is *expected* to disagree with it. Do not let this drift into being mistaken for the
-/// real sampling policy — replace it before Phase 2 ships.
+/// ascending row (Morton) order within `range`. This is *not* the priority-sample definition
+/// (Reference Sheet R3: `priority(e) = splitmix64(e) >> 48`); it exists only so the walking
+/// skeleton has an end-to-end query path to test against, and Phase 2's differential oracle is
+/// *expected* to disagree with it. Do not let this drift into being mistaken for the real
+/// sampling policy — replace it before Phase 2 ships.
 fn sample_tile(
     mask: &EffectiveMask,
-    ranges: &[(usize, Range<u32>)],
-    segments: &[SegmentData],
+    segment: &SegmentData,
+    range: Range<u32>,
     declared_scalars: &[DeclaredScalar],
     k: usize,
     out: &mut Vec<PointOut>,
 ) {
     let mut remaining = k;
-    for (seg_idx, range) in ranges {
+    for row in mask.iter_range(range) {
         if remaining == 0 {
             break;
         }
-        let segment = &segments[*seg_idx];
-        for row in mask.iter_range(range.clone()) {
-            if remaining == 0 {
-                break;
-            }
-            out.push(row_to_point(segment, row, declared_scalars));
-            remaining -= 1;
-        }
+        out.push(row_to_point(segment, row, declared_scalars));
+        remaining -= 1;
     }
 }
 

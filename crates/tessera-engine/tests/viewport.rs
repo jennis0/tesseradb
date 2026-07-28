@@ -2,10 +2,14 @@
 //! built through `tessera-build`'s library API (Task 8's smoke-test pattern).
 //!
 //! Every item carries `ALL_TERM` ("0"); every third item (`source_id % 3 == 0`) additionally
-//! carries `SUBSET_TERM` ("1"). At `zoom = 0`, `tiles_for_bbox` always returns exactly one tile
-//! covering the whole grid regardless of `bbox` (depth 0 has no bits to discriminate on), which
-//! makes a brute-force oracle over the *input* relation trivial: no bbox-intersection geometry to
-//! reproduce, just term membership.
+//! carries `SUBSET_TERM` ("1"). Most tests below query at `zoom = 0`, where `tiles_for_bbox`
+//! always returns exactly one tile covering the whole grid regardless of `bbox` (depth 0 has no
+//! bits to discriminate on) — a brute-force oracle over the *input* relation is then trivial: no
+//! bbox-intersection geometry to reproduce, just term membership. That leaves the
+//! `tile_ranges`/`count_range` tiling path itself unexercised, so
+//! `tile_counts_match_brute_force_at_a_non_degenerate_zoom_and_bbox_subset` below queries at
+//! `zoom = 4` with a bbox covering a strict subset of tiles, cross-checked against an independent
+//! per-item Morton-prefix oracle.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -22,7 +26,7 @@ use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig, EngineError};
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
 use tessera_plugin::Passthrough;
-use tessera_spatial::Extent;
+use tessera_spatial::{morton_of, tiles_for_bbox, Extent};
 use tessera_store::read::open_bundle;
 use tessera_types::PinId;
 
@@ -402,6 +406,87 @@ fn f_sampler_returns_first_k_in_row_order() {
         );
         assert_eq!(point.x, expected_xs[i]);
         assert_eq!(point.y, expected_ys[i]);
+    }
+}
+
+/// Review finding: every other test in this suite queries at `zoom = 0`, where `bbox` is inert
+/// (`tiles_for_bbox` always returns the single whole-grid tile regardless of its value) — so the
+/// `tile_ranges`/`count_range` aggregation path, and `TileCount.tile`'s prefix, were never
+/// actually exercised against a bbox that selects a strict subset of tiles. This test picks a
+/// non-degenerate zoom (4: a 16x16 tile grid) and a bbox covering roughly one quadrant of the
+/// extent, then cross-checks the engine's per-tile counts against an independent brute-force
+/// oracle: each item's own `(x, y)` quantised to a Morton code and shifted to a zoom-4 tile
+/// prefix by hand (the same public `tessera_spatial` functions the engine itself calls, but
+/// grouped independently of `tile_ranges`/`count_range`) — an off-by-one in either would show up
+/// here even though it passes at zoom 0.
+#[test]
+fn tile_counts_match_brute_force_at_a_non_degenerate_zoom_and_bbox_subset() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = open_engine_uncapped(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    const ZOOM: u8 = 4;
+    // Roughly the lower-left quadrant of the extent — a strict, non-degenerate subset of zoom
+    // 4's 16x16 tile grid (unlike zoom 0, whose one tile is inert to `bbox`).
+    let bbox = [0.0, 0.0, 250.0, 250.0];
+
+    let out = engine
+        .viewport(&session, "s0", ZOOM, bbox, N_ITEMS as usize, None)
+        .unwrap();
+
+    let e = extent();
+    let touched_tiles = tiles_for_bbox(bbox, ZOOM, &e);
+    let touched_prefixes: std::collections::BTreeSet<u64> =
+        touched_tiles.iter().map(|t| t.prefix).collect();
+    assert!(
+        touched_prefixes.len() > 1,
+        "the bbox must touch more than one tile for this to be a non-degenerate check"
+    );
+
+    // Independent brute-force oracle, entirely bypassing `tile_ranges`/`count_range`: each
+    // item's own fixture `(x, y)` (the exact formula `write_points` used) quantised to a Morton
+    // code, then shifted to a zoom-4 prefix (`Tile::code_range`'s own inverse: `prefix = code >>
+    // (32 - 2*depth)`).
+    let shift = 32 - 2 * ZOOM as u32;
+    let mut brute_counts: BTreeMap<u64, u64> = BTreeMap::new();
+    for source_id in 0..N_ITEMS {
+        let x = ((source_id * 37) % 1000) as f64;
+        let y = ((source_id * 53) % 1000) as f64;
+        let code = morton_of(x, y, &e).raw() as u64;
+        let prefix = code >> shift;
+        if touched_prefixes.contains(&prefix) {
+            *brute_counts.entry(prefix).or_insert(0) += 1;
+        }
+    }
+    let expected: BTreeMap<u64, u64> = brute_counts.into_iter().filter(|&(_, c)| c > 0).collect();
+    assert!(
+        !expected.is_empty(),
+        "the fixture bbox must touch at least one non-empty tile for this test to mean anything"
+    );
+
+    let got: BTreeMap<u64, u64> = out.tiles.iter().map(|t| (t.tile, t.visible)).collect();
+    assert_eq!(
+        got, expected,
+        "tile prefixes/counts must match the brute-force (x,y) -> Morton -> prefix oracle exactly"
+    );
+    for t in &out.tiles {
+        assert_eq!(t.matched, t.visible, "(e) matched == visible");
+        assert!(
+            touched_prefixes.contains(&t.tile),
+            "engine returned tile prefix {} outside tiles_for_bbox's own tile set",
+            t.tile
+        );
     }
 }
 
