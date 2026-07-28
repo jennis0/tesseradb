@@ -1372,12 +1372,19 @@ name = "tessera-engine"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "arrow",
  "croaring",
+ "parquet",
  "rand 0.8.7",
  "rustc-hash",
+ "serde_json",
+ "sha2",
  "tempfile",
  "tessera-authz",
+ "tessera-build",
  "tessera-lifecycle",
+ "tessera-plugin",
+ "tessera-spatial",
  "tessera-store",
  "tessera-types",
 ]

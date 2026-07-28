@@ -8,6 +8,8 @@
 //! `tessera build` advances the bundle.
 
 pub mod compose;
+pub mod session;
+pub mod viewport;
 
 use std::sync::Arc;
 
@@ -17,6 +19,8 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
 pub use compose::{compose, EffectiveMask, RowProjection};
+pub use session::{Engine, EngineConfig, EngineError, Session};
+pub use viewport::{PointOut, ScalarOut, TileCount, ViewportOut};
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1, slimmed for
 /// Phase 1: no merge/compaction fields yet).

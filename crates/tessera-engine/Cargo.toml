@@ -7,11 +7,18 @@ edition = "2021"
 tessera-types = { path = "../tessera-types" }
 tessera-authz = { path = "../tessera-authz" }
 tessera-store = { path = "../tessera-store" }
+tessera-spatial = { path = "../tessera-spatial" }
 tessera-lifecycle = { path = "../tessera-lifecycle" }
+tessera-plugin = { path = "../tessera-plugin" }
 croaring = { workspace = true }
 arc-swap = { workspace = true }
 rustc-hash = "1"
+arrow = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-rand = { workspace = true }
+tessera-build = { path = "../tessera-build" }
+parquet = { workspace = true }
