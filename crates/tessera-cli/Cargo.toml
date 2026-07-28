@@ -6,3 +6,8 @@ edition = "2021"
 [[bin]]
 name = "tessera"
 path = "src/main.rs"
+
+[dependencies]
+tessera-build = { path = "../tessera-build" }
+tessera-spatial = { path = "../tessera-spatial" }
+clap = { workspace = true }

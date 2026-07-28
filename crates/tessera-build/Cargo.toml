@@ -2,3 +2,19 @@
 name = "tessera-build"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+tessera-types = { path = "../tessera-types" }
+tessera-plugin = { path = "../tessera-plugin" }
+tessera-spatial = { path = "../tessera-spatial" }
+tessera-store = { path = "../tessera-store" }
+tessera-authz = { path = "../tessera-authz" }
+arrow = { workspace = true }
+parquet = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
