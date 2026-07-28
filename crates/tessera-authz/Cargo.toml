@@ -9,6 +9,7 @@ tessera-types = { path = "../tessera-types" }
 rustc-hash = "1"
 arrow = { workspace = true }
 memmap2 = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

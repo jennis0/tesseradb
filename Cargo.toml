@@ -21,3 +21,4 @@ arrow = { version = "59", default-features = false, features = ["ipc"] }
 tempfile = "3"
 rand = "0.8"
 memmap2 = "0.9"
+sha2 = "0.10"
