@@ -91,6 +91,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "arrow"
 version = "59.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1361,6 +1370,17 @@ dependencies = [
 [[package]]
 name = "tessera-engine"
 version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "croaring",
+ "rand 0.8.7",
+ "rustc-hash",
+ "tempfile",
+ "tessera-authz",
+ "tessera-lifecycle",
+ "tessera-store",
+ "tessera-types",
+]
 
 [[package]]
 name = "tessera-lifecycle"
@@ -1369,8 +1389,10 @@ dependencies = [
  "crc32fast",
  "postcard",
  "proptest",
+ "rustc-hash",
  "serde",
  "tempfile",
+ "tessera-authz",
  "tessera-types",
 ]
 

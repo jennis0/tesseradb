@@ -2,3 +2,16 @@
 name = "tessera-engine"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+tessera-types = { path = "../tessera-types" }
+tessera-authz = { path = "../tessera-authz" }
+tessera-store = { path = "../tessera-store" }
+tessera-lifecycle = { path = "../tessera-lifecycle" }
+croaring = { workspace = true }
+arc-swap = { workspace = true }
+rustc-hash = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rand = { workspace = true }
