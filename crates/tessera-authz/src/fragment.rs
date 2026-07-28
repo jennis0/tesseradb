@@ -11,9 +11,15 @@
 //! cache directory (never in the bundle — Reference Sheet R1), so that a repeated grant set
 //! reuses the on-disk fragment across process restarts instead of re-unioning postings. The
 //! cache key is deliberately wider than "the set of granted terms": see [`FragmentCache::new`].
+//! Because a parseable-but-wrong fragment would be a silent disclosure (not merely a crash), the
+//! cache does not rely on "the directory is engine-private" as its only line of defence: entries
+//! are content-addressed with a stored SHA-256 digest verified on every reopen (before the
+//! unsafe `Frozen` view is ever constructed), writes are `fsync`ed before the rename that makes
+//! them visible, and the directory and its files are created with owner-only permissions on
+//! unix.
 
 use std::fs::File;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -43,8 +49,16 @@ pub fn build_fragment(terms: &[TermId], postings: &PostingsReader) -> io::Result
         match postings.posting(term)? {
             PostingRef::Roaring(view) => views.push(view),
             PostingRef::Array(bytes) => {
+                // `PostingsReader::open` (Task 5) validates every tag-0 payload's length is a
+                // multiple of 4 once, at open time — this is not re-checked per lookup, so a
+                // violation here would mean that validation was bypassed, not that this call site
+                // needs its own fail-closed handling.
+                debug_assert!(
+                    bytes.len() % 4 == 0,
+                    "tag-0 posting payload length must be a multiple of 4 (validated at \
+                     PostingsReader::open)"
+                );
                 for chunk in bytes.chunks_exact(4) {
-                    // `chunk` is exactly 4 bytes by construction of `chunks_exact(4)`.
                     small.push(u32::from_le_bytes(chunk.try_into().unwrap()));
                 }
             }
@@ -104,16 +118,60 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// write-then-rename. The suffix must be unique per call (not just derived from `path`): two
 /// concurrent `get_or_build` calls that race to build the *same* canonical key (same process,
 /// racing threads sharing this `FragmentCache`, or two separate processes sharing the cache
-/// directory) must not both write through one shared tmp path, where an unsynchronised
-/// `std::fs::write` from each could interleave and leave a corrupt file behind before either
-/// rename lands. With a unique tmp path per attempt, both writes complete independently and the
-/// final `rename` (POSIX-atomic) simply lets the later one win — both wrote byte-identical
-/// content, since the frozen bytes are a deterministic function of the same bitmap.
+/// directory) must not both write through one shared tmp path, where an unsynchronised write from
+/// each could interleave and leave a corrupt file behind before either rename lands. With a
+/// unique tmp path per attempt, both writes complete independently and the final `rename`
+/// (POSIX-atomic) simply lets the later one win — both wrote byte-identical content, since the
+/// frozen bytes are a deterministic function of the same bitmap.
 fn tmp_sibling(path: &Path) -> PathBuf {
     let unique = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut name = path.as_os_str().to_owned();
     name.push(format!(".{}.{unique}.tmp", std::process::id()));
     PathBuf::from(name)
+}
+
+/// Create `dir` (and any missing ancestors) with owner-only permissions on unix (`0700`); on
+/// other platforms this is `create_dir_all` with whatever the platform default is — mask
+/// fragments are name the viewer's exact visible set, so per-principal cache entries should never
+/// be group/world-readable where the platform lets us say so.
+#[cfg(unix)]
+fn create_private_dir_all(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir_all(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+/// Create (truncating) a file at `path` with owner-only permissions on unix (`0600`); see
+/// [`create_private_dir_all`].
+#[cfg(unix)]
+fn create_private_file(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_file(path: &Path) -> io::Result<File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+fn invalid_data(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
 /// A frozen, memory-mapped fragment reopened from the cache directory. `view()` borrows straight
@@ -129,65 +187,77 @@ pub struct FrozenFragment {
 }
 
 impl FrozenFragment {
-    /// View the frozen bitmap. Safe because:
-    /// - the mapped bytes are exactly what [`FragmentCache`] wrote via
-    ///   `Bitmap::serialize_into_vec::<Frozen>` (never touched by anything else — the cache
-    ///   directory is engine-private), and
-    /// - the mapping's length was checked against the sidecar-recorded exact frozen size when
-    ///   this `FrozenFragment` was opened, and
-    /// - the mapping's base address is page-aligned (mmap always returns page-aligned bases),
-    ///   which satisfies `Frozen::REQUIRED_ALIGNMENT` (32).
+    /// View the frozen bitmap. Safe because every `FrozenFragment` in existence was constructed
+    /// by [`open`](Self::open), which — before ever returning `Ok` — checked:
+    /// - the mapped length matches the sidecar-recorded exact frozen size, *and*
+    /// - the mapped bytes' SHA-256 digest matches the sidecar-recorded digest (computed from the
+    ///   frozen bytes at build time). This is the load-bearing check: bytes of the right length
+    ///   but wrong or corrupted content — e.g. right-length garbage left by a torn write after
+    ///   power loss, on a filesystem where the rename lands before the data is durable — would
+    ///   pass a length-only check and then be undefined behaviour (or a disclosure: a
+    ///   parseable-but-wrong fragment) once handed to `Frozen`'s unchecked deserialiser. The
+    ///   digest closes that gap.
+    ///
+    /// The mapping's base address is also page-aligned (mmap always returns page-aligned bases),
+    /// satisfying `Frozen::REQUIRED_ALIGNMENT` (32).
     pub fn view(&self) -> BitmapView<'_> {
-        // SAFETY: see the discharge above; `open`/`build_and_persist` are the only writers/
-        // openers of these bytes and both uphold Frozen's `deserialize_view` contract.
+        // SAFETY: see the discharge above — `open()` is the only constructor of `FrozenFragment`
+        // and it verifies length and digest before returning `Ok`.
         unsafe { BitmapView::deserialize::<Frozen>(&self.mmap[..]) }
     }
 
-    /// Open an existing `(frag_path, meta_path)` pair, validating the sidecar-recorded length
-    /// against the mapped file before ever calling the unsafe `Frozen` view deserialiser. Fails
-    /// closed (`InvalidData`) on any mismatch, truncation, or malformed sidecar — a corrupt cache
-    /// entry must never reach `BitmapView::deserialize::<Frozen>`, whose safety contract we could
-    /// not otherwise discharge.
+    /// Open an existing `(frag_path, meta_path)` pair, verifying the sidecar-recorded length and
+    /// SHA-256 digest against the mapped file before ever calling the unsafe `Frozen` view
+    /// deserialiser. Fails closed (`InvalidData`) on any mismatch, truncation, or malformed
+    /// sidecar — a corrupt or tampered cache entry must never reach
+    /// `BitmapView::deserialize::<Frozen>`, whose safety contract we could not otherwise
+    /// discharge for bytes we did not just produce ourselves.
     fn open(frag_path: &Path, meta_path: &Path) -> io::Result<Self> {
         let meta = std::fs::read(meta_path)?;
-        if meta.len() != 16 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "fragment cache: {} has length {} (expected 16: watermark u64 LE \
-                     ‖ frozen_len u64 LE)",
-                    meta_path.display(),
-                    meta.len()
-                ),
-            ));
+        if meta.len() != META_LEN {
+            return Err(invalid_data(format!(
+                "fragment cache: {} has length {} (expected {META_LEN}: watermark u64 LE \
+                 ‖ frozen_len u64 LE ‖ sha256(frozen_bytes))",
+                meta_path.display(),
+                meta.len()
+            )));
         }
         let watermark = u64::from_le_bytes(meta[0..8].try_into().unwrap());
         let expected_len = u64::from_le_bytes(meta[8..16].try_into().unwrap());
+        let expected_digest: [u8; 32] = meta[16..48].try_into().unwrap();
 
         let file = File::open(frag_path)?;
-        // SAFETY: the cache directory is engine-private and not concurrently truncated/resized
-        // by anything outside this process during the mapping's lifetime, matching memmap2's
-        // usual caveat for file-backed mappings (same discharge as `PostingsReader::open`).
+        // SAFETY: the mapping is read-only for the duration of this function and dropped (or
+        // handed back inside `FrozenFragment`, still read-only) before anything else in this
+        // process opens the same path for writing — `FragmentCache` never mutates a `.frag` file
+        // in place, only write-then-rename under a fresh temp name (same discharge as
+        // `PostingsReader::open`).
         let mmap = unsafe { memmap2::Mmap::map(&file) }?;
 
         if mmap.len() as u64 != expected_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "fragment cache: {} has length {} but the sidecar records {expected_len} \
-                     — refusing to view a mismatched frozen buffer",
-                    frag_path.display(),
-                    mmap.len()
-                ),
-            ));
+            return Err(invalid_data(format!(
+                "fragment cache: {} has length {} but the sidecar records {expected_len} \
+                 — refusing to view a mismatched frozen buffer",
+                frag_path.display(),
+                mmap.len()
+            )));
+        }
+
+        let actual_digest: [u8; 32] = Sha256::digest(&mmap[..]).into();
+        if actual_digest != expected_digest {
+            return Err(invalid_data(format!(
+                "fragment cache: {} does not match its sidecar-recorded SHA-256 digest — \
+                 refusing to view a corrupted or tampered frozen buffer",
+                frag_path.display()
+            )));
         }
 
         Ok(FrozenFragment { mmap, watermark })
     }
 
-    /// Serialise `bitmap` in `Frozen` format and persist it (plus its watermark sidecar) under
-    /// `(frag_path, meta_path)` via write-then-rename, then reopen it as a `FrozenFragment`
-    /// (exercising the same validated-open path a cache hit would use).
+    /// Serialise `bitmap` in `Frozen` format and persist it (plus its watermark/length/digest
+    /// sidecar) under `(frag_path, meta_path)` via write-then-rename, then reopen it as a
+    /// `FrozenFragment` (exercising the same validated-open path a cache hit would use).
     fn build_and_persist(
         frag_path: &Path,
         meta_path: &Path,
@@ -202,21 +272,48 @@ impl FrozenFragment {
         let mut scratch = Vec::new();
         let frozen_bytes = bitmap.serialize_into_vec::<Frozen>(&mut scratch);
         let frozen_len = frozen_bytes.len() as u64;
+        let digest: [u8; 32] = Sha256::digest(&*frozen_bytes).into();
 
+        // Frag before meta, and both fsynced before their rename: on crash recovery, a `.meta`
+        // file existing implies its `.frag` sibling is already fully durable — `open()` treats a
+        // frag-without-meta (or a length/digest mismatch) as a plain cache miss, never a false
+        // hit, so writing meta second is what makes "meta present" a trustworthy signal that the
+        // pair is complete and intact.
         let tmp_frag = tmp_sibling(frag_path);
-        std::fs::write(&tmp_frag, &*frozen_bytes)?;
+        {
+            let mut f = create_private_file(&tmp_frag)?;
+            f.write_all(frozen_bytes)?;
+            f.sync_data()?;
+        }
         std::fs::rename(&tmp_frag, frag_path)?;
 
-        let mut meta = Vec::with_capacity(16);
+        let mut meta = Vec::with_capacity(META_LEN);
         meta.extend_from_slice(&watermark.to_le_bytes());
         meta.extend_from_slice(&frozen_len.to_le_bytes());
+        meta.extend_from_slice(&digest);
         let tmp_meta = tmp_sibling(meta_path);
-        std::fs::write(&tmp_meta, &meta)?;
+        {
+            let mut f = create_private_file(&tmp_meta)?;
+            f.write_all(&meta)?;
+            f.sync_data()?;
+        }
         std::fs::rename(&tmp_meta, meta_path)?;
+
+        // Fsync the containing directory so both renames' directory-entry updates are durable,
+        // not just the file contents — otherwise a power loss right after the renames could
+        // leave the entries themselves unrecorded even though the file bytes hit disk.
+        if let Some(parent) = frag_path.parent() {
+            if let Ok(dir_file) = File::open(parent) {
+                let _ = dir_file.sync_all();
+            }
+        }
 
         Self::open(frag_path, meta_path)
     }
 }
+
+/// `watermark: u64 LE (8) ‖ frozen_len: u64 LE (8) ‖ sha256(frozen_bytes) (32)`.
+const META_LEN: usize = 48;
 
 /// Directory-backed frozen fragment store.
 ///
@@ -228,22 +325,30 @@ impl FrozenFragment {
 /// rebuild — or an auth plugin change — with a stale key would otherwise serve a frozen fragment
 /// naming a *different* entity set).
 ///
-/// On-disk layout (flat, under `dir`, one pair per canonical key, hex-encoded):
+/// On-disk layout (flat, under `dir`, one pair per canonical key, hex-encoded; `dir` and every
+/// file in it are created with owner-only permissions on unix — see
+/// [`create_private_dir_all`]/[`create_private_file`]):
 /// - `<hex key>.frag` — the exact `Frozen`-format bitmap bytes, written at file offset 0 (the
 ///   mmap base is page-aligned, satisfying `Frozen::REQUIRED_ALIGNMENT = 32` on reopen).
-/// - `<hex key>.meta` — a 16-byte sidecar: `watermark: u64 LE ‖ frozen_len: u64 LE`. `watermark`
-///   restores the generation's SEGMENTS watermark at build time across process restarts;
-///   `frozen_len` lets `FrozenFragment::open` validate the mapped length before ever calling the
-///   unsafe `Frozen` view deserialiser (fail-closed on a truncated or corrupt cache entry).
+/// - `<hex key>.meta` — a [`META_LEN`]-byte sidecar: `watermark: u64 LE ‖ frozen_len: u64 LE ‖
+///   sha256(frozen_bytes)`. `watermark` restores the generation's SEGMENTS watermark at build
+///   time across process restarts; `frozen_len` and the digest let [`FrozenFragment::open`]
+///   verify the mapped file's length *and content* before ever calling the unsafe `Frozen` view
+///   deserialiser — fail-closed on a truncated, corrupted, or tampered cache entry, not just a
+///   short one (a length-only check would pass right-length garbage, e.g. from a torn write after
+///   power loss).
 ///
-/// Both files are written via write-then-rename (`<name>.tmp` → `<name>`), so a crash mid-write
-/// never leaves a partial file visible at the looked-up name.
+/// Both files are written via write-then-rename (`<name>.<pid>.<n>.tmp` → `<name>`), each
+/// `fsync`ed before its rename and the containing directory `fsync`ed after, so a crash mid-write
+/// or immediately after never leaves a partial or not-yet-durable file visible at the looked-up
+/// name.
 ///
 /// An in-memory `FxHashMap<auth_data_hash, canonical_key>` gives repeat sessions presenting the
 /// same credential a fast path that skips re-sorting and re-hashing the granted term list; it is
 /// pure memoisation of [`canonical_key`]'s computation; it is not itself a source of authorisation
 /// decisions and holds nothing that must survive a restart (the on-disk `.frag`/`.meta` pair is
-/// the durable cache; this map is not).
+/// the durable cache; this map is not). Because the fast path skips recomputation, it trusts that
+/// **`auth_data_hash` determines `satisfied`** — see [`get_or_build`](Self::get_or_build)'s doc.
 pub struct FragmentCache {
     dir: PathBuf,
     bundle_identity: [u8; 32],
@@ -288,12 +393,22 @@ impl FragmentCache {
     /// auth_plugin_hash, satisfied)` combination has been seen — by *any* process sharing this
     /// cache directory, not just this one.
     ///
-    /// `auth_data_hash` identifies the *credential* (not the term set) for the in-memory
-    /// canonical-key fast path — repeat calls with the same `auth_data_hash` skip re-sorting and
-    /// re-hashing `satisfied`. `postings` supplies the union inputs on a cache miss.
-    /// `watermark` is the caller-supplied SEGMENTS watermark to persist alongside a freshly built
-    /// fragment; it is ignored on a cache hit (the hit's own persisted watermark, from when it
-    /// was built, is what's returned — Task 10's composition uses the fragment's own watermark).
+    /// **Caller obligation:** `auth_data_hash` must identify the *credential* whose evaluation
+    /// produced `satisfied` — i.e. it must be a (collision-resistant) function of the same
+    /// `auth_data` that the auth plugin evaluated to obtain `satisfied`, such that the same
+    /// `auth_data_hash` never arrives paired with two different term sets. The in-memory
+    /// canonical-key fast path trusts this: on a memo hit it returns the previously-computed
+    /// canonical key *without* re-deriving it from `satisfied`, so a caller that violates the
+    /// obligation would silently get back a fragment built for a *different* grant set — an I2
+    /// disclosure if that other set happens to be a superset. Debug builds catch a violation via
+    /// a `debug_assert_eq!` against a freshly recomputed key; release builds do not re-check on
+    /// the fast path (that would defeat its purpose), so this obligation is load-bearing in
+    /// release too.
+    ///
+    /// `postings` supplies the union inputs on a cache miss. `watermark` is the caller-supplied
+    /// SEGMENTS watermark to persist alongside a freshly built fragment; it is ignored on a cache
+    /// hit (the hit's own persisted watermark, from when it was built, is what's returned —
+    /// Task 10's composition uses the fragment's own watermark).
     pub fn get_or_build(
         &self,
         satisfied: &[TermId],
@@ -304,7 +419,18 @@ impl FragmentCache {
         let key = {
             let cached = self.key_memo.lock().unwrap().get(&auth_data_hash).copied();
             match cached {
-                Some(key) => key,
+                Some(key) => {
+                    debug_assert_eq!(
+                        key,
+                        canonical_key(&self.bundle_identity, &self.auth_plugin_hash, satisfied),
+                        "get_or_build: auth_data_hash {auth_data_hash:02x?} was previously \
+                         associated with a different term set than `satisfied` now hashes to — \
+                         callers must derive auth_data_hash from the same auth_data that produced \
+                         `satisfied` (see this method's doc: a violation silently returns a \
+                         fragment for the wrong grant set, an I2 disclosure risk)"
+                    );
+                    key
+                }
                 None => {
                     let key =
                         canonical_key(&self.bundle_identity, &self.auth_plugin_hash, satisfied);
@@ -317,16 +443,14 @@ impl FragmentCache {
         let frag_path = self.frag_path(&key);
         let meta_path = self.meta_path(&key);
 
-        if frag_path.exists() && meta_path.exists() {
-            if let Ok(frozen) = FrozenFragment::open(&frag_path, &meta_path) {
-                return Ok(Arc::new(frozen));
-            }
-            // Fall through: a malformed on-disk entry is rebuilt, not fatal — the store is a
-            // cache, not the source of truth, and rebuilding is always safe (I2: `build_fragment`
-            // recomputes from `M_auth`-eligible postings either way).
+        // No existence pre-check: `open()` itself fails closed on anything short of a fully
+        // valid, digest-matching pair, so a missing file and a corrupt one are indistinguishable
+        // "miss, rebuild" outcomes here — there is nothing a pre-check would add.
+        if let Ok(frozen) = FrozenFragment::open(&frag_path, &meta_path) {
+            return Ok(Arc::new(frozen));
         }
 
-        std::fs::create_dir_all(&self.dir)?;
+        create_private_dir_all(&self.dir)?;
         let bitmap = build_fragment(satisfied, postings)?;
         self.rebuilds.fetch_add(1, Ordering::Relaxed);
         let frozen = FrozenFragment::build_and_persist(&frag_path, &meta_path, &bitmap, watermark)?;

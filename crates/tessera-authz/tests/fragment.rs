@@ -132,6 +132,10 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
             0,
             "reopening the cache dir must hit the on-disk frozen fragment, not rebuild"
         );
+        assert_eq!(
+            frozen.watermark, 42,
+            "reopened fragment must restore its persisted watermark"
+        );
         let got: HashSet<u32> = frozen.view().iter().collect();
         assert_eq!(got, expected);
 
@@ -181,6 +185,41 @@ fn stale_bundle_identity_misses_the_cache() {
             cache.rebuild_count(),
             1,
             "different bundle_identity must not hit a fragment keyed under the old identity"
+        );
+    }
+}
+
+#[test]
+fn stale_auth_plugin_hash_misses_the_cache() {
+    let corpus_dir = TempDir::new().unwrap();
+    let (path, _per_term) = write_random_postings(corpus_dir.path(), 13, 5);
+    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+
+    let cache_dir = TempDir::new().unwrap();
+    let bundle_identity = [9u8; 32];
+    let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
+    let auth_data_hash = [1u8; 32];
+
+    {
+        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, [7u8; 32]);
+        cache
+            .get_or_build(&terms, auth_data_hash, &reader, 1)
+            .unwrap();
+        assert_eq!(cache.rebuild_count(), 1);
+    }
+
+    // Same cache dir, same bundle_identity, different auth_plugin_hash: must rebuild, not hit —
+    // design §2.3 requires the plugin version in the key (an auth plugin upgrade must not serve a
+    // frozen fragment computed under a different plugin's term semantics).
+    {
+        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, [8u8; 32]);
+        cache
+            .get_or_build(&terms, auth_data_hash, &reader, 1)
+            .unwrap();
+        assert_eq!(
+            cache.rebuild_count(),
+            1,
+            "different auth_plugin_hash must not hit a fragment keyed under the old plugin hash"
         );
     }
 }
