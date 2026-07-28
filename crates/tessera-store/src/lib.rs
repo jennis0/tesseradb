@@ -1,4 +1,16 @@
-//! Segment file writers: `columns.arrow`, `morton.u64`, `permutation.bin` (contracts §2.1,
-//! Reference Sheet R4). Byte-level only — no on-disk index/mask construction lives here yet.
+//! Segment file writers (`columns.arrow`, `morton.u64`, `permutation.bin`; contracts §2.1,
+//! Reference Sheet R4), the bundle read protocol and zero-copy loader, and `Permutation` — the
+//! only legal EntityId→RowId path in the codebase (invariant I4).
 
+pub mod error;
+pub mod manifest;
+pub mod permutation;
+pub mod read;
 pub mod write;
+
+pub use error::{Result, StoreError};
+pub use permutation::Permutation;
+pub use read::{
+    open_bundle, tile_ranges, Bundle, ColumnsRef, MortonSlice, PartitionData, ScalarSlice,
+    SegmentData, SliceData,
+};
