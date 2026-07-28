@@ -2,3 +2,12 @@
 name = "tessera-store"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+tessera-types = { path = "../tessera-types" }
+tessera-spatial = { path = "../tessera-spatial" }
+arrow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rand = { workspace = true }
