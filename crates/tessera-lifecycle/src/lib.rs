@@ -8,5 +8,5 @@
 pub mod alloc;
 pub mod wal;
 
-pub use alloc::{assign_sorted, Allocator, PendingItem};
+pub use alloc::{assign_sorted, high_water_from, Allocator, PendingItem};
 pub use wal::{ChangeOp, Wal, WalError, WalRecord, WalRow, WalScalar};

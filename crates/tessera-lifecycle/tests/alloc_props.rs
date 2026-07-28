@@ -5,8 +5,9 @@ use std::collections::HashSet;
 
 use proptest::prelude::*;
 
-use tessera_lifecycle::alloc::{assign_sorted, Allocator, PendingItem};
-use tessera_types::TermId;
+use tessera_lifecycle::alloc::{assign_sorted, high_water_from, Allocator, PendingItem};
+use tessera_lifecycle::wal::{WalRecord, WalRow};
+use tessera_types::{EntityId, TermId};
 
 proptest! {
     /// Interleaved `allocate` calls on a single allocator never overlap and always advance the
@@ -29,30 +30,53 @@ proptest! {
         }
     }
 
-    /// Simulates repeated crashes: each "session" allocates some ranges, all of which become
-    /// durable (as WAL rows/leases would, once fsynced) before the allocator is dropped and
-    /// rebuilt from `max(manifest_hw, replayed rows/leases)` — exactly `high_water()` at the
-    /// point of the crash. No ID handed out in an earlier session may reappear in a later one.
+    /// Simulates repeated crashes against a *replayed* WAL, not a carried-over `high_water()`:
+    /// each "session" allocates some ranges, records one `WalRow` per allocated ID (as the real
+    /// system would once each row is fsynced) into a log standing in for the on-disk WAL, then
+    /// the allocator is dropped (the crash). The next session rebuilds via
+    /// `Allocator::new(manifest_hw.max(high_water_from(&wal_records)))` — the actual seeding
+    /// contract (`Allocator::high_water()` itself is not durable; only what made it into the WAL
+    /// is). No ID handed out in an earlier session may reappear in a later one.
     #[test]
     fn no_reuse_across_simulated_crashes(
         session_sizes in prop::collection::vec(prop::collection::vec(1u64..32, 1..10), 1..12),
     ) {
-        let mut durable_hw = 0u64;
+        // No bundle exists in this simulation, so `manifest_hw` is always 0 — the WAL's replayed
+        // high-water mark is the only contributor. Spelled out as `max(manifest_hw, ...)` anyway
+        // (with the redundant-with-0 lint silenced) because that full expression is the actual
+        // production seeding contract this test exists to exercise, not just the degenerate case.
+        let manifest_hw: u64 = 0;
+        let mut wal_records: Vec<WalRecord> = Vec::new();
         let mut used: HashSet<u64> = HashSet::new();
 
         for sizes in session_sizes {
-            // Rebuild from the durable high-water mark left by the previous (simulated-crashed)
-            // session — this is `Allocator::new`'s entire seeding contract.
-            let mut alloc = Allocator::new(durable_hw);
+            // Rebuild exactly as a real restart would: from the bundle's manifest high-water
+            // mark and whatever the (accumulated, "replayed") WAL log actually contains.
+            #[allow(clippy::unnecessary_min_or_max)]
+            let seed = manifest_hw.max(high_water_from(&wal_records));
+            let mut alloc = Allocator::new(seed);
+
             for n in sizes {
                 let range = alloc.allocate(n);
                 for id in range {
                     prop_assert!(!used.contains(&id), "id {} reused across a simulated crash", id);
                     used.insert(id);
+                    wal_records.push(WalRecord::IngestBatch {
+                        batch_id: format!("batch-{id}"),
+                        body_hash: [0u8; 32],
+                        rows: vec![WalRow {
+                            external_id: id.to_le_bytes().to_vec(),
+                            entity_id: EntityId::new(id),
+                            descriptors: Vec::new(),
+                            x: 0.0,
+                            y: 0.0,
+                            scalars: Vec::new(),
+                        }],
+                    });
                 }
             }
-            durable_hw = alloc.high_water();
-            // `alloc` is dropped here — the simulated crash.
+            // `alloc` is dropped here — the simulated crash. `wal_records` persists, standing in
+            // for durable, already-fsynced WAL content survived from disk.
         }
     }
 

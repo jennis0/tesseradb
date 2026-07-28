@@ -12,6 +12,8 @@ use std::ops::Range;
 
 use tessera_types::{EntityId, TermId};
 
+use crate::wal::WalRecord;
+
 /// Monotone, never-reusing entity-ID allocator (I9).
 pub struct Allocator {
     high_water: u64,
@@ -36,6 +38,37 @@ impl Allocator {
     pub fn high_water(&self) -> u64 {
         self.high_water
     }
+}
+
+/// Computes the entity-ID high-water mark implied by a set of replayed WAL records: the maximum
+/// of every `Lease.hi` and every `WalRow.entity_id.raw() + 1`.
+///
+/// This is the "replayed rows/leases" half of `Allocator::new`'s `max(manifest_hw, replayed
+/// rows/leases)` seeding contract — callers should rebuild with
+/// `Allocator::new(manifest_hw.max(high_water_from(&replayed)))` rather than carrying a
+/// pre-crash `Allocator::high_water()` value across a restart, since the allocator itself does
+/// not persist: only what actually made it into the WAL (or the bundle manifest) did.
+pub fn high_water_from(records: &[WalRecord]) -> u64 {
+    let mut hw = 0u64;
+    for rec in records {
+        match rec {
+            WalRecord::Lease { hi, .. } => {
+                if *hi > hw {
+                    hw = *hi;
+                }
+            }
+            WalRecord::IngestBatch { rows, .. } => {
+                for row in rows {
+                    let candidate = row.entity_id.raw() + 1;
+                    if candidate > hw {
+                        hw = candidate;
+                    }
+                }
+            }
+            WalRecord::Change { .. } => {}
+        }
+    }
+    hw
 }
 
 /// One item awaiting entity-ID assignment at serve time (append ingest).
@@ -71,16 +104,22 @@ fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
 /// permanent signature ordering rather than breaking it. Items with identical signatures land in
 /// a contiguous ID run, which is what makes their postings compress as runs.
 pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) {
-    let mut order: Vec<usize> = (0..items.len()).collect();
-    order.sort_by(|&a, &b| {
-        let ka = signature_sort_key(&items[a].terms);
-        let kb = signature_sort_key(&items[b].terms);
-        ka.cmp(&kb)
-            .then_with(|| items[a].external_id.cmp(&items[b].external_id))
+    // Compute each item's (signature, external_id) sort key once, up front, rather than inside
+    // the comparator — `sort_by`'s comparator can be called O(n log n) times, and
+    // `signature_sort_key` allocates, so recomputing it per-comparison would be O(n log n)
+    // allocations instead of O(n).
+    let mut order: Vec<(usize, Vec<u32>)> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| (i, signature_sort_key(&item.terms)))
+        .collect();
+    order.sort_by(|(a, ka), (b, kb)| {
+        ka.cmp(kb)
+            .then_with(|| items[*a].external_id.cmp(&items[*b].external_id))
     });
 
     let ids = alloc.allocate(items.len() as u64);
-    for (rank, idx) in order.into_iter().enumerate() {
+    for (rank, (idx, _)) in order.into_iter().enumerate() {
         items[idx].entity_id = Some(EntityId::new(ids.start + rank as u64));
     }
 }
@@ -104,5 +143,45 @@ mod tests {
         // Same three-line rule as tessera_build::signature_sort_key: sorted, deduplicated.
         let key = signature_sort_key(&[TermId::new(9), TermId::new(2), TermId::new(2)]);
         assert_eq!(key, vec![2, 9]);
+    }
+
+    fn row(entity_id: u64) -> WalRecord {
+        WalRecord::IngestBatch {
+            batch_id: "b".into(),
+            body_hash: [0u8; 32],
+            rows: vec![crate::wal::WalRow {
+                external_id: entity_id.to_le_bytes().to_vec(),
+                entity_id: EntityId::new(entity_id),
+                descriptors: Vec::new(),
+                x: 0.0,
+                y: 0.0,
+                scalars: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn high_water_from_takes_the_max_of_rows_and_leases() {
+        assert_eq!(high_water_from(&[]), 0);
+        // A row with entity_id 5 means IDs 0..=5 are taken, so the next free ID is 6.
+        assert_eq!(high_water_from(&[row(5)]), 6);
+        assert_eq!(
+            high_water_from(&[row(5), WalRecord::Lease { lo: 6, hi: 20 }]),
+            20
+        );
+        // A lease lower than an already-seen row must not pull the high-water mark backwards.
+        assert_eq!(
+            high_water_from(&[WalRecord::Lease { lo: 6, hi: 20 }, row(3)]),
+            20
+        );
+        // Change records carry no entity-ID information.
+        assert_eq!(
+            high_water_from(&[WalRecord::Change {
+                external_id: vec![1],
+                op: crate::wal::ChangeOp::Delete,
+                descriptors: None,
+            }]),
+            0
+        );
     }
 }

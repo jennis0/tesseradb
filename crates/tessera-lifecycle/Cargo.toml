@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tessera-types = { path = "../tessera-types" }
+tessera-types = { path = "../tessera-types", features = ["serde"] }
 postcard = { workspace = true }
 crc32fast = { workspace = true }
 serde = { workspace = true }

@@ -1,14 +1,12 @@
-use serde::{Deserialize, Serialize};
-
 /// Macro for creating ID newtypes with no cross-space conversions (invariant I4).
 /// Each type gets new(raw) and raw(self) methods, with derives Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug.
-/// Also derives `Serialize`/`Deserialize` (transparent, single-field) so newtypes can appear in
-/// on-disk formats (e.g. the lifecycle WAL) without leaking a cross-type conversion.
+/// Under the (off-by-default) `serde` feature, also derives `Serialize`/`Deserialize`
+/// (transparent, single-field) so newtypes can appear in on-disk formats (e.g. the lifecycle
+/// WAL) without leaking a cross-type conversion.
 macro_rules! define_id_newtype {
     ($name:ident, $inner:ty) => {
-        #[derive(
-            Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize,
-        )]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
         pub struct $name($inner);
 
         impl $name {

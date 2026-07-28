@@ -4,4 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-serde = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[features]
+# Off by default: only tessera-lifecycle (the WAL) needs ID newtypes to serialise. Every other
+# crate keeps tessera-types dependency-free of serde.
+serde = ["dep:serde"]

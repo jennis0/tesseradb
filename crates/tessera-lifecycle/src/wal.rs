@@ -4,7 +4,8 @@
 //! ack before fsync — everything below exists to make that fsync boundary the one place acked
 //! state can be trusted from, and everything past it disposable.
 //!
-//! Record framing on disk: `u32 LE len ‖ postcard bytes ‖ u32 LE crc32(postcard bytes)`.
+//! On-disk layout: a fixed 6-byte header (`b"TWAL"` ‖ `u16 LE` format version), then a sequence
+//! of framed records: `u32 LE len ‖ postcard bytes ‖ u32 LE crc32(postcard bytes)`.
 //!
 //! ## The positional CRC rule
 //!
@@ -19,8 +20,9 @@
 //! must refuse to come up at all.
 //!
 //! The two cases are told apart by comparing a failing record's **start offset** against the
-//! last-fsynced offset, tracked in the sidecar file `wal.sync` (8-byte LE offset, written and
-//! fsynced immediately after every WAL fsync — see [`Wal::fsync`]):
+//! last-fsynced offset, tracked in the sidecar file `<name>.sync` (8-byte LE offset, written via
+//! write-tmp-then-rename and fsynced — together with its directory entry — immediately after
+//! every WAL fsync; see [`Wal::fsync`]):
 //!
 //! - failing record starts **at or past** the sync offset → it was never fsynced, so it can only
 //!   be an artefact of a torn tail write. Truncate the log there and replay succeeds with the
@@ -28,6 +30,14 @@
 //! - failing record starts **before** the sync offset → it lies inside bytes that were reported
 //!   durable. Fail closed: return [`WalError::WalCorruption`] and the caller must not become
 //!   ready.
+//!
+//! Two failure modes that are easy to get fail-open by accident, and are guarded explicitly
+//! here: a WAL file that is simply **shorter** than the recorded sync offset (no corrupted
+//! record at all — the tail is just *gone*, e.g. a restored stale copy or lost filesystem
+//! blocks) must fail closed exactly as a corrupted record before the sync point would; and a
+//! **missing or unreadable sidecar** must default to "assume everything present is acked", not
+//! "assume nothing is acked" — the latter would silently downgrade real, previously-fsynced
+//! records to discardable tail noise the moment the sidecar is lost.
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -42,6 +52,9 @@ use tessera_types::EntityId;
 /// imported: the brief scopes this crate's dependencies to `tessera-types`, `postcard` and
 /// `crc32fast` only (no `tessera-spatial`), so the WAL carries its own copy of the (tiny, stable)
 /// shape. Keep the two enums in lockstep if either changes.
+///
+/// On-disk format: variant order is frozen and append-only (postcard encodes enum variants by
+/// declaration index) — never reorder or remove a variant, only append new ones at the end.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WalScalar {
     U64(u64),
@@ -73,6 +86,8 @@ pub struct WalRow {
 /// §3) are distinct and must not be conflated: deletion denies retire by the epoch ledger,
 /// suppressions retire only on `Unsuppress` (never touching postings), and predicate changes
 /// retire at their compaction fold.
+///
+/// On-disk format: variant order is frozen and append-only — see [`WalScalar`]'s note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChangeOp {
     Predicate,
@@ -82,6 +97,8 @@ pub enum ChangeOp {
 }
 
 /// One framed WAL record.
+///
+/// On-disk format: variant order is frozen and append-only — see [`WalScalar`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WalRecord {
     /// An accepted `/control/ingest` batch. `body_hash` is the SHA-256 of the raw request body
@@ -105,15 +122,25 @@ pub enum WalRecord {
     Lease { lo: u64, hi: u64 },
 }
 
-/// WAL-level failures. [`WalError::WalCorruption`] is the fail-closed case: the caller must not
-/// treat the WAL as open/ready.
+/// WAL-level failures. [`WalError::WalCorruption`], [`WalError::BadHeader`] and
+/// [`WalError::Poisoned`] are all fail-closed cases: the caller must not treat the WAL as
+/// open/ready, and must not attempt further operations on a poisoned handle.
 #[derive(Debug)]
 pub enum WalError {
     Io(std::io::Error),
     Postcard(postcard::Error),
-    /// Framing/CRC failure starting before the last-fsynced offset — acked state, possibly a
-    /// deny, is damaged. Fail closed (lifecycle design §4): do not come ready.
+    /// Framing/CRC failure starting before the last-fsynced offset, or a WAL file shorter than
+    /// that offset — acked state, possibly a deny, is damaged or missing. Fail closed (lifecycle
+    /// design §4): do not come ready.
     WalCorruption,
+    /// The file's leading magic/version header is missing or does not match. Not itself a
+    /// framing/CRC failure, but the same fail-closed answer applies: a file we cannot positively
+    /// identify as this WAL format must not be trusted or written to.
+    BadHeader,
+    /// A previous `append` or `fsync` failed partway through a write. `self.len` can no longer
+    /// be trusted to name a record boundary in the underlying file, so every subsequent
+    /// operation on this handle refuses rather than risk writing past a torn frame.
+    Poisoned,
 }
 
 impl std::fmt::Display for WalError {
@@ -124,6 +151,11 @@ impl std::fmt::Display for WalError {
             WalError::WalCorruption => write!(
                 f,
                 "wal corruption before the last-fsynced offset — acked state may be damaged"
+            ),
+            WalError::BadHeader => write!(f, "wal file header missing or unrecognised"),
+            WalError::Poisoned => write!(
+                f,
+                "wal handle poisoned by a previous write failure — reopen from disk"
             ),
         }
     }
@@ -145,36 +177,84 @@ impl From<postcard::Error> for WalError {
 
 pub type Result<T> = std::result::Result<T, WalError>;
 
+/// File format magic, checked at open.
+const WAL_MAGIC: [u8; 4] = *b"TWAL";
+/// File format version, checked at open. Bump on any incompatible change to record framing or
+/// the header itself.
+const WAL_VERSION: u16 = 1;
+/// Header size in bytes (`WAL_MAGIC` ‖ `WAL_VERSION` LE). Every record offset in this module —
+/// including the ones compared against the sidecar's last-fsync offset — is a byte offset from
+/// the start of the file, so it already accounts for the header living at the front.
+pub const HEADER_LEN: u64 = WAL_MAGIC.len() as u64 + 2;
+
 /// An open write-ahead log. `open` replays existing records; `append` buffers a new one;
 /// `fsync` is the durability boundary the ack contract waits on.
 pub struct Wal {
     file: File,
     sync_path: PathBuf,
-    /// Current end-of-file offset — bytes appended so far, whether or not yet fsynced.
+    /// Current end-of-file offset — bytes appended so far (including the header), whether or
+    /// not yet fsynced.
     len: u64,
+    /// Set on any I/O error part-way through a write. Once poisoned, every further `append`/
+    /// `fsync` call refuses immediately (I3) rather than risk `len` disagreeing with the file.
+    poisoned: bool,
 }
 
+/// The sidecar lives beside the WAL file, named after its stem: `wal.log` → `wal.sync`. Not a
+/// fixed `wal.sync` in the directory — a directory could plausibly host more than one WAL in
+/// future, and naming it after the file it belongs to avoids collision.
 fn sync_sidecar_path(wal_path: &Path) -> PathBuf {
-    match wal_path.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => dir.join("wal.sync"),
-        _ => PathBuf::from("wal.sync"),
-    }
+    let dir = wal_path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let stem = wal_path.file_stem().unwrap_or(wal_path.as_os_str());
+    let mut name = stem.to_os_string();
+    name.push(".sync");
+    dir.join(name)
 }
 
-/// Reads the sidecar's last-fsync offset. A missing sidecar means nothing has ever been
-/// fsynced (offset 0) — a fresh WAL, or one that crashed before its first fsync. A sidecar that
-/// exists but is not exactly 8 bytes cannot be trusted; treat it the same as "nothing synced"
-/// (offset 0), which is the conservative choice: it makes replay more likely to fail closed on
-/// any subsequent framing problem, never less.
-fn read_sync_point(sync_path: &Path) -> Result<u64> {
+/// A `.tmp` sibling of `path`, used for the write-tmp-then-rename sidecar update (C3): a rename
+/// is atomic, so there is never a window where the sidecar is truncated-but-not-yet-rewritten.
+fn tmp_sibling(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".tmp");
+    PathBuf::from(os)
+}
+
+/// Fsyncs a directory so that entries created or renamed within it (a new WAL file, a renamed
+/// sidecar) are durable, not just the file contents themselves.
+fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    File::open(dir)?.sync_all()
+}
+
+/// Resolves the last-fsync offset to replay against.
+///
+/// `wal_len` is the WAL file's byte length (including header) *before* this open's replay has
+/// touched it. If the file carries no records yet (`wal_len <= HEADER_LEN`), there is nothing to
+/// protect and the sync point is simply the file's current length. Otherwise:
+///
+/// - a well-formed 8-byte sidecar is trusted as-is;
+/// - a missing or malformed sidecar defaults to `wal_len` — i.e. **everything present is assumed
+///   acked** (fail closed: a lost/short sidecar must make corruption anywhere in a non-empty WAL
+///   refuse to open, not silently look like an untouched tail — C2).
+fn resolve_sync_point(sync_path: &Path, wal_len: u64) -> Result<u64> {
+    if wal_len <= HEADER_LEN {
+        return Ok(wal_len);
+    }
     match std::fs::read(sync_path) {
         Ok(bytes) if bytes.len() == 8 => {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&bytes);
             Ok(u64::from_le_bytes(buf))
         }
-        Ok(_) => Ok(0),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Ok(_) => Ok(wal_len),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(wal_len),
         Err(e) => Err(e.into()),
     }
 }
@@ -193,28 +273,67 @@ fn read_up_to(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(total)
 }
 
-/// Replays every record from offset 0, applying the positional CRC rule on the first framing or
-/// CRC failure encountered. Returns the records collected and the offset replay stopped at
-/// (== the file's logical length after any truncation).
-fn replay(file: &mut File, sync_point: u64) -> Result<(Vec<WalRecord>, u64)> {
+fn write_header(file: &mut File) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(0))?;
+    file.write_all(&WAL_MAGIC)?;
+    file.write_all(&WAL_VERSION.to_le_bytes())?;
+    file.sync_all()?;
+    file.seek(SeekFrom::Start(HEADER_LEN))?;
+    Ok(())
+}
+
+fn check_header(file: &mut File) -> Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut buf = [0u8; HEADER_LEN as usize];
+    let n = read_up_to(file, &mut buf)?;
+    if n < HEADER_LEN as usize
+        || buf[0..4] != WAL_MAGIC
+        || u16::from_le_bytes([buf[4], buf[5]]) != WAL_VERSION
+    {
+        return Err(WalError::BadHeader);
+    }
+    Ok(())
+}
+
+/// Replays every record from just past the header, applying the positional CRC rule on the
+/// first framing or CRC failure encountered. Returns the records collected and the offset
+/// replay stopped at (== the file's logical length after any truncation).
+fn replay(file: &mut File, sync_point: u64) -> Result<(Vec<WalRecord>, u64)> {
+    let total_len = file.metadata()?.len();
+    file.seek(SeekFrom::Start(HEADER_LEN))?;
     let mut records = Vec::new();
-    let mut pos: u64 = 0;
+    let mut pos: u64 = HEADER_LEN;
 
     loop {
         let mut len_buf = [0u8; 4];
         let n = read_up_to(file, &mut len_buf)?;
         if n == 0 {
-            // Clean end of log: nothing was ever written from `pos` onward.
+            // Clean end of log: nothing was ever written from `pos` onward. This is only a safe,
+            // ackable state if `pos` has actually reached the last-fsynced offset (C1) — a WAL
+            // that is simply *shorter* than what the sidecar claims was durable is exactly as
+            // dangerous as a corrupted record before that offset, and must fail the same way.
+            if pos < sync_point {
+                return Err(WalError::WalCorruption);
+            }
             break;
         }
         if n < 4 {
             return finish_on_failure(file, pos, sync_point, records);
         }
-        let body_len = u32::from_le_bytes(len_buf) as usize;
+        let body_len = u32::from_le_bytes(len_buf) as u64;
 
-        let mut body = vec![0u8; body_len];
-        if read_up_to(file, &mut body)? < body_len {
+        // Bound the claimed body length against what the file can actually hold before
+        // allocating for it: a corrupted length prefix (e.g. a stray 0xFFFFFFFF) must be treated
+        // as a framing failure at `pos`, not turned into a multi-gigabyte allocation attempt
+        // (I1). (The short-read check below would eventually catch an over-long body too, but
+        // only after the allocation already happened — this bound avoids paying for it at all.)
+        let remaining = total_len.saturating_sub(pos + 4);
+        if body_len > remaining {
+            return finish_on_failure(file, pos, sync_point, records);
+        }
+
+        let mut body = vec![0u8; body_len as usize];
+        if (read_up_to(file, &mut body)? as u64) < body_len {
             return finish_on_failure(file, pos, sync_point, records);
         }
 
@@ -228,13 +347,19 @@ fn replay(file: &mut File, sync_point: u64) -> Result<(Vec<WalRecord>, u64)> {
             return finish_on_failure(file, pos, sync_point, records);
         }
 
+        // Framing + CRC alone cannot catch every corruption: an all-zero region (e.g. sparse-file
+        // zero-fill, or a hole left by a crash mid-write with no CRC ever written) has
+        // `body_len == 0` and `crc32fast::hash(&[]) == 0`, which passes both checks trivially.
+        // `postcard::from_bytes` is the backstop here — an empty (or otherwise all-zero) byte
+        // string cannot select any `WalRecord` variant, so decode fails and this record is
+        // still routed through `finish_on_failure` like any other corrupt record.
         let record: WalRecord = match postcard::from_bytes(&body) {
             Ok(r) => r,
             Err(_) => return finish_on_failure(file, pos, sync_point, records),
         };
 
         records.push(record);
-        pos += 4 + body_len as u64 + 4;
+        pos += 4 + body_len + 4;
     }
 
     Ok((records, pos))
@@ -251,8 +376,11 @@ fn finish_on_failure(
         // Inside the region we told a caller was durable. Do not repair by discarding it.
         Err(WalError::WalCorruption)
     } else {
-        // At or past the sync point: never acked. Safe to discard silently.
+        // At or past the sync point: never acked. Safe to discard silently — but fsync the
+        // truncation immediately (I2), so a second crash before the next explicit `Wal::fsync`
+        // cannot let the filesystem resurrect the stale tail we just decided to drop.
         file.set_len(pos)?;
+        file.sync_data()?;
         Ok((records, pos))
     }
 }
@@ -263,7 +391,8 @@ impl Wal {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<(Wal, Vec<WalRecord>)> {
         let path = path.as_ref();
         let sync_path = sync_sidecar_path(path);
-        let sync_point = read_sync_point(&sync_path)?;
+
+        let is_new = !path.exists();
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -271,6 +400,26 @@ impl Wal {
             .read(true)
             .write(true)
             .open(path)?;
+
+        let initial_len = file.metadata()?.len();
+        if initial_len == 0 {
+            write_header(&mut file)?;
+        } else {
+            check_header(&mut file)?;
+        }
+        if is_new {
+            // The directory entry for a brand-new WAL file must itself be durable (C3) —
+            // otherwise a crash immediately after creation can lose the file entirely while its
+            // sidecar (if any survives from a same-named predecessor) still claims a sync point.
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                fsync_dir(dir)?;
+            } else {
+                fsync_dir(Path::new("."))?;
+            }
+        }
+
+        let wal_len = file.metadata()?.len();
+        let sync_point = resolve_sync_point(&sync_path, wal_len)?;
 
         let (records, len) = replay(&mut file, sync_point)?;
         file.seek(SeekFrom::Start(len))?;
@@ -280,6 +429,7 @@ impl Wal {
                 file,
                 sync_path,
                 len,
+                poisoned: false,
             },
             records,
         ))
@@ -287,28 +437,76 @@ impl Wal {
 
     /// Buffers `rec` for append. Not durable until [`Wal::fsync`] returns.
     pub fn append(&mut self, rec: &WalRecord) -> Result<()> {
+        if self.poisoned {
+            return Err(WalError::Poisoned);
+        }
         let body = postcard::to_allocvec(rec)?;
         let crc = crc32fast::hash(&body);
         let len = body.len() as u32;
-        self.file.write_all(&len.to_le_bytes())?;
-        self.file.write_all(&body)?;
-        self.file.write_all(&crc.to_le_bytes())?;
-        self.len += 4 + body.len() as u64 + 4;
-        Ok(())
+
+        let write_result: std::io::Result<()> = (|| {
+            self.file.write_all(&len.to_le_bytes())?;
+            self.file.write_all(&body)?;
+            self.file.write_all(&crc.to_le_bytes())?;
+            Ok(())
+        })();
+
+        match write_result {
+            Ok(()) => {
+                self.len += 4 + body.len() as u64 + 4;
+                Ok(())
+            }
+            Err(e) => {
+                // A partially-completed write_all may have left the file at an offset between
+                // the old and new `self.len` — we cannot know how many bytes actually landed, so
+                // `self.len` can no longer be trusted to name a record boundary. Poison rather
+                // than guess (I3).
+                self.poisoned = true;
+                Err(WalError::Io(e))
+            }
+        }
     }
 
     /// Flushes buffered appends to durable storage and advances the sidecar's last-fsync offset
     /// to match. Returns the new durable offset. The ack contract must not return 200 until this
     /// has returned `Ok`.
     pub fn fsync(&mut self) -> Result<u64> {
-        self.file.sync_data()?;
-        let mut sidecar = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.sync_path)?;
-        sidecar.write_all(&self.len.to_le_bytes())?;
-        sidecar.sync_all()?;
-        Ok(self.len)
+        if self.poisoned {
+            return Err(WalError::Poisoned);
+        }
+
+        if let Err(e) = self.file.sync_data() {
+            self.poisoned = true;
+            return Err(WalError::Io(e));
+        }
+
+        let result: std::io::Result<()> = (|| {
+            let tmp_path = tmp_sibling(&self.sync_path);
+            {
+                let mut tmp = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&tmp_path)?;
+                tmp.write_all(&self.len.to_le_bytes())?;
+                tmp.sync_all()?;
+            }
+            std::fs::rename(&tmp_path, &self.sync_path)?;
+            let dir = self
+                .sync_path
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            fsync_dir(dir)?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => Ok(self.len),
+            Err(e) => {
+                self.poisoned = true;
+                Err(WalError::Io(e))
+            }
+        }
     }
 }
