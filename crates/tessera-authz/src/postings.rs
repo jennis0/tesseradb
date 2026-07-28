@@ -32,9 +32,13 @@ const POSTING_COLUMN_NAME: &str = "posting";
 /// (raw little-endian `u32` array) when `per_term[t].len() <= small_term_threshold as usize`
 /// (including the empty case), and tag 1 (portable Roaring bytes) otherwise.
 ///
-/// `per_term[t]` must already be sorted ascending — this is a CSR postings writer, not a sort
-/// step; callers are expected to hand it term-ordered, sorted entity lists (e.g. from the build
-/// pipeline's grouping pass).
+/// `per_term[t]` must already be sorted strictly ascending (no duplicates) — this is a CSR
+/// postings writer, not a sort step; callers are expected to hand it term-ordered, sorted entity
+/// lists (e.g. from the build pipeline's grouping pass). This is checked unconditionally
+/// (not just in debug builds): these are authorisation masks, and an unsorted/duplicated input
+/// would otherwise silently diverge in content depending only on which side of
+/// `small_term_threshold` a term's count lands (tag 0 stores input verbatim; tag 1 sorts and
+/// dedups via the Roaring bitmap) — a content-integrity bug, not merely a style one.
 pub fn write_postings(
     path: &Path,
     per_term: &[Vec<u32>],
@@ -42,11 +46,16 @@ pub fn write_postings(
 ) -> io::Result<()> {
     let mut builder = LargeBinaryBuilder::new();
 
-    for entities in per_term {
-        debug_assert!(
-            entities.windows(2).all(|w| w[0] <= w[1]),
-            "write_postings: entity ids for a term must be sorted ascending"
-        );
+    for (t, entities) in per_term.iter().enumerate() {
+        if !entities.windows(2).all(|w| w[0] < w[1]) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "write_postings: term {t}'s entity list must be sorted strictly ascending \
+                     (no duplicates)"
+                ),
+            ));
+        }
 
         let mut record = Vec::new();
         if (entities.len() as u64) <= small_term_threshold as u64 {
@@ -86,6 +95,7 @@ pub fn write_postings(
 
 /// A borrowed view of one term's postings, tied to the lifetime of the [`PostingsReader`] that
 /// produced it.
+#[derive(Debug)]
 pub enum PostingRef<'a> {
     /// Tag 0: raw little-endian `u32` entity ids, sorted ascending.
     Array(&'a [u8]),
@@ -97,6 +107,7 @@ pub enum PostingRef<'a> {
 /// Reads `postings.arrow`. Holds the backing bytes (either an owned buffer or a memory map);
 /// [`PostingRef`]s returned by [`PostingsReader::posting`] borrow from that backing storage
 /// without copying.
+#[derive(Debug)]
 pub struct PostingsReader {
     array: LargeBinaryArray,
 }
@@ -115,7 +126,12 @@ impl PostingsReader {
             // SAFETY: `arc` owns the mapping for as long as any Buffer built from it is alive
             // (the Arc is captured as the buffer's `Allocation`), and the mapping is valid for
             // `len` bytes for its entire lifetime.
-            let ptr = NonNull::new(arc.as_ptr() as *mut u8).unwrap_or_else(NonNull::dangling);
+            // memmap2::Mmap never returns a null base pointer (even the zero-length map case
+            // uses a valid, non-null dangling-style allocation internally) — see memmap2's
+            // `MmapInner` construction, which always goes through a real `mmap(2)`/`VirtualAlloc`
+            // call or a dedicated empty-map sentinel address, never a null pointer.
+            let ptr = NonNull::new(arc.as_ptr() as *mut u8)
+                .expect("memmap2::Mmap never returns a null base pointer");
             unsafe { Buffer::from_custom_allocation(ptr, len, arc) }
         } else {
             let data = std::fs::read(path)?;
@@ -147,6 +163,8 @@ impl PostingsReader {
             .ok_or_else(|| invalid_data("postings.arrow: column 0 is not a LargeBinaryArray"))?
             .clone();
 
+        validate_records(&array)?;
+
         Ok(PostingsReader { array })
     }
 
@@ -174,8 +192,13 @@ impl PostingsReader {
         match tag {
             0 => Ok(PostingRef::Array(payload)),
             1 => {
-                // SAFETY: `payload` is exactly the bytes produced by `write_postings` via
-                // `Bitmap::serialize::<Portable>`, so it is a valid portable Roaring bitmap.
+                // SAFETY: every tag-1 payload in `self.array` was validated once, at `open`
+                // time, by `validate_records` — which round-trips it through
+                // `Bitmap::try_deserialize::<Portable>` (bounds-checked, internally validated)
+                // and confirms the payload is *exactly* the bitmap's serialised size with no
+                // truncation or trailing garbage. `BitmapView::deserialize`'s own safety
+                // contract (valid portable bytes, no length mismatch) is therefore already
+                // discharged before we ever reach this unsafe block.
                 let view = unsafe { BitmapView::deserialize::<Portable>(payload) };
                 Ok(PostingRef::Roaring(view))
             }
@@ -184,6 +207,56 @@ impl PostingsReader {
             ))),
         }
     }
+}
+
+/// Validate every record in `array` once, at `open` time, so that later lookups (which use the
+/// unsafe zero-copy `BitmapView::deserialize` for tag-1 records) never operate on unchecked
+/// bytes. A malformed record here — corrupt file, truncated write, wrong tag — fails `open`
+/// closed (`InvalidData`) rather than causing undefined behaviour or a panic deep inside
+/// CRoaring on first lookup.
+fn validate_records(array: &LargeBinaryArray) -> io::Result<()> {
+    for idx in 0..array.len() {
+        let bytes = array.value(idx);
+        let (tag, payload) = bytes
+            .split_first()
+            .ok_or_else(|| invalid_data(format!("postings.arrow: term {idx} has no tag byte")))?;
+
+        match tag {
+            0 => {
+                if payload.len() % 4 != 0 {
+                    return Err(invalid_data(format!(
+                        "postings.arrow: term {idx} tag-0 payload length {} is not a multiple \
+                         of 4",
+                        payload.len()
+                    )));
+                }
+            }
+            1 => {
+                let bitmap = Bitmap::try_deserialize::<Portable>(payload).ok_or_else(|| {
+                    invalid_data(format!(
+                        "postings.arrow: term {idx} tag-1 payload is not a valid portable \
+                         Roaring bitmap"
+                    ))
+                })?;
+                let consumed = bitmap.get_serialized_size_in_bytes::<Portable>();
+                if consumed != payload.len() {
+                    return Err(invalid_data(format!(
+                        "postings.arrow: term {idx} tag-1 payload has {} trailing byte(s) \
+                         beyond the {consumed}-byte serialised bitmap (payload is \
+                         {} bytes) — BitmapView::deserialize requires an exact-length buffer",
+                        payload.len().saturating_sub(consumed),
+                        payload.len()
+                    )));
+                }
+            }
+            other => {
+                return Err(invalid_data(format!(
+                    "postings.arrow: term {idx} has unknown tag byte {other}"
+                )))
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Decode the (single) record batch of an Arrow IPC FILE held in `buffer`, without copying its
@@ -221,8 +294,7 @@ fn decode_single_batch(buffer: &Buffer) -> io::Result<RecordBatch> {
 
     if let Some(dictionaries) = footer.dictionaries() {
         for block in dictionaries.iter() {
-            let block_len = (block.bodyLength() + block.metaDataLength() as i64) as usize;
-            let offset = block.offset() as usize;
+            let (offset, block_len) = checked_block_range(block, buffer.len())?;
             let data = buffer.slice_with_length(offset, block_len);
             decoder
                 .read_dictionary(block, &data)
@@ -241,14 +313,39 @@ fn decode_single_batch(buffer: &Buffer) -> io::Result<RecordBatch> {
     }
 
     let block = batches.get(0);
-    let block_len = (block.bodyLength() + block.metaDataLength() as i64) as usize;
-    let offset = block.offset() as usize;
+    let (offset, block_len) = checked_block_range(block, buffer.len())?;
     let data = buffer.slice_with_length(offset, block_len);
 
     decoder
         .read_record_batch(block, &data)
         .map_err(|e| invalid_data(format!("postings.arrow: {e}")))?
         .ok_or_else(|| invalid_data("postings.arrow: record batch block decoded to nothing"))
+}
+
+/// Validate a footer `Block`'s `(offset, bodyLength + metaDataLength)` against the file length,
+/// returning them as checked `usize`s. `Block`'s fields are `i64` in the flatbuffer schema; a
+/// corrupt or adversarial footer could report a negative value, an overflowing sum, or a range
+/// past end-of-file — `Buffer::slice_with_length` panics on out-of-bounds input, so every field
+/// must be checked here before it ever reaches that call (fail closed, not a panic).
+fn checked_block_range(block: &arrow::ipc::Block, buffer_len: usize) -> io::Result<(usize, usize)> {
+    let offset = usize::try_from(block.offset())
+        .map_err(|_| invalid_data("postings.arrow: block offset is negative"))?;
+    let body_len = usize::try_from(block.bodyLength())
+        .map_err(|_| invalid_data("postings.arrow: block bodyLength is negative"))?;
+    let meta_len = usize::try_from(block.metaDataLength())
+        .map_err(|_| invalid_data("postings.arrow: block metaDataLength is negative"))?;
+    let block_len = body_len
+        .checked_add(meta_len)
+        .ok_or_else(|| invalid_data("postings.arrow: block length overflows"))?;
+    let end = offset
+        .checked_add(block_len)
+        .ok_or_else(|| invalid_data("postings.arrow: block offset + length overflows"))?;
+    if end > buffer_len {
+        return Err(invalid_data(format!(
+            "postings.arrow: block range [{offset}, {end}) exceeds file length {buffer_len}"
+        )));
+    }
+    Ok((offset, block_len))
 }
 
 fn invalid_data(msg: impl Into<String>) -> io::Error {
@@ -259,7 +356,6 @@ fn invalid_data(msg: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use rand::seq::SliceRandom;
     use rand::SeedableRng;
     use std::collections::BTreeSet;
     use tempfile::TempDir;
@@ -289,6 +385,7 @@ mod tests {
         fn random_per_term_sets_round_trip(
             seed in any::<u64>(),
             term_sizes in prop::collection::vec(0usize..200, 1..12),
+            mmap in any::<bool>(),
         ) {
             let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
             let mut per_term = Vec::new();
@@ -297,17 +394,15 @@ mod tests {
                 while set.len() < size {
                     set.insert(rand::Rng::gen_range(&mut rng, 0..1_000_000u32));
                 }
-                let mut v: Vec<u32> = set.into_iter().collect();
-                v.shuffle(&mut rng);
-                v.sort_unstable();
-                per_term.push(v);
+                // BTreeSet iterates in ascending order already — no shuffle-then-sort needed.
+                per_term.push(set.into_iter().collect::<Vec<u32>>());
             }
 
             let temp = TempDir::new().unwrap();
             let path = temp.path().join("postings.arrow");
             write_postings(&path, &per_term, 32).unwrap();
 
-            let reader = PostingsReader::open(&path, false).unwrap();
+            let reader = PostingsReader::open(&path, mmap).unwrap();
             prop_assert_eq!(reader.term_count() as usize, per_term.len());
 
             for (t, expected) in per_term.iter().enumerate() {
@@ -321,5 +416,177 @@ mod tests {
                 prop_assert_eq!(&got, expected);
             }
         }
+    }
+
+    #[test]
+    fn write_postings_rejects_unsorted_input() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("postings.arrow");
+        let err = write_postings(&path, &[vec![5, 3, 9]], 32).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn write_postings_rejects_duplicate_entities() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("postings.arrow");
+        let err = write_postings(&path, &[vec![3, 3, 9]], 32).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// Cross-check the on-disk bytes for the singleton (tag 0) and large (tag 1) records against
+    /// an independent Arrow reader (not `PostingsReader`) — proves the writer's byte layout,
+    /// not just that our own reader agrees with itself.
+    #[test]
+    fn record_bytes_match_the_tagged_format_exactly() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("postings.arrow");
+
+        let singleton: Vec<u32> = vec![5];
+        let large: Vec<u32> = (1..=1000u32).collect();
+        write_postings(&path, &[singleton, large], 32).unwrap();
+
+        let file = File::open(&path).unwrap();
+        let mut reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        assert!(reader.next().is_none(), "expected exactly one record batch");
+
+        let array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<LargeBinaryArray>()
+            .unwrap();
+
+        // Term 0: tag 0 ‖ u32 LE 5 -> exactly [0, 5, 0, 0, 0].
+        assert_eq!(array.value(0), &[0u8, 5, 0, 0, 0]);
+
+        // Term 1: tag 1, first payload byte is a portable-format control byte, not asserted
+        // further here (that's what the round-trip test is for) — just the tag.
+        assert_eq!(array.value(1)[0], 1u8);
+    }
+
+    #[test]
+    fn open_rejects_wrong_column_schema() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("postings.arrow");
+        write_wrong_type_column(&path).unwrap();
+
+        let err = PostingsReader::open(&path, false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn open_rejects_unknown_tag_byte() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("postings.arrow");
+        write_raw_records(&path, &[&[2u8, 1, 2, 3, 4]]).unwrap();
+
+        let err = PostingsReader::open(&path, false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn open_rejects_zero_length_record() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("postings.arrow");
+        write_raw_records(&path, &[&[]]).unwrap();
+
+        let err = PostingsReader::open(&path, false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn posting_rejects_out_of_range_term_id() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("postings.arrow");
+        write_postings(&path, &[vec![1, 2, 3]], 32).unwrap();
+
+        let reader = PostingsReader::open(&path, false).unwrap();
+        let err = reader.posting(TermId::new(5)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn open_rejects_truncated_tag1_record() {
+        let temp = TempDir::new().unwrap();
+        let valid_path = temp.path().join("valid.arrow");
+        let large: Vec<u32> = (1..=1000u32).collect();
+        write_postings(&valid_path, &[large], 32).unwrap();
+
+        // Pull out a genuine tag-1 payload, then truncate it before re-embedding it as a
+        // hand-built record — this must fail `open`, not walk off the end of the slice inside
+        // CRoaring.
+        let file = File::open(&valid_path).unwrap();
+        let mut reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        let array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<LargeBinaryArray>()
+            .unwrap();
+        let full_record = array.value(0);
+        assert_eq!(full_record[0], 1u8, "expected a tag-1 record to truncate");
+        let truncated = &full_record[..full_record.len() / 2];
+
+        let truncated_path = temp.path().join("truncated.arrow");
+        write_raw_records(&truncated_path, &[truncated]).unwrap();
+
+        let err = PostingsReader::open(&truncated_path, false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Build a `postings.arrow`-shaped file with arbitrary raw record bytes (bypassing
+    /// `write_postings`'s tag encoding entirely), so tests can construct malformed records.
+    fn write_raw_records(path: &Path, records: &[&[u8]]) -> io::Result<()> {
+        let mut builder = LargeBinaryBuilder::new();
+        for record in records {
+            builder.append_value(record);
+        }
+        let array = builder.finish();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            POSTING_COLUMN_NAME,
+            DataType::LargeBinary,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(array)])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+        let file = File::create(path)?;
+        let mut writer = FileWriter::try_new(BufWriter::new(file), &schema)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        writer
+            .write(&batch)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        writer
+            .finish()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        Ok(())
+    }
+
+    /// Build a `postings.arrow`-shaped file whose single column is named `posting` but has the
+    /// wrong Arrow type (`UInt32` instead of `LargeBinary`) — exercises the schema check in
+    /// `open`.
+    fn write_wrong_type_column(path: &Path) -> io::Result<()> {
+        use arrow::array::UInt32Array;
+
+        let array = UInt32Array::from(vec![1u32, 2, 3]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            POSTING_COLUMN_NAME,
+            DataType::UInt32,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(array)])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+        let file = File::create(path)?;
+        let mut writer = FileWriter::try_new(BufWriter::new(file), &schema)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        writer
+            .write(&batch)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        writer
+            .finish()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        Ok(())
     }
 }

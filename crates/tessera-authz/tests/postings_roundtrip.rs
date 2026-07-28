@@ -47,12 +47,23 @@ fn round_trip_three_terms() {
         PostingRef::Roaring(_) => panic!("term 2 should be tag 0 (array)"),
     };
 
-    // Cross-check record 1's first byte is 1 (tag) directly against the raw file bytes.
-    let raw = std::fs::read(&path).unwrap();
-    // We don't hand-parse the Arrow IPC container here (that's the reader's job); instead
-    // just confirm the reader's own view of record 1 reports tag-1 shape via the enum match
-    // above, and that the file is non-trivially sized (sanity that something was written).
-    assert!(raw.len() > 100);
+    // Byte-level cross-check via an independent Arrow reader (not `PostingsReader`): the
+    // singleton (tag 0) record must be exactly tag ‖ u32 LE 5, and record 1's first byte must
+    // be the tag-1 marker.
+    let file = std::fs::File::open(&path).unwrap();
+    let mut arrow_reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
+    let batch = arrow_reader.next().unwrap().unwrap();
+    let array = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::LargeBinaryArray>()
+        .unwrap();
+    assert_eq!(
+        array.value(0),
+        &[0u8, 5, 0, 0, 0],
+        "term 0: tag 0 ‖ u32 LE 5"
+    );
+    assert_eq!(array.value(1)[0], 1u8, "term 1: tag byte must be 1");
 }
 
 #[test]
