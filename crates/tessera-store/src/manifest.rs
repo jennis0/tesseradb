@@ -55,6 +55,18 @@ pub struct IdentityDescriptor {
     /// case-folding — contracts §2.6).
     pub key: String,
     pub shard_id: u32,
+    /// The transport-identity epoch (contracts §2.2, §2.6 r6). Advanced whenever the
+    /// partitioning or sharding changes, carried forward verbatim by a normal rebuild, and
+    /// reset to 1 by a key rotation.
+    ///
+    /// **Not `#[serde(default)]`, deliberately.** `tessera_id` is stable across rebuilds but
+    /// *not* across a repartition, and the churn is **partial** — so without this signal a
+    /// stale identifier does not fail, it silently names whichever entity now occupies that
+    /// permutation input. A defaulted epoch would make every bundle claim epoch 0 and defeat
+    /// the one mechanism that distinguishes "your identifier is old" from "your identifier
+    /// resolved". An absent `epoch` is a typed reader error, exactly as an absent `identity`
+    /// object is.
+    pub epoch: u32,
 }
 
 impl IdentityDescriptor {
@@ -77,6 +89,17 @@ impl IdentityDescriptor {
                     "identity rounds {} does not match this reader's {IDENTITY_ROUNDS}",
                     self.rounds
                 ),
+            });
+        }
+        // Contracts §2.2: the epoch is "reset to 1 by a key rotation" and advanced from there,
+        // so 0 is not a value any conforming writer produces. Refusing it here means a
+        // hand-edited or partially-written manifest fails closed rather than presenting an
+        // epoch that no client can meaningfully compare against.
+        if self.epoch == 0 {
+            return Err(StoreError::InvalidIdentity {
+                detail: "identity epoch is 0; conforming writers start at 1 and advance \
+                         (contracts §2.2)"
+                    .to_string(),
             });
         }
         Ok(())
