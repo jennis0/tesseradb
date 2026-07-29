@@ -1,7 +1,7 @@
 """Read a Tessera bundle directly off disk (Reference Sheet R4, contracts §2.1-§2.3).
 
 Independent of `tessera-store`: this module re-parses `CURRENT`/`MANIFEST.json`/
-`SEGMENTS-<n>.json`, `permutation.bin`, `morton.u64`, `postings.arrow` and `columns.arrow` from
+`SEGMENTS-<n>.json`, `permutation.bin`, `morton.u32`, `postings.arrow` and `columns.arrow` from
 their byte-level definitions, verifying every file digest the manifests name along the way. Tag-1
 postings records are read via `pyroaring.BitMap.deserialize`, which reads the portable Roaring
 format directly — this doubles as the cross-implementation portable-format check the brief calls
@@ -37,7 +37,7 @@ class Segment:
     entity_id: np.ndarray  # uint64, row order
     x: np.ndarray  # float32, row order
     y: np.ndarray  # float32, row order
-    morton: np.ndarray  # uint64, row order (raw sorted codes from morton.u64)
+    morton: np.ndarray  # uint32, row order (raw sorted codes from morton.u32)
     row_count: int
 
 
@@ -207,7 +207,7 @@ def _read_permutation(path: Path) -> Permutation:
 
 def _read_segment(seg_dir: Path) -> Segment:
     columns_path = seg_dir / "columns.arrow"
-    morton_path = seg_dir / "morton.u64"
+    morton_path = seg_dir / "morton.u32"
 
     with ipc.open_file(columns_path) as reader:
         table = reader.read_all()
@@ -216,12 +216,12 @@ def _read_segment(seg_dir: Path) -> Segment:
     y = table.column("y").to_numpy(zero_copy_only=False).astype(np.float32)
 
     morton_bytes = morton_path.read_bytes()
-    morton = np.frombuffer(morton_bytes, dtype="<u8")
+    morton = np.frombuffer(morton_bytes, dtype="<u4")
 
     row_count = len(entity_id)
     if len(morton) != row_count:
         raise ValueError(
-            f"{seg_dir}: columns.arrow has {row_count} rows but morton.u64 has {len(morton)}"
+            f"{seg_dir}: columns.arrow has {row_count} rows but morton.u32 has {len(morton)}"
         )
     return Segment(entity_id=entity_id, x=x, y=y, morton=morton, row_count=row_count)
 

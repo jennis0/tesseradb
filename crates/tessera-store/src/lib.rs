@@ -1,4 +1,4 @@
-//! Segment file writers (`columns.arrow`, `morton.u64`, `permutation.bin`; contracts §2.1,
+//! Segment file writers (`columns.arrow`, `morton.u32`, `permutation.bin`; contracts §2.1,
 //! Reference Sheet R4), the bundle read protocol and zero-copy loader, and `Permutation` — the
 //! only legal EntityId→RowId path in the codebase (invariant I4).
 

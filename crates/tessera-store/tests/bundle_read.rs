@@ -61,7 +61,7 @@ fn file_digest(path: &Path) -> FileDigest {
 /// Build a tiny bundle at `root` with one partition ("default"), one slice ("main"), one
 /// segment ("seg0"), `n` entities `0..n`. Returns the sorted items (row order) and their
 /// morton codes, so the test can independently recompute expectations.
-fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u64>) {
+fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     let extent = unit_extent();
     let mut items: Vec<TilerItem> = (0..n)
         .map(|entity_id| TilerItem {
@@ -105,8 +105,8 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u64>) {
         file_digest(&seg_dir.join("columns.arrow")),
     );
     segments_files.insert(
-        "partitions/default/slices/main/segments/seg0/morton.u64".to_string(),
-        file_digest(&seg_dir.join("morton.u64")),
+        "partitions/default/slices/main/segments/seg0/morton.u32".to_string(),
+        file_digest(&seg_dir.join("morton.u32")),
     );
 
     let segments_manifest = SegmentsManifest {
@@ -203,8 +203,8 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
         assert_eq!(priority_col[i], item.priority);
     }
 
-    // morton.u64 round-trips exactly what sort_batch computed.
-    assert_eq!(seg.morton.u64(), codes.as_slice());
+    // morton.u32 round-trips exactly what sort_batch computed.
+    assert_eq!(seg.morton.u32(), codes.as_slice());
 }
 
 #[test]
@@ -274,13 +274,45 @@ fn tile_ranges_agrees_with_linear_scan_of_morton_array() {
         },
     ] {
         let (lo, hi) = tile.code_range();
-        let expected_start = codes.iter().position(|&c| c >= lo).unwrap_or(codes.len());
-        let expected_end = codes.iter().position(|&c| c >= hi).unwrap_or(codes.len());
+        let expected_start = codes
+            .iter()
+            .position(|&c| c as u64 >= lo)
+            .unwrap_or(codes.len());
+        let expected_end = codes
+            .iter()
+            .position(|&c| c as u64 >= hi)
+            .unwrap_or(codes.len());
 
         let range = tile_ranges(seg, &tile);
         assert_eq!(range.start as usize, expected_start, "tile {tile:?} start");
         assert_eq!(range.end as usize, expected_end, "tile {tile:?} end");
     }
+}
+
+#[test]
+fn tile_ranges_covers_the_whole_segment_at_depth_zero() {
+    // Depth 0's exclusive code-range end is `1 << 32`, which does not fit in u32. This test
+    // exists because narrowing `Tile::code_range` alongside the stored column would overflow
+    // here and silently return an empty range in release builds — the codes are widened for
+    // the comparison instead (contracts §2.5, r5).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_items, codes) = build_bundle(dir.path(), 300);
+
+    let bundle = open_bundle(dir.path()).expect("open_bundle");
+    let seg = &bundle.partitions["default"].slices["main"].segments[0];
+
+    let whole = tile_ranges(
+        seg,
+        &Tile {
+            prefix: 0,
+            depth: 0,
+        },
+    );
+    assert_eq!(
+        whole,
+        0u32..codes.len() as u32,
+        "depth 0 must select every row in the segment"
+    );
 }
 
 /// Read `partitions/default/SEGMENTS-0.json` under `root`'s bundle prefix, apply `edit` to its

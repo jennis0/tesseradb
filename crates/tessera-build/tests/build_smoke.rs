@@ -235,7 +235,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         "partitions/default/entities/external-ids-0.arrow",
         "partitions/default/slices/s0/permutation.bin",
         "partitions/default/slices/s0/segments/seg-0/columns.arrow",
-        "partitions/default/slices/s0/segments/seg-0/morton.u64",
+        "partitions/default/slices/s0/segments/seg-0/morton.u32",
     ] {
         assert!(
             bundle.manifest.files.contains_key(rel),
@@ -541,10 +541,10 @@ fn morton_input_requires_the_identity_extent() {
     .unwrap();
     let bundle = open_bundle(&out).unwrap();
     let mut got: Vec<u64> =
-        std::fs::read(out.join("v00000/partitions/default/slices/s0/segments/seg-0/morton.u64"))
+        std::fs::read(out.join("v00000/partitions/default/slices/s0/segments/seg-0/morton.u32"))
             .unwrap()
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64)
             .collect();
     got.sort_unstable();
     let mut want: Vec<u64> = (0..N_ITEMS).map(source_morton).collect();

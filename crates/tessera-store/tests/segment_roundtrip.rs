@@ -1,5 +1,5 @@
 //! Round-trip test for the tiler + segment writers (Task 3, Step 1): sort a batch, write
-//! `columns.arrow` / `morton.u64` / `permutation.bin`, and read every byte back.
+//! `columns.arrow` / `morton.u32` / `permutation.bin`, and read every byte back.
 
 use std::fs;
 use std::io::Read;
@@ -61,12 +61,12 @@ fn tiler_and_segment_writers_round_trip() {
     let perm_path = dir.path().join("permutation.bin");
     write_permutation(&perm_path, &row_order_entities, bound).expect("write_permutation");
 
-    // (a) morton.u64: non-decreasing, equal to the codes sort_batch returned.
-    let morton_bytes = fs::read(dir.path().join("morton.u64")).expect("read morton.u64");
-    assert_eq!(morton_bytes.len(), items.len() * 8);
-    let file_codes: Vec<u64> = morton_bytes
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+    // (a) morton.u32: non-decreasing, equal to the codes sort_batch returned.
+    let morton_bytes = fs::read(dir.path().join("morton.u32")).expect("read morton.u32");
+    assert_eq!(morton_bytes.len(), items.len() * 4);
+    let file_codes: Vec<u32> = morton_bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect();
     assert_eq!(file_codes, codes);
     assert!(file_codes.windows(2).all(|w| w[0] <= w[1]));
@@ -171,6 +171,40 @@ fn tiler_and_segment_writers_round_trip() {
     for unused_id in bound..wider_bound {
         assert_eq!(slots2[unused_id as usize], 0xFFFF_FFFF);
     }
+}
+
+#[test]
+fn morton_file_is_u32_four_bytes_per_row_and_the_u64_file_is_gone() {
+    let extent = unit_extent();
+    let mut items: Vec<TilerItem> = (0..1000u64)
+        .map(|entity_id| TilerItem {
+            entity_id: EntityId::new(entity_id),
+            x: ((entity_id * 7919) % 1000) as f32 / 1000.0,
+            y: ((entity_id * 104_729) % 1000) as f32 / 1000.0,
+            node_id: 0,
+            priority: priority(entity_id),
+            scalars: vec![],
+        })
+        .collect();
+    let codes = sort_batch(&mut items, &extent);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_segment(dir.path(), &items, &codes, &[]).expect("write_segment");
+
+    assert!(
+        !dir.path().join("morton.u64").exists(),
+        "the u64 file must not be written any more (contracts r5)"
+    );
+
+    let bytes = fs::read(dir.path().join("morton.u32")).expect("read morton.u32");
+    assert_eq!(bytes.len(), items.len() * 4, "4 bytes per row, no header");
+
+    let read_back: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(read_back, codes, "bytes must round-trip sort_batch's codes");
+    assert!(read_back.windows(2).all(|w| w[0] <= w[1]));
 }
 
 #[test]

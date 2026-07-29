@@ -2,7 +2,7 @@
 
 Five things are proven, kept deliberately separate (task brief):
 
-(a) morton.u64 byte-for-byte vs the oracle's own recomputation from columns.arrow's x/y
+(a) morton.u32 byte-for-byte vs the oracle's own recomputation from columns.arrow's x/y
     (contracts §2.5's obligation).
 (b) postings-derived server counts == the oracle's pairs-derived brute-force counts, for every
     tile a random viewport touches — the union-vs-semi-join differential, and the entity-space
@@ -74,7 +74,7 @@ def _random_bbox(rng: random.Random) -> tuple[float, float, float, float]:
 
 
 def test_morton_matches_byte_for_byte(oracle_bundle: Bundle):
-    """(a) morton.u64 vs the oracle's own recomputation from columns.arrow x/y."""
+    """(a) morton.u32 vs the oracle's own recomputation from columns.arrow x/y."""
     seg = oracle_bundle.segment(SLICE)
     for i in range(0, seg.row_count, max(1, seg.row_count // 5000)):
         recomputed = morton.morton_of(float(seg.x[i]), float(seg.y[i]), oracle_bundle.extent)

@@ -34,7 +34,7 @@ pub enum StoreError {
         last_error: Option<String>,
     },
     /// A manifest referenced a partition/slice/segment directory structure that doesn't exist
-    /// or doesn't match the expected `columns.arrow` / `morton.u64` / `permutation.bin` shape.
+    /// or doesn't match the expected `columns.arrow` / `morton.u32` / `permutation.bin` shape.
     MalformedBundle { detail: String },
     /// A file the loader is about to open has no corresponding entry in either the chosen
     /// `SEGMENTS-<n>.json`'s `files` map or `MANIFEST.json`'s — i.e. its bytes were never

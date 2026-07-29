@@ -43,18 +43,20 @@ pub struct TilerItem {
 /// (contracts §2.6 — the priority tiebreak within equal Morton codes is contract, not
 /// incidental). Row ID after sorting is simply the item's index.
 ///
-/// Returns the sorted items' Morton codes as low-aligned `u64`s (the 32-bit code widened,
-/// matching `morton.u64`'s on-disk representation), in the same order as `items` post-sort.
+/// Returns the sorted items' Morton codes as `u32`s, matching `morton.u32`'s on-disk
+/// representation, in the same order as `items` post-sort. The code is 32 bits because §5.2
+/// fixes the grid at 2^16 x 2^16 — a property of the *grid*, not the population, so this width
+/// does not change at 10^10 or 10^11 (contracts §2.5, r5; was a low-aligned `u64`).
 ///
 /// Morton codes are computed from the `f32` `x`/`y` values promoted to `f64` for the
 /// quantisation math (R2: `cell()` is defined over `f64`), against `extent`.
-pub fn sort_batch(items: &mut [TilerItem], extent: &Extent) -> Vec<u64> {
+pub fn sort_batch(items: &mut [TilerItem], extent: &Extent) -> Vec<u32> {
     // Pair each item with its Morton code up front so the sort comparator and the
     // returned code vector both derive from one computation (avoids recomputing per
     // comparison, and avoids the code and the sorted item order ever disagreeing).
-    let mut codes: Vec<u64> = items
+    let mut codes: Vec<u32> = items
         .iter()
-        .map(|item| morton_of(item.x as f64, item.y as f64, extent).raw() as u64)
+        .map(|item| morton_of(item.x as f64, item.y as f64, extent).raw())
         .collect();
 
     let mut order: Vec<usize> = (0..items.len()).collect();
@@ -68,7 +70,7 @@ pub fn sort_batch(items: &mut [TilerItem], extent: &Extent) -> Vec<u64> {
     // Apply the permutation to both `items` and `codes` in lockstep so the returned codes
     // stay aligned with `items`'s new order.
     let mut sorted_items = Vec::with_capacity(items.len());
-    let mut sorted_codes = Vec::with_capacity(items.len());
+    let mut sorted_codes: Vec<u32> = Vec::with_capacity(items.len());
     for &i in &order {
         sorted_items.push(items[i].clone());
         sorted_codes.push(codes[i]);
@@ -132,5 +134,21 @@ mod tests {
         ];
         let codes = sort_batch(&mut items, &e);
         assert!(codes.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[test]
+    fn returned_codes_are_u32_and_match_morton_of_on_the_sorted_items() {
+        let e = unit_extent();
+        let mut items = vec![item(1, 0.75, 0.75, 10), item(2, 0.10, 0.10, 10)];
+        let codes: Vec<u32> = sort_batch(&mut items, &e);
+        assert_eq!(codes.len(), 2);
+        assert!(codes[0] <= codes[1]);
+        for (i, it) in items.iter().enumerate() {
+            assert_eq!(
+                codes[i],
+                morton_of(it.x as f64, it.y as f64, &e).raw(),
+                "row {i}: returned code must equal morton_of() on the sorted item"
+            );
+        }
     }
 }

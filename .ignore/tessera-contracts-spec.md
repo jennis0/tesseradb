@@ -1,7 +1,7 @@
 # Tessera — Contracts Specification
 
-**Status:** Draft r4 — r3 plus two owner-decided amendments from Phase 1 planning review (Appendix R)
-**Owns:** the byte- and schema-level definition of the boundaries named in the system architecture §4: the bundle format, the service API, the plugin ABI and the wire format. `§n` refers to the design (r15); `SA §n` to the system architecture (r4). Where this document and either of those disagree, they are right — except for the four recorded deviations in §0.3, which are proposed back to them.
+**Status:** Draft r5 — r4 plus the Morton column narrowed to `u32` (Appendix R)
+**Owns:** the byte- and schema-level definition of the boundaries named in the system architecture §4: the bundle format, the service API, the plugin ABI and the wire format. `§n` refers to the design (r15); `SA §n` to the system architecture (r4). Where this document and either of those disagree, they are right — except for the five recorded deviations in §0.3, which are proposed back to them.
 
 ---
 
@@ -21,8 +21,9 @@ Each proposed back to its source; until applied there, this list is the record:
 
 1. **Portable Roaring in the bundle, not frozen** (was SA §4.1). Frozen is CRoaring-internal — a weak oracle and audit story; portable is publicly specified. The engine builds frozen mirrors under its local cache at sync time (out of contract); §10.4's frozen-view mask loading is untouched.
 2. **The inverse permutation is not stored** (was §5.1 "plus its inverse", SA §4.1). Row→entity is the `entity_id` column of `columns.arrow`; storing it twice adds a consistency obligation with no reader.
-3. **`tiles.bin` and `candidates.bin` are out of contract** (was SA §4.1). Both are derivable — tile ranges by binary search over `morton.u64`, candidate lists from the priority column — and I7 guarantees the exact fallback, so they are engine-local derived caches, exactly like the frozen mirrors.
+3. **`tiles.bin` and `candidates.bin` are out of contract** (was SA §4.1). Both are derivable — tile ranges by binary search over `morton.u32`, candidate lists from the priority column — and I7 guarantees the exact fallback, so they are engine-local derived caches, exactly like the frozen mirrors.
 4. **Side-manifests are per partition** (refines SA §4.1's prefix-level `SEGMENTS-<n>.json`). Workers flush independently and hold their own watermarks (SA §6.3–6.4); a prefix-global side-manifest would need a coordinating writer and would put entity-ID tombstones outside their compartment. The pin is a vector of per-partition *(n, watermark)*, which is what SA §4.2 already says it is.
+5. **`morton.u32`, not `morton.u64`** *(r5; was §10.3's "sorted `morton.u64` column")*. The stored Morton column is a raw `u32` array and the file is renamed to match. The width is a property of the **grid** — §5.2 fixes it at 2¹⁶ × 2¹⁶ — not of the population, so it does not change at 10¹⁰ or 10¹¹; it constrains only future grid depth beyond 16, which nothing currently wants. `bundle_format` stays at **1**: format 1 has never been published (Phase 1 is its only writer), and the *rename* is what makes any pre-existing bundle fail closed — `open_bundle` verifies each named file against the manifest's file map, so a missing `morton.u32` is a typed error, never a half-width read. Saves 4 GB at 10⁹ at zero decode cost. Source: the drawn-mark budget spec §2.
 
 ### 0.4 Phase-marked, not speculative
 
@@ -60,7 +61,7 @@ bundle/
         permutation.bin
         segments/<seg_id>/
           columns.arrow
-          morton.u64
+          morton.u32
       text/…                    # Phase 4 (2.10)
       vectors/…                 # Phase 4 (2.10)
 ```
@@ -117,15 +118,15 @@ Entity IDs appear here only inside their own partition's directory; `entity_lo`/
 
 ### 2.5 Quantisation and Morton codes
 
-The contract, because the oracle must reproduce `morton.u64` byte-for-byte and clients name tiles. Grid: 2¹⁶ × 2¹⁶ (§5.2). Quantisation of coordinate *v* over `[min, max]` from MANIFEST:
+The contract, because the oracle must reproduce `morton.u32` byte-for-byte and clients name tiles. Grid: 2¹⁶ × 2¹⁶ (§5.2). Quantisation of coordinate *v* over `[min, max]` from MANIFEST:
 
 ```
 cell(v) = clamp( floor( (v − min) / (max − min) × 65536 ), 0, 65535 )
 ```
 
-(so `v = max` lands in cell 65535; cells are half-open). Interleave: bit *i* of `cell(x)` occupies code bit 2*i*; bit *i* of `cell(y)` occupies code bit 2*i*+1 — matching the design's worked example (x=6, y=3 → 30). The 32-bit code is stored low-aligned in a `u64`; high bits zero. A tile at depth *d* (0 ≤ d ≤ 16) is identified on the wire by its prefix value `code >> (32 − 2d)`; its row range in a segment is found by binary search over that segment's `morton.u64`.
+(so `v = max` lands in cell 65535; cells are half-open). Interleave: bit *i* of `cell(x)` occupies code bit 2*i*; bit *i* of `cell(y)` occupies code bit 2*i*+1 — matching the design's worked example (x=6, y=3 → 30). The 32-bit code is stored as a `u32` *(r5; was low-aligned in a `u64` with high bits zero — 4 GB of zeroes at 10⁹)*. A tile at depth *d* (0 ≤ d ≤ 16) is identified on the wire by its prefix value `code >> (32 − 2d)`; its row range in a segment is found by binary search over that segment's `morton.u32`. **A tile's code range is computed in `u64`** — at depth 0 the exclusive end is 2³², which no `u32` holds — and each stored code is widened for the comparison; narrowing the bounds instead overflows to an empty range.
 
-### 2.6 `columns.arrow`, `morton.u64`, `permutation.bin`
+### 2.6 `columns.arrow`, `morton.u32`, `permutation.bin`
 
 `columns.arrow`: standard Arrow IPC file, uncompressed buffers (mmap-and-slice — §10.3), one record batch, Morton order with priority tiebreak:
 
@@ -148,7 +149,7 @@ priority = (z ^ (z >> 31)) >> 48        # as u16
 
 Previously the table said only "hash-derived", which no second reader could reproduce. Changing this function is a `bundle_format` bump.
 
-`morton.u64`: raw sorted `u64` codes, no header; length = `row_count × 8`.
+`morton.u32` *(r5; was `morton.u64`)*: raw sorted `u32` codes, no header; length = `row_count × 4`.
 
 `permutation.bin`: header `TSPM`, `u16 version = 1`, `u16 reserved`, `u64 bound`; then `entity_to_row: u32 × bound`, sentinel `0xFFFFFFFF` (segments therefore hold fewer than 2³²−1 rows). **Row IDs are segment-local**; this file addresses the partition-slice's single build segment (2.1), and `bound` is that partition-slice's max build entity + 1 — not the global high-water, so sparse partitions don't ship oceans of sentinel. An entity in a *streamed* segment is located via its segment's `entity_lo`/`entity_hi` and that segment's `entity_id` column; compaction folds everything back into one segment and a fresh permutation.
 
@@ -258,6 +259,8 @@ The WAL; frozen mirrors, derived tile tables and candidate lists (deviation 3); 
 ## Appendix R — Review record
 
 r1 was reviewed by two independent reviewers: implementability-and-simplicity (verdict: sound-with-fixes) and conformance against the design and system architecture (verdict: needs-rework, centred on the side-manifest schema). r2 resolves all findings. Structural: side-manifests moved **per partition** with per-partition *(n, watermark)* pins, partition-local tombstones and an in-contract `deny` set with an immediate-publication rule (closing a replica fail-open the WAL's out-of-contract status would otherwise create); dictionary append-only file replaced by immutable extents; `tiles.bin` and `candidates.bin` de-contracted as derived caches (bespoke binary formats: three → one); the Morton/quantisation function specified (2.5); the ABI given a packed-u64 convention, buffer lifecycle, uniform JSON outputs and a two-module split so trust-anchor rotation cannot masquerade as a reindex event; row IDs defined segment-local with one-build-segment-per-partition-slice; external-ID extents added per flush; `/v1/region`'s exact three-batch layout fixed with its threshold evaluated against masked counts (I2); auth_data made base64-precise for the r15 fast-path hash; token revocation moved off the URL; `declared_scalars`, slice/node ingest fields, overflow identity, batch-id raw-byte idempotency, phash construction, sentinel reservations and header scheme all pinned. Four deviations from the sources are recorded in §0.3 and proposed back (SA §4.1's layout tree and §5.1's inverse permutation being the substantive two).
+
+**r5** narrows the stored Morton column to `u32` (2026-07-29), from the drawn-mark budget spec §2. §2.5 stored the 32-bit code low-aligned in a `u64` with the high bits zero — 4 GB of zeroes at 10⁹, on a column that is read per viewport. The width is a property of the *grid* (§5.2 fixes it at 2¹⁶ × 2¹⁶), not of the population, so nothing about 10¹⁰ or 10¹¹ wants the spare bits; only a future grid deeper than 16 would, and nothing currently does. Recorded as §0.3 deviation 5 rather than a `bundle_format` bump: format 1 is unpublished, Phase 1 is its only writer, and renaming the file is what makes a pre-existing bundle fail closed instead of half-width-read — a missing `morton.u32` is a typed reader error. §2.5 additionally records that a tile's code range must be computed in `u64`, since depth 0's exclusive end is 2³²; the stored codes are widened for the comparison. Companion change in the design's r20, which corrects the residency figures the narrowing feeds.
 
 **r4** applies two owner decisions (2026-07-28) raised during Phase 1 implementation-planning review. The pair relation becomes **`pairs.parquet`** (§2.1, §2.4): r3 specified Arrow IPC with `DELTA_BINARY_PACKED` — a Parquet encoding Arrow IPC does not support — so the spec was internally inconsistent and the measured 3.8×/3× figures were Parquet's all along; r3 had already re-scoped the file off both request paths, so the uncompressed-mmap argument never applied to it, and Parquet stands. And the **priority function is fixed** (§2.6): high 16 bits of splitmix64 over the entity ID — previously "hash-derived" with no definition, which no oracle could reproduce. Both were surfaced by the Phase 1 plan's independent review as silent-deviation risks and resolved by the owner rather than by the plan.
 

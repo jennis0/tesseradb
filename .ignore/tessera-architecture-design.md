@@ -408,7 +408,7 @@ Immutable prefixes make rebuilds atomic: write a new version, flip a pointer, ro
 
 The organising property is that **the row ID is the array index**. Nothing is stored to locate row *i*; it lives at byte offset *i* × width.
 
-One file per column per segment: raw little-endian, fixed-width, uncompressed, in Morton-rank order with priority as the intra-leaf tiebreak. Alongside them a sorted `morton.u64` column, the tile table, and the per-node candidate lists. Use the Arrow IPC file format with uncompressed buffers: self-describing, and the buffers remain page-aligned raw arrays that can be mmap'd and sliced zero-copy.
+One file per column per segment: raw little-endian, fixed-width, uncompressed, in Morton-rank order with priority as the intra-leaf tiebreak. Alongside them a sorted `morton.u32` column *(r20; the code is 32 bits because §5.2 fixes the grid at 2¹⁶ × 2¹⁶ — contracts §2.5)*, the tile table, and the per-node candidate lists. Use the Arrow IPC file format with uncompressed buffers: self-describing, and the buffers remain page-aligned raw arrays that can be mmap'd and sliced zero-copy.
 
 ### 10.4 The query path
 
