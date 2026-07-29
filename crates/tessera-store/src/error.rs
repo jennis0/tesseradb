@@ -52,6 +52,10 @@ pub enum StoreError {
     InvalidColumns { path: PathBuf, detail: String },
     /// `permutation.bin` failed header/length/content validation.
     InvalidPermutation { path: PathBuf, detail: String },
+    /// `MANIFEST.json`'s `identity` object named an unknown construction or a round count this
+    /// reader doesn't implement — a bundle written by a different `tessera_id` construction
+    /// must not be silently read by this one (contracts §2.6 r6).
+    InvalidIdentity { detail: String },
     /// An `external-ids-<n>.arrow` extent failed Arrow IPC / schema validation, or failed the
     /// within-extent ascending-order check (R4).
     InvalidExternalIds { path: PathBuf, detail: String },
@@ -119,6 +123,9 @@ impl fmt::Display for StoreError {
             }
             StoreError::InvalidPermutation { path, detail } => {
                 write!(f, "invalid permutation.bin at {}: {detail}", path.display())
+            }
+            StoreError::InvalidIdentity { detail } => {
+                write!(f, "invalid identity descriptor: {detail}")
             }
             StoreError::InvalidExternalIds { path, detail } => {
                 write!(

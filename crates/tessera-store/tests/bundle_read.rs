@@ -14,22 +14,23 @@ use sha2::{Digest, Sha256};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::{Extent, Tile};
 use tessera_store::manifest::{
-    CurrentPointer, FileDigest, Manifest, PartitionDescriptor, Quantisation, SegmentDescriptor,
-    SegmentsManifest, SliceDescriptor,
+    CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
+    SegmentDescriptor, SegmentsManifest, SliceDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{open_bundle, tile_ranges, StoreError};
-use tessera_types::EntityId;
+use tessera_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
-/// R3 priority: `(splitmix64(entity_id) >> 48) as u16` — copied here rather than imported so
-/// the test independently reproduces what the writer/reader are supposed to agree on, the same
-/// way `segment_roundtrip.rs` does.
-fn priority(entity_id: u64) -> u16 {
-    let mut z = entity_id.wrapping_add(0x9E3779B97F4A7C15);
+/// A synthetic `tessera_id`-shaped value for test fixtures: full splitmix64 output over a
+/// seed, so its top 16 bits are a `priority` prefix like any real `tessera_id` (contracts
+/// §2.6), without claiming this is the actual Feistel construction (Task 5's own tests cover
+/// that separately).
+fn synthetic_tessera_id(seed: u64) -> TesseraId {
+    let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
     z ^= z >> 31;
-    (z >> 48) as u16
+    TesseraId::new(z)
 }
 
 fn unit_extent() -> Extent {
@@ -65,16 +66,15 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     let extent = unit_extent();
     let mut items: Vec<TilerItem> = (0..n)
         .map(|entity_id| TilerItem {
-            entity_id: EntityId::new(entity_id),
+            tessera_id: synthetic_tessera_id(entity_id),
             // Spread points across the grid deterministically so tiles split them up.
             x: ((entity_id * 37) % 100) as f32 / 100.0,
             y: ((entity_id * 61) % 100) as f32 / 100.0,
-            node_id: 0xFFFF_FFFF,
-            priority: priority(entity_id),
             scalars: vec![],
         })
         .collect();
-    let codes = sort_batch(&mut items, &extent);
+    let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
+    let codes = sort_batch(&mut items, &mut entity_ids, &extent);
 
     let prefix_dir = root.join("v00000");
     let partition_dir = prefix_dir.join("partitions").join("default");
@@ -84,7 +84,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
 
     write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
 
-    let row_order_entities: Vec<EntityId> = items.iter().map(|i| i.entity_id).collect();
+    let row_order_entities: Vec<EntityId> = entity_ids.clone();
     let bound = n;
     write_permutation(
         &slice_dir.join("permutation.bin"),
@@ -144,6 +144,12 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
             y_max: extent.y_max,
         },
         entity_id_high_water: n,
+        identity: IdentityDescriptor {
+            construction: IDENTITY_CONSTRUCTION.to_string(),
+            rounds: IDENTITY_ROUNDS,
+            key: "0123456789abcdef0123456789abcdef".to_string(),
+            shard_id: 0,
+        },
         slices: vec![SliceDescriptor {
             id: "main".to_string(),
             display_name: "Main".to_string(),
@@ -189,18 +195,16 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     assert_eq!(seg.row_count, items.len() as u32);
 
     // columns.arrow round-trips row 0..n exactly.
-    let entity_id_col = seg.columns.entity_id();
+    let tessera_id_col = seg.columns.tessera_id();
     let x_col = seg.columns.x();
     let y_col = seg.columns.y();
-    let node_id_col = seg.columns.node_id();
     let priority_col = seg.columns.priority();
-    assert_eq!(entity_id_col.len(), items.len());
+    assert_eq!(tessera_id_col.len(), items.len());
     for (i, item) in items.iter().enumerate() {
-        assert_eq!(entity_id_col[i], item.entity_id.raw());
+        assert_eq!(tessera_id_col[i], item.tessera_id.raw());
         assert_eq!(x_col[i], item.x);
         assert_eq!(y_col[i], item.y);
-        assert_eq!(node_id_col[i], item.node_id);
-        assert_eq!(priority_col[i], item.priority);
+        assert_eq!(priority_col[i], item.tessera_id.priority());
     }
 
     // morton.u32 round-trips exactly what sort_batch computed.

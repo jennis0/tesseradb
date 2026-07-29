@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use arrow::array::{Array, Float32Array, StringArray, UInt16Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, Float32Array, StringArray, UInt16Array, UInt64Array};
 use arrow::buffer::Buffer;
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::ipc::convert::fb_to_schema;
@@ -106,6 +106,10 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
             max_supported: BUNDLE_FORMAT,
         });
     }
+
+    // A bundle written by a different `tessera_id` construction (or round count) must not be
+    // silently read by this one (contracts §2.6 r6) — fail closed before any segment is opened.
+    manifest.identity.validate()?;
 
     // The MANIFEST-level `files` set (dictionary extents and anything else it names) is
     // verified once, up front — it isn't partition-specific, and the reader protocol requires
@@ -506,8 +510,8 @@ impl MortonSlice {
         self.mmap.is_empty()
     }
 
-    /// The codes, in row order (ascending, ties broken by priority then entity ID at write
-    /// time — contracts §2.6).
+    /// The codes, in row order (ascending; no further tiebreak beyond `tessera_id` at write
+    /// time — contracts §2.6 r6).
     pub fn u32(&self) -> &[u32] {
         // SAFETY: length is a checked multiple of 4 (validated at `load`); the mmap base is
         // page-aligned (>= 4-byte aligned) by construction, so this cast is always valid — no
@@ -529,20 +533,19 @@ pub enum ScalarSlice<'a> {
 
 /// A zero-copy, mmap-backed view of `columns.arrow`. Validated once at [`ColumnsRef::load`]:
 /// exactly one record batch, uncompressed, 8-byte-aligned buffers (via
-/// [`FileDecoder::with_require_alignment`]), and the five fixed columns present with the
-/// expected names and types (R4). Every accessor below borrows directly from the underlying
-/// `RecordBatch`'s buffers — no per-call copy.
+/// [`FileDecoder::with_require_alignment`]), and the four fixed columns present with the
+/// expected names and types (contracts §2.6 r6). Every accessor below borrows directly from the
+/// underlying `RecordBatch`'s buffers — no per-call copy.
 #[derive(Debug)]
 pub struct ColumnsRef {
     batch: RecordBatch,
     scalar_index: HashMap<String, usize>,
 }
 
-const FIXED_COLUMNS: [(&str, DataType); 5] = [
-    ("entity_id", DataType::UInt64),
+const FIXED_COLUMNS: [(&str, DataType); 4] = [
+    ("tessera_id", DataType::UInt64),
     ("x", DataType::Float32),
     ("y", DataType::Float32),
-    ("node_id", DataType::UInt32),
     ("priority", DataType::UInt16),
 ];
 
@@ -588,7 +591,11 @@ impl ColumnsRef {
         self.batch.num_rows() as u32
     }
 
-    pub fn entity_id(&self) -> &[u64] {
+    /// The row→wire-identity direction (contracts §2.6, §0.3 deviations 2 and 6): the
+    /// `tessera_id` shown to viewers, stored at the row it is shown from. No entity ID is
+    /// stored here — after contracts r6 the gather cannot produce one, which is what makes
+    /// I10 structural rather than a discipline at the serialisation chokepoint.
+    pub fn tessera_id(&self) -> &[u64] {
         downcast::<UInt64Array>(&self.batch, 0).values()
     }
 
@@ -600,12 +607,8 @@ impl ColumnsRef {
         downcast::<Float32Array>(&self.batch, 2).values()
     }
 
-    pub fn node_id(&self) -> &[u32] {
-        downcast::<UInt32Array>(&self.batch, 3).values()
-    }
-
     pub fn priority(&self) -> &[u16] {
-        downcast::<UInt16Array>(&self.batch, 4).values()
+        downcast::<UInt16Array>(&self.batch, 3).values()
     }
 
     /// A declared-scalar column by name, or `None` if `columns.arrow` has no such column.

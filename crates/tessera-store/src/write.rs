@@ -6,13 +6,13 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float32Array, StringArray, UInt16Array, UInt32Array, UInt64Array};
+use arrow::array::{ArrayRef, Float32Array, StringArray, UInt16Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 
 use tessera_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
-use tessera_types::EntityId;
+use tessera_types::{EntityId, TesseraId};
 
 const PERMUTATION_MAGIC: &[u8; 4] = b"TSPM";
 const PERMUTATION_VERSION: u16 = 1;
@@ -59,10 +59,9 @@ fn write_columns_arrow(
     scalar_schema: &[(String, ScalarType)],
 ) -> io::Result<()> {
     let mut fields = vec![
-        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("tessera_id", DataType::UInt64, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("node_id", DataType::UInt32, false),
         Field::new("priority", DataType::UInt16, false),
     ];
     for (name, ty) in scalar_schema {
@@ -70,19 +69,19 @@ fn write_columns_arrow(
     }
     let schema = Arc::new(Schema::new(fields));
 
-    let entity_id: ArrayRef = Arc::new(UInt64Array::from_iter_values(
-        items.iter().map(|i| i.entity_id.raw()),
+    let tessera_id: ArrayRef = Arc::new(UInt64Array::from_iter_values(
+        items.iter().map(|i| i.tessera_id.raw()),
     ));
     let x: ArrayRef = Arc::new(Float32Array::from_iter_values(items.iter().map(|i| i.x)));
     let y: ArrayRef = Arc::new(Float32Array::from_iter_values(items.iter().map(|i| i.y)));
-    let node_id: ArrayRef = Arc::new(UInt32Array::from_iter_values(
-        items.iter().map(|i| i.node_id),
-    ));
+    // `priority` is derived here, from the `tessera_id` the item already carries — the one
+    // place this column is computed (contracts §2.6 r6, `TesseraId::priority()`); neither the
+    // tiler nor `write_columns` below recomputes the shift inline.
     let priority: ArrayRef = Arc::new(UInt16Array::from_iter_values(
-        items.iter().map(|i| i.priority),
+        items.iter().map(|i| i.tessera_id.priority()),
     ));
 
-    let mut columns: Vec<ArrayRef> = vec![entity_id, x, y, node_id, priority];
+    let mut columns: Vec<ArrayRef> = vec![tessera_id, x, y, priority];
     for (idx, (name, ty)) in scalar_schema.iter().enumerate() {
         columns.push(build_scalar_column(items, idx, *ty, name)?);
     }
@@ -124,8 +123,8 @@ fn build_scalar_column(
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "write_segment: entity {} is missing scalar '{}' at index {}",
-                    item.entity_id.raw(),
+                    "write_segment: tessera_id {} is missing scalar '{}' at index {}",
+                    item.tessera_id.raw(),
                     name,
                     idx
                 ),
@@ -176,8 +175,8 @@ fn scalar_type_mismatch(
     io::Error::new(
         io::ErrorKind::InvalidInput,
         format!(
-            "write_segment: entity {} scalar '{}' expected {}, got {:?}",
-            item.entity_id.raw(),
+            "write_segment: tessera_id {} scalar '{}' expected {}, got {:?}",
+            item.tessera_id.raw(),
             name,
             expected,
             got
@@ -203,48 +202,48 @@ pub fn write_morton_codes<I: IntoIterator<Item = u32>>(path: &Path, codes: I) ->
     writer.flush()
 }
 
-/// Write `columns.arrow` from columns that are already in row order — the fixed five columns of
+/// Write `columns.arrow` from columns that are already in row order — the fixed four columns of
 /// contracts §2.6, no declared scalars.
 ///
 /// Takes each column **by value** so the `Vec`s become the Arrow buffers with no copy. This
 /// record batch is the largest single structure the batch build materialises (at 10^9 rows,
-/// 8+4+4+4+2 bytes per row), so a copy here would be another twenty-two gigabytes. Produces
+/// 8+4+4+2 bytes per row), so a copy here would be another eighteen gigabytes. Produces
 /// byte-for-byte what [`write_segment`] writes for the same rows and no scalars.
+///
+/// `priority` is derived here from `tessera_id` via `TesseraId::priority` — the same one place
+/// `write_columns_arrow` derives it — so the two build paths are byte-identical by
+/// construction rather than by agreement (contracts §2.6 r6, 2026-07-30 fold).
 pub fn write_columns(
     path: &Path,
-    entity_id: Vec<u64>,
+    tessera_id: Vec<u64>,
     x: Vec<f32>,
     y: Vec<f32>,
-    node_id: Vec<u32>,
-    priority: Vec<u16>,
 ) -> io::Result<()> {
-    let rows = entity_id.len();
-    for (name, len) in [
-        ("x", x.len()),
-        ("y", y.len()),
-        ("node_id", node_id.len()),
-        ("priority", priority.len()),
-    ] {
+    let rows = tessera_id.len();
+    for (name, len) in [("x", x.len()), ("y", y.len())] {
         if len != rows {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("write_columns: column '{name}' has {len} rows, entity_id has {rows}"),
+                format!("write_columns: column '{name}' has {len} rows, tessera_id has {rows}"),
             ));
         }
     }
 
+    let priority: Vec<u16> = tessera_id
+        .iter()
+        .map(|&id| TesseraId::new(id).priority())
+        .collect();
+
     let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("tessera_id", DataType::UInt64, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("node_id", DataType::UInt32, false),
         Field::new("priority", DataType::UInt16, false),
     ]));
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(UInt64Array::from(entity_id)),
+        Arc::new(UInt64Array::from(tessera_id)),
         Arc::new(Float32Array::from(x)),
         Arc::new(Float32Array::from(y)),
-        Arc::new(UInt32Array::from(node_id)),
         Arc::new(UInt16Array::from(priority)),
     ];
     let batch = RecordBatch::try_new(schema.clone(), columns)

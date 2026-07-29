@@ -7,6 +7,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use tessera_types::{IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+
+use crate::error::{Result, StoreError};
+
 /// `CURRENT`: the bundle's only mutable file. Points at the live prefix directory and the
 /// digest `MANIFEST.json` at that prefix must match.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +42,47 @@ pub struct Quantisation {
     pub y_max: f64,
 }
 
+/// `MANIFEST.json`'s `identity` object (contracts §2.2/§2.6 r6): the `tessera_id`
+/// permutation's construction, round count, per-deployment key and shard id. **Required** —
+/// no `#[serde(default)]` — because an absent object cannot invert a `tessera_id`, and a
+/// *defaulted* key would invert every identifier to the wrong entity, suppressing the wrong
+/// item on `/control/changes`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityDescriptor {
+    pub construction: String,
+    pub rounds: u32,
+    /// Exactly 32 lowercase hex characters (readers reject any other case rather than
+    /// case-folding — contracts §2.6).
+    pub key: String,
+    pub shard_id: u32,
+}
+
+impl IdentityDescriptor {
+    /// Reject an unknown `construction` or a `rounds` other than [`IDENTITY_ROUNDS`]: a bundle
+    /// written by a different construction must not be silently read by this one (contracts
+    /// §2.6 r6 — "changing the construction, the round count or the round function is a
+    /// `bundle_format` bump").
+    pub fn validate(&self) -> Result<()> {
+        if self.construction != IDENTITY_CONSTRUCTION {
+            return Err(StoreError::InvalidIdentity {
+                detail: format!(
+                    "unknown identity construction '{}' (expected '{IDENTITY_CONSTRUCTION}')",
+                    self.construction
+                ),
+            });
+        }
+        if self.rounds != IDENTITY_ROUNDS {
+            return Err(StoreError::InvalidIdentity {
+                detail: format!(
+                    "identity rounds {} does not match this reader's {IDENTITY_ROUNDS}",
+                    self.rounds
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// `slices` entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SliceDescriptor {
@@ -66,6 +111,7 @@ pub struct Manifest {
     pub small_term_threshold: u32,
     pub quantisation: Quantisation,
     pub entity_id_high_water: u64,
+    pub identity: IdentityDescriptor,
     pub slices: Vec<SliceDescriptor>,
     pub partitions: Vec<PartitionDescriptor>,
     #[serde(default)]

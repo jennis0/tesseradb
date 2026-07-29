@@ -2,15 +2,15 @@
 //!
 //! One implementation shared by `tessera build` now and streaming flush later (plan §5).
 //! Deliberately free of I/O — segment writing lives in `tessera-store`. Priority is **not**
-//! computed here: the entity-ID allocator owns priority assignment (R3, splitmix64 over the
-//! final entity ID); callers pass it in already computed.
+//! computed here: it is the leading 16 bits of the `tessera_id` the caller supplies (contracts
+//! §2.6 r6), so the tiler needs no separate value and the allocator owns nothing about it.
 
-use tessera_types::EntityId;
+use tessera_types::{EntityId, TesseraId};
 
 use crate::morton::{morton_of, Extent};
 
-/// A declared-scalar value carried alongside the fixed columns (`entity_id`, `x`, `y`,
-/// `node_id`, `priority`). Phase 1 supports the three scalar kinds below (R4).
+/// A declared-scalar value carried alongside the fixed columns (`tessera_id`, `x`, `y`,
+/// `priority`). Phase 1 supports the three scalar kinds below (R4).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarValue {
     U64(u64),
@@ -27,21 +27,25 @@ pub enum ScalarType {
     Utf8,
 }
 
-/// One item to be placed into a segment: its entity identity, geometry, node attachment,
-/// priority (R3, computed by the caller), and any declared scalars.
+/// One item to be placed into a segment: its wire identity, geometry, and any declared
+/// scalars. No `priority` field — it is a prefix of `tessera_id`, and a stored second copy
+/// would be a second source of truth (contracts §2.6 r6, 2026-07-30 fold).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TilerItem {
-    pub entity_id: EntityId,
+    pub tessera_id: TesseraId,
     pub x: f32,
     pub y: f32,
-    pub node_id: u32,
-    pub priority: u16,
     pub scalars: Vec<ScalarValue>,
 }
 
-/// Sort `items` into segment (row) order: `(morton, priority, entity_id)` ascending
-/// (contracts §2.6 — the priority tiebreak within equal Morton codes is contract, not
-/// incidental). Row ID after sorting is simply the item's index.
+/// Sort `items` into segment (row) order: `(morton, tessera_id)` ascending (contracts §2.6 r6).
+/// No further tiebreak: `tessera_id` is a bijection over 2^64 and there is one row per entity,
+/// so the order is total — and because `priority` is the leading 16 bits of `tessera_id`,
+/// ordering by `(morton, priority, tessera_id)` is identically this order. The entity ID is
+/// **not** a sort key at any position; it is passed alongside so the caller can keep
+/// `permutation.bin` and the external-ID sidecars aligned with the new row order. Row order is
+/// key-dependent: a different deployment key reorders rows inside a Morton cell (contracts
+/// §2.2, rotation).
 ///
 /// Returns the sorted items' Morton codes as `u32`s, matching `morton.u32`'s on-disk
 /// representation, in the same order as `items` post-sort. The code is 32 bits because §5.2
@@ -50,7 +54,20 @@ pub struct TilerItem {
 ///
 /// Morton codes are computed from the `f32` `x`/`y` values promoted to `f64` for the
 /// quantisation math (R2: `cell()` is defined over `f64`), against `extent`.
-pub fn sort_batch(items: &mut [TilerItem], extent: &Extent) -> Vec<u32> {
+///
+/// `entity_ids` is permuted identically to `items` (a companion vector, not a sort key) and
+/// must be the same length.
+pub fn sort_batch(
+    items: &mut Vec<TilerItem>,
+    entity_ids: &mut Vec<EntityId>,
+    extent: &Extent,
+) -> Vec<u32> {
+    assert_eq!(
+        items.len(),
+        entity_ids.len(),
+        "sort_batch: items and entity_ids must be the same length"
+    );
+
     // Pair each item with its Morton code up front so the sort comparator and the
     // returned code vector both derive from one computation (avoids recomputing per
     // comparison, and avoids the code and the sorted item order ever disagreeing).
@@ -63,19 +80,21 @@ pub fn sort_batch(items: &mut [TilerItem], extent: &Extent) -> Vec<u32> {
     order.sort_by(|&a, &b| {
         codes[a]
             .cmp(&codes[b])
-            .then(items[a].priority.cmp(&items[b].priority))
-            .then(items[a].entity_id.raw().cmp(&items[b].entity_id.raw()))
+            .then_with(|| items[a].tessera_id.cmp(&items[b].tessera_id))
     });
 
-    // Apply the permutation to both `items` and `codes` in lockstep so the returned codes
-    // stay aligned with `items`'s new order.
+    // Apply the permutation to `items`, `entity_ids` and `codes` in lockstep so all three
+    // stay aligned with the new row order.
     let mut sorted_items = Vec::with_capacity(items.len());
+    let mut sorted_entity_ids = Vec::with_capacity(entity_ids.len());
     let mut sorted_codes: Vec<u32> = Vec::with_capacity(items.len());
     for &i in &order {
         sorted_items.push(items[i].clone());
+        sorted_entity_ids.push(entity_ids[i]);
         sorted_codes.push(codes[i]);
     }
-    items.clone_from_slice(&sorted_items);
+    *items = sorted_items;
+    *entity_ids = sorted_entity_ids;
     codes = sorted_codes;
     codes
 }
@@ -93,31 +112,33 @@ mod tests {
         }
     }
 
-    fn item(entity_id: u64, x: f32, y: f32, priority: u16) -> TilerItem {
+    fn item(tessera_id: u64, x: f32, y: f32) -> TilerItem {
         TilerItem {
-            entity_id: EntityId::new(entity_id),
+            tessera_id: TesseraId::new(tessera_id),
             x,
             y,
-            node_id: 0,
-            priority,
             scalars: vec![],
         }
     }
 
     #[test]
-    fn sorts_by_morton_then_priority_then_entity_id() {
+    fn sorts_by_morton_then_tessera_id() {
         let e = unit_extent();
-        // Two items at the identical coordinate (same Morton code): must order by
-        // (priority, entity_id) — the tiebreak is contract (contracts §2.6).
-        let mut items = vec![
-            item(9, 0.5, 0.5, 5),
-            item(2, 0.5, 0.5, 5),
-            item(1, 0.5, 0.5, 1),
-        ];
-        let codes = sort_batch(&mut items, &e);
+        // Two items at the identical coordinate (same Morton code) plus a third sharing the
+        // leading 16 bits with one of them: must order purely by ascending `tessera_id` — the
+        // tiebreak is contract (contracts §2.6 r6). Without a Morton collision this test would
+        // prove nothing about the order that just changed.
+        let mut items = vec![item(9, 0.5, 0.5), item(2, 0.5, 0.5), item(1, 0.5, 0.5)];
+        let mut entity_ids = vec![EntityId::new(90), EntityId::new(20), EntityId::new(10)];
+        let codes = sort_batch(&mut items, &mut entity_ids, &e);
         assert_eq!(
-            items.iter().map(|i| i.entity_id.raw()).collect::<Vec<_>>(),
+            items.iter().map(|i| i.tessera_id.raw()).collect::<Vec<_>>(),
             vec![1, 2, 9]
+        );
+        // `entity_ids` must be permuted identically to `items`.
+        assert_eq!(
+            entity_ids.iter().map(|e| e.raw()).collect::<Vec<_>>(),
+            vec![10, 20, 90]
         );
         assert_eq!(codes.len(), 3);
         assert_eq!(codes[0], codes[1]);
@@ -125,22 +146,43 @@ mod tests {
     }
 
     #[test]
+    fn ordering_by_the_priority_prefix_then_the_full_id_equals_ordering_by_the_id() {
+        // Contracts §2.6 r6: `priority` is a PREFIX of `tessera_id`, so the two orders are
+        // the same order. This is what licenses an implementation to compare the cheap
+        // 16-bit prefix first (pipeline.rs's 12-byte RowRec does exactly that). Ids share
+        // their high 16 bits (prefix ties) so the test proves something.
+        let ids: Vec<TesseraId> = vec![
+            TesseraId::new(0x0001_0000_0000_0005),
+            TesseraId::new(0x0001_0000_0000_0002),
+            TesseraId::new(0x0001_0000_0000_0009),
+            TesseraId::new(0x0002_0000_0000_0000),
+            TesseraId::new(0x0000_ffff_ffff_ffff),
+        ];
+
+        let mut by_id = ids.clone();
+        by_id.sort();
+
+        let mut by_prefix_then_id = ids.clone();
+        by_prefix_then_id.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.cmp(b)));
+
+        assert_eq!(by_id, by_prefix_then_id);
+    }
+
+    #[test]
     fn returned_codes_are_non_decreasing() {
         let e = unit_extent();
-        let mut items = vec![
-            item(1, 0.9, 0.9, 0),
-            item(2, 0.1, 0.1, 0),
-            item(3, 0.5, 0.5, 0),
-        ];
-        let codes = sort_batch(&mut items, &e);
+        let mut items = vec![item(1, 0.9, 0.9), item(2, 0.1, 0.1), item(3, 0.5, 0.5)];
+        let mut entity_ids = vec![EntityId::new(1), EntityId::new(2), EntityId::new(3)];
+        let codes = sort_batch(&mut items, &mut entity_ids, &e);
         assert!(codes.windows(2).all(|w| w[0] <= w[1]));
     }
 
     #[test]
     fn returned_codes_are_u32_and_match_morton_of_on_the_sorted_items() {
         let e = unit_extent();
-        let mut items = vec![item(1, 0.75, 0.75, 10), item(2, 0.10, 0.10, 10)];
-        let codes: Vec<u32> = sort_batch(&mut items, &e);
+        let mut items = vec![item(1, 0.75, 0.75), item(2, 0.10, 0.10)];
+        let mut entity_ids = vec![EntityId::new(1), EntityId::new(2)];
+        let codes: Vec<u32> = sort_batch(&mut items, &mut entity_ids, &e);
         assert_eq!(codes.len(), 2);
         assert!(codes[0] <= codes[1]);
         for (i, it) in items.iter().enumerate() {
