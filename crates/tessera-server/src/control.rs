@@ -19,8 +19,8 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
-use tessera_lifecycle::{ChangeOp, PendingItem, WalRecord, WalRow, WalScalar};
-use tessera_types::TermId;
+use tessera_lifecycle::{ChangeOp, PendingItem, WalRow, WalScalar};
+use tessera_types::{EntityId, TermId};
 
 use crate::error::ApiError;
 use crate::health::{healthz, readyz};
@@ -236,30 +236,21 @@ async fn ingest(
         })
         .collect();
 
-    let record = WalRecord::IngestBatch {
-        batch_id: batch_id.clone(),
-        body_hash,
-        rows: rows.clone(),
-    };
-
-    // The ack contract: WAL append -> fsync -> apply+swap -> 200. Never 200 without fsync.
-    {
-        let mut wal = state.engine.wal().lock().unwrap();
-        wal.append(&record).map_err(|e| {
-            tracing::error!("wal append failed for an ingest batch");
-            ApiError::FailClosed(format!("wal append failed: {e}"))
+    // The ack contract, atomically: WAL append -> fsync -> apply+swap -> 200. Never 200 without
+    // fsync. `Engine::accept_ingest` holds the WAL lock across the whole sequence (Critical 1
+    // fix), so this can never race a concurrent `/control/changes` acceptance into a lost-update
+    // generation swap.
+    let accepted = rows.len() as u64;
+    state
+        .engine
+        .accept_ingest(rows, terms_per_item, batch_id, body_hash)
+        .map_err(|e| {
+            tracing::error!("wal append/fsync failed for an ingest batch");
+            ApiError::FailClosed(format!("wal append/fsync failed: {e}"))
         })?;
-        wal.fsync().map_err(|e| {
-            tracing::error!("wal fsync failed for an ingest batch");
-            ApiError::FailClosed(format!("wal fsync failed: {e}"))
-        })?;
-    }
-
-    state.engine.apply_ingest(&rows, &terms_per_item);
-    state.engine.record_accepted_batch(batch_id, body_hash);
 
     Ok(Json(IngestResp {
-        accepted: rows.len() as u64,
+        accepted,
         over_bound,
         over_bound_ids,
     }))
@@ -276,6 +267,17 @@ struct ChangeItem {
     access: Option<String>,
 }
 
+/// One `/control/changes` item, fully validated but not yet applied — see [`changes`]'s doc.
+struct ValidatedChange {
+    external_id: Vec<u8>,
+    entity: EntityId,
+    op: ChangeOp,
+    /// Raw descriptor bytes (never `TermId`s — see `Engine::accept_change`'s doc for why
+    /// resolution is deferred past this validation pass, until after this item's own WAL
+    /// append/fsync succeeds).
+    raw_descriptors: Option<Vec<Vec<u8>>>,
+}
+
 async fn changes(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -283,7 +285,18 @@ async fn changes(
 ) -> Result<StatusCode, ApiError> {
     state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
 
-    for item in items {
+    // Validate-first (Important 2 fix): parse every item's op, base64-decode and resolve its
+    // external id, and validate its `access` field's shape — all *before* appending anything.
+    // The previous item-by-item loop could append, fsync and apply items 1..n-1 before item n's
+    // 404/422 aborted the request, leaving the caller with a single error for a batch that was
+    // actually partially applied. Doing every fallible *validation* step first means a rejected
+    // batch is rejected wholesale, with no side effect at all. (A WAL I/O failure partway through
+    // the second, apply-only loop below is a different class of failure — an infrastructure
+    // fault, not a client-correctable validation error — and is not, and cannot be, rolled back:
+    // each item's `Engine::accept_change` call is its own complete ack-contract unit, exactly as
+    // `/control/ingest`'s batches are.)
+    let mut validated = Vec::with_capacity(items.len());
+    for item in &items {
         let op = match item.op.as_str() {
             "predicate" => ChangeOp::Predicate,
             "delete" => ChangeOp::Delete,
@@ -302,7 +315,11 @@ async fn changes(
             .resolve_external_id(&external_id_bytes)
             .ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
 
-        let descriptors: Option<Vec<Vec<u8>>> = match &item.access {
+        // `terms_of_label` only maps `access` bytes to descriptor *bytes* (deterministic, no
+        // persistent state touched) — validating this here is safe and does not pre-empt
+        // `Engine::accept_change`'s deferred `resolve_terms` (Important 3 fix), which is the step
+        // that actually interns novel descriptors into the process-lifetime extension state.
+        let raw_descriptors: Option<Vec<Vec<u8>>> = match &item.access {
             Some(access) => Some(
                 state
                     .engine
@@ -312,54 +329,58 @@ async fn changes(
             ),
             None => None,
         };
-        let terms: Option<Vec<TermId>> = descriptors
-            .as_ref()
-            .map(|ds| state.engine.resolve_terms(ds));
 
-        let record = WalRecord::Change {
+        validated.push(ValidatedChange {
             external_id: external_id_bytes,
+            entity,
             op,
-            descriptors: descriptors.clone(),
-        };
+            raw_descriptors,
+        });
+    }
 
-        let append_result = {
-            let mut wal = state.engine.wal().lock().unwrap();
-            wal.append(&record).and_then(|()| wal.fsync().map(|_| ()))
-        };
-
-        match append_result {
-            Ok(()) => {
-                state.engine.apply_change(entity, op, terms);
-            }
-            Err(e) => {
-                if matches!(op, ChangeOp::Delete | ChangeOp::Suppress) {
-                    // Deny-op append failure (lifecycle §4): apply anyway, alarm, 500. Never a
-                    // refusal that leaves a deny unapplied.
+    for change in validated {
+        state
+            .engine
+            .accept_change(
+                change.external_id,
+                change.entity,
+                change.op,
+                change.raw_descriptors,
+            )
+            .map_err(|e| {
+                if matches!(change.op, ChangeOp::Delete | ChangeOp::Suppress) {
+                    // Deny-op append failure (lifecycle §4): `Engine::accept_change` already
+                    // applied the change to the live overlay before returning this error — never
+                    // a refusal that leaves a deny unapplied.
                     tracing::error!(
-                        op = ?op,
+                        op = ?change.op,
                         "ALARM: wal append/fsync failed for a deny-op change; applied to the \
                          in-memory overlay anyway (item hidden immediately) and returning 500 — \
                          durability is owed, caller must retry"
                     );
-                    state.engine.apply_change(entity, op, terms);
                 } else {
                     tracing::error!(
                         "wal append/fsync failed for a non-deny change; refusing without applying"
                     );
                 }
-                return Err(ApiError::FailClosed(format!(
-                    "wal append/fsync failed: {e}"
-                )));
-            }
-        }
+                ApiError::FailClosed(format!("wal append/fsync failed: {e}"))
+            })?;
     }
 
     // R5: `/control/changes` is 200 after fsync, never 429.
     Ok(StatusCode::OK)
 }
 
-async fn status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
+async fn status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Important 1 fix: R5 requires bearer auth on every plane, including this one — this handler
+    // previously returned `entity_id_high_water` (a global, unmasked corpus-size fact) to anyone
+    // who could reach the control listener at all, which may be loopback TCP, not only a unix
+    // socket (config.rs's `ControlListen::Tcp`).
+    state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
+    Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
-    }))
+    })))
 }

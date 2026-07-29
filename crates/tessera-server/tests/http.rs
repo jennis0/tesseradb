@@ -723,3 +723,274 @@ async fn h_config_missing_disclosure_refuses_to_start() {
         "a config missing [disclosure] must refuse to start"
     );
 }
+
+// --- Fix-report regression tests (reviewer findings on the first Task 13 pass) ---
+
+/// Important 1: `GET /control/status` must require the operator bearer credential — it discloses
+/// `entity_id_high_water`, a global unmasked corpus-size fact, and the control listener may be
+/// plain loopback TCP, not only a unix socket.
+#[tokio::test]
+async fn control_status_requires_bearer() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let resp = server
+        .client
+        .get(server.control_url("/control/status"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let resp = server
+        .client
+        .get(server.control_url("/control/status"))
+        .bearer_auth("not-the-operator-credential")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let resp = server
+        .client
+        .get(server.control_url("/control/status"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+/// Important 1: `GET /v1/meta` must require a valid session token — it discloses bundle
+/// extents/slices/declared-scalar schema.
+#[tokio::test]
+async fn viewer_meta_requires_bearer() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let resp = server
+        .client
+        .get(server.viewer_url("/v1/meta"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let resp = server
+        .client
+        .get(server.viewer_url("/v1/meta"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+/// Important 2: a `/control/changes` batch whose *later* item fails validation (unknown external
+/// id) must leave every earlier item in the same batch unapplied — validate-first, not
+/// apply-then-abort. Suppresses a real item first in the batch, then names a nonexistent external
+/// id second; the whole request must 404, and the real item's count must be unaffected.
+#[tokio::test]
+async fn changes_batch_validates_before_applying_anything() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+
+    let viewport_req = serde_json::json!({
+        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+    });
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&viewport_req)
+        .send()
+        .await
+        .unwrap();
+    let (tiles_before, _) = decode_viewport(&resp.bytes().await.unwrap());
+
+    const REAL_SOURCE_ID: u64 = 9;
+    let real_external_id =
+        base64::engine::general_purpose::STANDARD.encode(external_id_of(REAL_SOURCE_ID));
+    // Not a real external id (never ingested/built) — must 404 during validation.
+    let bogus_external_id =
+        base64::engine::general_purpose::STANDARD.encode(b"this-external-id-does-not-exist");
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([
+            { "external_id": real_external_id, "op": "suppress" },
+            { "external_id": bogus_external_id, "op": "suppress" },
+        ]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&viewport_req)
+        .send()
+        .await
+        .unwrap();
+    let (tiles_after, _) = decode_viewport(&resp.bytes().await.unwrap());
+
+    assert_eq!(
+        tiles_after[0].1, tiles_before[0].1,
+        "the batch's first item must not have been applied once a later item failed validation"
+    );
+}
+
+/// Critical 1: two concurrent acceptances (one `/control/ingest`, one `/control/changes`) must
+/// both survive — the previous unlocked apply+swap allowed a lost-update race where whichever
+/// `store()` won silently discarded the other's already-fsynced, already-acked change. Runs the
+/// engine's `accept_ingest`/`accept_change` directly (not through HTTP) on two OS threads, synced
+/// to start together, so both race to load/clone/store the same starting generation.
+#[test]
+fn concurrent_ingest_and_change_both_survive() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = Arc::new(
+        Engine::open(
+            &bundle_root,
+            &tmp.path().join("cache"),
+            &tmp.path().join("wal.log"),
+            Passthrough::new(),
+            EngineConfig {
+                token_max_lifetime_secs: 3600,
+                max_k: 200,
+            },
+        )
+        .expect("engine should open"),
+    );
+
+    const SUPPRESS_SOURCE_ID: u64 = 3;
+    let suppress_entity = engine
+        .resolve_external_id(&external_id_of(SUPPRESS_SOURCE_ID))
+        .expect("fixture item must resolve");
+
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+
+    let engine_a = Arc::clone(&engine);
+    let barrier_a = Arc::clone(&barrier);
+    let change_thread = std::thread::spawn(move || {
+        barrier_a.wait();
+        engine_a
+            .accept_change(
+                external_id_of(SUPPRESS_SOURCE_ID),
+                suppress_entity,
+                tessera_lifecycle::ChangeOp::Suppress,
+                None,
+            )
+            .expect("change should be accepted");
+    });
+
+    let engine_b = Arc::clone(&engine);
+    let barrier_b = Arc::clone(&barrier);
+    let ingest_thread = std::thread::spawn(move || {
+        let new_external_id = external_id_of(N_ITEMS + 100);
+        let row = tessera_lifecycle::WalRow {
+            external_id: new_external_id.clone(),
+            entity_id: tessera_types::EntityId::new(N_ITEMS + 100),
+            descriptors: vec![b"0".to_vec()],
+            x: 5.0,
+            y: 5.0,
+            scalars: Vec::new(),
+        };
+        let terms = engine_b.resolve_terms(std::slice::from_ref(&b"0".to_vec()));
+        barrier_b.wait();
+        engine_b
+            .accept_ingest(
+                vec![row],
+                vec![terms],
+                "concurrent-batch".to_string(),
+                [7u8; 32],
+            )
+            .expect("ingest should be accepted");
+    });
+
+    change_thread.join().unwrap();
+    ingest_thread.join().unwrap();
+
+    // The suppression's effect: a viewport count one lower than the full-coverage baseline.
+    // (Phase 1's ingested/buffered items have no row geometry yet — no flush — so the ingested
+    // item contributes nothing to any tile's count regardless of correctness; its effect is
+    // checked separately below, via the established external-id map a lost swap would revert.)
+    let session = engine
+        .authorise(br#"{"terms": ["0"]}"#)
+        .expect("authorise should succeed");
+    let out = engine
+        .viewport(
+            &session,
+            "s0",
+            0,
+            [0.0, 0.0, 1000.0, 1000.0],
+            (N_ITEMS + 10) as usize,
+            None,
+        )
+        .expect("viewport should succeed");
+
+    assert_eq!(
+        out.tiles[0].visible,
+        N_ITEMS - 1,
+        "the concurrent suppression must have survived — a lost update would leave the count \
+         unchanged"
+    );
+
+    // The ingest's effect: the newly-accepted external id must resolve to its assigned entity —
+    // a lost update (the ingest's generation swap silently reverted by a racing change, or vice
+    // versa) would make this `None`.
+    let new_external_id = external_id_of(N_ITEMS + 100);
+    assert_eq!(
+        engine.resolve_external_id(&new_external_id),
+        Some(tessera_types::EntityId::new(N_ITEMS + 100)),
+        "the concurrent ingest must have survived — a lost update would drop it from the live \
+         buffer/established state"
+    );
+}

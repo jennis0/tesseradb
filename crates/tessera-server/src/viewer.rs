@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -62,9 +62,19 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
-async fn meta(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn meta(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Important 1 fix: this handler previously had no bearer check at all, against R5's "Bearer
+    // auth on every plane" — it disclosed bundle extents/slices/declared-scalar schema to anyone
+    // who could reach the viewer listener. The viewer plane's bearer is a session token (this
+    // module's doc), so a valid, unexpired session is required here exactly as for `/v1/viewport`.
+    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
+    state.authenticated_session(token)?;
+
     let meta = state.engine.meta();
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
         "slices": meta.slices.iter().map(|(id, name)| serde_json::json!({"id": id, "display_name": name})).collect::<Vec<_>>(),
@@ -78,7 +88,7 @@ async fn meta(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         // Reference Sheet R5: filter operand names are `[]` in Phase 1 (no filters — scope
         // constraint 11).
         "filter_operands": Vec::<String>::new(),
-    }))
+    })))
 }
 
 #[derive(Debug, Deserialize)]

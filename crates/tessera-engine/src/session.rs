@@ -362,14 +362,6 @@ impl Engine {
         self.allocator.lock().unwrap().high_water()
     }
 
-    /// Access to the open WAL handle. The ack contract (Task 13) is: parse -> allocate ->
-    /// `wal().append` -> `wal().fsync` -> apply+swap -> 200 — every step against the *same*
-    /// locked handle, never released and reacquired mid-sequence, so two concurrent acceptances
-    /// cannot interleave their appends.
-    pub fn wal(&self) -> &Mutex<Wal> {
-        &self.wal
-    }
-
     /// The plugin this engine was opened with — Task 13's `/control/ingest` handler calls
     /// `terms_of_label` through this to turn an item's `access` bytes into descriptors.
     pub fn plugin(&self) -> &Arc<dyn Plugin> {
@@ -388,6 +380,22 @@ impl Engine {
     /// from wherever WAL replay (or the previous call to this method) left off — see
     /// `DescriptorResolver::resume`'s doc for why restarting that sequence per call would be
     /// fail-open.
+    ///
+    /// **Durability-ordering exemption (review finding, Important 3):** ideally every call to
+    /// this method happens only after the record that will carry its descriptors is durably WAL
+    ///-appended and fsynced — otherwise an extension id can be minted in-process for a batch
+    /// whose append then fails, leaving the live resolver's state one step ahead of what a
+    /// restart-replay would ever reconstruct from the WAL alone. `Engine::accept_change` honours
+    /// that ordering (it resolves only after its `Change` record's append/fsync succeeds).
+    /// `/control/ingest` is a deliberate, structural exception: signature-sorted entity-id
+    /// assignment (I9/§11.1, `allocate_sorted`) needs each item's resolved terms to compute its
+    /// sort key *before* the item's `WalRow` (which carries the assigned id) can even be framed
+    /// for append — so this call cannot be deferred past the durability boundary for ingest
+    /// without abandoning signature-sorted assignment itself. This is judged safe in practice
+    /// (not merely convenient) because an extension id is, by construction, unsatisfiable by any
+    /// session's `satisfied` set (`tessera_lifecycle::buffer`'s module doc) — a live/replay
+    /// mismatch in exactly *which* extension id a novel descriptor got renumbers internal
+    /// bookkeeping only, never a visibility outcome.
     pub fn resolve_terms(&self, descriptors: &[Descriptor]) -> Vec<TermId> {
         let mut state = self.resolver_state.lock().unwrap();
         let (extension, next_extension_id) = std::mem::take(&mut *state);
@@ -431,21 +439,49 @@ impl Engine {
             .insert(batch_id, body_hash);
     }
 
-    /// Apply an already-WAL-fsynced ingest batch to the live buffer and swap in a new generation
-    /// (I1 composition rule 4: a buffered item participates in authorisation the moment it is
-    /// accepted). `rows` carry raw descriptor bytes (never `TermId`s — see `WalRow`'s doc);
-    /// `terms` is each row's already-resolved term set, in the same order, computed by the caller
-    /// via [`Engine::resolve_terms`] before this call (resolving again here would double-intern
-    /// any novel descriptor).
+    /// Accept an ingest batch atomically: WAL append -> fsync -> apply (buffer clone + insert) ->
+    /// generation swap, all while holding `self.wal`'s lock (**review finding, Critical 1**: the
+    /// previous split — append/fsync under the caller's own WAL lock, then a *separate*,
+    /// unlocked `apply_ingest`/`apply_change` call — let two concurrent acceptances race on
+    /// `ArcSwap::load_full`/`store`: both load the same pre-swap generation, both clone it, and
+    /// whichever `store`s last silently discards the other's already-fsynced, already-acked
+    /// change with no error. Holding the WAL mutex across the *entire* append-through-swap
+    /// sequence, for both this method and [`Engine::accept_change`], serialises every generation
+    /// swap through one lock: the second of two concurrent acceptances cannot even begin its
+    /// `load_full()` until the first has finished its `store()`, so it always builds its new
+    /// generation on top of the first's effect rather than racing it.
     ///
-    /// Never fails: the ack contract's only fallible steps are parse, allocate, and WAL
-    /// append/fsync, all of which happen before this is called.
-    pub fn apply_ingest(&self, rows: &[WalRow], terms: &[Vec<TermId>]) {
+    /// `rows` carry raw descriptor bytes (never `TermId`s — see `WalRow`'s doc); `terms` is each
+    /// row's already-resolved term set, in the same order (resolved by the caller via
+    /// [`Engine::resolve_terms`] before this call — see that method's doc for why ingest,
+    /// specifically, cannot defer resolution past this call the way [`Engine::accept_change`]
+    /// does).
+    ///
+    /// On success, also records `batch_id`/`body_hash` as accepted (the idempotency index) before
+    /// releasing the lock, so a concurrent replay of the same batch id can never observe a window
+    /// where the generation has swapped but the idempotency index hasn't caught up yet.
+    pub fn accept_ingest(
+        &self,
+        rows: Vec<WalRow>,
+        terms: Vec<Vec<TermId>>,
+        batch_id: String,
+        body_hash: [u8; 32],
+    ) -> std::result::Result<(), WalError> {
         debug_assert_eq!(rows.len(), terms.len());
+        let record = WalRecord::IngestBatch {
+            batch_id: batch_id.clone(),
+            body_hash,
+            rows: rows.clone(),
+        };
+
+        let mut wal = self.wal.lock().unwrap();
+        wal.append(&record)?;
+        wal.fsync()?;
+
         let generation = self.generation.load_full();
         let mut buffer = (*generation.buffer).clone();
         let mut established = self.established.lock().unwrap();
-        for (row, row_terms) in rows.iter().zip(terms) {
+        for (row, row_terms) in rows.iter().zip(&terms) {
             established.insert(row.external_id.clone(), row.entity_id);
             buffer.insert_row_with_terms(row, row_terms.clone());
         }
@@ -461,15 +497,76 @@ impl Engine {
             buffer: Arc::new(buffer),
         };
         self.generation.store(Arc::new(next));
+
+        self.accepted_batches
+            .lock()
+            .unwrap()
+            .insert(batch_id, body_hash);
+
+        drop(wal);
+        Ok(())
     }
 
-    /// Apply an already-WAL-fsynced (or, per the deny-op append-failure rule, deliberately
-    /// *not*-yet-durable — see Task 13's server-side caller) disposition change to the live
-    /// overlay and swap in a new generation. Pins are never invalidated by this (I11: a pin fixes
-    /// `(prefix, segments_version)` only, and this bumps `overlay_version`, not
-    /// `segments_version`) — lifecycle §2.3's rule that a suppression applies to a pinned request
-    /// the moment it is accepted, without expiring the pin.
-    pub fn apply_change(&self, entity: EntityId, op: ChangeOp, terms: Option<Vec<TermId>>) {
+    /// Accept one `/control/changes` disposition change atomically: WAL append -> fsync -> apply
+    /// (overlay clone + `Overlay::apply`) -> generation swap, all while holding `self.wal`'s lock
+    /// — see [`Engine::accept_ingest`]'s doc for why (Critical 1) and this crate's `ChangeOp`
+    /// doc for the three retirement rules this composes with.
+    ///
+    /// **Deny-op append failure** (lifecycle §4): if the append/fsync genuinely fails and `op` is
+    /// `Delete`/`Suppress`, the change is still applied (the item hidden immediately) before this
+    /// returns `Err` — never a refusal that leaves a deny unapplied. For any other op, a failed
+    /// append/fsync applies nothing.
+    ///
+    /// **Durability-ordering fix (review finding, Important 3):** `raw_descriptors` (present only
+    /// for `Predicate`) are resolved to `TermId`s via [`Engine::resolve_terms`] *inside* this
+    /// method, only after the append/fsync has already succeeded — never before. Unlike ingest
+    /// (see `resolve_terms`'s doc for why that path is a structural exception), a change's
+    /// resolved terms are needed only for the subsequent `Overlay::apply` call, not for anything
+    /// that must be decided before the record can be framed, so there is no reason to mint an
+    /// extension id for a record that might never become durable. `Delete`/`Suppress`/
+    /// `Unsuppress` never carry descriptors, so the deny-op append-failure path never resolves
+    /// anything either.
+    pub fn accept_change(
+        &self,
+        external_id: Vec<u8>,
+        entity: EntityId,
+        op: ChangeOp,
+        raw_descriptors: Option<Vec<Vec<u8>>>,
+    ) -> std::result::Result<(), WalError> {
+        let record = WalRecord::Change {
+            external_id,
+            op,
+            descriptors: raw_descriptors.clone(),
+        };
+
+        let mut wal = self.wal.lock().unwrap();
+        let append_result = wal.append(&record).and_then(|()| wal.fsync());
+
+        let result = match append_result {
+            Ok(_) => {
+                let terms = raw_descriptors.as_ref().map(|ds| self.resolve_terms(ds));
+                self.apply_change_locked(entity, op, terms);
+                Ok(())
+            }
+            Err(e) => {
+                if matches!(op, ChangeOp::Delete | ChangeOp::Suppress) {
+                    self.apply_change_locked(entity, op, None);
+                }
+                Err(e)
+            }
+        };
+
+        drop(wal);
+        result
+    }
+
+    /// The overlay-clone-and-swap step shared by both of [`Engine::accept_change`]'s outcomes.
+    /// Private: called only while `self.wal`'s lock is held (see [`Engine::accept_ingest`]'s doc
+    /// for why every generation swap must be serialised through that one lock). Pins are never
+    /// invalidated by this (I11: a pin fixes `(prefix, segments_version)` only, and this bumps
+    /// `overlay_version`, not `segments_version`) — lifecycle §2.3's rule that a suppression
+    /// applies to a pinned request the moment it is accepted, without expiring the pin.
+    fn apply_change_locked(&self, entity: EntityId, op: ChangeOp, terms: Option<Vec<TermId>>) {
         let generation = self.generation.load_full();
         let mut overlay: Overlay = (*generation.overlay).clone();
         overlay.apply(entity, op, terms);
