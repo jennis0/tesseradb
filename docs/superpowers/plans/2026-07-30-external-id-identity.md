@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make a keyed, opaque, fixed-width `tessera_id` the identity at the service boundary in both directions; take entity↔external resolution off the viewport path entirely; drop two columns' worth of dead weight from the hot bundle; then rebuild the 10⁹ bundle once against the final format and re-run Phase 1's exit measurement.
+**Goal:** Make a keyed, opaque, fixed-width `tessera_id` the identity at the service boundary in both directions; take entity↔external resolution off the viewport path entirely; drop two columns' worth of dead weight from the hot bundle; **redefine `priority` as a 16-bit prefix of that identity, so the sample stops being ordered by permission signature above V ≈ 2×10⁶** (owner decision, 2026-07-30, folded in); then rebuild the 10⁹ bundle once against the final format and re-run Phase 1's exit measurement.
 
 **Architecture.** The wire identity is
 
@@ -65,10 +65,10 @@ Every task's requirements implicitly include this section.
 ### Invariants this plan touches
 
 - **I10 — entity IDs never cross the trust boundary.** Its *substance* is preserved and strengthened: after Task 6 the gather cannot see an entity ID, because `columns.arrow` no longer stores one. Its *mechanism clause* changes — "clients receive per-session opaque handles instead" becomes "clients receive an opaque `tessera_id`" — and the design text saying so must be amended, not left contradicting the code (Critical C-3, Task 4).
-- **I9 — entity IDs append-only, never reused.** Untouched. Signature-sorted assignment (§11.1) is untouched and must stay untouched.
+- **I9 — entity IDs append-only, never reused.** Untouched. Signature-sorted assignment (§11.1) is untouched and must stay untouched. **What does change (2026-07-30) is that signature order stops leaking into row order:** the storage sort's final tiebreak was the entity ID, which is permanently signature-sorted, and it becomes the `tessera_id`, which is not. §11.1's assignment is unchanged; what it is *visible through* is.
 - **I2 — derived quantities are functions of visible data only.** Untouched, and must stay untouched. No task in this plan changes what is counted, sampled or aggregated.
 - **I4 — permissions in entity space, geometry in row space, related only by an explicit permutation.** This plan makes the permutation the *only* entity↔row bridge on the request path, which is what §5.1 always said it was.
-- **I7 — sampling after masking.** Untouched.
+- **I7 — sampling after masking.** Its *letter* is untouched: no task changes when the mask is applied. Its **purpose** is what the priority redefinition serves — above V ≈ 2×10⁶ the old sample was ordered by permission signature through the tiebreak, which keeps I7's letter and breaks what it is for. The plan does not change the placeholder first-k sampler; it changes the **storage order that sampler inherits**, which is where the defect lived. See "`priority` becomes a prefix of `tessera_id`" below.
 - **C4 (response timing) is `Open` in the leak register.** Critical C-5 raises a *new, strong* per-click channel on `/v1/items` that C4's existing text (viewport time correlating weakly) does not cover. Task 9 removes it structurally and Task 4 records the ruling; C4 itself stays `Open`.
 
 ### Owner rulings already taken — do NOT re-open
@@ -93,6 +93,7 @@ Every task's requirements implicitly include this section.
 18. **Task 14 MAY delete `/tmp/tessera-1e9`** (Q5, 2026-07-29), **conditional on Task 2 having captured the current-format baseline first** — an enforced precondition, not advice. See Task 14 Step 2.
 19. **The identity key lives in a per-deployment config file, `--id-key-file`** (Q6, 2026-07-29) — **not** an environment variable. The wider config file is not designed here.
 20. **Contracts §1's external-ID cap tightens to 64 bytes** (Q7, 2026-07-29), and **the identity epoch is advertised on `/meta` and OPTIONAL on `/v1/items`** (Q8, 2026-07-29), as this plan already assumed. Reasoning recorded at the resolved questions below.
+21. **`priority` is `high16(tessera_id)`, and the storage sort order is `(morton, tessera_id)`** (owner decision, 2026-07-30, `docs/design-memos/2026-07-30-priority-as-identity-prefix.md`). The standalone `splitmix64`-over-entity priority function is **deleted**; the column, its `u16` width and its 2 B/row are unchanged. **Important I-4 is retired by argument** — `priority` is no longer an unkeyed function of the entity ID, so the viewer-plane prohibition, its layer check and its byte-scanner sweep all lapse. See "`priority` becomes a prefix of `tessera_id`" below.
 
 ### What this revision deleted from the previous draft
 
@@ -115,7 +116,7 @@ Round 2's verdict was **sound with fixes**: of round 1's six Criticals, C-1, C-3
 | **Q4 → design** | The item endpoint's visibility test moves to **entity space**, per the reviewer's option (d). O(1), no `RowProjection`, identical work for an unknown ID and an invisible one. **C-5 closed rather than narrowed**; the "404s everything until a viewport has been drawn" behaviour is gone; open question 4 is retired. |
 | **I-1** | `Allocator::allocate` is capped at `u32::MAX` and `forward` takes a **checked conversion**. "Collision-free by construction" previously rested on nothing enforced. |
 | **I-3** | The control-plane principal obtains chosen-plaintext pairs **by construction** and is outside the defended set. Stated, because the round-function ruling depends on it. |
-| **I-4** | `priority` — an *unkeyed* `splitmix64` of the entity ID — is **forbidden on the viewer plane**, in the layer check and the byte-scanner. |
+| **I-4** | `priority` — an *unkeyed* `splitmix64` of the entity ID — is **forbidden on the viewer plane**, in the layer check and the byte-scanner. **⚠ RETIRED 2026-07-30** by the owner's priority-as-prefix decision, which removes the premise (`priority` is no longer unkeyed). Round 2's finding was correct on round 2's definition; see "What the priority-as-prefix decision changed" below. |
 | **I-7** | The locator is **singular**: `ext-locator.u32`, one file. The two readings differed by 33 GiB. |
 | **I-8 / I-9** | Ingest dedup consults `Engine::established` (post-build duplicates); drill-down for post-build entities is specified rather than returning a `None` that reads as "no external ID". |
 | **owner, post-review** | `tessera_id` is a **transport** identifier with an **identity epoch**; the partition-vs-shard ambiguity is **resolved** against the code and §12.4. |
@@ -138,6 +139,18 @@ All nine open questions are now closed and two rulings landed. **No mechanism ch
 | **Q9** | Confirmed as written. |
 | **sizing** | The sidecar sizing table across key lengths and **the ~16-byte threshold** at which the store dominates the bundle now sit in the arithmetic section and in Task 15's memo, so the replacement is scheduled by evidence. Phase 1 builds neither compression nor replacement. |
 
+### What the priority-as-prefix decision changed (2026-07-30) — read this if you hold a pre-fold copy
+
+Source: `docs/design-memos/2026-07-30-priority-as-identity-prefix.md`, an owner decision folded into this plan after Tasks 1–3 had been executed and committed. **No identity mechanism changes** — the Feistel, the key, the epoch, the sidecars and every arithmetic figure in this plan are untouched, and the bundle changes zero bytes. What changes is one column's *definition*, the storage sort order, and one prohibition that loses its premise.
+
+| | change |
+|---|---|
+| **`priority`** | Redefined from `high16(splitmix64(entity_id))` to **`high16(tessera_id)`**. Same column, same `u16`, same 2 B/row, same physical position. The standalone priority function is **deleted**, not kept alongside. |
+| **sort order** | `(morton, priority, entity_id)` → **`(morton, tessera_id)`**. Stated in full below; this is the single most load-bearing edit in the fold, because the oracle re-derives row order from build inputs. |
+| **Important I-4** | **Retired.** The prohibition rested entirely on `priority` being an *unkeyed* residue of the entity ID. It is now 16 bits of an identity the wire already carries in full. The layer-check grep and the byte-scanner sweep go with it. |
+| **row order is now key-dependent** | It was not before. A re-key changes which row lands where inside a Morton cell, and therefore reshuffles the sample. Recorded as an accepted residual below. |
+| **tasks touched** | Task 4 (spec text, plus amending Task 3's committed memo), Task 5 (`TesseraId::priority()` — the single definition), Task 6 (`sort_batch`, `TilerItem`, the writers), Task 7 (delete `priority_of`, the `RowRec` comparator, the chi-squared check), Task 9 (one consequence note), Task 10 (drop the layer-check grep), Task 12 (oracle), Task 13 (drop the sweep). **No new task, and the whole fold must land before Task 14's rebuild** — it changes the storage sort order, so landing it afterwards means rebuilding twice. |
+
 ---
 
 ## The routing principle — where per-point capability lives
@@ -146,7 +159,7 @@ All nine open questions are now closed and two rulings landed. **No mechanism ch
 
 | role | home | mechanism | examples |
 |---|---|---|---|
-| per **rendered mark** | hot fixed-width column | `columns.arrow` declared scalars | colour, importance, declared scalars — and `priority`, **which is stored but must NEVER be emitted** (below) |
+| per **rendered mark** | hot fixed-width column | `columns.arrow` declared scalars | colour, importance, declared scalars — and `priority`, a 16-bit prefix of the row's own `tessera_id` (below) |
 | per **query** | entity-space bitmap | the filter contract, §8.2 | labels, text match, vector threshold |
 | per **interaction** | cold sidecar keyed by wire ID | drill-down fetch | external ID, full record, provenance |
 
@@ -160,9 +173,87 @@ Constraints binding any future metadata work, from §8.2 — quoted because each
 - **Pre-intersection cardinality must be structurally unreachable** (C8).
 - The filterable vocabulary must itself be containment-filtered (C11).
 
-**`priority` is stored, never shown** *(Important I-4; this row is why the prohibition has to live here and not only in the threat model)*. `priority` is an **unkeyed `splitmix64` of the entity ID** (contracts §2.6). It is in `columns.arrow` because `sort_batch`'s `(morton, priority, entity_id)` tiebreak needs it at build, and because a future sampler may read it server-side. **Emitting it on the viewer plane would publish a 16-bit residue of the entity ID per mark** — a 65,536× narrowing of entity space, computable offline, and combinable across the ~143,000 marks of a single viewport. That is I10 defeated by a sort key. It is not on the wire today; the risk is that this table's per-mark row reads as a licence, and a future contributor adds it to the points batch as "just an existing hot column". **It is forbidden on the viewer plane by contract (Task 4, §3.2 and §5), and the byte-scanner sweeps for it (Task 13).** Any future per-mark column derived from the entity ID by an unkeyed function inherits the same prohibition; the general rule is that **a hot column may be shown only if it is independent of the entity ID or keyed under the deployment key.**
+**`priority` is a 16-bit prefix of the row's `tessera_id`** *(owner decision, 2026-07-30)*. It is in `columns.arrow` because the storage sort needs it at build, because a future sampler reads it server-side, and because a cheap prefix must be **physically contiguous** — a strided read of the high 2 bytes of a `uint64` array touches every page holding any value (512 `u64` per page against 2,048 `u16`) and pulls the whole cache line regardless, which is §10.4's column-major argument one level down.
+
+**The general rule stands and `priority` now satisfies it: a hot column may be shown only if it is independent of the entity ID, or keyed under the deployment key.** Any future per-mark column derived from the entity ID by an *unkeyed* function inherits the prohibition that `priority` has just been released from.
+
+> **Historical note — Important I-4, retired 2026-07-30, and why a future reader must not reinstate it by reflex.** Review round 2 forbade `priority` on the viewer plane, in the contracts spec, in `scripts/check-layers.sh` and in the conformance byte-scanner. That finding was **correct on the definition it was given**: `priority` was then `high16(splitmix64(entity_id))`, an *unkeyed* 16-bit residue of the entity ID, so publishing it handed a viewer a 65,536× narrowing of entity space per mark, computable offline and combinable across the ~143,000 marks of one viewport — I10 defeated by a sort key. The owner's redefinition removes the premise rather than weakening the rule: `priority` is now 16 bits of a **keyed** identity that the same payload already carries in full, so a viewer learns nothing from it that the `tessera_id` column does not already tell them. A viewer holding *k* marks learns only that their priorities fall below some cut *P*, and *P* is fully determined by *k* and the exact masked count *V* that §7.1 already gives them; nothing about unseen items is recoverable, and no leak-register entry is required. **I-4 was retired by argument, not weakened by convenience.** Reinstating the prohibition without first re-establishing that `priority` is unkeyed would be reinstating a guard against a threat that no longer exists.
 
 **Owner's forward note.** Expanding the core columnar store is an explicitly available trade — more per-point data in the hot path, paid for in resident memory. It is a **deliberate option with a stated cost**, not something forbidden. The cost is exact and computable: one byte per row per 10⁹ items is 0.93 GiB of resident set, read on every viewport. Any proposal to add a hot column should state that number and argue it against the residency budget in Appendix A.
+
+---
+
+## `priority` becomes a prefix of `tessera_id` *(owner decision, 2026-07-30)*
+
+**Source:** `docs/design-memos/2026-07-30-priority-as-identity-prefix.md`. **Deadline:** this fold must land before Task 14 rebuilds the 10⁹ bundle, because it changes the storage sort order; landing it afterwards means rebuilding twice. **Cost:** zero bytes in the bundle, zero bytes on the wire, no change to any figure in the Arithmetic section.
+
+### The two defects being fixed
+
+Reproduced rather than summarised, because both are the kind of finding a later reader will try to re-derive.
+
+**1. Above V ≈ 2×10⁶ the sampler orders by permission signature.** `priority` was `high16(splitmix64(entity_id))` — a `u16`, so 65,536 distinct values. For a tile with **V** visible items the *k*-th lowest priority sits at ≈ `k·2¹⁶/V`, which is a resolvable value only when **V ≤ 2¹⁶·k**. At *k*=30 that threshold is **V ≈ 2×10⁶**. Above it every candidate carries the same priority and the **tiebreak becomes the sampler** — and the tiebreak was `entity_id`: storage order was `(morton, priority, entity_id)`, direct evaluation keeps the *k* lowest out of a partial sort, so equal priorities resolved by row order, and entity IDs are **signature-sorted, permanently, under I9** (§11.1).
+
+So a principal whose visible set spans groups A and B, where A was allocated lower entity IDs, sees mostly A at coarse zoom even if B is ten times larger. **This keeps the letter of I7 and breaks its purpose.** §7.2 rejects global LOD sampling because *"a principal authorised for a small or clustered slice would see a nearly empty screen while thousands of authorised items sat invisible beneath a sample that selected around them"* — this is that failure moved *inside* the visible set, and it correlates with permissions precisely **because the entity allocator was made permission-aware**.
+
+It bites **head principals, not tail**: at 0.01% coverage V at depth 0 is 10⁵ and the cut resolves; at 25% coverage V is 2.5×10⁸ and the sample is tie-dominated from roughly depth 3 upward. Candidate lists inherit it — they are built as "top c·*k* by priority", tie-broken the same way (§7.2). Large *k* *helps* (V ≤ 2¹⁶·k), so **the binding case is the default overview at k≈30 — the first screen a user sees.**
+
+**2. Shard-local `u32` entity IDs break §12.3's composition argument.** D8 makes `entity_id` a shard-local `u32`, so `splitmix64(entity_id)` is no longer the *"global per-item property"* on which §12.3's *"priority sampling composes exactly"* depends. Item 12,345 carries an identical priority in **every** shard, and `(priority, shard_id, entity_id)` as a global order makes shard 0 win every tie. `high16(tessera_id)` restores the property: the shard is part of the bijection's input, so the value is global by construction.
+
+### The decision
+
+**`priority` is defined as `high16(tessera_id)`** — the top 16 bits of the `u64`, i.e. `(tessera_id >> 48) as u16`. Same column, same `u16` width, same 2 B/row hot read, same physical position in `columns.arrow`. The standalone `splitmix64`-over-entity construction is **deleted**, not kept alongside.
+
+### The sort and tiebreak statement — normative
+
+This paragraph replaces every "the sort tiebreak does not move" statement in earlier copies of this plan, in Task 3's committed memo, and in `crates/tessera-spatial/src/tiler.rs`'s doc comments. It is normative and an executor must not paraphrase it:
+
+> **The storage sort order is `(morton, tessera_id)` ascending, and it needs no further tiebreak.**
+>
+> `tessera_id` is a keyed bijection over 2⁶⁴ and there is exactly one row per entity, so within a build no two rows share a `tessera_id` and the order is **total**. Because `priority` is a *prefix* of `tessera_id`, "order by `(morton, priority, tessera_id)`" is **identically** "order by `(morton, tessera_id)`" — there is no composite comparator to get subtly wrong, and an implementation may compare the 16-bit prefix first purely as an optimisation, provided a test asserts the two agree. `entity_id` is **not** a sort key at any position. `priority` is **not** an independent sort key: it is a cached prefix, and it must be derived at exactly one place from the `tessera_id` it is a prefix of.
+>
+> **What the oracle must re-derive:** row order as `(morton_of(x, y, extent), forward(identity.key, identity.shard_id, entity_id))` ascending. **Row order is therefore key-dependent, where it previously was not** — the oracle reads `identity` from MANIFEST for `identity.py` already, so this adds a dependency and no new artifact. A different key gives a different order within a Morton cell; that is intended (see the residuals) and is not a defect for `build_equivalence.rs`, which passes one key to both build paths.
+>
+> **The one condition under which an explicit tiebreak returns:** if a future format ever stores more than one row per entity, `tessera_id` stops being unique per row and the order stops being total. Nothing in Phase 1 does this — `permutation.bin`'s `entity_to_row` is a bijection — but a Phase 3 or later change that breaks it must supply a tiebreak explicitly rather than inherit an unspecified one.
+
+### The build sequence inverts: `tessera_id` is computed BEFORE the sort, not written at the row after it
+
+**This is the consequence most likely to produce a wrong implementation if left vague, and it is not in the source memo's change list** (it was raised by the independent gate on Task 3's memo, 2026-07-30). Until now `tessera_id` was *"a column value written at the row, not a sort key"* — the pipeline could allocate entity IDs, sort by `(morton, priority, entity_id)`, and derive the identity afterwards in row order. Under `priority = high16(tessera_id)` **a function of `tessera_id` is the sort key**, so the identity must exist before the tiler runs. The sequence, for **both** build paths:
+
+1. Allocate entity IDs — signature-sorted assignment, §11.1, **unchanged**.
+2. **`tessera_id = forward(identity.key, identity.shard_id, entity_id)` for every item — before the tiler.** Fallible (Important I-1): a checked conversion, collected into a `Result`.
+3. Morton codes from `x`, `y` against the extent — unchanged.
+4. **Sort by `(morton, tessera_id)`**, permuting the companion `entity_ids` vector identically. That vector is still needed — for `permutation.bin`'s `entity_to_row` and for the external-ID extents and locator — but it is a **companion, not a sort key**, which is a different reason from the one Task 6 previously gave for passing it.
+5. Derive the `priority` column as `(tessera_id >> 48) as u16` **over the already-sorted `tessera_id` vector**. It is a projection of a column that is already in hand, computed at exactly one place, never an independent hash.
+6. Write `columns.arrow` as `(tessera_id, x, y, priority, …declared scalars)`.
+
+**The streaming pipeline's compact sort record needs a decision, and this plan makes it.** `pipeline.rs`'s `RowRec` is a deliberately 12-byte `#[repr(C)]` record (`morton: u32, entity: u32, priority: u16, _pad: u16`) because it is sorted at 10⁹ scale. A full `tessera_id` in it would make it 16 bytes — **+3.7 GiB at 10⁹, at the build's tightest moment, immediately re-spending what dropping the `NODE_NONE` column just freed.** Instead: **`RowRec` keeps its 12 bytes and its `priority` prefix, and the comparator recomputes `forward(shard_id, entity)` only when `(morton, priority)` ties.** `forward` is a pure function of the stored `entity`, so this is exact, and it costs eight `splitmix64` rounds on the fall-through path only. Task 6 must carry a test asserting this comparator agrees with a naive full-`tessera_id` sort over a small batch containing engineered prefix ties. **If the tie path shows up in the build profile at 10⁹, the escalation is the 16-byte record and its 3.7 GiB — report the measurement to the owner rather than choosing silently.** The in-memory reference path has no such trade: `TilerItem` carries the `tessera_id` itself, so its comparator reads it directly.
+
+**Why prefix width is a performance knob and nothing more.** Fall-through volume — the rows whose 16-bit prefixes tie and which a comparator must resolve on the full `u64` — is ≈ V/2^w, which at 10⁹ is a few thousand scattered 8 B reads against a prefix scan of hundreds of megabytes. The sample is *correct* at any prefix width, because the prefix is a prefix. **In Phase 1 this arithmetic is a build-time comparator concern only:** the placeholder first-k sampler takes rows in storage order and never reads the priority column at query time, so no executor should build a runtime prefix-scan-then-fall-through path in this plan.
+
+### What must be verified, not assumed *(carried from the memo, unresolved)*
+
+The high 32 bits of `tessera_id` are the left Feistel half `L`, and this plan is explicit that the construction is **a blinding permutation, not a cipher**. Sampling needs **uniformity, not unpredictability**, and 8 balanced rounds of `splitmix64` deliver it — **but the inputs are highly structured** (`shard_id = 0`, `entity_id` dense from 0), and residual structure in `L` would be inherited by the sample, which is the exact defect being fixed. **Task 7 adds a chi-squared check over `high16(tessera_id)` alongside the existing known-answer vectors in `build_equivalence`.** This is an open verification item, not a stated fact: if the check fails, the fold does not land and the owner is told.
+
+### The confirming measurement — PENDING, do not run it here
+
+The memo's own confirmation is *"over the existing 10⁹ k-sweep, count the (tile, principal) pairs with V > 2×10⁶. No new corpus needed."* **That measurement is being run concurrently by another agent and is not this plan's work.** Two consequences an executor must respect:
+
+1. It reads the **existing** `/tmp/tessera-1e9` bundle, so it must be complete before **Task 14 Step 2** deletes it. Add it to the things Task 14's precondition check confirms are already recorded.
+2. The redefinition is justified by the argument above independently of the count — the count sizes the defect, it does not establish it. Do not treat a pending measurement as a gate on the fold, and do not restate its result before it exists.
+
+### Residuals, recorded not hidden *(carried from the memo)*
+
+- **The sample reshuffles on a re-key as well as on a reshard.** Before this change it reshuffled on reshard only, since `entity_id` changed. Re-key is rare and operator-initiated, and a reshard already bumps the identity epoch. **Accepted.**
+- **Key rotation's blast radius widens from identifiers to row order** *(raised by the gate on Task 3's memo)*. With a key-dependent sort key, a rotation **reorders tied rows**, so `columns.arrow` row IDs are no longer invariant under rotation: a rebuild under a new key produces a different `permutation.bin` as well as different identifiers. `build_equivalence.rs`'s determinism claim is untouched — the build is still a pure function of `(key, shard_id, entity_id)` — but "rotation invalidates every outstanding identifier" becomes "rotation invalidates every outstanding identifier **and changes row order**". Rotation was already a breaking change and remains one; this widens what breaks, not how often. **Accepted, and it must be stated wherever rotation is described** (the `--rotate-id-key` flag row and the threat model's rotation bullet).
+- **Prefix width may need revisiting at 10¹²⁺.** If the coarse-zoom path remains a live scan rather than a session-established summary, fall-through at zoom 0 grows to ~1.5×10⁸ rows. The trigger is `w ≈ log₂(V_max/k)` — about 24 bits for a 10⁹ shard at head coverage. **Record the trigger; do not pay for it now.**
+- **Not addressed:** sample stability across resharding. Hashing the durable `external_id` would give it, but that key is absent for items whose identity *is* their `tessera_id` (Ruling A), so stability would be mixed. More machinery than the rare event warrants.
+
+### What this does NOT change
+
+- The Feistel construction, its key, its schedule, its round count, the epoch, the CLI flags, the N-1 refusal, the allocator cap, `forward`'s checked conversion.
+- Any figure in the Arithmetic section. `columns.arrow` stays 18 B/row; `priority` stays `u16`. **The bundle changes zero bytes.**
+- The placeholder first-k sampler, the mask-build path, or anything in `tessera-authz` (still out of scope) — only the **storage order it reads in** changes.
+- §11.1's signature-sorted entity-ID assignment, which is permanent under I9.
 
 ---
 
@@ -301,7 +392,7 @@ This section is the normative statement of the seven points the brief's Part 7 r
 
 **Input encoding.** `L₀ = shard_id`, `R₀ = entity_id`. (Equivalently: the 64-bit input is `(shard_id as u64) << 32 | entity_id as u64`, split at bit 32.)
 
-**Independently verified invertible** (review round 2). Forward `(L,R) ← (R, L ^ F(i,R))`, inverse `(L,R) ← (R ^ F(i,L), L)` over the rounds reversed. The balanced 32/32 split makes this a permutation of 2⁶⁴ for **any** round function; round-count parity is irrelevant; and the output packing `(L<<32)|R` is itself a bijection. There is no unbalanced-split or odd-round hazard here. **Do not change the construction** — the ruling is to keep `splitmix64` at 8 rounds, conditional only on the three fixes below (the allocator cap, the control-plane threat-model statement, and forbidding `priority` on the viewer plane).
+**Independently verified invertible** (review round 2). Forward `(L,R) ← (R, L ^ F(i,R))`, inverse `(L,R) ← (R ^ F(i,L), L)` over the rounds reversed. The balanced 32/32 split makes this a permutation of 2⁶⁴ for **any** round function; round-count parity is irrelevant; and the output packing `(L<<32)|R` is itself a bijection. There is no unbalanced-split or odd-round hazard here. **Do not change the construction** — the ruling is to keep `splitmix64` at 8 rounds, conditional only on the three fixes below (the allocator cap, the control-plane threat-model statement, and the third, which was *"forbid `priority` on the viewer plane"* and is now **satisfied differently**: `priority` is a prefix of the keyed identity, so there is no unkeyed residue of the entity ID to forbid. The condition is **met, not dropped** — see "`priority` becomes a prefix of `tessera_id`" above).
 
 **Key schedule.** The key is 16 bytes, read little-endian as two `u64` halves `k0` (bytes 0–7) and `k1` (bytes 8–15).
 
@@ -315,7 +406,7 @@ round_key(i) = splitmix64( k0 ^ k1.wrapping_mul(i + 1) )      for i = 0, 1, …,
 
 **Degenerate keys are rejected** *(review round 2)*. A key with `k1 == 0` collapses the schedule to a single constant round key for all eight rounds; the all-zero key does the same and is additionally the value an uninitialised buffer supplies. Both are still permutations, so nothing fails loudly. **`IdentityKey::from_hex` and `--id-key` therefore refuse `k1 == 0` and refuse the all-zero key**, with a typed error naming the reason. The CSPRNG mint retries rather than emitting one (probability ~2⁻⁶⁴; the retry loop exists so the property is enforced, not assumed).
 
-**Round function.** `splitmix64` is exactly the function contracts §2.6 already fixes for `priority` (all arithmetic wrapping `u64`):
+**Round function.** `splitmix64` — the function contracts §2.6 fixed for `priority` up to r5, and which after the 2026-07-30 redefinition survives in the spec as **this** round function, with `priority` becoming a prefix of its output rather than a second application of it (all arithmetic wrapping `u64`):
 
 ```
 splitmix64(x):
@@ -348,7 +439,7 @@ shard_id = L;  entity_id = R
 
 **The allocator cap** *(Important I-1)*. `Allocator::allocate` is today `lo + n` on a `u64` with **no cap at all** (`crates/tessera-lifecycle/src/alloc.rs:31–36`), and `Allocator::new` seeds from a `u64` high-water. "Collision-free by construction" therefore currently rests on nothing but the corpus being small. **`allocate` must refuse to hand out any ID `≥ u32::MAX`** — a typed error (`AllocError::Exhausted { high_water }`), not a wrap and not a panic in a serving path — and `Allocator::new` must refuse a seed above the same bound. This is §16's entity-ID-exhaustion question arriving early, and refusing is the fail-closed answer: an ingest that would exhaust the space is rejected, the WAL is untouched, and the operator is told. Task 7 implements it; Task 5's `forward` is what makes a bypass loud.
 
-**Why a bijection at all, and why this one.** A Feistel network is a permutation for *any* round function `F` — invertibility does not depend on `F`'s quality — which is what makes collision-freedom structural rather than probabilistic. `splitmix64` is chosen over SHA-256 for three reasons: it is already contract in this spec (§2.6's priority), so the oracle already reproduces it and a second reader has one construction to learn instead of two; it is ~2 ns rather than ~150 ns, which at 8 rounds × 10⁹ items is ~16 s of build rather than ~20 min; and the property being defended (below) does not need a cipher.
+**Why a bijection at all, and why this one.** A Feistel network is a permutation for *any* round function `F` — invertibility does not depend on `F`'s quality — which is what makes collision-freedom structural rather than probabilistic. `splitmix64` is chosen over SHA-256 for three reasons: it was already contract in this spec (§2.6's priority up to r5), so the oracle already reproduces it and a second reader has one construction to learn instead of two — and after the 2026-07-30 redefinition there is genuinely only **one** use of it left in the format, since `priority` becomes a prefix of this function's output rather than an independent hash; it is ~2 ns rather than ~150 ns, which at 8 rounds × 10⁹ items is ~16 s of build rather than ~20 min; and the property being defended (below) does not need a cipher.
 
 **Honest limitation, for the reviewer to judge explicitly.** This is a *blinding permutation*, not a cipher. `splitmix64` is not a cryptographic PRF, and 8 rounds of it should not be assumed to resist an adversary who obtains known `(entity_id, tessera_id)` pairs. The threat model below is what makes that acceptable, and the reviewer is asked to rule on the trade rather than have it assumed: **it buys collision-freedom by construction and a pure function, at the cost of an obviously-correct sorted array, against "design for audit before performance".** The mitigating fact is that the whole construction is ~30 lines with a round-trip test and fixed known-answer vectors on both sides.
 
@@ -379,7 +470,7 @@ It lives in MANIFEST, digest-covered like everything else, as a top-level object
 | `--id-key-file <path>` | **Owner ruling Q6.** Read the key from a per-deployment config file at the given path. **This is where the key lives outside the bundle**, and it is the answer to "the bundle was lost and must be rebuilt from source". See "The deployment config file" below. |
 | `--id-key <32 hex>` | Use the given key (lowercase hex, non-degenerate). For restoring a lineage from a recorded key; `--epoch <n>` may accompany it and defaults to 1. **Discouraged in practice** — a key on a command line reaches shell history, process listings and CI logs; `--id-key-file` exists so this does not have to be the ordinary route. |
 | `--mint-id-key` | **Explicitly** mint a fresh 16-byte key from the OS CSPRNG at `epoch = 1`, record it, and print it prominently. Help text: *"starts a NEW identity lineage; every `tessera_id` any client holds becomes wrong."* |
-| `--rotate-id-key` | Required to proceed when a key was carried or supplied *and* the operator intends a different one. Refuses without it. |
+| `--rotate-id-key` | Required to proceed when a key was carried or supplied *and* the operator intends a different one. Refuses without it. Help text must state **both** consequences: every `tessera_id` any client holds becomes wrong, **and** row order changes, because the storage sort key is `(morton, tessera_id)` *(2026-07-30)*. |
 | `--bump-id-epoch` | Advance `identity.epoch` while keeping the key — the repartitioning/resharding signal (see "The identity epoch"). |
 
 **Refusal rules.** If `--carry-id-key-from` names a bundle whose `identity.construction` or `identity.rounds` differ from this build's, **refuse** — a silently different construction under the same key is the worst outcome available. **If any two key sources are given and disagree** — `--id-key-file` against `--carry-id-key-from`, `--id-key` against either — refuse unless `--rotate-id-key`, whose help text states that all outstanding identifiers are invalidated. Agreement between two sources is not an error and is in fact the useful case: it is how an operator checks that the config file and the previous bundle are the same lineage. Refuse a degenerate key (`k1 == 0`, all-zero) from any source. Refuse a key that is not exactly 32 lowercase hex characters.
@@ -451,13 +542,15 @@ The cost of "advertised" is that a client which ignores the epoch entirely can, 
 
 Ingest a batch of *n* items and you hold *n* known plaintext/ciphertext pairs for the deployment key, chosen in the sense that you decide *n*. **That is fine, and it is why the round function does not need to be a PRF**: a control-plane principal already holds `/control/changes`, the ingest path and the corpus size; entity IDs tell it nothing it cannot ask for directly. But it means the correct statement of the defended property is *"a viewer-plane principal cannot recover entity space"*, **not** *"nobody can"*. An implementation that ever hands a `tessera_id` and its entity ID to the same *viewer* would move the construction inside the attacked set, where 8 rounds of a non-cryptographic mixer is not a claim this plan makes. Both the byte-scanner (Task 13) and the layer check (Task 10) exist to keep that from happening by accident.
 
-**Corollary — `priority` must never be emitted on the viewer plane** *(Important I-4)*. `priority` is an **unkeyed** `splitmix64` of the entity ID (contracts §2.6), so publishing it hands a viewer a 16-bit residue of the entity: a 65,536× narrowing of the search space per mark, computable offline against a candidate entity range, and *combinable across marks*. It is not on the wire today — but the routing principle's per-mark row lists it as an exemplar hot column, which is exactly the sentence a future contributor will cite when adding it. **It is forbidden on the viewer plane**, in the contracts spec and in the byte-scanner's sweep, and the reason is recorded next to it so the prohibition survives the next reader who thinks it is just a sort key.
+**Corollary as it now stands — `priority` is inside the keyed set, and Important I-4 is retired** *(owner decision, 2026-07-30)*. Round 2's corollary read: *`priority` is an unkeyed `splitmix64` of the entity ID, so publishing it hands a viewer a 16-bit residue of the entity — a 65,536× narrowing per mark, computable offline against a candidate entity range and combinable across marks; therefore it is forbidden on the viewer plane, in the contracts spec and in the byte-scanner's sweep.* The redefinition removes its premise: `priority` is `high16(tessera_id)`, a keyed function of a value the same payload already carries in full, so it narrows nothing a viewer does not already hold. **A viewer receiving *k* marks learns only that their priorities fall below some cut *P*, and *P* is fully determined by *k* and by the exact masked count *V* that §7.1 already gives them; nothing about unseen items is recoverable.** The prohibition, its layer check and its byte-scanner sweep are retired — see the historical note under the routing principle for why a future reader must not reinstate them by reflex.
+
+**What the threat model still requires, unchanged:** an implementation must never hand a `tessera_id` **and its entity ID** to the same *viewer*. That is what would move the construction inside the attacked set, and it is what the byte-scanner (Task 13) and the layer check (Task 10) exist to prevent. The general rule survives verbatim: **a hot column may be shown only if it is independent of the entity ID, or keyed under the deployment key.** `priority` now satisfies its second limb; a future unkeyed derivative of the entity ID would not.
 
 Consequences to write down so a later reader does not mistake the key for something it is not:
 
 - **No special handling is required** beyond the bundle's existing protection. It is not a KMS key, not rotated on a schedule, not split.
 - **But it must never leave the server.** It appears in no API response (including `/meta`, `/status` and error bodies), in no log line, and in no metric label. Task 13 adds a conformance assertion sweeping for the key bytes on the viewer plane, exactly as the byte-scanner already sweeps for entity IDs.
-- **Rotation is a breaking change for clients,** not an operational hygiene measure. Do not schedule it.
+- **Rotation is a breaking change for clients,** not an operational hygiene measure. Do not schedule it. **And since 2026-07-30 it changes more than identifiers:** the storage sort key is `(morton, tessera_id)`, so a rotation reorders tied rows and a rebuild under a new key yields a different `permutation.bin` as well as different `tessera_id`s. Determinism is unaffected (the build remains a pure function of `(key, shard_id, entity_id)`); the blast radius is wider.
 
 ### 4. Width — `u64`, and why not 32 bits
 
@@ -479,7 +572,9 @@ Stay at `u64` even though a single-shard Phase 1 deployment could encode the who
 
 The bijection is a **pure function of `(key, shard, entity)`**. Both build paths — the streaming pipeline (`pipeline.rs`) and the in-memory reference path (`lib.rs:180`) — read the same key from the same `BuildArgs`, apply the same function to the same entity IDs, and produce byte-identical `columns.arrow`. **No seed is threaded, no RNG is constructed, no ordering dependence exists.** This is strictly simpler than the random-mint design it replaces, and it is why the previous draft's seeded-minting machinery is deleted rather than adapted.
 
-**The sort tiebreak does not move.** `sort_batch` orders by `(morton, priority, entity_id)`, contracts §2.6 calls that contract, and the oracle must re-derive the row order from the build inputs. `tessera_id` is *not* the tiebreak. Task 6 passes entity IDs alongside `TilerItem` for exactly this reason.
+**The sort order moves onto the identity** *(owner decision, 2026-07-30; this supersedes the earlier "the sort tiebreak does not move")*. `sort_batch` orders by **`(morton, tessera_id)`** ascending, with no further tiebreak, because `priority` is a prefix of `tessera_id` and `tessera_id` is unique per row. Contracts §2.6 calls that order contract, and the oracle re-derives it from `(morton_of(x, y, extent), forward(identity.key, identity.shard_id, entity_id))`. The normative statement, including the one condition under which an explicit tiebreak returns, is in "The sort and tiebreak statement" above; do not restate it from memory.
+
+**Row order is now key-dependent, and `build_equivalence.rs` is unaffected by that.** Both build paths read the same key from the same `BuildArgs`, so they sort identically and produce byte-identical `columns.arrow`. What key-dependence does mean is that a *re-key* changes row order within a Morton cell — recorded as an accepted residual — and that a future test comparing two bundles built under different keys must compare sets, not row indices. Task 6 still passes entity IDs alongside `TilerItem`, but now as a **companion vector permuted with the items** for `permutation.bin` and the sidecars, **not as a sort key**.
 
 ### 7. What remains in sidecars
 
@@ -543,7 +638,7 @@ Task 4 Step 10 therefore does **both** of the things the earlier draft offered a
 
 ## Arithmetic — at 10⁹, redone (Critical C-4)
 
-Bytes/row × 10⁹, in GiB. **None of the previous draft's sidecar arithmetic is carried forward.** `columns.arrow` today is 22 B/row = 21.1 GiB measured (`entity_id` u64 8, `x` f32 4, `y` f32 4, `node_id` u32 4, `priority` u16 2).
+Bytes/row × 10⁹, in GiB. **None of the previous draft's sidecar arithmetic is carried forward.** `columns.arrow` today is 22 B/row = 21.1 GiB measured (`entity_id` u64 8, `x` f32 4, `y` f32 4, `node_id` u32 4, `priority` u16 2). **The 2026-07-30 priority redefinition changes none of this arithmetic**: same column, same `u16`, same 2 B/row — only the function that fills it, and the order the rows sit in.
 
 **Identity width, decided (brief Part 4, independently checked):**
 
@@ -626,7 +721,7 @@ Sorted extents at 10⁹, costed as `(key bytes + 4 offset + 4 entity)` per row, 
 
 **Free-space problem, stated plainly.** 15 GiB free; the new bundle is ~43.6 GiB (corrected — see the "Whole bundle on disk" table above); the old is 47.63 GiB measured (51.1 GB decimal). **The old and new bundles cannot coexist.** Task 14 is gated on an explicit owner decision, with a 2.5 × 10⁸ fallback that fits. Task 2 exists partly so the current bundle's baseline is captured in full *before* that decision is reached.
 
-**Attribution — do not let these be conflated.** The residency win comes **almost entirely from dropping `node_id` (−3.8 GiB) and de-residenting the external-ID extents (−18.9 GiB)**. The identity swap is **width-neutral and saves zero bytes**. It is justified by the architecture argument — the boundary identity is a pure function of the internal one, so internal→external needs no structure and external→internal needs no lookup — not by the tail. They are planned and built together only because the format must be final before the single rebuild. Task 15's memo must separate them explicitly.
+**Attribution — do not let these be conflated.** The residency win comes **almost entirely from dropping `node_id` (−3.8 GiB) and de-residenting the external-ID extents (−18.9 GiB)**. The identity swap is **width-neutral and saves zero bytes**, and **so is the 2026-07-30 priority redefinition** — same column, same `u16`, same 2 B/row; it is justified by I7's purpose and §12.3's composition argument, and must never be credited with a byte or a millisecond. The identity swap is justified by the architecture argument — the boundary identity is a pure function of the internal one, so internal→external needs no structure and external→internal needs no lookup — not by the tail. They are planned and built together only because the format must be final before the single rebuild. Task 15's memo must separate them explicitly.
 
 ---
 
@@ -644,6 +739,8 @@ Sorted extents at 10⁹, costed as `(key bytes + 4 offset + 4 entity)` per row, 
 2. **Drawn-mark Task 7's `DEFAULT_MAX_K` *value* must not be committed until this plan's Task 15 has run.** A `k` calibrated on the current bundle is calibrated against a swapping box and a 4-byte handle; both change here. The calibration *method* is unaffected — only the numbers it consumes.
 3. Neither plan edits the other's files. Drawn-mark Task 7 lists `crates/tessera-server/src/config.rs`, `.ignore/tessera-contracts-spec.md` (§3 `k` note) and `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` (Task 16 k-sweep); this plan touches the contracts spec in §0.3/§2/§3/§5 and the Phase 1 plan's Task 16 only in Task 16, after drawn-mark Task 7. **If both are in flight on the contracts spec at once, STOP and report** rather than merging revision blocks by hand.
 
+**A second in-flight plan overlaps the priority fold, and this plan does NOT resolve the overlap.** `docs/superpowers/plans/2026-07-30-selection-route-chooser.md` declares itself a companion to the priority memo and states that it *"shares Task 1's call site"* — i.e. the selection path this fold's spec text describes but does not implement. **Nothing from that plan is folded in here, and nothing here decides anything for it.** If both are in flight against the selection path or against design §7.2 at the same time, **STOP and report to the owner** rather than reconciling them; the sequencing between the two is an owner decision, not an executor's.
+
 ---
 
 ## File Structure
@@ -655,11 +752,12 @@ Sorted extents at 10⁹, costed as `(key bytes + 4 offset + 4 entity)` per row, 
 - Create: `scripts/discriminate_tail.py`, `docs/design-memos/2026-07-30-tail-discrimination.md`
 - Modify: `crates/tessera-engine/src/session.rs`, `crates/tessera-engine/Cargo.toml`, `crates/tessera-store/src/external_ids.rs` (temporary, feature-gated)
 
-**Task 3 — the identity construction memo**
+**Task 3 — the identity construction memo** *(EXECUTED, committed `acfe2ce`)*
 - Create: `docs/design-memos/2026-07-30-tessera-id-construction.md`, `reference/vectors/tessera_id.json`
 
 **Task 4 — the documents**
-- Modify: `.ignore/tessera-architecture-design.md` — I10 (`:143`), §2.6 step 10 (`:100`), §10.6 (`:445`), Appendix C (C6), Appendix A, §10.3 (routing principle), §11.1, §16 (open question), Appendix G (r21)
+- Modify: `docs/design-memos/2026-07-30-tessera-id-construction.md` — Step 0, the four priority amendments to Task 3's committed memo (the vectors file is **not** touched)
+- Modify: `.ignore/tessera-architecture-design.md` — I10 (`:143`), §2.6 step 10 (`:100`), §10.6 (`:445`), Appendix C (C6), Appendix A, §10.3 (routing principle), §11.1, §16 (open question), **§7.2 (`:240`, `:246`, `:248`), §2.6 step 7 (`:97`), §5.2 (`:163`), `:411`, §12.3 (`:525`), §14 (`:590`) — the priority redefinition**, Appendix G (r21)
 - Modify: `.ignore/tessera-contracts-spec.md` — §0.3 (deviations 6–9), §1, §2.1, §2.2 (MANIFEST `identity`), §2.4, §2.6, §3.1, §3.2, §3.4, §5, Appendix R (r6)
 
 **Task 5 — the bijection**
@@ -921,6 +1019,21 @@ git commit -m "test(probes): discriminate the constant viewport tail against pag
 
 ### Task 3: The identity construction — specify it before anything is written
 
+> ## ✅ Task 3 is EXECUTED and COMMITTED (`acfe2ce`) — and partially superseded by the 2026-07-30 priority decision
+>
+> Both outputs are in the tree: `docs/design-memos/2026-07-30-tessera-id-construction.md` and `reference/vectors/tessera_id.json`. **Do not re-run this task.** Step 4's independent gate has also completed and it passed: the reviewer reimplemented the construction in Python **from the memo's text alone** and reproduced **all 57 vectors plus all 10 key-schedule values — 114/114, first run**. Nothing in the memo's §1.1–§1.9 references `priority`, so **the gate survives the priority redefinition untouched and `reference/vectors/tessera_id.json` needs no amendment at all.** Tasks 5 and 12 may proceed against both artifacts as committed.
+>
+> **What must be amended in the committed memo, and who owns it: Task 4 Step 0.** The memo is the reviewed record of a decision that has since moved, and a memo that quietly drops a condition misrepresents the review it records. Four amendments, no more:
+>
+> | memo location | amendment |
+> |---|---|
+> | §3.2, the `priority` bullet (memo:443–456) | **Superseded.** Replace the prohibition with the retirement argument: `priority` is `high16(tessera_id)`, a keyed function of a value the payload already carries in full, so there is no unkeyed residue to forbid. **Keep the general rule at memo:454–455 verbatim** — *a hot column may be shown only if it is independent of the entity ID, or keyed under the deployment key* — because it is what **licenses** the change rather than being collateral to it. Delete the "Open interaction, flagged not resolved" block (memo:457–465), whose condition has now been met. |
+> | §5a, precondition 4 (memo:582–584) | **Restate as satisfied differently, never silently drop.** §5a says in terms that *"a memo that omits them misrepresents the review"*. The 8-round `splitmix64` ruling was made conditional on three fixes, the third being the `priority` prohibition. That channel is now closed **by keying `priority`, not by forbidding it** — the condition is met, and the round-function ruling still rests on something real. **This is the amendment most likely to be missed.** |
+> | §6, Determinism (memo:601–607) | **Superseded.** `sort_batch` orders by `(morton, tessera_id)`; `tessera_id` **is** the sort key, so the memo's *"it is a column value written at the row, not a sort key"* inverts — the identity is computed **before** the tiler. Transcribe "The sort and tiebreak statement" and "The build sequence inverts" from this plan; do not paraphrase. Add that row order is now key-dependent and that rotation therefore reorders tied rows. |
+> | §6, the storage argument (memo:609–614) | **Unaffected in substance** — `tessera_id` is still stored rather than recomputed per gathered mark, for the same reason. But it sits immediately after the sentence being replaced and **will read oddly if §6 is edited in isolation**; check the join. |
+>
+> Everything else in the memo stands: §1's construction, the key lifetime and flags, the N-1 refusal, the config file, the epoch, the threat model's other limbs, the width and prefix arguments, the sidecar sections, and the honest limitation.
+
 The bijection is the load-bearing novelty of this change and the one thing the Python oracle must reproduce **from spec text alone**. This task produces the reviewable artifact and the shared test vectors, before either implementation exists, so that neither can be written by reading the other.
 
 **Files:**
@@ -939,11 +1052,11 @@ The bijection is the load-bearing novelty of this change and the one thing the P
 2. **Key lifetime and location** — per-deployment/per-lineage, in MANIFEST, the **seven** `tessera build` flags, **the N-1 refusal (a build with no explicit key decision exits non-zero before any work)**, the other refusal rules, and the fail-closed handling of an absent `identity` object. **State plainly the consequence of getting this wrong:** every client-held identifier silently breaks on rebuild, and a stdout warning on a ninety-minute build is not a gate.
 2b. **The deployment config file** *(owner ruling Q6)* — `--id-key-file <path>` is where the key lives outside the bundle, so a deployment rebuilt from source keeps its lineage. Record: the minimal TOML shape; that unknown sections are ignored but an unknown key inside `[identity]` is an error; that there is **no default search path and no environment variable**, because a file the binary finds on its own is not a human deciding and would defeat N-1; that `--mint-id-key` prints and does not write; and the owner's stated direction that this file will grow into *"something similar to elastic index configuration"*. **Do not design that file in the memo** — one flag, one shape, one sentence of direction.
 2a. **`tessera_id` is a transport identifier, and the identity epoch** — stable across rebuilds, **not** across repartitioning or resharding; the churn is *partial*, so a stale ID names a **different item** rather than 404ing; consumers persist `external_id`; the epoch rides the §12.5/§10.2 prefix flip, is advertised on `/meta`, and may be presented on `/v1/items` for a `409`.
-3. **Threat model** — what the key defends (**a viewer-plane** client cannot derive or order entity IDs) and what it does not (a bundle-holder can invert everything, and that is fine). **State explicitly that the control-plane principal is outside the defended set and obtains chosen-plaintext pairs by construction** — `/status`'s `entity_id_high_water` plus `/control/ingest`'s returned `tessera_id`s over a dense monotone allocator — because the round-function ruling depends on that premise and a later reader must not have to reconstruct it. The consequences: no special key handling needed; the key must never leave the server on any plane; rotation is a breaking change and is not hygiene; **`priority` must never be emitted on the viewer plane** (unkeyed `splitmix64` of the entity ID).
+3. **Threat model** — what the key defends (**a viewer-plane** client cannot derive or order entity IDs) and what it does not (a bundle-holder can invert everything, and that is fine). **State explicitly that the control-plane principal is outside the defended set and obtains chosen-plaintext pairs by construction** — `/status`'s `entity_id_high_water` plus `/control/ingest`'s returned `tessera_id`s over a dense monotone allocator — because the round-function ruling depends on that premise and a later reader must not have to reconstruct it. The consequences: no special key handling needed; the key must never leave the server on any plane; rotation is a breaking change and is not hygiene; ~~**`priority` must never be emitted on the viewer plane** (unkeyed `splitmix64` of the entity ID)~~ — **superseded 2026-07-30: `priority` is `high16(tessera_id)` and the prohibition is retired; see the box at the head of this task.**
 4. **Width** — `u64`, and why narrowing to 32 bits for a single-shard deployment is refused.
 5. **Which prefix** — §13.3 row-range shard, not §12 partition; `shard_id = 0` in Phase 1. **Reproduce the three-part resolution** from "Which prefix" above (one global `Manifest::entity_id_high_water` and one `Allocator`; §12.4's partition identity is a content hash, not a dense integer; shards do not exist in the format while partitions do), and record only the *narrowed* residual — whether a future multi-shard deployment allocates entity IDs per shard — as an open question.
-5a. **The preconditions the ruling is conditional on** — the allocator cap at `u32::MAX`, `forward`'s checked conversion, the control-plane threat-model statement, and the `priority` prohibition. The Feistel ruling is *conditional on these three fixes*; a memo that omits them misrepresents the review.
-6. **Determinism** — pure function, no seed threading, byte-equality between build paths, and the explicit statement that the sort tiebreak stays `(morton, priority, entity_id)`.
+5a. **The preconditions the ruling is conditional on** — the allocator cap at `u32::MAX`, `forward`'s checked conversion, the control-plane threat-model statement, and the `priority` prohibition **— which since 2026-07-30 is *satisfied differently* rather than dropped: the channel is closed by keying `priority`, not by forbidding it.** The Feistel ruling is *conditional on these three fixes*; a memo that omits them misrepresents the review.
+6. **Determinism** — pure function, no seed threading, byte-equality between build paths, and the explicit statement of the storage sort order — **which since 2026-07-30 is `(morton, tessera_id)` with no further tiebreak, computed before the tiler runs, not `(morton, priority, entity_id)`.**
 7. **What remains in sidecars** — the two directions, their cadences, and the explicit statement that no `tessera_id → entity` sidecar exists. **Plus, and these are the two owner rulings the memo must not omit:** *(a)* under **Ruling A** the sidecar is a translation table holding rows only for items whose caller supplied a key — an item with no caller key has its `tessera_id` as its identity, occupies no extent row, and must never have one manufactured for it; *(b)* under **Ruling B** the whole structure is a **placeholder** for a future adopted metadata store, so it stays minimal, both directions sit behind one module surface, and Appendix D — which rejects adoption for the *access-control layer* — does not forbid adoption for a cold store that never participates in masking. State the fail-closed and off-the-request-path conditions any replacement inherits.
 8. **The honest limitation, and the ruling already taken** — `splitmix64` is not a cryptographic PRF; this is a blinding permutation whose security rests on the *viewer* never obtaining known plaintext pairs. **Review round 2 ruled: keep `splitmix64` at 8 rounds**, conditional on the three fixes in §5a; second choice was keyed SipHash-1-3 at ~80–120 s added to a ninety-minute build (~2%). Record the ruling and its conditions, state the trade against "design for audit before performance", and record the fallback that was *not* taken: a 128-bit random ID, collision-free in practice and needing no crypto in the oracle, at 26 B/row ≈ 25.0 GiB — *worse than today* — which reopens the residency problem. **This point is now a record, not an open question**; Step 4's review must not re-litigate it unless it finds an error in the round-2 verification.
 
@@ -997,10 +1110,15 @@ The format is a contract before it is code. This task lands the spec so Tasks 5�
 **Files:**
 - Modify: `.ignore/tessera-architecture-design.md`
 - Modify: `.ignore/tessera-contracts-spec.md`
+- Modify: `docs/design-memos/2026-07-30-tessera-id-construction.md` *(Step 0 — Task 3's committed memo, four amendments only)*
 
 **Interfaces:**
-- Consumes: Task 1's memo (the premise), Task 2's verdict (the motivation), Task 3's memo (the construction).
+- Consumes: Task 1's memo (the premise), Task 2's verdict (the motivation), Task 3's memo (the construction), the priority-as-prefix memo (`docs/design-memos/2026-07-30-priority-as-identity-prefix.md`).
 - Produces: the normative schemas Tasks 5–13 implement.
+
+- [ ] **Step 0: Amend Task 3's committed construction memo for the priority redefinition**
+
+Task 3 shipped at `acfe2ce` stating the plan's *then*-current position on `priority` and flagging the conflict inline. This task owns bringing it into line, because it is the task that lands the construction in the spec and the memo is the spec's source. **Exactly the four amendments enumerated in the box at the head of Task 3** — §3.2's `priority` bullet (keeping the general rule at memo:454–455, which licenses the change), §5a's precondition 4 restated as *satisfied differently*, §6's determinism statement and build-sequence inversion, and the join into memo:609–614's storage argument. **`reference/vectors/tessera_id.json` needs no amendment** and must not be touched: the memo's §1 does not reference `priority`, and the independent gate reproduced all 57 vectors and all 10 key-schedule values from the memo's text alone (114/114). Commit it with this task's documents commit, adding the path explicitly.
 
 - [ ] **Step 1: Amend the design's I10 mechanism clause (`:143`) — Critical C-3**
 
@@ -1157,6 +1275,21 @@ exactly right; if it keeps allocating globally, the prefix stays 0 and the four 
 buy only the option. The encoding is the same either way, so nothing is blocked.
 ```
 
+- [ ] **Step 7a: Land the priority redefinition in the design — §7.2, §12.3, and the four places that describe the sort order**
+
+*(Added by the 2026-07-30 fold. The design is the specification, so this is where the redefinition becomes normative; contracts §2.6 in Step 10 implements it.)* Read each line before editing — the wording differs at each and a search-and-replace will produce nonsense.
+
+| design line | what it says now | amendment |
+|---|---|---|
+| `:240` (**§7.2**, the definition) | *"Every item carries a fixed pseudo-random **priority**, derived by hashing its entity ID."* | Derived as the **high 16 bits of the item's `tessera_id`** (contracts §2.6), which is a keyed permutation of `(shard_id, entity_id)`. Keep the nesting argument **verbatim** — it depends only on priority being a fixed per-item constant and mask-independent, which it still is. **Add the reason for the change**, in §7.2's own terms: at 65,536 distinct values the *k*-th lowest priority is resolvable only when V ≤ 2¹⁶·*k* (V ≈ 2×10⁶ at *k*=30), and above that the tiebreak was the entity ID — signature-sorted under I9 — so the sample was ordered by permission signature. That is the failure this section rejects for global LOD sampling, moved inside the visible set; it is the argument for the redefinition and it belongs in the section that makes it. |
+| `:97` (§2.6 step 7) | *"Priority is a hash-derived per-point constant and mask-independent"* | *"a keyed per-point constant — the high 16 bits of the item's `tessera_id` — and mask-independent"*. The rest of the step is unchanged. |
+| `:248` (§7.2, direct evaluation) | *"read their priorities, keep the k lowest"* | Add that the comparator **falls through to the full `tessera_id` on prefix ties**, and that this is identically "the *k* lowest by `tessera_id`" because the prefix is a prefix — so there is no composite comparator to get wrong and the sample is correct at any prefix width. Note the width is a **performance** knob: fall-through volume ≈ V/2^w, and the revisit trigger is `w ≈ log₂(V_max/k)` (~24 bits for a 10⁹ shard at head coverage). Phase 1 implements no such comparator — the sampler is the placeholder first-k — so this is spec text ahead of code, and say so. |
+| `:246` (§7.2, candidate lists) | *"the top c·k items by priority, unmasked"* | Unchanged in form; annotate that "by priority" now means "by `tessera_id` prefix", so the lists inherit the fix rather than needing their own. |
+| `:163` (§5.2), `:411`, `:590` (§14) | *"priority as the intra-leaf tiebreak"* / *"derive per-item priorities; sort and assign row ranks"* | State the order as **`(morton, tessera_id)`** and, at `:590`, invert the build sequence: the identity is derived **before** the sort, and the priority column is a projection of the sorted identity column. Transcribe from "The build sequence inverts" above. |
+| `:525` (**§12.3**) | *"Because priority is a global per-item property, the k lowest-priority visible items in a tile equal the k lowest of the union of each partition's k lowest."* | The claim is **restored, not amended**: under D8's shard-local `u32` entity IDs, `splitmix64(entity_id)` had stopped being a global per-item property — item 12,345 carried an identical priority in every shard and `(priority, shard_id, entity_id)` made shard 0 win every tie. `high16(tessera_id)` is global by construction because the shard is part of the bijection's input. Record the defect and its repair here; the composition argument itself stands verbatim. |
+
+**Do not touch `:845`** (Appendix G's r19 paragraph, which records the priority function as fixed at splitmix64-high-16). It is a historical record of what r4 decided and must stay true to that; r21's paragraph is where the change is recorded.
+
 - [ ] **Step 8: Bump the design to r21**
 
 Bump the status line to `revision 21` and prepend to Appendix G:
@@ -1192,6 +1325,28 @@ Bump the status line to `revision 21` and prepend to Appendix G:
   path**. §16
   records that entity-ID uniqueness across §12 partitions is unsettled. No invariant
   changes in substance.
+
+  **`priority` is redefined as the high 16 bits of the item's `tessera_id`** (owner
+  decision, 2026-07-30), and the storage sort order becomes **`(morton, tessera_id)`**
+  with no further tiebreak. Same column, same `u16`, **zero bytes changed**. Two defects
+  are repaired. §7.2's sample was resolvable only while V ≤ 2¹⁶·*k* — V ≈ 2×10⁶ at
+  *k*=30 — and above that threshold the tiebreak *was* the sampler; the tiebreak was the
+  entity ID, which §11.1 assigns in signature order, so **the sample was ordered by
+  permission signature**, keeping I7's letter and breaking its purpose, at the default
+  overview, for head principals, with candidate lists inheriting it. And §12.3's
+  composition argument had quietly lapsed: under D8's shard-local `u32` entity IDs
+  `splitmix64(entity_id)` was no longer the global per-item property the argument names.
+  A keyed bijection over 2⁶⁴ is global, uniform and uncorrelated with signature, and
+  because the `u16` is a *prefix* of it, "*k* lowest by priority then by `tessera_id`" is
+  identically "*k* lowest by `tessera_id`" — so prefix width becomes a performance knob
+  only. Consequences recorded rather than hidden: row order is now **key-dependent**, so
+  a key rotation reorders tied rows as well as invalidating identifiers; the sample
+  reshuffles on a re-key as well as on a reshard; and the uniformity of the Feistel's
+  high bits under structured inputs is **verified by a chi-squared check at build**, not
+  assumed. The identity swap's viewer-plane prohibition on `priority` (contracts r6) is
+  **retired by argument**: 16 bits of a keyed identity the payload already carries in
+  full discloses nothing, since the cut *P* is determined by *k* and the masked count
+  §7.1 already gives. No leak-register entry is required.
 ```
 
 - [ ] **Step 9: Add four deviations to contracts §0.3**
@@ -1380,25 +1535,48 @@ for the epoch it was issued under.
 |---|---|---|
 | `tessera_id` | uint64 | the row→wire-identity direction (deviations 2, 6) |
 | `x`, `y` | float32 | as supplied (quantisation is for codes, not storage) |
-| `priority` | uint16 | splitmix64-derived constant over the entity ID (below). **Build-and-server-side only — never emitted on the viewer plane** *(r6)* |
+| `priority` | uint16 | the **high 16 bits of this row's `tessera_id`** — `(tessera_id >> 48) as u16` *(r6)* |
 | *declared scalars* | per MANIFEST | |
 ```
 
-and add, immediately under the priority-function block:
+**Delete the standalone priority-function block** (§2.6's `priority = (z ^ (z >> 31)) >> 48` over the entity ID, fixed in r4) and replace it with:
 
 ```markdown
-**`priority` must never appear in a viewer-plane payload** *(r6)*. It is an **unkeyed**
-`splitmix64` of the entity ID, so emitting it publishes a 16-bit residue of that entity
-ID per mark — a 65,536× narrowing of entity space, computable offline and combinable
-across the ~10⁵ marks of one viewport. That is **I10** defeated by a sort key. It exists
-in `columns.arrow` because `sort_batch`'s `(morton, priority, entity_id)` tiebreak needs
-it at build; it is not a display value and never becomes one. The general rule it is an
-instance of: **a hot column may cross the boundary only if it is independent of the
-entity ID, or keyed under the deployment key as `tessera_id` is.** The conformance
-byte-scanner sweeps viewer-plane payloads for it (§5).
+**`priority` is a prefix of the identity, and the sort order is `(morton, tessera_id)`**
+*(r6; supersedes r4's standalone priority function, which was an unkeyed `splitmix64`
+over the entity ID)*. `priority = (tessera_id >> 48) as u16`. There is **one** hash
+construction in this format, not two: the Feistel below, of whose output `priority` is
+the leading 16 bits.
+
+`columns.arrow` is sorted by **`(morton, tessera_id)` ascending, with no further
+tiebreak**. `tessera_id` is a bijection over 2⁶⁴ and there is one row per entity, so the
+order is total; and because `priority` is a *prefix* of `tessera_id`, ordering by
+`(morton, priority, tessera_id)` is **identically** ordering by `(morton, tessera_id)`.
+An implementation may compare the prefix first as an optimisation. **The entity ID is
+not a sort key at any position.** The oracle re-derives row order as
+`(morton_of(x, y, extent), FPE_k(shard_id ‖ entity_id))`, so **row order is
+key-dependent**: a key rotation reorders tied rows as well as invalidating every
+identifier a client holds (§2.2).
+
+**Why the column exists at all, given that its value is a prefix of another column in
+the same file.** A cheap prefix must be *physically contiguous*: reading the high 2 bytes
+of a `uint64` array at stride 8 touches every page holding any value (512 `u64` per page
+against 2,048 `u16`) and pulls the whole cache line regardless. This is design §10.4's
+column-major argument one level down. Prefix **width** is therefore a performance knob
+and not a correctness parameter — the sample is correct at any width, and fall-through
+volume is ≈ V/2^w.
+
+**`priority` on the viewer plane is permitted and unused** *(r6)*. It is 16 bits of a
+keyed identity the same payload already carries in full, so it narrows nothing: a viewer
+holding *k* marks learns only that their priorities fall below some cut *P*, and *P* is
+determined by *k* and the exact masked count §7.1 already returns. Nothing emits it
+because nothing needs it. The general rule remains: **a hot column may cross the boundary
+only if it is independent of the entity ID, or keyed under the deployment key** — and an
+*unkeyed* derivative of the entity ID would still be forbidden, which is what r6's
+earlier drafts prohibited when `priority` was one.
 ```
 
-and add, after the priority-function block, **the full construction from "The identity construction" above** — input encoding, key schedule, round function, round count, forward and inverse pseudocode — introduced by:
+and add, after that block, **the full construction from "The identity construction" above** — input encoding, key schedule, round function, round count, forward and inverse pseudocode — introduced by:
 
 ```markdown
 **The `tessera_id` permutation is contract** *(r6)*. The oracle must reproduce the
@@ -1450,7 +1628,9 @@ O(1), constructs **no row-space projection**, and does **identical work for an
 identifier that names nothing and one that names an invisible item** — which is what
 closes the endpoint's timing channel rather than narrowing it (design Appendix C, C4
 annotation). A row is looked up only *after* the answer is already "visible", and the
-external-ID sidecar is read only after that. `priority` is never returned.
+external-ID sidecar is read only after that. `priority` is not returned — not because it
+may not be (r6 retires that prohibition; it is a prefix of the `tessera_id` in the same
+response) but because a drill-down has no use for a sort key.
 
 If `epoch` is supplied and differs from `identity.epoch` (§2.2), the response is
 `409 conflict` — *"stale identity epoch; re-resolve by external_id"* — decided before
@@ -1474,8 +1654,9 @@ Determined by §3's Arrow schemas plus three rules: **the identity on the viewer
 is the item's `tessera_id`** — a keyed permutation of `(shard_id, entity_id)` that
 carries no entity-space order and is invertible only inside the trust boundary (I10;
 byte-scan-tested in payloads and logs, which sweep for entity IDs, for the identity key
-itself, for `priority` — an *unkeyed* function of the entity ID, forbidden on this
-plane (§2.6) — and for caller external IDs outside the drill-down response); entity IDs
+itself, and for caller external IDs outside the drill-down response — **not** for
+`priority`, which r6 makes a prefix of the keyed identity and therefore harmless on this
+plane (§2.6)); entity IDs
 cross no process boundary and are not stored in any request-path artifact (§2.6);
 buffers are uncompressed for zero-copy slicing. *(r6; the per-session `u32` handle is
 retired from the viewer plane — §0.3 deviation 8 — and retained for Phase 3 node
@@ -1490,7 +1671,7 @@ document to drift.
 **Status:** Draft r6 — r5 plus the boundary identity: `columns.arrow` carries a keyed `tessera_id`, `node_id` is removed, point handles are retired from the viewer plane, external-ID resolution becomes a per-extent lazy sidecar (Appendix R)
 ```
 
-Append to Appendix R, above the r5 paragraph, a paragraph recording: the four deviations; that `tessera_id` is a **keyed bijection and therefore collision-free by construction, stable with nothing persisted, and needing no `tessera_id → entity` sidecar** — *conditional on the allocator refusing to issue an ID at or above `u32::MAX`, which is what makes "by construction" true rather than aspirational*; that `tessera_id` is a **transport** identifier with an epoch, not a durable key, and that consumers persist `external_id`; that a build with no explicit identity-key decision **refuses**; that entity IDs narrow to `u32` on disk under D8 with `terms/pairs.parquet` as the one recorded exception; that the premise was established by compiler-enforced enumeration rather than grep; that I10 is strengthened in substance and changed in mechanism, with the design's r21 as the companion; that §2.6's streamed-segment locator is revised because it depended on the deleted column; that `priority` is forbidden on the viewer plane as an unkeyed function of the entity ID; **that §1's external-ID cap tightens from 256 bytes to 64 (owner ruling), with over-length a typed error rather than a truncation, and that sidecar disk scales linearly with key length — with the ~16-byte threshold at which the store dominates the bundle recorded in §2.4**; **that the identity key's home outside the bundle is a per-deployment configuration file named explicitly on the command line (`--id-key-file`), with no default search path, so that a build never acquires a key nobody chose**; **that the external-ID store is marked TRANSITIONAL — a placeholder for a future adopted per-point metadata store occupying design §8.3's sidecar slot, with the note that Appendix D rejects adoption for the access-control layer and not for a cold store off the request path**; **that an item whose caller supplied no external ID has its `tessera_id` as its identifier and occupies no row in the store, so a deployment supplying no keys writes no extents at all**; and that the costs are **C6**, moved to `Accepted — caller's control`, and **C17**, a new entry for the linkability a stable identity buys.
+Append to Appendix R, above the r5 paragraph, a paragraph recording: the four deviations; that `tessera_id` is a **keyed bijection and therefore collision-free by construction, stable with nothing persisted, and needing no `tessera_id → entity` sidecar** — *conditional on the allocator refusing to issue an ID at or above `u32::MAX`, which is what makes "by construction" true rather than aspirational*; that `tessera_id` is a **transport** identifier with an epoch, not a durable key, and that consumers persist `external_id`; that a build with no explicit identity-key decision **refuses**; that entity IDs narrow to `u32` on disk under D8 with `terms/pairs.parquet` as the one recorded exception; that the premise was established by compiler-enforced enumeration rather than grep; that I10 is strengthened in substance and changed in mechanism, with the design's r21 as the companion; that §2.6's streamed-segment locator is revised because it depended on the deleted column; **that `priority` is redefined as the high 16 bits of the row's `tessera_id` and r4's standalone `splitmix64`-over-entity function is deleted, that the sort order becomes `(morton, tessera_id)` with no further tiebreak and is therefore key-dependent, that the redefinition repairs a sample which above V ≈ 2×10⁶ was ordered by permission signature through a signature-sorted entity-ID tiebreak (I7's purpose, not its letter) and restores §12.3's global-per-item-property premise under D8's shard-local IDs, that zero bytes change in the bundle, and that `priority` is consequently *permitted* on the viewer plane — a keyed prefix of an identity the payload already carries — while an unkeyed derivative of the entity ID would still be forbidden**; **that §1's external-ID cap tightens from 256 bytes to 64 (owner ruling), with over-length a typed error rather than a truncation, and that sidecar disk scales linearly with key length — with the ~16-byte threshold at which the store dominates the bundle recorded in §2.4**; **that the identity key's home outside the bundle is a per-deployment configuration file named explicitly on the command line (`--id-key-file`), with no default search path, so that a build never acquires a key nobody chose**; **that the external-ID store is marked TRANSITIONAL — a placeholder for a future adopted per-point metadata store occupying design §8.3's sidecar slot, with the note that Appendix D rejects adoption for the access-control layer and not for a cold store off the request path**; **that an item whose caller supplied no external ID has its `tessera_id` as its identifier and occupies no row in the store, so a deployment supplying no keys writes no extents at all**; and that the costs are **C6**, moved to `Accepted — caller's control`, and **C17**, a new entry for the linkability a stable identity buys.
 
 - [ ] **Step 12: Verify no other document contradicts the new format**
 
@@ -1503,8 +1684,10 @@ Read each hit. SA D14 (caller-supplied external IDs as the admin-plane identity)
 - [ ] **Step 13: Commit**
 
 ```bash
-git add .ignore/tessera-architecture-design.md .ignore/tessera-contracts-spec.md
-git commit -m "docs(design,contracts): the tessera_id boundary identity — design r21, contracts r6"
+git add .ignore/tessera-architecture-design.md .ignore/tessera-contracts-spec.md docs/design-memos/2026-07-30-tessera-id-construction.md
+git commit -m "docs(design,contracts): the tessera_id boundary identity — design r21, contracts r6
+
+priority becomes high16(tessera_id); the storage sort order becomes (morton, tessera_id)."
 ```
 
 ---
@@ -1518,7 +1701,31 @@ Thirty lines, in the crate with no dependencies, tested against Task 3's vectors
 
 **Interfaces:**
 - Consumes: Task 3's memo and `reference/vectors/tessera_id.json`.
-- Produces: `TesseraId(u64)`; `IdentityKey([u8; 16])`; `IdentityKey::forward(shard: u32, entity: EntityId) -> Result<TesseraId, IdentityError>`; `IdentityKey::invert(id: TesseraId) -> (u32, EntityId)`; `IdentityKey::from_hex(&str) -> Result<Self, IdentityError>`; `const IDENTITY_CONSTRUCTION: &str = "feistel-splitmix64-v1"`; `const IDENTITY_ROUNDS: u32 = 8`.
+- Produces: `TesseraId(u64)`; `IdentityKey([u8; 16])`; `IdentityKey::forward(shard: u32, entity: EntityId) -> Result<TesseraId, IdentityError>`; `IdentityKey::invert(id: TesseraId) -> (u32, EntityId)`; `IdentityKey::from_hex(&str) -> Result<Self, IdentityError>`; `const IDENTITY_CONSTRUCTION: &str = "feistel-splitmix64-v1"`; `const IDENTITY_ROUNDS: u32 = 8`; **`TesseraId::priority(&self) -> u16`** *(2026-07-30 fold)*.
+
+**`TesseraId::priority()` is the one and only definition of the priority column** *(owner decision, 2026-07-30)*. `(self.0 >> 48) as u16` — the leading 16 bits of the identity, and contracts §2.6's `priority`. It lives here, beside the construction it is a prefix of, because three call sites need it and a second inline `>> 48` is how the column and the sort key drift apart: `tessera-store`'s two writers derive the column with it (Task 6), and `tessera-build`'s streaming comparator uses it as the cheap prefix in its 12-byte sort record (Task 7). **`tessera-build`'s `priority_of(EntityId)` (`lib.rs:140–143`) is deleted, not re-pointed** — it takes the wrong argument. Add to Step 1:
+
+```rust
+#[test]
+fn priority_is_the_leading_sixteen_bits_of_the_identity() {
+    // Contracts §2.6 r6. The point of the redefinition is that the sort prefix and the
+    // full sort key are the same value, so this is not a formatting detail: if priority
+    // is ever anything but a prefix, "k lowest by priority then by tessera_id" stops
+    // being "k lowest by tessera_id" and the sampler acquires a composite comparator.
+    let key = IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").unwrap();
+    for e in (0u32..1 << 16).step_by(13) {
+        let id = key.forward(0, EntityId::new(e)).unwrap();
+        assert_eq!(id.priority(), (id.raw() >> 48) as u16);
+    }
+}
+
+#[test]
+fn ordering_by_priority_then_id_is_ordering_by_id() {
+    // Assert the equivalence the prefix argument rests on over a shuffled sample:
+    // sort_by(|a,b| a.priority().cmp(&b.priority()).then(a.raw().cmp(&b.raw()))) must
+    // produce exactly sort_by_key(|x| x.raw()).
+}
+```
 
 **`forward` is fallible, and that is Important I-1, not fussiness.** `EntityId` is a `u64` newtype; D8 says entity IDs are `u32`. A bare `entity.raw() as u32` **truncates**, and two entities differing only above bit 32 would then share a `tessera_id` — at which point "collision-free by construction" is false and `invert` returns the *wrong* entity, which on `/control/changes` is a suppression against the wrong item. So `forward` performs a **checked conversion** and returns `IdentityError::EntityOutOfRange { entity }` above `u32::MAX`. Task 7's allocator cap is what makes that error unreachable; this signature is what makes its absence loud rather than silent. **Both must land, and neither substitutes for the other.**
 
@@ -1660,7 +1867,7 @@ git commit -m "feat(types): the tessera_id keyed bijection (feistel-splitmix64-v
 
 **Interfaces:**
 - Consumes: contracts §2.6 as revised in Task 4; Task 5's `TesseraId`.
-- Produces: `ColumnsRef::tessera_id(&self) -> &[u64]`; `write_columns(path, tessera_id: Vec<u64>, x: Vec<f32>, y: Vec<f32>, priority: Vec<u16>)`; `TilerItem { tessera_id: TesseraId, x, y, priority, scalars }`; `Manifest::identity: IdentityDescriptor` (required).
+- Produces: `ColumnsRef::tessera_id(&self) -> &[u64]`; `write_columns(path, tessera_id: Vec<u64>, x: Vec<f32>, y: Vec<f32>)` — **the `priority` column is derived inside the writer from `tessera_id` via `TesseraId::priority()`** *(2026-07-30 fold)*; `TilerItem { tessera_id: TesseraId, x, y, scalars }` (**no `priority` field** — it is a prefix of `tessera_id`); `Manifest::identity: IdentityDescriptor` (required).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1756,17 +1963,19 @@ pub struct IdentityDescriptor {
 ```
 as a **required** `Manifest::identity` field — no `#[serde(default)]`, so an absent object is a deserialisation error (contracts §2.2 r6). Add a validator rejecting an unknown `construction` or a `rounds` other than `IDENTITY_ROUNDS`; a bundle written by a different construction must not be read by this one.
 
-`crates/tessera-spatial/src/tiler.rs`: `TilerItem` loses `node_id` and its `entity_id: EntityId` becomes `tessera_id: TesseraId`.
+`crates/tessera-spatial/src/tiler.rs`: `TilerItem` loses `node_id` **and `priority`**, and its `entity_id: EntityId` becomes `tessera_id: TesseraId`. The module doc comment at `tiler.rs:4–6` — *"Priority is **not** computed here: the entity-ID allocator owns priority assignment (R3, splitmix64 over the final entity ID); callers pass it in already computed"* — is now false and must be replaced: priority is the leading 16 bits of the `tessera_id` the caller supplies, so the tiler needs no separate value and the allocator owns nothing about it. The `ScalarValue` doc at `tiler.rs:12–13`, which lists the fixed columns as `(entity_id, x, y, node_id, priority)`, becomes `(tessera_id, x, y, priority)`.
 
-**The sort tiebreak does not move.** `sort_batch` orders by `(morton, priority, entity_id)`; contracts §2.6 calls that tiebreak contract because the oracle must re-derive the row order from the build inputs. `sort_batch` therefore takes entity IDs as a *sort key argument* rather than reading them from `TilerItem`:
+**The sort order moves onto the identity** *(2026-07-30 fold; this replaces the earlier "the sort tiebreak does not move", which is now wrong)*. `sort_batch` orders by **`(morton, tessera_id)` ascending with no further tiebreak** — see "The sort and tiebreak statement" and "The build sequence inverts" above, which are normative and must not be paraphrased. `TilerItem` therefore **loses its `priority` field**: the value is a prefix of the `tessera_id` the item already carries, and a stored second copy is a second source of truth. `sort_batch` still takes `entity_ids`, but as a **companion vector permuted with the items**, not as a sort key:
 
 ```rust
-/// Sort `items` into segment (row) order: `(morton, priority, entity_id)` ascending
-/// (contracts §2.6). The entity ID is passed alongside rather than stored on
-/// `TilerItem`, because after contracts r6 the item carries the `tessera_id` it will
-/// be shown by, and the tiebreak must stay on the entity ID — the oracle re-derives
-/// the row order from the build inputs, and `tessera_id` is a permutation of entity
-/// space that would give a different, key-dependent order.
+/// Sort `items` into segment (row) order: `(morton, tessera_id)` ascending
+/// (contracts §2.6 r6). No further tiebreak: `tessera_id` is a bijection over 2^64 and
+/// there is one row per entity, so the order is total — and because `priority` is the
+/// leading 16 bits of `tessera_id`, ordering by `(morton, priority, tessera_id)` is
+/// identically this order. The entity ID is **not** a sort key at any position; it is
+/// passed alongside so the caller can keep `permutation.bin` and the external-ID
+/// sidecars aligned with the new row order. Row order is key-dependent: a different
+/// deployment key reorders rows inside a Morton cell (contracts §2.2, rotation).
 pub fn sort_batch(
     items: &mut Vec<TilerItem>,
     entity_ids: &mut Vec<EntityId>,
@@ -1775,6 +1984,20 @@ pub fn sort_batch(
 ```
 
 with `entity_ids` permuted identically to `items`, and the caller retaining it for the permutation and the sidecars.
+
+**Rename the existing test rather than deleting it.** `sorts_by_morton_then_priority_then_entity_id` (`tiler.rs:108`) becomes `sorts_by_morton_then_tessera_id`, and its fixture must include **at least one pair sharing a Morton code** so the identity ordering is actually exercised. Add one more:
+
+```rust
+#[test]
+fn ordering_by_the_priority_prefix_then_the_full_id_equals_ordering_by_the_id() {
+    // Contracts §2.6 r6: `priority` is a PREFIX of `tessera_id`, so the two orders are
+    // the same order. This is what licenses an implementation to compare the cheap
+    // 16-bit prefix first (pipeline.rs's 12-byte RowRec does exactly that). Engineer
+    // prefix ties — ids sharing their high 16 bits — or the test proves nothing.
+}
+```
+
+**The priority column is derived in one place, and that place is `TesseraId::priority()`** (Task 5). Neither the tiler nor either build path may recompute `(id >> 48) as u16` inline. `write_segment` and `write_columns` derive the column from the `tessera_id` values they are already given, so `write_columns` **loses its `priority: Vec<u16>` parameter** along with `node_id`: `write_columns(path, tessera_id: Vec<u64>, x: Vec<f32>, y: Vec<f32>)`. The written schema is unchanged — four fixed columns, `priority` still `uint16` at ordinal 3 — and deriving it inside the writer is what makes both build paths byte-identical by construction rather than by agreement.
 
 - [ ] **Step 4: Run the tests**
 
@@ -2007,6 +2230,27 @@ and appends `"${IDENTITY_ARGS[@]}"` to the existing `tessera build` invocation, 
 
 **No seed, no RNG, and no `provenance.public_id_seed`.** If the executor finds themselves adding one, they are working from the superseded draft. (The CSPRNG appears in exactly one place: `--mint-id-key`, which draws 16 bytes once and retries on a degenerate draw.)
 
+- [ ] **Step 3a: Redefine `priority` and move the identity ahead of the sort** *(2026-07-30 fold)*
+
+Four edits, and the ordering between them is the point — see "The build sequence inverts" above.
+
+1. **Delete `priority_of` and its test.** `crates/tessera-build/src/lib.rs:140–143` (`priority(e) = (splitmix64(e) >> 48) as u16`, with the R3/§2.6 doc comment) and `priority_matches_r3_splitmix64` (`lib.rs:862–872`) both go. Nothing re-points to `TesseraId::priority()` at this call site — the argument was the entity ID, which is the defect.
+2. **Compute the identity before the tiler, on both paths.** The in-memory path (`lib.rs` ~315–334) constructs `TilerItem { tessera_id: …forward(shard, entity_id)?, … }` with no `priority` field. The streaming path fills `RowRec` from the identity, not from the entity.
+3. **`RowRec` keeps 12 bytes and its comparator recomputes on a prefix tie.** `pipeline.rs:109–124`: keep `#[repr(C)] { morton: u32, entity: u32, priority: u16, _pad: u16 }` — `priority` is now `key.forward(shard, entity)?.priority()`, filled where the record is built — and change `order()` from a plain tuple to a comparator:
+
+   ```rust
+   // (morton, tessera_id) ascending (contracts §2.6 r6). `priority` is the leading 16
+   // bits of `tessera_id`, so comparing it first is the SAME order, not an
+   // approximation of it. The full identity is recomputed from `entity` only on a
+   // prefix tie: `forward` is a pure function, so this is exact, and the record stays
+   // 12 bytes — a `u64` here would be 16 B/row, +3.7 GiB at 10^9, immediately
+   // re-spending what dropping the NODE_NONE column just freed.
+   fn cmp(&self, other: &Self, key: &IdentityKey, shard: u32) -> Ordering
+   ```
+
+   The tie path costs eight `splitmix64` rounds. **If it shows in the build profile at 10⁹, the escalation is the 16-byte record and its 3.7 GiB — measure and report to the owner; do not choose silently.** Add a unit test that this comparator agrees with a naive full-`tessera_id` sort over a batch containing engineered prefix ties.
+4. **The `priority` vector at `pipeline.rs:411–413` disappears.** `write_columns` derives the column from `tessera_id` (Task 6), so there is no separate vector to build and no second derivation site.
+
 - [ ] **Step 4: Write the column and drop `NODE_NONE`**
 
 `pipeline.rs` (~394–420): drop the `node_id` vector entirely — **this deletes the 4 GB `vec![NODE_NONE; n]` allocation at the build's tightest moment** (`pipeline.rs:416`); record the peak-RSS effect in Task 14. Build the identity column in row order:
@@ -2020,11 +2264,13 @@ let tessera_row: Vec<u64> = rows
     .map(|r| args.identity_key.forward(args.shard_id, r.entity).map(|id| id.raw()))
     .collect::<Result<_, _>>()
     .map_err(BuildError::Identity)?;
-write_columns(&columns_path, tessera_row, x_row, y_row, priority)
+write_columns(&columns_path, tessera_row, x_row, y_row)
     .map_err(|e| BuildError::io(&columns_path, e))?;
 ```
 
-Make the in-memory path (`lib.rs` ~315–334) match: `TilerItem { tessera_id: args.identity_key.forward(args.shard_id, entity_id), … }`, with the parallel `entity_ids` vector passed to `sort_batch` per Task 6.
+*(2026-07-30 fold: no `priority` argument — the writer derives it from `tessera_id`; and `tessera_row` is not built here for the first time, since Step 3a already needed the identity **before** the sort. What happens at this point is the permutation of an identity vector that already exists, not its construction.)*
+
+Make the in-memory path (`lib.rs` ~315–334) match: `TilerItem { tessera_id: args.identity_key.forward(args.shard_id, entity_id)?, … }`, with the parallel `entity_ids` vector passed to `sort_batch` per Task 6.
 
 Record `identity` in MANIFEST from `BuildArgs`, identically on both paths.
 
@@ -2043,12 +2289,33 @@ Then, in the same pass that has the sorted rows in hand, write **one** `entities
 
 Both files are recorded in the side-manifest and digest-covered.
 
+- [ ] **Step 5a: The uniformity check the redefinition is conditional on** *(2026-07-30 fold — an open verification item, not a formality)*
+
+The priority prefix is now the top 16 bits of the left Feistel half `L`, and this plan states plainly that the construction is **a blinding permutation, not a cipher**. Sampling needs **uniformity, not unpredictability** — but the inputs are highly structured (`shard_id = 0`, `entity_id` dense from 0), and **residual structure in `L` would be inherited by the sample, which is the exact defect being fixed.** So it is verified rather than assumed.
+
+Add to `crates/tessera-build/tests/build_equivalence.rs`, alongside the existing known-answer assertions:
+
+```rust
+#[test]
+fn the_priority_prefix_is_uniform_over_dense_entity_ids() {
+    // Chi-squared over high16(tessera_id) for entity_id dense from 0 at shard_id = 0 --
+    // the structured input the build actually presents. 8 balanced rounds of splitmix64
+    // should give uniformity; this asserts it rather than trusting it, because a biased
+    // prefix reintroduces the tie-domination the redefinition exists to remove.
+    // Bucket to 2^8 bins over >= 2^20 entities, assert the statistic against the 0.001
+    // critical value, and state both the bin count and the threshold in the failure
+    // message so a failure is diagnosable rather than just red.
+}
+```
+
+**If this fails, the fold does not land: stop and report to the owner.** The fallback on the record is the review's second choice of round function (keyed SipHash-1-3, ~2% of build time), not a wider prefix — a biased prefix is biased at every width.
+
 - [ ] **Step 6: Run the tests**
 
 ```bash
 cargo test -p tessera-build
 ```
-Expected: PASS, including `streaming_build_is_byte_identical_to_the_reference_build` and `entity_ids_follow_signature_order`.
+Expected: PASS, including `streaming_build_is_byte_identical_to_the_reference_build`, `entity_ids_follow_signature_order` and `the_priority_prefix_is_uniform_over_dense_entity_ids`.
 
 - [ ] **Step 7: Quality gates and commit**
 
@@ -2057,7 +2324,10 @@ cargo fmt --all
 cargo clippy -p tessera-build --all-targets -- -D warnings
 bash scripts/check-layers.sh
 git add crates/tessera-build/src/lib.rs crates/tessera-build/src/pipeline.rs crates/tessera-build/Cargo.toml crates/tessera-build/tests/build_equivalence.rs crates/tessera-build/tests/build_smoke.rs crates/tessera-cli/src/main.rs crates/tessera-cli/Cargo.toml crates/tessera-lifecycle/src/alloc.rs crates/tessera-lifecycle/tests/ scripts/build_full.sh Cargo.lock
-git commit -m "feat(build,cli)!: derive tessera_id from the deployment key, refuse a build with no key decision, cap the allocator at u32::MAX, write the ext locator, drop the NODE_NONE column"
+git commit -m "feat(build,cli)!: derive tessera_id from the deployment key, refuse a build with no key decision, cap the allocator at u32::MAX, write the ext locator, drop the NODE_NONE column
+
+priority becomes high16(tessera_id) and the identity is computed before the tiler; the
+standalone splitmix64-over-entity priority function is deleted."
 ```
 
 ---
@@ -2461,7 +2731,7 @@ Three consequences the executor must handle rather than paper over:
 
 1. **`row_of` is reached only for a visible entity**, and is itself an O(1) bounds-checked slot read (`permutation.rs:160–171`), not a scan. The `for` loops are over *slices*, not rows — Phase 1 has one.
 2. **The drill-down sidecar read happens only for a visible item** — after the visibility test, never before. Reading it earlier would make the sidecar's first-open cost observable for invisible IDs, reintroducing C-5 through the back door.
-3. **`priority` is not in `ItemOut`.** It is an unkeyed `splitmix64` of the entity ID (Important I-4); `row_to_point` must not carry it into the response, and Task 13 sweeps for it.
+3. **`priority` is not in `ItemOut`** — but the reason has changed *(2026-07-30 fold)*. It is **no longer forbidden**: Important I-4 is retired, `priority` is `high16(tessera_id)`, and the response already carries the full `tessera_id`. It stays out because a drill-down has no use for a sort key, not because emitting it would disclose anything. **Do not add a guard for it, and do not re-add the retired sweep.**
 
 - [ ] **Step 4b: `external_id_of` — the drill-down direction, live map first (Important I-9)**
 
@@ -2658,15 +2928,9 @@ if grep -rn "IdentityKey" crates/tessera-wire/src/ crates/tessera-server/src/vie
   echo "FAIL: the identity key must not appear in the wire or viewer layers"
   fail=1
 fi
-
-# I4/I10: `priority` is an UNKEYED splitmix64 of the entity ID (contracts §2.6), so
-# emitting it publishes a 16-bit residue of entity space per mark. It is a build-side
-# sort key, never a display value.
-if grep -n "priority" crates/tessera-wire/src/payload.rs; then
-  echo "FAIL: priority must not appear in the wire payload; it is an unkeyed function of the entity ID"
-  fail=1
-fi
 ```
+
+**Do NOT add a `priority` grep** *(2026-07-30 fold)*. Earlier copies of this plan specified one here, because `priority` was then an *unkeyed* `splitmix64` of the entity ID and emitting it would have published a 16-bit residue of entity space per mark. `priority` is now `high16(tessera_id)` — a keyed prefix of a value the payload carries in full — so **Important I-4 is retired and this check must not be written.** The general rule it enforced still holds and would justify a grep for a *future* unkeyed derivative of the entity ID; it does not justify one for `priority`. See the historical note under "The routing principle" before reinstating anything here.
 
 **And confirm Task 5's amendment landed.** The existing I4 check greps `impl From` against `EntityId|RowId|TermId|Handle` and does **not** name `TesseraId`, so an `impl From<EntityId> for TesseraId` — the single most natural convenience someone will reach for — passes the one guard that exists to stop it. Task 5 adds `TesseraId` to that alternation; verify here that it is present, because this is the task that owns the script.
 
@@ -2819,7 +3083,7 @@ The Python oracle is an **independent re-derivation** and its independence is th
 
 **Interfaces:**
 - Consumes: the contracts r6 schemas; Task 3's memo and `reference/vectors/tessera_id.json`.
-- Produces: `identity.forward/invert`; `Segment.tessera_id` and a **derived** `Segment.entity_id`; `Bundle.tessera_id_of(entity_id)`.
+- Produces: `identity.forward/invert`; `Segment.tessera_id` and a **derived** `Segment.entity_id`; `Bundle.tessera_id_of(entity_id)`; **`identity.priority_of(tessera_id)` and a row-order re-derivation from `(morton, tessera_id)`** *(2026-07-30 fold)*.
 
 - [ ] **Step 1: Reimplement the bijection in Python, from the spec text**
 
@@ -2851,6 +3115,13 @@ def _entity_of_rows(perm: np.ndarray, rows: np.ndarray) -> np.ndarray:
 ```
 
 `Segment` gains `tessera_id: np.ndarray  # uint64, row order` and keeps `entity_id: np.ndarray  # uint32, row order, DERIVED`. A **cross-check** the oracle should assert once per bundle on a sample of rows: `identity.forward(shard, entity_of_row[r]) == tessera_id[r]`. That is the only test that catches a key/column disagreement, and it uses both derivations against each other.
+
+- [ ] **Step 2a: Re-derive `priority` and the row order from the identity** *(2026-07-30 fold)*
+
+The oracle re-derives two things it previously derived differently, and both must come from the spec text, not from the Rust:
+
+1. **`priority = (tessera_id >> 48) & 0xFFFF`** — a prefix of the identity, **not** `splitmix64` over the entity ID. Assert it against the stored column for every row of a small bundle; a mismatch means the build's derivation and the spec's disagree, which is exactly what this check exists to catch.
+2. **Row order is `(morton, tessera_id)` ascending, with no further tiebreak** — see "The sort and tiebreak statement" above; transcribe it, do not paraphrase. Add an assertion that re-sorting a small bundle's `(morton_of(x, y, extent), tessera_id)` pairs reproduces the stored row order exactly. **Row order is now key-dependent**, so this derivation reads `identity.key` and `identity.shard_id` from MANIFEST — which `identity.py` already does, so it adds a dependency and no new artifact. Any previous oracle code re-deriving order from `(morton, priority, entity_id)` is wrong for r6 and must go.
 
 - [ ] **Step 3: Re-point `external_id_of` and add the sidecar round-trip**
 
@@ -2888,7 +3159,9 @@ git commit -m "test(reference): oracle reimplements the tessera_id bijection and
 
 ---
 
-### Task 13: Conformance — the byte-scanner's premise is now stronger, and its scan needs a scope (Important I-4)
+### Task 13: Conformance — the byte-scanner's premise is now stronger, and its scan needs a scope
+
+*(The title previously cited Important I-4, which the 2026-07-30 priority fold retires. The scoping work — deciding the sweep's width against a random-looking `u64` identity column — is unaffected and is still the substance of this task.)*
 
 **Files:**
 - Modify: `conformance/tests/test_byte_scan.py` (18–23, 112–116, 260, 301), `conformance/tests/test_restart_replay.py` (schema 112–117, `ext_b64` 170–171)
@@ -2904,7 +3177,7 @@ The current scan decodes a `handle` `UInt32` column and sweeps for 4-byte entity
 1. The wire identity column is now `tessera_id: UInt64`. The decode moves to `u64`.
 2. **The 4-byte sweep over a payload containing a random-looking `u64` column will hit by chance.** With 143,857 8-byte identities and a 10⁹-entity ID space, a naive "does any 4-byte window equal any entity ID" scan expects on the order of tens of spurious hits per run on the full fixture (the review estimated ~44). **Rule: the sweep excludes the `tessera_id` column's own buffer and scans every other buffer, every metadata field and every log line.** Record that scoping decision in the test docstring with its reason — an unscoped scan either flakes or gets weakened silently later, and a weakened I10 test is worse than none.
 
-3. **Add a `priority` sweep** *(Important I-4)*. `priority` is an unkeyed `splitmix64` of the entity ID, so its appearance on the viewer plane would publish a 16-bit residue of entity space per mark. It is not on the wire today, and this test is what keeps it that way: assert no `priority` field in the points batch schema, and sweep the payload's non-identity buffers for the 2-byte `priority` values of the fixture's entities. The 2-byte sweep will hit by chance far more often than the 4-byte one, so **scope it to schema field names plus the declared-scalar buffers** rather than raw bytes, and say so in the docstring — a raw 2-byte sweep is not a test, it is a coin toss.
+3. ~~**Add a `priority` sweep** *(Important I-4)*.~~ **DO NOT ADD IT** *(2026-07-30 fold)*. The sweep was specified because `priority` was an *unkeyed* `splitmix64` of the entity ID, so its appearance on the viewer plane would have published a 16-bit residue of entity space per mark. `priority` is now `high16(tessera_id)`, a keyed prefix of a value the payload already carries in full, and **Important I-4 is retired by argument** — the sweep has nothing left to protect. It was also the weakest test in the suite as specified: a 2-byte sweep hits by chance far more often than the 4-byte one, which is why it needed scoping to schema field names and declared-scalar buffers. **Retiring it removes a flaky test and a false guard at the same time; do not reinstate it without first re-establishing that `priority` is unkeyed.**
 
 Add the identity-key sweep (the key must appear nowhere on the viewer plane) and an **explicit negative control**: assert that a known `tessera_id` **is** found in the payload, so the test cannot pass vacuously by scanning nothing.
 
@@ -2922,12 +3195,16 @@ is a property of the format rather than of a mapping step.
 The sweep additionally covers (a) the deployment identity key, which inverts every
 tessera_id and must never leave the server; (b) caller-supplied external IDs, which are
 admin-plane identifiers (SA D14) and appear on the viewer plane in exactly one place by
-design: the /v1/items drill-down response (D4); and (c) `priority`, which is an
-UNKEYED splitmix64 of the entity ID (contracts §2.6) and would publish a 16-bit residue
-of entity space per mark -- a 65,536x narrowing, computable offline and combinable
-across the ~10^5 marks of one viewport. Viewport payloads and all logs are swept; that
-one drill-down response body is excluded, by name, and the exclusion is narrow on
+design: the /v1/items drill-down response (D4). Viewport payloads and all logs are swept;
+that one drill-down response body is excluded, by name, and the exclusion is narrow on
 purpose.
+
+Not swept: `priority`. Contracts r6 defines it as high16(tessera_id) -- a KEYED prefix of
+a value this payload already carries in full -- so it narrows nothing and there is nothing
+to protect. An earlier draft of this suite swept for it, when priority was an unkeyed
+splitmix64 of the entity ID; that prohibition (plan Important I-4) was retired by argument
+on 2026-07-30. An UNKEYED per-mark derivative of the entity ID would still be forbidden,
+and would need its own sweep.
 
 Scope: the tessera_id column's own buffer is excluded from the 4-byte entity sweep,
 because a random-looking u64 column produces chance 4-byte matches against a 10^9
@@ -3048,6 +3325,17 @@ grep -q "terms/" docs/design-memos/2026-07-30-tail-discrimination.md || { echo "
 grep -Eq "CONFIRMED|REFUTED" docs/design-memos/2026-07-30-tail-discrimination.md || { echo "NO VERDICT"; exit 1; }
 ```
 
+**One further precondition, added by the 2026-07-30 priority fold.** The confirming measurement for the priority defect — the count of (tile, principal) pairs with V > 2×10⁶ over the existing 10⁹ k-sweep — reads **this** bundle and cannot be re-run once it is gone. It is being run concurrently by another agent, so this gate must confirm its result is **recorded and committed** before deleting, exactly as it does for Task 2's baseline:
+
+```bash
+# 5. The priority-defect confirmation over the OLD bundle is recorded and committed.
+#    (Owner decision 2026-07-30; the file is whatever the concurrent measurement lands
+#    as -- confirm the path with the owner rather than guessing it, and do NOT delete on
+#    an absent result.)
+```
+
+**If that result is not yet recorded, STOP and report** rather than deleting. Unlike Task 2's baseline this measurement is not a gate on the *plan* — the redefinition is justified by argument — but it is irreplaceable evidence about a defect in the shipped format, and deleting its only corpus to save 47 GiB an hour early is not a trade anyone would choose deliberately.
+
 **And one judgement the checks cannot make: if Task 2's verdict was REFUTED, deletion is NOT authorised by Q5.** The ruling was given on a plan whose premise was live. A refutation sends the executor back to Task 2 Step 4's instruction — *stop and report; do not soften a refutation* — and the owner decides again with the refutation in hand. Q5 answers "may the baseline's *storage* be reclaimed once the baseline is *captured*", not "may the rebuild proceed regardless of what the baseline said".
 
 **Step 2b — report the numbers, then delete.** Report to the owner: free space, the old bundle's measured size, the new bundle's projected size using Task 2's `terms/` measurement, and confirmation that every precondition above passed. Then, and only then:
@@ -3140,7 +3428,7 @@ New, and load-bearing under D4/D6 because drill-down is now a designed feature r
 - **Latency:** the k sweep beside the baseline table. **The specific claim to test: does `p99 − p50` stop being a near-constant ~42–47 ms?** If it does, the hypothesis is confirmed and the tail was residency. If p50 improves but the constant tail survives, the hypothesis is **refuted** and the memo must say so in those words and identify what the tail did correlate with.
 - **Drill-down:** Step 3's numbers, including the unknown-vs-invisible timing comparison.
 - **The k=30 exit gate (p99 < 10 ms):** whether it passes now, reported alongside the drawn-mark plan's finding that this criterion *"would pass against a mark budget the product does not want"* — a pass at k=30 is necessary for Phase 1 and not sufficient for the product.
-- **Separated attribution, stated plainly:** how much came from dropping `node_id` (−3.8 GiB), how much from de-residenting the external-ID extents (−18.9 GiB), and how much from the identity swap (**zero bytes, by construction — it is width-neutral**). The reader must be able to tell, and the two must not be conflated in favour of the more interesting change.
+- **Separated attribution, stated plainly:** how much came from dropping `node_id` (−3.8 GiB), how much from de-residenting the external-ID extents (−18.9 GiB), and how much from the identity swap (**zero bytes, by construction — it is width-neutral**). The reader must be able to tell, and the two must not be conflated in favour of the more interesting change. **The priority redefinition costs and saves nothing either** *(2026-07-30)*: it is the same column at the same width, and the memo must say so rather than let a correctness fix collect credit for a residency result. What it *may* legitimately note is that row order changed, so any before/after comparison at the row level is between different orders.
 - **Input to the drawn-mark calibration:** the measured transport cost at 8 B/point, and the note that the handle-table ceiling (P3) is no longer an input under D5.
 - **The sidecar's cost is a property of the deployment, not of Tessera** *(Ruling A)*. State that the measured 14.9 GiB of extents and 3.7 GiB of locator are what **this corpus** costs — 8-byte keys the build synthesises from `source_id` for a corpus whose callers supply nothing — and that under the owner's framing those items' identity is their `tessera_id`. A deployment whose callers supply no external IDs pays **zero** sidecar disk; the synthesis is kept as the only 10⁹ test article for the two sidecar directions and for Step 3's pathological residency case. Do not let the number read as a floor.
 - **The sizing threshold, restated against the measurement** *(owner, 2026-07-29)*. Reproduce the table — 14.9 GiB at 8-byte keys, 22.4 at 16-byte binary UUIDs, 41 at 36-character UUID strings, 67 at the new 64-byte cap, with the locator flat at 3.7 GiB throughout — and the threshold: **once mean key length exceeds ~16 bytes the store dominates the bundle and compression, or Ruling B's replacement store, pays for itself.** Phase 1 builds neither; the point of the number in this memo is that the first deployment with long keys meets a decision that already exists. Note which remedy applies where: dictionary or prefix encoding for long human-readable keys, the replacement store for random UUIDs, which compress essentially not at all.
@@ -3183,7 +3471,7 @@ Every number from Tasks 14–15 against each plan-§5 exit criterion, pass/fail,
 - Signature-sorted entity allocation in effect — unchanged by this work; cite `entity_ids_follow_signature_order`.
 - WAL ack contract + positional CRC rule + restart-replay deny survival.
 - Differential oracle agreement on counts, geometry bytes, first-k — **and on the `tessera_id` column**, reproduced independently from the spec text.
-- Placeholder sampler is first-k and commented as deliberately wrong.
+- Placeholder sampler is first-k and commented as deliberately wrong — **and the storage order it reads is now `(morton, tessera_id)`**, so the first-k it returns is no longer ordered by permission signature above V ≈ 2×10⁶ *(2026-07-30 fold)*. Cite the chi-squared uniformity check alongside it: what makes the placeholder's output unbiased is the prefix's uniformity, and that is measured, not assumed.
 - `tessera verify` passes; corrupted-byte red paths green.
 - Layer checks green.
 
@@ -3216,7 +3504,7 @@ git commit -m "docs: Phase 1 exit record against the contracts-r6 identity forma
 | | question | status |
 |---|---|---|
 | 1 | entity-ID uniqueness across partitions | **RESOLVED** against the code and design — prefix is the §13.3 shard, reserved at 0 |
-| 2 | is `splitmix64` an acceptable round function | **RULED** by review round 2 — keep it, 8 rounds, conditional on three fixes |
+| 2 | is `splitmix64` an acceptable round function | **RULED** by review round 2 — keep it, 8 rounds, conditional on three fixes, the third of which the 2026-07-30 fold satisfies differently (keyed `priority`, not forbidden `priority`). One **new verification item**: a chi-squared check that `high16` is uniform under structured inputs (Task 7 Step 5a) |
 | 3 | locator or a duplicate column | **ANSWERED** — locator; build for the real-world externally-provided ID |
 | 4 | `/v1/items` with no cached projection | **RETIRED** — the visibility test is in entity space |
 | 5 | may Task 14 delete `/tmp/tessera-1e9` | **ANSWERED — yes**, conditional on Task 2's baseline, enforced at Task 14 Step 2a |
@@ -3227,7 +3515,7 @@ git commit -m "docs: Phase 1 exit record against the contracts-r6 identity forma
 
 1. ~~**Are entity IDs globally unique across §12 partitions?**~~ **RESOLVED** against the code and the design — see "Which prefix" above. Entity IDs are bundle-global (**one** `Manifest::entity_id_high_water`, **one** `Allocator`); §12.4 makes a partition's identity a canonical content hash rather than a dense small integer, so it could not be a `u32` prefix in any case; and §12 partitions exist in the format today while §13.3 shards do not. **The bijection's prefix is the row-range shard, reserved and valued 0.** What survives is narrower and blocks nothing: *if* a future multi-shard deployment allocates entity IDs per shard, the reserved prefix becomes load-bearing; if it keeps allocating globally, the four bytes buy only the option. The encoding is identical either way. **No decision needed from you now** — Task 4 Step 7 records the resolution in §16.
 
-2. ~~**Is `splitmix64` an acceptable round function?**~~ **RULED** by review round 2: **keep `splitmix64` at 8 rounds.** The construction was independently verified invertible (balanced 32/32 split ⇒ a permutation of 2⁶⁴ for any round function; round-count parity irrelevant; the output packing is itself a bijection), and the ruling is conditional on three fixes this revision applies: the allocator cap at `u32::MAX`, the explicit statement that the control plane is outside the defended set, and forbidding `priority` on the viewer plane. Second choice was keyed SipHash-1-3 at ~80–120 s added to a ninety-minute build (~2%). **No decision needed from you** unless you want the stronger round function anyway — say so before Task 5 if you do; nothing else in the plan changes if you do.
+2. ~~**Is `splitmix64` an acceptable round function?**~~ **RULED** by review round 2: **keep `splitmix64` at 8 rounds.** The construction was independently verified invertible (balanced 32/32 split ⇒ a permutation of 2⁶⁴ for any round function; round-count parity irrelevant; the output packing is itself a bijection), and the ruling is conditional on three fixes this revision applies: the allocator cap at `u32::MAX`, the explicit statement that the control plane is outside the defended set, and closing the unkeyed-`priority` channel — **which since the 2026-07-30 fold is closed by *keying* `priority` rather than by forbidding it. The condition is satisfied differently, not dropped**, and the ruling still rests on something real. Second choice was keyed SipHash-1-3 at ~80–120 s added to a ninety-minute build (~2%). **No decision needed from you** unless you want the stronger round function anyway — say so before Task 5 if you do; nothing else in the plan changes if you do.
 
 3. ~~**The drill-down structure: locator (3.7 GiB) or a second copy (11.2 GiB)?**~~ **ANSWERED (2026-07-29): the locator.** The owner's reason is *"build around the more likely real-world scenario of an externally provided ID"* — and that reason is **stronger than the arithmetic the plan first offered**, which is why it is worth recording rather than just ticking. The plan had argued 7.5 GiB on the synthetic corpus's 8-byte keys, i.e. a constant. Under the owner's framing it is not a constant: the duplicate column costs `mean_key_len + 4` bytes per row and **scales with the caller's key length**, while the locator is a flat 4 B/row whatever the keys look like. At 16-byte UUIDs the margin is ~15 GiB, at 36-character UUID strings ~34 GiB, at the 64-byte cap ~60 GiB — and the duplicate column's cost is, exactly, *the whole external-ID store a second time*. **The indirection is the cheap half of the trade.** See "Why a locator rather than a second copy" above for the table. **No decision outstanding**; Task 7 Step 5 writes `ext-locator.u32`, singular.
 
@@ -3255,13 +3543,14 @@ git commit -m "docs: Phase 1 exit record against the contracts-r6 identity forma
 - **The wider deployment configuration file** (Q6). This plan adds `--id-key-file` and a minimal `[identity]` section and records the owner's direction — *"something similar to elastic index configuration"* — and specifies nothing else about that file: no schema, no precedence rules beyond the key-source refusal, no secret management, and no entry in the contracts spec beyond naming the flag.
 - Repartitioning and resharding themselves (§12.5, §13.3). This plan specifies the identity **epoch** that makes their identifier churn detectable; it does not implement either.
 - Closing C4 (response timing) for the **viewport** path. `/v1/items`' identical 404 removes the status, code and message channels and its timing channel is closed structurally; the viewport correlation remains and C4 stays `Open`.
-- Changing the placeholder first-k sampler (I7), the mask-build path, or anything in `tessera-authz`.
+- Changing the placeholder first-k sampler (I7), the mask-build path, or anything in `tessera-authz`. **The 2026-07-30 priority fold does not change this**, and the distinction matters: it changes the **storage order the placeholder sampler reads in**, which is where the signature-ordering defect lived, and not a line of the sampler. Building the real selection comparator — prefix scan, fall-through to the full `tessera_id`, and the candidate-list path — remains out of scope; this plan lands it as **spec text** in Task 4 Step 7a (design §7.2) and implements none of it.
 - Any change to §11.1's signature-sorted assignment, which is permanent under I9.
+- **Measuring the defect the priority fold repairs.** The count of (tile, principal) pairs with V > 2×10⁶ over the existing 10⁹ k-sweep is being run concurrently by another agent. It sizes the defect; it does not establish it, and this plan does not wait on it. It does read the **existing** bundle, so it must be complete before Task 14 Step 2 deletes it.
 
 ## Risks the executor should watch
 
 - **`build_equivalence.rs` byte-equality is the tripwire for Task 7** — but it got *simpler*, not harder. The identity is a pure function of `(key, shard, entity)`, so there is no seed to thread and no RNG to reconcile. If the two paths diverge, look at the two schema literals (`write.rs:61`, `write.rs:236`), the validator (`read.rs:541`), and the sort tiebreak — not at the identity.
-- **The sort tiebreak is contract.** `sort_batch` orders by `(morton, priority, entity_id)` and the oracle re-derives the row order from build inputs. **Do not let it drift onto `tessera_id`**, which is a key-dependent permutation of entity space and would give a different order under a different key. Task 6 Step 3 passes entity IDs alongside for exactly this reason.
+- **The sort order is contract, and since 2026-07-30 it IS the identity.** `sort_batch` orders by **`(morton, tessera_id)`** with no further tiebreak, and the oracle re-derives that order from build inputs — which now include the key. *(This risk previously said the opposite: "do not let the tiebreak drift onto `tessera_id`". That instruction is **wrong** after the owner's priority-as-prefix decision and is recorded here only so an executor holding a stale copy recognises which way round the plan now goes.)* What to actually watch: **the entity ID must not appear at any position in the sort**, since it is signature-sorted under I9 and that is the defect being fixed; `priority` must be derived at exactly one place, `TesseraId::priority()`, or the column and the sort key drift apart; and the identity must be computed **before** the tiler, not written at the row afterwards.
 - **A digest is not a sortedness check** (Critical C-1). If an executor finds the sortedness scan "redundant with the digest", they have rediscovered the bug: the digest proves the file is the one MANIFEST named; sortedness proves the binary search returns the right answer, and a build bug emitting an out-of-order extent produces a correctly-digested file. A mis-resolved ID denies the wrong entity and leaves the intended target visible.
 - **Laziness must be per extent** (Critical C-6). One lock over the whole family turns the first drill-down into a permanent 11 GiB residency increase, silently undoing the change this plan exists to make.
 - **A `None` that should be an error.** Every sidecar failure mode (missing file, digest mismatch, schema mismatch, out-of-order extent) must be a typed error. A corrupt sidecar returning `None` reads as "unknown external ID" and would let `/control/changes` silently fail to suppress — fail-open, and precisely the shape the lifecycle design warns about twice. The same applies to Task 2's temporary feature (Important I-2), and to the item path: **`.ok().flatten()` is forbidden anywhere on it** (Critical N-3), because it converts every typed error Task 8 exists to produce into a `200` with `external_id: null`.
@@ -3271,7 +3560,9 @@ git commit -m "docs: Phase 1 exit record against the contracts-r6 identity forma
 - **Manufacturing an external ID for an item that has none** *(Ruling A)*. `0xFFFFFFFF` in the locator is the **ordinary** case — an item whose identity is its `tessera_id`, not an item with missing data. A well-meaning "fill in a synthetic key so every item has one" would invent identity, double the sidecar for no benefit, and make Ruling A false. The build's existing `source_id`-derived keys are scaffolding for the synthetic corpus and must not be generalised into a rule.
 - **Deleting `/tmp/tessera-1e9` before the baseline is safely captured.** Q5 authorises the deletion; it authorises it **conditionally**, and the condition is enforced at Task 14 Step 2a rather than remembered. Do not weaken those checks because they are "obviously satisfied" — an uncommitted results JSON is one `git checkout` from gone, and there is no second chance at an old-format measurement. A **REFUTED** Task 2 verdict does not carry the authorisation at all.
 - **The allocator cap being "tidied" as an unnecessary bound.** `allocate` returning a `Result` looks like ceremony on a `lo + n`. It is the precondition "collision-free by construction" rests on: past `u32::MAX` two entities share a `tessera_id` and a suppression lands on the wrong item.
-- **`priority` reaching the wire.** It is an unkeyed `splitmix64` of the entity ID and it is listed as a per-mark hot column in the routing principle, which reads as a licence. Layer check and byte-scanner both guard it; do not weaken either.
+- **Reinstating the retired `priority` guards by reflex** *(2026-07-30 fold; this risk replaces "`priority` reaching the wire", which was its inverse)*. An executor or reviewer working from the design corpus, from Task 3's memo before Task 4 Step 0 amends it, or from a stale copy of this plan will find `priority` described as an unkeyed `splitmix64` of the entity ID and forbidden on the viewer plane, and will "restore" the layer-check grep and the byte-scanner sweep. **Both are retired, by argument, and the argument is at "The routing principle" above.** The rule that survives is narrower and worth keeping straight: a hot column may cross the boundary only if it is **independent of the entity ID or keyed under the deployment key** — so a future *unkeyed* derivative of the entity ID does need a guard, and `priority` does not.
+- **A second derivation of `priority`.** `(id >> 48) as u16` is four characters of arithmetic and will be inlined wherever it is needed. Two sites is how the sort prefix and the written column drift apart, and the drift is silent: the bundle still verifies, the oracle still agrees on identities, and only the *sample* is wrong. One definition, `TesseraId::priority()`, called by both writers and by the streaming comparator.
+- **Deriving row order without the key.** Row order was key-independent until 2026-07-30 and is not any more. An oracle, test or tool that re-derives row order from `(morton, priority, entity_id)`, or that compares row indices between two bundles built under different keys, is wrong for r6 and will fail in a way that looks like a build bug.
 - **Branch-dependent observability on `/v1/items`.** The identical-404 rule is defeated by one `tracing::debug!` inside one arm, or by two metric counters. Task 10 Step 4 checks for both; re-check after any later edit to that handler.
 - **The identity key must never be logged.** `IdentityKey`'s `Debug` is redacted for this reason; a `{:?}` on a struct that contains it must not leak it either. Task 10's layer check greps for it in the wire and viewer layers.
 - **Do not "fix" the oracle to agree.** If the differential suite fails after Task 12, the engine is the suspect until proven otherwise. And do not write the Python bijection by reading the Rust one — its independence is the only thing that makes agreement evidence.
