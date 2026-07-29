@@ -22,3 +22,8 @@ rand = { workspace = true }
 tempfile = { workspace = true }
 tessera-build = { path = "../tessera-build" }
 parquet = { workspace = true }
+criterion = "0.5"
+
+[[bench]]
+name = "viewport"
+harness = false

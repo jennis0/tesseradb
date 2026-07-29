@@ -1,0 +1,32 @@
+{
+  "note": "Task 16, Step 1 regression-gate baseline: criterion micro-benches at 2.4M items (data/scaled/geometry.parquet prefix entity_id < 2,422,486), bundle /tmp/tessera-2m4, categories-subclass pairs (vocab 176 terms at this scale — smaller than the 10^9-scale 47,968; fragment_build/10000 clamped to vocab size, hence the 176 label). Regenerate via `cargo bench -p tessera-engine` and diff mean_ns against this file; target/criterion/ itself is gitignored, so this summary is the committed record.",
+  "generated_at": "2026-07-29",
+  "corpus_scale": 2422486,
+  "benchmarks": {
+    "fragment_build/100": {
+      "w_terms": 100,
+      "mean_ns": 110526.78
+    },
+    "fragment_build/176": {
+      "w_terms": 176,
+      "note": "requested w=10000, clamped to this corpus's actual vocab size (176)",
+      "mean_ns": 279489.95
+    },
+    "compose": {
+      "mean_ns": 69.28,
+      "note": "diff-only composition against an empty Overlay/IngestBuffer (fresh build, no WAL changes) -- O(containers touched), not O(cardinality); this is why it is nanoseconds, not microseconds"
+    },
+    "viewport/tile_sweep_k0": {
+      "zoom": 8,
+      "bbox": [0.0, 0.0, 23170.0, 23170.0],
+      "k": 0,
+      "mean_ns": 2604310.49
+    },
+    "viewport/gather_k30": {
+      "zoom": 8,
+      "bbox": [0.0, 0.0, 23170.0, 23170.0],
+      "k": 30,
+      "mean_ns": 2781968.43
+    }
+  }
+}

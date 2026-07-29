@@ -22,6 +22,7 @@ the brief; the RNG is seeded for reproducibility.
 from __future__ import annotations
 
 import base64
+import os
 import random
 from collections import Counter
 
@@ -35,8 +36,12 @@ from .wire import decode_viewport
 
 SLICE = "s0"
 SEED = 20260728
-N_GRANT_SETS = 20
-N_VIEWPORTS_PER_GRANT = 10
+# Task 16, Step 4: the 10^9-bundle exit run uses a reduced sample count (the brief's "5 grants x
+# 5 viewports" -- the independent Python oracle is slow by design, and re-deriving a mask from
+# 1.72B pairs per grant set is not something to do 20x at that scale). Overridable via env so the
+# default 250k invocation (CI, everyday `pytest`) is unaffected.
+N_GRANT_SETS = int(os.environ.get("TESSERA_DIFFERENTIAL_N_GRANTS", "20"))
+N_VIEWPORTS_PER_GRANT = int(os.environ.get("TESSERA_DIFFERENTIAL_N_VIEWPORTS", "10"))
 ZOOM_RANGE = (3, 8)
 GRID_MAX = 65536.0
 

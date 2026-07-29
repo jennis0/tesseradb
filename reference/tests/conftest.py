@@ -14,6 +14,7 @@ refactor.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -28,11 +29,22 @@ from oracle.harness import (  # noqa: F401 (re-exported for tests importing dire
     stop_server,
 )
 
-BUNDLE_ROOT = Path("/tmp/tessera-250k")
+# Task 16, Step 4: `TESSERA_BUNDLE_ROOT` lets the differential/conformance suites be pointed at
+# the 10^9 bundle for the one-off exit-criteria run, without touching the 250k default any other
+# invocation (CI, everyday `pytest`) relies on. When set, the bundle is assumed to already exist
+# (a 10^9 build is never implicitly triggered by a test run) -- `ensure_fixture_bundle` is only
+# called for the default small fixture.
+_ENV_BUNDLE_ROOT = os.environ.get("TESSERA_BUNDLE_ROOT")
+BUNDLE_ROOT = Path(_ENV_BUNDLE_ROOT) if _ENV_BUNDLE_ROOT else Path("/tmp/tessera-250k")
 
 
 @pytest.fixture(scope="session")
 def bundle_root() -> Path:
+    if _ENV_BUNDLE_ROOT:
+        assert BUNDLE_ROOT.joinpath("CURRENT").exists(), (
+            f"TESSERA_BUNDLE_ROOT={BUNDLE_ROOT} set but no bundle found there"
+        )
+        return BUNDLE_ROOT
     ensure_fixture_bundle(BUNDLE_ROOT)
     return BUNDLE_ROOT
 

@@ -9,6 +9,7 @@ root.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -19,11 +20,20 @@ sys.path.insert(0, str(REPO_ROOT / "reference"))
 
 from oracle.harness import ensure_fixture_bundle  # noqa: E402
 
-BUNDLE_ROOT = Path("/tmp/tessera-250k")  # same fixture bundle reference/tests uses — reused, not rebuilt
+# Task 16, Step 4: `TESSERA_BUNDLE_ROOT` override for the one-off 10^9 exit-criteria run — see
+# `reference/tests/conftest.py`'s matching comment. Unset, this is unchanged: the same 250k
+# fixture `reference/tests` uses, reused not rebuilt.
+_ENV_BUNDLE_ROOT = os.environ.get("TESSERA_BUNDLE_ROOT")
+BUNDLE_ROOT = Path(_ENV_BUNDLE_ROOT) if _ENV_BUNDLE_ROOT else Path("/tmp/tessera-250k")
 
 
 @pytest.fixture(scope="session")
 def bundle_root() -> Path:
+    if _ENV_BUNDLE_ROOT:
+        assert BUNDLE_ROOT.joinpath("CURRENT").exists(), (
+            f"TESSERA_BUNDLE_ROOT={BUNDLE_ROOT} set but no bundle found there"
+        )
+        return BUNDLE_ROOT
     ensure_fixture_bundle(BUNDLE_ROOT)
     return BUNDLE_ROOT
 

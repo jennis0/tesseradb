@@ -107,6 +107,12 @@ async fn viewport(
     headers: HeaderMap,
     Json(req): Json<ViewportReq>,
 ) -> Result<Response, ApiError> {
+    // Task 16: server-side timing for the exit-criteria measurement (bench_p99.py, plan §5).
+    // Not a wire-format field — an observability-only response header, measured around the whole
+    // handler body (auth check through Arrow IPC serialisation), reported to microseconds so the
+    // <10ms exit gate can be checked without relying on end-to-end (client-observed) latency,
+    // which also includes HTTP/TCP/loopback overhead outside the engine's control.
+    let start = std::time::Instant::now();
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
     let entry = state.authenticated_session(token)?;
 
@@ -172,11 +178,13 @@ async fn viewport(
 
     let pin_header =
         serde_json::to_string(&PinDto::from(&out.pin)).expect("PinDto serialisation cannot fail");
+    let server_us = start.elapsed().as_micros().to_string();
 
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
         .header("x-tessera-pin", pin_header)
+        .header("x-tessera-server-us", server_us)
         .body(Body::from(bytes))
         .expect("response construction cannot fail"))
 }
