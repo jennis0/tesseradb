@@ -951,7 +951,225 @@ family. If it holds up, it removes most of the code this memo assumes we write.
 
 ---
 
-## 12. Sources
+## 12. Accumulo — what travels, and what must not
+
+Added 2026-07-29 on owner request. Accumulo is the right place to look and the only place in
+this survey where the question is not "can we tolerate its security model" but "what can we
+learn from a security model taken as seriously as ours". Appendix E's label syntax is already
+adopted from it. Two of the findings below are *validations* of existing decisions, one is a
+directly reusable artifact, and one is the clearest external evidence in this memo that I2 is
+a real differentiator rather than pedantry.
+
+### 12.1 `accumulo-access` — the reusable artifact is the specification, not the code
+
+The library is Java-only, Apache-2.0, and **no Rust port exists**. So Appendix E's plan — reimplement
+the grammar natively rather than take a JVM dependency, and use the reference implementation
+as a differential-test oracle in CI — stands unchanged.
+
+What is better than expected: the repository carries a **`SPECIFICATION.md`** and an **ANTLRv4
+grammar**. That upgrades the plan from "match the behaviour of an implementation" to "implement
+a specification and differentially test against its reference implementation", which is a
+materially stronger position for **I5** (two implementations must not disagree about what a
+label means). The ten-line ABNF Appendix E describes should be derived from the ANTLR grammar and the
+specification, and any divergence between our ABNF and theirs is a defect in ours.
+
+**Action this suggests:** cite `SPECIFICATION.md` in the contracts spec alongside the grammar,
+and make the differential oracle test against the specification's stated examples as well as
+against random expressions.
+
+### 12.2 The iterator stack — scope-parameterised filters, and correctness under partial input
+
+Accumulo's filtering abstraction is a stack of `SortedKeyValueIterator`s constructed per
+request, where system iterators form the foundation and user iterators layer above, and the
+same iterator can be configured at three **scopes**: `scan`, `minc` (minor compaction) and
+`majc` (major compaction).
+
+Two things travel.
+
+**One filter pipeline, applied at more than one lifecycle point.** The same composable
+abstraction serves reads and compactions. Our analogue is that predicate-change entries retire
+*at their compaction fold* (lifecycle §3) — the same logic has to be correct both when serving
+and when folding, and Accumulo's answer is to make that a property of the abstraction rather
+than of two parallel code paths.
+
+**A filter must be correct under partial input.** The documentation is explicit that during
+compaction "Iterators will not necessarily see all of the Key-Value pairs in every
+invocation", and that combiners must not perform any function that would be incorrect due to
+missing values. This is a stronger and more useful statement of a discipline we need: any fold
+that computes an aggregate must be associative and tolerant of seeing a subset. It is worth
+stating as an explicit obligation on anything that folds deltas.
+
+**One claim I could not verify and am therefore not making.** The documentation does not spell
+out where the visibility filter sits in the stack or whether it can be bypassed. The design's
+own structural guarantee — that the mask goes in first (§8.2) and that filters live entirely
+in the second stage (I12) — should not be justified by analogy to an Accumulo ordering I have
+not confirmed.
+
+### 12.3 RFile — three constructions worth copying
+
+RFile is Accumulo's on-disk sorted key-value format (ISAM-organised: data blocks, index blocks,
+meta blocks). Three features map onto things this design either has or wants:
+
+- **Locality groups.** Sets of column families stored separately within one file, so a scan
+  over frequently-co-accessed columns avoids reading the others. This is exactly Appendix F's
+  "storage goes in its own column group" for the bitemporal quad, and exactly the residency
+  argument in §10.5 (r20) that structures should be grouped by access *cadence*. Accumulo
+  makes it a first-class, configurable table property rather than a layout convention, and the
+  constraint it enforces is worth copying: locality groups must have mutually exclusive column
+  family sets, and the default group is written last.
+- **Multi-level index.** Index blocks may point to other index blocks, so *the entire index
+  never has to be resident, even when the file is written*. Directly relevant to the
+  external-ID index recently built as a binary search over mmap'd extents: a multi-level index
+  is the construction that keeps that bounded as the corpus grows, and the "not resident even
+  at write time" property matters for the streaming build under a fixed memory budget.
+- **Bloom filters in meta blocks.** A cheap negative test before opening a file. Under fan-out
+  a partition could skip reading a postings extent when a term is provably absent, which is a
+  real saving on the mask-build path — and it is safe under I2 because a false positive costs
+  work, never disclosure, and a bloom filter over *terms the principal already satisfies*
+  reveals nothing new.
+
+All three are designs to copy, not code to link: RFile is Java and inside HDFS assumptions we
+do not share.
+
+### 12.4 The shard / wikisearch design — our architecture, independently arrived at
+
+Accumulo's canonical search pattern is a **document-partitioned (sharded) index**: row is the
+shard ID, column family is the term, column qualifier is the document ID; the
+`IntersectingIterator` then performs a boolean AND across terms **server-side, within a
+shard**, returning only documents carrying all specified terms. Documents are stored in the
+same row as their index, so retrieval needs no second round trip.
+
+This is Tessera's model — partitioned index, intersection evaluated locally, no cross-partition
+coordination for the boolean part — reached independently by the most security-serious system
+in the field. That is worth recording as validation of §12.3 (architecture design) and §13.3
+rather than as something to adopt.
+
+**One part of the pattern must not be taken.** The documented optimisation is that queries run
+on all servers but *only those partitions for which low-cardinality terms can be found* are
+consulted, using aggregated reverse-index information. That is statistics-driven pruning, and
+§8.2 forbids it for a specific reason: it makes execution time a function of how much the
+principal can see, and the aggregated cardinality it consults is a corpus-wide count over
+mostly-unauthorised records (C8). Accumulo can do this because its threat model does not
+include timing and cardinality inference; ours does.
+
+### 12.5 D4M's degree table — the clearest thing we must decline
+
+The D4M 2.0 schema stores four tables: the raw text, a table of unique column|value pairs, its
+**transpose** as an index to every unique string, and a **degree table** holding the sums of
+unique column|value pairs under an accumulator column. The stated purpose of the degree table
+is that it "enables efficient query planning by allowing queries to estimate the size of their
+results prior to executing queries", and it is computed at ingest precisely because fast
+cardinality access is useful for planning, load balancing and filtering.
+
+This is a well-regarded, widely deployed design whose central optimisation is **simultaneously
+both things our leak register forbids**: a materialised pre-intersection cardinality (C8) and a
+statistics-driven planner (§8.2). It is the most useful negative example in this memo, because
+nothing about it looks like a security decision — it looks like table design.
+
+The transpose-table idea, by contrast, travels fine: it is an inverted index, and we have one.
+
+### 12.6 Sampling — a fail-closed rule worth adopting verbatim
+
+Accumulo's per-table sampling uses a `RowSampler` configured with a hash function
+(`murmur3_32` recommended, `md5` and `sha1` available) and a modulus; the decision is
+deterministic, so *the same subset of rows is selected for every RFile's sample set*, and the
+configuration is persisted inside each RFile.
+
+This validates the priority scheme fixed in contracts r19 (splitmix64-high-16): a deterministic
+hash-derived per-item value, computed once at build, giving a reproducible sample. Accumulo
+arrived at the same construction for the same reason.
+
+**The rule worth adopting verbatim is the failure behaviour.** A sample scan succeeds *only if
+every RFile it spans was written with the same sampler configuration*; mismatched
+configurations fail rather than silently returning a mixed sample. Our analogue: a sampled read
+spanning extents written under different priority-function versions must **refuse**, not blend.
+Silently mixing two sampling schemes would produce a coverage claim that is false — which under
+I7 (sampling happens after masking, and direct evaluation is the main selection route) is a
+correctness failure that would present as sparse principals' maps being subtly wrong rather
+than empty. This belongs in the conformance suite as a byte-scanner or interleaving check.
+
+### 12.7 Bulk import — the pattern we already use, plus one refinement
+
+Files are built offline (historically by MapReduce, now `RFile.newWriter()`), then brought in
+by `importDirectory` against an online or offline table, with `offline()`/`online()` table
+operations available. Newer 2.x methods deliberately examine files *outside* holding a table
+lock.
+
+This is §14's "write to a new immutable prefix and flip the pointer", and the lock-avoidance
+refinement matches I11's drain semantics. One refinement we do not have: **files that fail to
+import are moved to a failure directory** rather than failing the whole operation. For a
+streaming build under a fixed memory budget that is a useful shape — a partition that fails
+validation is quarantined and named, and the rest of the build completes — provided the
+manifest cannot then describe a bundle as complete when part of it was quarantined. Fail-closed
+would require the flip to be refused, with the quarantine used for diagnosis.
+
+### 12.8 How Accumulo handles the aggregate problem — the finding that matters most
+
+Accumulo generates **summary statistics** embedded in each RFile, cached per tablet server,
+used for compaction decisions and for user insight into "what data exists in their table
+without scanning all records". Available summarizers include `CountingSummarizer`,
+`FamilySummarizer`, `DeletesSummarizer`, `EntryLengthSummarizer`, and — notably —
+`VisibilitySummarizer` and `AuthorizationSummarizer`.
+
+Access is controlled by a table permission:
+
+> Users must have the table permission `GET_SUMMARIES` in order to retrieve summary data.
+> Because summary data may be derived from sensitive data, requesting summary data requires a
+> special permission.
+
+Read that carefully. The most security-serious system in this survey — cell-level visibility,
+a formally specified label algebra, monotone predicates by construction — handles
+aggregate-derived-from-unauthorised-data by **gating the aggregate behind a coarse permission**,
+not by computing it over what the requester may see. The documentation is candid that the
+summary *may be derived from sensitive data*; the mitigation is that you need a permission to
+ask.
+
+That is precisely the construction **I2 rejects**: *a quantity derived from the full dataset
+and then gated is a disclosure, not a filtered view.* And `VisibilitySummarizer` sharpens it —
+summarising the visibility labels themselves is the label-existence channel that I3 and C11
+exist to close, offered as a feature.
+
+Three consequences.
+
+1. **This is the best external evidence in the memo that I2 is load-bearing.** The gap between
+   "gate the aggregate" and "compute the aggregate inside the mask" is the entire product, and
+   here is a mature, security-focused, widely deployed system landing on the wrong side of it
+   deliberately and documenting why. It belongs in Appendix D's provenance discussion, and it is
+   a better citation than the Elasticsearch DLS term-count channel because it is not a bug or an
+   acknowledged limitation — it is the designed behaviour.
+2. **It is a warning about our own summary structures.** §7.9's (term × tile) count matrix and
+   any per-file statistics we add are the same shape as an Accumulo summary. The reason ours is
+   sound is specific and fragile: a visible count for a tile is the sum over *satisfied* terms,
+   so every quantity read is inside the principal's own authorisation. Anyone extending that
+   matrix with a term-independent total, or a per-tile grand count, reproduces Accumulo's design
+   exactly — and it would look like a harmless denominator.
+3. **It argues against a `GET_SUMMARIES`-style escape hatch.** If a future deployment wants
+   corpus-wide statistics, the honest mechanism is a separate, explicitly-out-of-band reporting
+   path that is not part of the viewer surface — not a permission on the viewer API. The moment
+   the viewer surface can return a corpus-wide quantity, the leak register stops being
+   exhaustive, and the leak register is exhaustive *because* the surface is enumerable (five
+   viewer verbs).
+
+### 12.9 Summary of dispositions
+
+| From Accumulo | Disposition |
+|---|---|
+| `accumulo-access` `SPECIFICATION.md` + ANTLR grammar | **Adopt as the normative source** for Appendix E's ABNF; keep the Java library as differential oracle only |
+| Iterator scopes; "correct under partial input" | **Adopt as a stated obligation** on delta folds |
+| RFile locality groups | **Adopt the design** for column groups (Appendix F's quad, cadence grouping) |
+| RFile multi-level index | **Adopt the design** for the external-ID index and postings extents |
+| Bloom filters in meta blocks | **Adopt** as a negative test on the mask-build path; safe under I2 |
+| Shard + `IntersectingIterator` | **Validation**, not adoption — we already have it |
+| Sampler config mismatch fails the scan | **Adopt verbatim** as a fail-closed rule; add a conformance check |
+| Bulk import: offline build, atomic flip, failure quarantine | **Already ours**; consider the quarantine refinement, fail-closed |
+| Low-cardinality partition pruning | **Decline** — statistics-driven planning (§8.2), and consults a pre-intersection cardinality (C8) |
+| D4M degree table | **Decline** — C8 and the planner rule, simultaneously |
+| Summaries behind `GET_SUMMARIES` | **Decline, and cite as a counter-example.** Gating a corpus-wide aggregate is what I2 forbids |
+| `VisibilitySummarizer` | **Decline** — the label-existence channel I3/C11 close |
+
+---
+
+## 13. Sources
 
 Roaring and bitmaps: [CRoaring](https://github.com/RoaringBitmap/CRoaring) ·
 [`croaring`](https://crates.io/crates/croaring) · [`roaring`](https://docs.rs/roaring) ·
