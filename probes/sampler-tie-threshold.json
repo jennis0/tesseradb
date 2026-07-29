@@ -1,0 +1,882 @@
+{
+  "bundle": "/tmp/tessera-1e9",
+  "threshold": 2000000,
+  "boot_seconds": 84.66181320000032,
+  "seed": 0,
+  "zooms_probed": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "grant_widths": [
+    5,
+    20,
+    100,
+    500,
+    2000,
+    8000,
+    16000,
+    30000,
+    47968
+  ],
+  "per_grant": {
+    "5": {
+      "grant_width": 5,
+      "authorise_seconds": 0.005649731996527407,
+      "by_zoom": {
+        "0": {
+          "n_tiles_nonempty": 1,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 57117.0,
+          "max_visible": 57117,
+          "server_us": 3057.0,
+          "wall_seconds": 0.004141293000429869
+        },
+        "1": {
+          "n_tiles_nonempty": 3,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 19039.0,
+          "max_visible": 42973,
+          "server_us": 798.0,
+          "wall_seconds": 0.0016006770019885153
+        },
+        "2": {
+          "n_tiles_nonempty": 7,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 8159.571428571428,
+          "max_visible": 23033,
+          "server_us": 659.0,
+          "wall_seconds": 0.0013509749987861142
+        },
+        "3": {
+          "n_tiles_nonempty": 17,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 3359.823529411765,
+          "max_visible": 18916,
+          "server_us": 753.0,
+          "wall_seconds": 0.0019640190002974123
+        },
+        "4": {
+          "n_tiles_nonempty": 41,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 1393.0975609756097,
+          "max_visible": 18007,
+          "server_us": 1423.0,
+          "wall_seconds": 0.0022541509970324114
+        },
+        "5": {
+          "n_tiles_nonempty": 98,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 582.8265306122449,
+          "max_visible": 18007,
+          "server_us": 3068.0,
+          "wall_seconds": 0.0039364519980154
+        },
+        "6": {
+          "n_tiles_nonempty": 257,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 222.24513618677042,
+          "max_visible": 9792,
+          "server_us": 8439.0,
+          "wall_seconds": 0.009245312001439743
+        },
+        "7": {
+          "n_tiles_nonempty": 693,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 82.41991341991341,
+          "max_visible": 8162,
+          "server_us": 24030.0,
+          "wall_seconds": 0.02517828699637903
+        },
+        "8": {
+          "n_tiles_nonempty": 1876,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 30.446162046908317,
+          "max_visible": 6999,
+          "server_us": 67043.0,
+          "wall_seconds": 0.0682561319990782
+        }
+      },
+      "total_visible_at_min_zoom": 57117,
+      "coverage_fraction": 5.7117e-05
+    },
+    "20": {
+      "grant_width": 20,
+      "authorise_seconds": 0.0065612979960860685,
+      "by_zoom": {
+        "0": {
+          "n_tiles_nonempty": 1,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 294912.0,
+          "max_visible": 294912,
+          "server_us": 8494.0,
+          "wall_seconds": 0.009372837004775647
+        },
+        "1": {
+          "n_tiles_nonempty": 4,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 73728.0,
+          "max_visible": 105511,
+          "server_us": 1190.0,
+          "wall_seconds": 0.0019938670011470094
+        },
+        "2": {
+          "n_tiles_nonempty": 13,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 22685.53846153846,
+          "max_visible": 96571,
+          "server_us": 1338.0,
+          "wall_seconds": 0.002049607996013947
+        },
+        "3": {
+          "n_tiles_nonempty": 41,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 7192.975609756098,
+          "max_visible": 79703,
+          "server_us": 1482.0,
+          "wall_seconds": 0.0021530640005948953
+        },
+        "4": {
+          "n_tiles_nonempty": 99,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 2978.909090909091,
+          "max_visible": 79703,
+          "server_us": 2146.0,
+          "wall_seconds": 0.0028935439986526035
+        },
+        "5": {
+          "n_tiles_nonempty": 248,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 1189.1612903225807,
+          "max_visible": 56902,
+          "server_us": 4426.0,
+          "wall_seconds": 0.005405741998401936
+        },
+        "6": {
+          "n_tiles_nonempty": 638,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 462.2445141065831,
+          "max_visible": 42441,
+          "server_us": 11504.0,
+          "wall_seconds": 0.01265072199748829
+        },
+        "7": {
+          "n_tiles_nonempty": 1603,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 183.97504678727387,
+          "max_visible": 21756,
+          "server_us": 29807.0,
+          "wall_seconds": 0.030917585994757246
+        },
+        "8": {
+          "n_tiles_nonempty": 3863,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 76.34273880403832,
+          "max_visible": 18281,
+          "server_us": 74150.0,
+          "wall_seconds": 0.07542560400179354
+        }
+      },
+      "total_visible_at_min_zoom": 294912,
+      "coverage_fraction": 0.000294912
+    },
+    "100": {
+      "grant_width": 100,
+      "authorise_seconds": 0.018812024994986132,
+      "by_zoom": {
+        "0": {
+          "n_tiles_nonempty": 1,
+          "n_exceed_threshold": 1,
+          "fraction_exceed": 1.0,
+          "mean_visible": 2188970.0,
+          "max_visible": 2188970,
+          "server_us": 59333.0,
+          "wall_seconds": 0.060650634004559834
+        },
+        "1": {
+          "n_tiles_nonempty": 4,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 547242.5,
+          "max_visible": 716534,
+          "server_us": 2944.0,
+          "wall_seconds": 0.004225216995109804
+        },
+        "2": {
+          "n_tiles_nonempty": 16,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 136810.625,
+          "max_visible": 284062,
+          "server_us": 3259.0,
+          "wall_seconds": 0.004292358993552625
+        },
+        "3": {
+          "n_tiles_nonempty": 61,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 35884.75409836065,
+          "max_visible": 217033,
+          "server_us": 5634.0,
+          "wall_seconds": 0.006581179004570004
+        },
+        "4": {
+          "n_tiles_nonempty": 210,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 10423.666666666666,
+          "max_visible": 203378,
+          "server_us": 8719.0,
+          "wall_seconds": 0.009779986001376528
+        },
+        "5": {
+          "n_tiles_nonempty": 684,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 3200.248538011696,
+          "max_visible": 159096,
+          "server_us": 12417.0,
+          "wall_seconds": 0.013456381006108131
+        },
+        "6": {
+          "n_tiles_nonempty": 2280,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 960.0745614035088,
+          "max_visible": 95010,
+          "server_us": 26988.0,
+          "wall_seconds": 0.028268852998735383
+        },
+        "7": {
+          "n_tiles_nonempty": 7370,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 297.010854816825,
+          "max_visible": 60663,
+          "server_us": 68050.0,
+          "wall_seconds": 0.06962308299989672
+        },
+        "8": {
+          "n_tiles_nonempty": 22660,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 96.60061782877317,
+          "max_visible": 46204,
+          "server_us": 151943.0,
+          "wall_seconds": 0.15415552600461524
+        }
+      },
+      "total_visible_at_min_zoom": 2188970,
+      "coverage_fraction": 0.00218897
+    },
+    "500": {
+      "grant_width": 500,
+      "authorise_seconds": 0.04579346100217663,
+      "by_zoom": {
+        "0": {
+          "n_tiles_nonempty": 1,
+          "n_exceed_threshold": 1,
+          "fraction_exceed": 1.0,
+          "mean_visible": 16102913.0,
+          "max_visible": 16102913,
+          "server_us": 391737.0,
+          "wall_seconds": 0.39305001200409606
+        },
+        "1": {
+          "n_tiles_nonempty": 4,
+          "n_exceed_threshold": 4,
+          "fraction_exceed": 1.0,
+          "mean_visible": 4025728.25,
+          "max_visible": 6170644,
+          "server_us": 36767.0,
+          "wall_seconds": 0.037974051003402565
+        },
+        "2": {
+          "n_tiles_nonempty": 16,
+          "n_exceed_threshold": 1,
+          "fraction_exceed": 0.0625,
+          "mean_visible": 1006432.0625,
+          "max_visible": 2262707,
+          "server_us": 10390.0,
+          "wall_seconds": 0.011576933997275773
+        },
+        "3": {
+          "n_tiles_nonempty": 64,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 251608.015625,
+          "max_visible": 1175424,
+          "server_us": 11529.0,
+          "wall_seconds": 0.012781588004145306
+        },
+        "4": {
+          "n_tiles_nonempty": 256,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 62902.00390625,
+          "max_visible": 684491,
+          "server_us": 13336.0,
+          "wall_seconds": 0.014510947999951895
+        },
+        "5": {
+          "n_tiles_nonempty": 1019,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 15802.662414131502,
+          "max_visible": 422129,
+          "server_us": 23094.0,
+          "wall_seconds": 0.024348995000764262
+        },
+        "6": {
+          "n_tiles_nonempty": 4030,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 3995.7600496277914,
+          "max_visible": 301097,
+          "server_us": 39669.0,
+          "wall_seconds": 0.04110362299979897
+        },
+        "7": {
+          "n_tiles_nonempty": 15827,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 1017.4330574334997,
+          "max_visible": 145552,
+          "server_us": 98084.0,
+          "wall_seconds": 0.10010345999762649
+        },
+        "8": {
+          "n_tiles_nonempty": 61074,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 263.6623276680748,
+          "max_visible": 81693,
+          "server_us": 225508.0,
+          "wall_seconds": 0.23034308099886402
+        }
+      },
+      "total_visible_at_min_zoom": 16102913,
+      "coverage_fraction": 0.016102913
+    },
+    "2000": {
+      "grant_width": 2000,
+      "authorise_seconds": 0.11193814100261079,
+      "by_zoom": {
+        "0": {
+          "n_tiles_nonempty": 1,
+          "n_exceed_threshold": 1,
+          "fraction_exceed": 1.0,
+          "mean_visible": 78323438.0,
+          "max_visible": 78323438,
+          "server_us": 2164747.0,
+          "wall_seconds": 2.166092496001511
+        },
+        "1": {
+          "n_tiles_nonempty": 4,
+          "n_exceed_threshold": 4,
+          "fraction_exceed": 1.0,
+          "mean_visible": 19580859.5,
+          "max_visible": 25941136,
+          "server_us": 202999.0,
+          "wall_seconds": 0.2042779729963513
+        },
+        "2": {
+          "n_tiles_nonempty": 16,
+          "n_exceed_threshold": 16,
+          "fraction_exceed": 1.0,
+          "mean_visible": 4895214.875,
+          "max_visible": 7791828,
+          "server_us": 67473.0,
+          "wall_seconds": 0.06865519800339825
+        },
+        "3": {
+          "n_tiles_nonempty": 64,
+          "n_exceed_threshold": 9,
+          "fraction_exceed": 0.140625,
+          "mean_visible": 1223803.71875,
+          "max_visible": 4007435,
+          "server_us": 73387.0,
+          "wall_seconds": 0.07453247800003737
+        },
+        "4": {
+          "n_tiles_nonempty": 256,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 305950.9296875,
+          "max_visible": 1984737,
+          "server_us": 64490.0,
+          "wall_seconds": 0.06560685400472721
+        },
+        "5": {
+          "n_tiles_nonempty": 1024,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 76487.732421875,
+          "max_visible": 1040202,
+          "server_us": 69180.0,
+          "wall_seconds": 0.07039375699969241
+        },
+        "6": {
+          "n_tiles_nonempty": 4089,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 19154.6681340181,
+          "max_visible": 524367,
+          "server_us": 87154.0,
+          "wall_seconds": 0.08857323900156189
+        },
+        "7": {
+          "n_tiles_nonempty": 16304,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 4803.940014720314,
+          "max_visible": 407450,
+          "server_us": 138678.0,
+          "wall_seconds": 0.1406641630019294
+        },
+        "8": {
+          "n_tiles_nonempty": 64873,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 1207.3349159126292,
+          "max_visible": 344087,
+          "server_us": 309065.0,
+          "wall_seconds": 0.3145661890011979
+        }
+      },
+      "total_visible_at_min_zoom": 78323438,
+      "coverage_fraction": 0.078323438
+    },
+    "8000": {
+      "grant_width": 8000,
+      "authorise_seconds": 0.2046969849980087,
+      "by_zoom": {
+        "0": {
+          "n_tiles_nonempty": 1,
+          "n_exceed_threshold": 1,
+          "fraction_exceed": 1.0,
+          "mean_visible": 306487160.0,
+          "max_visible": 306487160,
+          "server_us": 11104483.0,
+          "wall_seconds": 11.105983389999892
+        },
+        "1": {
+          "n_tiles_nonempty": 4,
+          "n_exceed_threshold": 4,
+          "fraction_exceed": 1.0,
+          "mean_visible": 76621790.0,
+          "max_visible": 101227715,
+          "server_us": 621942.0,
+          "wall_seconds": 0.6231543200046872
+        },
+        "2": {
+          "n_tiles_nonempty": 16,
+          "n_exceed_threshold": 16,
+          "fraction_exceed": 1.0,
+          "mean_visible": 19155447.5,
+          "max_visible": 32753362,
+          "server_us": 455797.0,
+          "wall_seconds": 0.4569652270001825
+        },
+        "3": {
+          "n_tiles_nonempty": 64,
+          "n_exceed_threshold": 57,
+          "fraction_exceed": 0.890625,
+          "mean_visible": 4788861.875,
+          "max_visible": 14050804,
+          "server_us": 91833.0,
+          "wall_seconds": 0.09299230100441491
+        },
+        "4": {
+          "n_tiles_nonempty": 256,
+          "n_exceed_threshold": 38,
+          "fraction_exceed": 0.1484375,
+          "mean_visible": 1197215.46875,
+          "max_visible": 7418304,
+          "server_us": 84721.0,
+          "wall_seconds": 0.08595272399543319
+        },
+        "5": {
+          "n_tiles_nonempty": 1024,
+          "n_exceed_threshold": 7,
+          "fraction_exceed": 0.0068359375,
+          "mean_visible": 299303.8671875,
+          "max_visible": 4214106,
+          "server_us": 86814.0,
+          "wall_seconds": 0.0880756670012488
+        },
+        "6": {
+          "n_tiles_nonempty": 4094,
+          "n_exceed_threshold": 1,
+          "fraction_exceed": 0.0002442598925256473,
+          "mean_visible": 74862.52076209086,
+          "max_visible": 2601139,
+          "server_us": 108656.0,
+          "wall_seconds": 0.1100499129970558
+        },
+        "7": {
+          "n_tiles_nonempty": 16364,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 18729.354681007087,
+          "max_visible": 1882270,
+          "server_us": 191670.0,
+          "wall_seconds": 0.19373616200027755
+        },
+        "8": {
+          "n_tiles_nonempty": 65348,
+          "n_exceed_threshold": 0,
+          "fraction_exceed": 0.0,
+          "mean_visible": 4690.0771255432455,
+          "max_visible": 1605803,
+          "server_us": 447492.0,
+          "wall_seconds": 0.45262331000412814
+        }
+      },
+      "total_visible_at_min_zoom": 306487160,
+      "coverage_fraction": 0.30648716
+    },
+    "16000": {
+      "grant_width": 16000,
+      "authorise_seconds": 0.2627331050025532,
+      "by_zoom": {
+        "0": {
+          "n_tiles_nonempty": 1,
+          "n_exceed_threshold": 1,
+          "fraction_exceed": 1.0,
+          "mean_visible": 472979538.0,
+          "max_visible": 472979538,
+          "server_us": 14337178.0,
+          "wall_seconds": 14.33854364099534
+        },
+        "1": {
+          "n_tiles_nonempty": 4,
+          "n_exceed_threshold": 4,
+          "fraction_exceed": 1.0,
+          "mean_visible": 118244884.5,
+          "max_visible": 158432623,
+          "server_us": 942551.0,
+          "wall_seconds": 0.9438240910021705
+        },
+        "2": {
+          "n_tiles_nonempty": 16,
+          "n_exceed_threshold": 16,
+          "fraction_exceed": 1.0,
+          "mean_visible": 29561221.125,
+          "max_visible": 50648731,
+          "server_us": 891192.0,
+          "wall_seconds": 0.8923294590058504
+        },
+        "3": {
+          "n_tiles_nonempty": 64,
+          "n_exceed_threshold": 63,
+          "fraction_exceed": 0.984375,
+          "mean_visible": 7390305.28125,
+          "max_visible": 22257350,
+          "server_us": 548687.0,
+          "wall_seconds": 0.5498565659945598
+        },
+        "4": {
+          "n_tiles_nonempty": 256,
+          "n_exceed_threshold": 82,
+          "fraction_exceed": 0.3203125,
+          "mean_visible": 1847576.3203125,
+          "max_visible": 11201015,
+          "server_us": 145029.0,
+          "wall_seconds": 0.14616645599744515
+        },
+        "5": {
+          "n_tiles_nonempty": 1024,
+          "n_exceed_threshold": 24,
+          "fraction_exceed": 0.0234375,
+          "mean_visible": 461894.080078125,
+          "max_visible": 6546925,
+          "server_us": 91973.0,
+          "wall_seconds": 0.09325343299860833
+        },
+        "6": {
+          "n_tiles_nonempty": 4095,
+          "n_exceed_threshold": 4,
+          "fraction_exceed": 0.0009768009768009768,
+          "mean_visible": 115501.71868131869,
+          "max_visible": 3974113,
+          "server_us": 110136.0,
+          "wall_seconds": 0.11163995600509224
+        },
+        "7": {
+          "n_tiles_nonempty": 16372,
+          "n_exceed_threshold": 1,
+          "fraction_exceed": 6.10798924993892e-05,
+          "mean_visible": 28889.53933545077,
+          "max_visible": 2853152,
+          "server_us": 183063.0,
+          "wall_seconds": 0.18527204400015762
+        },
+        "8": {
+          "n_tiles_nonempty": 65418,
+          "n_exceed_threshold": 1,
+          "fraction_exceed": 1.5286312635666025e-05,
+          "mean_visible": 7230.113088140879,
+          "max_visible": 2403839,
+          "server_us": 458356.0,
+          "wall_seconds": 0.4637662379973335
+        }
+      },
+      "total_visible_at_min_zoom": 472979538,
+      "coverage_fraction": 0.472979538
+    },
+    "30000": {
+      "grant_width": 30000,
+      "authorise_seconds": 0.38372775899915723,
+      "by_zoom": {
+        "0": {
+          "n_tiles_nonempty": 1,
+          "n_exceed_threshold": 1,
+          "fraction_exceed": 1.0,
+          "mean_visible": 720667264.0,
+          "max_visible": 720667264,
+          "server_us": 21789390.0,
+          "wall_seconds": 21.790733820998867
+        },
+        "1": {
+          "n_tiles_nonempty": 4,
+          "n_exceed_threshold": 4,
+          "fraction_exceed": 1.0,
+          "mean_visible": 180166816.0,
+          "max_visible": 242863694,
+          "server_us": 1465214.0,
+          "wall_seconds": 1.4664771109964931
+        },
+        "2": {
+          "n_tiles_nonempty": 16,
+          "n_exceed_threshold": 16,
+          "fraction_exceed": 1.0,
+          "mean_visible": 45041704.0,
+          "max_visible": 77058808,
+          "server_us": 1288877.0,
+          "wall_seconds": 1.2901224279994494
+        },
+        "3": {
+          "n_tiles_nonempty": 64,
+          "n_exceed_threshold": 63,
+          "fraction_exceed": 0.984375,
+          "mean_visible": 11260426.0,
+          "max_visible": 34694159,
+          "server_us": 1111017.0,
+          "wall_seconds": 1.1122394820049522
+        },
+        "4": {
+          "n_tiles_nonempty": 256,
+          "n_exceed_threshold": 138,
+          "fraction_exceed": 0.5390625,
+          "mean_visible": 2815106.5,
+          "max_visible": 17923113,
+          "server_us": 377398.0,
+          "wall_seconds": 0.37852438699337654
+        },
+        "5": {
+          "n_tiles_nonempty": 1024,
+          "n_exceed_threshold": 70,
+          "fraction_exceed": 0.068359375,
+          "mean_visible": 703776.625,
+          "max_visible": 9577822,
+          "server_us": 132484.0,
+          "wall_seconds": 0.13364885999908438
+        },
+        "6": {
+          "n_tiles_nonempty": 4096,
+          "n_exceed_threshold": 16,
+          "fraction_exceed": 0.00390625,
+          "mean_visible": 175944.15625,
+          "max_visible": 5736713,
+          "server_us": 126767.0,
+          "wall_seconds": 0.12810365299810655
+        },
+        "7": {
+          "n_tiles_nonempty": 16376,
+          "n_exceed_threshold": 3,
+          "fraction_exceed": 0.00018319491939423546,
+          "mean_visible": 44007.52711284807,
+          "max_visible": 4018314,
+          "server_us": 182829.0,
+          "wall_seconds": 0.18480057200213196
+        },
+        "8": {
+          "n_tiles_nonempty": 65472,
+          "n_exceed_threshold": 2,
+          "fraction_exceed": 3.0547409579667644e-05,
+          "mean_visible": 11007.259042033236,
+          "max_visible": 3340411,
+          "server_us": 452779.0,
+          "wall_seconds": 0.45787173400458414
+        }
+      },
+      "total_visible_at_min_zoom": 720667264,
+      "coverage_fraction": 0.720667264
+    },
+    "47968": {
+      "grant_width": 47968,
+      "authorise_seconds": 0.7199023580033099,
+      "by_zoom": {
+        "0": {
+          "n_tiles_nonempty": 1,
+          "n_exceed_threshold": 1,
+          "fraction_exceed": 1.0,
+          "mean_visible": 1000000000.0,
+          "max_visible": 1000000000,
+          "server_us": 27771973.0,
+          "wall_seconds": 27.773362738000287
+        },
+        "1": {
+          "n_tiles_nonempty": 4,
+          "n_exceed_threshold": 4,
+          "fraction_exceed": 1.0,
+          "mean_visible": 250000000.0,
+          "max_visible": 336053709,
+          "server_us": 1885448.0,
+          "wall_seconds": 1.8869475679966854
+        },
+        "2": {
+          "n_tiles_nonempty": 16,
+          "n_exceed_threshold": 16,
+          "fraction_exceed": 1.0,
+          "mean_visible": 62500000.0,
+          "max_visible": 107218614,
+          "server_us": 2002482.0,
+          "wall_seconds": 2.004018764004286
+        },
+        "3": {
+          "n_tiles_nonempty": 64,
+          "n_exceed_threshold": 63,
+          "fraction_exceed": 0.984375,
+          "mean_visible": 15625000.0,
+          "max_visible": 47762520,
+          "server_us": 1183777.0,
+          "wall_seconds": 1.1851930120028555
+        },
+        "4": {
+          "n_tiles_nonempty": 256,
+          "n_exceed_threshold": 173,
+          "fraction_exceed": 0.67578125,
+          "mean_visible": 3906250.0,
+          "max_visible": 24416318,
+          "server_us": 359183.0,
+          "wall_seconds": 0.3603888219950022
+        },
+        "5": {
+          "n_tiles_nonempty": 1024,
+          "n_exceed_threshold": 136,
+          "fraction_exceed": 0.1328125,
+          "mean_visible": 976562.5,
+          "max_visible": 12997864,
+          "server_us": 201884.0,
+          "wall_seconds": 0.20341852500132518
+        },
+        "6": {
+          "n_tiles_nonempty": 4096,
+          "n_exceed_threshold": 37,
+          "fraction_exceed": 0.009033203125,
+          "mean_visible": 244140.625,
+          "max_visible": 7787046,
+          "server_us": 191035.0,
+          "wall_seconds": 0.19245016800414305
+        },
+        "7": {
+          "n_tiles_nonempty": 16378,
+          "n_exceed_threshold": 7,
+          "fraction_exceed": 0.0004274026132616925,
+          "mean_visible": 61057.516180241786,
+          "max_visible": 5543694,
+          "server_us": 225505.0,
+          "wall_seconds": 0.22736915800487623
+        },
+        "8": {
+          "n_tiles_nonempty": 65481,
+          "n_exceed_threshold": 3,
+          "fraction_exceed": 4.581481651165987e-05,
+          "mean_visible": 15271.605503886623,
+          "max_visible": 4584942,
+          "server_us": 475399.0,
+          "wall_seconds": 0.47984958400047617
+        }
+      },
+      "total_visible_at_min_zoom": 1000000000,
+      "coverage_fraction": 1.0
+    }
+  },
+  "dictionary_vocab": 47968,
+  "overall_pairs": 560761,
+  "overall_exceed": 1110,
+  "overall_fraction_exceed": 0.001979452922011338,
+  "by_depth": {
+    "0": {
+      "pairs": 9,
+      "exceed": 7,
+      "fraction_exceed": 0.7777777777777778
+    },
+    "1": {
+      "pairs": 35,
+      "exceed": 24,
+      "fraction_exceed": 0.6857142857142857
+    },
+    "2": {
+      "pairs": 132,
+      "exceed": 81,
+      "fraction_exceed": 0.6136363636363636
+    },
+    "3": {
+      "pairs": 503,
+      "exceed": 255,
+      "fraction_exceed": 0.5069582504970179
+    },
+    "4": {
+      "pairs": 1886,
+      "exceed": 431,
+      "fraction_exceed": 0.22852598091198303
+    },
+    "5": {
+      "pairs": 7169,
+      "exceed": 237,
+      "fraction_exceed": 0.03305900404519459
+    },
+    "6": {
+      "pairs": 27675,
+      "exceed": 58,
+      "fraction_exceed": 0.002095754290876242
+    },
+    "7": {
+      "pairs": 107287,
+      "exceed": 11,
+      "fraction_exceed": 0.00010252873134676149
+    },
+    "8": {
+      "pairs": 416065,
+      "exceed": 6,
+      "fraction_exceed": 1.4420823669378583e-05
+    }
+  }
+}
