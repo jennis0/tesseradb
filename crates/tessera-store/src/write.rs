@@ -1,4 +1,4 @@
-//! Segment file writers: `columns.arrow`, `morton.u64`, `permutation.bin` (contracts §2.1/§2.6,
+//! Segment file writers: `columns.arrow`, `morton.u32`, `permutation.bin` (contracts §2.1/§2.6,
 //! Reference Sheet R4). Byte formats here are fixed by the contracts spec — do not vary them.
 
 use std::fs::File;
@@ -20,7 +20,7 @@ const PERMUTATION_RESERVED: u16 = 0;
 const PERMUTATION_ABSENT: u32 = 0xFFFF_FFFF;
 
 /// Write `columns.arrow` (Arrow IPC file format, one record batch, uncompressed buffers) and
-/// `morton.u64` (raw little-endian `u64` codes, no header) into `dir`.
+/// `morton.u32` (raw little-endian `u32` codes, no header) into `dir`.
 ///
 /// `items` and `codes` must already be in row order (i.e. the output of
 /// [`tessera_spatial::tiler::sort_batch`]) and the same length; row *i*'s Morton code is
@@ -29,7 +29,7 @@ const PERMUTATION_ABSENT: u32 = 0xFFFF_FFFF;
 pub fn write_segment(
     dir: &Path,
     items: &[TilerItem],
-    codes: &[u64],
+    codes: &[u32],
     scalar_schema: &[(String, ScalarType)],
 ) -> io::Result<()> {
     if items.len() != codes.len() {
@@ -49,7 +49,7 @@ pub fn write_segment(
     );
 
     write_columns_arrow(&dir.join("columns.arrow"), items, scalar_schema)?;
-    write_morton_u64(&dir.join("morton.u64"), codes)?;
+    write_morton_u32(&dir.join("morton.u32"), codes)?;
     Ok(())
 }
 
@@ -185,12 +185,81 @@ fn scalar_type_mismatch(
     )
 }
 
-fn write_morton_u64(path: &Path, codes: &[u64]) -> io::Result<()> {
+fn write_morton_u32(path: &Path, codes: &[u32]) -> io::Result<()> {
+    write_morton_codes(path, codes.iter().copied())
+}
+
+/// Write `morton.u32` (contracts §2.6: raw little-endian `u32` codes, no header) from an
+/// iterator of codes in row order.
+///
+/// Streaming, so the codes need never exist as one slice: the batch build holds its row order in
+/// a packed record array and would otherwise have to materialise a second copy alongside the
+/// segment columns, which are already the largest thing it allocates.
+pub fn write_morton_codes<I: IntoIterator<Item = u32>>(path: &Path, codes: I) -> io::Result<()> {
     let mut writer = BufWriter::new(File::create(path)?);
     for code in codes {
         writer.write_all(&code.to_le_bytes())?;
     }
     writer.flush()
+}
+
+/// Write `columns.arrow` from columns that are already in row order — the fixed five columns of
+/// contracts §2.6, no declared scalars.
+///
+/// Takes each column **by value** so the `Vec`s become the Arrow buffers with no copy. This
+/// record batch is the largest single structure the batch build materialises (at 10^9 rows,
+/// 8+4+4+4+2 bytes per row), so a copy here would be another twenty-two gigabytes. Produces
+/// byte-for-byte what [`write_segment`] writes for the same rows and no scalars.
+pub fn write_columns(
+    path: &Path,
+    entity_id: Vec<u64>,
+    x: Vec<f32>,
+    y: Vec<f32>,
+    node_id: Vec<u32>,
+    priority: Vec<u16>,
+) -> io::Result<()> {
+    let rows = entity_id.len();
+    for (name, len) in [
+        ("x", x.len()),
+        ("y", y.len()),
+        ("node_id", node_id.len()),
+        ("priority", priority.len()),
+    ] {
+        if len != rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("write_columns: column '{name}' has {len} rows, entity_id has {rows}"),
+            ));
+        }
+    }
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("node_id", DataType::UInt32, false),
+        Field::new("priority", DataType::UInt16, false),
+    ]));
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(UInt64Array::from(entity_id)),
+        Arc::new(Float32Array::from(x)),
+        Arc::new(Float32Array::from(y)),
+        Arc::new(UInt32Array::from(node_id)),
+        Arc::new(UInt16Array::from(priority)),
+    ];
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+    let file = File::create(path)?;
+    let mut writer = FileWriter::try_new(BufWriter::new(file), &schema)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    writer
+        .finish()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    Ok(())
 }
 
 /// Write `permutation.bin` (R4): `"TSPM"` ‖ u16 version=1 ‖ u16 reserved=0 ‖ u64 `bound` ‖
@@ -205,7 +274,30 @@ pub fn write_permutation(
     items_in_row_order: &[EntityId],
     bound: u64,
 ) -> io::Result<()> {
-    for entity_id in items_in_row_order {
+    write_permutation_iter(path, items_in_row_order.iter().copied(), bound)
+}
+
+/// [`write_permutation`] over an iterator of entities in row order, so a caller holding its row
+/// order in a packed form need not materialise a `Vec<EntityId>` (8 bytes per row) alongside the
+/// slot array it is about to build. Byte-for-byte identical output.
+///
+/// The slot array itself is still `bound` `u32`s wide — 4 GB at 10^9 entities. That is inherent
+/// to the format (R4 defines `permutation.bin` as a dense entity-indexed array) and is the
+/// ledgered, accepted cost; it is one contiguous allocation, not a per-item one.
+pub fn write_permutation_iter<I: IntoIterator<Item = EntityId>>(
+    path: &Path,
+    items_in_row_order: I,
+    bound: u64,
+) -> io::Result<()> {
+    let bound_usize = usize::try_from(bound).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("write_permutation: bound {bound} does not fit in usize"),
+        )
+    })?;
+
+    let mut slots = vec![PERMUTATION_ABSENT; bound_usize];
+    for (row, entity_id) in items_in_row_order.into_iter().enumerate() {
         let raw = entity_id.raw();
         if raw >= bound {
             return Err(io::Error::new(
@@ -221,17 +313,6 @@ pub fn write_permutation(
                 ),
             ));
         }
-    }
-
-    let bound_usize = usize::try_from(bound).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("write_permutation: bound {bound} does not fit in usize"),
-        )
-    })?;
-
-    let mut slots = vec![PERMUTATION_ABSENT; bound_usize];
-    for (row, entity_id) in items_in_row_order.iter().enumerate() {
         let row_u32 = u32::try_from(row).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -249,15 +330,13 @@ pub fn write_permutation(
                 ),
             ));
         }
-        let slot = entity_id.raw() as usize;
+        let slot = raw as usize;
         if slots[slot] != PERMUTATION_ABSENT {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "write_permutation: entity id {} appears at both row {} and row {}",
-                    entity_id.raw(),
-                    slots[slot],
-                    row
+                    raw, slots[slot], row
                 ),
             ));
         }

@@ -60,6 +60,20 @@ pub const IDENTITY_EXTENT: Extent = Extent {
 ///    disagree. So this branch **requires** the identity extent and errors otherwise; a corpus
 ///    with real coordinates must ship `x`/`y` and take branch 1.
 pub fn read_points(path: &Path, extent: &Extent, limit: Option<u64>) -> Result<Vec<PointRow>> {
+    let mut out = Vec::new();
+    scan_points(path, extent, limit, |row| out.push(row))?;
+    Ok(out)
+}
+
+/// The streaming form of [`read_points`]: calls `visit` once per selected row and never holds
+/// more than one decoded record batch. The batch build uses this so the points file — 10⁹ rows
+/// in the Phase 0 corpus — can be traversed several times without ever being materialised.
+pub fn scan_points<F: FnMut(PointRow)>(
+    path: &Path,
+    extent: &Extent,
+    limit: Option<u64>,
+    mut visit: F,
+) -> Result<()> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
@@ -120,7 +134,6 @@ pub fn read_points(path: &Path, extent: &Extent, limit: Option<u64>) -> Result<V
         Geometry::Morton(column_index(path, &projected, "morton")?)
     };
 
-    let mut out = Vec::new();
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
@@ -132,7 +145,7 @@ pub fn read_points(path: &Path, extent: &Extent, limit: Option<u64>) -> Result<V
                     if limit.is_some_and(|l| ids[i] >= l) {
                         continue;
                     }
-                    out.push(PointRow {
+                    visit(PointRow {
                         source_id: ids[i],
                         x: xs[i],
                         y: ys[i],
@@ -150,7 +163,7 @@ pub fn read_points(path: &Path, extent: &Extent, limit: Option<u64>) -> Result<V
                         detail: format!("morton code {} does not fit in u32", codes[i]),
                     })?;
                     let (cx, cy) = deinterleave(code);
-                    out.push(PointRow {
+                    visit(PointRow {
                         source_id: ids[i],
                         x: cx as f32,
                         y: cy as f32,
@@ -159,13 +172,29 @@ pub fn read_points(path: &Path, extent: &Extent, limit: Option<u64>) -> Result<V
             }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Read `pairs` (`entity_id`, `term_id`), keeping rows with `entity_id < limit`, grouped into
 /// each source entity's term list. Lists are returned sorted and deduplicated: the label set is
 /// a *set*, and downstream (the signature key, the postings writer) depends on it being one.
 pub fn read_pairs(path: &Path, limit: Option<u64>) -> Result<HashMap<u64, Vec<u64>>> {
+    let mut grouped: HashMap<u64, Vec<u64>> = HashMap::new();
+    scan_pairs(path, limit, |source_id, term| {
+        grouped.entry(source_id).or_default().push(term)
+    })?;
+    for terms in grouped.values_mut() {
+        terms.sort_unstable();
+        terms.dedup();
+    }
+    Ok(grouped)
+}
+
+/// The streaming form of [`read_pairs`]: calls `visit(source_entity_id, source_term_id)` once
+/// per selected row, in file order, holding only one decoded record batch. Rows are **not**
+/// grouped, sorted or deduplicated — that is the caller's business, and at 1.72 × 10⁹ pairs it
+/// is the difference between a bounded traversal and a 70 GB `HashMap`.
+pub fn scan_pairs<F: FnMut(u64, u64)>(path: &Path, limit: Option<u64>, mut visit: F) -> Result<()> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
@@ -180,7 +209,6 @@ pub fn read_pairs(path: &Path, limit: Option<u64>) -> Result<HashMap<u64, Vec<u6
         .build()
         .map_err(|e| BuildError::parquet(path, e))?;
 
-    let mut grouped: HashMap<u64, Vec<u64>> = HashMap::new();
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
@@ -189,14 +217,10 @@ pub fn read_pairs(path: &Path, limit: Option<u64>) -> Result<HashMap<u64, Vec<u6
             if limit.is_some_and(|l| ids[i] >= l) {
                 continue;
             }
-            grouped.entry(ids[i]).or_default().push(terms[i]);
+            visit(ids[i], terms[i]);
         }
     }
-    for terms in grouped.values_mut() {
-        terms.sort_unstable();
-        terms.dedup();
-    }
-    Ok(grouped)
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]

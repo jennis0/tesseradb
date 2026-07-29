@@ -21,6 +21,7 @@
 
 pub mod error;
 pub mod input;
+mod pipeline;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -105,31 +106,8 @@ pub fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
     key
 }
 
-/// `priority(e) = (splitmix64(e) >> 48) as u16` over the **final** entity ID (R3, contracts
-/// §2.6). Mask-independent by construction (design §7.2): priority must not depend on any
-/// viewer's visibility, or the intra-cell tiebreak would leak.
-pub fn priority_of(entity_id: EntityId) -> u16 {
-    let mut z = entity_id.raw().wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    (z >> 48) as u16
-}
-
-/// One item after labelling, before entity-ID assignment.
-///
-/// The item's term set is held only as its `signature` — [`signature_sort_key`]'s sorted,
-/// deduplicated term-ID list. That is both the ordering key and the postings input, so keeping a
-/// second, unsorted copy alongside it would only create a way for the two to disagree.
-struct StagedItem {
-    source_id: u64,
-    x: f32,
-    y: f32,
-    signature: Vec<u32>,
-}
-
-/// Run the batch build, producing a complete bundle at `args.out`.
-pub fn build(args: &BuildArgs) -> Result<BuildReport> {
+/// Argument and destination checks shared by both build implementations.
+fn validate_args(args: &BuildArgs) -> Result<()> {
     args.extent
         .validate()
         .map_err(|detail| BuildError::Invalid(format!("extent: {detail}")))?;
@@ -156,6 +134,51 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
             args.out.display()
         )));
     }
+    Ok(())
+}
+
+/// `priority(e) = (splitmix64(e) >> 48) as u16` over the **final** entity ID (R3, contracts
+/// §2.6). Mask-independent by construction (design §7.2): priority must not depend on any
+/// viewer's visibility, or the intra-cell tiebreak would leak.
+pub fn priority_of(entity_id: EntityId) -> u16 {
+    let mut z = entity_id.raw().wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 48) as u16
+}
+
+/// One item after labelling, before entity-ID assignment.
+///
+/// The item's term set is held only as its `signature` — [`signature_sort_key`]'s sorted,
+/// deduplicated term-ID list. That is both the ordering key and the postings input, so keeping a
+/// second, unsorted copy alongside it would only create a way for the two to disagree.
+struct StagedItem {
+    source_id: u64,
+    x: f32,
+    y: f32,
+    signature: Vec<u32>,
+}
+
+/// Run the batch build, producing a complete bundle at `args.out`.
+///
+/// This is [`pipeline::build`] — the streaming pipeline, which holds a bounded set of packed
+/// arrays rather than one struct per item. [`build_in_memory`] is the older, linear
+/// implementation, kept as the byte-equality oracle the two are tested against.
+pub fn build(args: &BuildArgs) -> Result<BuildReport> {
+    pipeline::build(args)
+}
+
+/// The original linear, fully in-memory build (Task 8).
+///
+/// Superseded by [`build`] for anything but small inputs — it materialises one [`StagedItem`]
+/// per point and the whole `per_term` posting relation before writing a byte, which at 10⁹
+/// items is tens of gigabytes. It is retained, and exercised by
+/// `tests/build_equivalence.rs`, as the **oracle** for the streaming pipeline: the two must
+/// produce byte-identical bundles for any input, because the entity-ID assignment they encode
+/// is permanent (I9) and every digest in the bundle depends on it.
+pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
+    validate_args(args)?;
 
     // ---- 1. read inputs --------------------------------------------------------------
     let mut points = input::read_points(&args.points, &args.extent, args.limit)?;
@@ -282,8 +305,7 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
     let pairs_path = terms_dir.join("pairs.parquet");
     write_pairs_parquet(&pairs_path, &per_term)?;
 
-    let external_ids_path = entities_dir.join("external-ids-0.arrow");
-    write_external_ids(&external_ids_path, &staged)?;
+    let external_ids_paths = write_external_ids(&entities_dir, &staged)?;
 
     // ---- 6. tiler and segment --------------------------------------------------------
     let mut tiler_items: Vec<TilerItem> = staged
@@ -305,7 +327,7 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
     write_segment(&segment_dir, &tiler_items, &codes, &[])
         .map_err(|e| BuildError::io(&segment_dir, e))?;
     fsync_file(&segment_dir.join("columns.arrow"))?;
-    fsync_file(&segment_dir.join("morton.u64"))?;
+    fsync_file(&segment_dir.join("morton.u32"))?;
 
     let permutation_path = slice_dir.join("permutation.bin");
     let row_order: Vec<EntityId> = tiler_items.iter().map(|i| i.entity_id).collect();
@@ -316,6 +338,48 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
     fsync_file(&permutation_path)?;
 
     // ---- 7. manifests ----------------------------------------------------------------
+    write_manifests(
+        args,
+        &BundleFiles {
+            dict_paths,
+            dict_records,
+            external_ids_paths,
+            other_paths: vec![
+                postings_path,
+                pairs_path,
+                permutation_path,
+                segment_dir.join("columns.arrow"),
+                segment_dir.join("morton.u32"),
+            ],
+        },
+        &plugin,
+        n,
+        term_count,
+        pair_count,
+    )
+}
+
+/// Every file a build wrote, split by the role it plays in the manifests.
+struct BundleFiles {
+    dict_paths: Vec<PathBuf>,
+    dict_records: u64,
+    external_ids_paths: Vec<PathBuf>,
+    other_paths: Vec<PathBuf>,
+}
+
+/// Write `SEGMENTS-0.json`, `MANIFEST.json` and `CURRENT` over the files a build produced.
+/// Shared by both build implementations so the two cannot drift in the one place where a
+/// difference would be invisible until a digest failed.
+fn write_manifests(
+    args: &BuildArgs,
+    files: &BundleFiles,
+    plugin: &Passthrough,
+    n: u64,
+    term_count: u64,
+    pair_count: u64,
+) -> Result<BuildReport> {
+    let bounds = plugin.declared_bounds();
+    let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
     // Contracts §2.2 / §2.3 divide the two `files` maps by *when* a file appeared:
     // `MANIFEST.files` covers every file present at build time, and `SEGMENTS-<n>.files` covers
     // only what has been added *since* that manifest was written (streamed segments, later
@@ -326,22 +390,21 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
     let prefix_dir = args.out.join(PREFIX);
     let mut manifest_files: BTreeMap<String, FileDigest> = BTreeMap::new();
     let mut dict_extents = Vec::new();
-    for path in &dict_paths {
+    for path in &files.dict_paths {
         let rel = relative_to(&prefix_dir, path)?;
         manifest_files.insert(rel.clone(), digest_file(path)?);
         dict_extents.push(DictExtent {
             path: rel,
-            records: dict_records,
+            records: files.dict_records,
         });
     }
-    for path in [
-        &postings_path,
-        &pairs_path,
-        &external_ids_path,
-        &permutation_path,
-        &segment_dir.join("columns.arrow"),
-        &segment_dir.join("morton.u64"),
-    ] {
+    let mut external_id_extents = Vec::with_capacity(files.external_ids_paths.len());
+    for path in &files.external_ids_paths {
+        let rel = relative_to(&prefix_dir, path)?;
+        manifest_files.insert(rel.clone(), digest_file(path)?);
+        external_id_extents.push(rel);
+    }
+    for path in &files.other_paths {
         manifest_files.insert(relative_to(&prefix_dir, path)?, digest_file(path)?);
     }
 
@@ -362,7 +425,7 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
         }],
         deltas: Vec::new(),
         dict_extents,
-        external_id_extents: vec![relative_to(&prefix_dir, &external_ids_path)?],
+        external_id_extents,
         tombstones: Vec::new(),
         deny: Vec::new(),
         // Nothing has been added since MANIFEST.json — see the note above.
@@ -495,75 +558,154 @@ pub fn verify(root: &Path) -> Result<VerifyReport> {
 /// Write `pairs.parquet` (R4): `(entity_id: uint64, term_id: uint32)` sorted by
 /// `(term_id, entity_id)`, DELTA_BINARY_PACKED on both columns.
 ///
-/// `per_term[t]` is already ascending, and terms are emitted in ordinal order, so the required
-/// sort is the iteration order — no sort step is needed or performed. The file is off both
-/// request paths (build-cadence and oracle reads only), so the encoding is chosen for the
-/// oracle's benefit, not for query latency.
-fn write_pairs_parquet(path: &Path, per_term: &[Vec<u32>]) -> Result<()> {
-    let schema = std::sync::Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let props = WriterProperties::builder()
-        .set_writer_version(WriterVersion::PARQUET_2_0)
-        .set_encoding(Encoding::DELTA_BINARY_PACKED)
-        .set_dictionary_enabled(false)
-        .set_statistics_enabled(EnabledStatistics::Chunk)
-        .set_compression(Compression::SNAPPY)
-        .build();
-    let file = File::create(path).map_err(|e| BuildError::io(path, e))?;
-    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
-        .map_err(|e| BuildError::parquet(path, e))?;
+/// Rows are pushed in the required order rather than sorted here — both builds emit terms in
+/// ordinal order and each term's entities ascending, so the sort *is* the iteration order. The
+/// file is off both request paths (build-cadence and oracle reads only), so the encoding is
+/// chosen for the oracle's benefit, not for query latency.
+pub(crate) struct PairsParquetWriter {
+    path: PathBuf,
+    schema: std::sync::Arc<Schema>,
+    writer: ArrowWriter<File>,
+    entities: Vec<u64>,
+    terms: Vec<u32>,
+}
 
+impl PairsParquetWriter {
+    /// Rows per record batch. Bounds the writer's own memory no matter how many pairs arrive.
     const BATCH: usize = 1 << 16;
-    let mut entities: Vec<u64> = Vec::with_capacity(BATCH);
-    let mut terms: Vec<u32> = Vec::with_capacity(BATCH);
-    let flush = |entities: &mut Vec<u64>, terms: &mut Vec<u32>, w: &mut ArrowWriter<File>| {
-        if entities.is_empty() {
+
+    pub(crate) fn create(path: &Path) -> Result<Self> {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("entity_id", DataType::UInt64, false),
+            Field::new("term_id", DataType::UInt32, false),
+        ]));
+        let props = WriterProperties::builder()
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .set_encoding(Encoding::DELTA_BINARY_PACKED)
+            .set_dictionary_enabled(false)
+            .set_statistics_enabled(EnabledStatistics::Chunk)
+            .set_compression(Compression::SNAPPY)
+            .build();
+        let file = File::create(path).map_err(|e| BuildError::io(path, e))?;
+        let writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
+            .map_err(|e| BuildError::parquet(path, e))?;
+        Ok(PairsParquetWriter {
+            path: path.to_path_buf(),
+            schema,
+            writer,
+            entities: Vec::with_capacity(Self::BATCH),
+            terms: Vec::with_capacity(Self::BATCH),
+        })
+    }
+
+    pub(crate) fn push(&mut self, entity_id: u64, term_id: u32) -> Result<()> {
+        self.entities.push(entity_id);
+        self.terms.push(term_id);
+        if self.entities.len() == Self::BATCH {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        if self.entities.is_empty() {
             return Ok(());
         }
         let batch = RecordBatch::try_new(
-            schema.clone(),
+            self.schema.clone(),
             vec![
-                std::sync::Arc::new(UInt64Array::from(std::mem::take(entities))) as ArrayRef,
-                std::sync::Arc::new(UInt32Array::from(std::mem::take(terms))) as ArrayRef,
+                std::sync::Arc::new(UInt64Array::from(std::mem::take(&mut self.entities)))
+                    as ArrayRef,
+                std::sync::Arc::new(UInt32Array::from(std::mem::take(&mut self.terms))) as ArrayRef,
             ],
         )
-        .map_err(|e| BuildError::arrow(path, e))?;
-        w.write(&batch).map_err(|e| BuildError::parquet(path, e))
-    };
+        .map_err(|e| BuildError::arrow(&self.path, e))?;
+        self.entities.reserve(Self::BATCH);
+        self.terms.reserve(Self::BATCH);
+        self.writer
+            .write(&batch)
+            .map_err(|e| BuildError::parquet(&self.path, e))
+    }
 
+    pub(crate) fn finish(mut self) -> Result<()> {
+        self.flush()?;
+        let path = self.path.clone();
+        self.writer
+            .close()
+            .map_err(|e| BuildError::parquet(&path, e))?;
+        fsync_file(&path)
+    }
+}
+
+fn write_pairs_parquet(path: &Path, per_term: &[Vec<u32>]) -> Result<()> {
+    let mut writer = PairsParquetWriter::create(path)?;
     for (t, entity_ids) in per_term.iter().enumerate() {
         for &entity in entity_ids {
-            entities.push(entity as u64);
-            terms.push(t as u32);
-            if entities.len() == BATCH {
-                flush(&mut entities, &mut terms, &mut writer)?;
-            }
+            writer.push(entity as u64, t as u32)?;
         }
     }
-    flush(&mut entities, &mut terms, &mut writer)?;
-    writer.close().map_err(|e| BuildError::parquet(path, e))?;
-    fsync_file(path)
+    writer.finish()
 }
 
 /// Write `external-ids-0.arrow` (R4): `(external_id: binary, entity_id: uint64)` sorted by the
 /// external ID's **bytes**. The external ID here is the source corpus's entity ID as 8 bytes
 /// little-endian; byte order is not numeric order, so the sort is over the encoded keys.
-fn write_external_ids(path: &Path, staged: &[StagedItem]) -> Result<()> {
-    let mut rows: Vec<([u8; 8], u64)> = staged
+fn write_external_ids(dir: &Path, staged: &[StagedItem]) -> Result<Vec<PathBuf>> {
+    let mut rows: Vec<(u64, u64)> = staged
         .iter()
         .enumerate()
-        .map(|(position, item)| (item.source_id.to_le_bytes(), position as u64))
+        .map(|(position, item)| (item.source_id, position as u64))
         .collect();
-    rows.sort_unstable_by_key(|(key, _)| *key);
+    rows.sort_unstable_by_key(|(source_id, _)| source_id.to_le_bytes());
+    write_external_id_extents(dir, rows.len(), rows.iter().copied())
+}
 
+/// The largest number of rows one `external-ids-<n>.arrow` extent may carry.
+///
+/// Arrow's `Binary` layout addresses its values buffer with **`i32`** offsets, so an extent of
+/// 8-byte external ids saturates at `i32::MAX / 8` rows — a 10⁹-item bundle cannot be written as
+/// one extent at all. Splitting well below that ceiling and listing every extent in
+/// `external_id_extents` (contracts §2.1 has always made that field a list, and the engine's
+/// index already loads and re-sorts across extents) is what makes the largest corpus
+/// expressible; at every scale below the split point exactly one extent is written, identical to
+/// what earlier builds wrote.
+const EXTERNAL_ID_ROWS_PER_EXTENT: usize = 100_000_000;
+
+/// Write `rows` — `(source_id, entity_id)` in ascending external-id **byte** order, `len` of
+/// them — as one or more extents in `dir`, returning their paths in order. The extents partition
+/// the global order into consecutive ranges, so each is individually sorted too.
+fn write_external_id_extents<I>(dir: &Path, len: usize, rows: I) -> Result<Vec<PathBuf>>
+where
+    I: Iterator<Item = (u64, u64)>,
+{
+    let mut paths = Vec::new();
+    let mut rows = rows.peekable();
+    let mut remaining = len;
+    loop {
+        let take = remaining.min(EXTERNAL_ID_ROWS_PER_EXTENT);
+        let chunk: Vec<(u64, u64)> = rows.by_ref().take(take).collect();
+        let path = dir.join(format!("external-ids-{}.arrow", paths.len()));
+        write_external_id_extent(&path, &chunk)?;
+        paths.push(path);
+        remaining -= chunk.len();
+        if remaining == 0 || rows.peek().is_none() {
+            break;
+        }
+    }
+    Ok(paths)
+}
+
+fn write_external_id_extent(path: &Path, rows: &[(u64, u64)]) -> Result<()> {
     let schema = std::sync::Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("entity_id", DataType::UInt64, false),
     ]));
+    let keys: Vec<[u8; 8]> = rows
+        .iter()
+        .map(|(source, _)| source.to_le_bytes())
+        .collect();
     let external: ArrayRef = std::sync::Arc::new(BinaryArray::from_iter_values(
-        rows.iter().map(|(key, _)| key.as_slice()),
+        keys.iter().map(|key| key.as_slice()),
     ));
     let entity: ArrayRef = std::sync::Arc::new(UInt64Array::from_iter_values(
         rows.iter().map(|(_, id)| *id),
@@ -611,18 +753,38 @@ fn fsync_dir(path: &Path) -> Result<()> {
     dir.sync_all().map_err(|e| BuildError::io(path, e))
 }
 
+/// SHA-256 and size of `path`, read in fixed-size chunks. Never `fs::read` here: at 10⁹ items
+/// `columns.arrow` alone is over 20 GB, and slurping it to hash it would reintroduce the very
+/// ceiling this build was rewritten to remove.
 fn digest_file(path: &Path) -> Result<FileDigest> {
-    let bytes = fs::read(path).map_err(|e| BuildError::io(path, e))?;
+    use std::io::Read;
+    let mut file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut size = 0u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| BuildError::io(path, e))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
     Ok(FileDigest {
-        size: bytes.len() as u64,
-        sha256: hex_sha256(&bytes),
+        size,
+        sha256: hex_digest(hasher.finalize().as_slice()),
     })
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
+    hex_digest(Sha256::digest(bytes).as_slice())
+}
+
+fn hex_digest(digest: &[u8]) -> String {
     use std::fmt::Write;
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
+    let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {
         let _ = write!(out, "{byte:02x}");
     }

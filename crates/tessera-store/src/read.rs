@@ -1,4 +1,4 @@
-//! The bundle read protocol (contracts §2.3), the zero-copy `columns.arrow` / `morton.u64`
+//! The bundle read protocol (contracts §2.3), the zero-copy `columns.arrow` / `morton.u32`
 //! loader, and `tile_ranges`.
 //!
 //! `tessera-store` never depends on `tessera-authz`, and this module has its own Arrow IPC
@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
+use std::io::Read;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
@@ -147,10 +148,10 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
             };
 
             let seg_dir = slice_dir.join("segments").join(&seg_desc.seg_id);
-            let morton_path = seg_dir.join("morton.u64");
+            let morton_path = seg_dir.join("morton.u32");
             let columns_path = seg_dir.join("columns.arrow");
             let morton_rel = format!(
-                "partitions/{}/slices/{}/segments/{}/morton.u64",
+                "partitions/{}/slices/{}/segments/{}/morton.u32",
                 partition_desc.phash, seg_desc.slice, seg_desc.seg_id
             );
             let columns_rel = format!(
@@ -179,7 +180,7 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
                 return Err(StoreError::MalformedBundle {
                     detail: format!(
                         "segment '{}' (slice '{}'): manifest row_count {} doesn't match \
-                         morton.u64 ({} codes) or columns.arrow ({} rows)",
+                         morton.u32 ({} codes) or columns.arrow ({} rows)",
                         seg_desc.seg_id,
                         seg_desc.slice,
                         seg_desc.row_count,
@@ -389,23 +390,41 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
 /// (read-only bundle storage, no writer with access to a serving replica's files), not one this
 /// module's checks can close from inside a single process.
 fn verify_files(base: &Path, files: &BTreeMap<String, FileDigest>) -> Result<()> {
+    // Read in fixed-size chunks, never whole: at 10^9 items `columns.arrow` alone is over 20 GB,
+    // and slurping every file to hash it would make opening a bundle cost more memory than
+    // serving it. The verification itself is unchanged and unconditional — every named file is
+    // still read in full and hashed, because a bundle whose bytes were not checked is a bundle
+    // whose authorisation data was not checked (fail closed).
+    let mut buffer = vec![0u8; 1 << 20];
     for (rel_path, digest) in files {
         let path = safe_join(base, rel_path)?;
-        let bytes = std::fs::read(&path).map_err(|source| StoreError::Io {
+        let mut file = File::open(&path).map_err(|source| StoreError::Io {
             path: path.clone(),
             source,
         })?;
-        if bytes.len() as u64 != digest.size {
+        let mut hasher = Sha256::new();
+        let mut size = 0u64;
+        loop {
+            let read = file.read(&mut buffer).map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            size += read as u64;
+        }
+        if size != digest.size {
             return Err(StoreError::FileVerificationFailed {
                 path,
                 reason: format!(
-                    "size mismatch: manifest says {}, file is {} bytes",
-                    digest.size,
-                    bytes.len()
+                    "size mismatch: manifest says {}, file is {size} bytes",
+                    digest.size
                 ),
             });
         }
-        let actual = hex_sha256(&bytes);
+        let actual = hex_digest(hasher.finalize().as_slice());
         if actual != digest.sha256 {
             return Err(StoreError::FileVerificationFailed {
                 path,
@@ -420,15 +439,19 @@ fn verify_files(base: &Path, files: &BTreeMap<String, FileDigest>) -> Result<()>
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
+    hex_digest(Sha256::digest(bytes).as_slice())
+}
+
+fn hex_digest(digest: &[u8]) -> String {
+    use std::fmt::Write;
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
+        let _ = write!(out, "{byte:02x}");
     }
     out
 }
 
-/// A memory-mapped, zero-copy view of `morton.u64`: raw sorted little-endian `u64` codes, no
+/// A memory-mapped, zero-copy view of `morton.u32`: raw sorted little-endian `u32` codes, no
 /// header (R4).
 #[derive(Debug)]
 pub struct MortonSlice {
@@ -447,10 +470,10 @@ impl MortonSlice {
             path: path.to_path_buf(),
             source,
         })?;
-        if mmap.len() % 8 != 0 {
+        if mmap.len() % 4 != 0 {
             return Err(StoreError::MalformedBundle {
                 detail: format!(
-                    "{}: length {} is not a multiple of 8",
+                    "{}: length {} is not a multiple of 4",
                     path.display(),
                     mmap.len()
                 ),
@@ -458,10 +481,10 @@ impl MortonSlice {
         }
         let slice = MortonSlice { mmap };
         // `tile_ranges`'s binary search is only sound over an ascending array (contracts
-        // §2.5/§2.6: "Morton order"); a hand-corrupted or wrongly-built `morton.u64` that isn't
+        // §2.5/§2.6: "Morton order"); a hand-corrupted or wrongly-built `morton.u32` that isn't
         // sorted would make `partition_point` silently return a wrong (not merely imprecise)
         // range instead of erroring — checked once here, fail-closed, rather than trusted.
-        if !slice.u64().windows(2).all(|w| w[0] <= w[1]) {
+        if !slice.u32().windows(2).all(|w| w[0] <= w[1]) {
             return Err(StoreError::MalformedBundle {
                 detail: format!("{}: codes are not sorted ascending", path.display()),
             });
@@ -471,7 +494,7 @@ impl MortonSlice {
 
     /// The number of codes (rows) in this segment.
     pub fn len(&self) -> usize {
-        self.mmap.len() / 8
+        self.mmap.len() / 4
     }
 
     pub fn is_empty(&self) -> bool {
@@ -480,12 +503,12 @@ impl MortonSlice {
 
     /// The codes, in row order (ascending, ties broken by priority then entity ID at write
     /// time — contracts §2.6).
-    pub fn u64(&self) -> &[u64] {
-        // SAFETY: length is a checked multiple of 8 (validated at `load`); the mmap base is
-        // page-aligned (>= 8-byte aligned) by construction, so this cast is always valid — no
+    pub fn u32(&self) -> &[u32] {
+        // SAFETY: length is a checked multiple of 4 (validated at `load`); the mmap base is
+        // page-aligned (>= 4-byte aligned) by construction, so this cast is always valid — no
         // per-open re-check needed the way `permutation.bin`'s offset-16 slice needed one,
         // since here the slice starts at offset 0.
-        unsafe { std::slice::from_raw_parts(self.mmap.as_ptr() as *const u64, self.len()) }
+        unsafe { std::slice::from_raw_parts(self.mmap.as_ptr() as *const u32, self.len()) }
     }
 }
 
@@ -858,13 +881,17 @@ fn invalid_columns(path: &Path, detail: &str) -> StoreError {
 }
 
 /// The row range `tile` occupies within `seg`'s Morton order, found by binary search over
-/// `seg.morton.u64()` (contracts §2.5). Callers must treat a tile as resolving to a **set** of
+/// `seg.morton.u32()` (contracts §2.5). Callers must treat a tile as resolving to a **set** of
 /// ranges — one per segment sharing the tile's slice — even though Phase 1 has exactly one
 /// segment per slice; the engine-level signature is `Vec<Range<u32>>` (task brief).
+///
+/// `Tile::code_range` returns `u64` bounds deliberately: at depth 0 the exclusive end is
+/// `1 << 32`, which does not fit in `u32`. Each stored code is widened for the comparison
+/// rather than the bounds being narrowed, which would overflow to an empty range there.
 pub fn tile_ranges(seg: &SegmentData, tile: &Tile) -> Range<u32> {
-    let codes = seg.morton.u64();
+    let codes = seg.morton.u32();
     let (lo, hi) = tile.code_range();
-    let start = codes.partition_point(|&c| c < lo);
-    let end = codes.partition_point(|&c| c < hi);
+    let start = codes.partition_point(|&c| (c as u64) < lo);
+    let end = codes.partition_point(|&c| (c as u64) < hi);
     start as u32..end as u32
 }

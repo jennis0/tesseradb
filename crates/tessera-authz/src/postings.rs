@@ -44,32 +44,53 @@ pub fn write_postings(
     per_term: &[Vec<u32>],
     small_term_threshold: u32,
 ) -> io::Result<()> {
-    let mut builder = LargeBinaryBuilder::new();
-
+    let mut records = Vec::with_capacity(per_term.len());
     for (t, entities) in per_term.iter().enumerate() {
-        if !entities.windows(2).all(|w| w[0] < w[1]) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "write_postings: term {t}'s entity list must be sorted strictly ascending \
-                     (no duplicates)"
-                ),
-            ));
-        }
+        records.push(encode_posting(t, entities, small_term_threshold)?);
+    }
+    write_posting_records(path, &records)
+}
 
-        let mut record = Vec::new();
-        if (entities.len() as u64) <= small_term_threshold as u64 {
-            record.push(0u8);
-            for entity in entities {
-                record.extend_from_slice(&entity.to_le_bytes());
-            }
-        } else {
-            let mut bitmap = Bitmap::of(entities);
-            bitmap.run_optimize();
-            record.push(1u8);
-            record.extend_from_slice(&bitmap.serialize::<Portable>());
+/// Encode term `t`'s sorted entity list into its on-disk record (`u8 tag ‖ payload`), applying
+/// exactly the tag rule [`write_postings`] documents and the same unconditional sortedness
+/// check. Split out so a build that cannot hold every term's entity list at once can encode
+/// each term as soon as its list is complete and keep only the (compressed) records.
+pub fn encode_posting(
+    t: usize,
+    entities: &[u32],
+    small_term_threshold: u32,
+) -> io::Result<Vec<u8>> {
+    if !entities.windows(2).all(|w| w[0] < w[1]) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "write_postings: term {t}'s entity list must be sorted strictly ascending \
+                 (no duplicates)"
+            ),
+        ));
+    }
+
+    let mut record = Vec::new();
+    if (entities.len() as u64) <= small_term_threshold as u64 {
+        record.push(0u8);
+        for entity in entities {
+            record.extend_from_slice(&entity.to_le_bytes());
         }
-        builder.append_value(&record);
+    } else {
+        let mut bitmap = Bitmap::of(entities);
+        bitmap.run_optimize();
+        record.push(1u8);
+        record.extend_from_slice(&bitmap.serialize::<Portable>());
+    }
+    Ok(record)
+}
+
+/// Write `postings.arrow` from already-encoded records (see [`encode_posting`]); record ordinal
+/// = term id. Byte-for-byte the same file [`write_postings`] would write from the same postings.
+pub fn write_posting_records(path: &Path, records: &[Vec<u8>]) -> io::Result<()> {
+    let mut builder = LargeBinaryBuilder::new();
+    for record in records {
+        builder.append_value(record);
     }
 
     let array = builder.finish();
