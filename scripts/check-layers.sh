@@ -16,7 +16,7 @@ deny tessera-server tessera-authz
 deny tessera-wire tessera-store
 deny tessera-wire tessera-authz
 # I4: no ID conversions in types
-if grep -rn "impl From" crates/tessera-types/src/ | grep -E "EntityId|RowId|TermId|Handle"; then
+if grep -rn "impl From" crates/tessera-types/src/ | grep -E "EntityId|RowId|TermId|TesseraId|Handle"; then
   echo "FORBIDDEN: ID conversion in tessera-types"; fail=1
 fi
 # I10: the payload module never sees EntityId (handles + plain columns only)

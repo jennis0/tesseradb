@@ -1,3 +1,6 @@
+mod identity;
+pub use identity::{IdentityError, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+
 /// Macro for creating ID newtypes with no cross-space conversions (invariant I4).
 /// Each type gets new(raw) and raw(self) methods, with derives Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug.
 /// Under the (off-by-default) `serde` feature, also derives `Serialize`/`Deserialize`

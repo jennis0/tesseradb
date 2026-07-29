@@ -6,6 +6,11 @@ edition = "2021"
 [dependencies]
 serde = { workspace = true, optional = true }
 
+[dev-dependencies]
+# Test-only: parses reference/vectors/tessera_id.json against the known-answer vectors
+# (Task 5). The crate itself remains dependency-free of serde_json.
+serde_json = { workspace = true }
+
 [features]
 # Off by default: only tessera-lifecycle (the WAL) needs ID newtypes to serialise. Every other
 # crate keeps tessera-types dependency-free of serde.
