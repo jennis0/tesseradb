@@ -188,7 +188,7 @@ inherited as rejected.
 | Candidate | Detail | What it costs us |
 |---|---|---|
 | **Tantivy** | DocIds are segment-local, insertion-ordered, and renumbered by merges; the index is mmap'd via `MmapDirectory`; scoring is BM25 by default with `ConstScoreQuery` available to skip it | The most mature Rust text index. We give up incremental multithreaded indexing, a tested query parser, block-max WAND, and positions |
-| **Lance** | Row addresses are fragment ID ‖ offset. But it ships BITMAP / BTREE / LABEL_LIST scalar indexes and a genuine prefilter that [feeds an allow-list into the vector index before distance computation](https://deepwiki.com/lancedb/lance/5.4-filtering-and-row-masking) | A2 done properly, plus one format for columns *and* vectors *and* scalar indexes |
+| **Lance** | Row addresses are fragment ID ‖ offset — **but stable row IDs exist and are not experimental** (§11.2), which materially weakens this objection. Ships BITMAP / BTREE / LABEL_LIST scalar indexes and a genuine prefilter that [feeds an allow-list into the vector index before distance computation](https://deepwiki.com/lancedb/lance/5.4-filtering-and-row-masking) | A2 done properly, plus one format for columns *and* vectors *and* scalar indexes |
 | **DataFusion / Parquet** | Predicate pushdown produces row selections and record batches; Parquet is already a workspace dependency | A whole query engine we already ship. But it optimises with statistics, which §8.2 forbids |
 | **DuckDB** | Automatic zonemaps, FTS with `match_bm25`, VSS with HNSW — all in-process | Zonemaps are exactly the "Morton range ≡ contiguous row range" trick, generically implemented |
 | **SQLite + FTS5 + `sqlite-vec`** | Smallest possible embedded footprint; FTS5 and vectors cross-referenced by rowid | Ubiquity and auditability; SQLite is arguably the most-tested code in the register |
@@ -223,7 +223,7 @@ this survey rather than a rejection — noted in §10.
 | **`sled`** | Alpha; rewrite incomplete |
 | **`fjall`** | LSM in pure Rust, but [deliberately does not mmap, and active feature development winds down into 2026](https://fjall-rs.github.io/post/fjall-3/) |
 | **`faiss-rs`** | Pinned to Faiss 1.7.2, dynamically linked against a system install. `faiss-next` is newer (1.14.x, optional CUDA) but young |
-| **`redb`** | Pure Rust, mmap'd copy-on-write B-trees, LMDB-inspired — the closest pure-Rust analogue to LMDB. Not disqualified; simply less proven at this workload than LMDB |
+| **`redb`** | Pure Rust, copy-on-write B+trees, LMDB-inspired. **Not an mmap store: `create_mmapped`/`open_mmapped` were removed in 2.0 because the backend's soundness could not be proven** (§11.3). That removes the zero-copy mmap property §8 leans on, so it is not the pure-Rust LMDB analogue this memo first called it |
 
 Archival of the only pure-Rust DiskANN is the single most consequential maturity finding in
 this survey: it removes the option that would otherwise have been the best fit for
@@ -758,13 +758,11 @@ both operands are inside `M_auth`.
   yields anything bitmap-shaped was not established. The most under-examined live candidate.
 - **Groonga** — LGPL, embeddable, column store plus full text, actively released. Not
   evaluated.
-- **Vortex** — compute pushdown into the encoding is close to what §6.6 wants, and the
-  random-access claims are strong. Not evaluated against an actual predicate workload.
-- **Lance** — the prefilter is genuinely §8.2-shaped and it bundles scalar indexes, FTS and
-  vectors. Set aside on row addressing, which may be the wrong call.
-- **`redb`** — the pure-Rust LMDB analogue, under-evaluated relative to LMDB.
 - **`croaring` 2.x frozen views** — the disk-backed story in §8 depends on this and it was
   not verified against the crate's actual Rust API.
+
+Vortex, Lance and `redb` were flagged as gaps in the first draft of this memo and have since
+been examined; §11 records what was found, including two corrections to §3.
 
 **Measurements that would settle the contested items.** All are cheap relative to the
 decisions they inform, and all should follow the Phase 0 pattern of measuring over the
@@ -784,7 +782,176 @@ synthetic 10⁹ corpus:
 
 ---
 
-## 11. Sources
+## 11. Deep dive: Vortex, Lance, redb, and off-the-shelf bitmap-index implementations
+
+Added 2026-07-29 on owner request, after the three formats above were flagged as gaps in §10
+and the question was raised of whether an optimised implementation of Roaring-based indexes
+over a KV store already exists rather than being written here.
+
+Two of the four findings correct §3. One of them corrects a claim this memo made, and the
+other weakens an objection this memo relied on.
+
+### 11.1 Vortex — the most interesting substrate, and the least settled
+
+**The model.** Vortex separates in-memory *Arrays* (logical type + physical encoding) from
+lazy *Layouts*, which permit query planning without fetching data. Built-in layouts are
+`FlatLayout` (one serialised array in one segment), `StructLayout` (one child layout per
+field), `ChunkedLayout` (one child per row partition), `ZoneMapLayout` (statistics per
+logical zone) and `DictLayout` (dictionary values plus indices). Layouts reference lazily
+fetched *segments* whose physical location is abstracted, so the storage backend is
+pluggable. The footer holds a segment index mapping row ranges to segment offsets.
+
+**Why it is attractive here.** Three properties line up with things this design already
+needs:
+
+- **Compute pushdown into the encoding.** Encodings supply compute kernels, so a range
+  predicate over a delta-encoded column is evaluated without full decode. That is §6.6's
+  requirement — evaluate a range without materialising the column — arriving as a general
+  facility rather than a bespoke BSI.
+- **Random access ~200× faster than Parquet from local disk.** The design's gather is a
+  sorted list of row IDs and a request for a gather (§10.1); it is *the* access pattern,
+  and it is precisely what Parquet is bad at. This is relevant well beyond attributes — it
+  bears on the hot columns and the drawn-mark budget's residency question (§10.5, r20).
+- **Immutable files.** A8 satisfied natively, no second lifecycle.
+
+**Why it is not settled.** Format stability is managed by date-stamped *editions*
+(`YYYY.MM.DD`) rather than semver, with a deliberately minimal footer so older readers can
+consume newer files that avoid unsupported features, and writers can target older reader
+editions. That is a thoughtful compatibility story, and it is also an admission that the
+format is still moving. Planned-but-absent: forwards compatibility via embedded WebAssembly
+decompressors. **Licence was not confirmed** and must be before any commitment.
+
+**Disposition.** Promoted from "set aside" to **candidate worth a measurement**, but for the
+*gather*, not for the attribute index. The attribute operands want bitmaps; Vortex hands back
+Arrow. Where it might genuinely win is Appendix A's hot columns, and that is a different
+memo.
+
+### 11.2 Lance — stable row IDs exist, which weakens my objection, but the mechanism is in flux
+
+§3.4 set Lance aside because row addresses are fragment ID ‖ offset and therefore unstable.
+**That was incomplete.** Lance has *move-stable row IDs*, and they are an established
+feature rather than an experiment: auto-incrementing `u64` IDs, `max_row_id` tracked in the
+manifest and assigned during the commit loop, with each fragment carrying a small row-ID
+index mapping row ID to row address — usually a simple range after an append. The stated
+motivation is exactly ours: compaction changes row addresses, which invalidates index files
+and degrades queries.
+
+Two qualifications, and they matter.
+
+**"Move-stable" is not "update-stable."** IDs survive compaction and other physical rewrites,
+but *updated rows are deleted and re-appended under new IDs*. Under I9 an entity ID is
+permanent — never recycled, never reassigned — so if entity ID were Lance's row ID, an
+attribute update would silently mint a new identity for an existing item. Every mask, node
+membership and generating set naming the old ID would then be wrong in the worst possible
+way: not stale, but *pointing at nothing*, while the item still exists. So entity ID cannot
+be Lance's row ID under any mutable-attribute scenario, which returns us to storing entity
+ID as a column and paying translation — the original objection, narrowed but intact.
+
+**The mechanism is under active re-evaluation.** [Discussion #6933](https://github.com/lance-format/lance/discussions/6933)
+asks whether stable row IDs should stay a purpose-built storage path or become a
+system-managed identity column backed by a maintained index, and the maintainers' own list
+of concerns is instructive: the manifest-based `row_id_meta` path fragments metadata
+encoding, lookup construction, caching and maintenance semantics; it can inflate
+manifest-adjacent state over time; it overlaps conceptually with the Fragment Remapping
+Index; and the mapping degrades under frequent row-wide updates.
+
+**Disposition.** The objection in §3.4 stands but for a better-stated reason: not "row IDs
+are unstable" (they need not be) but **"identity is the one thing we cannot delegate."**
+I9's permanence, signature-sorted assignment, and the fact that identity assignment is
+*permanent under I9 and cannot be retrofitted* together mean the entity-ID allocator has to
+be ours. Lance remains a strong candidate for the **vector sidecar and its scalar
+prefilter**, where identity is ours and Lance's row IDs are a private detail — and there the
+prefilter is genuinely §8.2-shaped.
+
+### 11.3 redb — the mmap claim in §3.6 was wrong
+
+§3.6 described `redb` as "mmap'd copy-on-write B-trees" and the closest pure-Rust analogue to
+LMDB. **The first half is no longer true.** `Builder::create_mmapped` and
+`Builder::open_mmapped` were **removed in redb 2.0**, because it was infeasible to prove the
+mmap backend sound; the remaining file-based backend is reported to be within a constant
+factor. The trade was made deliberately, in favour of an entirely safe API.
+
+That is decisive for A3 as this memo frames it. §8's disk-backed story is *mmap'd zero-copy
+Roaring frozen views* — the page cache does the residency management and a bitmap is used in
+place without deserialisation. A file-backed store must copy the value into a buffer on every
+read. For a per-query attribute operand that copy may well be acceptable; for anything on the
+per-viewport path it is not. So `redb` is not the LMDB substitute here; LMDB's mmap is
+precisely the property being substituted for.
+
+What `redb` does have, and what is worth stealing conceptually, is its **savepoint and
+epoch-reclamation model**: copy-on-write B+trees where committed pages are never modified in
+place; ephemeral and *persistent* savepoints, the latter surviving restart, with
+constant-time creation and restoration; and pages moving to "pending free" and being
+reclaimed once all referencing transactions are orphaned. That is structurally the same
+mechanism as our generations, pins and the epoch ledger — a pin *is* a savepoint, and
+retirement *is* epoch-based reclamation. If a KV engine is ever adopted, `redb`'s model is
+the one whose consistency semantics would map onto the lifecycle document with least
+friction, which partly offsets the mmap loss. Durability is configurable per transaction
+(non-durable; 1PC + XXH3 checksum; 2PC), which is the right shape for a WAL-fronted design.
+
+**Disposition.** Set aside for the postings path on the mmap regression. Retained as the
+reference model for lifecycle semantics if §4.1's escalation is ever taken.
+
+### 11.4 Is there an off-the-shelf Roaring-index-over-KV implementation?
+
+The question is the right one to ask — if several attribute families each want "a keyspace
+mapping values to Roaring bitmaps, persisted, compressed, disk-backed", that is one component
+written once, and it is exactly the sort of thing that should already exist.
+
+**The honest answer: no mature Rust library does this as a reusable component.** What exists:
+
+| Candidate | What it is | Why it does not serve |
+|---|---|---|
+| **Meilisearch `milli` facet databases** | The real thing: LMDB keyspaces mapping facet values and value-ranges to Roaring bitmaps, with the hierarchical level tree | [Not published, explicitly not maintained as a library](https://github.com/meilisearch/meilisearch/issues/3367). Reuse the design (§6.5–6.6), not the code |
+| **GreptimeDB `index` + `puffin`** | Per-column inverted index: an FST mapping values to bitmap (offset, size) pairs, bitmaps containerised in Puffin as `greptime-inverted-index-v1`. A `Bitmap` abstraction supporting **both `BitVec` and `RoaringBitmap`** | **Bitmaps are over fixed-size row groups (e.g. 4,096 rows), not individual rows.** It is a skip index that narrows *which groups to scan*, not an exact posting list. Under I2 we need exact masked counts, so a superset-with-rescan is not an operand — it is a candidate generator |
+| **`bitrush-index`** | Serialisable bitmap index with `memory_index` and `storage_index` modes; claims millions of values/sec on one thread | Directly on-point and the closest to what was asked for. Small, young, single-author; needs evaluation before it could be trusted with an invariant-bearing structure |
+| **FeatureBase / Pilosa** | The canonical range-encoded BSI implementation | Go, and a service (§3.3) |
+| **`edgesearch`** | Term → Roaring bitmap postings, chunked for Cloudflare Workers KV | A demonstration that the pattern is standard practice, not a reusable component |
+
+**But one layer *is* reusable off the shelf, and it is the layer worth reusing: the container
+format.**
+
+**Puffin** is Apache Iceberg's format for auxiliary index blobs — a file holding typed,
+independently-addressable blobs with metadata and a footer. GreptimeDB uses it for exactly
+this purpose. And Iceberg's `deletion-vector-v1` blob type specifies a **standard on-disk
+serialisation for 64-bit Roaring bitmaps**: 64-bit positions split into a 32-bit high key and
+a 32-bit sub-position, one 32-bit Roaring bitmap per key, bitmap count as 8 bytes
+little-endian, bitmaps ordered by unsigned key comparison, with big-endian length and CRC
+fields for Delta compatibility.
+
+That matters because it is precisely the decision this memo would otherwise have to invent:
+how do we lay many Roaring bitmaps out in one immutable file, addressably, with checksums and
+room for metadata? There is a published spec, multi-language readers, and a production Rust
+user. Adopting it costs a little awkwardness (the endianness split is a compatibility scar,
+and `deletion-vector-v1` is semantically a delete vector, so we would want our own blob type
+alongside rather than misusing theirs) and buys a format decision we do not have to defend.
+
+**Recommendation.** Split the question in two, and the reuse answer differs by half:
+
+- **Container and codec: reuse.** Puffin as the blob container, Iceberg's Roaring
+  serialisation as the bitmap encoding, `croaring`'s portable/frozen format as the in-process
+  representation. No format invention.
+- **The index logic: write it.** A few hundred lines per family over §6's constructions.
+  This is the A7 justification, stated: the only implementations that exist are unpublished
+  (milli), coarse-grained by design (GreptimeDB), or too young to carry an invariant
+  (`bitrush-index`) — and the logic itself is small, whereas the format is not.
+
+One design idea to adopt outright regardless: **GreptimeDB's `Bitmap` abstraction over both
+`BitVec` and Roaring**. §6.6 identified that range-encoded BSI slices are roughly half-dense
+and therefore compress badly under Roaring; a bitmap type that switches representation by
+density resolves that without a new codec, and it is the same insight Lucene acts on when it
+prefers `FixedBitSet` above 1% density. The caution from prior art §1 applies and must be
+carried across: a dense `FixedBitSet` has **no cheap range rank**, and `range_cardinality` is
+load-bearing for us (§8.1's free affordance), so the switch may be taken for BSI slices —
+which are never range-ranked — but *not* for postings, which are.
+
+**Added measurement.** Evaluate `bitrush-index` against a hand-rolled Puffin-framed index on
+one attribute family, and settle the Puffin blob-type question, before writing the second
+family. If it holds up, it removes most of the code this memo assumes we write.
+
+---
+
+## 12. Sources
 
 Roaring and bitmaps: [CRoaring](https://github.com/RoaringBitmap/CRoaring) ·
 [`croaring`](https://crates.io/crates/croaring) · [`roaring`](https://docs.rs/roaring) ·
