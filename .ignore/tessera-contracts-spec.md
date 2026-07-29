@@ -71,13 +71,14 @@ bundle/
         segments/<seg_id>/
           columns.arrow
           morton.u32
+          permutation.bin        # streamed segments only (2.6); absent on the build segment
       text/…                    # Phase 4 (2.10)
       vectors/…                 # Phase 4 (2.10)
 ```
 
 `<phash>` is `"default"` for the empty required set, else the hex SHA-256 over the partition's required descriptors, each encoded as `u32 length ‖ bytes`, sorted bytewise, concatenated. `CURRENT` is the only mutable file, replaced atomically (write-then-rename locally; conditional put on object stores). Every other file is immutable; the prefix grows only by whole new files named in a newer side-manifest. `<slice_id>` and `<seg_id>` are opaque; identity and order come from manifests, never filename lexicography. A `seg_id`, once used, is **never reused** — across flushes, compactions or prefixes (merge-abandonment identity checks and delta provenance both depend on it).
 
-**One segment per (partition, slice) at build.** `tessera build` and every compaction emit exactly one segment per partition-slice — a build *is* a full compaction. Additional segments exist only between compactions, appended by streaming flushes. This is what makes the permutation's single-segment addressing (2.6) sufficient.
+**One segment per (partition, slice) at build.** `tessera build` and every compaction emit exactly one segment per partition-slice — a build *is* a full compaction. Additional segments exist only between compactions, appended by streaming flushes. This is what makes the slice-level `permutation.bin`'s single-segment addressing (2.6) sufficient. *(r6: a **streamed** segment additionally carries its own `permutation.bin`, shown in the tree above, because 0.3 deviation 6 removes the `entity_id` column r5 located streamed entities through. The slice-level file addresses the build segment; a streamed segment's own file addresses that segment, bounded by its `entity_hi − entity_lo`. Compaction folds both back into one segment and one fresh permutation, so the streamed form exists only between compactions — Phase 2, and no Phase 1 build emits one.)*
 
 ### 2.2 MANIFEST.json
 
