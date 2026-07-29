@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 19
+**Status:** Draft for review — revision 20
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 *A tessera is a single tile of a mosaic, and — in Rome — a token presented to be recognised and admitted. Both readings are load-bearing: the unit of storage is a tile, the unit of access is a token, and every viewer assembles a different mosaic from the same tiles without any of them seeing the whole picture.*
@@ -438,6 +438,8 @@ A warm stateful tier is **mandatory**. Masking cannot be pushed to a CDN, unmask
 
 Serving nodes hold the term index, the auth plugin's auxiliary structures and the text index resident for their partition. Token-to-mask state is held with LRU plus maximum-lifetime eviction, with the auth data retained alongside so eviction is transparent (§2.3).
 
+**Resident for the partition, not read per viewport** *(r20)*. The sentence above sizes what a node holds; it is not a claim about per-request cost, and it has been read as one. Mask build is **per session**, and it reads only the ~10<sup>4</sup> postings the principal actually satisfies — not the index. Ordering the structures by access *cadence* rather than by size gives a much smaller per-viewport working set than the residency figure implies: `priority` is scanned per viewport, `morton` is touched sparsely (~30 pages per tile), the gather columns are per viewport but page-sparse at small *k*, and the term index and `permutation.bin` are per *session*. **At a large mark budget the gather columns join the per-viewport set** — the gather stops being a sparse point read and becomes a scan — which is what makes the drawn-mark budget a residency question and not only a latency one.
+
 ### 10.6 Wire format and the trust boundary
 
 Responses are Arrow IPC; typed arrays go straight into GPU buffers with no parsing. Points carry per-session opaque handles rather than entity IDs (**I10**), resolved server-side on drill-down. The point handle and the authorisation token are different objects that happen to share the word.
@@ -556,7 +558,9 @@ The materialised mask breaks first: at 125 MB dense, a thousand live auth inputs
 
 ### 13.2 What does not break
 
-The render path is invariant — a viewport shows a few thousand points at 10<sup>9</sup> exactly as at 10<sup>7</sup>. The tile scheme is invariant; tiles simply go deeper. And label generation cost is the caller's, so it does not appear here at all.
+The tile scheme is invariant; tiles simply go deeper. And label generation cost is the caller's, so it does not appear here at all.
+
+**The render path's invariance is a claim under test, not a settled property** *(r20)*. Earlier revisions asserted it flatly — "a viewport shows a few thousand points at 10<sup>9</sup> exactly as at 10<sup>7</sup>" — but that held only under the assumption that a viewport draws a few thousand marks. The owner decision of 2026-07-29 inverts the assumption: the drawn-mark budget should be the largest a given client can render, plausibly 10<sup>7</sup> on a capable GPU, which changes which reads dominate and which structures must be resident (Appendix A, §10.5). Probes P1 (GPU render) and P2 (transport and decode) decide it; until they report, this section claims nothing about the render path at large *k*. See the drawn-mark budget spec.
 
 ### 13.3 Sharding, and an unresolved trade
 
@@ -659,10 +663,10 @@ At 10<sup>7</sup> items:
 | Term index, ~1 posting/item | 20–40 MB |
 | Hot columns (24 B/row) | 240 MB |
 | Coordinates only (2 × float32) | 80 MB |
-| Permutation arrays, both directions | 80 MB |
+| Permutation `entity_to_row` | 40 MB |
 | Candidate lists, levels 0–6 at 4*k* = 128 | 2.8 MB |
 | Retained auth data (per mask) | ~40 KB |
-| Wire payload, 50 k points | 0.6 MB |
+| Wire payload, 50 k points *(assumed k; P2 replaces)* | 0.6 MB |
 | Source embeddings (768-d float32), if served | 31 GB |
 
 At 10<sup>9</sup> items:
@@ -674,9 +678,13 @@ At 10<sup>9</sup> items:
 | Term index, ~1 posting/item | ~2 GB | ~31 MB |
 | Hot columns | 24 GB | 375 MB |
 | Coordinates only | 8 GB | 125 MB |
-| Permutation arrays, both directions | 8 GB | 125 MB |
+| Permutation `entity_to_row` | 4 GB | 62.5 MB |
 | Candidate lists, levels 0–9 | 179 MB | ~3 MB |
 | Source embeddings, if served | ~3 TB | separate store |
+
+**One direction only** *(r20)*. Earlier revisions listed "permutation arrays, both directions". Contracts §2.6 stores only `entity_to_row: u32 × bound`; the row→entity direction *is* the `entity_id` column of `columns.arrow`, already counted in the hot column set above. Counting it twice inflated the residency figure by 4 GB at 10<sup>9</sup>.
+
+**The wire figure is an assumption, not a measurement** *(r20)*. 0.6 MB at 50 k points is 12 B/point arithmetic against an assumed mark budget, not an observed Arrow IPC payload. Probe P2 measures bytes on the wire, transfer time and JS decode time across the sweep and replaces this row with a measured figure at the calibrated *k*.
 
 Mask construction costs tens of milliseconds at 10<sup>7</sup> and seconds at 10<sup>9</sup> before sharding parallelises it.
 
@@ -833,6 +841,7 @@ Both were checked exhaustively against explicit quantification over all well-for
 
 ## Appendix G — Revision history
 
+- **r20** — Corrections owed to the corpus by the drawn-mark budget spec (2026-07-29), which records the owner decision that the drawn-mark budget should be the largest a given client can render rather than the few thousand this document was written around. Appendix A's permutation row counted both directions; contracts §2.6 stores only `entity_to_row`, and the row→entity direction is the `entity_id` column already counted in hot columns — 8 GB → 4 GB at 10<sup>9</sup>. Appendix A's 50 k-point wire figure is marked as an assumption at an unstated *k*, pending probe P2. §13.2's "the render path is invariant" is demoted from settled property to claim under test, pending probes P1 and P2. §10.5's residency sentence gains a note that it sizes what a node holds and is not a per-viewport claim — mask build is per session and reads only the postings the principal satisfies, and it is at a large mark budget that the gather columns join the per-viewport set. No invariant changes; no format changes. The companion format change (`morton.u64` → `morton.u32`) is the contracts spec's r5.
 - **r19** — One amendment from the Phase 1 plan's independent review (owner-decided, 2026-07-28). §2.3: the canonical mask-cache key gains the postings identity (manifest digest; partition + postings-epoch under fan-out) alongside the satisfied term set and plugin version — term IDs are bundle-relative ordinals, so a cache persisting across a rebuild could serve a mask naming different entities under an identity-free key. Aligns §2.3 with the cache key the system architecture's §3 already specified. Companion changes in the contracts spec's r4: the pair relation becomes Parquet, and the priority function is fixed as splitmix64-high-16.
 - **r18** — The real-label rerun retired by owner decision (2026-07-28): no real access-labelled corpus is available (personal project), so the synthetic-corpus Phase 0 evidence is accepted as final and Phase 1 proceeds on it. The standing caveat converts to deployment guidance: re-run the Phase 0 measurements against real labels before trusting signature alignment, posting compression or union-cost conclusions in any deployment that has them. §16's spatial-autocorrelation entry updated accordingly. Also annotated in place: §11.1's measured compression baseline (created-order ≈ nothing; signature-sorting is the whole effect) and §7.2's measured duty cycle (direct evaluation is the main route).
 - **r17** — Four §16 policy questions settled by owner decision (2026-07-27): compartment semantics are **data separation** (§12.1 now operative, not conditional); **current credentials govern all temporal slices** (§9 — the shared-mask premise stands; historical-grants viewing knowingly not provided); the declared generating set is the **prompt sample** (§7.8 — honest to provenance, recorded in manifest provenance, full membership available as a per-deployment strict mode); the token-lifetime backstop defaults to **one hour** (deployment-overridable).

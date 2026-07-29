@@ -201,13 +201,18 @@ empty-tile failure, for exactly the users least able to report it.
 
 *Lands in:* `tessera-spatial`, Phase 2. *Evidence:* results §5.
 
-### 3.2 The permutation must stay cached — **DECIDED** *(serving)*
+### 3.2 The *projected mask* must stay cached — **DECIDED** *(serving)*
 
 Permuting a 69M-item mask from entity to row space costs **8.8 s** at
 10⁹. §10.4 already requires caching it per *(token, slice, pin)*; the
 number makes the consequence concrete — if it ever drifts onto the
 per-viewport path, the system is dead. Worth a comment at the call site,
 not just a line in a document.
+
+**What is cached is the projected mask**, per *(token, slice, pin)* — not
+`permutation.bin`, which is read once per session and never per viewport.
+The earlier heading said "the permutation", which reads as the file.
+Clarified 2026-07-29; no decision changes.
 
 *Evidence:* results §6.
 
@@ -226,6 +231,25 @@ depth 0*, where one call counts a billion rows in 191 µs. §13.3's
 concern about zoomed-out overviews is about mask materialisation and
 shard fan-out, not counting. *Evidence:* results §6.
 
+### 3.5 The gather was never measured — **PROBE OWED** *(serving)*
+
+Phase 0 measured every bitmap primitive and no column read. The whole
+selection path downstream of `range_cardinality` is therefore modelled,
+not observed, and it is where §4's retrieval argument lives.
+
+Two distinct reads, and conflating them understates the second:
+
+| Read | Rows touched | Sensitive to row clustering? |
+|---|---|---|
+| Output gather (x/y/scalars) | *k* ≈ 30 per tile | Barely — sampled rows scatter regardless |
+| **Priority read under direct evaluation** | **every visible row in the tile range** | **Yes — this is the one** |
+
+*Probe:* priority-column reads over a tile-sized row range, scattered
+vs signature-clustered visible set, swept over coverage
+(0.01%–25%) and tile depth; alongside the output gather as a control.
+Pre-Phase-2, cheap, and it decides whether §4 has a retrieval case at
+all or only a mask-projection one.
+
 ---
 
 ## 4. Row-space signature-major layout — **DEFERRED**
@@ -235,15 +259,117 @@ with a Morton-only residual. Top 500 groups cover 82.4% of the corpus;
 the knee is K ≈ 250–1,000 aligned groups, implying a size threshold of
 ~0.02–0.05% of corpus.
 
-**Why not now:** the whole-group visibility shortcut is invariant-bearing
-(sound only while a group is untouched by overlay and live set), so it
-wants the conformance suite watching. Its costs are real — per-tile
-segment fan-out at ~6–8× the design's budget, a group-aware merge
-policy, and predicate changes becoming physical row moves.
+**The key is the signature — the item's whole term set — not a single
+term.** Items carry ~130 terms each (results §7), so a term-major layout
+is not a partition of row space: it requires either duplicating each row
+~130× in geometry or nominating a "primary" term. Duplication is fatal
+independently of cost, because a masked count stops being the
+cardinality of a bitmap and starts needing a dedup — which is the
+property I2's aggregates rest on. A signature *is* a partition (each
+item has exactly one), so the layout is a permutation of rows, and it is
+what makes the whole-group visibility shortcut available at all.
 
-**Trigger:** a deployment whose real-label signature histogram shows the
-knee, *and* a working conformance suite. Per-deployment build decision,
-not a core commitment. *Evidence:* results §3; scaling analysis §5.3.
+### 4.1 What it buys
+
+1. **Mask projection into row space.** The measured 8.8 s to project a
+   69M-item mask (results §6) is dominated by container count. Cluster
+   the authorised rows and the projected bitmap collapses from ~15,000
+   containers toward runs: cheaper to build, smaller to cache per
+   *(token, slice, pin)*, cheaper for every subsequent range operation.
+   This is the strongest leg.
+2. **The whole-group visibility shortcut** — every item in a signature
+   group is visible to exactly the same principals, so a group can be
+   admitted or skipped without consulting the mask. Invariant-bearing;
+   see below.
+3. **Permutation encodability.** Today `permutation.bin` is a flat
+   `u32 × bound` array (~4 GB/slice at 10⁹) and is left uncompressed for
+   a *deliberate* reason, not an incidental one: §11.1 forbids assigning
+   entity IDs in Morton order (leak C6), so entity order and row order
+   are unrelated by construction and the values are a maximum-entropy
+   permutation — delta-coding buys ~17% (log₂(n!)/n ≈ 26.6 bits vs 32)
+   on a structure already off the per-viewport path. Signature-major
+   row layout breaks that: entity IDs are *already* signature-sorted
+   (§2.1, permanent under I9), so `entity_to_row` becomes near-monotone
+   within each group — long increasing runs, the regime where
+   Elias-Fano or delta-plus-bitpacking wins outright, and it cuts the
+   8.8 s projection at the same time. **The permutation's
+   incompressibility is a consequence of the current layout, not a
+   property of permutations.** Not an independent option; it arrives
+   with §4 or not at all.
+4. **The priority gather under direct evaluation** — see §4.2. Real,
+   but unmeasured.
+
+### 4.2 What it does *not* buy, and one thing that is unmeasured
+
+**It does not help the output gather.** Per viewport that is a few
+hundred tiles × *k*≈30 marks, columnar, ~10 pages per column per tile
+(design §10.4). The sample is the *k* lowest-**priority** items and
+priority is a hash of the entity ID — uncorrelated with everything — so
+the sampled rows are scattered within a tile under any layout.
+Signature-major clusters *authorised* rows, not *sampled* rows, and it
+makes this read slightly worse by fragmenting each tile into K
+sub-ranges.
+
+**It plausibly does help the priority read, which is the larger one.**
+Direct evaluation — the *main* route at working coverages (§3.1) —
+reads the priority column for **every visible row in the tile's range**,
+not for *k* rows. At 1% coverage of a 266k-row depth-6 tile that is
+~2,700 scattered reads over the tile's priority block. That read scales
+with visible count and is exactly what clustering would make contiguous.
+
+**Neither read was measured in Phase 0.** results §1–8 cover mask build,
+n-way union, `range_cardinality`, autocorrelation and per-item breadth;
+there is no gather measurement anywhere. The probe that would settle
+§4's retrieval argument is in §3.5.
+
+### 4.3 Ruled out, so they are not re-derived
+
+- **Priority as a major sort key at some tile depth.** The ordering is
+  already `(morton-prefix-to-leaf, priority)` — design §5.2 puts
+  priority in place of deeper Morton bits below leaf depth, and §10.4
+  stores columns that way. That does give a contiguous prefix read at
+  *leaf* depth. Moving priority outside the Morton prefix at any
+  coarser depth *d* makes depth-*d* tiles contiguous at the cost of
+  every depth below *d*, and `tiles_for_bbox` needs contiguity at every
+  zoom. One depth or all depths; not both.
+- **Build-time hierarchical LOD levels** (Potree/Cesium style: assign
+  each point the coarsest depth at which it makes the top-*k*, order by
+  `(level, morton)`, so the visible set at depth *d* is a prefix). This
+  is the correct answer in an unmasked system and is **closed to this
+  one by invariant, not by cost**: the top-*k* is computed unmasked at
+  build, which is "derived from the full dataset and then gated" — the
+  I2 shape §7.2 opens by rejecting. The system's build-time LOD
+  structure already exists and is already correctly bounded: the
+  candidate list, which yields *k* survivors only above coverage 1/*c*.
+
+### 4.4 Why not now
+
+The whole-group visibility shortcut is invariant-bearing (sound only
+while a group is untouched by overlay and live set), so it wants the
+conformance suite watching. Its costs are real — per-tile segment
+fan-out at ~6–8× the design's budget, a group-aware merge policy, and
+predicate changes becoming physical row moves. It also degrades to
+nothing on author-like policy (1.54M signatures over 2.42M items), so it
+is a per-deployment build decision, not a core commitment.
+
+**Trigger** *(aligned to plan §14, 2026-07-29)*. Design r18 retired the
+real-label rerun permanently — no real access-labelled corpus is
+available to this project — so the signature histogram is **deployment
+guidance**, not a gate this project can pass. The two live gates are:
+
+1. **A working conformance suite** (Phase 2, plan §10.1). The
+   whole-group visibility shortcut is sound only while a group is
+   untouched by the overlay and the live set — invariant-bearing, and
+   exactly the class of change that passes every functional test while
+   leaking.
+2. **The gather probe** (§3.5, re-scoped to large *k* by the drawn-mark
+   budget spec's P4). Phase 0 measured no column read at all, so the
+   retrieval half of the case is modelled.
+
+A deployment that *does* have real labels re-runs the Phase 0
+measurements and checks its own signature histogram for the knee before
+enabling the layout. *Evidence:* results §3, §6; scaling analysis §5.3.
+**Open decision:** plan §14.
 
 ---
 
