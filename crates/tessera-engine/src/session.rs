@@ -24,10 +24,11 @@ use sha2::{Digest, Sha256};
 
 use tessera_authz::{Dict, FragmentCache, FrozenFragment, PostingsReader};
 use tessera_lifecycle::alloc::{high_water_from, Allocator};
+use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::overlay::replay;
-use tessera_lifecycle::wal::{Wal, WalError};
-use tessera_lifecycle::OverlayError;
-use tessera_plugin::{Plugin, PluginError};
+use tessera_lifecycle::wal::{ChangeOp, Wal, WalError, WalRecord, WalRow};
+use tessera_lifecycle::{alloc::PendingItem, assign_sorted, Overlay, OverlayError};
+use tessera_plugin::{Descriptor, Plugin, PluginError};
 use tessera_store::manifest::CurrentPointer;
 use tessera_store::read::open_bundle;
 use tessera_store::StoreError;
@@ -147,6 +148,21 @@ pub struct Engine {
     /// exercised by this task's authorise/viewport paths, but seeding it here — rather than
     /// leaving it to whichever task first needs it — is what the brief asks `Engine::open` to do.
     allocator: Mutex<Allocator>,
+    /// External ids established by the bundle's own extent, at open — immutable for the process
+    /// lifetime (Task 11).
+    external_index: ExternalIdIndex,
+    /// External ids established live (bundle replay's `IngestBatch` rows, plus every
+    /// subsequently-accepted `/control/ingest` batch) — consulted before falling back to
+    /// `external_index`, so a `/control/changes` naming an item ingested only seconds ago (not
+    /// yet in any bundle) still resolves (Task 13).
+    established: Mutex<FxHashMap<Vec<u8>, EntityId>>,
+    /// The descriptor resolver's extension state (dictionary-miss descriptors interned in
+    /// replay/accept order), detached from replay's borrow of `dict` and resumed on every live
+    /// resolution — see `DescriptorResolver::resume`'s doc (Task 13).
+    resolver_state: Mutex<(FxHashMap<Vec<u8>, TermId>, u32)>,
+    /// `/control/ingest` idempotency index: accepted batch id -> the body hash it was accepted
+    /// with (Task 13).
+    accepted_batches: Mutex<FxHashMap<String, [u8; 32]>>,
 }
 
 impl Engine {
@@ -219,10 +235,31 @@ impl Engine {
             .max(high_water_from(&records));
         let allocator = Allocator::new(high_water);
 
-        let (overlay, buffer) = replay(&records, &dict, |external_id| {
+        let (overlay, buffer, established, resolver) = replay(&records, &dict, |external_id| {
             external_index.resolve(external_id)
         })
         .map_err(EngineError::Overlay)?;
+        // Detach the resolver's extension state from `dict`'s borrow immediately (Task 13): the
+        // live serving path resumes exactly this state on every future descriptor resolution, so
+        // novel-descriptor extension ids keep counting down from wherever replay left off, rather
+        // than restarting and colliding with ids already handed out earlier in this process's
+        // lifetime (see `DescriptorResolver::resume`'s doc).
+        let resolver_state = resolver.into_state();
+
+        // The idempotency index for `/control/ingest` (Task 13): every previously-accepted batch
+        // id, mapped to the body hash it was accepted with, so a retried request with the same id
+        // and body is recognised as a no-op 200 rather than re-applied.
+        let mut accepted_batches: FxHashMap<String, [u8; 32]> = FxHashMap::default();
+        for record in &records {
+            if let WalRecord::IngestBatch {
+                batch_id,
+                body_hash,
+                ..
+            } = record
+            {
+                accepted_batches.insert(batch_id.clone(), *body_hash);
+            }
+        }
 
         let plugin: Arc<dyn Plugin> = Arc::new(plugin);
         let auth_plugin_hash = hex_decode_32(&plugin.auth_plugin_hash()).ok_or_else(|| {
@@ -256,6 +293,10 @@ impl Engine {
             next_token_id: AtomicU64::new(0),
             wal: Mutex::new(wal),
             allocator: Mutex::new(allocator),
+            external_index,
+            established: Mutex::new(established),
+            resolver_state: Mutex::new(resolver_state),
+            accepted_batches: Mutex::new(accepted_batches),
         })
     }
 
@@ -321,10 +362,128 @@ impl Engine {
         self.allocator.lock().unwrap().high_water()
     }
 
-    /// Access to the open WAL handle, for future ingest/change acceptance (Task 13); not used by
-    /// this task's request paths.
+    /// Access to the open WAL handle. The ack contract (Task 13) is: parse -> allocate ->
+    /// `wal().append` -> `wal().fsync` -> apply+swap -> 200 — every step against the *same*
+    /// locked handle, never released and reacquired mid-sequence, so two concurrent acceptances
+    /// cannot interleave their appends.
     pub fn wal(&self) -> &Mutex<Wal> {
         &self.wal
+    }
+
+    /// The plugin this engine was opened with — Task 13's `/control/ingest` handler calls
+    /// `terms_of_label` through this to turn an item's `access` bytes into descriptors.
+    pub fn plugin(&self) -> &Arc<dyn Plugin> {
+        &self.plugin
+    }
+
+    /// The plugin's declared sizing bounds (R6) — Task 13's ingest handler consults these to
+    /// decide `over_bound`, never to exclude an item (bounds warn, never exclude — design §6.2
+    /// r16).
+    pub fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
+        self.plugin.declared_bounds()
+    }
+
+    /// Resolve raw term descriptors to `TermId`s: a dictionary hit resolves to its durable,
+    /// bundle-relative id; a miss is interned into the process-lifetime extension state, resumed
+    /// from wherever WAL replay (or the previous call to this method) left off — see
+    /// `DescriptorResolver::resume`'s doc for why restarting that sequence per call would be
+    /// fail-open.
+    pub fn resolve_terms(&self, descriptors: &[Descriptor]) -> Vec<TermId> {
+        let mut state = self.resolver_state.lock().unwrap();
+        let (extension, next_extension_id) = std::mem::take(&mut *state);
+        let mut resolver = DescriptorResolver::resume(&self.dict, extension, next_extension_id);
+        let ids = descriptors.iter().map(|d| resolver.resolve(d)).collect();
+        *state = resolver.into_state();
+        ids
+    }
+
+    /// Resolve an external id to its `EntityId`, checking every item established live (bundle
+    /// replay's own `IngestBatch` rows, plus every `/control/ingest` batch accepted since) before
+    /// falling back to the bundle's own `entities/external-ids-0.arrow` extent.
+    pub fn resolve_external_id(&self, external_id: &[u8]) -> Option<EntityId> {
+        if let Some(&entity) = self.established.lock().unwrap().get(external_id) {
+            return Some(entity);
+        }
+        self.external_index.resolve(external_id)
+    }
+
+    /// Allocate entity ids for a freshly-parsed ingest batch, in signature-sorted order (I9/§11.1)
+    /// — must be called after every item's `terms` field is populated (via
+    /// [`Engine::resolve_terms`]) and before the batch's `WalRow`s are framed for WAL append.
+    pub fn allocate_sorted(&self, items: &mut [PendingItem]) {
+        let mut alloc = self.allocator.lock().unwrap();
+        assign_sorted(items, &mut alloc);
+    }
+
+    /// The body hash a batch id was previously accepted with, if any — the idempotency check for
+    /// `/control/ingest`'s replay rule (R5): equal hash -> 200 no-op; different hash -> 409.
+    pub fn accepted_batch(&self, batch_id: &str) -> Option<[u8; 32]> {
+        self.accepted_batches.lock().unwrap().get(batch_id).copied()
+    }
+
+    /// Record a batch id as accepted. Must only be called after the batch's `IngestBatch` record
+    /// has been WAL-appended and fsynced (the ack contract) — this index is purely an in-memory
+    /// accelerant for the idempotency check above, not itself a durability boundary.
+    pub fn record_accepted_batch(&self, batch_id: String, body_hash: [u8; 32]) {
+        self.accepted_batches
+            .lock()
+            .unwrap()
+            .insert(batch_id, body_hash);
+    }
+
+    /// Apply an already-WAL-fsynced ingest batch to the live buffer and swap in a new generation
+    /// (I1 composition rule 4: a buffered item participates in authorisation the moment it is
+    /// accepted). `rows` carry raw descriptor bytes (never `TermId`s — see `WalRow`'s doc);
+    /// `terms` is each row's already-resolved term set, in the same order, computed by the caller
+    /// via [`Engine::resolve_terms`] before this call (resolving again here would double-intern
+    /// any novel descriptor).
+    ///
+    /// Never fails: the ack contract's only fallible steps are parse, allocate, and WAL
+    /// append/fsync, all of which happen before this is called.
+    pub fn apply_ingest(&self, rows: &[WalRow], terms: &[Vec<TermId>]) {
+        debug_assert_eq!(rows.len(), terms.len());
+        let generation = self.generation.load_full();
+        let mut buffer = (*generation.buffer).clone();
+        let mut established = self.established.lock().unwrap();
+        for (row, row_terms) in rows.iter().zip(terms) {
+            established.insert(row.external_id.clone(), row.entity_id);
+            buffer.insert_row_with_terms(row, row_terms.clone());
+        }
+        drop(established);
+
+        let next = Generation {
+            prefix: generation.prefix.clone(),
+            segments_version: generation.segments_version,
+            watermark: generation.watermark,
+            bundle: Arc::clone(&generation.bundle),
+            overlay_version: generation.overlay_version + 1,
+            overlay: Arc::clone(&generation.overlay),
+            buffer: Arc::new(buffer),
+        };
+        self.generation.store(Arc::new(next));
+    }
+
+    /// Apply an already-WAL-fsynced (or, per the deny-op append-failure rule, deliberately
+    /// *not*-yet-durable — see Task 13's server-side caller) disposition change to the live
+    /// overlay and swap in a new generation. Pins are never invalidated by this (I11: a pin fixes
+    /// `(prefix, segments_version)` only, and this bumps `overlay_version`, not
+    /// `segments_version`) — lifecycle §2.3's rule that a suppression applies to a pinned request
+    /// the moment it is accepted, without expiring the pin.
+    pub fn apply_change(&self, entity: EntityId, op: ChangeOp, terms: Option<Vec<TermId>>) {
+        let generation = self.generation.load_full();
+        let mut overlay: Overlay = (*generation.overlay).clone();
+        overlay.apply(entity, op, terms);
+
+        let next = Generation {
+            prefix: generation.prefix.clone(),
+            segments_version: generation.segments_version,
+            watermark: generation.watermark,
+            bundle: Arc::clone(&generation.bundle),
+            overlay_version: generation.overlay_version + 1,
+            overlay: Arc::new(overlay),
+            buffer: Arc::clone(&generation.buffer),
+        };
+        self.generation.store(Arc::new(next));
     }
 }
 

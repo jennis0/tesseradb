@@ -10,4 +10,7 @@ path = "src/main.rs"
 [dependencies]
 tessera-build = { path = "../tessera-build" }
 tessera-spatial = { path = "../tessera-spatial" }
+tessera-server = { path = "../tessera-server" }
 clap = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing-subscriber = "0.3"

@@ -2,3 +2,28 @@
 name = "tessera-server"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+tessera-types = { path = "../tessera-types" }
+tessera-engine = { path = "../tessera-engine" }
+tessera-wire = { path = "../tessera-wire" }
+tessera-lifecycle = { path = "../tessera-lifecycle" }
+tessera-plugin = { path = "../tessera-plugin" }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+tracing = "0.1"
+parking_lot = { workspace = true }
+sha2 = { workspace = true }
+base64 = "0.22"
+arrow = { workspace = true }
+rustc-hash = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tessera-build = { path = "../tessera-build" }
+tessera-spatial = { path = "../tessera-spatial" }
+parquet = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

@@ -36,7 +36,11 @@ pub struct OverlayEntry {
 /// Accumulated overlay state, keyed by (internal) `EntityId`. Never keyed by external id —
 /// external-id resolution happens once, at replay/accept time (see [`replay`]), so the hot
 /// composition path (`tessera_engine::compose`) never has to resolve identity.
-#[derive(Debug, Default)]
+/// `Clone` (added for Task 13): the server's live `/control/changes` acceptance path builds the
+/// next generation's overlay by cloning the current one and applying the newly-accepted change —
+/// see [`IngestBuffer`](crate::IngestBuffer)'s doc for why a clone-and-replace, not an in-place
+/// mutation, is what the `ArcSwap`-snapshot design requires.
+#[derive(Debug, Default, Clone)]
 pub struct Overlay {
     entries: FxHashMap<EntityId, OverlayEntry>,
 }
@@ -131,11 +135,29 @@ impl std::error::Error for OverlayError {}
 ///   `Predicate`'s descriptors are resolved through the same `DescriptorResolver` as ingest rows.
 /// - `Lease` records carry no overlay/buffer information (I9 allocator bookkeeping only) and are
 ///   skipped here.
-pub fn replay(
+///
+/// Returns, alongside the overlay and buffer, the `external_id -> entity_id` map this replay
+/// established from `IngestBatch` rows, and the `DescriptorResolver` in its final state — both
+/// borrowed from `dict` for exactly as long as this call. Task 13's `Engine::open` immediately
+/// detaches them (`.into_state()`) into owned data it keeps for the process's lifetime, so a live
+/// `/control/ingest` or `/control/changes` acceptance can keep resolving external ids and novel
+/// descriptors from exactly where replay left off, rather than restarting either sequence (see
+/// [`DescriptorResolver::resume`]'s doc for why restarting descriptor extension ids would be
+/// fail-open).
+#[allow(clippy::type_complexity)]
+pub fn replay<'a>(
     records: &[WalRecord],
-    dict: &Dict,
+    dict: &'a Dict,
     resolve_from_bundle: impl Fn(&[u8]) -> Option<EntityId>,
-) -> Result<(Overlay, IngestBuffer), OverlayError> {
+) -> Result<
+    (
+        Overlay,
+        IngestBuffer,
+        FxHashMap<Vec<u8>, EntityId>,
+        DescriptorResolver<'a>,
+    ),
+    OverlayError,
+> {
     let mut overlay = Overlay::new();
     let mut buffer = IngestBuffer::new();
     let mut resolver = DescriptorResolver::new(dict);
@@ -169,7 +191,7 @@ pub fn replay(
         }
     }
 
-    Ok((overlay, buffer))
+    Ok((overlay, buffer, established, resolver))
 }
 
 #[cfg(test)]
@@ -284,7 +306,7 @@ mod tests {
             descriptors: None,
         }];
 
-        let (overlay, _buffer) = replay(&records, &dict, |external_id| {
+        let (overlay, _buffer, _established, _resolver) = replay(&records, &dict, |external_id| {
             if external_id == b"from-a-previous-build" {
                 Some(bundle_entity)
             } else {

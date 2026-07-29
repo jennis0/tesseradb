@@ -42,8 +42,12 @@ enum Command {
         /// Bundle root (the directory containing `CURRENT`).
         bundle: PathBuf,
     },
-    /// Serve a bundle. Not implemented in this phase.
-    Serve,
+    /// Serve a bundle: the three HTTP planes (viewer/session/control), per `tessera.toml`.
+    Serve {
+        /// Path to `tessera.toml` (SA §7).
+        #[arg(short = 'c', long = "config")]
+        config: PathBuf,
+    },
 }
 
 fn parse_extent(raw: &str) -> Result<Extent, String> {
@@ -127,9 +131,32 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Command::Serve => {
-            eprintln!("tessera serve: not implemented in Phase 1's walking skeleton");
-            ExitCode::FAILURE
+        Command::Serve { config } => {
+            tracing_subscriber::fmt::init();
+            let prepared = match tessera_server::prepare(&config) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("tessera serve: refused to start: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("tessera serve: could not start async runtime: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match runtime.block_on(tessera_server::run(prepared)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("tessera serve: {e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
     }
 }

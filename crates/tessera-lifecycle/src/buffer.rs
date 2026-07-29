@@ -49,6 +49,17 @@ pub struct DescriptorResolver<'a> {
     next_extension_id: u32,
 }
 
+// Manual (not derived): `Dict` itself carries no `Debug` impl, and adding one purely to satisfy
+// this struct's derive would be scope creep on another crate. `dict` is omitted from the output.
+impl std::fmt::Debug for DescriptorResolver<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DescriptorResolver")
+            .field("extension", &self.extension)
+            .field("next_extension_id", &self.next_extension_id)
+            .finish()
+    }
+}
+
 /// Extension ids count down from here — see this module's doc for why the top of the range,
 /// never `dict.len()` upward. `R6`'s `declared_bounds().max_distinct_terms` (200,000,000) is the
 /// largest a real dictionary is sized for; this leaves a margin of roughly 4.09 billion ids
@@ -93,6 +104,36 @@ impl<'a> DescriptorResolver<'a> {
         self.extension.insert(descriptor.to_vec(), id);
         id
     }
+
+    /// Resume a resolver from a previously-persisted extension state.
+    ///
+    /// Task 13's server keeps accepting live `/control/ingest`/`/control/changes` requests after
+    /// `replay` has returned — a fresh `DescriptorResolver::new` for each live request would
+    /// restart extension-id assignment from [`EXTENSION_ID_START`] every time, colliding with ids
+    /// already handed out to *other* novel descriptors earlier in the same process's lifetime
+    /// (breaking the determinism obligation this module's doc describes: the same WAL, replayed
+    /// again after a restart, must reproduce the same assignment). Extracting a resolver's state
+    /// via [`DescriptorResolver::into_state`] after `replay` and resuming it here — once, at
+    /// `Engine::open`, then persisting the state back after every live resolution — keeps one
+    /// continuous assignment sequence across the whole process lifetime, matching what a full
+    /// WAL replay (bundle + WAL + these new records) would compute.
+    pub fn resume(
+        dict: &'a Dict,
+        extension: FxHashMap<Vec<u8>, TermId>,
+        next_extension_id: u32,
+    ) -> Self {
+        DescriptorResolver {
+            dict,
+            extension,
+            next_extension_id,
+        }
+    }
+
+    /// Extract this resolver's mutable extension state, detaching it from `dict`'s borrow so it
+    /// can be stored (e.g. behind a `Mutex`, in `tessera-engine`'s `Engine`) and later resumed.
+    pub fn into_state(self) -> (FxHashMap<Vec<u8>, TermId>, u32) {
+        (self.extension, self.next_extension_id)
+    }
 }
 
 /// One buffered item's authorisation-relevant state: its resolved terms and the geometry/scalars
@@ -109,7 +150,12 @@ pub struct BufferedItem {
 /// Replayed `WalRow`s not yet folded into a bundle, keyed by (internal) `EntityId` — the id the
 /// row was allocated under (SA §6.2: WAL rows carry their already-allocated id; replay reuses it,
 /// never re-allocates).
-#[derive(Debug, Default)]
+/// `Clone` (added for Task 13): the server's live `/control/ingest` acceptance path builds the
+/// next generation's buffer by cloning the current one and inserting the newly-accepted rows,
+/// rather than mutating shared state in place — the immutable-snapshot-behind-`ArcSwap` design
+/// (see `tessera_engine::Generation`'s doc) requires every generation's buffer to be a distinct,
+/// never-mutated-after-publication value.
+#[derive(Debug, Default, Clone)]
 pub struct IngestBuffer {
     items: FxHashMap<EntityId, BufferedItem>,
 }

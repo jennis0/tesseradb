@@ -11,10 +11,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use tessera_spatial::{tiles_for_bbox, Extent};
-use tessera_store::manifest::DeclaredScalar;
+use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::tile_ranges;
-use tessera_types::{EntityId, PinId};
+use tessera_types::{EntityId, PinId, API_VERSION};
 
 use crate::compose::{compose, EffectiveMask, RowProjection};
 use crate::session::{Engine, EngineError, Result, Session};
@@ -59,6 +59,91 @@ pub struct ViewportOut {
     pub pin: PinId,
     pub tiles: Vec<TileCount>,
     pub points: Vec<PointOut>,
+}
+
+/// `GET /v1/meta`'s payload (R5) — the bundle-level facts a viewer client needs before it can
+/// issue a sensible `/v1/viewport` call.
+#[derive(Debug, Clone)]
+pub struct EngineMeta {
+    pub api_version: u32,
+    pub bundle_format: u32,
+    /// `(id, display_name)` pairs, in manifest order.
+    pub slices: Vec<(String, String)>,
+    pub quantisation: Quantisation,
+    pub declared_scalars: Vec<DeclaredScalar>,
+}
+
+impl Engine {
+    /// `GET /v1/meta` (R5): read-only bundle facts, no session/authorisation involved. Loads the
+    /// generation once, like every other request path.
+    pub fn meta(&self) -> EngineMeta {
+        let generation = self.generation.load_full();
+        let manifest = &generation.bundle.manifest;
+        EngineMeta {
+            api_version: API_VERSION,
+            bundle_format: manifest.bundle_format,
+            slices: manifest
+                .slices
+                .iter()
+                .map(|s| (s.id.clone(), s.display_name.clone()))
+                .collect(),
+            quantisation: manifest.quantisation,
+            declared_scalars: manifest.declared_scalars.clone(),
+        }
+    }
+
+    /// `POST /v1/items/{handle}` (R5): the scalar payload for one entity, gated by this session's
+    /// effective mask. Phase 1 has no by-entity index (geometry is Morton-ordered, not
+    /// entity-ordered), so this is a linear scan over every segment in every slice of the current
+    /// generation — acceptable at walking-skeleton scale for an endpoint that is not on the
+    /// per-viewport hot path; revisit before this ever needs to scale with corpus size.
+    ///
+    /// Returns `None` if `entity` has no row in this bundle, or has a row but is not currently
+    /// visible to `session` (I2: a denied/unauthorised entity's scalars must not leak through
+    /// this side door either).
+    pub fn item(&self, session: &Session, entity: EntityId) -> Option<Vec<ScalarOut>> {
+        let generation = self.generation.load_full();
+        let declared_scalars = &generation.bundle.manifest.declared_scalars;
+
+        for partition in generation.bundle.partitions.values() {
+            for slice_data in partition.slices.values() {
+                for segment in &slice_data.segments {
+                    let Some(idx) = segment
+                        .columns
+                        .entity_id()
+                        .iter()
+                        .position(|&e| e == entity.raw())
+                    else {
+                        continue;
+                    };
+                    let row = idx as u32;
+
+                    // Ad hoc, uncached mask: this endpoint is not on the per-viewport path, so
+                    // paying `Permutation::project`'s cost here (rather than reusing the cached
+                    // `RowProjection`, keyed for the viewport path only) is acceptable — see this
+                    // method's doc.
+                    let base = Arc::new(RowProjection::new(
+                        &session.fragment,
+                        &slice_data.permutation,
+                    ));
+                    let mask = compose(
+                        &session.fragment,
+                        &session.satisfied,
+                        &generation.overlay,
+                        &generation.buffer,
+                        base,
+                        &slice_data.permutation,
+                    );
+                    if !mask.contains_row(row) {
+                        continue;
+                    }
+
+                    return Some(row_to_point(segment, row, declared_scalars).scalars);
+                }
+            }
+        }
+        None
+    }
 }
 
 impl Engine {

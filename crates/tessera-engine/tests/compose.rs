@@ -541,7 +541,8 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
 
     // Reopen: fresh replay from disk, not the in-memory `Overlay`/`IngestBuffer` above.
     let (_wal, records) = Wal::open(&wal_path).unwrap();
-    let (overlay, buffer) = replay(&records, &dict, |_external_id| None).unwrap();
+    let (overlay, buffer, _established, _resolver) =
+        replay(&records, &dict, |_external_id| None).unwrap();
 
     let x_entry = overlay.get(e(ENTITY_X)).expect("X has an overlay entry");
     assert!(x_entry.deleted, "delete must survive replay");
