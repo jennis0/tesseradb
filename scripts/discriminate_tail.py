@@ -191,6 +191,23 @@ def build_and_copy(dest_name: str, feature: bool) -> Path:
     src = REPO_ROOT / "target" / "release" / "tessera"
     dest = REPO_ROOT / "target" / "release" / dest_name
     shutil.copy2(src, dest)
+
+    # Never leave a measurement binary at the default path. `cargo build --features
+    # tessera-engine/skip-id-index` writes to `target/release/tessera`, and on
+    # 2026-07-30 that binary was left there: the reference suite's `ensure_cli_built`
+    # short-circuited on existence, silently reused it, and every `/control/changes`
+    # request panicked the server with the external-ID index disabled. The failures
+    # read as a code regression and survived a `git stash`, because stashing sources
+    # does not rebuild a binary.
+    #
+    # `ensure_cli_built` no longer short-circuits, so that specific trap is closed at
+    # the other end too -- but a feature-enabled binary sitting at the path every other
+    # tool reaches for is a hazard regardless of who is careful. Remove it, and let the
+    # next caller's own build put default-feature bytes back.
+    if feature:
+        src.unlink(missing_ok=True)
+        print(f"  removed {src} (measurement build must not persist at the default path)")
+
     return dest
 
 

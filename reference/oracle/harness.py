@@ -45,8 +45,25 @@ def free_port() -> int:
 
 
 def ensure_cli_built() -> None:
-    if CLI_BIN.exists():
-        return
+    """Build `target/release/tessera` with **default features**, always.
+
+    This deliberately does NOT short-circuit on `CLI_BIN.exists()`. Cargo already
+    no-ops in about a second when nothing has changed, so the saving was negligible —
+    and the cost was severe: an existence check cannot tell a default-feature binary
+    from one built with a *measurement* feature enabled.
+
+    That is not hypothetical. On 2026-07-30 the tail-discrimination probe built a
+    `--features tessera-engine/skip-id-index` binary into this same path. Every
+    subsequent run of this suite silently reused it, so the external-ID index was
+    disabled and every `/control/changes` request panicked the server — surfacing as
+    two `RemoteDisconnected` failures that looked like a code regression and survived
+    a `git stash` (stashing sources does not rebuild a binary), which made them look
+    pre-existing on master. They were an artefact.
+
+    Letting cargo decide is the fix: it tracks the feature set, so a binary left
+    behind with the wrong features is rebuilt rather than trusted. Anything needing a
+    non-default binary must build it to its own path and never to `CLI_BIN`.
+    """
     subprocess.run(
         ["cargo", "build", "--release", "-p", "tessera-cli"],
         cwd=REPO_ROOT,
