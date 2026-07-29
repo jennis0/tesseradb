@@ -1,0 +1,1097 @@
+{
+  "bundle": "/tmp/tessera-1e9",
+  "boot_seconds": 52.10572487599711,
+  "n_viewports": 800,
+  "seed": 0,
+  "k_sweep": {
+    "50": {
+      "server_us": {
+        "p50": 6366.0,
+        "p99": 48328.0,
+        "max": 108121.0
+      },
+      "n_tiles_nonempty": {
+        "mean": 264.1475,
+        "max": 289
+      },
+      "sigma_visible": {
+        "mean": 25412345.42375,
+        "max": 144770263
+      },
+      "sigma_matched": {
+        "mean": 25412345.42375,
+        "max": 144770263
+      },
+      "points_returned": {
+        "mean": 11172.38375,
+        "max": 14450
+      },
+      "visible_over_points_returned": {
+        "mean": 3888.1323233000417,
+        "min": 1.0,
+        "max": 35745.74395061728
+      },
+      "correlations": {
+        "server_us_vs_tiles": -0.46286752192553776,
+        "server_us_vs_sigma_visible": 0.827728871674066,
+        "server_us_vs_sigma_matched": 0.827728871674066,
+        "server_us_vs_points_returned": 0.008083131734207069,
+        "server_us_vs_response_bytes": -0.003892469302802719
+      },
+      "normalised_cost": {
+        "us_per_row_visible": 0.0004597852856619877,
+        "us_per_point_gathered": 1.0458128508161921,
+        "us_per_tile": 44.23370465364995
+      }
+    },
+    "1000": {
+      "server_us": {
+        "p50": 37956.0,
+        "p99": 80659.0,
+        "max": 810250.0
+      },
+      "n_tiles_nonempty": {
+        "mean": 264.1475,
+        "max": 289
+      },
+      "sigma_visible": {
+        "mean": 25412345.42375,
+        "max": 144770263
+      },
+      "sigma_matched": {
+        "mean": 25412345.42375,
+        "max": 144770263
+      },
+      "points_returned": {
+        "mean": 155420.1225,
+        "max": 289000
+      },
+      "visible_over_points_returned": {
+        "mean": 194.93848800445238,
+        "min": 1.0,
+        "max": 1787.2871975308642
+      },
+      "correlations": {
+        "server_us_vs_tiles": -0.03769320348047779,
+        "server_us_vs_sigma_visible": 0.332133910300078,
+        "server_us_vs_sigma_matched": 0.332133910300078,
+        "server_us_vs_points_returned": 0.5588945722601043,
+        "server_us_vs_response_bytes": 0.5587001374877991
+      },
+      "normalised_cost": {
+        "us_per_row_visible": 0.0012916716049878182,
+        "us_per_point_gathered": 0.21119790971725685,
+        "us_per_tile": 124.26543881732744
+      }
+    }
+  },
+  "authorise_seconds": 0.23705806599900825,
+  "grant_width": 10000,
+  "warmup_server_us": 10568990,
+  "per_request_samples": {
+    "50": [
+      {
+        "zoom": 6,
+        "server_us": 23518.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 33238994,
+        "sigma_matched": 33238994,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 2300.276401384083
+      },
+      {
+        "zoom": 5,
+        "server_us": 44111.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 117933950,
+        "sigma_matched": 117933950,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 8161.519031141868
+      },
+      {
+        "zoom": 11,
+        "server_us": 1813.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 21627,
+        "sigma_matched": 21627,
+        "points_returned": 13621,
+        "response_bytes": 177108,
+        "visible_over_points": 1.5877688862785404
+      },
+      {
+        "zoom": 7,
+        "server_us": 12193.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 8538887,
+        "sigma_matched": 8538887,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 590.9264359861592
+      },
+      {
+        "zoom": 10,
+        "server_us": 4956.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 137836,
+        "sigma_matched": 137836,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 9.538823529411765
+      },
+      {
+        "zoom": 4,
+        "server_us": 35749.0,
+        "n_tiles_nonempty": 81,
+        "sigma_visible": 107840638,
+        "sigma_matched": 107840638,
+        "points_returned": 4050,
+        "response_bytes": 53652,
+        "visible_over_points": 26627.318024691358
+      },
+      {
+        "zoom": 7,
+        "server_us": 9636.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 3985977,
+        "sigma_matched": 3985977,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 275.84615916955016
+      },
+      {
+        "zoom": 9,
+        "server_us": 3165.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 299635,
+        "sigma_matched": 299635,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 20.73598615916955
+      },
+      {
+        "zoom": 12,
+        "server_us": 1490.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 19580,
+        "sigma_matched": 19580,
+        "points_returned": 14074,
+        "response_bytes": 182676,
+        "visible_over_points": 1.3912178485149922
+      },
+      {
+        "zoom": 7,
+        "server_us": 18579.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 5375889,
+        "sigma_matched": 5375889,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 372.03384083044983
+      },
+      {
+        "zoom": 12,
+        "server_us": 2834.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 3445,
+        "sigma_matched": 3445,
+        "points_returned": 3445,
+        "response_bytes": 51156,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 11,
+        "server_us": 1751.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 7178,
+        "sigma_matched": 7178,
+        "points_returned": 7176,
+        "response_bytes": 97428,
+        "visible_over_points": 1.000278706800446
+      },
+      {
+        "zoom": 7,
+        "server_us": 6298.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 4682556,
+        "sigma_matched": 4682556,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 324.05231833910034
+      },
+      {
+        "zoom": 4,
+        "server_us": 62631.0,
+        "n_tiles_nonempty": 81,
+        "sigma_visible": 135404635,
+        "sigma_matched": 135404635,
+        "points_returned": 4050,
+        "response_bytes": 53652,
+        "visible_over_points": 33433.24320987654
+      },
+      {
+        "zoom": 5,
+        "server_us": 38671.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 120766966,
+        "sigma_matched": 120766966,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 8357.575501730103
+      },
+      {
+        "zoom": 8,
+        "server_us": 5774.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 1199581,
+        "sigma_matched": 1199581,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 83.01598615916954
+      },
+      {
+        "zoom": 12,
+        "server_us": 1117.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 6963,
+        "sigma_matched": 6963,
+        "points_returned": 6936,
+        "response_bytes": 94356,
+        "visible_over_points": 1.0038927335640138
+      },
+      {
+        "zoom": 7,
+        "server_us": 25342.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 17360919,
+        "sigma_matched": 17360919,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 1201.4476816608997
+      },
+      {
+        "zoom": 11,
+        "server_us": 3984.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 10100,
+        "sigma_matched": 10100,
+        "points_returned": 10007,
+        "response_bytes": 132372,
+        "visible_over_points": 1.0092934945538123
+      },
+      {
+        "zoom": 4,
+        "server_us": 31608.0,
+        "n_tiles_nonempty": 81,
+        "sigma_visible": 132069384,
+        "sigma_matched": 132069384,
+        "points_returned": 4050,
+        "response_bytes": 53652,
+        "visible_over_points": 32609.724444444444
+      },
+      {
+        "zoom": 10,
+        "server_us": 2167.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 58716,
+        "sigma_matched": 58716,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 4.063391003460207
+      },
+      {
+        "zoom": 12,
+        "server_us": 1005.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 4030,
+        "sigma_matched": 4030,
+        "points_returned": 4030,
+        "response_bytes": 58260,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 9,
+        "server_us": 2620.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 204065,
+        "sigma_matched": 204065,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 14.122145328719723
+      },
+      {
+        "zoom": 5,
+        "server_us": 28744.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 104075145,
+        "sigma_matched": 104075145,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 7202.432179930795
+      },
+      {
+        "zoom": 10,
+        "server_us": 2491.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 100718,
+        "sigma_matched": 100718,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 6.970103806228374
+      },
+      {
+        "zoom": 11,
+        "server_us": 1999.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 11245,
+        "sigma_matched": 11245,
+        "points_returned": 11135,
+        "response_bytes": 146196,
+        "visible_over_points": 1.0098787606645712
+      },
+      {
+        "zoom": 10,
+        "server_us": 1625.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 22666,
+        "sigma_matched": 22666,
+        "points_returned": 13576,
+        "response_bytes": 176532,
+        "visible_over_points": 1.6695639363582793
+      },
+      {
+        "zoom": 7,
+        "server_us": 15826.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 6561547,
+        "sigma_matched": 6561547,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 454.0862975778547
+      },
+      {
+        "zoom": 12,
+        "server_us": 1946.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 16020,
+        "sigma_matched": 16020,
+        "points_returned": 13564,
+        "response_bytes": 176340,
+        "visible_over_points": 1.1810675317015629
+      },
+      {
+        "zoom": 10,
+        "server_us": 2013.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 49527,
+        "sigma_matched": 49527,
+        "points_returned": 13837,
+        "response_bytes": 179796,
+        "visible_over_points": 3.579316325793163
+      },
+      {
+        "zoom": 9,
+        "server_us": 14369.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 1717610,
+        "sigma_matched": 1717610,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 118.86574394463668
+      },
+      {
+        "zoom": 12,
+        "server_us": 1836.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 13657,
+        "sigma_matched": 13657,
+        "points_returned": 13045,
+        "response_bytes": 170004,
+        "visible_over_points": 1.0469145266385589
+      },
+      {
+        "zoom": 10,
+        "server_us": 1876.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 14957,
+        "sigma_matched": 14957,
+        "points_returned": 13237,
+        "response_bytes": 172308,
+        "visible_over_points": 1.1299388078869834
+      },
+      {
+        "zoom": 12,
+        "server_us": 2320.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 4024,
+        "sigma_matched": 4024,
+        "points_returned": 4024,
+        "response_bytes": 58260,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 12,
+        "server_us": 1040.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 3752,
+        "sigma_matched": 3752,
+        "points_returned": 3752,
+        "response_bytes": 54996,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 11,
+        "server_us": 5381.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 38853,
+        "sigma_matched": 38853,
+        "points_returned": 13115,
+        "response_bytes": 170772,
+        "visible_over_points": 2.962485703393061
+      },
+      {
+        "zoom": 7,
+        "server_us": 8063.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 6697807,
+        "sigma_matched": 6697807,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 463.5160553633218
+      },
+      {
+        "zoom": 9,
+        "server_us": 3306.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 365558,
+        "sigma_matched": 365558,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 25.298131487889272
+      },
+      {
+        "zoom": 12,
+        "server_us": 6215.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 6226,
+        "sigma_matched": 6226,
+        "points_returned": 6226,
+        "response_bytes": 85716,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 11,
+        "server_us": 1356.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 6935,
+        "sigma_matched": 6935,
+        "points_returned": 6935,
+        "response_bytes": 94356,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 6,
+        "server_us": 10717.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 24024664,
+        "sigma_matched": 24024664,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 1662.6065051903115
+      },
+      {
+        "zoom": 5,
+        "server_us": 29463.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 103553991,
+        "sigma_matched": 103553991,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 7166.36615916955
+      },
+      {
+        "zoom": 8,
+        "server_us": 8639.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 1833773,
+        "sigma_matched": 1833773,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 126.90470588235294
+      },
+      {
+        "zoom": 5,
+        "server_us": 29010.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 94958532,
+        "sigma_matched": 94958532,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 6571.524705882353
+      },
+      {
+        "zoom": 4,
+        "server_us": 25742.0,
+        "n_tiles_nonempty": 81,
+        "sigma_visible": 108138209,
+        "sigma_matched": 108138209,
+        "points_returned": 4050,
+        "response_bytes": 53652,
+        "visible_over_points": 26700.792345679012
+      },
+      {
+        "zoom": 8,
+        "server_us": 4737.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 1260937,
+        "sigma_matched": 1260937,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 87.26207612456747
+      },
+      {
+        "zoom": 9,
+        "server_us": 4319.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 65304,
+        "sigma_matched": 65304,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 4.519307958477508
+      },
+      {
+        "zoom": 8,
+        "server_us": 4116.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 1088721,
+        "sigma_matched": 1088721,
+        "points_returned": 14431,
+        "response_bytes": 187092,
+        "visible_over_points": 75.4432125285843
+      },
+      {
+        "zoom": 8,
+        "server_us": 8013.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 2110942,
+        "sigma_matched": 2110942,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 146.08595155709344
+      },
+      {
+        "zoom": 9,
+        "server_us": 2098.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 73275,
+        "sigma_matched": 73275,
+        "points_returned": 14450,
+        "response_bytes": 187476,
+        "visible_over_points": 5.070934256055363
+      }
+    ],
+    "1000": [
+      {
+        "zoom": 6,
+        "server_us": 58208.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 33238994,
+        "sigma_matched": 33238994,
+        "points_returned": 289000,
+        "response_bytes": 3584916,
+        "visible_over_points": 115.01382006920416
+      },
+      {
+        "zoom": 5,
+        "server_us": 62591.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 117933950,
+        "sigma_matched": 117933950,
+        "points_returned": 289000,
+        "response_bytes": 3584916,
+        "visible_over_points": 408.07595155709345
+      },
+      {
+        "zoom": 11,
+        "server_us": 4017.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 21627,
+        "sigma_matched": 21627,
+        "points_returned": 21627,
+        "response_bytes": 276180,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 7,
+        "server_us": 35686.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 8538887,
+        "sigma_matched": 8538887,
+        "points_returned": 281053,
+        "response_bytes": 3486420,
+        "visible_over_points": 30.381767851615177
+      },
+      {
+        "zoom": 10,
+        "server_us": 19459.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 137836,
+        "sigma_matched": 137836,
+        "points_returned": 137773,
+        "response_bytes": 1713492,
+        "visible_over_points": 1.0004572739215956
+      },
+      {
+        "zoom": 4,
+        "server_us": 34737.0,
+        "n_tiles_nonempty": 81,
+        "sigma_visible": 107840638,
+        "sigma_matched": 107840638,
+        "points_returned": 81000,
+        "response_bytes": 1005972,
+        "visible_over_points": 1331.365901234568
+      },
+      {
+        "zoom": 7,
+        "server_us": 32298.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 3985977,
+        "sigma_matched": 3985977,
+        "points_returned": 275790,
+        "response_bytes": 3421332,
+        "visible_over_points": 14.452942456216686
+      },
+      {
+        "zoom": 9,
+        "server_us": 28424.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 299635,
+        "sigma_matched": 299635,
+        "points_returned": 250708,
+        "response_bytes": 3111060,
+        "visible_over_points": 1.1951553201333822
+      },
+      {
+        "zoom": 12,
+        "server_us": 3504.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 19580,
+        "sigma_matched": 19580,
+        "points_returned": 19580,
+        "response_bytes": 250836,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 7,
+        "server_us": 37922.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 5375889,
+        "sigma_matched": 5375889,
+        "points_returned": 289000,
+        "response_bytes": 3584916,
+        "visible_over_points": 18.60169204152249
+      },
+      {
+        "zoom": 12,
+        "server_us": 1444.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 3445,
+        "sigma_matched": 3445,
+        "points_returned": 3445,
+        "response_bytes": 51156,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 11,
+        "server_us": 1413.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 7178,
+        "sigma_matched": 7178,
+        "points_returned": 7178,
+        "response_bytes": 97428,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 7,
+        "server_us": 35894.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 4682556,
+        "sigma_matched": 4682556,
+        "points_returned": 288728,
+        "response_bytes": 3581460,
+        "visible_over_points": 16.21787980382921
+      },
+      {
+        "zoom": 4,
+        "server_us": 41880.0,
+        "n_tiles_nonempty": 81,
+        "sigma_visible": 135404635,
+        "sigma_matched": 135404635,
+        "points_returned": 81000,
+        "response_bytes": 1005972,
+        "visible_over_points": 1671.662160493827
+      },
+      {
+        "zoom": 5,
+        "server_us": 66333.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 120766966,
+        "sigma_matched": 120766966,
+        "points_returned": 289000,
+        "response_bytes": 3584916,
+        "visible_over_points": 417.8787750865052
+      },
+      {
+        "zoom": 8,
+        "server_us": 28166.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 1199581,
+        "sigma_matched": 1199581,
+        "points_returned": 234354,
+        "response_bytes": 2908692,
+        "visible_over_points": 5.118670899579269
+      },
+      {
+        "zoom": 12,
+        "server_us": 1605.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 6963,
+        "sigma_matched": 6963,
+        "points_returned": 6963,
+        "response_bytes": 94740,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 7,
+        "server_us": 225075.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 17360919,
+        "sigma_matched": 17360919,
+        "points_returned": 289000,
+        "response_bytes": 3584916,
+        "visible_over_points": 60.07238408304498
+      },
+      {
+        "zoom": 11,
+        "server_us": 2476.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 10100,
+        "sigma_matched": 10100,
+        "points_returned": 10100,
+        "response_bytes": 133524,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 4,
+        "server_us": 40655.0,
+        "n_tiles_nonempty": 81,
+        "sigma_visible": 132069384,
+        "sigma_matched": 132069384,
+        "points_returned": 81000,
+        "response_bytes": 1005972,
+        "visible_over_points": 1630.4862222222223
+      },
+      {
+        "zoom": 10,
+        "server_us": 9699.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 58716,
+        "sigma_matched": 58716,
+        "points_returned": 58716,
+        "response_bytes": 735060,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 12,
+        "server_us": 1308.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 4030,
+        "sigma_matched": 4030,
+        "points_returned": 4030,
+        "response_bytes": 58260,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 9,
+        "server_us": 25460.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 204065,
+        "sigma_matched": 204065,
+        "points_returned": 200536,
+        "response_bytes": 2490132,
+        "visible_over_points": 1.0175978377947101
+      },
+      {
+        "zoom": 5,
+        "server_us": 62020.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 104075145,
+        "sigma_matched": 104075145,
+        "points_returned": 289000,
+        "response_bytes": 3584916,
+        "visible_over_points": 360.1216089965398
+      },
+      {
+        "zoom": 10,
+        "server_us": 13607.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 100718,
+        "sigma_matched": 100718,
+        "points_returned": 99577,
+        "response_bytes": 1240788,
+        "visible_over_points": 1.0114584693252457
+      },
+      {
+        "zoom": 11,
+        "server_us": 2701.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 11245,
+        "sigma_matched": 11245,
+        "points_returned": 11245,
+        "response_bytes": 147540,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 10,
+        "server_us": 4372.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 22666,
+        "sigma_matched": 22666,
+        "points_returned": 22666,
+        "response_bytes": 289044,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 7,
+        "server_us": 40612.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 6561547,
+        "sigma_matched": 6561547,
+        "points_returned": 289000,
+        "response_bytes": 3584916,
+        "visible_over_points": 22.704314878892735
+      },
+      {
+        "zoom": 12,
+        "server_us": 3359.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 16020,
+        "sigma_matched": 16020,
+        "points_returned": 16020,
+        "response_bytes": 206868,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 10,
+        "server_us": 7722.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 49527,
+        "sigma_matched": 49527,
+        "points_returned": 49527,
+        "response_bytes": 621396,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 9,
+        "server_us": 39568.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 1717610,
+        "sigma_matched": 1717610,
+        "points_returned": 288026,
+        "response_bytes": 3572820,
+        "visible_over_points": 5.963385249942713
+      },
+      {
+        "zoom": 12,
+        "server_us": 3065.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 13657,
+        "sigma_matched": 13657,
+        "points_returned": 13657,
+        "response_bytes": 177492,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 10,
+        "server_us": 3401.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 14957,
+        "sigma_matched": 14957,
+        "points_returned": 14957,
+        "response_bytes": 193620,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 12,
+        "server_us": 1371.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 4024,
+        "sigma_matched": 4024,
+        "points_returned": 4024,
+        "response_bytes": 58260,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 12,
+        "server_us": 1020.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 3752,
+        "sigma_matched": 3752,
+        "points_returned": 3752,
+        "response_bytes": 54996,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 11,
+        "server_us": 6005.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 38853,
+        "sigma_matched": 38853,
+        "points_returned": 38853,
+        "response_bytes": 489300,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 7,
+        "server_us": 42463.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 6697807,
+        "sigma_matched": 6697807,
+        "points_returned": 289000,
+        "response_bytes": 3584916,
+        "visible_over_points": 23.17580276816609
+      },
+      {
+        "zoom": 9,
+        "server_us": 33170.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 365558,
+        "sigma_matched": 365558,
+        "points_returned": 256718,
+        "response_bytes": 3185364,
+        "visible_over_points": 1.4239671546210237
+      },
+      {
+        "zoom": 12,
+        "server_us": 1894.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 6226,
+        "sigma_matched": 6226,
+        "points_returned": 6226,
+        "response_bytes": 85716,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 11,
+        "server_us": 1886.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 6935,
+        "sigma_matched": 6935,
+        "points_returned": 6935,
+        "response_bytes": 94356,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 6,
+        "server_us": 46070.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 24024664,
+        "sigma_matched": 24024664,
+        "points_returned": 288307,
+        "response_bytes": 3576468,
+        "visible_over_points": 83.33014460280188
+      },
+      {
+        "zoom": 5,
+        "server_us": 69144.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 103553991,
+        "sigma_matched": 103553991,
+        "points_returned": 289000,
+        "response_bytes": 3584916,
+        "visible_over_points": 358.31830795847753
+      },
+      {
+        "zoom": 8,
+        "server_us": 39545.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 1833773,
+        "sigma_matched": 1833773,
+        "points_returned": 276149,
+        "response_bytes": 3425940,
+        "visible_over_points": 6.640520153974847
+      },
+      {
+        "zoom": 5,
+        "server_us": 61901.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 94958532,
+        "sigma_matched": 94958532,
+        "points_returned": 289000,
+        "response_bytes": 3584916,
+        "visible_over_points": 328.5762352941176
+      },
+      {
+        "zoom": 4,
+        "server_us": 35979.0,
+        "n_tiles_nonempty": 81,
+        "sigma_visible": 108138209,
+        "sigma_matched": 108138209,
+        "points_returned": 81000,
+        "response_bytes": 1005972,
+        "visible_over_points": 1335.0396172839505
+      },
+      {
+        "zoom": 8,
+        "server_us": 36886.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 1260937,
+        "sigma_matched": 1260937,
+        "points_returned": 277584,
+        "response_bytes": 3443604,
+        "visible_over_points": 4.542542077353161
+      },
+      {
+        "zoom": 9,
+        "server_us": 10766.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 65304,
+        "sigma_matched": 65304,
+        "points_returned": 65304,
+        "response_bytes": 816660,
+        "visible_over_points": 1.0
+      },
+      {
+        "zoom": 8,
+        "server_us": 26421.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 1088721,
+        "sigma_matched": 1088721,
+        "points_returned": 182584,
+        "response_bytes": 2267988,
+        "visible_over_points": 5.962849975901503
+      },
+      {
+        "zoom": 8,
+        "server_us": 25385.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 2110942,
+        "sigma_matched": 2110942,
+        "points_returned": 182901,
+        "response_bytes": 2272020,
+        "visible_over_points": 11.541445918830405
+      },
+      {
+        "zoom": 9,
+        "server_us": 10920.0,
+        "n_tiles_nonempty": 289,
+        "sigma_visible": 73275,
+        "sigma_matched": 73275,
+        "points_returned": 73275,
+        "response_bytes": 915348,
+        "visible_over_points": 1.0
+      }
+    ]
+  }
+}
