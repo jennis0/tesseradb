@@ -1,0 +1,315 @@
+{
+  "construction": "feistel-splitmix64-v1",
+  "rounds": 8,
+  "key": "000102030405060708090a0b0c0d0e0f",
+  "notes": {
+    "authority": "This file is the shared gate for the Rust implementation (tessera-types) and the Python reference oracle. Disambiguation rule, agreed in advance: if the two implementations disagree with each other but one of them agrees with this file, this file is authoritative and the disagreeing implementation is wrong. If both implementations agree with each other and disagree with this file, this file is wrong and is corrected by a commit that says so. The file was generated from docs/design-memos/2026-07-30-tessera-id-construction.md before either implementation existed.",
+    "directions": "Every entry in `vectors` MUST be asserted in BOTH directions: forward(key, shard_id, entity_id) == tessera_id, and invert(key, tessera_id) == (shard_id, entity_id).",
+    "key_encoding": "`key` is exactly 32 lowercase hex characters; key_bytes[0] is the first two characters. k0 = u64::from_le_bytes(key_bytes[0..8]), k1 = u64::from_le_bytes(key_bytes[8..16]). Uppercase or mixed case is REJECTED, not case-folded.",
+    "hex_fields": "All `0x`-prefixed strings are unsigned 64-bit values written as 16 hex digits. `shard_id` and `entity_id` are plain JSON integers in [0, 2^32)."
+  },
+  "splitmix64": [
+    {
+      "input": "0x0000000000000000",
+      "output": "0xe220a8397b1dcdaf"
+    },
+    {
+      "input": "0x0000000000000001",
+      "output": "0x910a2dec89025cc1"
+    },
+    {
+      "input": "0x0000000000000002",
+      "output": "0x975835de1c9756ce"
+    },
+    {
+      "input": "0x9e3779b97f4a7c15",
+      "output": "0x6e789e6aa1b965f4"
+    },
+    {
+      "input": "0xffffffffffffffff",
+      "output": "0xe4d971771b652c20"
+    },
+    {
+      "input": "0x0123456789abcdef",
+      "output": "0x157a3807a48faa9d"
+    }
+  ],
+  "key_schedule": {
+    "key": "000102030405060708090a0b0c0d0e0f",
+    "k0": "0x0706050403020100",
+    "k1": "0x0f0e0d0c0b0a0908",
+    "round_keys": [
+      "0xc00f03b07279e609",
+      "0xfef7da4f78e003fd",
+      "0xa4a78ddb397fca3a",
+      "0x62e42b600993e687",
+      "0x40b22a397c7894ff",
+      "0x4fea56c98c720a61",
+      "0x19e53c21404a7eea",
+      "0x89a0b38afbf573be"
+    ]
+  },
+  "vectors": [
+    {
+      "shard_id": 0,
+      "entity_id": 0,
+      "tessera_id": "0xf961833445206e9e"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 1,
+      "tessera_id": "0x5bda5e1b69714ddc"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 2,
+      "tessera_id": "0xa7fc837cc81d8ae3"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 2147483647,
+      "tessera_id": "0x089e3614b1933a53"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 2147483648,
+      "tessera_id": "0xcb7bcbd253f17769"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 4294967294,
+      "tessera_id": "0x027aa524e933028e"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 4294967295,
+      "tessera_id": "0xa95987b691d7f2e5"
+    },
+    {
+      "shard_id": 1,
+      "entity_id": 0,
+      "tessera_id": "0x52eed38ebb0b4ba4"
+    },
+    {
+      "shard_id": 1,
+      "entity_id": 1,
+      "tessera_id": "0x00c60fc57e91f347"
+    },
+    {
+      "shard_id": 1,
+      "entity_id": 2,
+      "tessera_id": "0x756c89bfdf7ac90c"
+    },
+    {
+      "shard_id": 1,
+      "entity_id": 2147483647,
+      "tessera_id": "0xf1995b25c25e6fa4"
+    },
+    {
+      "shard_id": 1,
+      "entity_id": 2147483648,
+      "tessera_id": "0x5f02751e5ba89685"
+    },
+    {
+      "shard_id": 1,
+      "entity_id": 4294967294,
+      "tessera_id": "0x648bf1c8f028d387"
+    },
+    {
+      "shard_id": 1,
+      "entity_id": 4294967295,
+      "tessera_id": "0x00267fcd329d5a18"
+    },
+    {
+      "shard_id": 4294967295,
+      "entity_id": 0,
+      "tessera_id": "0xd48d299dc4435542"
+    },
+    {
+      "shard_id": 4294967295,
+      "entity_id": 1,
+      "tessera_id": "0xc7829fded3e47e36"
+    },
+    {
+      "shard_id": 4294967295,
+      "entity_id": 2,
+      "tessera_id": "0x077fe0407d98dec9"
+    },
+    {
+      "shard_id": 4294967295,
+      "entity_id": 2147483647,
+      "tessera_id": "0x61626446b879fb07"
+    },
+    {
+      "shard_id": 4294967295,
+      "entity_id": 2147483648,
+      "tessera_id": "0x9e00687f7c9ffe0e"
+    },
+    {
+      "shard_id": 4294967295,
+      "entity_id": 4294967294,
+      "tessera_id": "0x66f714e5c7461d43"
+    },
+    {
+      "shard_id": 4294967295,
+      "entity_id": 4294967295,
+      "tessera_id": "0xc4d9e3aa36751221"
+    },
+    {
+      "shard_id": 4294967295,
+      "entity_id": 4099366197,
+      "tessera_id": "0x7d6164bf6d9528c5"
+    },
+    {
+      "shard_id": 1,
+      "entity_id": 2292640455,
+      "tessera_id": "0x3f3aa21eb9ae0b3a"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 2545938666,
+      "tessera_id": "0xf3ff5ec181d62a14"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 2316339984,
+      "tessera_id": "0xbecb7e546a5c2836"
+    },
+    {
+      "shard_id": 4294967295,
+      "entity_id": 1528474670,
+      "tessera_id": "0xb7b2aa242d204a49"
+    },
+    {
+      "shard_id": 4294967295,
+      "entity_id": 1544527643,
+      "tessera_id": "0x684ddf4a2d3277af"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 1199894415,
+      "tessera_id": "0x5525b9895e5f667b"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 2982464414,
+      "tessera_id": "0x481530c1fc0c6a33"
+    },
+    {
+      "shard_id": 7,
+      "entity_id": 1639531530,
+      "tessera_id": "0x1f31ab14e49cbc80"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 2835021905,
+      "tessera_id": "0x8f1b9bae182543e4"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 3264768448,
+      "tessera_id": "0x15b539be6c906a37"
+    },
+    {
+      "shard_id": 0,
+      "entity_id": 3005578785,
+      "tessera_id": "0x9282f760348bbe95"
+    }
+  ],
+  "inverse_only": [
+    {
+      "tessera_id": "0x0000000000000000",
+      "shard_id": 941541988,
+      "entity_id": 2957527112
+    },
+    {
+      "tessera_id": "0xffffffffffffffff",
+      "shard_id": 4093482477,
+      "entity_id": 3952391669
+    },
+    {
+      "tessera_id": "0x0000000100000000",
+      "shard_id": 1389427229,
+      "entity_id": 2594235792
+    },
+    {
+      "tessera_id": "0x00000000ffffffff",
+      "shard_id": 3627394015,
+      "entity_id": 2580957359
+    },
+    {
+      "tessera_id": "0x811d028dae1305ce",
+      "shard_id": 1819170673,
+      "entity_id": 2192031636
+    },
+    {
+      "tessera_id": "0x508ce82c2e04f279",
+      "shard_id": 3707523382,
+      "entity_id": 4134779527
+    }
+  ],
+  "secondary_key": {
+    "key": "fedcba98765432100123456789abcdef",
+    "k0": "0x1032547698badcfe",
+    "k1": "0xefcdab8967452301",
+    "why": "A second key with the same inputs. An implementation that ignores the key, or that swaps k0 and k1, or that reads the halves big-endian, reproduces the primary vectors only by coincidence and fails here.",
+    "vectors": [
+      {
+        "shard_id": 0,
+        "entity_id": 0,
+        "tessera_id": "0x8c672835e0927236"
+      },
+      {
+        "shard_id": 0,
+        "entity_id": 1,
+        "tessera_id": "0xf22f0cbe0b075076"
+      },
+      {
+        "shard_id": 0,
+        "entity_id": 2,
+        "tessera_id": "0xf1d7a17904660854"
+      },
+      {
+        "shard_id": 0,
+        "entity_id": 2147483647,
+        "tessera_id": "0x62d303d6b3bb5f0b"
+      },
+      {
+        "shard_id": 0,
+        "entity_id": 2147483648,
+        "tessera_id": "0xa9825106aa25bd22"
+      },
+      {
+        "shard_id": 0,
+        "entity_id": 4294967294,
+        "tessera_id": "0x5d4147c993cd72ab"
+      }
+    ]
+  },
+  "rejected_keys": [
+    {
+      "key": "00000000000000000000000000000000",
+      "reason": "all-zero key; also k1 == 0. Both the parser and --id-key MUST refuse."
+    },
+    {
+      "key": "0f0e0d0c0b0a09080000000000000000",
+      "reason": "k1 == 0 (bytes 8..16 all zero): every round key collapses to splitmix64(k0). MUST refuse."
+    },
+    {
+      "key": "000102030405060708090A0B0C0D0E0F",
+      "reason": "uppercase hex; MUST refuse rather than case-fold."
+    },
+    {
+      "key": "000102030405060708090a0b0c0d0e",
+      "reason": "30 hex characters; MUST refuse (exactly 32 required)."
+    },
+    {
+      "key": "000102030405060708090a0b0c0d0e0f00",
+      "reason": "34 hex characters; MUST refuse."
+    },
+    {
+      "key": "000102030405060708090a0b0c0d0e0g",
+      "reason": "non-hex character; MUST refuse."
+    }
+  ]
+}
