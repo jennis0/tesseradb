@@ -52,6 +52,9 @@ pub enum StoreError {
     InvalidColumns { path: PathBuf, detail: String },
     /// `permutation.bin` failed header/length/content validation.
     InvalidPermutation { path: PathBuf, detail: String },
+    /// An `external-ids-<n>.arrow` extent failed Arrow IPC / schema validation, or failed the
+    /// within-extent ascending-order check (R4).
+    InvalidExternalIds { path: PathBuf, detail: String },
 }
 
 impl fmt::Display for StoreError {
@@ -110,6 +113,13 @@ impl fmt::Display for StoreError {
             }
             StoreError::InvalidPermutation { path, detail } => {
                 write!(f, "invalid permutation.bin at {}: {detail}", path.display())
+            }
+            StoreError::InvalidExternalIds { path, detail } => {
+                write!(
+                    f,
+                    "invalid external-ids extent at {}: {detail}",
+                    path.display()
+                )
             }
         }
     }

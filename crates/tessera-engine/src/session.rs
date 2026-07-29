@@ -7,7 +7,6 @@
 //! authority on which descriptors exist), and the resulting term set is unioned into a mask
 //! fragment via [`FragmentCache`] — this union *is* the authorisation decision (I2).
 
-use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,7 +14,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
-use arrow::array::{Array, BinaryArray, UInt64Array};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use rustc_hash::FxHashMap;
@@ -226,7 +224,8 @@ impl Engine {
             .iter()
             .map(|p| prefix_dir.join(p))
             .collect();
-        let external_index = ExternalIdIndex::load(&external_id_paths).map_err(EngineError::Io)?;
+        let external_index =
+            ExternalIdIndex::load(&external_id_paths).map_err(EngineError::Store)?;
 
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
         let high_water = bundle
@@ -610,74 +609,26 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-/// A sorted `(external_id, entity_id)` index over the bundle's
-/// `entities/external-ids-0.arrow` extent(s) (contracts §2.1) — the `resolve_from_bundle` seam
+/// Resolve an external id to an [`EntityId`] via `tessera_store::ExternalIdIndex` — a thin
+/// newtype-free wrapper so callers in this crate keep using `EntityId` rather than the bare
+/// `u64` the store crate (which has no `EntityId` type) returns.
+///
+/// The index itself is O(extents) resident: each extent is mmap'd and read zero-copy (no
+/// per-id heap allocation, no re-sort across extents — R4 guarantees extent *k*'s ids all
+/// precede extent *k+1*'s, so picking the extent and then binary-searching within it is two
+/// bounded steps, never a scan of every id). This is the `resolve_from_bundle` seam
 /// `tessera_lifecycle::overlay::replay` left open (Task 10's report flags this as the one thing
-/// left to wire in). Built once at `Engine::open`, never on a per-request path: at Phase 1 scales
-/// (up to 2.4M items validated, 10⁹ deferred to Task 16) a one-time linear read plus sort is
-/// cheap relative to the WAL replay it feeds.
-struct ExternalIdIndex {
-    ids: Vec<Vec<u8>>,
-    entities: Vec<u64>,
-}
+/// left to wire in), authorisation-bearing because `/control/changes` denies whichever entity
+/// it resolves to — a wrong resolution denies the wrong entity and leaves the intended target
+/// visible.
+struct ExternalIdIndex(tessera_store::ExternalIdIndex);
 
 impl ExternalIdIndex {
-    fn load(paths: &[PathBuf]) -> io::Result<Self> {
-        let mut ids: Vec<Vec<u8>> = Vec::new();
-        let mut entities: Vec<u64> = Vec::new();
-
-        for path in paths {
-            let file = File::open(path)?;
-            let reader = arrow::ipc::reader::FileReader::try_new(file, None)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-            for batch in reader {
-                let batch =
-                    batch.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-                let ext_col = batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<BinaryArray>()
-                    .ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "external-ids extent: column 0 is not Binary",
-                        )
-                    })?;
-                let ent_col = batch
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "external-ids extent: column 1 is not UInt64",
-                        )
-                    })?;
-                for i in 0..batch.num_rows() {
-                    ids.push(ext_col.value(i).to_vec());
-                    entities.push(ent_col.value(i));
-                }
-            }
-        }
-
-        // Each extent is individually sorted by external-id bytes (R4); re-sorting once across
-        // their concatenation makes the loader correct even for more than one extent, though
-        // Phase 1 always has exactly one.
-        let mut order: Vec<usize> = (0..ids.len()).collect();
-        order.sort_by(|&a, &b| ids[a].cmp(&ids[b]));
-        let sorted_ids: Vec<Vec<u8>> = order.iter().map(|&i| ids[i].clone()).collect();
-        let sorted_entities: Vec<u64> = order.iter().map(|&i| entities[i]).collect();
-
-        Ok(ExternalIdIndex {
-            ids: sorted_ids,
-            entities: sorted_entities,
-        })
+    fn load(paths: &[PathBuf]) -> std::result::Result<Self, StoreError> {
+        tessera_store::ExternalIdIndex::load(paths).map(ExternalIdIndex)
     }
 
     fn resolve(&self, external_id: &[u8]) -> Option<EntityId> {
-        self.ids
-            .binary_search_by(|probe| probe.as_slice().cmp(external_id))
-            .ok()
-            .map(|idx| EntityId::new(self.entities[idx]))
+        self.0.resolve(external_id).map(EntityId::new)
     }
 }
