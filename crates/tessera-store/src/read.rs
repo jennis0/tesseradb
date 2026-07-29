@@ -739,16 +739,17 @@ fn reject_nulls(
 }
 
 /// Decode the (single, uncompressed, 8-byte-aligned) record batch of an Arrow IPC FILE held in
-/// `buffer`. Structurally the same footer/dictionary/block walk as
-/// `tessera_authz::postings::decode_single_batch`, generalised to `columns.arrow`'s schema and
-/// hardened with two checks that file has no need of: `with_require_alignment(true)` (fail
-/// closed on a misaligned buffer rather than silently reallocating) and an explicit rejection
-/// of compressed batches (§ "no compression" in the task brief — decoding would otherwise
-/// quietly succeed via an allocated, decompressed copy, defeating the zero-copy contract
-/// without ever raising an error).
-/// Decode a single-record-batch Arrow IPC file's bytes to a `RecordBatch`, zero-copy over
-/// `buffer`. Shared with [`crate::external_ids`], which reads the same on-disk shape
-/// (uncompressed, alignment-checked, exactly one batch) for `external-ids-<n>.arrow` extents.
+/// `buffer`, zero-copy. Structurally the same footer/dictionary/block walk as
+/// `tessera_authz::postings::decode_single_batch`, generalised to any single-record-batch
+/// schema and hardened with two checks that file has no need of: `with_require_alignment(true)`
+/// (fail closed on a misaligned buffer rather than silently reallocating) and an explicit
+/// rejection of compressed batches (§ "no compression" in the task brief — decoding would
+/// otherwise quietly succeed via an allocated, decompressed copy, defeating the zero-copy
+/// contract without ever raising an error). Shared with [`crate::external_ids`], which reads the
+/// same on-disk shape (uncompressed, alignment-checked, exactly one batch) for
+/// `external-ids-<n>.arrow` extents — errors come back as `StoreError::InvalidColumns`
+/// regardless of caller; `external_ids` remaps them to `InvalidExternalIds` at its call site so
+/// the message names the right file.
 pub(crate) fn decode_single_batch(buffer: &Buffer, path: &Path) -> Result<RecordBatch> {
     const FOOTER_TRAILER_LEN: usize = 10; // 4-byte footer length + 6-byte "ARROW1" magic
     if buffer.len() < FOOTER_TRAILER_LEN {

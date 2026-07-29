@@ -11,6 +11,16 @@
 //! `ColumnsRef` and `tessera_authz::postings::PostingsReader` use) and binary-searches directly
 //! over the mapped `BinaryArray`: O(1) heap allocations and O(row bytes) resident memory per
 //! extent, no per-id copy, no re-sort.
+//!
+//! Every extent's within-extent sortedness is validated once at `load` (a linear scan of
+//! adjacent keys) — this touches every page of the mapped file, so immediately after
+//! `Engine::open` the OS will have paged in and the process's RSS will reflect each extent's
+//! *mapped* bytes as resident, not merely "mapped but untouched". That is a real cost (this
+//! reader does not skip or make it debug-only — the check protects a binary search that would
+//! otherwise silently mis-resolve over a corrupt or out-of-order extent), but it does not change
+//! the *owned* (non-mmap) memory claim this module makes: those pages are backed by the mmap,
+//! reclaimable by the OS under memory pressure, and shared/deduplicated the way any read-only
+//! file-backed mapping is — not a copy this process's allocator holds.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -58,7 +68,16 @@ impl ExternalIdExtent {
             .expect("memmap2::Mmap never returns a null base pointer");
         let buffer = unsafe { Buffer::from_custom_allocation(ptr, len, arc) };
 
-        let batch = decode_single_batch(&buffer, path)?;
+        // `decode_single_batch` is shared with `ColumnsRef` and reports failures as
+        // `StoreError::InvalidColumns` (its message says "invalid columns.arrow at ..." —
+        // correct for its usual caller, misleading here). Remap to `InvalidExternalIds` with the
+        // same path and detail so an external-ids decode failure is reported as what it is.
+        let batch = decode_single_batch(&buffer, path).map_err(|e| match e {
+            StoreError::InvalidColumns { path, detail } => {
+                StoreError::InvalidExternalIds { path, detail }
+            }
+            other => other,
+        })?;
         validate_schema(&batch, path)?;
         validate_sorted(&batch, path)?;
 
@@ -226,6 +245,37 @@ impl ExternalIdIndex {
             .iter()
             .map(|p| ExternalIdExtent::load(p))
             .collect::<Result<Vec<_>>>()?;
+
+        // Within-extent order is checked at `ExternalIdExtent::load` (O(rows) there), but
+        // nothing yet confirms extent *k*'s keys all precede extent *k+1*'s — the property
+        // `resolve`'s extent-selection step depends on (R4; `tessera-build`'s
+        // `write_external_id_extents` chunks one globally pre-sorted array, so this always
+        // holds for a build-produced bundle). Checked here at O(extents): failure today is
+        // fail-closed by accident (a shuffled extent list makes every lookup silently return
+        // `None` — every deny 404s rather than resolving to the wrong entity), but "accidentally
+        // fail-closed" is not the same as "checked", and this is authorisation-bearing enough
+        // to refuse to open rather than trust it.
+        // Tracks the most recent non-empty extent's last key (as `(extent_idx, key)`) seen so
+        // far, so an empty extent between two non-empty ones doesn't skip the check across it.
+        let mut prev_non_empty: Option<(usize, &[u8])> = None;
+        for (idx, extent) in extents.iter().enumerate() {
+            let Some(first) = extent.first_key() else {
+                continue;
+            };
+            if let Some((prev_idx, prev_last)) = prev_non_empty {
+                if prev_last >= first {
+                    return Err(StoreError::InvalidExternalIds {
+                        path: paths[idx].clone(),
+                        detail: format!(
+                            "extent {prev_idx}'s last key is not strictly less than extent \
+                             {idx}'s first key — extents must partition one ascending order"
+                        ),
+                    });
+                }
+            }
+            prev_non_empty = Some((idx, extent.last_key().expect("first_key was Some")));
+        }
+
         Ok(ExternalIdIndex { extents })
     }
 
@@ -235,11 +285,15 @@ impl ExternalIdIndex {
     pub fn resolve(&self, external_id: &[u8]) -> Option<u64> {
         // Extents partition the global sorted order into consecutive ranges (build splits
         // sequentially from one globally sorted array), so the extent whose `last_key` is the
-        // first to be `>= external_id` is the only one that can contain it.
+        // first to be `>= external_id` is the only one that can contain it. `is_some_and` (not
+        // `is_none_or`): an empty extent has no `last_key` and must not match unconditionally —
+        // an empty extent ahead of non-empty ones would otherwise short-circuit `position` and
+        // make every lookup `None`. A fully-empty index (every extent empty) falls out of this
+        // naturally: no extent ever matches, `position` returns `None`, and so does `resolve`.
         let extent_idx = self
             .extents
             .iter()
-            .position(|e| e.last_key().is_none_or(|last| last >= external_id))?;
+            .position(|e| e.last_key().is_some_and(|last| last >= external_id))?;
         self.extents[extent_idx].resolve(external_id)
     }
 }
@@ -401,8 +455,58 @@ mod tests {
                     "mismatch at rows_per_extent={rows_per_extent}, row {i}"
                 );
                 assert_eq!(index.resolve(&key), Some(i));
+
+                // Explicit boundary probes: the lexicographic neighbours either side of a
+                // present key are absent-or-present in the fixture (never both mapping to the
+                // same row `i`), so they exercise off-by-one behaviour right at an extent
+                // boundary or a real key, not just the interior — the case an out-of-order or
+                // mis-split extent would get wrong first.
+                if let Some(pred) = byte_pred(&key) {
+                    assert_eq!(
+                        index.resolve(&pred),
+                        oracle.resolve(&pred),
+                        "predecessor-of-present-key mismatch at rows_per_extent={rows_per_extent}, row {i}"
+                    );
+                }
+                if let Some(succ) = byte_succ(&key) {
+                    assert_eq!(
+                        index.resolve(&succ),
+                        oracle.resolve(&succ),
+                        "successor-of-present-key mismatch at rows_per_extent={rows_per_extent}, row {i}"
+                    );
+                }
             }
         }
+    }
+
+    /// The lexicographic predecessor of `key` (as compared byte-by-byte from index 0, matching
+    /// `BinaryArray`/`Ord` comparison), or `None` if `key` is all zero bytes (no predecessor).
+    fn byte_pred(key: &[u8; 8]) -> Option<[u8; 8]> {
+        let mut out = *key;
+        for byte in out.iter_mut().rev() {
+            if *byte == 0 {
+                *byte = 0xFF;
+            } else {
+                *byte -= 1;
+                return Some(out);
+            }
+        }
+        None
+    }
+
+    /// The lexicographic successor of `key`, or `None` if `key` is all `0xFF` bytes (no
+    /// successor).
+    fn byte_succ(key: &[u8; 8]) -> Option<[u8; 8]> {
+        let mut out = *key;
+        for byte in out.iter_mut().rev() {
+            if *byte == 0xFF {
+                *byte = 0;
+            } else {
+                *byte += 1;
+                return Some(out);
+            }
+        }
+        None
     }
 
     #[test]
@@ -459,5 +563,63 @@ mod tests {
         );
         let err = ExternalIdIndex::load(&[path]).unwrap_err();
         assert!(matches!(err, StoreError::InvalidExternalIds { .. }));
+    }
+
+    #[test]
+    fn rejects_extents_out_of_order_relative_to_each_other() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // Each extent is individually sorted ascending, but extent 1's keys all precede extent
+        // 0's — a shuffled extent *list*, not a shuffled extent. `ExternalIdExtent::load`'s
+        // within-extent check can't see this; only the cross-extent check in
+        // `ExternalIdIndex::load` can.
+        let path0 = temp.path().join("external-ids-0.arrow");
+        let path1 = temp.path().join("external-ids-1.arrow");
+        write_extent(&path0, &[(vec![5, 0, 0, 0, 0, 0, 0, 0], 0)]);
+        write_extent(&path1, &[(vec![1, 0, 0, 0, 0, 0, 0, 0], 1)]);
+
+        let err = ExternalIdIndex::load(&[path0, path1]).unwrap_err();
+        assert!(
+            matches!(err, StoreError::InvalidExternalIds { .. }),
+            "expected InvalidExternalIds, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cross_extent_check_skips_over_an_empty_extent_rather_than_short_circuiting() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // An empty extent in the middle must not swallow the ordering check between its
+        // non-empty neighbours: extent 1 is empty, but extent 0 (key 5) still comes after
+        // extent 2 (key 1) here, which must still be caught.
+        let path0 = temp.path().join("external-ids-0.arrow");
+        let path1 = temp.path().join("external-ids-1.arrow");
+        let path2 = temp.path().join("external-ids-2.arrow");
+        write_extent(&path0, &[(vec![5, 0, 0, 0, 0, 0, 0, 0], 0)]);
+        write_extent(&path1, &[]);
+        write_extent(&path2, &[(vec![1, 0, 0, 0, 0, 0, 0, 0], 1)]);
+
+        let err = ExternalIdIndex::load(&[path0, path1, path2]).unwrap_err();
+        assert!(matches!(err, StoreError::InvalidExternalIds { .. }));
+    }
+
+    #[test]
+    fn an_empty_extent_ahead_of_non_empty_ones_does_not_short_circuit_resolve() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // Regression for the `is_none_or` bug: an empty leading extent's `last_key()` is `None`,
+        // which must not match every lookup unconditionally.
+        let path0 = temp.path().join("external-ids-0.arrow");
+        let path1 = temp.path().join("external-ids-1.arrow");
+        write_extent(&path0, &[]);
+        write_extent(
+            &path1,
+            &[
+                (vec![1, 0, 0, 0, 0, 0, 0, 0], 0),
+                (vec![9, 0, 0, 0, 0, 0, 0, 0], 1),
+            ],
+        );
+
+        let index = ExternalIdIndex::load(&[path0, path1]).unwrap();
+        assert_eq!(index.resolve(&[1, 0, 0, 0, 0, 0, 0, 0]), Some(0));
+        assert_eq!(index.resolve(&[9, 0, 0, 0, 0, 0, 0, 0]), Some(1));
+        assert_eq!(index.resolve(&[5, 0, 0, 0, 0, 0, 0, 0]), None);
     }
 }
