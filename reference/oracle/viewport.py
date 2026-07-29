@@ -76,6 +76,17 @@ def first_k(
 
     Matches the engine's current placeholder sampler (`sample_tile`'s doc) — see this module's
     doc for why this, and not an R3 priority order, is what the differential compares against.
+
+    PHASE2-TODO: this function's ordering is a deliberate, TEMPORARY mirror of
+    `tessera-engine`'s placeholder `sample_tile` (ascending row/Morton order), not the R3
+    priority-sample definition (`priority(e) = splitmix64(e) >> 48`, tiebreak `(morton, priority,
+    entity_id)`). The moment Phase 2 replaces that placeholder with the real priority sampler,
+    this function MUST be re-pointed to sort candidates by `morton.priority(entity_id)` (ties
+    broken by entity id) instead of row order — and until that landing PR does so, the
+    differential test in `tests/test_differential.py` covering point sets (item (c)) is EXPECTED
+    TO DISAGREE with a server that has already switched to priority order. Leaving this comment
+    unresolved past that point is a bug, not a style note — grep for "PHASE2-TODO" before
+    declaring Phase 2's sampler done.
     """
     seg = bundle.segment(slice_id)
     lo, hi = morton.code_range(tile, zoom)

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import random
+from collections import Counter
 
 import pytest
 
@@ -128,20 +129,23 @@ def test_grid_differential(server, oracle_bundle: Bundle):
                 expected_n = min(k, visible)
                 tile_points = server_points[cursor : cursor + expected_n]
                 cursor += expected_n
-                server_xy = {(round(x, 4), round(y, 4)) for _h, x, y in tile_points}
+                # Counter, not set: two distinct entities can share rounded coordinates within a
+                # tile, and a set would silently absorb a server bug that dropped one of them
+                # while duplicating another (the brief calls for a multiset comparison here).
+                server_xy = Counter((round(x, 4), round(y, 4)) for _h, x, y in tile_points)
 
                 oracle_xy_list = _oracle_first_k(oracle_bundle, base_mask, SLICE, zoom, t, k)
-                oracle_xy = {(round(x, 4), round(y, 4)) for x, y in oracle_xy_list}
+                oracle_xy = Counter((round(x, 4), round(y, 4)) for x, y in oracle_xy_list)
 
                 assert server_xy == oracle_xy, (
-                    f"point set disagrees for tile {t} zoom={zoom}: "
+                    f"point multiset disagrees for tile {t} zoom={zoom}: "
                     f"server={server_xy} oracle={oracle_xy}"
                 )
                 points_checked += len(tile_points)
             assert cursor == len(server_points), "points list must be exactly consumed by tiles"
 
     assert tiles_checked > 0
-    assert points_checked >= 0
+    assert points_checked > 0
 
 
 def _oracle_counts(bundle, base_mask, slice_id, zoom, bbox):

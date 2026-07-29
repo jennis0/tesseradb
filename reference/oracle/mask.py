@@ -21,8 +21,6 @@ from dataclasses import dataclass, field
 
 import pyarrow.parquet as pq
 
-from . import bundle as bundle_mod
-
 
 def mask_of(term_ids: set[int], pairs_path) -> set[int]:
     """Entity ids granted access to at least one of `term_ids`, scanned from `pairs.parquet`.
