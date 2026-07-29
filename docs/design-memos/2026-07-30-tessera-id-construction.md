@@ -1,6 +1,7 @@
 # The `tessera_id` construction (2026-07-30)
 
-**Status:** specification, for review. **Touches:** contracts §1, §2.2, §2.4, §2.6; design
+**Status:** specification, for review; **amended 2026-07-30** (see *Amendments*, below).
+**Touches:** contracts §1, §2.2, §2.4, §2.6; design
 §10.6, §12.5, §13.3, §16, Appendix C (C6, C17); `tessera-types`, `tessera-build`,
 `tessera-store`, `tessera-engine`, `tessera-wire`, the reference oracle, the byte-scanner.
 
@@ -28,6 +29,41 @@ is wrong and is corrected by a commit that says so.
 **Vocabulary, deliberately.** This is a **blinding permutation**, not encryption. It is
 called that throughout, and in any spec text derived from this memo, because calling it
 encryption would claim a security property §8 explicitly does not claim.
+
+## Amendments since the reviewed version (`acfe2ce`)
+
+Recorded here rather than applied silently, because this memo is the record of a review and
+a memo that quietly drops or rewrites a condition misrepresents it. Nothing in §1.1–§1.9
+changes, so `reference/vectors/tessera_id.json` is **unamended** and the independent gate on
+it (114/114 reproduced from this text alone) still stands.
+
+**From the owner's `priority` decision (2026-07-30), landed in design r21 / contracts r6:**
+
+- **§3.2** — the `priority` viewer-plane prohibition is **retired**, superseded by keying.
+  The general rule it was an instance of is kept verbatim: it is what licenses the change.
+  The "Open interaction, flagged not resolved" block is deleted, its condition having been met.
+- **§5a, precondition 4** — restated as **satisfied differently, not dropped**: the channel is
+  closed by keying `priority` rather than by forbidding it, so the 8-round ruling still rests
+  on something real.
+- **§6** — the sort order becomes `(morton, tessera_id)` with no further tiebreak; the build
+  sequence **inverts** (`tessera_id` is computed before the tiler, not written at the row
+  after it); row order is now **key-dependent**, so rotation reorders tied rows. §2.1's
+  `--rotate-id-key` row and §3.2's rotation bullet say so too. The storage argument that
+  follows is unchanged in substance and gains one sentence at the join.
+
+**From the independent gate on this memo (2026-07-30):**
+
+- **§3** — the three unqualified "cannot" claims are restated as the property the construction
+  is **intended** to provide, with a forward reference to §8, which admits that eight rounds of
+  a non-cryptographic mixer should not be assumed to resist an adversary holding pairs.
+- **§3** — the viewer-plane setting is recorded: **ciphertext-only with a near-degenerate
+  plaintext prior** (`shard_id` always 0, `entity_id` dense from zero under I9), which is
+  stronger than "no known pairs" implies and which §3.1's own standard says must be written
+  down rather than reconstructed.
+- **§9** — the `key_schedule` row no longer claims to catch a non-wrapping `k1 × (i + 1)`
+  multiply. It cannot: under the canonical key `k1 × 8` never overflows. The credit moves to
+  `secondary_key`, whose `k1` does.
+- **Change list** — the contracts §2.6 row updated, having recorded the retired prohibition.
 
 ---
 
@@ -280,7 +316,8 @@ an accompaniment to `--id-key`, not an eighth source.
 - **Any two key sources given that disagree** — `--id-key-file` against
   `--carry-id-key-from`, `--id-key` against either — → **refuse unless
   `--rotate-id-key`**, whose help text states that all outstanding identifiers are
-  invalidated. **Agreement between two sources is not an error** and is in fact the useful
+  invalidated **and that row order changes** *(amended 2026-07-30 — the key is now a sort
+  key, §6)*. **Agreement between two sources is not an error** and is in fact the useful
   case: it is how an operator checks that the config file and the previous bundle are the
   same lineage.
 - A degenerate key (`k1 == 0`, all-zero) **from any source** → refuse (§1.3).
@@ -400,10 +437,41 @@ bundle-holder inverts every `tessera_id` to `(shard, entity)` trivially. That is
 and intended: a bundle-holder already has the postings, the masks and the geometry, so
 entity IDs tell them nothing new.
 
-**The property being defended is narrower and precise:** a **viewer-plane client** —
-holding `tessera_id`s and no bundle — cannot derive entity IDs, cannot order them, and
-cannot count the gaps between them. That is what Appendix C's C6 was about, and what D1
-relaxes to the caller's own external IDs.
+**The property being defended is narrower and precise:** the construction is **intended to
+provide** that a **viewer-plane client** — holding `tessera_id`s and no bundle — has no
+practical route to derive entity IDs, to order them, or to count the gaps between them. That
+is what Appendix C's C6 was about, and what D1 relaxes to the caller's own external IDs.
+
+**Stated as an intent rather than as three "cannot"s, deliberately** *(amended 2026-07-30,
+raised by the independent gate on this memo)*. §8 says plainly that eight rounds of a
+non-cryptographic mixer **should not be assumed to resist** an adversary who obtains known
+`(entity_id, tessera_id)` pairs; three unqualified "cannot" claims here would contradict that
+admission 260 lines later, and a reader who met only the first would take a stronger guarantee
+than this memo makes. What is claimed is the design intent and the absence of a known route
+under the setting below — not an unconditional impossibility.
+
+**The viewer-plane setting, written down rather than left to be reconstructed** *(amended
+2026-07-30; §3.1's own standard is that a premise a ruling depends on must be recorded)*. The
+viewer-plane adversary's position is **ciphertext-only with a near-degenerate plaintext
+prior**, and that is *stronger* than "no known pairs" implies in both directions, so both
+limbs are recorded:
+
+- **Stronger for the defence than a generic ciphertext-only setting**, because the viewer has
+  no pairs at all: the layer check and the byte-scanner keep entity IDs off the plane
+  entirely, so the viewer never observes a plaintext.
+- **Weaker than a generic ciphertext-only setting**, because the plaintext distribution is
+  almost fully known: `shard_id` is **always 0** for as long as §13.4 rules sharding
+  premature (§5), and `entity_id` is **dense from zero** under I9's append-only allocation.
+  The viewer therefore knows the plaintext set is essentially `{0, 1, …, high_water}` in the
+  low half with a constant high half, and — via `/meta`-adjacent corpus scale — approximately
+  how large it is. The adversary's task is not "guess the plaintext" but "distinguish this
+  permutation of a known small domain from a random one", which is a different and easier
+  question than the phrase "no known pairs" suggests.
+
+Nothing in the ruling changes on this: the domain is 2³² wide, the viewer obtains no pairs,
+and the consequence of a distinguisher would be entity-space recovery bounded by what C6 as
+revised already accepts. But it is the setting the 8-round choice is actually made in, and it
+belongs in the record.
 
 ### 3.1 The control-plane principal is OUTSIDE the defended set, and obtains chosen-plaintext pairs by construction
 
@@ -439,30 +507,31 @@ happening by accident.
   Task 13 adds a conformance sweep for the key bytes on the viewer plane, exactly as the
   byte-scanner already sweeps for entity IDs.
 - **Rotation is a breaking change for clients, not operational hygiene.** Do not schedule
-  it.
-- **`priority` must never be emitted on the viewer plane** *(plan Important I-4)*.
-  `priority` is an **unkeyed** `splitmix64` of the entity ID (contracts §2.6), so
-  publishing it hands a viewer a 16-bit residue of the entity: a 65,536× narrowing of the
-  search space per mark, computable offline against a candidate entity range, and
-  *combinable across marks*. It is not on the wire today — but the routing principle's
-  per-mark row lists it as an exemplar hot column, which is precisely the sentence a future
-  contributor will cite when adding it. It is **forbidden on the viewer plane**, in the
-  contracts spec and in the byte-scanner's sweep, and the reason is recorded next to the
-  prohibition so it survives the next reader who thinks `priority` is just a sort key.
+  it. *(Amended 2026-07-30: since `tessera_id` became the storage sort key, rotation also
+  **reorders tied rows** and therefore changes `permutation.bin` — see §6.)*
+- **`priority`'s viewer-plane prohibition is RETIRED** *(amended 2026-07-30; the concurrent
+  memo `docs/design-memos/2026-07-30-priority-as-identity-prefix.md` was adopted by owner
+  decision, and this bullet as first written — a prohibition, plan Important I-4 — is
+  **superseded**)*. The prohibition rested entirely on `priority` being an **unkeyed**
+  `splitmix64` of the entity ID, which is what publishing would have made dangerous: a
+  16-bit residue of the entity, a 65,536× narrowing of the search space per mark, computable
+  offline against a candidate entity range and combinable across marks. `priority` is now
+  `high16(tessera_id)` — 16 bits of a **keyed** identity the same payload already carries in
+  **full** — so there is no unkeyed residue of the entity ID left to forbid. A viewer holding
+  *k* marks learns only that their priorities fall below some cut *P*, and *P* is determined
+  by *k* and the exact masked count §7.1 already returns. **The channel is closed by keying
+  it, not by forbidding it**, and the prohibition is retired **by argument** rather than
+  weakened by convenience: a future reader must not reinstate it without first
+  re-establishing that `priority` is unkeyed.
 
-  **The general rule** the prohibition is an instance of: *a hot column may be shown on the
+  **The general rule** the prohibition was an instance of, and which `priority` now
+  satisfies rather than escapes: *a hot column may be shown on the
   viewer plane only if it is independent of the entity ID, or keyed under the deployment
   key.*
 
-  > **Open interaction, flagged not resolved.** The concurrent memo
-  > `docs/design-memos/2026-07-30-priority-as-identity-prefix.md` (status: *decision, for
-  > review*, not adopted at the time of writing) proposes redefining `priority` as
-  > `high16(tessera_id)`, which would satisfy the general rule's second limb and retire
-  > I-4 by argument. **This memo states the plan's position as it stands**: while
-  > `priority` is an unkeyed function of the entity ID, it is forbidden on the viewer
-  > plane. If that memo is adopted, this bullet and §6's tiebreak statement are superseded
-  > by it, and the byte-scanner's I-4 sweep goes with them. Nothing in §1 changes either
-  > way.
+  It is stated here unchanged because it is what **licenses** the redefinition rather than
+  being collateral to it. Any future per-mark column derived from the entity ID by an
+  *unkeyed* function inherits the prohibition `priority` has just been released from.
 
 ### 3.3 The construction against the invariants
 
@@ -579,9 +648,17 @@ that omits them misrepresents the review.**
    rather than silent. The two must land together. (Task 5.)
 3. **The control-plane threat-model statement** (§3.1), written down rather than implied,
    because the choice of a non-cryptographic mixer depends on that premise.
-4. **The `priority` prohibition on the viewer plane** (§3.2), which closes the one channel
-   that would hand a viewer an unkeyed residue of the entity ID and thereby move the
-   construction inside the attacked set.
+4. **The channel that would hand a viewer an unkeyed residue of the entity ID is closed**
+   (§3.2) — the one that would otherwise move the construction inside the attacked set.
+   **This precondition stands; only the mechanism satisfying it has changed** *(amended
+   2026-07-30)*. As ruled, it was satisfied by **prohibiting** `priority` on the viewer
+   plane. It is now satisfied by **keying** it: `priority` is `high16(tessera_id)`, so it is
+   no longer a residue of the entity ID at all, and no unkeyed derivative of the entity ID
+   is emitted on any plane. **The condition is met, not dropped** — the round-function
+   ruling still rests on something real, and the general rule at §3.2 (a hot column may
+   cross only if it is independent of the entity ID or keyed under the deployment key)
+   remains the operative test for every future column. Recorded rather than deleted because
+   this section says in terms that a memo omitting a condition misrepresents the review.
 
 ---
 
@@ -598,19 +675,73 @@ the earlier draft's seeded-minting machinery is deleted rather than adapted, and
 The only non-determinism anywhere near the construction is the **CSPRNG mint**, which
 happens once, at an operator's explicit request, outside the build's data path.
 
-**The sort tiebreak does not move.** `sort_batch` orders by
-**`(morton, priority, entity_id)`**, contracts §2.6 calls that contract, and the oracle
-must re-derive the row order from the build inputs. **`tessera_id` is *not* the tiebreak** —
-it is a column value written at the row, not a sort key. Task 6 passes entity IDs alongside
-`TilerItem` for exactly this reason. (See the flag in §3.2: the concurrent
-priority-as-prefix memo proposes changing this order. Until it is adopted, the order above
-is the contract.)
+**The sort order moves onto the identity** *(amended 2026-07-30; this replaces the "the
+sort tiebreak does not move" statement first written here, which said `tessera_id` was "a
+column value written at the row, not a sort key" and now **inverts**)*. Under
+`priority = high16(tessera_id)` a function of `tessera_id` **is** the sort key, so the
+identity must exist before the tiler runs. The statement below is normative and must not be
+paraphrased:
 
-`tessera_id` is **stored** at the row rather than recomputed per gathered mark because the
-gather is a tight zero-copy loop over mmap'd columns, and eight `splitmix64` rounds per
-mark at ~143,857 marks per viewport is work the format can pay for once at build. It is
-nonetheless **derivable**, which is what lets `tessera verify` check the whole column
-against the key.
+> **The storage sort order is `(morton, tessera_id)` ascending, and it needs no further
+> tiebreak.**
+>
+> `tessera_id` is a keyed bijection over 2⁶⁴ and there is exactly one row per entity, so
+> within a build no two rows share a `tessera_id` and the order is **total**. Because
+> `priority` is a *prefix* of `tessera_id`, "order by `(morton, priority, tessera_id)`" is
+> **identically** "order by `(morton, tessera_id)`" — there is no composite comparator to
+> get subtly wrong, and an implementation may compare the 16-bit prefix first purely as an
+> optimisation, provided a test asserts the two agree. `entity_id` is **not** a sort key at
+> any position. `priority` is **not** an independent sort key: it is a cached prefix, and it
+> must be derived at exactly one place from the `tessera_id` it is a prefix of.
+>
+> **What the oracle must re-derive:** row order as
+> `(morton_of(x, y, extent), forward(identity.key, identity.shard_id, entity_id))` ascending.
+> **Row order is therefore key-dependent, where it previously was not** — the oracle already
+> reads `identity` from MANIFEST, so this adds a dependency and no new artifact. A different
+> key gives a different order within a Morton cell; that is intended, and it is not a defect
+> for `build_equivalence.rs`, which passes one key to both build paths.
+>
+> **The one condition under which an explicit tiebreak returns:** if a future format ever
+> stores more than one row per entity, `tessera_id` stops being unique per row and the order
+> stops being total. Nothing in Phase 1 does this — `permutation.bin`'s `entity_to_row` is a
+> bijection — but a Phase 3 or later change that breaks it must supply a tiebreak explicitly
+> rather than inherit an unspecified one.
+
+**The build sequence therefore inverts: `tessera_id` is computed BEFORE the sort, not
+written at the row after it.** This is the consequence most likely to produce a wrong
+implementation if left vague. The sequence, for **both** build paths:
+
+1. Allocate entity IDs — signature-sorted assignment, §11.1, **unchanged**.
+2. **`tessera_id = forward(identity.key, identity.shard_id, entity_id)` for every item —
+   before the tiler.** Fallible (§1.8): a checked conversion, collected into a `Result`.
+3. Morton codes from `x`, `y` against the extent — unchanged.
+4. **Sort by `(morton, tessera_id)`**, permuting the companion `entity_ids` vector
+   identically. That vector is still needed — for `permutation.bin`'s `entity_to_row` and
+   for the external-ID extents and locator — but it is a **companion, not a sort key**,
+   which is a different reason from the one first given here for passing it alongside
+   `TilerItem`.
+5. Derive the `priority` column as `(tessera_id >> 48) as u16` **over the already-sorted
+   `tessera_id` vector**. It is a projection of a column already in hand, computed at exactly
+   one place, never an independent hash.
+6. Write `columns.arrow` as `(tessera_id, x, y, priority, …declared scalars)`.
+
+**Key rotation's blast radius widens accordingly.** With a key-dependent sort key, a rotation
+**reorders tied rows**, so `columns.arrow` row IDs are no longer invariant under it: a rebuild
+under a new key produces a different `permutation.bin` as well as different identifiers. The
+determinism claim above is untouched — the build is still a pure function of
+`(key, shard_id, entity_id)` — but "rotation invalidates every outstanding identifier"
+becomes "rotation invalidates every outstanding identifier **and changes row order**".
+Rotation was already a breaking change and remains one; this widens what breaks, not how
+often, and it must be stated wherever rotation is described (§2.1's `--rotate-id-key` row,
+§3.2's rotation bullet).
+
+`tessera_id` is nonetheless **stored** at the row rather than recomputed per gathered mark,
+and the reason is unchanged by the inversion above: the gather is a tight zero-copy loop over
+mmap'd columns, and eight `splitmix64` rounds per mark at ~143,857 marks per viewport is work
+the format can pay for once at build. The build sequence adds a second reason — the value must
+exist before the sort in any case, so storing it costs nothing the build had not already
+spent. It is nonetheless **derivable**, which is what lets `tessera verify` check the whole
+column against the key.
 
 ---
 
@@ -713,10 +844,10 @@ Canonical test key `000102030405060708090a0b0c0d0e0f`
 | block | count | what it catches |
 |---|---|---|
 | `splitmix64` | 6 | a wrong shift constant (30/27/31), a wrong golden-ratio or multiplier constant, signed shift, missing 64-bit wraparound — **before** the round loop is blamed |
-| `key_schedule` | `k0`, `k1`, 8 round keys | big-endian half read, swapped halves, `i` instead of `i + 1`, non-wrapping multiply |
+| `key_schedule` | `k0`, `k1`, 8 round keys | big-endian half read, swapped halves, `i` instead of `i + 1` |
 | `vectors` | 33 | the construction end to end: `entity_id ∈ {0, 1, 2, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFE, 0xFFFFFFFF}` × `shard_id ∈ {0, 1, 0xFFFFFFFF}`, plus 12 random entities across shards 0, 1, 7 and `0xFFFFFFFF`. **Every one is asserted in both directions.** |
 | `inverse_only` | 6 | the inverse loop *independently* of the forward one — arbitrary `u64`s (including `0`, `u64::MAX`, and ids whose halves are `0`/`0xFFFFFFFF`) and the `(shard, entity)` they invert to. An off-by-one round index in `invert` alone fails here. |
-| `secondary_key` | 6 | an implementation that ignores the key, hard-codes the schedule, or reads the halves the wrong way round |
+| `secondary_key` | 6 | an implementation that ignores the key, hard-codes the schedule, or reads the halves the wrong way round — **and a non-wrapping `k1 × (i + 1)`**, which only this block can catch *(corrected 2026-07-30, from the independent gate: the row above previously claimed the credit. It cannot. Under the canonical key `k1 = 0x0f0e0d0c0b0a0908`, and `k1 × 8` — the largest multiple the schedule takes — is `0x78706860585048 40`, which never overflows `u64`, so the primary `key_schedule` block exercises no wraparound in that multiply at all. The secondary key's `k1 = 0xefcdab8967452301` does overflow from `i + 1 = 2` upward, so a missing 64-bit reduction there changes every round key and every vector in this block. Wraparound inside `splitmix64`'s own multiplies is the `splitmix64` block's job and is a different bug.)* |
 | `rejected_keys` | 6 | the all-zero key, `k1 == 0` with a non-zero `k0`, **uppercase hex**, 30 characters, 34 characters, a non-hex character — each with the reason it must be refused |
 
 Which realistic failures each edge case covers: a **swapped half** shows up on every
@@ -739,7 +870,7 @@ it is reproducible from §1 alone, which is the property being tested.
 | contracts §1 | external-ID cap 256 → 64 bytes; sidecar disk scales with key length |
 | contracts §2.2 | the seven build flags, the N-1 refusal, `--id-key-file`, `identity_epoch` on `/meta`, optional `epoch` on `/v1/items` |
 | contracts §2.4 | `identity` in MANIFEST; the sidecar as placeholder; compression as a conditional future option |
-| contracts §2.6 | the construction (§1 verbatim); `columns.arrow`'s identity column; `priority` forbidden on the viewer plane |
+| contracts §2.6 | the construction (§1 verbatim); `columns.arrow`'s identity column; `priority` redefined as `high16(tessera_id)` and the sort order as `(morton, tessera_id)` *(amended 2026-07-30; this row previously read "`priority` forbidden on the viewer plane", which is retired — §3.2, §5a precondition 4, §6)* |
 | design §10.6, I10 | mechanism clause: opaque `tessera_id` in place of per-session handle; substance unchanged |
 | design Appendix C | C6 revised; **C17 added** (stable wire identity across sessions and principals) |
 | design §16 | the partition-versus-shard resolution; the narrowed residual |
