@@ -1,0 +1,225 @@
+{
+  "bundle": "/tmp/tessera-1e9",
+  "frozen_bundle_bytes": 51142054146,
+  "n_viewports": 2000,
+  "k_values": [
+    50,
+    500,
+    1000
+  ],
+  "grant_width": 10000,
+  "seed": 0,
+  "cache_dropped": false,
+  "verdict": "REFUTED",
+  "verdict_note": "Arm D (skip-id-index + prefaulted) shows majflt_delta=0 with the p99-p50 gap still at 43.86 ms at k=1000 -- a tail with zero major page faults cannot be attributed to page faults. Arm A's 2048 majflt across 6000 requests (~0.34/request) is, even at a generous 0.5ms/fault, two orders of magnitude short of the observed ~42ms gap. See docs/design-memos/2026-07-30-tail-discrimination.md for the full analysis.",
+  "terms_du": {
+    "measured_on": "/tmp/tessera-1e9 (existing bundle, before any rebuild)",
+    "whole_bundle_bytes": 51142099202,
+    "terms_dir_bytes": 266622154,
+    "pairs_parquet_bytes": 121442840,
+    "postings_arrow_bytes": 145175218,
+    "entities_dir_bytes": 20250013716,
+    "columns_arrow_total_bytes": 22625001234,
+    "morton_u32_bytes": 4000000000,
+    "permutation_bin_bytes": 4000000016,
+    "note": "terms/ is 0.25 GiB (266622154 bytes) -- neither the plan's assumed 3.7 GiB residual nor contracts §2.4's ~5.6 GiB pairs.parquet estimate. Root cause and plan correction in docs/design-memos/2026-07-30-tail-discrimination.md and docs/superpowers/plans/2026-07-30-external-id-identity.md."
+  },
+  "arms": {
+    "A": {
+      "summary_k": 1000,
+      "p50": 42622.0,
+      "p99": 85211.0,
+      "max": 7130698.0,
+      "majflt_delta": 2048,
+      "minflt_delta": 2140988,
+      "peak_rss": 32906916,
+      "boot_seconds": 110.24501554799645,
+      "prefault_seconds": null,
+      "prefault_files": [],
+      "warmup_server_us": 10905219,
+      "swap_total_kb_before": 12582912,
+      "swap_free_kb_before": 11090700,
+      "swap_total_kb_after": 12582912,
+      "swap_free_kb_after": 10928988,
+      "swap_used_delta_kb": 161712,
+      "k": {
+        "50": {
+          "p50": 5719.0,
+          "p99": 45034.0,
+          "max": 228032.0,
+          "e2e_p50": 6926.515001396183,
+          "e2e_p99": 46372.91299877688,
+          "e2e_max": 229362.4029989587,
+          "n": 2000
+        },
+        "500": {
+          "p50": 23072.0,
+          "p99": 53166.0,
+          "max": 816029.0,
+          "e2e_p50": 26846.7670030077,
+          "e2e_p99": 57127.65799398767,
+          "e2e_max": 820139.4000061555,
+          "n": 2000
+        },
+        "1000": {
+          "p50": 42622.0,
+          "p99": 85211.0,
+          "max": 7130698.0,
+          "e2e_p50": 45933.276996947825,
+          "e2e_p99": 91595.9429985378,
+          "e2e_max": 7138356.306000788,
+          "n": 2000
+        }
+      }
+    },
+    "B": {
+      "summary_k": 1000,
+      "p50": 43784.0,
+      "p99": 88225.0,
+      "max": 1751999.0,
+      "majflt_delta": 259,
+      "minflt_delta": 2118483,
+      "peak_rss": 32412084,
+      "boot_seconds": 61.63865604699822,
+      "prefault_seconds": 12.706124058000569,
+      "prefault_files": [
+        "/tmp/tessera-1e9/v00000/partitions/default/slices/s0/segments/seg-0/columns.arrow",
+        "/tmp/tessera-1e9/v00000/partitions/default/slices/s0/segments/seg-0/morton.u32",
+        "/tmp/tessera-1e9/v00000/partitions/default/slices/s0/permutation.bin"
+      ],
+      "warmup_server_us": 10029996,
+      "swap_total_kb_before": 12582912,
+      "swap_free_kb_before": 10928988,
+      "swap_total_kb_after": 12582912,
+      "swap_free_kb_after": 10848464,
+      "swap_used_delta_kb": 80524,
+      "k": {
+        "50": {
+          "p50": 4149.0,
+          "p99": 40164.0,
+          "max": 279045.0,
+          "e2e_p50": 5262.555001536384,
+          "e2e_p99": 41422.72699391469,
+          "e2e_max": 280385.9929990722,
+          "n": 2000
+        },
+        "500": {
+          "p50": 22779.0,
+          "p99": 52719.0,
+          "max": 770933.0,
+          "e2e_p50": 25846.627999271732,
+          "e2e_p99": 55927.31100477977,
+          "e2e_max": 773942.921005073,
+          "n": 2000
+        },
+        "1000": {
+          "p50": 43784.0,
+          "p99": 88225.0,
+          "max": 1751999.0,
+          "e2e_p50": 46974.172997579444,
+          "e2e_p99": 93426.89599725418,
+          "e2e_max": 1757185.3069966892,
+          "n": 2000
+        }
+      }
+    },
+    "C": {
+      "summary_k": 1000,
+      "p50": 41764.0,
+      "p99": 79724.0,
+      "max": 1848169.0,
+      "majflt_delta": 690,
+      "minflt_delta": 2189493,
+      "peak_rss": 20926720,
+      "boot_seconds": 61.619781469999,
+      "prefault_seconds": null,
+      "prefault_files": [],
+      "warmup_server_us": 9289109,
+      "swap_total_kb_before": 12582912,
+      "swap_free_kb_before": 10848464,
+      "swap_total_kb_after": 12582912,
+      "swap_free_kb_after": 10630600,
+      "swap_used_delta_kb": 217864,
+      "k": {
+        "50": {
+          "p50": 4520.0,
+          "p99": 45716.0,
+          "max": 250185.0,
+          "e2e_p50": 5683.126000803895,
+          "e2e_p99": 46724.58399727475,
+          "e2e_max": 251670.38400104502,
+          "n": 2000
+        },
+        "500": {
+          "p50": 24306.0,
+          "p99": 58476.0,
+          "max": 1000509.0,
+          "e2e_p50": 27420.07699998794,
+          "e2e_p99": 61535.62200051965,
+          "e2e_max": 1003989.28100185,
+          "n": 2000
+        },
+        "1000": {
+          "p50": 41764.0,
+          "p99": 79724.0,
+          "max": 1848169.0,
+          "e2e_p50": 44749.61599771632,
+          "e2e_p99": 84615.19500269787,
+          "e2e_max": 1853442.5739999278,
+          "n": 2000
+        }
+      }
+    },
+    "D": {
+      "summary_k": 1000,
+      "p50": 42699.0,
+      "p99": 86562.0,
+      "max": 1843393.0,
+      "majflt_delta": 0,
+      "minflt_delta": 2006398,
+      "peak_rss": 21159348,
+      "boot_seconds": 48.59545180200075,
+      "prefault_seconds": 13.263397930000792,
+      "prefault_files": [
+        "/tmp/tessera-1e9/v00000/partitions/default/slices/s0/segments/seg-0/columns.arrow",
+        "/tmp/tessera-1e9/v00000/partitions/default/slices/s0/segments/seg-0/morton.u32",
+        "/tmp/tessera-1e9/v00000/partitions/default/slices/s0/permutation.bin"
+      ],
+      "warmup_server_us": 9324168,
+      "swap_total_kb_before": 12582912,
+      "swap_free_kb_before": 10630600,
+      "swap_total_kb_after": 12582912,
+      "swap_free_kb_after": 10611904,
+      "swap_used_delta_kb": 18696,
+      "k": {
+        "50": {
+          "p50": 4308.0,
+          "p99": 38672.0,
+          "max": 356585.0,
+          "e2e_p50": 5466.0770038026385,
+          "e2e_p99": 40111.94300255738,
+          "e2e_max": 357864.7749964148,
+          "n": 2000
+        },
+        "500": {
+          "p50": 23415.0,
+          "p99": 57862.0,
+          "max": 911060.0,
+          "e2e_p50": 26507.091002713423,
+          "e2e_p99": 61129.50999522582,
+          "e2e_max": 914273.394002521,
+          "n": 2000
+        },
+        "1000": {
+          "p50": 42699.0,
+          "p99": 86562.0,
+          "max": 1843393.0,
+          "e2e_p50": 45895.200993982144,
+          "e2e_p99": 91665.9080030513,
+          "e2e_max": 1848467.4880019156,
+          "n": 2000
+        }
+      }
+    }
+  }
+}

@@ -234,7 +234,20 @@ fn validate_sorted(batch: &RecordBatch, path: &Path) -> Result<()> {
 /// pick which one — no data beyond each extent's own mapped bytes is held resident twice.
 #[derive(Debug)]
 pub struct ExternalIdIndex {
-    extents: Vec<ExternalIdExtent>,
+    state: IndexState,
+}
+
+/// Loaded extents, or the [`ExternalIdIndex::disabled`] measurement state — kept as an enum
+/// rather than an `Option<Vec<_>>` so `resolve` is forced to match both arms explicitly (an
+/// `Option` invites `.unwrap_or_default()`-shaped code that would quietly treat "disabled" as
+/// "loaded with zero extents", which resolves every id to `None` — i.e. exactly the fail-open
+/// this module's `disabled` state exists to rule out).
+#[derive(Debug)]
+enum IndexState {
+    Loaded(Vec<ExternalIdExtent>),
+    /// TEMPORARY (Task 2, `skip-id-index` measurement feature — removed in Task 8, which makes
+    /// the sidecars lazy for real). See [`ExternalIdIndex::disabled`].
+    Disabled,
 }
 
 impl ExternalIdIndex {
@@ -276,13 +289,40 @@ impl ExternalIdIndex {
             prev_non_empty = Some((idx, extent.last_key().expect("first_key was Some")));
         }
 
-        Ok(ExternalIdIndex { extents })
+        Ok(ExternalIdIndex {
+            state: IndexState::Loaded(extents),
+        })
     }
 
-    /// Resolve `external_id` to its entity id, or `None` if it names nothing in this index.
-    /// Fail-closed callers (I10/`/control/changes`) treat `None` as "not found in the bundle",
-    /// distinct from any live-established mapping they may also consult.
-    pub fn resolve(&self, external_id: &[u8]) -> Option<u64> {
+    /// TEMPORARY (Task 2, tail discrimination — removed in Task 8, which makes the sidecars lazy
+    /// for real). An index that refuses to resolve: neither maps nor page-touches any extent, so
+    /// a `skip-id-index` measurement build can attribute the viewport tail without the 18.9 GB of
+    /// external-ID extents ever entering the process's resident set.
+    ///
+    /// **Every `resolve` on this state returns `Err(StoreError::IdIndexDisabled)` — never
+    /// `Ok(None)`.** `Ok(None)` reads as "this bundle has no such external id", which is exactly
+    /// the answer a fail-closed caller (I10/`/control/changes`) gives a legitimate deny for an
+    /// item that exists but that this disabled index simply never looked up — turning a
+    /// WAL-resident suppression into a silent no-op. A typed error cannot be confused with that
+    /// answer by any caller that matches on it, `?`-propagates it, or panics on it; measurement
+    /// builds must never be enabled where `/control/changes` denies are exercised (see
+    /// `Engine::open`'s `skip-id-index` guard).
+    pub fn disabled() -> Self {
+        Self {
+            state: IndexState::Disabled,
+        }
+    }
+
+    /// Resolve `external_id` to its entity id, or `Ok(None)` if it names nothing in this index.
+    /// Fail-closed callers (I10/`/control/changes`) treat `Ok(None)` as "not found in the
+    /// bundle", distinct from any live-established mapping they may also consult — and must
+    /// treat `Err(StoreError::IdIndexDisabled)` as a hard failure, never as `Ok(None)`'s
+    /// equivalent (see [`ExternalIdIndex::disabled`]'s doc).
+    pub fn resolve(&self, external_id: &[u8]) -> Result<Option<u64>> {
+        let extents = match &self.state {
+            IndexState::Loaded(extents) => extents,
+            IndexState::Disabled => return Err(StoreError::IdIndexDisabled),
+        };
         // Extents partition the global sorted order into consecutive ranges (build splits
         // sequentially from one globally sorted array), so the extent whose `last_key` is the
         // first to be `>= external_id` is the only one that can contain it. `is_some_and` (not
@@ -290,11 +330,13 @@ impl ExternalIdIndex {
         // an empty extent ahead of non-empty ones would otherwise short-circuit `position` and
         // make every lookup `None`. A fully-empty index (every extent empty) falls out of this
         // naturally: no extent ever matches, `position` returns `None`, and so does `resolve`.
-        let extent_idx = self
-            .extents
+        let Some(extent_idx) = extents
             .iter()
-            .position(|e| e.last_key().is_some_and(|last| last >= external_id))?;
-        self.extents[extent_idx].resolve(external_id)
+            .position(|e| e.last_key().is_some_and(|last| last >= external_id))
+        else {
+            return Ok(None);
+        };
+        Ok(extents[extent_idx].resolve(external_id))
     }
 }
 
@@ -426,10 +468,10 @@ mod tests {
 
         for i in 0..500u64 {
             let key = (i.wrapping_mul(0x9E37_79B9) ^ 0xFFFF_FFFF_0000_0000).to_le_bytes();
-            assert_eq!(index.resolve(&key), oracle.resolve(&key));
-            assert_eq!(index.resolve(&key), Some(i));
+            assert_eq!(index.resolve(&key).unwrap(), oracle.resolve(&key));
+            assert_eq!(index.resolve(&key).unwrap(), Some(i));
         }
-        assert_eq!(index.resolve(&[0xAB; 8]), None);
+        assert_eq!(index.resolve(&[0xAB; 8]).unwrap(), None);
     }
 
     #[test]
@@ -450,11 +492,11 @@ mod tests {
             for i in 0..total {
                 let key = (i.wrapping_mul(0x9E37_79B9) ^ 0xFFFF_FFFF_0000_0000).to_le_bytes();
                 assert_eq!(
-                    index.resolve(&key),
+                    index.resolve(&key).unwrap(),
                     oracle.resolve(&key),
                     "mismatch at rows_per_extent={rows_per_extent}, row {i}"
                 );
-                assert_eq!(index.resolve(&key), Some(i));
+                assert_eq!(index.resolve(&key).unwrap(), Some(i));
 
                 // Explicit boundary probes: the lexicographic neighbours either side of a
                 // present key are absent-or-present in the fixture (never both mapping to the
@@ -463,14 +505,14 @@ mod tests {
                 // mis-split extent would get wrong first.
                 if let Some(pred) = byte_pred(&key) {
                     assert_eq!(
-                        index.resolve(&pred),
+                        index.resolve(&pred).unwrap(),
                         oracle.resolve(&pred),
                         "predecessor-of-present-key mismatch at rows_per_extent={rows_per_extent}, row {i}"
                     );
                 }
                 if let Some(succ) = byte_succ(&key) {
                     assert_eq!(
-                        index.resolve(&succ),
+                        index.resolve(&succ).unwrap(),
                         oracle.resolve(&succ),
                         "successor-of-present-key mismatch at rows_per_extent={rows_per_extent}, row {i}"
                     );
@@ -533,7 +575,7 @@ mod tests {
                 rng.gen::<[u8; 8]>()
             };
             assert_eq!(
-                index.resolve(&key),
+                index.resolve(&key).unwrap(),
                 oracle.resolve(&key),
                 "mismatch for probe key {key:?}"
             );
@@ -546,7 +588,7 @@ mod tests {
         let paths = build_fixture(temp.path(), 0, 4);
         assert_eq!(paths.len(), 1);
         let index = ExternalIdIndex::load(&paths).unwrap();
-        assert_eq!(index.resolve(&[1, 2, 3, 4, 5, 6, 7, 8]), None);
+        assert_eq!(index.resolve(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap(), None);
     }
 
     #[test]
@@ -618,8 +660,24 @@ mod tests {
         );
 
         let index = ExternalIdIndex::load(&[path0, path1]).unwrap();
-        assert_eq!(index.resolve(&[1, 0, 0, 0, 0, 0, 0, 0]), Some(0));
-        assert_eq!(index.resolve(&[9, 0, 0, 0, 0, 0, 0, 0]), Some(1));
-        assert_eq!(index.resolve(&[5, 0, 0, 0, 0, 0, 0, 0]), None);
+        assert_eq!(index.resolve(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap(), Some(0));
+        assert_eq!(index.resolve(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(), Some(1));
+        assert_eq!(index.resolve(&[5, 0, 0, 0, 0, 0, 0, 0]).unwrap(), None);
+    }
+
+    /// TEMPORARY (Task 2): `disabled()` must fail closed with a typed error, never the `None`
+    /// that a real "not found" answer uses — the whole point of the distinction (see
+    /// `ExternalIdIndex::disabled`'s doc: a `None` here would read as "unknown external id" and
+    /// let a WAL-resident suppression silently fail to apply under the measurement feature).
+    #[test]
+    fn disabled_index_errors_rather_than_returning_none() {
+        let index = ExternalIdIndex::disabled();
+        let err = index
+            .resolve(&[1, 0, 0, 0, 0, 0, 0, 0])
+            .expect_err("a disabled index must error, not resolve to Ok(None)");
+        assert!(
+            matches!(err, StoreError::IdIndexDisabled),
+            "expected IdIndexDisabled, got {err:?}"
+        );
     }
 }

@@ -55,6 +55,12 @@ pub enum StoreError {
     /// An `external-ids-<n>.arrow` extent failed Arrow IPC / schema validation, or failed the
     /// within-extent ascending-order check (R4).
     InvalidExternalIds { path: PathBuf, detail: String },
+    /// TEMPORARY (Task 2, `skip-id-index` measurement feature — removed in Task 8): the
+    /// external-ID index was never loaded (`ExternalIdIndex::disabled`) and every resolution
+    /// fails closed with this variant rather than silently returning `None`, which would read as
+    /// "no such external id" and turn a WAL-resident suppression into a no-op. Never returned
+    /// outside a `skip-id-index` build.
+    IdIndexDisabled,
 }
 
 impl fmt::Display for StoreError {
@@ -121,6 +127,11 @@ impl fmt::Display for StoreError {
                     path.display()
                 )
             }
+            StoreError::IdIndexDisabled => write!(
+                f,
+                "external-ID index disabled (skip-id-index measurement build) — refusing to \
+                 resolve rather than returning a fail-open None"
+            ),
         }
     }
 }

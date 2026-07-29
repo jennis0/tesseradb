@@ -218,16 +218,47 @@ impl Engine {
         let postings =
             Arc::new(PostingsReader::open(&postings_path, true).map_err(EngineError::Io)?);
 
+        #[cfg_attr(feature = "skip-id-index", allow(unused_variables))]
         let external_id_paths: Vec<PathBuf> = partition
             .manifest
             .external_id_extents
             .iter()
             .map(|p| prefix_dir.join(p))
             .collect();
+        // TEMPORARY (Task 2, tail discrimination — removed in Task 8, which makes the sidecars
+        // lazy for real). Under `skip-id-index` the bundle's external-ID extents are neither
+        // mapped nor scanned, and every resolution is a typed ERROR rather than a `None`: a
+        // `None` here would read as "unknown external ID" and a WAL-resident suppression would
+        // silently fail to apply. Measurement builds only.
+        #[cfg(feature = "skip-id-index")]
+        let external_index = ExternalIdIndex::disabled();
+        #[cfg(not(feature = "skip-id-index"))]
         let external_index =
             ExternalIdIndex::load(&external_id_paths).map_err(EngineError::Store)?;
 
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
+
+        // TEMPORARY (Task 2): `skip-id-index` never maps the external-ID extents, so any WAL
+        // `Change` record replayed against a disabled index would hit `ExternalIdIndex::resolve`'s
+        // `Err(StoreError::IdIndexDisabled)` — the closure passed to `replay` below still has to
+        // return a bare `Option<EntityId>` (that signature is permanent, shared with the live
+        // `/control/changes` path, and out of scope for this temporary feature), so it can only
+        // report that failure by panicking. Refuse to open at all rather than let that panic be
+        // the first anyone hears of it: the measurement workload this feature exists for is
+        // viewport-only and never issues a change, so a WAL with a `Change` record and this
+        // feature enabled is always a misuse, not a real measurement run.
+        #[cfg(feature = "skip-id-index")]
+        if records
+            .iter()
+            .any(|r| matches!(r, WalRecord::Change { .. }))
+        {
+            return Err(EngineError::Malformed(
+                "skip-id-index: refusing to open a WAL containing Change (deny) records — this \
+                 measurement feature must never run against a WAL with denies, since the \
+                 disabled external-ID index cannot resolve them"
+                    .to_string(),
+            ));
+        }
         let high_water = bundle
             .manifest
             .entity_id_high_water
@@ -624,11 +655,36 @@ fn hex_encode(bytes: &[u8]) -> String {
 struct ExternalIdIndex(tessera_store::ExternalIdIndex);
 
 impl ExternalIdIndex {
+    #[cfg(not(feature = "skip-id-index"))]
     fn load(paths: &[PathBuf]) -> std::result::Result<Self, StoreError> {
         tessera_store::ExternalIdIndex::load(paths).map(ExternalIdIndex)
     }
 
+    /// TEMPORARY (Task 2, `skip-id-index` measurement feature — removed in Task 8). Wraps
+    /// [`tessera_store::ExternalIdIndex::disabled`]: every resolution against the returned index
+    /// is a typed `StoreError::IdIndexDisabled`, never a silent `None`.
+    #[cfg(feature = "skip-id-index")]
+    fn disabled() -> Self {
+        ExternalIdIndex(tessera_store::ExternalIdIndex::disabled())
+    }
+
+    /// `Option<EntityId>`, matching every other resolver in this module (`resolve_from_bundle`'s
+    /// closure signature in `tessera_lifecycle::overlay::replay` is permanent and shared with the
+    /// live `/control/changes` path, and is out of scope for this temporary feature). Under the
+    /// non-measurement build this always succeeds or is a genuine "not found" `None`. Under
+    /// `skip-id-index`, `Engine::open` has already refused to start if the WAL contains any
+    /// `Change` record, so this is only ever reachable here with nothing to resolve; if that
+    /// invariant is ever violated, panic loudly rather than silently return `None` for a
+    /// disabled index — a `None` here would read as "unknown external id" and let a
+    /// WAL-resident suppression fail to apply without a trace.
     fn resolve(&self, external_id: &[u8]) -> Option<EntityId> {
-        self.0.resolve(external_id).map(EntityId::new)
+        match self.0.resolve(external_id) {
+            Ok(found) => found.map(EntityId::new),
+            Err(e) => panic!(
+                "external-ID resolution required but the index is disabled ({e}) — \
+                 Engine::open's skip-id-index WAL guard should have refused to start before \
+                 this could ever be reached"
+            ),
+        }
     }
 }
