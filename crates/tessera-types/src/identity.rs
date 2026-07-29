@@ -31,9 +31,12 @@ pub enum IdentityError {
     InvalidHexLength { len: usize },
     /// The hex string contained a character outside `0-9a-f` (including `A-F`).
     InvalidHexChar { ch: char },
-    /// The key's second 64-bit half (`k1`) is zero, collapsing the key schedule (memo
-    /// §1.3). This includes the all-zero key.
-    DegenerateKey,
+    /// The key is all-zero (a special case of `k1 == 0`, named separately -- memo §1.3 --
+    /// so the message says which of the two an operator hit).
+    DegenerateKeyAllZero,
+    /// The key's second 64-bit half (`k1`) is zero (and `k0` is not), collapsing the key
+    /// schedule to a single repeated round key for all eight rounds (memo §1.3).
+    DegenerateKeyK1Zero,
     /// `forward`'s entity input exceeded `u32::MAX`. Plan Important I-1: a truncating
     /// cast would make "collision-free by construction" false. See memo §1.8.
     EntityOutOfRange { entity: u64 },
@@ -54,8 +57,14 @@ impl std::fmt::Display for IdentityError {
                     "identity key contains non-lowercase-hex character {ch:?}"
                 )
             }
-            IdentityError::DegenerateKey => {
-                write!(f, "identity key is degenerate (k1 == 0, or all-zero)")
+            IdentityError::DegenerateKeyAllZero => {
+                write!(f, "identity key is degenerate: all-zero key (k1 == 0)")
+            }
+            IdentityError::DegenerateKeyK1Zero => {
+                write!(
+                    f,
+                    "identity key is degenerate: k1 == 0 (round schedule collapses)"
+                )
             }
             IdentityError::EntityOutOfRange { entity } => {
                 write!(
@@ -149,8 +158,11 @@ impl IdentityKey {
     /// Construct directly from the two little-endian `u64` halves, refusing degenerate
     /// keys (`k1 == 0`, which subsumes the all-zero key).
     fn from_parts(k0: u64, k1: u64) -> Result<Self, IdentityError> {
+        if k0 == 0 && k1 == 0 {
+            return Err(IdentityError::DegenerateKeyAllZero);
+        }
         if k1 == 0 {
-            return Err(IdentityError::DegenerateKey);
+            return Err(IdentityError::DegenerateKeyK1Zero);
         }
         Ok(IdentityKey { k0, k1 })
     }
@@ -223,31 +235,46 @@ mod tests {
 
     const CANONICAL_KEY: &str = "000102030405060708090a0b0c0d0e0f";
 
+    /// Loads `reference/vectors/tessera_id.json`, shared with every test below that reads
+    /// from it -- a single load point so a future correction to the file reaches every
+    /// block, not just `vectors`/`inverse_only`/`secondary_key`/`rejected_keys` (task-5
+    /// review minor: `splitmix64_known_answers` and `key_schedule_matches_vectors` used to
+    /// hardcode these values instead).
+    fn load_vectors_doc() -> serde_json::Value {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../reference/vectors/tessera_id.json"
+        ))
+        .expect("reference/vectors/tessera_id.json must exist");
+        serde_json::from_str(&raw).unwrap()
+    }
+
     #[test]
     fn splitmix64_known_answers() {
-        assert_eq!(splitmix64(0x0000000000000000), 0xe220a8397b1dcdaf);
-        assert_eq!(splitmix64(0x0000000000000001), 0x910a2dec89025cc1);
-        assert_eq!(splitmix64(0x0000000000000002), 0x975835de1c9756ce);
-        assert_eq!(splitmix64(0x9e3779b97f4a7c15), 0x6e789e6aa1b965f4);
-        assert_eq!(splitmix64(0xffffffffffffffff), 0xe4d971771b652c20);
-        assert_eq!(splitmix64(0x0123456789abcdef), 0x157a3807a48faa9d);
+        let doc = load_vectors_doc();
+        let cases = doc["splitmix64"].as_array().unwrap();
+        assert_eq!(cases.len(), 6);
+        for case in cases {
+            let input = parse_hex_u64(case["input"].as_str().unwrap());
+            let expected = parse_hex_u64(case["output"].as_str().unwrap());
+            assert_eq!(splitmix64(input), expected, "splitmix64({input:#x})");
+        }
     }
 
     #[test]
     fn key_schedule_matches_vectors() {
-        let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
-        assert_eq!(key.k0, 0x0706050403020100);
-        assert_eq!(key.k1, 0x0f0e0d0c0b0a0908);
-        let expected: [u64; 8] = [
-            0xc00f03b07279e609,
-            0xfef7da4f78e003fd,
-            0xa4a78ddb397fca3a,
-            0x62e42b600993e687,
-            0x40b22a397c7894ff,
-            0x4fea56c98c720a61,
-            0x19e53c21404a7eea,
-            0x89a0b38afbf573be,
-        ];
+        let doc = load_vectors_doc();
+        let ks = &doc["key_schedule"];
+        let key = IdentityKey::from_hex(ks["key"].as_str().unwrap()).unwrap();
+        assert_eq!(key.k0, parse_hex_u64(ks["k0"].as_str().unwrap()));
+        assert_eq!(key.k1, parse_hex_u64(ks["k1"].as_str().unwrap()));
+        let expected: Vec<u64> = ks["round_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| parse_hex_u64(v.as_str().unwrap()))
+            .collect();
+        assert_eq!(expected.len(), IDENTITY_ROUNDS as usize);
         for (i, exp) in expected.iter().enumerate() {
             assert_eq!(key.round_key(i as u32), *exp, "round key {i}");
         }
@@ -283,17 +310,20 @@ mod tests {
         // implementation existed (Task 3). The Python oracle tests against the same file.
         // Disagreement here means the Rust is wrong; agreement between two independent
         // implementations and the file is the evidence the construction is reproducible.
-        let raw = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../reference/vectors/tessera_id.json"
-        ))
-        .expect("reference/vectors/tessera_id.json must exist");
-        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let doc = load_vectors_doc();
+
+        // Catches the file being swapped to a different construction (task-5 review
+        // minor): neither implementation's tests previously asserted these two top-level
+        // fields against anything.
+        assert_eq!(doc["construction"].as_str().unwrap(), IDENTITY_CONSTRUCTION);
+        assert_eq!(doc["rounds"].as_u64().unwrap(), IDENTITY_ROUNDS as u64);
 
         let key_hex = doc["key"].as_str().unwrap();
         let key = IdentityKey::from_hex(key_hex).unwrap();
 
-        for v in doc["vectors"].as_array().unwrap() {
+        let main_vectors = doc["vectors"].as_array().unwrap();
+        assert_eq!(main_vectors.len(), 33);
+        for v in main_vectors {
             let shard = v["shard_id"].as_u64().unwrap() as u32;
             let entity = v["entity_id"].as_u64().unwrap();
             let expected = parse_hex_u64(v["tessera_id"].as_str().unwrap());
@@ -306,7 +336,13 @@ mod tests {
             );
         }
 
-        for v in doc["inverse_only"].as_array().unwrap() {
+        // `inverse_only`: asserted in BOTH directions (task-5 review minor -- Rust used
+        // to assert the inverse direction only). Valid because the construction is a
+        // total bijection over 2**64 (memo §1.7): `forward(*invert(x)) == x` must hold
+        // even for a `tessera_id` not drawn from a forward-generated vector.
+        let inverse_only = doc["inverse_only"].as_array().unwrap();
+        assert_eq!(inverse_only.len(), 6);
+        for v in inverse_only {
             let id = parse_hex_u64(v["tessera_id"].as_str().unwrap());
             let shard = v["shard_id"].as_u64().unwrap() as u32;
             let entity = v["entity_id"].as_u64().unwrap();
@@ -314,13 +350,21 @@ mod tests {
                 key.invert(TesseraId::new(id)),
                 (shard, EntityId::new(entity))
             );
+            assert_eq!(
+                key.forward(shard, EntityId::new(entity)).unwrap().raw(),
+                id,
+                "forward(*invert({id:#x})) should round-trip"
+            );
         }
 
         let sk = &doc["secondary_key"];
         let sk_key = IdentityKey::from_hex(sk["key"].as_str().unwrap()).unwrap();
         assert_eq!(sk_key.k0, parse_hex_u64(sk["k0"].as_str().unwrap()));
         assert_eq!(sk_key.k1, parse_hex_u64(sk["k1"].as_str().unwrap()));
-        for v in sk["vectors"].as_array().unwrap() {
+        // `secondary_key.vectors`: asserted in BOTH directions too (same minor).
+        let sk_vectors = sk["vectors"].as_array().unwrap();
+        assert_eq!(sk_vectors.len(), 6);
+        for v in sk_vectors {
             let shard = v["shard_id"].as_u64().unwrap() as u32;
             let entity = v["entity_id"].as_u64().unwrap();
             let expected = parse_hex_u64(v["tessera_id"].as_str().unwrap());
@@ -330,9 +374,16 @@ mod tests {
                 expected,
                 "secondary_key shard={shard} entity={entity}"
             );
+            assert_eq!(
+                sk_key.invert(TesseraId::new(expected)),
+                (shard, EntityId::new(entity)),
+                "secondary_key invert shard={shard} entity={entity}"
+            );
         }
 
-        for v in doc["rejected_keys"].as_array().unwrap() {
+        let rejected_keys = doc["rejected_keys"].as_array().unwrap();
+        assert_eq!(rejected_keys.len(), 6);
+        for v in rejected_keys {
             let key_str = v["key"].as_str().unwrap();
             assert!(
                 IdentityKey::from_hex(key_str).is_err(),
@@ -414,11 +465,11 @@ mod tests {
         // why they must be refused at the door.
         assert!(matches!(
             IdentityKey::from_hex("0f0e0d0c0b0a09080000000000000000").unwrap_err(),
-            IdentityError::DegenerateKey
+            IdentityError::DegenerateKeyK1Zero
         ));
         assert!(matches!(
             IdentityKey::from_hex("00000000000000000000000000000000").unwrap_err(),
-            IdentityError::DegenerateKey
+            IdentityError::DegenerateKeyAllZero
         ));
     }
 

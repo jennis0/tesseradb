@@ -37,7 +37,7 @@ MASK32 = 0xFFFF_FFFF
 
 ROUNDS = 8
 
-_HEX_KEY_RE = re.compile(r"^[0-9a-f]{32}$")
+_HEX_KEY_RE = re.compile(r"^[0-9a-f]{32}\Z")
 
 
 class IdentityError(ValueError):
@@ -58,28 +58,84 @@ def splitmix64(x: int) -> int:
     return z & MASK64
 
 
-@dataclass(frozen=True)
+def _describe_hex_rejection(key_hex: object) -> str:
+    """Build a rejection message that names the length and the offending character/
+    position, never the key text itself (finding 4: the key must appear in no log line,
+    memo §3.2 -- a rejected key is still key material, and interpolating `{key_hex!r}`
+    puts a byte-for-byte valid key into a log line the moment the only thing wrong with
+    it is uppercase)."""
+    if not isinstance(key_hex, str):
+        return f"identity key must be a string; got {type(key_hex).__name__}"
+    length = len(key_hex)
+    if length != 32:
+        return (
+            "identity key must be exactly 32 lowercase hex characters (0-9a-f); got "
+            f"length {length}"
+        )
+    for position, ch in enumerate(key_hex):
+        if ch not in "0123456789abcdef":
+            return (
+                "identity key must be exactly 32 lowercase hex characters (0-9a-f); "
+                f"invalid character {ch!r} at position {position}"
+            )
+    # _HEX_KEY_RE rejected the string but every character is individually a lowercase hex
+    # digit and the length is 32 -- e.g. a trailing newline, which `\Z` (not `$`) now
+    # catches. The loop above already scanned every character of `key_hex`, so falling
+    # through here means the string matched length and character-set but not the anchored
+    # regex; report that plainly without repeating the string.
+    return "identity key does not match the required 32-lowercase-hex-character form"
+
+
+def _reject_if_degenerate(k0: int, k1: int) -> None:
+    """Degenerate keys are rejected (memo §1.3): `k1 == 0` collapses the schedule to a
+    single repeated round key for all eight rounds. The all-zero key is a special case of
+    `k1 == 0` and is named separately so the error says which one was hit. This is the one
+    gate both `from_hex` and direct construction go through (finding 3) -- there is no
+    second, bypassable copy of this check.
+    """
+    if k0 == 0 and k1 == 0:
+        raise IdentityError("degenerate identity key: all-zero key (k1 == 0)")
+    if k1 == 0:
+        raise IdentityError("degenerate identity key: k1 == 0 (round schedule collapses)")
+
+
+@dataclass(frozen=True, repr=False)
 class IdentityKey:
-    """A parsed, validated 128-bit per-deployment key (memo §1.2-§1.4)."""
+    """A parsed, validated 128-bit per-deployment key (memo §1.2-§1.4).
+
+    `repr=False` plus the explicit `__repr__` below keep key material out of any pytest
+    assertion dump, `%r` log line or traceback that touches a value of this type (finding
+    1) -- the generated dataclass `__repr__` would otherwise print `k0`/`k1` verbatim.
+    """
 
     k0: int
     k1: int
+
+    def __post_init__(self) -> None:
+        # Runs for EVERY construction path, including `IdentityKey(k0=0, k1=0)` called
+        # directly -- there is exactly one gate (finding 3), not one gate plus a
+        # convention that `from_hex` is the only entry point.
+        _reject_if_degenerate(self.k0, self.k1)
+
+    def __repr__(self) -> str:
+        return "IdentityKey(<redacted>)"
 
     @staticmethod
     def from_hex(key_hex: str) -> "IdentityKey":
         """Parse the MANIFEST/config-file key encoding.
 
         The hex-case rule is reject, not normalise (memo §1.2): exactly 32 lowercase
-        `0-9a-f` characters, no `0x` prefix, no whitespace, no separator. Uppercase is
-        rejected outright, not case-folded. `k0`/`k1` are then read little-endian **over
-        the decoded bytes**, not the text: `key_bytes[0]` is the first two characters of
-        the string, `k0` covers bytes 0..8, `k1` covers bytes 8..16.
+        `0-9a-f` characters, no `0x` prefix, no whitespace, no separator -- and, since
+        `_HEX_KEY_RE` is anchored with `\\Z` rather than `$`, no trailing newline either
+        (`$` matches immediately before a trailing `\\n`, which `bytes.fromhex` then
+        silently tolerates -- exactly the shape a key read from `--id-key-file` arrives
+        in). Uppercase is rejected outright, not case-folded. `k0`/`k1` are then read
+        little-endian **over the decoded bytes**, not the text: `key_bytes[0]` is the
+        first two characters of the string, `k0` covers bytes 0..8, `k1` covers bytes
+        8..16.
         """
         if not isinstance(key_hex, str) or not _HEX_KEY_RE.match(key_hex):
-            raise IdentityError(
-                "identity key must be exactly 32 lowercase hex characters (0-9a-f); got "
-                f"{key_hex!r}"
-            )
+            raise IdentityError(_describe_hex_rejection(key_hex))
         key_bytes = bytes.fromhex(key_hex)
         if len(key_bytes) != 16:
             raise IdentityError(f"identity key must decode to 16 bytes; got {len(key_bytes)}")
@@ -89,16 +145,11 @@ class IdentityKey:
 
     @staticmethod
     def _validated(k0: int, k1: int) -> "IdentityKey":
-        """Degenerate keys are rejected (memo §1.3): `k1 == 0` collapses the schedule to a
-        single repeated round key for all eight rounds. The all-zero key is a special case
-        of `k1 == 0` and is named separately so the error says which one was hit.
-        """
+        """Mask to 64 bits and construct. Degenerate rejection happens in
+        `__post_init__`, not here -- so it applies uniformly whether the key came from
+        `from_hex` or was built directly."""
         k0 &= MASK64
         k1 &= MASK64
-        if k0 == 0 and k1 == 0:
-            raise IdentityError("degenerate identity key: all-zero key (k1 == 0)")
-        if k1 == 0:
-            raise IdentityError("degenerate identity key: k1 == 0 (round schedule collapses)")
         return IdentityKey(k0=k0, k1=k1)
 
     def round_key(self, i: int) -> int:

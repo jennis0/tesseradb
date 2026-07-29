@@ -22,10 +22,25 @@ import pyarrow.ipc as ipc
 from pyroaring import BitMap
 
 from . import identity as identity_mod
+from . import morton as morton_mod
 
 PERMUTATION_MAGIC = b"TSPM"
 PERMUTATION_VERSION = 1
 PERMUTATION_ABSENT = 0xFFFF_FFFF
+
+# Finding 6 (task-5 review): an absent MANIFEST `identity` object is, per the memo, "a
+# typed reader error, not a default... it does not acquire a minted key, a zero key or a
+# legacy path" (docs/design-memos/2026-07-30-tessera-id-construction.md §2). The fallback
+# below violates that rule on purpose, as a temporary scaffold: no bundle in this checkout
+# carries an `identity` object yet, because tessera-build/tessera-store have not been
+# repointed at the tessera_id column (only tessera-types/identity.rs has landed as of
+# Task 5/12). REMOVE THIS FALLBACK the moment Task 6/7 land build-side `identity` emission
+# -- at that point every bundle this oracle reads is post-r6 and an absent `identity`
+# object must raise, full stop.
+PRE_R6_IDENTITY_FALLBACK_REMOVE_AT = (
+    "Task 6/7: tessera-build/tessera-store emitting MANIFEST `identity` and the "
+    "`tessera_id` column"
+)
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -101,11 +116,12 @@ class Bundle:
         )
 
         # `identity` (contracts r6, docs/design-memos/2026-07-30-tessera-id-construction.md
-        # §2): the per-deployment key and the §13.3 shard prefix `tessera_id` is built under.
-        # An absent object is a pre-r6 bundle -- the oracle degrades to reading the stored
-        # `entity_id` column directly (the format this repo's build/store crates still
-        # produce as of this task); a bundle that *does* carry `identity` is read strictly,
-        # per the memo's fail-closed rule (bad construction/rounds/key refuse, not default).
+        # §2): the per-deployment key and the §13.3 shard prefix `tessera_id` is built
+        # under. A bundle that *does* carry `identity` is read strictly, per the memo's
+        # fail-closed rule: bad construction/rounds/key/shard_id/epoch all refuse, none
+        # default. An absent object takes the PRE_R6_IDENTITY_FALLBACK_REMOVE_AT scaffold
+        # path above instead of raising -- see its docstring for why that is still
+        # tolerated and when it must go.
         identity_obj = self.manifest.get("identity")
         if identity_obj is not None:
             if identity_obj.get("construction") != "feistel-splitmix64-v1":
@@ -118,7 +134,9 @@ class Bundle:
                 identity_obj["key"]
             )
             self.identity_shard_id: int | None = identity_obj["shard_id"]
-            self.identity_epoch: int | None = identity_obj.get("epoch")
+            if "epoch" not in identity_obj:
+                raise ValueError("manifest `identity` object is missing `epoch`")
+            self.identity_epoch: int | None = identity_obj["epoch"]
         else:
             self.identity_key = None
             self.identity_shard_id = None
@@ -206,11 +224,19 @@ class Bundle:
         return identity_mod.forward(self.identity_key, self.identity_shard_id, entity_id)
 
     def derive_row_order(self, slice_id: str) -> np.ndarray:
-        """Re-derive row order from `(morton_of(x, y, extent), tessera_id)` ascending, with
-        no further tiebreak (the priority-as-identity-prefix fold; `tessera_id` is already
-        unique so nothing else is needed to break ties). Row order is therefore
-        key-dependent, where it previously was not -- this reads `identity.key` and
-        `identity.shard_id` from MANIFEST, which `Bundle.__init__` already parses.
+        """Re-derive row order from `(morton_of(x, y, extent), forward(identity.key,
+        identity.shard_id, entity_id))` ascending, with no further tiebreak (the
+        priority-as-identity-prefix fold; `tessera_id` is already unique so nothing else is
+        needed to break ties). Row order is therefore key-dependent, where it previously
+        was not -- this reads `identity.key` and `identity.shard_id` from MANIFEST, which
+        `Bundle.__init__` already parses.
+
+        Delegates to `row_order_from_geometry`, the module-level, key-dependent
+        re-derivation -- computed from `(x, y)` and the permutation-derived `entity_id`,
+        **never from the stored `morton`/`tessera_id` columns** (finding 5): a build that
+        emitted a wrong `tessera_id` column and sorted consistently by its own wrong
+        values must fail this check, not pass it. `test_identity.py` calls the same
+        function, so the shipped path is the tested path.
 
         Returns the row indices that would produce sorted order, i.e. `stored_order[result]`
         is the re-derived order; compare against `np.arange(row_count)` to check the stored
@@ -219,11 +245,9 @@ class Bundle:
         if self.identity_key is None:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
         seg = self.segment(slice_id)
-        if seg.tessera_id is None:
-            raise ValueError("segment has no stored tessera_id column (pre-r6 bundle)")
-        # np.lexsort sorts by the LAST key primary -- (morton, tessera_id) ascending means
-        # tessera_id is the secondary (fastest-varying) key, morton primary.
-        return np.lexsort((seg.tessera_id, seg.morton))
+        return row_order_from_geometry(
+            self.identity_key, self.identity_shard_id, seg.entity_id, seg.x, seg.y, self.extent
+        )
 
     def permutation(self, slice_id: str) -> Permutation:
         if slice_id not in self._permutation_cache:
@@ -332,6 +356,45 @@ def _read_dictionary(path: Path) -> list[bytes]:
         out.append(data[offset : offset + length])
         offset += length
     return out
+
+
+def row_order_from_geometry(
+    key: identity_mod.IdentityKey,
+    shard_id: int,
+    entity_ids: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    extent: tuple[float, float, float, float],
+) -> np.ndarray:
+    """The single, module-level row-order re-derivation (finding 5, task-5 review): sort
+    ascending by `(morton_of(x, y, extent), forward(key, shard_id, entity_id))`, computed
+    from geometry and the permutation-derived entity id -- never by reading the stored
+    `morton`/`tessera_id` columns, so a build that emits a wrong column but sorts
+    consistently by its own wrong values does not pass this check.
+
+    `Bundle.derive_row_order` and `test_identity.py`'s
+    `test_row_order_is_morton_then_tessera_id_ascending` both call this function rather
+    than each re-implementing the lexsort inline, so the shipped ordering path is the
+    tested ordering path: swapping the two `np.lexsort` arguments here breaks the test
+    directly, instead of the test silently re-deriving the same (possibly also swapped)
+    order alongside it.
+
+    Uses `identity.row_sort_key` (not a hand-inlined `forward` + tuple) so that function
+    has a real call site too.
+    """
+    n = len(entity_ids)
+    mortons = np.empty(n, dtype=np.uint64)
+    tesseras = np.empty(n, dtype=np.uint64)
+    for i in range(n):
+        morton_code = morton_mod.morton_of(float(x[i]), float(y[i]), extent)
+        morton_code, tessera_id = identity_mod.row_sort_key(
+            key, shard_id, int(entity_ids[i]), morton_code
+        )
+        mortons[i] = morton_code
+        tesseras[i] = tessera_id
+    # np.lexsort sorts by the LAST key primary -- (morton, tessera_id) ascending means
+    # tessera_id is the secondary (fastest-varying) key, morton primary.
+    return np.lexsort((tesseras, mortons))
 
 
 def _read_permutation(path: Path) -> Permutation:

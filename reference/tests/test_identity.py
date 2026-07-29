@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from oracle import identity as ident
+from oracle import morton
 
 VECTORS_PATH = (
     Path(__file__).resolve().parents[1] / "vectors" / "tessera_id.json"
@@ -39,6 +40,17 @@ def canonical_key(vectors) -> ident.IdentityKey:
 
 def _u(hexstr: str) -> int:
     return int(hexstr, 16)
+
+
+# --- File-level identity: catches the file being swapped to a different construction ----
+
+
+def test_file_construction_and_rounds_match_the_module(vectors):
+    """One-line check that catches the vectors file being swapped to a different
+    construction (task-5 review minors): `construction` must be the string this module
+    implements, and `rounds` must equal `ident.ROUNDS`, not merely be presumed to."""
+    assert vectors["construction"] == "feistel-splitmix64-v1"
+    assert vectors["rounds"] == ident.ROUNDS
 
 
 # --- §1.2 key parsing: the worked example in the memo text itself -----------------------
@@ -181,6 +193,60 @@ def test_rejected_key_reasons_are_distinct_all_zero_vs_k1_zero(vectors):
         ident.IdentityKey.from_hex("0f0e0d0c0b0a09080000000000000000")
 
 
+def test_trailing_newline_is_rejected_not_normalised(vectors):
+    """Finding 2 (task-5 review): `$` matches immediately before a trailing `\\n`, and
+    `bytes.fromhex` then silently tolerates ASCII whitespace, so the old
+    `^[0-9a-f]{32}$` regex accepted a key with a trailing newline as the canonical key --
+    exactly the shape a key read from `--id-key-file` arrives in. Memo §1.2's rule is
+    reject, not normalise; `\\Z` (not `$`) is what makes that true."""
+    canonical = "000102030405060708090a0b0c0d0e0f"
+    assert ident.IdentityKey.from_hex(canonical) is not None  # sanity: valid on its own
+    with pytest.raises(ident.IdentityError):
+        ident.IdentityKey.from_hex(canonical + "\n")
+
+
+def test_direct_construction_cannot_bypass_degenerate_key_rejection():
+    """Finding 3 (task-5 review): `IdentityKey` used to be a bare `@dataclass(frozen=True)`
+    with public `k0`/`k1`, so the generated `__init__` skipped `_validated`'s check
+    entirely and `IdentityKey(k0=0, k1=0)` succeeded. `__post_init__` is now the one gate
+    every construction path -- `from_hex` included -- runs through."""
+    with pytest.raises(ident.IdentityError):
+        ident.IdentityKey(k0=0, k1=0)
+    with pytest.raises(ident.IdentityError):
+        ident.IdentityKey(k0=123, k1=0)
+
+
+def test_rejection_message_never_contains_the_key_text(vectors):
+    """Finding 4 (task-5 review): interpolating `{key_hex!r}` into the error put a
+    byte-for-byte valid key into a log line the moment the only defect was uppercase.
+    The message must name the length and the offending character/position instead."""
+    upper = "000102030405060708090A0B0C0D0E0F"
+    with pytest.raises(ident.IdentityError) as excinfo:
+        ident.IdentityKey.from_hex(upper)
+    message = str(excinfo.value)
+    assert upper not in message
+    assert upper.lower() not in message
+    assert "position" in message
+
+    too_short = "000102030405060708090a0b0c0d0e"
+    with pytest.raises(ident.IdentityError) as excinfo:
+        ident.IdentityKey.from_hex(too_short)
+    message = str(excinfo.value)
+    assert too_short not in message
+    assert "length" in message
+
+
+def test_debug_repr_does_not_print_key_material(canonical_key):
+    """Finding 1 (task-5 review), mirroring Rust's `debug_does_not_print_key_material`
+    (`identity.rs:469`): `IdentityKey` was a public frozen dataclass with no `repr=False`,
+    so the generated `__repr__` printed `k0`/`k1` verbatim -- any pytest assertion dump,
+    `%r` log line or traceback touching a key leaked it."""
+    printed = repr(canonical_key)
+    assert "redacted" in printed
+    assert format(canonical_key.k0, "x") not in printed
+    assert format(canonical_key.k1, "x") not in printed
+
+
 # --- Round-trip, over and above the vectors ----------------------------------------------
 
 
@@ -248,22 +314,50 @@ def test_entity_of_rows_inverts_permutation_for_touched_rows(canonical_key):
 def test_row_order_is_morton_then_tessera_id_ascending(canonical_key):
     """The post-fold storage sort order (`docs/design-memos/2026-07-30-priority-as-identity-
     prefix.md`, "The decision"): `(morton, tessera_id)` ascending, no further tiebreak.
-    `tessera_id` is already globally unique, so this needs no third key."""
+    `tessera_id` is already globally unique, so this needs no third key.
+
+    Finding 5 (task-5 review): the shipped re-derivation -- `bundle.row_order_from_geometry`,
+    which `Bundle.derive_row_order` also calls -- is exercised here directly, computing
+    `tessera_id` from the permutation-derived `entity_id` via `forward` and `morton` from
+    `(x, y)` via `morton_of`, rather than re-implementing the lexsort inline against
+    pre-picked morton codes. Swapping `row_order_from_geometry`'s two `np.lexsort`
+    arguments now breaks this test directly, instead of the test silently re-deriving the
+    same (possibly also swapped) order alongside it."""
     import numpy as np
+
+    from oracle.bundle import row_order_from_geometry
 
     entities = list(range(50))
     shard_id = 0
-    # A handful of Morton codes with deliberate repeats, so the tiebreak is exercised.
-    morton_codes = [entities[i] % 7 for i in range(len(entities))]
+    extent = (0.0, 100.0, 0.0, 100.0)
 
+    # A handful of distinct Morton codes with deliberate repeats, so the tiebreak is
+    # exercised -- built from real (x, y) geometry, not by pre-picking morton codes
+    # directly, so this exercises `morton_of` too rather than assuming its output.
+    def xy_for_cell(cell: int) -> tuple[float, float]:
+        frac = (cell + 0.5) / 65536.0
+        return frac * 100.0, 0.0
+
+    xs = []
+    ys = []
+    for i in range(len(entities)):
+        x, y = xy_for_cell(i % 7)
+        xs.append(x)
+        ys.append(y)
+    x_arr = np.array(xs, dtype=np.float32)
+    y_arr = np.array(ys, dtype=np.float32)
+    entity_arr = np.array(entities, dtype=np.uint64)
+
+    morton_codes = [morton.morton_of(x, y, extent) for x, y in zip(xs, ys)]
     tessera_ids = [ident.forward(canonical_key, shard_id, e) for e in entities]
 
-    # Reference: Python's stable sort by the exact tuple the memo specifies.
+    # Reference: Python's stable sort by the exact tuple the memo specifies, computed
+    # independently of `row_order_from_geometry`.
     expected_order = sorted(
         range(len(entities)), key=lambda i: (morton_codes[i], tessera_ids[i])
     )
 
-    got_order = np.lexsort((tessera_ids, morton_codes))
+    got_order = row_order_from_geometry(canonical_key, shard_id, entity_arr, x_arr, y_arr, extent)
     assert list(got_order) == expected_order
 
     # And re-sorting entirely by tessera_id alone, once morton codes are fixed, agrees with
