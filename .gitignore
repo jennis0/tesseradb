@@ -8,3 +8,8 @@ __pycache__/
 .ignore/analysis-models/
 analysis-models/
 .vscode/
+
+# Task 14: reference oracle's isolated venv (never committed)
+reference/.venv/
+reference/.pytest_cache/
+**/__pycache__/

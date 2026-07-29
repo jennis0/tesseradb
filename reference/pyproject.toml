@@ -1,0 +1,8 @@
+[project]
+name = "tessera-reference-oracle"
+version = "0.1.0"
+description = "Independent Python differential oracle for Tessera (Task 14) — test-only, never a component."
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
