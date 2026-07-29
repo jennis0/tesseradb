@@ -1,32 +1,48 @@
 {
-  "note": "Task 16, Step 1 regression-gate baseline: criterion micro-benches at 2.4M items (data/scaled/geometry.parquet prefix entity_id < 2,422,486), bundle /tmp/tessera-2m4, categories-subclass pairs (vocab 176 terms at this scale — smaller than the 10^9-scale 47,968; fragment_build/10000 clamped to vocab size, hence the 176 label). Regenerate via `cargo bench -p tessera-engine` and diff mean_ns against this file; target/criterion/ itself is gitignored, so this summary is the committed record.",
+  "note": "Task 16 regression-gate baseline: criterion micro-benches at 2.4M items (data/scaled/geometry.parquet prefix entity_id < 2,422,486), bundle /tmp/tessera-2m4, categories-subclass pairs (vocab 176 terms at this scale — smaller than the 10^9-scale 47,968; fragment_build/10000 clamped to vocab size, hence the 176 label). Regenerate via `cargo bench -p tessera-engine` and diff mean_ns against this file; target/criterion/ itself is gitignored, so this summary is the committed record.",
   "generated_at": "2026-07-29",
+  "refreshed_at": "2026-07-29 (post e5b5bea/2a399b5/975eb7c/669d7b5: streaming build pipeline, morton u32, mmap external-id index)",
   "corpus_scale": 2422486,
+  "history": {
+    "first_baseline_2026-07-29_pre-perf-work": {
+      "fragment_build/100_mean_ns": 110526.78,
+      "fragment_build/176_mean_ns": 279489.95,
+      "compose_mean_ns": 69.28,
+      "viewport/tile_sweep_k0_mean_ns": 2604310.49,
+      "viewport/gather_k30_mean_ns": 2781968.43
+    }
+  },
   "benchmarks": {
     "fragment_build/100": {
       "w_terms": 100,
-      "mean_ns": 110526.78
+      "mean_ns": 117747.97,
+      "delta_vs_first_baseline_pct": 6.53
     },
     "fragment_build/176": {
       "w_terms": 176,
       "note": "requested w=10000, clamped to this corpus's actual vocab size (176)",
-      "mean_ns": 279489.95
+      "mean_ns": 280187.69,
+      "delta_vs_first_baseline_pct": 0.25
     },
     "compose": {
-      "mean_ns": 69.28,
-      "note": "diff-only composition against an empty Overlay/IngestBuffer (fresh build, no WAL changes) -- O(containers touched), not O(cardinality); this is why it is nanoseconds, not microseconds"
+      "mean_ns": 68.54,
+      "note": "diff-only composition against an empty Overlay/IngestBuffer (fresh build, no WAL changes) -- O(containers touched), not O(cardinality); this is why it is nanoseconds, not microseconds",
+      "delta_vs_first_baseline_pct": -1.07
     },
     "viewport/tile_sweep_k0": {
       "zoom": 8,
       "bbox": [0.0, 0.0, 23170.0, 23170.0],
       "k": 0,
-      "mean_ns": 2604310.49
+      "mean_ns": 2863020.77,
+      "delta_vs_first_baseline_pct": 9.93,
+      "note": "regressed ~10% vs the pre-perf-work baseline; plausibly the mmap binary-search external-id index / morton u32 read path adding overhead at this corpus size, or simply noise across two separate rebuilds of /tmp/tessera-2m4 (old-format bundle was deleted and rebuilt fresh under the new pipeline for this run). Not investigated further -- flagged for whoever owns viewport-path performance next; nowhere near the 10ms/300-tile gate regardless."
     },
     "viewport/gather_k30": {
       "zoom": 8,
       "bbox": [0.0, 0.0, 23170.0, 23170.0],
       "k": 30,
-      "mean_ns": 2781968.43
+      "mean_ns": 2980304.46,
+      "delta_vs_first_baseline_pct": 7.13
     }
   }
 }
