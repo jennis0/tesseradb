@@ -13,17 +13,54 @@ purely from what replay restored:
 - replaying the *same* ingest batch id with the *same* body is still idempotent (200, and the
   high-water mark does not move again — no double-buffering).
 
-**`/control/status`'s actual Phase 1 shape.** The brief describes checking that `/control/status`
-"shows the ingested batch's rows as buffered". Phase 1's `/control/status` handler
-(`crates/tessera-server/src/control.rs`) exposes exactly one field, `entity_id_high_water`
-(Important-1 fix note in that file: it used to expose this unauthenticated, which is why every
-call here is bearer-gated). There is no separate "buffered row count" to read. The adaptation
-made here: `entity_id_high_water` growing at ingest time and then *staying exactly put* across
-the kill/restart (not reset, not re-incremented) is itself the observable proof that the ingested
-batch's rows were replayed as buffered items with their *original* allocated entity ids — replay
-re-uses IDs already assigned in the WAL rather than re-allocating (`tessera-lifecycle`'s WAL doc),
-so a high-water mark that is unchanged after a from-scratch replay is only possible if the ingest
-record was found, replayed, and its allocation honoured exactly.
+**`/control/status`'s actual Phase 1 shape, and why "high-water unchanged" alone is weaker
+evidence than it first looks (code review Important-2 on an earlier draft of this file).** The
+brief describes checking that `/control/status` "shows the ingested batch's rows as buffered".
+Phase 1's `/control/status` handler (`crates/tessera-server/src/control.rs`) exposes exactly one
+field, `entity_id_high_water` — there is no separate buffered-row-count field, no batch-id list,
+and no flag anywhere distinguishing "this response reflects a WAL replay" from "this response
+reflects a freshly recorded batch" (confirmed by reading every route `control.rs` registers).
+
+**Why a *direct* viewport-visibility check (does the ingested item show up on a subsequent
+`/v1/viewport`?) is impossible in Phase 1, not merely inconvenient.** Investigated before choosing
+the evidence below, per the review's instruction. `crates/tessera-engine/src/compose.rs`'s mask
+composition walks the ingest buffer looking for a row via `Permutation::row_of(entity)`, and its
+own comment states Phase 1 buffered entities have no row anywhere (no flush/build has happened
+yet) — the "no row" branch is always taken, so a buffered item contributes nothing to any
+viewport's mask, however it is authorised. `tessera-lifecycle/src/buffer.rs`'s module doc says the
+same thing directly: "a buffered item simply has no `Permutation::row_of` entry anywhere, so it
+can never contribute [to a viewport]." This is stated as intentional design in
+`.ignore/tessera-system-architecture.md` (§6.2/§6.3: WAL/ack durably records allocator state
+immediately; spatial/viewport visibility only arrives once a flush/build produces row geometry —
+"the catch-up window is the build duration; visibility latency during it degrades gracefully
+rather than data being lost"). So there is no HTTP-observable surface where "does this ingested
+item now render" is even a coherent question to ask in Phase 1 — testing it would be testing a
+capability the design deliberately doesn't have yet, not testing replay.
+
+**The strongest evidence actually available, and what it does and doesn't prove.** Two
+behavioural checks, both HTTP-only:
+1. `entity_id_high_water` growing at ingest time and then staying *exactly* put across the
+   kill/restart (not reset lower, not re-incremented) — entity-id allocation is monotonic and
+   append-only (I9: ids are never reused), so if the ingest record had been dropped by replay, the
+   high-water mark after restart would revert to its pre-ingest value, strictly lower than what
+   was observed right after the original ingest. Exact numeric equality across a from-scratch
+   restart is therefore real (if partial) evidence the record survived, not just "no crash".
+2. **New in this fix:** re-posting the *same* batch id with a **different** body after restart
+   must return `409 Conflict`, not `200`. `control.rs`'s idempotency check is keyed on
+   `(batch_id, body_hash)` (`session.rs`'s `accepted_batches` map); a `409` is only possible if the
+   *original* body's hash specifically was recovered by replay, not merely a high-water checkpoint
+   number. This closes exactly the gap the review named: an implementation that persists
+   `entity_id_high_water` as an independent durable counter but drops the itemised WAL ingest
+   record (and therefore the batch-id → body-hash map) would pass check 1 by coincidence but fail
+   check 2, because a dropped record makes the batch id look unseen, and an unseen batch id with a
+   *different* body is accepted fresh (`200`), not rejected.
+
+This remains inferential — a maximally adversarial implementation could theoretically special-case
+`accepted_batches` durability separately from everything else the ingest record should have
+restored (e.g. still failing to re-derive the correct entity ids for the *original*, matching-body
+repost) — but no such gap is observable through any HTTP surface Phase 1 exposes; this is the
+ceiling of what black-box conformance testing can assert here, and it substantially narrows the
+review's "high-water alone" gap.
 
 **Out of scope (Task 13 note, brief step 2):** deny-op WAL-append-failure fault injection (what
 happens if the fsync for a `suppress`/`delete` genuinely fails) is explicitly out of scope for
@@ -55,10 +92,12 @@ GRID_MAX = 65536.0
 BATCH_ID = "conformance-restart-replay-batch-1"
 
 
-def _build_ingest_batch() -> bytes:
+def _build_ingest_batch(*, access: str = "999002") -> bytes:
     """One small Arrow IPC stream, schema `(external_id: binary, x: float32, y: float32,
     access: utf8)` (R5) — three brand-new items, external ids well outside the fixture's own
-    source-id range (which is `< 250_000`, R4's build-with-`--limit`), so there's no collision."""
+    source-id range (which is `< 250_000`, R4's build-with-`--limit`), so there's no collision.
+    `access` (the third item's access string) is a parameter so a caller can build a body that
+    differs from the original under the SAME batch id, for the conflict/replay-evidence check."""
     external_ids = [
         (900_000_001).to_bytes(8, "little"),
         (900_000_002).to_bytes(8, "little"),
@@ -66,7 +105,7 @@ def _build_ingest_batch() -> bytes:
     ]
     xs = [1000.0, 2000.0, 3000.0]
     ys = [1000.0, 2000.0, 3000.0]
-    accesses = ["999001", "999001", "999002"]
+    accesses = ["999001", "999001", access]
 
     schema = pa.schema(
         [
@@ -195,6 +234,26 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(bundle_root: Path, restar
             assert (
                 status_after_replay_ingest["entity_id_high_water"] == high_water_after_ingest
             ), "re-posting an already-acked batch id/body must not re-allocate or double-buffer"
+
+            # --- stronger replay evidence: same batch id, DIFFERENT body -> 409, not 200 --------
+            # (module doc, Important-2 fix: this is what actually distinguishes "the itemised WAL
+            # ingest record was replayed" from "only a high-water checkpoint number was restored".
+            # If the original record had been silently dropped by replay, this batch id would look
+            # unseen post-restart, and an unseen id with a different body is accepted fresh (200).
+            different_body = _build_ingest_batch(access="999003")
+            assert different_body != batch_body
+            resp3 = srv2.ingest(different_body, BATCH_ID)
+            assert resp3.status_code == 409, (
+                f"same batch id + different body must be rejected as a conflict — a 200 here "
+                f"would mean the original batch's body hash was NOT actually recovered by WAL "
+                f"replay, only its high-water side-effect was (got {resp3.status_code}: "
+                f"{resp3.text})"
+            )
+
+            status_after_conflict = srv2.status()
+            assert status_after_conflict["entity_id_high_water"] == high_water_after_ingest, (
+                "a rejected (409) conflicting re-post must not allocate anything either"
+            )
         finally:
             stop_server(proc2)
     finally:

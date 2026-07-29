@@ -17,7 +17,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "reference"))
 
-from oracle.harness import ensure_cli_built, ensure_fixture_bundle, spawn_server, stop_server  # noqa: E402
+from oracle.harness import ensure_fixture_bundle  # noqa: E402
 
 BUNDLE_ROOT = Path("/tmp/tessera-250k")  # same fixture bundle reference/tests uses — reused, not rebuilt
 
@@ -28,10 +28,8 @@ def bundle_root() -> Path:
     return BUNDLE_ROOT
 
 
-@pytest.fixture(scope="session")
-def server(tmp_path_factory, bundle_root):
-    ensure_cli_built()
-    tmp_dir = tmp_path_factory.mktemp("tessera-serve-conformance")
-    srv, proc = spawn_server(bundle_root, tmp_dir)
-    yield srv
-    stop_server(proc)
+# NB: deliberately no shared session-scoped `server` fixture here (code review flagged the
+# previous one as dead weight — nothing in this suite used it). Every test module needs a server
+# spawned with non-default arguments (a file-backed log for the byte-scan, a private fixed
+# cache/WAL path for restart-replay, two independent bundles for the canary scaffold), so each
+# module defines its own `spawn_server(...)` fixture rather than sharing one generic instance.

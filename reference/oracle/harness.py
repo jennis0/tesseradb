@@ -136,6 +136,17 @@ class Server:
         resp.raise_for_status()
         return resp
 
+    def item(self, token: str, handle: int, pin: str | None = None) -> requests.Response:
+        body: dict = {}
+        if pin is not None:
+            body["pin"] = pin
+        return requests.post(
+            f"{self.viewer_base}/v1/items/{handle}",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+            timeout=10,
+        )
+
     def change(self, external_id_b64: str, op: str, access: str | None = None) -> requests.Response:
         item = {"external_id": external_id_b64, "op": op}
         if access is not None:

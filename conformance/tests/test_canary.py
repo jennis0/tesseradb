@@ -41,8 +41,18 @@ from oracle.wire import decode_viewport
 
 GRID_MAX = 65536.0
 SLICE = "s0"
+# Zooms 0-6 of the grid's full 0-16 depth range (contracts §2.5) — deep enough that the corner
+# tile the canary occupies is a small, specific prefix distinct from its neighbours (checked
+# below at the deepest zoom), shallow enough to keep the test fast. Not exhaustive over all 17
+# depths; a scaffold, not an exhaustive per-depth sweep (see module doc: this is what Phase 2
+# extends).
 ZOOM_RANGE = range(0, 7)
-K = 500  # comfortably >= N_BASE_ITEMS so no tile's point set is truncated
+# K = 500 is comfortably >= N_BASE_ITEMS (400), so no tile's point set is ever truncated by the
+# `k` cap for either bundle — deliberately: this test is about comparing full membership between
+# two bundles, not about exercising the first-k selector/priority-tiebreak machinery itself (that
+# is Task 7/9's job). Worth stating explicitly: `k`-truncation and its interaction with the canary
+# item's priority ordering is therefore NOT exercised by this test.
+K = 500
 
 
 @pytest.fixture(scope="module")
