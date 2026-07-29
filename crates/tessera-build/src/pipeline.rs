@@ -26,6 +26,27 @@
 //! | points ×1 | external ids | 20N |
 //! | points ×1 | geometry, the tiler sort, and the segment | 28N |
 //!
+//! ## The two assumptions this construction makes
+//!
+//! **The inputs do not change while the build runs.** The linear build reads each file once;
+//! this one reads the points file four times and the pairs file three, and it carries counts and
+//! offsets from an earlier pass into a later one. A points or pairs file rewritten mid-build
+//! would therefore be read as two different corpora. That cannot be prevented from inside the
+//! process, so it is checked instead: every place a later pass depends on an earlier one — a
+//! source id that must resolve to an ordinal, a term bucket that must have room — is a typed
+//! error, never an `unwrap`, and the postings pass ends by confirming it emitted exactly as many
+//! pairs as the relation held. A mutated input fails the build; it never silently produces a
+//! bundle whose postings belong to a different corpus than its geometry.
+//!
+//! **The labelling plugin is `builtin:passthrough`.** [`build_dictionary`] exploits the fact that
+//! passthrough's label rule is *decomposable*: an item's descriptors are its comma-separated
+//! source terms independently, so a term's descriptor can be derived from the term alone and the
+//! whole item never has to be assembled. That is a property of passthrough, not of the plugin
+//! ABI — a plugin that derived descriptors from the label as a whole would be mislabelled by
+//! this shortcut, and mislabelled authorisation data is the one failure mode this system exists
+//! to prevent. [`require_decomposable_labelling`] refuses to run against any other plugin rather
+//! than assume it decomposes (I2, fail closed).
+//!
 //! ## Byte-for-byte identity is the correctness condition
 //!
 //! Entity IDs are assigned by signature order and are **permanent** (I9): a build that ordered
@@ -65,7 +86,8 @@ use crate::error::{BuildError, Result};
 use crate::input;
 use crate::{
     fsync_file, priority_of, validate_args, write_external_id_extents, write_manifests, BuildArgs,
-    BuildReport, BundleFiles, PairsParquetWriter, PHASH, PREFIX, SEG_ID,
+    BuildReport, BundleFiles, ExternalIdRow, PairsParquetWriter, EXTERNAL_ID_ROWS_PER_EXTENT,
+    PHASH, PREFIX, SEG_ID,
 };
 
 /// One item's position in the signature sort. 12 bytes, four-byte aligned: at 10⁹ items the
@@ -101,6 +123,18 @@ impl RowRec {
     }
 }
 
+/// The failure every "a later pass disagrees with an earlier one" check reports.
+///
+/// The only way to reach one of these is for an input file to have changed under the build (see
+/// the module docs) or for a counting pass to be wrong. Both are corruption of the relation
+/// between an item's geometry and its authorisation data, so both fail the build.
+fn input_changed(detail: &str) -> BuildError {
+    BuildError::Invalid(format!(
+        "the input files changed while the build was reading them ({detail}); \
+         the points and pairs files must be immutable for the duration of a build"
+    ))
+}
+
 /// Bit `i` of a packed bitset.
 fn bit_set(bits: &mut [u64], i: usize) {
     bits[i / 64] |= 1u64 << (i % 64);
@@ -126,6 +160,7 @@ fn term_of(packed_entry: u64) -> u32 {
 pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
     validate_args(args)?;
     let plugin = Passthrough::new();
+    require_decomposable_labelling(&plugin)?;
     let bounds = plugin.declared_bounds();
 
     // ---- 1. ordinals: the sorted source ids ------------------------------------------
@@ -170,14 +205,35 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
 
     // ---- 3. the pairs relation, packed as `ordinal << 32 | term_id` -------------------
     let mut packed: Vec<u64> = Vec::with_capacity(pair_rows);
+    let mut failure: Option<BuildError> = None;
     input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
-        let ordinal = source_ids
-            .binary_search(&source_id)
-            .expect("pass 2 established every pairs entity is a point")
-            as u64;
-        let term = term_of_source[&source_term] as u64;
-        packed.push((ordinal << 32) | term);
+        if failure.is_some() {
+            return;
+        }
+        // Both lookups were established by the dictionary pass over this same file. A miss here
+        // means the file is not the one that pass read.
+        let (Ok(ordinal), Some(&term)) = (
+            source_ids.binary_search(&source_id),
+            term_of_source.get(&source_term),
+        ) else {
+            failure = Some(input_changed(&format!(
+                "the pairs file names entity {source_id} term {source_term}, which its first \
+                 pass did not"
+            )));
+            return;
+        };
+        packed.push(((ordinal as u64) << 32) | term as u64);
     })?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if packed.len() != pair_rows {
+        return Err(input_changed(&format!(
+            "the pairs file yielded {} rows, then {}",
+            pair_rows,
+            packed.len()
+        )));
+    }
     drop(source_ids);
     packed.sort_unstable();
     // The label set is a *set*: a source file that repeats a `(entity, term)` row must not turn
@@ -270,32 +326,38 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
     drop(row_counts);
 
     // ---- 7. external ids -------------------------------------------------------------
-    // Sorted by the external id's *bytes* (R4). The external id is the source id as 8 bytes
-    // little-endian, and byte order over those is numeric order over the byte-swapped value.
-    let mut external: Vec<(u64, u32)> = (0..n as usize)
-        .map(|ordinal| (source_ids[ordinal].swap_bytes(), entity_of_ordinal[ordinal]))
+    // Sorted by the external id's *bytes* (R4); `ExternalIdRow` holds each id as the sort key
+    // that makes that a plain integer comparison, in twelve bytes rather than a padded sixteen.
+    let mut external: Vec<ExternalIdRow> = (0..n as usize)
+        .map(|ordinal| ExternalIdRow::new(source_ids[ordinal], entity_of_ordinal[ordinal]))
         .collect();
-    external.sort_unstable();
-    let external_ids_paths = write_external_id_extents(
-        &entities_dir,
-        external.len(),
-        external
-            .iter()
-            .map(|&(swapped, entity)| (swapped.swap_bytes(), entity as u64)),
-    )?;
+    external.sort_unstable_by_key(ExternalIdRow::sort_key);
+    let external_ids_paths =
+        write_external_id_extents(&entities_dir, &external, EXTERNAL_ID_ROWS_PER_EXTENT)?;
     drop(external);
 
     // ---- 8. geometry, in entity order ------------------------------------------------
     let mut x_of_entity: Vec<f32> = vec![0.0; n as usize];
     let mut y_of_entity: Vec<f32> = vec![0.0; n as usize];
+    let mut failure: Option<BuildError> = None;
     input::scan_points(&args.points, &args.extent, args.limit, |point| {
-        let ordinal = source_ids
-            .binary_search(&point.source_id)
-            .expect("the same points file yielded this id in pass 1");
+        if failure.is_some() {
+            return;
+        }
+        let Ok(ordinal) = source_ids.binary_search(&point.source_id) else {
+            failure = Some(input_changed(&format!(
+                "the points file names entity {}, which its first pass did not",
+                point.source_id
+            )));
+            return;
+        };
         let entity = entity_of_ordinal[ordinal] as usize;
         x_of_entity[entity] = point.x;
         y_of_entity[entity] = point.y;
     })?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
     drop(source_ids);
     drop(entity_of_ordinal);
 
@@ -399,6 +461,49 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
         ids.push(point.source_id)
     })?;
     Ok(ids)
+}
+
+/// Refuse to run unless the configured plugin labels items the way this pipeline assumes.
+///
+/// The dictionary pass derives each term's descriptor from the term id alone, which is only
+/// sound when the plugin's label rule is decomposable — when `terms_of_label` over a
+/// comma-joined list yields exactly the per-element descriptors, in order. `builtin:passthrough`
+/// (R6) is defined that way; nothing in the plugin ABI requires it, and a plugin that derived
+/// descriptors from the label as a whole (a rule engine, a normaliser, anything that folds
+/// terms together) would be silently mislabelled here — every posting would name the wrong term,
+/// which is a disclosure, not a bug in a performance path.
+///
+/// So this is checked twice over, and fails closed: the plugin must *be* passthrough by its
+/// declared `data_plugin_hash`, and it must *behave* decomposably on a probe label. The hash
+/// check is what will still hold when `build` grows a plugin parameter; the probe is what
+/// catches a passthrough whose rule was changed without its hash being bumped.
+fn require_decomposable_labelling(plugin: &impl Plugin) -> Result<()> {
+    let reference = Passthrough::new();
+    if plugin.data_plugin_hash() != reference.data_plugin_hash() {
+        return Err(BuildError::Invalid(format!(
+            "the streaming build derives each term's descriptor from the term alone, which is \
+             only valid for builtin:passthrough's decomposable label rule; this plugin declares \
+             data_plugin_hash {} (expected {}). Build through `build_in_memory`, which routes \
+             every item's label through the plugin, or teach the pipeline this plugin's rule.",
+            plugin.data_plugin_hash(),
+            reference.data_plugin_hash()
+        )));
+    }
+    let probe: &[u8] = b"11,7,4096";
+    let descriptors = plugin.terms_of_label(probe)?;
+    let expected: Vec<Vec<u8>> = vec![b"11".to_vec(), b"7".to_vec(), b"4096".to_vec()];
+    if descriptors != expected {
+        return Err(BuildError::Invalid(format!(
+            "the plugin's label rule is not decomposable: label {:?} yielded {:?}, not one \
+             descriptor per comma-separated term",
+            String::from_utf8_lossy(probe),
+            descriptors
+                .iter()
+                .map(|d| String::from_utf8_lossy(d).into_owned())
+                .collect::<Vec<_>>()
+        )));
+    }
+    Ok(())
 }
 
 /// What [`build_dictionary`] establishes in its single pass over the pairs relation.
@@ -546,15 +651,49 @@ fn write_terms(
 
     let mut flat: Vec<u32> = vec![0; total as usize];
     let mut cursor: Vec<u64> = offsets[..row_counts.len()].to_vec();
+    let mut failure: Option<BuildError> = None;
     input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
-        let ordinal = source_ids
-            .binary_search(&source_id)
-            .expect("every pairs entity is a point");
-        let term = term_of_source[&source_term];
+        if failure.is_some() {
+            return;
+        }
+        let (Ok(ordinal), Some(&term)) = (
+            source_ids.binary_search(&source_id),
+            term_of_source.get(&source_term),
+        ) else {
+            failure = Some(input_changed(&format!(
+                "the pairs file names entity {source_id} term {source_term}, which its first \
+                 pass did not"
+            )));
+            return;
+        };
         let slot = &mut cursor[term as usize];
+        // The bucket was sized by the dictionary pass's count for this term. Writing past its
+        // end would land in the *next* term's bucket — one term's entities silently becoming
+        // another's posting, which is a disclosure. Check rather than trust the two counts agree.
+        if *slot >= offsets[term as usize + 1] {
+            failure = Some(input_changed(&format!(
+                "term {term}'s bucket holds {} rows but a further row arrived",
+                row_counts[term as usize]
+            )));
+            return;
+        }
         flat[*slot as usize] = entity_of_ordinal[ordinal];
         *slot += 1;
     })?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    // The mirror of the overflow check: a bucket left short would leave its tail zeroed, and a
+    // zero is a valid entity id, so an under-filled bucket must be caught by count, not by value.
+    for (term, slot) in cursor.iter().enumerate() {
+        if *slot != offsets[term + 1] {
+            return Err(input_changed(&format!(
+                "term {term}'s bucket expected {} rows, received {}",
+                row_counts[term],
+                slot - offsets[term]
+            )));
+        }
+    }
 
     let mut records: Vec<Vec<u8>> = Vec::with_capacity(row_counts.len());
     let mut pairs_writer = PairsParquetWriter::create(pairs_path)?;

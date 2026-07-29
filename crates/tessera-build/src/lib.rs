@@ -224,6 +224,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         if descriptors.len() > bounds.max_terms_per_item as usize {
             // A declared bound is a *declaration*: record it and carry on. Dropping terms here
             // would silently widen the item's visibility (I2/I3).
+            //
+            // This counts descriptors, and the streaming pipeline counts the item's signature
+            // length; the two always agree. `read_pairs` returns each item's source terms sorted
+            // and deduplicated, so the joined label has distinct decimal elements, passthrough
+            // yields one distinct descriptor each, and interning is injective — the descriptor
+            // count *is* the distinct term count, which is what a signature holds.
             over_bound_items += 1;
         }
         let terms: Vec<TermId> = descriptors.iter().map(|d| dict.intern(d)).collect();
@@ -651,13 +657,47 @@ fn write_pairs_parquet(path: &Path, per_term: &[Vec<u32>]) -> Result<()> {
 /// external ID's **bytes**. The external ID here is the source corpus's entity ID as 8 bytes
 /// little-endian; byte order is not numeric order, so the sort is over the encoded keys.
 fn write_external_ids(dir: &Path, staged: &[StagedItem]) -> Result<Vec<PathBuf>> {
-    let mut rows: Vec<(u64, u64)> = staged
+    let mut rows: Vec<ExternalIdRow> = staged
         .iter()
         .enumerate()
-        .map(|(position, item)| (item.source_id, position as u64))
+        .map(|(position, item)| ExternalIdRow::new(item.source_id, position as u32))
         .collect();
-    rows.sort_unstable_by_key(|(source_id, _)| source_id.to_le_bytes());
-    write_external_id_extents(dir, rows.len(), rows.iter().copied())
+    rows.sort_unstable_by_key(ExternalIdRow::sort_key);
+    write_external_id_extents(dir, &rows, EXTERNAL_ID_ROWS_PER_EXTENT)
+}
+
+/// One `(external_id, entity_id)` row awaiting the byte sort.
+///
+/// Twelve bytes, four-byte aligned. Deliberately **not** `(u64, u32)`: that tuple is padded to
+/// sixteen, which at 10⁹ items is four gigabytes of nothing at the build's second-tightest
+/// moment. The external id is held as its sort key — the source id byte-swapped, so that numeric
+/// order over `(key_hi, key_lo)` is byte order over the little-endian encoding that goes on disk
+/// (R4 sorts by the external id's *bytes*, and byte order is not numeric order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub(crate) struct ExternalIdRow {
+    key_hi: u32,
+    key_lo: u32,
+    entity_id: u32,
+}
+
+impl ExternalIdRow {
+    pub(crate) fn new(source_id: u64, entity_id: u32) -> Self {
+        let key = source_id.swap_bytes();
+        ExternalIdRow {
+            key_hi: (key >> 32) as u32,
+            key_lo: key as u32,
+            entity_id,
+        }
+    }
+
+    pub(crate) fn sort_key(&self) -> (u32, u32) {
+        (self.key_hi, self.key_lo)
+    }
+
+    fn source_id(&self) -> u64 {
+        (((self.key_hi as u64) << 32) | self.key_lo as u64).swap_bytes()
+    }
 }
 
 /// The largest number of rows one `external-ids-<n>.arrow` extent may carry.
@@ -669,46 +709,48 @@ fn write_external_ids(dir: &Path, staged: &[StagedItem]) -> Result<Vec<PathBuf>>
 /// index already loads and re-sorts across extents) is what makes the largest corpus
 /// expressible; at every scale below the split point exactly one extent is written, identical to
 /// what earlier builds wrote.
-const EXTERNAL_ID_ROWS_PER_EXTENT: usize = 100_000_000;
+pub(crate) const EXTERNAL_ID_ROWS_PER_EXTENT: usize = 100_000_000;
 
-/// Write `rows` — `(source_id, entity_id)` in ascending external-id **byte** order, `len` of
-/// them — as one or more extents in `dir`, returning their paths in order. The extents partition
-/// the global order into consecutive ranges, so each is individually sorted too.
-fn write_external_id_extents<I>(dir: &Path, len: usize, rows: I) -> Result<Vec<PathBuf>>
-where
-    I: Iterator<Item = (u64, u64)>,
-{
+/// Write `rows` — already in ascending external-id **byte** order — as one or more extents in
+/// `dir`, at most `rows_per_extent` rows each, returning their paths in order. The extents
+/// partition the global order into consecutive ranges, so each is individually sorted too.
+///
+/// `rows_per_extent` is a parameter rather than a direct use of
+/// [`EXTERNAL_ID_ROWS_PER_EXTENT`] so the splitting boundary is testable without writing a
+/// hundred million rows.
+fn write_external_id_extents(
+    dir: &Path,
+    rows: &[ExternalIdRow],
+    rows_per_extent: usize,
+) -> Result<Vec<PathBuf>> {
+    assert!(rows_per_extent > 0, "rows_per_extent must be positive");
     let mut paths = Vec::new();
-    let mut rows = rows.peekable();
-    let mut remaining = len;
-    loop {
-        let take = remaining.min(EXTERNAL_ID_ROWS_PER_EXTENT);
-        let chunk: Vec<(u64, u64)> = rows.by_ref().take(take).collect();
+    for chunk in rows.chunks(rows_per_extent) {
         let path = dir.join(format!("external-ids-{}.arrow", paths.len()));
-        write_external_id_extent(&path, &chunk)?;
+        write_external_id_extent(&path, chunk)?;
         paths.push(path);
-        remaining -= chunk.len();
-        if remaining == 0 || rows.peek().is_none() {
-            break;
-        }
+    }
+    // `chunks` yields nothing for an empty input, but a bundle always names at least one extent.
+    if paths.is_empty() {
+        let path = dir.join("external-ids-0.arrow");
+        write_external_id_extent(&path, &[])?;
+        paths.push(path);
     }
     Ok(paths)
 }
 
-fn write_external_id_extent(path: &Path, rows: &[(u64, u64)]) -> Result<()> {
+fn write_external_id_extent(path: &Path, rows: &[ExternalIdRow]) -> Result<()> {
     let schema = std::sync::Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("entity_id", DataType::UInt64, false),
     ]));
-    let keys: Vec<[u8; 8]> = rows
-        .iter()
-        .map(|(source, _)| source.to_le_bytes())
-        .collect();
+    // Built straight from `rows`: an intermediate `Vec` of keys or of widened rows would be a
+    // gigabyte-scale copy of data that is already laid out correctly.
     let external: ArrayRef = std::sync::Arc::new(BinaryArray::from_iter_values(
-        keys.iter().map(|key| key.as_slice()),
+        rows.iter().map(|row| row.source_id().to_le_bytes()),
     ));
     let entity: ArrayRef = std::sync::Arc::new(UInt64Array::from_iter_values(
-        rows.iter().map(|(_, id)| *id),
+        rows.iter().map(|row| row.entity_id as u64),
     ));
     let batch = RecordBatch::try_new(schema.clone(), vec![external, entity])
         .map_err(|e| BuildError::arrow(path, e))?;
@@ -753,6 +795,11 @@ fn fsync_dir(path: &Path) -> Result<()> {
     dir.sync_all().map_err(|e| BuildError::io(path, e))
 }
 
+/// How much of a file is held in memory at once while hashing it. One mebibyte is large enough
+/// that the syscall cost is noise against the hashing and small enough to be irrelevant to the
+/// build's peak.
+const DIGEST_CHUNK_BYTES: usize = 1 << 20;
+
 /// SHA-256 and size of `path`, read in fixed-size chunks. Never `fs::read` here: at 10⁹ items
 /// `columns.arrow` alone is over 20 GB, and slurping it to hash it would reintroduce the very
 /// ceiling this build was rewritten to remove.
@@ -760,7 +807,7 @@ fn digest_file(path: &Path) -> Result<FileDigest> {
     use std::io::Read;
     let mut file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 20];
+    let mut buffer = vec![0u8; DIGEST_CHUNK_BYTES];
     let mut size = 0u64;
     loop {
         let read = file
@@ -831,6 +878,98 @@ mod tests {
         let a = signature_sort_key(&[TermId::new(5), TermId::new(1), TermId::new(5)]);
         assert_eq!(a, vec![1, 5]);
         assert_eq!(signature_sort_key(&[TermId::new(1), TermId::new(5)]), a);
+    }
+
+    #[test]
+    fn external_ids_split_at_the_extent_boundary() {
+        use arrow::array::{Array, BinaryArray, UInt64Array};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        // Source ids chosen so that byte order and numeric order disagree — the sort is over the
+        // little-endian encoding (R4), so 0x0100 must come *after* 0xFF.
+        let sources: Vec<u64> = vec![0x00FF, 0x0100, 0x0001, 0x0200, 0xFF00, 0x0002, 0x1234];
+        let mut rows: Vec<ExternalIdRow> = sources
+            .iter()
+            .enumerate()
+            .map(|(entity, &source)| ExternalIdRow::new(source, entity as u32))
+            .collect();
+        rows.sort_unstable_by_key(ExternalIdRow::sort_key);
+
+        for rows_per_extent in [1usize, 2, 3, 6, 7, 8, 100] {
+            let dir = temp.path().join(format!("split-{rows_per_extent}"));
+            fs::create_dir_all(&dir).unwrap();
+            let paths = write_external_id_extents(&dir, &rows, rows_per_extent).unwrap();
+            assert_eq!(
+                paths.len(),
+                rows.len().div_ceil(rows_per_extent),
+                "wrong extent count at {rows_per_extent} rows per extent"
+            );
+            for (idx, path) in paths.iter().enumerate() {
+                assert_eq!(
+                    path.file_name().unwrap(),
+                    &*format!("external-ids-{idx}.arrow")
+                );
+            }
+
+            // Read the extents back in order: the concatenation must be every row exactly once,
+            // still in ascending external-id byte order, with each entity id beside its own id.
+            let mut seen: Vec<(Vec<u8>, u64)> = Vec::new();
+            for path in &paths {
+                let reader =
+                    arrow::ipc::reader::FileReader::try_new(File::open(path).unwrap(), None)
+                        .unwrap();
+                for batch in reader {
+                    let batch = batch.unwrap();
+                    let ids = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<BinaryArray>()
+                        .unwrap();
+                    let entities = batch
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                        .unwrap();
+                    for i in 0..batch.num_rows() {
+                        seen.push((ids.value(i).to_vec(), entities.value(i)));
+                    }
+                }
+            }
+            assert_eq!(seen.len(), rows.len());
+            assert!(
+                seen.windows(2).all(|w| w[0].0 < w[1].0),
+                "extents must partition one ascending byte order, got {seen:?}"
+            );
+            for (bytes, entity) in &seen {
+                let source = u64::from_le_bytes(bytes.as_slice().try_into().unwrap());
+                assert_eq!(sources[*entity as usize], source);
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_external_id_relation_still_names_one_extent() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let paths = write_external_id_extents(temp.path(), &[], 4).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].exists());
+    }
+
+    #[test]
+    fn external_id_rows_are_twelve_bytes_and_round_trip() {
+        assert_eq!(std::mem::size_of::<ExternalIdRow>(), 12);
+        for source in [0u64, 1, 0xFF, 0x0100, u64::MAX, 0x0123_4567_89AB_CDEF] {
+            let row = ExternalIdRow::new(source, 7);
+            assert_eq!(row.source_id(), source);
+            assert_eq!(row.entity_id, 7);
+        }
+        // The sort key must order by the id's *bytes*, which is not its numeric order: little
+        // endian puts 0x0100's low byte (0x00) first, so it sorts *before* the larger-looking
+        // 0x00FF (whose low byte is 0xFF).
+        assert!(0x0100u64.to_le_bytes() < 0x00FFu64.to_le_bytes());
+        let mut ids = [0x00FFu64, 0x0100u64];
+        ids.sort_by_key(|id| ExternalIdRow::new(*id, 0).sort_key());
+        assert_eq!(ids, [0x0100, 0x00FF]);
     }
 
     #[test]

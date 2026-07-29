@@ -389,13 +389,18 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
 /// codebase (see `tessera-authz`'s postings reader) — it is an operational/deployment concern
 /// (read-only bundle storage, no writer with access to a serving replica's files), not one this
 /// module's checks can close from inside a single process.
+/// How much of a file is held in memory at once while hashing it (see `verify_files`). Matches
+/// `tessera-build`'s constant of the same name; the two crates share no dependency to share it
+/// through.
+const DIGEST_CHUNK_BYTES: usize = 1 << 20;
+
 fn verify_files(base: &Path, files: &BTreeMap<String, FileDigest>) -> Result<()> {
     // Read in fixed-size chunks, never whole: at 10^9 items `columns.arrow` alone is over 20 GB,
     // and slurping every file to hash it would make opening a bundle cost more memory than
     // serving it. The verification itself is unchanged and unconditional — every named file is
     // still read in full and hashed, because a bundle whose bytes were not checked is a bundle
     // whose authorisation data was not checked (fail closed).
-    let mut buffer = vec![0u8; 1 << 20];
+    let mut buffer = vec![0u8; DIGEST_CHUNK_BYTES];
     for (rel_path, digest) in files {
         let path = safe_join(base, rel_path)?;
         let mut file = File::open(&path).map_err(|source| StoreError::Io {
