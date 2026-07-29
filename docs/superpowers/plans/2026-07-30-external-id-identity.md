@@ -149,7 +149,7 @@ Source: `docs/design-memos/2026-07-30-priority-as-identity-prefix.md`, an owner 
 | **sort order** | `(morton, priority, entity_id)` → **`(morton, tessera_id)`**. Stated in full below; this is the single most load-bearing edit in the fold, because the oracle re-derives row order from build inputs. |
 | **Important I-4** | **Retired.** The prohibition rested entirely on `priority` being an *unkeyed* residue of the entity ID. It is now 16 bits of an identity the wire already carries in full. The layer-check grep and the byte-scanner sweep go with it. |
 | **row order is now key-dependent** | It was not before. A re-key changes which row lands where inside a Morton cell, and therefore reshuffles the sample. Recorded as an accepted residual below. |
-| **tasks touched** | Task 4 (spec text, plus amending Task 3's committed memo), Task 5 (`TesseraId::priority()` — the single definition), Task 6 (`sort_batch`, `TilerItem`, the writers), Task 7 (delete `priority_of`, the `RowRec` comparator, the chi-squared check), Task 9 (one consequence note), Task 10 (drop the layer-check grep), Task 12 (oracle), Task 13 (drop the sweep). **No new task, and the whole fold must land before Task 14's rebuild** — it changes the storage sort order, so landing it afterwards means rebuilding twice. |
+| **tasks touched** | Task 4 (spec text, plus amending Task 3's committed memo), Task 5 (`TesseraId::priority()` — the single definition), Task 6 (`sort_batch`, `TilerItem`, the writers), Task 7 (delete `priority_of`, the `RowRec` comparator), Task 9 (one consequence note), Task 10 (drop the layer-check grep), Task 12 (oracle), Task 13 (drop the sweep). **No new task, and the whole fold must land before Task 14's rebuild** — it changes the storage sort order, so landing it afterwards means rebuilding twice. |
 
 ---
 
@@ -232,7 +232,7 @@ This paragraph replaces every "the sort tiebreak does not move" statement in ear
 
 ### What must be verified, not assumed *(carried from the memo, unresolved)*
 
-The high 32 bits of `tessera_id` are the left Feistel half `L`, and this plan is explicit that the construction is **a blinding permutation, not a cipher**. Sampling needs **uniformity, not unpredictability**, and 8 balanced rounds of `splitmix64` deliver it — **but the inputs are highly structured** (`shard_id = 0`, `entity_id` dense from 0), and residual structure in `L` would be inherited by the sample, which is the exact defect being fixed. **Task 7 adds a chi-squared check over `high16(tessera_id)` alongside the existing known-answer vectors in `build_equivalence`.** This is an open verification item, not a stated fact: if the check fails, the fold does not land and the owner is told.
+The high 32 bits of `tessera_id` are the left Feistel half `L`, and this plan is explicit that the construction is **a blinding permutation, not a cipher**. Sampling needs **uniformity, not unpredictability**, and 8 balanced rounds of `splitmix64` deliver it — **but the inputs are highly structured** (`shard_id = 0`, `entity_id` dense from 0), and residual structure in `L` would be inherited by the sample, which is the exact defect being fixed. **Owner ruling 2026-07-30: this property is already established and no check is added** — `priority` is `high16(splitmix64(entity_id))` in the shipped system, so §7.2 already rests on those high bits being uniform, and the new prefix is taken after 8 balanced rounds of the same mixer rather than one call. See Task 7 Step 5a (struck).
 
 ### The confirming measurement — PENDING, do not run it here
 
@@ -739,7 +739,11 @@ Sorted extents at 10⁹, costed as `(key bytes + 4 offset + 4 entity)` per row, 
 2. **Drawn-mark Task 7's `DEFAULT_MAX_K` *value* must not be committed until this plan's Task 15 has run.** A `k` calibrated on the current bundle is calibrated against a swapping box and a 4-byte handle; both change here. The calibration *method* is unaffected — only the numbers it consumes.
 3. Neither plan edits the other's files. Drawn-mark Task 7 lists `crates/tessera-server/src/config.rs`, `.ignore/tessera-contracts-spec.md` (§3 `k` note) and `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` (Task 16 k-sweep); this plan touches the contracts spec in §0.3/§2/§3/§5 and the Phase 1 plan's Task 16 only in Task 16, after drawn-mark Task 7. **If both are in flight on the contracts spec at once, STOP and report** rather than merging revision blocks by hand.
 
-**A second in-flight plan overlaps the priority fold, and this plan does NOT resolve the overlap.** `docs/superpowers/plans/2026-07-30-selection-route-chooser.md` declares itself a companion to the priority memo and states that it *"shares Task 1's call site"* — i.e. the selection path this fold's spec text describes but does not implement. **Nothing from that plan is folded in here, and nothing here decides anything for it.** If both are in flight against the selection path or against design §7.2 at the same time, **STOP and report to the owner** rather than reconciling them; the sequencing between the two is an owner decision, not an executor's.
+**A second in-flight plan overlaps the priority fold — RESOLVED by owner ruling, 2026-07-30.** `docs/superpowers/plans/2026-07-30-selection-route-chooser.md` declares itself a companion to the priority memo and states that it *"shares Task 1's call site"* — i.e. the selection path this fold's spec text describes but does not implement.
+
+**Owner:** *"Hold off on implementing the V < k efficiency."* That plan's `V ≤ k` fast path is **deferred**, so §7.2 is not contested and **this plan's Task 4 amends design §7.2 as written**. Nothing else from that plan is folded in, and nothing here decides anything else for it — when it resumes it rebases onto the §7.2 text this plan lands, including the `(morton, tessera_id)` order and the retired `priority` prohibition.
+
+Still **not** resolved here, and still not an executor's call: the priority memo's change-list rows for the **selection comparator** and the **candidate-list build** have no Phase 1 implementation site (the sampler is the placeholder first-k; no candidate-list build exists). They land in this plan as design §7.2 *spec text only* and are implemented by whoever owns the selection route.
 
 ---
 
@@ -1342,7 +1346,7 @@ Bump the status line to `revision 21` and prepend to Appendix G:
   only. Consequences recorded rather than hidden: row order is now **key-dependent**, so
   a key rotation reorders tied rows as well as invalidating identifiers; the sample
   reshuffles on a re-key as well as on a reshard; and the uniformity of the Feistel's
-  high bits under structured inputs is **verified by a chi-squared check at build**, not
+  high bits under structured inputs is **taken as already established** (owner ruling; see Task 7 Step 5a, struck), not
   assumed. The identity swap's viewer-plane prohibition on `priority` (contracts r6) is
   **retired by argument**: 16 bits of a keyed identity the payload already carries in
   full discloses nothing, since the cut *P* is determined by *k* and the masked count
@@ -2289,26 +2293,17 @@ Then, in the same pass that has the sorted rows in hand, write **one** `entities
 
 Both files are recorded in the side-manifest and digest-covered.
 
-- [ ] **Step 5a: The uniformity check the redefinition is conditional on** *(2026-07-30 fold — an open verification item, not a formality)*
+- [ ] ~~**Step 5a: The uniformity check the redefinition is conditional on**~~ — **STRUCK: owner ruling, 2026-07-30. Do not implement.**
 
-The priority prefix is now the top 16 bits of the left Feistel half `L`, and this plan states plainly that the construction is **a blinding permutation, not a cipher**. Sampling needs **uniformity, not unpredictability** — but the inputs are highly structured (`shard_id = 0`, `entity_id` dense from 0), and **residual structure in `L` would be inherited by the sample, which is the exact defect being fixed.** So it is verified rather than assumed.
+**Owner:** *"The splitmix uniformity has already been validated — I don't think we need to do it again."*
 
-Add to `crates/tessera-build/tests/build_equivalence.rs`, alongside the existing known-answer assertions:
+The fold added a chi-squared check over `high16(tessera_id)` on the reasoning that the prefix is the top 16 bits of the left Feistel half under highly structured inputs (`shard_id = 0`, `entity_id` dense from 0), and that residual structure in `L` would be inherited by the sample. The owner has ruled that property already established and the check redundant. The supporting argument, recorded so the decision is legible rather than merely obeyed:
 
-```rust
-#[test]
-fn the_priority_prefix_is_uniform_over_dense_entity_ids() {
-    // Chi-squared over high16(tessera_id) for entity_id dense from 0 at shard_id = 0 --
-    // the structured input the build actually presents. 8 balanced rounds of splitmix64
-    // should give uniformity; this asserts it rather than trusting it, because a biased
-    // prefix reintroduces the tie-domination the redefinition exists to remove.
-    // Bucket to 2^8 bins over >= 2^20 entities, assert the statistic against the 0.001
-    // critical value, and state both the bin count and the threshold in the failure
-    // message so a failure is diagnosable rather than just red.
-}
-```
+- `splitmix64`'s output distribution is **already load-bearing in the shipped system** — `priority` is `high16(splitmix64(entity_id))` today (contracts §2.6), and §7.2's sampling argument already rests on those high bits being uniform. The redefinition does not introduce that dependency; it inherits one that was validated when `priority` was designed.
+- The new prefix is taken after **8 balanced Feistel rounds** of the same mixer rather than a single call, so it cannot be *less* mixed than the value whose uniformity is already relied upon.
+- `docs/design-memos/2026-07-30-priority-as-identity-prefix.md` makes the argument directly: sampling needs *"uniformity, not unpredictability, and 8 balanced rounds of `splitmix64` deliver it"*.
 
-**If this fails, the fold does not land: stop and report to the owner.** The fallback on the record is the review's second choice of round function (keyed SipHash-1-3, ~2% of build time), not a wider prefix — a biased prefix is biased at every width.
+**No test is added and Task 7 gains no step here.** If a future change alters the round function, the round count, or the prefix width, this is the assumption that would need re-establishing — the fallback on the record remains the review's second choice of round function (keyed SipHash-1-3, ~2% of build time), not a wider prefix, since a biased prefix is biased at every width.
 
 - [ ] **Step 6: Run the tests**
 
@@ -3471,7 +3466,7 @@ Every number from Tasks 14–15 against each plan-§5 exit criterion, pass/fail,
 - Signature-sorted entity allocation in effect — unchanged by this work; cite `entity_ids_follow_signature_order`.
 - WAL ack contract + positional CRC rule + restart-replay deny survival.
 - Differential oracle agreement on counts, geometry bytes, first-k — **and on the `tessera_id` column**, reproduced independently from the spec text.
-- Placeholder sampler is first-k and commented as deliberately wrong — **and the storage order it reads is now `(morton, tessera_id)`**, so the first-k it returns is no longer ordered by permission signature above V ≈ 2×10⁶ *(2026-07-30 fold)*. Cite the chi-squared uniformity check alongside it: what makes the placeholder's output unbiased is the prefix's uniformity, and that is measured, not assumed.
+- Placeholder sampler is first-k and commented as deliberately wrong — **and the storage order it reads is now `(morton, tessera_id)`**, so the first-k it returns is no longer ordered by permission signature above V ≈ 2×10⁶ *(2026-07-30 fold)*. What makes the placeholder's output unbiased is the prefix's uniformity, which the owner has ruled already established (Task 7 Step 5a, struck).
 - `tessera verify` passes; corrupted-byte red paths green.
 - Layer checks green.
 
@@ -3504,7 +3499,7 @@ git commit -m "docs: Phase 1 exit record against the contracts-r6 identity forma
 | | question | status |
 |---|---|---|
 | 1 | entity-ID uniqueness across partitions | **RESOLVED** against the code and design — prefix is the §13.3 shard, reserved at 0 |
-| 2 | is `splitmix64` an acceptable round function | **RULED** by review round 2 — keep it, 8 rounds, conditional on three fixes, the third of which the 2026-07-30 fold satisfies differently (keyed `priority`, not forbidden `priority`). One **new verification item**: a chi-squared check that `high16` is uniform under structured inputs (Task 7 Step 5a) |
+| 2 | is `splitmix64` an acceptable round function | **RULED** by review round 2 — keep it, 8 rounds, conditional on three fixes, the third of which the 2026-07-30 fold satisfies differently (keyed `priority`, not forbidden `priority`). The fold's proposed chi-squared check on `high16` uniformity was **struck by owner ruling** — already validated (Task 7 Step 5a) |
 | 3 | locator or a duplicate column | **ANSWERED** — locator; build for the real-world externally-provided ID |
 | 4 | `/v1/items` with no cached projection | **RETIRED** — the visibility test is in entity space |
 | 5 | may Task 14 delete `/tmp/tessera-1e9` | **ANSWERED — yes**, conditional on Task 2's baseline, enforced at Task 14 Step 2a |
