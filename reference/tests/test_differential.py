@@ -278,3 +278,31 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
     oracle_counts = _oracle_counts(oracle_bundle, resolved_mask, SLICE, zoom, bbox)
 
     assert server_counts == oracle_counts
+
+
+def test_items_drilldown_returns_expected_external_id(server, oracle_bundle: Bundle):
+    """`/v1/items` on a visible item returns the same `external_id` the oracle derives
+    (Task 12 brief, Step 4). Requires a post-r6 bundle (`identity` in MANIFEST) so the
+    oracle can compute `tessera_id_of` -- skipped against a pre-r6 fixture, which is what
+    this repo's `tessera build` still produces as of this task (identity.rs is landing but
+    tessera-build has not yet been repointed at it)."""
+    if oracle_bundle.identity_key is None:
+        pytest.skip("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
+
+    descriptor = oracle_bundle.dictionary[0]
+    term_id = oracle_bundle.term_id_of(descriptor)
+    base_mask = mask_mod.mask_of({term_id}, oracle_bundle.pairs_path())
+    assert base_mask, "need at least one visible entity"
+
+    auth = server.authorise([_descriptor_str(descriptor)])
+    token = auth["token"]
+
+    target_entity = min(base_mask)
+    tessera_id = oracle_bundle.tessera_id_of(target_entity)
+    expected_external_id = oracle_bundle.external_id_of(target_entity)
+
+    resp = server.item(token, tessera_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    got_external_id = base64.b64decode(body["external_id"])
+    assert got_external_id == expected_external_id
