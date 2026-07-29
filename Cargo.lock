@@ -2271,11 +2271,19 @@ dependencies = [
 name = "tessera-cli"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "clap",
+ "parquet",
+ "rand 0.8.7",
+ "serde_json",
+ "tempfile",
  "tessera-build",
  "tessera-server",
  "tessera-spatial",
+ "tessera-store",
+ "tessera-types",
  "tokio",
+ "toml",
  "tracing-subscriber",
 ]
 

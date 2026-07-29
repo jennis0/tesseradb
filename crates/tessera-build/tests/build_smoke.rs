@@ -20,7 +20,14 @@ use parquet::arrow::ArrowWriter;
 use tessera_build::{build, signature_sort_key, BuildArgs};
 use tessera_spatial::Extent;
 use tessera_store::read::open_bundle;
-use tessera_types::TermId;
+use tessera_types::{IdentityKey, TermId};
+
+/// A fixed, non-degenerate test key shared by every fixture in this file.
+const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+
+fn test_key() -> IdentityKey {
+    IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
+}
 
 const N_ITEMS: u64 = 250;
 const N_TERMS: u64 = 17;
@@ -178,6 +185,10 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         extent: extent(),
         slice_id: "s0".to_string(),
         limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
     };
     let report = build(&args).expect("build should succeed");
     assert_eq!(report.items, N_ITEMS);
@@ -233,6 +244,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         "partitions/default/terms/postings.arrow",
         "partitions/default/terms/pairs.parquet",
         "partitions/default/entities/external-ids-0.arrow",
+        "partitions/default/entities/ext-locator.u32",
         "partitions/default/slices/s0/permutation.bin",
         "partitions/default/slices/s0/segments/seg-0/columns.arrow",
         "partitions/default/slices/s0/segments/seg-0/morton.u32",
@@ -245,7 +257,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     }
     assert_eq!(
         bundle.manifest.files.len(),
-        7,
+        8,
         "MANIFEST.json must list every build-written file and nothing else"
     );
 
@@ -266,8 +278,8 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         let ent = batch
             .column(1)
             .as_any()
-            .downcast_ref::<UInt64Array>()
-            .expect("entity_id must be UInt64");
+            .downcast_ref::<UInt32Array>()
+            .expect("entity_id must be UInt32 (contracts §2.4 r6)");
         for i in 0..batch.num_rows() {
             let key = ext.value(i).to_vec();
             assert_eq!(key.len(), 8, "external_id is the source id as 8-byte LE");
@@ -279,7 +291,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
             }
             prev_key = Some(key.clone());
             let source = u64::from_le_bytes(key.try_into().unwrap());
-            source_to_new.insert(source, ent.value(i));
+            source_to_new.insert(source, ent.value(i) as u64);
         }
     }
     assert_eq!(source_to_new.len(), N_ITEMS as usize);
@@ -457,6 +469,10 @@ fn build_refuses_to_clobber_an_existing_bundle() {
         extent: extent(),
         slice_id: "s0".to_string(),
         limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
     };
     build(&args).unwrap();
     // A second build into the same root would leave the first bundle's files half-overwritten
@@ -480,6 +496,10 @@ fn build_rejects_an_empty_selection() {
         extent: extent(),
         slice_id: "s0".to_string(),
         limit: Some(0),
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
     })
     .is_err());
 }
@@ -505,6 +525,10 @@ fn morton_input_requires_the_identity_extent() {
         extent,
         slice_id: "s0".to_string(),
         limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
     };
 
     // The caller's own extent, which the x/y branch would happily accept, must be rejected here.
@@ -537,6 +561,10 @@ fn morton_input_requires_the_identity_extent() {
         extent: identity,
         slice_id: "s0".to_string(),
         limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
     })
     .unwrap();
     let bundle = open_bundle(&out).unwrap();
@@ -570,6 +598,10 @@ fn build_rejects_an_unsafe_slice_id() {
         extent: extent(),
         slice_id: "../escape".to_string(),
         limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
     })
     .is_err());
 }
@@ -602,9 +634,153 @@ fn limit_filters_the_source_entity_id_prefix() {
         extent: extent(),
         slice_id: "s0".to_string(),
         limit: Some(100),
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
     })
     .unwrap();
     assert_eq!(report.items, 100);
     let bundle = open_bundle(&out).unwrap();
     assert_eq!(bundle.manifest.entity_id_high_water, 100);
+}
+
+/// `tessera verify` re-derives every row's `tessera_id` from `(identity.key, identity.shard_id,
+/// entity_id)` and fails if a single row disagrees (contracts §2.6 r6). A freshly built bundle
+/// must verify clean.
+#[test]
+fn verify_accepts_a_freshly_built_bundle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("points.parquet");
+    let pairs = tmp.path().join("pairs.parquet");
+    let out = tmp.path().join("bundle");
+    write_points(&points);
+    write_pairs(&pairs);
+
+    build(&BuildArgs {
+        points,
+        pairs,
+        out: out.clone(),
+        extent: extent(),
+        slice_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
+    })
+    .unwrap();
+
+    let report = tessera_build::verify(&out).expect("a freshly built bundle must verify");
+    assert_eq!(report.rows, N_ITEMS);
+    assert_eq!(report.entity_id_high_water, N_ITEMS);
+}
+
+/// Contracts §2.6 r6: "`tessera verify` checks the whole column against" the key. Corrupts one
+/// row's stored `tessera_id` (keeping every digest self-consistent, so the failure is the
+/// identity check itself and not an earlier digest-mismatch error) and asserts `verify` refuses.
+#[test]
+fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
+    use sha2::{Digest, Sha256};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("points.parquet");
+    let pairs = tmp.path().join("pairs.parquet");
+    let out = tmp.path().join("bundle");
+    write_points(&points);
+    write_pairs(&pairs);
+
+    let report = build(&BuildArgs {
+        points,
+        pairs,
+        out: out.clone(),
+        extent: extent(),
+        slice_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
+    })
+    .unwrap();
+
+    let columns_rel = "partitions/default/slices/s0/segments/seg-0/columns.arrow".to_string();
+    let columns_path = out.join(&report.prefix).join(&columns_rel);
+
+    // ---- corrupt row 0's tessera_id, keeping the schema and every other value intact --------
+    let file = File::open(&columns_path).unwrap();
+    let reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
+    let schema = reader.schema();
+    let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+    assert_eq!(batches.len(), 1, "the build writes one record batch");
+    let batch = &batches[0];
+    let tessera_id = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let mut corrupted: Vec<u64> = tessera_id.iter().map(|v| v.unwrap()).collect();
+    corrupted[0] ^= 1; // flip the low bit: still a plausible-looking u64, still wrong
+    let mut columns: Vec<Arc<dyn arrow::array::Array>> = Vec::new();
+    columns.push(Arc::new(UInt64Array::from(corrupted)));
+    for i in 1..batch.num_columns() {
+        columns.push(batch.column(i).clone());
+    }
+    let corrupted_batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+
+    let file = File::create(&columns_path).unwrap();
+    let mut writer = arrow::ipc::writer::FileWriter::try_new(file, &schema).unwrap();
+    writer.write(&corrupted_batch).unwrap();
+    writer.finish().unwrap();
+
+    // ---- keep MANIFEST.json's digest for this file self-consistent, so the failure below is
+    // the identity check, not an earlier "file does not match its recorded digest" error -------
+    let manifest_path = out.join(&report.prefix).join("MANIFEST.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let new_bytes = std::fs::read(&columns_path).unwrap();
+    let new_size = new_bytes.len() as u64;
+    let new_sha256 = {
+        let mut hasher = Sha256::new();
+        hasher.update(&new_bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    manifest["files"][&columns_rel]["size"] = serde_json::json!(new_size);
+    manifest["files"][&columns_rel]["sha256"] = serde_json::json!(new_sha256);
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+    std::fs::write(&manifest_path, &manifest_bytes).unwrap();
+
+    let manifest_sha256 = {
+        let mut hasher = Sha256::new();
+        hasher.update(&manifest_bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let current = serde_json::json!({
+        "prefix": report.prefix,
+        "manifest_digest": manifest_sha256,
+    });
+    std::fs::write(
+        out.join("CURRENT"),
+        serde_json::to_vec_pretty(&current).unwrap(),
+    )
+    .unwrap();
+
+    let err = tessera_build::verify(&out)
+        .expect_err("a corrupted tessera_id column must fail verification");
+    assert!(
+        matches!(err, tessera_build::BuildError::Invalid(_)),
+        "expected BuildError::Invalid, got {err:?}"
+    );
+    assert!(
+        format!("{err}").contains("tessera_id"),
+        "the error should name the identity check, got: {err}"
+    );
 }

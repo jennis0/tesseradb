@@ -42,11 +42,14 @@ use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::Extent;
 use tessera_store::manifest::{
-    CurrentPointer, DictExtent, FileDigest, Manifest, PartitionDescriptor, Quantisation,
-    SegmentDescriptor, SegmentsManifest, SliceDescriptor,
+    CurrentPointer, DictExtent, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
+    Quantisation, SegmentDescriptor, SegmentsManifest, SliceDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
-use tessera_types::{EntityId, TermId, BUNDLE_FORMAT, NODE_NONE, SMALL_TERM_THRESHOLD_DEFAULT};
+use tessera_types::{
+    EntityId, IdentityKey, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
+    SMALL_TERM_THRESHOLD_DEFAULT,
+};
 
 pub use error::{BuildError, Result};
 
@@ -73,6 +76,22 @@ pub struct BuildArgs {
     pub slice_id: String,
     /// Prefix filter on the *source* entity ID: keep rows with `entity_id < limit`.
     pub limit: Option<u64>,
+    /// The deployment's identity key (contracts §2.2). **Not** per bundle: it must be carried
+    /// across rebuilds or every `tessera_id` any client holds silently breaks. Resolved by the
+    /// CLI from `--carry-id-key-from` / `--id-key-file` / `--id-key` / `--mint-id-key`, and
+    /// passed here already decided so that both build paths see the same bytes.
+    pub identity_key: IdentityKey,
+    /// `identity_key`'s canonical 32-lowercase-hex-character form, exactly as MANIFEST records
+    /// it. Carried alongside the parsed key rather than recovered from it: `IdentityKey`
+    /// deliberately has no hex accessor, to preserve its redacted `Debug` (a hex accessor would
+    /// undo the redaction).
+    pub identity_key_hex: String,
+    /// MANIFEST `identity.epoch` (contracts §2.2/§2a): advanced by the CLI when the operator
+    /// passes `--bump-id-epoch` or rotates the key, carried forward verbatim on a normal
+    /// rebuild, reset to 1 by `--mint-id-key`.
+    pub identity_epoch: u32,
+    /// The §13.3 row-range shard this build produces. Phase 1: 0.
+    pub shard_id: u32,
 }
 
 /// What a completed build produced.
@@ -135,17 +154,6 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-/// `priority(e) = (splitmix64(e) >> 48) as u16` over the **final** entity ID (R3, contracts
-/// §2.6). Mask-independent by construction (design §7.2): priority must not depend on any
-/// viewer's visibility, or the intra-cell tiebreak would leak.
-pub fn priority_of(entity_id: EntityId) -> u16 {
-    let mut z = entity_id.raw().wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    (z >> 48) as u16
 }
 
 /// One item after labelling, before entity-ID assignment.
@@ -311,39 +319,41 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let pairs_path = terms_dir.join("pairs.parquet");
     write_pairs_parquet(&pairs_path, &per_term)?;
 
-    let external_ids_paths = write_external_ids(&entities_dir, &staged)?;
+    let (external_ids_paths, ext_locator_path) = write_external_ids(&entities_dir, &staged, n)?;
 
-    // ---- 6. tiler and segment --------------------------------------------------------
-    let mut tiler_items: Vec<TilerItem> = staged
-        .iter()
-        .enumerate()
-        .map(|(position, item)| {
-            let entity_id = EntityId::new(position as u64);
-            TilerItem {
-                entity_id,
-                x: item.x,
-                y: item.y,
-                node_id: NODE_NONE,
-                priority: priority_of(entity_id),
-                scalars: Vec::new(),
-            }
-        })
-        .collect();
-    let codes = sort_batch(&mut tiler_items, &args.extent);
+    // ---- 6. the identity, computed BEFORE the tiler (2026-07-30 fold, memo §6) --------
+    // `tessera_id` is now a sort key (`priority = high16(tessera_id)`, and the storage order is
+    // `(morton, tessera_id)`), so it must exist before `sort_batch` runs, not be written at the
+    // row after it.
+    let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
+    let mut tiler_items: Vec<TilerItem> = Vec::with_capacity(n as usize);
+    for (position, item) in staged.iter().enumerate() {
+        let entity_id = EntityId::new(position as u64);
+        let tessera_id = args.identity_key.forward(args.shard_id, entity_id)?;
+        tiler_items.push(TilerItem {
+            tessera_id,
+            x: item.x,
+            y: item.y,
+            scalars: Vec::new(),
+        });
+    }
+
+    // ---- 7. tiler and segment ---------------------------------------------------------
+    let codes = sort_batch(&mut tiler_items, &mut entity_ids, &args.extent);
     write_segment(&segment_dir, &tiler_items, &codes, &[])
         .map_err(|e| BuildError::io(&segment_dir, e))?;
     fsync_file(&segment_dir.join("columns.arrow"))?;
     fsync_file(&segment_dir.join("morton.u32"))?;
 
     let permutation_path = slice_dir.join("permutation.bin");
-    let row_order: Vec<EntityId> = tiler_items.iter().map(|i| i.entity_id).collect();
+    let row_order: Vec<EntityId> = entity_ids;
     // `bound` is the partition slice's max entity ID + 1. The bootstrap build allocates a dense
     // 0..n, so that is exactly the item count.
     write_permutation(&permutation_path, &row_order, n)
         .map_err(|e| BuildError::io(&permutation_path, e))?;
     fsync_file(&permutation_path)?;
 
-    // ---- 7. manifests ----------------------------------------------------------------
+    // ---- 8. manifests ------------------------------------------------------------------
     write_manifests(
         args,
         &BundleFiles {
@@ -356,6 +366,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 permutation_path,
                 segment_dir.join("columns.arrow"),
                 segment_dir.join("morton.u32"),
+                ext_locator_path,
             ],
         },
         &plugin,
@@ -458,6 +469,13 @@ fn write_manifests(
             y_max: args.extent.y_max,
         },
         entity_id_high_water: n,
+        identity: IdentityDescriptor {
+            construction: IDENTITY_CONSTRUCTION.to_string(),
+            rounds: IDENTITY_ROUNDS,
+            key: args.identity_key_hex.clone(),
+            shard_id: args.shard_id,
+            epoch: args.identity_epoch,
+        },
         slices: vec![SliceDescriptor {
             id: args.slice_id.clone(),
             display_name: args.slice_id.clone(),
@@ -512,9 +530,20 @@ pub struct VerifyReport {
 
 /// Verify a bundle at `root`: run the read protocol (which checks every manifest digest, every
 /// file's size and SHA-256, and each permutation's bijectivity onto its segment's rows), then
-/// re-confirm the permutation covers exactly the rows the segment claims.
+/// re-confirm the permutation covers exactly the rows the segment claims, and re-derive every
+/// row's `tessera_id` from `(identity.key, identity.shard_id, entity_id)`, failing if a single
+/// row disagrees (contracts §2.6 r6: "`tessera verify` checks the whole column against" the
+/// key).
 pub fn verify(root: &Path) -> Result<VerifyReport> {
     let bundle = tessera_store::read::open_bundle(root)?;
+    // The key is parsed here, not by `open_bundle`: `IdentityDescriptor::validate` (run at
+    // open) checks `construction`/`rounds`/`epoch` but never parses `key`'s hex, since
+    // `tessera-store` has no need to hold a live `IdentityKey` at all — only `tessera verify`
+    // and the build do.
+    let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
+        .map_err(|e| BuildError::Invalid(format!("MANIFEST identity.key: {e}")))?;
+    let shard_id = bundle.manifest.identity.shard_id;
+
     let mut slices = 0usize;
     let mut segments = 0usize;
     let mut rows = 0u64;
@@ -526,15 +555,18 @@ pub fn verify(root: &Path) -> Result<VerifyReport> {
             rows += row_count as u64;
             // `open_bundle` already ran `validate_rows` (no aliasing, no out-of-range row).
             // The remaining half of bijectivity is surjectivity: every row must be claimed by
-            // some entity, or `columns.arrow` holds a row no entity can ever address.
+            // some entity, or `columns.arrow` holds a row no entity can ever address. Built as
+            // a row-indexed array (rather than just a count) so the identity check below can
+            // reuse it instead of inverting the permutation a second time.
             slice.permutation.validate_rows(row_count)?;
+            let mut entity_of_row: Vec<Option<u64>> = vec![None; row_count as usize];
             let mut claimed = 0u64;
             for entity in 0..slice.permutation.bound() {
-                if slice
+                if let Some(row) = slice
                     .permutation
                     .row_of(tessera_types::EntityId::new(entity))
-                    .is_some()
                 {
+                    entity_of_row[row.raw() as usize] = Some(entity);
                     claimed += 1;
                 }
             }
@@ -543,6 +575,28 @@ pub fn verify(root: &Path) -> Result<VerifyReport> {
                     "slice '{slice_id}': permutation claims {claimed} rows but the segments hold \
                      {row_count} — not a bijection"
                 )));
+            }
+
+            // Phase 1 has exactly one segment per (partition, slice) at build (contracts
+            // §2.1), so its rows are `columns.arrow` row 0..row_count directly; a future
+            // streamed segment would need its own row-range offset, which does not exist yet
+            // (Phase 2).
+            for segment in &slice.segments {
+                let ids = segment.columns.tessera_id();
+                for (row, id) in ids.iter().enumerate() {
+                    // Bijectivity was just confirmed above, so every row has an entity.
+                    let entity = entity_of_row[row].expect("row claimed by validate_rows above");
+                    let expected = identity_key
+                        .forward(shard_id, tessera_types::EntityId::new(entity))
+                        .map_err(BuildError::Identity)?
+                        .raw();
+                    if *id != expected {
+                        return Err(BuildError::Invalid(format!(
+                            "slice '{slice_id}' row {row}: tessera_id {id:#x} does not match \
+                             identity.key's derivation {expected:#x} for entity {entity}"
+                        )));
+                    }
+                }
             }
         }
     }
@@ -653,17 +707,72 @@ fn write_pairs_parquet(path: &Path, per_term: &[Vec<u32>]) -> Result<()> {
     writer.finish()
 }
 
-/// Write `external-ids-0.arrow` (R4): `(external_id: binary, entity_id: uint64)` sorted by the
-/// external ID's **bytes**. The external ID here is the source corpus's entity ID as 8 bytes
-/// little-endian; byte order is not numeric order, so the sort is over the encoded keys.
-fn write_external_ids(dir: &Path, staged: &[StagedItem]) -> Result<Vec<PathBuf>> {
+/// Write `external-ids-0.arrow` (R4; r6 narrows `entity_id` to `uint32`) and
+/// `entities/ext-locator.u32` (r6, contracts §2.4/§2.6): the external ID here is the source
+/// corpus's entity ID as 8 bytes little-endian; byte order is not numeric order, so the sort is
+/// over the encoded keys. Returns the extent paths (in listed order) and the locator's path.
+fn write_external_ids(
+    dir: &Path,
+    staged: &[StagedItem],
+    entity_id_high_water: u64,
+) -> Result<(Vec<PathBuf>, PathBuf)> {
     let mut rows: Vec<ExternalIdRow> = staged
         .iter()
         .enumerate()
         .map(|(position, item)| ExternalIdRow::new(item.source_id, position as u32))
         .collect();
     rows.sort_unstable_by_key(ExternalIdRow::sort_key);
-    write_external_id_extents(dir, &rows, EXTERNAL_ID_ROWS_PER_EXTENT)
+    let extent_paths = write_external_id_extents(dir, &rows, EXTERNAL_ID_ROWS_PER_EXTENT)?;
+    let locator_path = write_ext_locator(dir, &rows, entity_id_high_water)?;
+    Ok((extent_paths, locator_path))
+}
+
+/// Write `entities/ext-locator.u32` (contracts §2.4/§2.6 r6): one raw `u32` array, no header, no
+/// `<k>` suffix, length `entity_id_high_water`, `locator[entity_id] = ordinal` — that entity's
+/// position in the concatenated sorted external-id extents, in listed (extent) order.
+/// `0xFFFFFFFF` marks an entity with no caller external ID; in this bootstrap build every item is
+/// given the source corpus's own id as its external id, so the sentinel is unused here but the
+/// array is still initialised to it, since a later, incremental build can append entities this
+/// build's extents never cover.
+///
+/// `rows` must already be in the same ascending order the extents were written in — the
+/// concatenation's ordinal for `rows[i]` is exactly `i`, so a second sort or a re-read of the
+/// extents is not needed to compute it.
+fn write_ext_locator(
+    dir: &Path,
+    rows: &[ExternalIdRow],
+    entity_id_high_water: u64,
+) -> Result<PathBuf> {
+    let path = dir.join("ext-locator.u32");
+    let bound = usize::try_from(entity_id_high_water).map_err(|_| {
+        BuildError::Invalid(format!(
+            "entity_id_high_water {entity_id_high_water} does not fit usize"
+        ))
+    })?;
+    let mut locator = vec![0xFFFF_FFFFu32; bound];
+    for (ordinal, row) in rows.iter().enumerate() {
+        let entity = row.entity_id as usize;
+        // `entity` is always `< bound` here: every row's entity id came from `0..n` at staging,
+        // and `entity_id_high_water` is `n`. Checked anyway — an out-of-range write here would
+        // silently corrupt an unrelated entity's locator slot, and that is a disclosure.
+        if entity >= locator.len() {
+            return Err(BuildError::Invalid(format!(
+                "ext-locator: entity id {entity} is out of bound (bound = {})",
+                locator.len()
+            )));
+        }
+        locator[entity] = ordinal as u32;
+    }
+    let mut file = File::create(&path).map_err(|e| BuildError::io(&path, e))?;
+    for slot in &locator {
+        file.write_all(&slot.to_le_bytes())
+            .map_err(|e| BuildError::io(&path, e))?;
+    }
+    file.sync_all().map_err(|e| BuildError::io(&path, e))?;
+    if let Some(parent) = path.parent() {
+        fsync_dir(parent)?;
+    }
+    Ok(path)
 }
 
 /// One `(external_id, entity_id)` row awaiting the byte sort.
@@ -742,15 +851,15 @@ fn write_external_id_extents(
 fn write_external_id_extent(path: &Path, rows: &[ExternalIdRow]) -> Result<()> {
     let schema = std::sync::Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
-        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("entity_id", DataType::UInt32, false), // r6, D8: was UInt64
     ]));
     // Built straight from `rows`: an intermediate `Vec` of keys or of widened rows would be a
     // gigabyte-scale copy of data that is already laid out correctly.
     let external: ArrayRef = std::sync::Arc::new(BinaryArray::from_iter_values(
         rows.iter().map(|row| row.source_id().to_le_bytes()),
     ));
-    let entity: ArrayRef = std::sync::Arc::new(UInt64Array::from_iter_values(
-        rows.iter().map(|row| row.entity_id as u64),
+    let entity: ArrayRef = std::sync::Arc::new(UInt32Array::from_iter_values(
+        rows.iter().map(|row| row.entity_id),
     ));
     let batch = RecordBatch::try_new(schema.clone(), vec![external, entity])
         .map_err(|e| BuildError::arrow(path, e))?;
@@ -859,21 +968,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn priority_matches_r3_splitmix64() {
-        // Independently computed reference values for the R3 construction.
-        fn reference(e: u64) -> u16 {
-            let mut z = e.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^= z >> 31;
-            (z >> 48) as u16
-        }
-        for e in [0u64, 1, 2, 42, 250_000, u32::MAX as u64] {
-            assert_eq!(priority_of(EntityId::new(e)), reference(e));
-        }
-    }
-
-    #[test]
     fn signature_key_is_sorted_deduplicated_and_order_independent() {
         let a = signature_sort_key(&[TermId::new(5), TermId::new(1), TermId::new(5)]);
         assert_eq!(a, vec![1, 5]);
@@ -882,7 +976,7 @@ mod tests {
 
     #[test]
     fn external_ids_split_at_the_extent_boundary() {
-        use arrow::array::{Array, BinaryArray, UInt64Array};
+        use arrow::array::{Array, BinaryArray, UInt32Array};
 
         let temp = tempfile::TempDir::new().unwrap();
         // Source ids chosen so that byte order and numeric order disagree — the sort is over the
@@ -928,10 +1022,10 @@ mod tests {
                     let entities = batch
                         .column(1)
                         .as_any()
-                        .downcast_ref::<UInt64Array>()
+                        .downcast_ref::<UInt32Array>()
                         .unwrap();
                     for i in 0..batch.num_rows() {
-                        seen.push((ids.value(i).to_vec(), entities.value(i)));
+                        seen.push((ids.value(i).to_vec(), entities.value(i) as u64));
                     }
                 }
             }

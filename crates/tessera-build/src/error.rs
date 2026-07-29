@@ -28,6 +28,16 @@ pub enum BuildError {
     /// The input violates an invariant the bundle format depends on.
     Invalid(String),
     Store(tessera_store::error::StoreError),
+    /// A `tessera_id` derivation failed — in this build, always
+    /// [`tessera_types::IdentityError::EntityOutOfRange`], which the allocator cap (I-1) makes
+    /// unreachable in practice. Never a truncation: see `IdentityKey::forward`'s doc comment.
+    Identity(tessera_types::IdentityError),
+    /// Contracts §1 r6: an external ID longer than 64 bytes is a typed error at build, never a
+    /// truncation — a truncated key is a *different* key, and two callers' keys sharing a
+    /// 64-byte prefix would collide into one entity.
+    ExternalIdTooLong {
+        len: usize,
+    },
 }
 
 impl BuildError {
@@ -67,6 +77,12 @@ impl std::fmt::Display for BuildError {
             BuildError::Plugin(detail) => write!(f, "plugin error: {detail}"),
             BuildError::Invalid(detail) => write!(f, "invalid input: {detail}"),
             BuildError::Store(e) => write!(f, "store error: {e}"),
+            BuildError::Identity(e) => write!(f, "identity error: {e}"),
+            BuildError::ExternalIdTooLong { len } => write!(
+                f,
+                "external id is {len} bytes, exceeding the 64-byte cap (contracts §1); refused \
+                 rather than truncated, since a truncated key is a different key"
+            ),
         }
     }
 }
@@ -76,6 +92,12 @@ impl std::error::Error for BuildError {}
 impl From<tessera_store::error::StoreError> for BuildError {
     fn from(e: tessera_store::error::StoreError) -> Self {
         BuildError::Store(e)
+    }
+}
+
+impl From<tessera_types::IdentityError> for BuildError {
+    fn from(e: tessera_types::IdentityError) -> Self {
+        BuildError::Identity(e)
     }
 }
 

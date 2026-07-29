@@ -19,7 +19,7 @@ proptest! {
         let mut seen: HashSet<u64> = HashSet::new();
 
         for n in sizes {
-            let range = alloc.allocate(n);
+            let range = alloc.allocate(n).unwrap();
             prop_assert_eq!(range.start, expected_next);
             prop_assert_eq!(range.end, expected_next + n);
             for id in range.clone() {
@@ -57,7 +57,7 @@ proptest! {
             let mut alloc = Allocator::new(seed);
 
             for n in sizes {
-                let range = alloc.allocate(n);
+                let range = alloc.allocate(n).unwrap();
                 for id in range {
                     prop_assert!(!used.contains(&id), "id {} reused across a simulated crash", id);
                     used.insert(id);
@@ -97,7 +97,7 @@ proptest! {
             .collect();
 
         let mut alloc = Allocator::new(0);
-        assign_sorted(&mut items, &mut alloc);
+        assign_sorted(&mut items, &mut alloc).unwrap();
 
         let n = items.len() as u64;
         let mut ids: Vec<u64> = items

@@ -27,9 +27,18 @@ use parquet::arrow::ArrowWriter;
 
 use tessera_build::{build, build_in_memory, BuildArgs};
 use tessera_spatial::Extent;
+use tessera_types::IdentityKey;
 
 const N_ITEMS: u64 = 4_000;
 const N_TERMS: u64 = 61;
+
+/// A fixed, non-degenerate test key shared by every fixture in this file — never a mint, since
+/// the tests need a stable, reproducible identity to assert byte equality against.
+const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+
+fn test_key() -> IdentityKey {
+    IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
+}
 
 fn extent() -> Extent {
     Extent {
@@ -135,6 +144,10 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         extent: extent(),
         slice_id: "s0".to_string(),
         limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
     }
 }
 
@@ -356,6 +369,10 @@ fn reference_build_at_scale() {
         },
         slice_id: "s0".to_string(),
         limit: Some(limit),
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
     })
     .unwrap();
     assert_eq!(report.items, limit);

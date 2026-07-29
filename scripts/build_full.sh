@@ -15,6 +15,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-/tmp/tessera-1e9}"
+shift || true
+# Identity-key forwarding, not a default (plan N-1 — this script deliberately supplies NO
+# default): the operator must pass one of --carry-id-key-from <bundle> / --id-key-file <path> /
+# --id-key <32 hex> / --mint-id-key as trailing arguments. This script's own refusal below is a
+# convenience so an operator who forgets gets a one-line message rather than a build that dies
+# after `df` and input reads; the binary's own N-1 refusal is the actual gate.
+IDENTITY_ARGS=("$@")
+if (( ${#IDENTITY_ARGS[@]} == 0 )); then
+  echo "ERROR: no identity-key argument given." >&2
+  echo "Pass one of --carry-id-key-from <bundle> / --id-key-file <path> / --id-key <32 hex> / --mint-id-key" >&2
+  echo "as trailing arguments; this script deliberately supplies NO default (plan N-1)." >&2
+  exit 1
+fi
 MIN_FREE_GB=50
 
 avail_kb=$(df --output=avail -k "$(dirname "$OUT")" 2>/dev/null | tail -1)
@@ -41,4 +54,5 @@ echo "Building the 10^9 bundle at $OUT (no --limit)..."
   --pairs "$ROOT/data/scaled/pairs/categories-subclass.pairs.parquet" \
   --out "$OUT" \
   --extent 0,65536,0,65536 \
-  --slice s0
+  --slice s0 \
+  "${IDENTITY_ARGS[@]}"

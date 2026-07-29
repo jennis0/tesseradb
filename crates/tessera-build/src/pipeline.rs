@@ -80,14 +80,14 @@ use tessera_authz::{encode_posting, write_posting_records, DictWriter};
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::morton::morton_of;
 use tessera_store::write::{write_columns, write_morton_codes, write_permutation_iter};
-use tessera_types::{EntityId, NODE_NONE, SMALL_TERM_THRESHOLD_DEFAULT};
+use tessera_types::{EntityId, IdentityKey, SMALL_TERM_THRESHOLD_DEFAULT};
 
 use crate::error::{BuildError, Result};
 use crate::input;
 use crate::{
-    fsync_file, priority_of, validate_args, write_external_id_extents, write_manifests, BuildArgs,
-    BuildReport, BundleFiles, ExternalIdRow, PairsParquetWriter, EXTERNAL_ID_ROWS_PER_EXTENT,
-    PHASH, PREFIX, SEG_ID,
+    fsync_file, validate_args, write_ext_locator, write_external_id_extents, write_manifests,
+    BuildArgs, BuildReport, BundleFiles, ExternalIdRow, PairsParquetWriter,
+    EXTERNAL_ID_ROWS_PER_EXTENT, PHASH, PREFIX, SEG_ID,
 };
 
 /// One item's position in the signature sort. 12 bytes, four-byte aligned: at 10⁹ items the
@@ -106,8 +106,10 @@ impl SortRec {
     }
 }
 
-/// One item's position in the tiler sort: Morton code, priority tiebreak, entity id
-/// (contracts §2.6). Also 12 bytes for the same reason.
+/// One item's position in the tiler sort: Morton code, the `tessera_id` prefix (`priority`),
+/// and the entity id needed to recompute the full identity on a prefix tie (contracts §2.6).
+/// Still 12 bytes, four-byte aligned — a `u64` `tessera_id` here would be 16 B/row, +3.7 GiB at
+/// 10⁹, immediately re-spending what dropping `NODE_NONE` just freed (2026-07-30 fold).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct RowRec {
@@ -118,8 +120,34 @@ struct RowRec {
 }
 
 impl RowRec {
-    fn order(&self) -> (u32, u16, u32) {
-        (self.morton, self.priority, self.entity)
+    /// `(morton, tessera_id)` ascending, with no further tiebreak (contracts §2.6 r6) —
+    /// `priority` is compared first as a cheap, physically contiguous prefix (this record's
+    /// point, and §2.6's "why the column exists at all"), and the full identity is recomputed
+    /// from `entity` only on a prefix tie. `forward` is a pure function, so this is exact: the
+    /// tie path costs eight `splitmix64` rounds, not an approximation of the order.
+    ///
+    /// Comparing `priority` first and refining on a tie is **identical** to comparing the full
+    /// `tessera_id` at every row — it is not merely "usually agrees" — because `priority` is
+    /// defined as `tessera_id`'s leading 16 bits (`TesseraId::priority`), so two rows can only
+    /// disagree in `priority` if they already disagree in `tessera_id`. A unit test below
+    /// checks this comparator against a naive full-`tessera_id` sort over a batch engineered to
+    /// contain prefix ties.
+    fn cmp(&self, other: &Self, key: &IdentityKey, shard: u32) -> std::cmp::Ordering {
+        self.morton.cmp(&other.morton).then_with(|| {
+            self.priority.cmp(&other.priority).then_with(|| {
+                // Unreachable in practice (the allocator cap makes `forward` infallible for any
+                // entity a build ever assigns), but `expect` rather than `unwrap_or` — a
+                // silently wrong tiebreak here is a silently wrong row order, and that must be
+                // loud if it is ever reached.
+                let a = key
+                    .forward(shard, EntityId::new(self.entity as u64))
+                    .expect("entity ids are capped below u32::MAX by the allocator (I-1)");
+                let b = key
+                    .forward(shard, EntityId::new(other.entity as u64))
+                    .expect("entity ids are capped below u32::MAX by the allocator (I-1)");
+                a.cmp(&b)
+            })
+        })
     }
 }
 
@@ -334,6 +362,10 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
     external.sort_unstable_by_key(ExternalIdRow::sort_key);
     let external_ids_paths =
         write_external_id_extents(&entities_dir, &external, EXTERNAL_ID_ROWS_PER_EXTENT)?;
+    // `external` is still in the concatenated extent order at this point (the extents partition
+    // it into consecutive ranges, in order) — its index *is* each row's ordinal, which is exactly
+    // what the locator addresses (contracts §2.4/§2.6 r6).
+    let ext_locator_path = write_ext_locator(&entities_dir, &external, n)?;
     drop(external);
 
     // ---- 8. geometry, in entity order ------------------------------------------------
@@ -361,9 +393,16 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
     drop(source_ids);
     drop(entity_of_ordinal);
 
-    // ---- 9. the tiler: (morton, priority, entity_id) ascending (contracts §2.6) -------
-    let mut rows: Vec<RowRec> = (0..n as usize)
-        .map(|entity| RowRec {
+    // ---- 9. the tiler: (morton, tessera_id) ascending, no further tiebreak (contracts
+    // §2.6 r6) — `tessera_id` is computed here, BEFORE the sort (2026-07-30 fold, memo §6):
+    // `priority = high16(tessera_id)` is now the sort key, so the identity must exist before
+    // `sort_unstable_by` runs, not be written at the row after it. -------------------------
+    let mut rows: Vec<RowRec> = Vec::with_capacity(n as usize);
+    for entity in 0..n as usize {
+        let tessera_id = args
+            .identity_key
+            .forward(args.shard_id, EntityId::new(entity as u64))?;
+        rows.push(RowRec {
             morton: morton_of(
                 x_of_entity[entity] as f64,
                 y_of_entity[entity] as f64,
@@ -371,11 +410,11 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
             )
             .raw(),
             entity: entity as u32,
-            priority: priority_of(EntityId::new(entity as u64)),
+            priority: tessera_id.priority(),
             _pad: 0,
-        })
-        .collect();
-    rows.sort_unstable_by_key(|r| r.order());
+        });
+    }
+    rows.sort_unstable_by(|a, b| a.cmp(b, &args.identity_key, args.shard_id));
 
     // ---- 10. the segment -------------------------------------------------------------
     let morton_path = segment_dir.join("morton.u32");
@@ -407,14 +446,21 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
         drop(y_of_entity);
         let entity_row: Vec<u32> = rows.iter().map(|r| r.entity).collect();
         drop(rows);
-        let entity_id: Vec<u64> = entity_row.iter().map(|&e| e as u64).collect();
-        let priority: Vec<u16> = entity_row
+        // `forward` is fallible (Important I-1): a checked conversion, never `as u32`. At build
+        // the allocator cap makes the error unreachable, and collecting into a `Result` is what
+        // keeps it that way rather than assuming it. This is the permutation of an identity
+        // vector that already existed before the sort (step 9 above), not its first computation.
+        let tessera_row: Vec<u64> = entity_row
             .iter()
-            .map(|&e| priority_of(EntityId::new(e as u64)))
-            .collect();
+            .map(|&e| {
+                args.identity_key
+                    .forward(args.shard_id, EntityId::new(e as u64))
+                    .map(|id| id.raw())
+            })
+            .collect::<std::result::Result<_, _>>()
+            .map_err(BuildError::Identity)?;
         drop(entity_row);
-        let node_id: Vec<u32> = vec![NODE_NONE; n as usize];
-        write_columns(&columns_path, entity_id, x_row, y_row, node_id, priority)
+        write_columns(&columns_path, tessera_row, x_row, y_row)
             .map_err(|e| BuildError::io(&columns_path, e))?;
     }
     fsync_file(&columns_path)?;
@@ -433,6 +479,7 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
                 permutation_path,
                 columns_path,
                 morton_path,
+                ext_locator_path,
             ],
         },
         &plugin,
@@ -733,4 +780,60 @@ fn dedup_len(sorted: &mut [u32]) -> usize {
         }
     }
     end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tessera_types::IdentityKey;
+
+    /// The tie path (Step 3a fold): comparing the `priority` prefix first and refining on a tie
+    /// by recomputing the full `tessera_id` from `entity` must produce **exactly** the same row
+    /// order as sorting by the full `tessera_id` directly — not merely "usually agrees". Fixed
+    /// `morton` across every row so the fixture ties on the first comparator field too, forcing
+    /// the comparison down to `priority` and then, on a further tie, the full identity.
+    #[test]
+    fn row_rec_comparator_agrees_with_a_full_tessera_id_sort_over_engineered_ties() {
+        let key = IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").unwrap();
+        let shard = 0u32;
+        let morton = 42u32;
+
+        let rows: Vec<RowRec> = (0..4000u32)
+            .map(|entity| {
+                let tessera_id = key.forward(shard, EntityId::new(entity as u64)).unwrap();
+                RowRec {
+                    morton,
+                    entity,
+                    priority: tessera_id.priority(),
+                    _pad: 0,
+                }
+            })
+            .collect();
+
+        // The fixture must actually exercise a prefix tie, or this test would prove nothing:
+        // 4000 rows over a 16-bit prefix puts us well past the birthday bound.
+        let mut priorities: Vec<u16> = rows.iter().map(|r| r.priority).collect();
+        priorities.sort_unstable();
+        assert!(
+            priorities.windows(2).any(|w| w[0] == w[1]),
+            "fixture must contain at least one priority-prefix tie"
+        );
+
+        let mut via_comparator = rows.clone();
+        via_comparator.sort_by(|a, b| a.cmp(b, &key, shard));
+
+        let mut naive = rows;
+        naive.sort_by_key(|r| {
+            key.forward(shard, EntityId::new(r.entity as u64))
+                .unwrap()
+                .raw()
+        });
+
+        let via_comparator_entities: Vec<u32> = via_comparator.iter().map(|r| r.entity).collect();
+        let naive_entities: Vec<u32> = naive.iter().map(|r| r.entity).collect();
+        assert_eq!(
+            via_comparator_entities, naive_entities,
+            "the prefix-then-recompute comparator must agree with a full tessera_id sort"
+        );
+    }
 }

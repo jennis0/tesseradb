@@ -14,6 +14,46 @@ use tessera_types::{EntityId, TermId};
 
 use crate::wal::WalRecord;
 
+/// The entity-ID space's ceiling (plan Important I-1, contracts §2.6): `bundle_format = 1`
+/// narrows every entity ID to `u32`, and `IdentityKey::forward`'s checked conversion refuses
+/// any entity at or above this bound. The allocator refusing first is what makes that
+/// conversion's error unreachable in practice rather than a rare, hard-to-reach corruption
+/// path: without this cap, "collision-free by construction" rested entirely on the corpus
+/// happening to stay small, and nothing enforced it.
+const ENTITY_ID_CEILING: u64 = u32::MAX as u64;
+
+/// Allocator errors. The batch has no effect when this is returned — `allocate` does not
+/// advance `high_water` on the error path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllocError {
+    /// Issuing the requested range would hand out an ID at or above [`ENTITY_ID_CEILING`].
+    /// `high_water` is the allocator's state at the time of refusal (unchanged by the call).
+    Exhausted { high_water: u64 },
+    /// [`Allocator::try_new`]'s seed already meets or exceeds the ceiling — caught at open
+    /// rather than at the first ingest, so a corrupt or hand-edited manifest high-water fails
+    /// closed immediately instead of silently colliding on the first allocation.
+    SeedAtCeiling { high_water: u64 },
+}
+
+impl std::fmt::Display for AllocError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AllocError::Exhausted { high_water } => write!(
+                f,
+                "entity-ID space exhausted: allocating from high-water {high_water} would issue \
+                 an ID at or above u32::MAX ({ENTITY_ID_CEILING})"
+            ),
+            AllocError::SeedAtCeiling { high_water } => write!(
+                f,
+                "allocator seed {high_water} is already at or above u32::MAX ({ENTITY_ID_CEILING}); \
+                 refusing to open rather than collide on the first allocation"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AllocError {}
+
 /// Monotone, never-reusing entity-ID allocator (I9).
 pub struct Allocator {
     high_water: u64,
@@ -21,17 +61,35 @@ pub struct Allocator {
 
 impl Allocator {
     /// Seeds the allocator at `high_water` — the caller's `max(manifest_hw, replayed rows/leases)`.
+    /// Unchecked: prefer [`Allocator::try_new`] wherever the seed has not already been validated,
+    /// since this constructor will happily seed at or above the ceiling and let the first
+    /// `allocate` refuse instead.
     pub fn new(high_water: u64) -> Self {
         Allocator { high_water }
     }
 
+    /// [`Allocator::new`], refusing a seed at or above [`ENTITY_ID_CEILING`] — the check that
+    /// belongs at open, so a manifest high-water that already exceeds the bound is caught before
+    /// any ingest is attempted rather than surfacing as an opaque exhaustion error later.
+    pub fn try_new(high_water: u64) -> Result<Self, AllocError> {
+        if high_water >= ENTITY_ID_CEILING {
+            return Err(AllocError::SeedAtCeiling { high_water });
+        }
+        Ok(Allocator { high_water })
+    }
+
     /// Allocates `n` consecutive, never-before-issued entity IDs and advances the high-water
-    /// mark past them.
-    pub fn allocate(&mut self, n: u64) -> Range<u64> {
+    /// mark past them. Refuses — leaving `high_water` unchanged — if any ID in the range would
+    /// be at or above [`ENTITY_ID_CEILING`] (Important I-1): a truncating allocation past
+    /// `u32::MAX` is exactly what would make "collision-free by construction" false.
+    pub fn allocate(&mut self, n: u64) -> Result<Range<u64>, AllocError> {
         let lo = self.high_water;
         let hi = lo + n;
+        if hi > ENTITY_ID_CEILING {
+            return Err(AllocError::Exhausted { high_water: lo });
+        }
         self.high_water = hi;
-        lo..hi
+        Ok(lo..hi)
     }
 
     /// The next ID this allocator will hand out.
@@ -103,7 +161,11 @@ fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
 /// the same total order the batch build uses (§11.1), so appended items interleave into the
 /// permanent signature ordering rather than breaking it. Items with identical signatures land in
 /// a contiguous ID run, which is what makes their postings compress as runs.
-pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) {
+///
+/// Fallible (Important I-1): propagates [`AllocError::Exhausted`] from the underlying
+/// `Allocator::allocate` rather than swallowing it — a batch that would exhaust the entity-ID
+/// space has no effect, exactly as `allocate` leaves `high_water` unchanged on that error.
+pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result<(), AllocError> {
     // Compute each item's (signature, external_id) sort key once, up front, rather than inside
     // the comparator — `sort_by`'s comparator can be called O(n log n) times, and
     // `signature_sort_key` allocates, so recomputing it per-comparison would be O(n log n)
@@ -118,10 +180,11 @@ pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) {
             .then_with(|| items[*a].external_id.cmp(&items[*b].external_id))
     });
 
-    let ids = alloc.allocate(items.len() as u64);
+    let ids = alloc.allocate(items.len() as u64)?;
     for (rank, (idx, _)) in order.into_iter().enumerate() {
         items[idx].entity_id = Some(EntityId::new(ids.start + rank as u64));
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -131,11 +194,29 @@ mod tests {
     #[test]
     fn allocate_is_monotone_and_never_reuses() {
         let mut alloc = Allocator::new(10);
-        let a = alloc.allocate(3);
-        let b = alloc.allocate(5);
+        let a = alloc.allocate(3).unwrap();
+        let b = alloc.allocate(5).unwrap();
         assert_eq!(a, 10..13);
         assert_eq!(b, 13..18);
         assert_eq!(alloc.high_water(), 18);
+    }
+
+    #[test]
+    fn the_allocator_refuses_to_issue_an_id_at_or_above_u32_max() {
+        // Plan Important I-1. `allocate` used to be `lo + n` on a u64 with no cap at all, so
+        // "collision-free by construction" rested on the corpus happening to stay small. Past
+        // 2^32 two entities would share a tessera_id and `invert` would return the WRONG one.
+        let mut a = Allocator::new(u32::MAX as u64 - 2);
+        assert!(a.allocate(1).is_ok());
+        assert!(matches!(a.allocate(10), Err(AllocError::Exhausted { .. })));
+        // The failed call must not have moved the high-water mark (the batch has no effect).
+        assert_eq!(a.high_water(), u32::MAX as u64 - 1);
+
+        // And the seed itself: a manifest high-water past the bound is refused at open, not
+        // silently carried into the first ingest.
+        assert!(Allocator::try_new(1u64 << 33).is_err());
+        assert!(Allocator::try_new(u32::MAX as u64).is_err());
+        assert!(Allocator::try_new(u32::MAX as u64 - 1).is_ok());
     }
 
     #[test]
