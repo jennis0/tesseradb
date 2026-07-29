@@ -223,3 +223,73 @@ fn stale_auth_plugin_hash_misses_the_cache() {
         );
     }
 }
+
+/// Task 6's deferred check, closed out here (cheap enough not to need the conformance suite,
+/// task-15-brief): a bit-flipped `.frag` file must be treated as a cache miss (rebuild), never as
+/// a successful-but-wrong open, and never a panic/crash. `FrozenFragment::open`'s sidecar digest
+/// check (fragment.rs module doc: "a parseable-but-wrong fragment would be a silent disclosure,
+/// not merely a crash") is exactly the mechanism under test.
+#[test]
+fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
+    let corpus_dir = TempDir::new().unwrap();
+    let (path, per_term) = write_random_postings(corpus_dir.path(), 21, 8);
+    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+
+    let cache_dir = TempDir::new().unwrap();
+    let bundle_identity = [3u8; 32];
+    let auth_plugin_hash = [4u8; 32];
+    let terms: Vec<TermId> = (0..8u32).map(TermId::new).collect();
+    let auth_data_hash = [2u8; 32];
+
+    let mut expected: HashSet<u32> = HashSet::new();
+    for t in &terms {
+        expected.extend(per_term[t.raw() as usize].iter().copied());
+    }
+
+    // Build and persist the frozen fragment once.
+    {
+        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
+        cache
+            .get_or_build(&terms, auth_data_hash, &reader, 5)
+            .unwrap();
+        assert_eq!(cache.rebuild_count(), 1);
+    }
+
+    // Flip one byte in the on-disk `.frag` file — a corrupt-but-right-length buffer, exactly the
+    // failure mode a torn write after power loss would produce.
+    let frag_path = std::fs::read_dir(cache_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("frag"))
+        .expect("exactly one .frag file expected");
+    {
+        let mut bytes = std::fs::read(&frag_path).unwrap();
+        assert!(
+            !bytes.is_empty(),
+            "frag file must not be empty for this test to mean anything"
+        );
+        bytes[0] ^= 0xFF;
+        std::fs::write(&frag_path, &bytes).unwrap();
+    }
+
+    // Reopening the cache dir fresh must not crash, must not serve the corrupted bytes, and must
+    // rebuild instead — the correct fragment either way, from postings directly this time.
+    {
+        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
+        let frozen = cache
+            .get_or_build(&terms, auth_data_hash, &reader, 5)
+            .expect("a corrupted cache entry must fail closed to a rebuild, not an error");
+        assert_eq!(
+            cache.rebuild_count(),
+            1,
+            "a bit-flipped .frag file must be treated as a cache miss (rebuild), not a hit"
+        );
+        assert_eq!(frozen.watermark, 5);
+        let got: HashSet<u32> = frozen.view().iter().collect();
+        assert_eq!(
+            got, expected,
+            "the rebuilt fragment must still be the correct one"
+        );
+    }
+}
