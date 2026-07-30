@@ -206,11 +206,12 @@ fn project_on_the_global_pool_without_an_explicit_install_still_matches() {
 /// cold-session projection build drops >= 2x at 8 threads vs 1 thread.
 ///
 /// Sized to stay well under the box's memory ceiling (WSL2, previously OOM-killed by a
-/// >4G-allocating test): `n` entities means a full mask materialises an `entities: Vec<u32>`
-/// (`n * 4` bytes) plus a `rows: Vec<u32>` of the same size live at once inside `project` (the
-/// transient-memory doubling `Permutation::project`'s doc notes) -- at `n = 16_000_000` that is
-/// ~128 MB transient, plus the ~64 MB mmap-backed `permutation.bin` itself, comfortably under the
-/// budget this box has previously blown through.
+/// >4G-allocating test): `n` entities means a full mask puts two `n * 4`-byte `Vec<u32>`s live at
+/// their peak overlap inside `project` (`entities` overlapping the just-finished `per_chunk`,
+/// then `per_chunk` overlapping `rows`'s reserved capacity -- see `Permutation::project`'s doc,
+/// "fix round 1" note, for why it is two and not three) -- at `n = 16_000_000` that is ~128 MB
+/// transient, plus the ~64 MB mmap-backed `permutation.bin` itself, comfortably under the budget
+/// this box has previously blown through.
 ///
 /// Run explicitly: `cargo test -p tessera-store --release -- --ignored --nocapture
 /// project_parallel_speedup_at_8_threads`

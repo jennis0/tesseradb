@@ -190,10 +190,17 @@ impl Permutation {
     /// including 1 (see the `--ignored` gate test and the correctness tests in
     /// `tests/permutation_project_parallel.rs`, both of which run this at several thread counts).
     ///
-    /// **Transient memory (brief's constraint):** `entities` and `rows` are both live at once, so
-    /// this call's peak transient memory is roughly double `mask.cardinality()` `u32`s, on top of
-    /// the mmap-backed `slots()` array (never copied — `slots` is only ever borrowed, read
-    /// concurrently by every chunk).
+    /// **Transient memory (brief's constraint; fix round 1 correction).** Two bindings are live
+    /// at any one instant, never three: `entities` is dropped explicitly the moment the chunked
+    /// map that reads it has finished (before `rows` exists at all), and `per_chunk` is consumed
+    /// — not copied — into `rows`, so its chunks free themselves one at a time as `rows` fills
+    /// rather than sitting alongside a fully-built `rows`. The peak instant is therefore either
+    /// "`entities` (mask.cardinality() `u32`s) + the just-finished `per_chunk` (<= the same
+    /// size)" or "the just-finished `per_chunk` + `rows`'s reserved-but-empty capacity (exactly
+    /// that size, computed below)" — both are one cardinality's worth of `u32`s each, so peak
+    /// transient is roughly **double** `mask.cardinality()` `u32`s, not triple. This is on top of
+    /// the mmap-backed `slots()` array, which is never copied — only ever borrowed, read
+    /// concurrently by every chunk.
     ///
     /// Output is a sorted set of *unique* row IDs — unique because `self` is a permutation (a
     /// bijection), so no two entities can ever map to the same row, whichever chunk found them —
@@ -214,14 +221,34 @@ impl Permutation {
         let per_chunk: Vec<Vec<u32>> = entities
             .par_chunks(chunk_len)
             .map(|chunk| {
-                chunk
-                    .iter()
-                    .filter_map(|&entity| slots.get(entity as usize).copied())
-                    .filter(|&slot| slot != ROW_ABSENT)
-                    .collect()
+                // `chunk.len()` is an exact upper bound on this chunk's hits (every filtered
+                // element survives at most once), so this capacity hint means the chunk's local
+                // `Vec` never reallocates as it fills — no realloc churn on top of the peak this
+                // doc note already accounts for.
+                let mut local = Vec::with_capacity(chunk.len());
+                local.extend(
+                    chunk
+                        .iter()
+                        .filter_map(|&entity| slots.get(entity as usize).copied())
+                        .filter(|&slot| slot != ROW_ABSENT),
+                );
+                local
             })
             .collect();
-        let mut rows: Vec<u32> = per_chunk.concat();
+        // `entities` is dead from here on — dropped explicitly rather than left to fall out of
+        // scope at the end of the function, so its allocation is freed before `rows` is even
+        // reserved below (fix round 1: this used to overlap with both `per_chunk` and `rows` at
+        // once, a 3x peak rather than the documented 2x).
+        drop(entities);
+
+        let total_rows: usize = per_chunk.iter().map(Vec::len).sum();
+        let mut rows: Vec<u32> = Vec::with_capacity(total_rows);
+        // `per_chunk.into_iter()` yields owned `Vec<u32>`s one at a time; `flatten` drains and
+        // drops each one as `extend` exhausts it, so `per_chunk`'s chunks free themselves
+        // progressively as `rows` fills, rather than the whole of `per_chunk` staying alive
+        // alongside a fully-built `rows` (which is what `per_chunk.concat()` did before this
+        // fix — the other half of the 3x-not-2x peak).
+        rows.extend(per_chunk.into_iter().flatten());
 
         rows.par_sort_unstable();
         // croaring 2.x has no dedicated "construct from sorted slice" entry point; `of` /
