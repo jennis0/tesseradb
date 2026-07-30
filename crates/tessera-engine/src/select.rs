@@ -244,19 +244,28 @@ impl Selection {
         let mut rows_visited: u64 = 0;
         let rows: Vec<u32> = if serves_all_visible(params, visible) {
             // Everything visible is served, so there is nothing to count and nothing to select —
-            // only ordering. Decorate-sort-undecorate rather than `sort_unstable_by_key`: the latter
-            // re-reads the identity column on every comparison, so V log V strided lookups into an
-            // 8 B/row mmap where V suffice. Immaterial at the old default cap of 30; at cap 500 it is
-            // ~1.4M lookups per viewport against ~150k.
-            let mut decorated: Vec<(u64, u32)> = visible_rows
-                .iter()
-                .map(|row| {
-                    rows_visited += 1;
-                    (ids[row as usize], row)
-                })
-                .collect();
-            decorated.sort_unstable();
-            decorated.into_iter().map(|(_, row)| row).collect()
+            // only ordering.
+            //
+            // **`sort_unstable_by_key`, and a decorate-sort was tried and is worse.** The key
+            // extraction re-reads the identity column on every comparison, so this is V log V
+            // strided lookups where V would do — which is why the decorate-sort (build
+            // `Vec<(u64, u32)>`, sort it, discard the keys) looks like an obvious win. Measured, it
+            // loses by ~3% at cap 500 and 1000 and by ~6% at cap 30
+            // (`examples/route_saving.rs`): sorting 12-byte tuples moves three times the bytes of
+            // sorting 4-byte row ids, and the extra allocation and the undecorate pass cost more
+            // than the saved lookups — the ids being read are in cache for the sizes the serve-all
+            // branch handles (V <= cap). Recorded because the reasoning for the other choice is
+            // more persuasive than the measurement, and someone will make it again.
+            // A plain loop rather than `map`/`inspect`: the increment is the point, not a side
+            // effect smuggled through an iterator adaptor. Capacity is exact — this branch runs
+            // only when `visible <= cap`.
+            let mut rows: Vec<u32> = Vec::with_capacity(params.cap.min(visible as usize));
+            for row in visible_rows.iter() {
+                rows_visited += 1;
+                rows.push(row);
+            }
+            rows.sort_unstable_by_key(|&row| ids[row as usize]);
+            rows
         } else {
             // One pass. `m(T) <= cap` always, so the `cap` smallest ids in the tile contain the
             // served set for *any* m the counting pass can produce — which is what makes a single
