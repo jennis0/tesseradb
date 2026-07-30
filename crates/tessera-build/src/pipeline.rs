@@ -13,18 +13,41 @@
 //! Every intermediate here is a **flat, packed array indexed by an integer**, and anything that
 //! can be recomputed from the input parquet files is recomputed rather than retained — the
 //! inputs are read several times because a pass over them costs seconds while holding their
-//! contents costs gigabytes. The passes, with the arrays alive at each point:
+//! contents costs gigabytes. The passes, with the arrays alive at each point (L = items whose
+//! signature exceeds two terms; the Phase 0 corpus has L ≈ 0.17N):
 //!
 //! | pass | produces | resident |
 //! |---|---|---|
 //! | points ×2 | `source_ids`, sorted — an item's **ordinal** is its index here | 8N |
 //! | pairs ×1 | the dictionary: term ids in first-appearance order | 8N |
 //! | pairs ×1 | `packed`: one `u64` per pair, `ordinal << 32 \| term_id` | 8P |
-//! | — | `recs`: the signature sort, 12 bytes per item | 8P + 12N |
+//! | — | `recs`: the signature sort, 12 bytes per item | 8P + 12N + 8L |
 //! | — | `entity_of_ordinal`: the permanent I9 assignment | 4N |
 //! | pairs ×1 | postings + `pairs.parquet`, via a term-bucketed `u32` array | 4P + 12N |
 //! | points ×1 | external ids | 20N |
 //! | points ×1 | geometry, the tiler sort, and the segment | 28N |
+//!
+//! ## Ordinal resolution never assumes anything about the ids themselves
+//!
+//! Source entity ids are caller-supplied external identifiers: they may be dense, sparse,
+//! clustered, or arbitrary bit patterns, and no pass may exploit their shape. What the build
+//! *establishes* — and all it relies on — is that `source_ids` is sorted and duplicate-free.
+//! Each pass that must map a source id back to its ordinal ([`join_chunk`]) therefore buffers a
+//! bounded chunk of rows, sorts the chunk, and resolves the whole chunk in **one sequential
+//! merge sweep** against `source_ids` — sequential memory traffic for any id distribution,
+//! where a per-row binary search over an 8 GB array at 10⁹ was a random cache-and-TLB miss per
+//! probe (measured as the dominant cost of the geometry pass, whose input arrives in Morton
+//! order). Within a chunk, rows carrying the same id keep no particular order; every consumer
+//! is insensitive to it (each call site argues why), so build output stays byte-deterministic.
+//!
+//! ## Parallelism does not participate in ordering decisions
+//!
+//! The large sorts run under rayon (`par_sort_unstable*`). Every parallel sort site is a
+//! **total order on unique keys** — the pre-sort triple carries the ordinal, the tiler
+//! comparator refines through the full `tessera_id` bijection, external-id keys are the
+//! dup-checked source ids, and `packed`'s duplicates are bit-identical `u64`s — so an unstable,
+//! nondeterministically-scheduled sort still has exactly one output. The equivalence suite's
+//! byte-identity assertion is the oracle that keeps this true.
 //!
 //! ## The two assumptions this construction makes
 //!
@@ -74,6 +97,7 @@
 
 use std::path::PathBuf;
 
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use tessera_authz::{encode_posting, write_posting_records, DictWriter};
@@ -173,17 +197,96 @@ fn bit_get(bits: &[u64], i: usize) -> bool {
     bits[i / 64] & (1u64 << (i % 64)) != 0
 }
 
-/// The pairs relation entry for `ordinal`: a contiguous ascending run in `packed`, whose low 32
-/// bits are the item's signature (sorted, deduplicated term ids — §11.1).
-fn sig_slice(packed: &[u64], ordinal: u32) -> &[u64] {
-    let o = ordinal as u64;
-    let lo = packed.partition_point(|&v| (v >> 32) < o);
-    let hi = lo + packed[lo..].partition_point(|&v| (v >> 32) == o);
-    &packed[lo..hi]
-}
-
 fn term_of(packed_entry: u64) -> u32 {
     packed_entry as u32
+}
+
+/// Rows buffered per [`join_chunk`] flush: 2²⁶ rows × 16 B ≈ 1 GiB of transient, constant in N.
+const JOIN_CHUNK_ROWS: usize = 1 << 26;
+
+/// Resolve a chunk of `(source_id, payload)` rows to ordinals by sorting the chunk and merging
+/// it against the sorted `source_ids` in one sequential sweep. See the module docs: this is how
+/// every pass maps ids to ordinals without assuming anything about the ids' shape, and without
+/// a random-access probe per row.
+///
+/// `on_row` receives `(Some(ordinal), source_id, payload)` for a resolved row and
+/// `(None, source_id, payload)` for an id absent from `source_ids` — whether an absent id is an
+/// error, and which error, is the calling pass's decision (the dictionary pass collects them;
+/// every later pass fails closed, because its first pass over the same file resolved them).
+///
+/// Rows with equal ids reach `on_row` in no particular order (the chunk sort is unstable and
+/// keyed on the id alone); callers must be — and each caller's site comments argue that they
+/// are — insensitive to that order. The chunk is drained; capacity is retained for reuse.
+fn join_chunk<P: Copy + Send>(
+    chunk: &mut Vec<(u64, P)>,
+    source_ids: &[u64],
+    mut on_row: impl FnMut(Option<u32>, u64, P) -> Result<()>,
+) -> Result<()> {
+    chunk.par_sort_unstable_by_key(|entry| entry.0);
+    let mut i = 0usize;
+    for &(id, payload) in chunk.iter() {
+        // Both sides ascend, so `i` only ever moves forward; it does not advance past a match,
+        // so a run of rows carrying the same id all resolve to the same ordinal.
+        while i < source_ids.len() && source_ids[i] < id {
+            i += 1;
+        }
+        let ordinal = if i < source_ids.len() && source_ids[i] == id {
+            Some(i as u32)
+        } else {
+            None
+        };
+        on_row(ordinal, id, payload)?;
+    }
+    chunk.clear();
+    Ok(())
+}
+
+/// Where each long signature (more than two terms) lives in `packed`, addressable in O(1).
+///
+/// [`refine_signature_ties`] needs the signature *tail* of every long member of a tie group.
+/// Locating it by binary search over `packed` per comparison — or even per member — is a
+/// random-probe walk over a multi-gigabyte array; the stage-4 cursor scan already stands on
+/// every signature's start, so the starts of the long ones are recorded there (`starts`,
+/// ordinal-ascending, **u64**: a u32 offset into `packed` would silently truncate past 2³²
+/// pairs, and a wrong slice here is a wrong permanent assignment under I9) and addressed by
+/// each ordinal's rank among long ordinals — a per-word popcount block over the `long_sig`
+/// bitset the scan builds anyway. 8 bytes per long item plus N/16 bytes of rank blocks.
+struct LongIndex {
+    bits: Vec<u64>,
+    /// `rank_blocks[w]` = set bits in `bits[..w]`. u32 suffices: there are at most N ≤ 2³²−1
+    /// long ordinals (the item-count ceiling is enforced before this is built).
+    rank_blocks: Vec<u32>,
+    starts: Vec<u64>,
+}
+
+impl LongIndex {
+    fn new(bits: Vec<u64>, starts: Vec<u64>) -> Self {
+        let mut rank_blocks = Vec::with_capacity(bits.len());
+        let mut acc = 0u32;
+        for &word in &bits {
+            rank_blocks.push(acc);
+            acc += word.count_ones();
+        }
+        debug_assert_eq!(acc as usize, starts.len(), "one start per long ordinal");
+        LongIndex {
+            bits,
+            rank_blocks,
+            starts,
+        }
+    }
+
+    fn is_long(&self, ordinal: u32) -> bool {
+        bit_get(&self.bits, ordinal as usize)
+    }
+
+    /// The `packed` index where `ordinal`'s signature begins. `ordinal` must be long.
+    fn start_of(&self, ordinal: u32) -> usize {
+        let word = ordinal as usize / 64;
+        let below = (1u64 << (ordinal % 64)) - 1;
+        let rank =
+            self.rank_blocks[word] as usize + (self.bits[word] & below).count_ones() as usize;
+        self.starts[rank] as usize
+    }
 }
 
 pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<BuildReport> {
@@ -216,6 +319,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "{n} items exceeds bundle_format 1's 2^32 entity-ID ceiling"
         )));
     }
+    // Anchors for step 5's re-read of this same file: the re-read used to be verified against
+    // nothing, so a points file swapped mid-build could silently hand every item the wrong
+    // external id. Order-independent sum plus the extrema make that loud instead.
+    let ids_sum = source_ids
+        .iter()
+        .fold(0u64, |acc, &id| acc.wrapping_add(id));
+    let (ids_first, ids_last) = (source_ids[0], *source_ids.last().expect("non-empty"));
 
     timer.end(BuildStage::SourceIds, source_ids.len() as u64);
 
@@ -238,29 +348,42 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     timer.end(BuildStage::Dictionary, term_count);
 
     // ---- 3. the pairs relation, packed as `ordinal << 32 | term_id` -------------------
+    // Chunk-order insensitivity ([`join_chunk`]): `packed` is globally sorted and deduplicated
+    // immediately below, so the order rows are pushed in — file order before, chunk-sorted
+    // order now — never reaches the output.
     let mut packed: Vec<u64> = Vec::with_capacity(pair_rows);
     let mut failure: Option<BuildError> = None;
+    let mut chunk: Vec<(u64, u64)> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(pair_rows.max(1)));
+    let resolve = |chunk: &mut Vec<(u64, u64)>, packed: &mut Vec<u64>| {
+        join_chunk(chunk, &source_ids, |ordinal, source_id, source_term| {
+            // Both lookups were established by the dictionary pass over this same file. A miss
+            // here means the file is not the one that pass read.
+            let (Some(ordinal), Some(&term)) = (ordinal, term_of_source.get(&source_term)) else {
+                return Err(input_changed(&format!(
+                    "the pairs file names entity {source_id} term {source_term}, which its \
+                     first pass did not"
+                )));
+            };
+            packed.push(((ordinal as u64) << 32) | term as u64);
+            Ok(())
+        })
+    };
     input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
         if failure.is_some() {
             return;
         }
-        // Both lookups were established by the dictionary pass over this same file. A miss here
-        // means the file is not the one that pass read.
-        let (Ok(ordinal), Some(&term)) = (
-            source_ids.binary_search(&source_id),
-            term_of_source.get(&source_term),
-        ) else {
-            failure = Some(input_changed(&format!(
-                "the pairs file names entity {source_id} term {source_term}, which its first \
-                 pass did not"
-            )));
-            return;
-        };
-        packed.push(((ordinal as u64) << 32) | term as u64);
+        chunk.push((source_id, source_term));
+        if chunk.len() == JOIN_CHUNK_ROWS {
+            if let Err(e) = resolve(&mut chunk, &mut packed) {
+                failure = Some(e);
+            }
+        }
     })?;
     if let Some(error) = failure {
         return Err(error);
     }
+    resolve(&mut chunk, &mut packed)?;
+    drop(chunk);
     if packed.len() != pair_rows {
         return Err(input_changed(&format!(
             "the pairs file yielded {} rows, then {}",
@@ -269,7 +392,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         )));
     }
     drop(source_ids);
-    packed.sort_unstable();
+    // A total order on (at worst bit-identical) u64s: the parallel unstable sort has exactly
+    // one output.
+    packed.par_sort_unstable();
     // The label set is a *set*: a source file that repeats a `(entity, term)` row must not turn
     // into a repeated posting (the linear build deduplicates in `read_pairs`).
     packed.dedup();
@@ -279,6 +404,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     // ---- 4. the signature sort (I9, permanent — see the module docs) ------------------
     let mut long_sig: Vec<u64> = vec![0; (n as usize).div_ceil(64)];
+    let mut long_starts: Vec<u64> = Vec::new();
     let mut recs: Vec<SortRec> = Vec::with_capacity(n as usize);
     let mut over_bound_items = 0u64;
     {
@@ -296,6 +422,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             }
             if sig.len() > 2 {
                 bit_set(&mut long_sig, ordinal as usize);
+                long_starts.push(start as u64);
             }
             // `term + 1` so that "no term at this position" (0) sorts before every real term,
             // which is what makes a signature order before any signature extending it.
@@ -318,10 +445,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             bounds.max_terms_per_item
         );
     }
-    recs.sort_unstable_by_key(|r| r.order());
-    refine_signature_ties(&mut recs, &packed, &long_sig);
+    // The triple (key_hi, key_lo, ordinal) is unique per rec — a total order, so the parallel
+    // unstable sort has exactly one output.
+    recs.par_sort_unstable_by_key(|r| r.order());
+    let long_index = LongIndex::new(long_sig, long_starts);
+    refine_signature_ties(&mut recs, &packed, &long_index);
     drop(packed);
-    drop(long_sig);
+    drop(long_index);
 
     timer.end(BuildStage::SignatureSort, recs.len() as u64);
 
@@ -342,9 +472,31 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     }
 
     // The source ids are needed twice more (external ids, geometry) and cost 8N to hold across
-    // the sort above; re-reading the points file is cheaper than carrying them through it.
+    // the sort above; re-reading the points file is cheaper than carrying them through it —
+    // *provided the file has not changed.* The re-read is verified against the first pass's
+    // anchors: row count, order-independent id sum, and (after the sort) the extrema. Without
+    // this, a points file swapped since stage 1 would silently pair every entity with a wrong
+    // external id — the geometry pass's own checks compare the changed file against itself.
     let mut source_ids = read_source_ids(args, Some(n as usize))?;
-    source_ids.sort_unstable();
+    if source_ids.len() as u64 != n
+        || source_ids
+            .iter()
+            .fold(0u64, |acc, &id| acc.wrapping_add(id))
+            != ids_sum
+    {
+        return Err(input_changed(&format!(
+            "the points file re-read for external ids yielded {} rows, not the {} its first \
+             pass did",
+            source_ids.len(),
+            n
+        )));
+    }
+    source_ids.par_sort_unstable();
+    if source_ids[0] != ids_first || *source_ids.last().expect("non-empty") != ids_last {
+        return Err(input_changed(
+            "the points file's id range changed between its first pass and the re-read",
+        ));
+    }
 
     timer.end(BuildStage::Assignment, n);
 
@@ -373,7 +525,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let mut external: Vec<ExternalIdRow> = (0..n as usize)
         .map(|ordinal| ExternalIdRow::new(source_ids[ordinal], entity_of_ordinal[ordinal]))
         .collect();
-    external.sort_unstable_by_key(ExternalIdRow::sort_key);
+    // Keys are the byte-swapped source ids — dup-checked, hence unique: a total order, one
+    // output under the parallel unstable sort.
+    external.par_sort_unstable_by_key(ExternalIdRow::sort_key);
     let external_ids_paths =
         write_external_id_extents(&entities_dir, &external, EXTERNAL_ID_ROWS_PER_EXTENT)?;
     // `external` is still in the concatenated extent order at this point (the extents partition
@@ -385,26 +539,65 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     timer.end(BuildStage::ExternalIds, n);
 
     // ---- 8. geometry, in entity order ------------------------------------------------
+    // Chunk-order insensitivity ([`join_chunk`]): source ids are duplicate-checked, so every
+    // `(x_of_entity, y_of_entity)` slot is written exactly once — there is no order to observe.
+    // (A file that *does* repeat an id since the first pass writes twice and is caught by the
+    // row-count check below, where it was previously last-write-wins silent.)
     let mut x_of_entity: Vec<f32> = vec![0.0; n as usize];
     let mut y_of_entity: Vec<f32> = vec![0.0; n as usize];
+    let mut points_seen = 0u64;
     let mut failure: Option<BuildError> = None;
+    let mut chunk: Vec<(u64, (f32, f32))> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
+    let resolve = |chunk: &mut Vec<(u64, (f32, f32))>,
+                       x_of_entity: &mut Vec<f32>,
+                       y_of_entity: &mut Vec<f32>,
+                       points_seen: &mut u64| {
+        join_chunk(chunk, &source_ids, |ordinal, source_id, (x, y)| {
+            let Some(ordinal) = ordinal else {
+                return Err(input_changed(&format!(
+                    "the points file names entity {source_id}, which its first pass did not"
+                )));
+            };
+            let entity = entity_of_ordinal[ordinal as usize] as usize;
+            x_of_entity[entity] = x;
+            y_of_entity[entity] = y;
+            *points_seen += 1;
+            Ok(())
+        })
+    };
     input::scan_points(&args.points, &args.extent, args.limit, |point| {
         if failure.is_some() {
             return;
         }
-        let Ok(ordinal) = source_ids.binary_search(&point.source_id) else {
-            failure = Some(input_changed(&format!(
-                "the points file names entity {}, which its first pass did not",
-                point.source_id
-            )));
-            return;
-        };
-        let entity = entity_of_ordinal[ordinal] as usize;
-        x_of_entity[entity] = point.x;
-        y_of_entity[entity] = point.y;
+        chunk.push((point.source_id, (point.x, point.y)));
+        if chunk.len() == JOIN_CHUNK_ROWS {
+            if let Err(e) = resolve(
+                &mut chunk,
+                &mut x_of_entity,
+                &mut y_of_entity,
+                &mut points_seen,
+            ) {
+                failure = Some(e);
+            }
+        }
     })?;
     if let Some(error) = failure {
         return Err(error);
+    }
+    resolve(
+        &mut chunk,
+        &mut x_of_entity,
+        &mut y_of_entity,
+        &mut points_seen,
+    )?;
+    drop(chunk);
+    // A shrunk points file resolves every id it still presents and would previously leave the
+    // missing entities at (0, 0) with no error at all — count, don't trust.
+    if points_seen != n {
+        return Err(input_changed(&format!(
+            "the points file yielded {points_seen} geometry rows, but its first pass \
+             selected {n}"
+        )));
     }
     drop(source_ids);
     drop(entity_of_ordinal);
@@ -415,24 +608,33 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // §2.6 r6) — `tessera_id` is computed here, BEFORE the sort (2026-07-30 fold, memo §6):
     // `priority = high16(tessera_id)` is now the sort key, so the identity must exist before
     // `sort_unstable_by` runs, not be written at the row after it. -------------------------
-    let mut rows: Vec<RowRec> = Vec::with_capacity(n as usize);
-    for entity in 0..n as usize {
-        let tessera_id = args
-            .identity_key
-            .forward(args.shard_id, EntityId::new(entity as u64))?;
-        rows.push(RowRec {
-            morton: morton_of(
-                x_of_entity[entity] as f64,
-                y_of_entity[entity] as f64,
-                &args.extent,
-            )
-            .raw(),
-            entity: entity as u32,
-            priority: tessera_id.priority(),
-            _pad: 0,
-        });
-    }
-    rows.sort_unstable_by(|a, b| a.cmp(b, &args.identity_key, args.shard_id));
+    // Indexed parallel map: the collect preserves entity order, and `forward`/`morton_of` are
+    // pure, so this is byte-identical to the serial loop it replaces.
+    let mut rows: Vec<RowRec> = (0..n as usize)
+        .into_par_iter()
+        .map(|entity| {
+            let tessera_id = args
+                .identity_key
+                .forward(args.shard_id, EntityId::new(entity as u64))?;
+            Ok(RowRec {
+                morton: morton_of(
+                    x_of_entity[entity] as f64,
+                    y_of_entity[entity] as f64,
+                    &args.extent,
+                )
+                .raw(),
+                entity: entity as u32,
+                priority: tessera_id.priority(),
+                _pad: 0,
+            })
+        })
+        .collect::<Result<_>>()?;
+    // The comparator is a total order — `(morton, priority, full tessera_id)`, and `forward`
+    // is a bijection per entity — so the parallel unstable sort has exactly one output.
+    // `IdentityKey` is a pure value type; `forward` takes `&self` and is safe to call from
+    // every worker at once, and the tie path's `expect` stays loud through rayon's panic
+    // propagation.
+    rows.par_sort_unstable_by(|a, b| a.cmp(b, &args.identity_key, args.shard_id));
 
     timer.end(BuildStage::TilerSort, n);
 
@@ -454,12 +656,14 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     {
         // Built and released one column at a time: the record batch itself is the largest thing
         // this build ever holds, so nothing that can be dropped first is kept alongside it.
+        // Indexed parallel gathers — collect preserves row order, so bytes are unchanged; at
+        // 10⁹ rows the serial versions are a billion random 4-byte reads each.
         let x_row: Vec<f32> = rows
-            .iter()
+            .par_iter()
             .map(|r| x_of_entity[r.entity as usize])
             .collect();
         let y_row: Vec<f32> = rows
-            .iter()
+            .par_iter()
             .map(|r| y_of_entity[r.entity as usize])
             .collect();
         drop(x_of_entity);
@@ -471,7 +675,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         // keeps it that way rather than assuming it. This is the permutation of an identity
         // vector that already existed before the sort (step 9 above), not its first computation.
         let tessera_row: Vec<u64> = entity_row
-            .iter()
+            .par_iter()
             .map(|&e| {
                 args.identity_key
                     .forward(args.shard_id, EntityId::new(e as u64))
@@ -523,6 +727,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u64>> {
     let count = match known_count {
         Some(count) => count,
+        // No limit ⇒ every row is selected ⇒ the metadata row count is exact and the counting
+        // decode is a whole pass over the file for nothing.
+        None if args.limit.is_none() => input::count_point_rows(&args.points)? as usize,
         None => {
             let mut count = 0usize;
             input::scan_points(&args.points, &args.extent, args.limit, |_| count += 1)?;
@@ -606,22 +813,38 @@ fn build_dictionary(
     source_ids: &[u64],
     dict_dir: &std::path::Path,
 ) -> Result<Dictionary> {
+    // Chunk-order insensitivity ([`join_chunk`]): per-term min-ordinal and row counts are
+    // commutative aggregations — no arrival order is observable in them.
     let mut first_ordinal: FxHashMap<u64, (u64, u64)> = FxHashMap::default();
     let mut absent: FxHashSet<u64> = FxHashSet::default();
     let mut pair_rows = 0usize;
+    // Grows toward `JOIN_CHUNK_ROWS` only if the relation is actually that large; this pass
+    // has no row count in hand yet.
+    let mut chunk: Vec<(u64, u64)> = Vec::new();
+    let mut resolve = |chunk: &mut Vec<(u64, u64)>| {
+        join_chunk(chunk, source_ids, |ordinal, source_id, source_term| {
+            match ordinal {
+                Some(ordinal) => {
+                    let slot = first_ordinal.entry(source_term).or_insert((u64::MAX, 0));
+                    slot.0 = slot.0.min(ordinal as u64);
+                    slot.1 += 1;
+                }
+                None => {
+                    absent.insert(source_id);
+                }
+            }
+            Ok(())
+        })
+    };
     input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
         pair_rows += 1;
-        match source_ids.binary_search(&source_id) {
-            Ok(ordinal) => {
-                let slot = first_ordinal.entry(source_term).or_insert((u64::MAX, 0));
-                slot.0 = slot.0.min(ordinal as u64);
-                slot.1 += 1;
-            }
-            Err(_) => {
-                absent.insert(source_id);
-            }
+        chunk.push((source_id, source_term));
+        if chunk.len() == JOIN_CHUNK_ROWS {
+            resolve(&mut chunk).expect("the dictionary pass's join reports no errors");
         }
     })?;
+    resolve(&mut chunk).expect("the dictionary pass's join reports no errors");
+    drop(chunk);
     if !absent.is_empty() {
         return Err(BuildError::Invalid(format!(
             "pairs file references {} entity ids absent from the points file (first: {})",
@@ -666,9 +889,35 @@ fn build_dictionary(
 /// `recs` arrives ordered by `(two-term key, ordinal)`. Items sharing a key share their first two
 /// terms; where every one of them has a signature of at most two terms they are *identical*
 /// signatures and the ordinal tiebreak already holds. Only a group containing a longer signature
-/// needs the full comparison, and a **stable** sort inside the group keeps the ordinal order the
-/// pre-sort established as the tiebreak.
-fn refine_signature_ties(recs: &mut [SortRec], packed: &[u64], long_sig: &[u64]) {
+/// needs refining — and inside such a group the work decomposes, because of two facts about the
+/// stage-4 key:
+///
+/// * **Every member of a refined group has exactly two or more terms.** The key encodes "no
+///   term at this position" as 0 and a real term `t` as `t + 1 ≥ 1` — and `t + 1` cannot wrap
+///   to 0, because term ids are checked below 2³²−1 right after the dictionary is built. So a
+///   zero-length signature keys as (0, 0) and a one-term signature as (t₀+1, 0), neither of
+///   which a long (>2-term) signature — (t₀+1, t₁+1), both halves ≥ 1 — can collide with. A
+///   refined group therefore holds only **short** members whose signature is *exactly* the
+///   group's two-term prefix (all identical) and **long** members extending that prefix.
+/// * **A prefix orders before every extension of it**, and identical signatures tie — so the
+///   refined order is: all shorts first, in the ordinal order the pre-sort already established;
+///   then the longs, ordered by their signature *tails* (terms from index 2 on) with ordinal
+///   breaking exact-tail ties. That is precisely the reference build's
+///   `(signature, source_id)` order, with the tiebreak the current stable sort left implicit
+///   made explicit.
+///
+/// Mechanically, each long member's tail is gathered **once** into a scratch arena — its
+/// location in `packed` comes from [`LongIndex`] in O(1), not from a binary search — and the
+/// long sort compares contiguous scratch, not the multi-gigabyte relation. The previous
+/// implementation did two `partition_point` probes over `packed` *per comparison*; with 46% of
+/// the Phase 0 corpus inside refined groups that was the single largest cost of the whole
+/// build (measured: 52.5% of the 1e8 build, superlinear).
+///
+/// Groups are disjoint slices of `recs`, so refinement runs in parallel across groups; each
+/// group's result is deterministic, so the whole pass is.
+fn refine_signature_ties(recs: &mut [SortRec], packed: &[u64], long: &LongIndex) {
+    // Group boundaries first (cheap linear scan), keeping only groups that need refining.
+    let mut refined: Vec<(usize, usize)> = Vec::new();
     let mut start = 0usize;
     while start < recs.len() {
         let mut end = start + 1;
@@ -678,16 +927,85 @@ fn refine_signature_ties(recs: &mut [SortRec], packed: &[u64], long_sig: &[u64])
         {
             end += 1;
         }
-        let group = &mut recs[start..end];
-        if group.len() > 1 && group.iter().any(|r| bit_get(long_sig, r.ordinal as usize)) {
-            group.sort_by(|a, b| {
-                sig_slice(packed, a.ordinal)
-                    .iter()
-                    .map(|&v| term_of(v))
-                    .cmp(sig_slice(packed, b.ordinal).iter().map(|&v| term_of(v)))
-            });
+        if end - start > 1 && recs[start..end].iter().any(|r| long.is_long(r.ordinal)) {
+            refined.push((start, end));
         }
         start = end;
+    }
+
+    // Split `recs` into one disjoint `&mut` slice per refined group (safe: the ranges are
+    // ascending and non-overlapping; `split_at_mut` walks them off the front).
+    let mut groups: Vec<&mut [SortRec]> = Vec::with_capacity(refined.len());
+    let mut rest = recs;
+    let mut consumed = 0usize;
+    for &(g_start, g_end) in &refined {
+        let (_, tail) = rest.split_at_mut(g_start - consumed);
+        let (group, tail) = tail.split_at_mut(g_end - g_start);
+        groups.push(group);
+        rest = tail;
+        consumed = g_end;
+    }
+
+    groups
+        .into_par_iter()
+        .for_each_init(RefineScratch::default, |scratch, group| {
+            refine_group(group, packed, long, scratch)
+        });
+}
+
+/// Per-worker buffers for [`refine_group`], reused across the groups a worker processes.
+#[derive(Default)]
+struct RefineScratch {
+    shorts: Vec<SortRec>,
+    /// `(tail start in `arena`, tail length, the rec)` per long member.
+    longs: Vec<(usize, usize, SortRec)>,
+    arena: Vec<u32>,
+}
+
+/// Refine one tie group: shorts keep their order at the front, longs sort by (tail, ordinal).
+/// See [`refine_signature_ties`] for why this equals the full-signature stable sort.
+fn refine_group(group: &mut [SortRec], packed: &[u64], long: &LongIndex, s: &mut RefineScratch) {
+    // A refined group's key has both halves non-zero (the disjointness argument above); a
+    // violation would mean a short member with fewer than two terms slipped in, which the
+    // partition below would order incorrectly. Loud in debug, impossible by construction.
+    debug_assert!(
+        group[0].key_hi != 0 && group[0].key_lo != 0,
+        "a refined tie group must hold only signatures of length >= 2"
+    );
+    s.shorts.clear();
+    s.longs.clear();
+    s.arena.clear();
+    for &rec in group.iter() {
+        if long.is_long(rec.ordinal) {
+            let sig_start = long.start_of(rec.ordinal);
+            let tail_start = s.arena.len();
+            // Skip the two prefix terms every member shares; walk the run to its end. The run
+            // is contiguous and ordinal-delimited, so no length bookkeeping is needed.
+            let mut i = sig_start + 2;
+            while i < packed.len() && (packed[i] >> 32) == rec.ordinal as u64 {
+                s.arena.push(term_of(packed[i]));
+                i += 1;
+            }
+            debug_assert!(
+                s.arena.len() > tail_start,
+                "a long signature has at least one tail term"
+            );
+            s.longs.push((tail_start, s.arena.len() - tail_start, rec));
+        } else {
+            s.shorts.push(rec);
+        }
+    }
+    let arena = &s.arena;
+    // (tail, ordinal) is a total order on unique keys — ordinals are unique — so this
+    // unstable sort has exactly one output, identical to the stable full-signature sort's.
+    s.longs.sort_unstable_by(|a, b| {
+        arena[a.0..a.0 + a.1]
+            .cmp(&arena[b.0..b.0 + b.1])
+            .then_with(|| a.2.ordinal.cmp(&b.2.ordinal))
+    });
+    group[..s.shorts.len()].copy_from_slice(&s.shorts);
+    for (k, &(_, _, rec)) in s.longs.iter().enumerate() {
+        group[s.shorts.len() + k] = rec;
     }
 }
 
@@ -722,40 +1040,53 @@ fn write_terms(
         offsets.push(total);
     }
 
+    // Chunk-order insensitivity ([`join_chunk`]): each bucket's fill order varies with chunk
+    // boundaries, but every bucket is sorted and deduplicated below before anything reads it —
+    // the fill order never reaches the output.
     let mut flat: Vec<u32> = vec![0; total as usize];
     let mut cursor: Vec<u64> = offsets[..row_counts.len()].to_vec();
     let mut failure: Option<BuildError> = None;
+    let mut chunk: Vec<(u64, u64)> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(total as usize));
+    let resolve = |chunk: &mut Vec<(u64, u64)>, flat: &mut Vec<u32>, cursor: &mut Vec<u64>| {
+        join_chunk(chunk, source_ids, |ordinal, source_id, source_term| {
+            let (Some(ordinal), Some(&term)) = (ordinal, term_of_source.get(&source_term)) else {
+                return Err(input_changed(&format!(
+                    "the pairs file names entity {source_id} term {source_term}, which its \
+                     first pass did not"
+                )));
+            };
+            let slot = &mut cursor[term as usize];
+            // The bucket was sized by the dictionary pass's count for this term. Writing past
+            // its end would land in the *next* term's bucket — one term's entities silently
+            // becoming another's posting, which is a disclosure. Check rather than trust the
+            // two counts agree.
+            if *slot >= offsets[term as usize + 1] {
+                return Err(input_changed(&format!(
+                    "term {term}'s bucket holds {} rows but a further row arrived",
+                    row_counts[term as usize]
+                )));
+            }
+            flat[*slot as usize] = entity_of_ordinal[ordinal as usize];
+            *slot += 1;
+            Ok(())
+        })
+    };
     input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
         if failure.is_some() {
             return;
         }
-        let (Ok(ordinal), Some(&term)) = (
-            source_ids.binary_search(&source_id),
-            term_of_source.get(&source_term),
-        ) else {
-            failure = Some(input_changed(&format!(
-                "the pairs file names entity {source_id} term {source_term}, which its first \
-                 pass did not"
-            )));
-            return;
-        };
-        let slot = &mut cursor[term as usize];
-        // The bucket was sized by the dictionary pass's count for this term. Writing past its
-        // end would land in the *next* term's bucket — one term's entities silently becoming
-        // another's posting, which is a disclosure. Check rather than trust the two counts agree.
-        if *slot >= offsets[term as usize + 1] {
-            failure = Some(input_changed(&format!(
-                "term {term}'s bucket holds {} rows but a further row arrived",
-                row_counts[term as usize]
-            )));
-            return;
+        chunk.push((source_id, source_term));
+        if chunk.len() == JOIN_CHUNK_ROWS {
+            if let Err(e) = resolve(&mut chunk, &mut flat, &mut cursor) {
+                failure = Some(e);
+            }
         }
-        flat[*slot as usize] = entity_of_ordinal[ordinal];
-        *slot += 1;
     })?;
     if let Some(error) = failure {
         return Err(error);
     }
+    resolve(&mut chunk, &mut flat, &mut cursor)?;
+    drop(chunk);
     // The mirror of the overflow check: a bucket left short would leave its tail zeroed, and a
     // zero is a valid entity id, so an under-filled bucket must be caught by count, not by value.
     for (term, slot) in cursor.iter().enumerate() {
@@ -768,22 +1099,39 @@ fn write_terms(
         }
     }
 
+    // Split `flat` into one disjoint `&mut` bucket per term (safe: consecutive ranges walked
+    // off the front), then sort, deduplicate and Roaring-encode every bucket in parallel.
+    // Bucket contents are multisets of entity ids — sort+dedup normalises whatever fill order
+    // the chunks produced — and `encode_posting` is pure, so the collected results are
+    // deterministic and in term order.
+    let mut buckets: Vec<&mut [u32]> = Vec::with_capacity(row_counts.len());
+    let mut rest: &mut [u32] = &mut flat;
+    for term in 0..row_counts.len() {
+        let width = (offsets[term + 1] - offsets[term]) as usize;
+        let (bucket, tail) = rest.split_at_mut(width);
+        buckets.push(bucket);
+        rest = tail;
+    }
+    let encoded: Vec<(usize, Vec<u8>)> = buckets
+        .into_par_iter()
+        .enumerate()
+        .map(|(term, bucket)| {
+            bucket.sort_unstable();
+            let end = dedup_len(bucket);
+            let record = encode_posting(term, &bucket[..end], SMALL_TERM_THRESHOLD_DEFAULT)
+                .map_err(|e| BuildError::io(postings_path, e))?;
+            Ok((end, record))
+        })
+        .collect::<Result<_>>()?;
+
     let mut records: Vec<Vec<u8>> = Vec::with_capacity(row_counts.len());
     let mut pairs_writer = PairsParquetWriter::create(pairs_path)?;
     let mut written = 0u64;
-    for term in 0..row_counts.len() {
-        let bucket = &mut flat[offsets[term] as usize..offsets[term + 1] as usize];
-        bucket.sort_unstable();
-        let end = dedup_len(bucket);
-        let bucket = &bucket[..end];
+    for (term, (end, record)) in encoded.into_iter().enumerate() {
+        let bucket = &flat[offsets[term] as usize..offsets[term] as usize + end];
         written += end as u64;
-        records.push(
-            encode_posting(term, bucket, SMALL_TERM_THRESHOLD_DEFAULT)
-                .map_err(|e| BuildError::io(postings_path, e))?,
-        );
-        for &entity in bucket.iter() {
-            pairs_writer.push(entity as u64, term as u32)?;
-        }
+        records.push(record);
+        pairs_writer.push_run(term as u32, bucket)?;
     }
     drop(flat);
     if written != pair_count {
@@ -812,6 +1160,80 @@ fn dedup_len(sorted: &mut [u32]) -> usize {
 mod tests {
     use super::*;
     use tessera_types::IdentityKey;
+
+    /// `LongIndex::start_of` must agree with a naive rank computation at every long ordinal,
+    /// across word boundaries and word-aligned positions.
+    #[test]
+    fn long_index_rank_agrees_with_naive_rank() {
+        // Long ordinals chosen to straddle word boundaries: 0, mid-word, 63/64/65, and a
+        // sparse tail; every other ordinal is short.
+        let long_ordinals: Vec<u32> = vec![0, 3, 63, 64, 65, 127, 128, 300, 449];
+        let n = 450usize;
+        let mut bits = vec![0u64; n.div_ceil(64)];
+        for &o in &long_ordinals {
+            bit_set(&mut bits, o as usize);
+        }
+        // Each long ordinal's "start" is a distinct sentinel so a wrong rank reads as a wrong
+        // value, not a coincidence.
+        let starts: Vec<u64> = long_ordinals.iter().map(|&o| 1000 + o as u64).collect();
+        let index = LongIndex::new(bits, starts);
+        for &o in &long_ordinals {
+            assert!(index.is_long(o));
+            assert_eq!(index.start_of(o), 1000 + o as usize, "ordinal {o}");
+        }
+        assert!(!index.is_long(1));
+        assert!(!index.is_long(62));
+        assert!(!index.is_long(129));
+    }
+
+    /// `join_chunk` must resolve every id that is present (including runs of duplicates, which
+    /// all map to the same ordinal), report every id that is absent as `None`, and drain the
+    /// chunk. The source ids are deliberately arbitrary — nothing about their shape may matter.
+    #[test]
+    fn join_chunk_resolves_duplicates_and_reports_misses() {
+        let source_ids: Vec<u64> = vec![5, 90, 1_000_003, u64::MAX - 1];
+        let mut chunk: Vec<(u64, u32)> = vec![
+            (1_000_003, 10),
+            (5, 11),
+            (90, 12),
+            (5, 13), // duplicate id, distinct payload
+            (7, 14), // absent
+            (u64::MAX - 1, 15),
+            (u64::MAX, 16), // absent, past the last source id
+        ];
+        let mut seen: Vec<(Option<u32>, u64, u32)> = Vec::new();
+        join_chunk(&mut chunk, &source_ids, |ordinal, id, payload| {
+            seen.push((ordinal, id, payload));
+            Ok(())
+        })
+        .unwrap();
+        assert!(chunk.is_empty(), "the chunk must be drained");
+        seen.sort_unstable_by_key(|&(_, _, p)| p);
+        assert_eq!(
+            seen,
+            vec![
+                (Some(2), 1_000_003, 10),
+                (Some(0), 5, 11),
+                (Some(1), 90, 12),
+                (Some(0), 5, 13),
+                (None, 7, 14),
+                (Some(3), u64::MAX - 1, 15),
+                (None, u64::MAX, 16),
+            ]
+        );
+    }
+
+    /// The first `Err` from `on_row` aborts the join and propagates.
+    #[test]
+    fn join_chunk_propagates_the_callbacks_error() {
+        let source_ids: Vec<u64> = vec![1, 2];
+        let mut chunk: Vec<(u64, ())> = vec![(1, ()), (3, ())];
+        let result = join_chunk(&mut chunk, &source_ids, |ordinal, id, ()| match ordinal {
+            Some(_) => Ok(()),
+            None => Err(input_changed(&format!("entity {id} missing"))),
+        });
+        assert!(result.is_err());
+    }
 
     /// The tie path (Step 3a fold): comparing the `priority` prefix first and refining on a tie
     /// by recomputing the full `tessera_id` from `entity` must produce **exactly** the same row

@@ -255,6 +255,103 @@ fn streaming_build_is_deterministic() {
     assert_bundles_identical(&first, &second, "run 1 vs run 2");
 }
 
+/// Signatures engineered around the streaming build's tie-group refinement, covering the group
+/// shapes `synth_terms` only produces incidentally:
+///
+/// * an **all-long group** — prefix (1,2) is carried only by >2-term signatures, so its group
+///   has no short member at all (the short/long partition must be a no-op at the front);
+/// * long tails that are **prefixes of one another** ((1,2,3) vs (1,2,3,4) vs (1,2,3,4,5));
+/// * **equal full signatures** among longs (the ordinal tiebreak inside the tail sort);
+/// * a **mixed group** (5,6) with shorts and longs interleaved in ordinal order;
+/// * a shorts-only group, a single-term group with several members, empty signatures, and an
+///   item whose input rows arrive unsorted and duplicated.
+fn shape_terms(e: u64) -> Vec<u64> {
+    match e % 11 {
+        0 => vec![1, 2, 3 + (e % 7)],
+        1 => vec![1, 2, 3],
+        2 => vec![1, 2, 3, 4],
+        3 => vec![1, 2, 3, 4, 5],
+        4 => vec![1, 2, 9, 10],
+        5 => vec![5, 6],
+        6 => vec![5, 6, 7 + (e % 5)],
+        7 => vec![8, 9],
+        8 => vec![11],
+        9 => vec![],
+        _ => vec![12, 3, 12], // unsorted, with a repeated term in the input rows
+    }
+}
+
+const N_SHAPE_ITEMS: u64 = 3_300;
+
+fn shape_source_id(e: u64) -> u64 {
+    // Sparse, non-monotonic, arbitrary-looking: nothing about the ids' shape may matter.
+    (e * 104_729) % 2_000_003
+}
+
+fn write_shape_points(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let ids: Vec<u64> = (0..N_SHAPE_ITEMS).map(shape_source_id).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e % 40) * 25) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e % 37) * 27) as f64).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+fn write_shape_pairs(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("term_id", DataType::UInt32, false),
+    ]));
+    let mut entities = Vec::new();
+    let mut terms = Vec::new();
+    for e in 0..N_SHAPE_ITEMS {
+        for t in shape_terms(e) {
+            entities.push(shape_source_id(e));
+            terms.push(t as u32);
+        }
+    }
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(entities)),
+            Arc::new(UInt32Array::from(terms)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+#[test]
+fn tie_group_shapes_are_byte_identical_to_the_reference_build() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let points = temp.path().join("points.parquet");
+    let pairs = temp.path().join("pairs.parquet");
+    write_shape_points(&points);
+    write_shape_pairs(&pairs);
+
+    let reference_out = temp.path().join("reference");
+    let streaming_out = temp.path().join("streaming");
+    build_in_memory(&args_for(&points, &pairs, reference_out.clone())).unwrap();
+    build(&args_for(&points, &pairs, streaming_out.clone())).unwrap();
+    assert_bundles_identical(&reference_out, &streaming_out, "tie-group shapes");
+}
+
 /// The same equivalence under `--limit`, which selects a prefix of *source* entity space and so
 /// changes which terms appear at all, and in what order they first appear.
 #[test]

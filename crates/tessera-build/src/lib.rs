@@ -706,6 +706,25 @@ impl PairsParquetWriter {
         Ok(())
     }
 
+    /// Push one term's whole (ascending) entity list. Batch boundaries fall at exactly the
+    /// rows they would under per-row [`push`] — fill to `BATCH`, flush, continue — so the
+    /// file bytes are identical; only the 1.7 × 10⁹ call-per-row overhead is gone.
+    pub(crate) fn push_run(&mut self, term_id: u32, entities: &[u32]) -> Result<()> {
+        let mut rest = entities;
+        while !rest.is_empty() {
+            let take = (Self::BATCH - self.entities.len()).min(rest.len());
+            let (now, later) = rest.split_at(take);
+            self.entities.extend(now.iter().map(|&e| e as u64));
+            self.terms
+                .extend(std::iter::repeat_n(term_id, now.len()));
+            if self.entities.len() == Self::BATCH {
+                self.flush()?;
+            }
+            rest = later;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<()> {
         if self.entities.is_empty() {
             return Ok(());
@@ -802,11 +821,18 @@ fn write_ext_locator(
         }
         locator[entity] = ordinal as u32;
     }
-    let mut file = File::create(&path).map_err(|e| BuildError::io(&path, e))?;
+    // Buffered: an unbuffered 4-bytes-per-write loop is one syscall per entity — measured as
+    // the majority of the whole external-ids stage at 10⁸ (the bytes written are identical).
+    let file = File::create(&path).map_err(|e| BuildError::io(&path, e))?;
+    let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
     for slot in &locator {
-        file.write_all(&slot.to_le_bytes())
+        writer
+            .write_all(&slot.to_le_bytes())
             .map_err(|e| BuildError::io(&path, e))?;
     }
+    let file = writer
+        .into_inner()
+        .map_err(|e| BuildError::io(&path, e.into_error()))?;
     file.sync_all().map_err(|e| BuildError::io(&path, e))?;
     if let Some(parent) = path.parent() {
         fsync_dir(parent)?;
