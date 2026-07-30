@@ -249,14 +249,6 @@ async fn viewport(
     headers: HeaderMap,
     Json(req): Json<ViewportReq>,
 ) -> Result<Response, ApiError> {
-    // Task 16: server-side timing for the exit-criteria measurement (bench_p99.py, plan §5).
-    // Not a wire-format field — an observability-only response header, measured around the whole
-    // handler body (auth check through Arrow IPC serialisation), reported to microseconds so the
-    // <10ms exit gate can be checked without relying on end-to-end (client-observed) latency,
-    // which also includes HTTP/TCP/loopback overhead outside the engine's control. Unaffected by
-    // moving the engine call off the reactor: `start` still spans the whole handler, `.await`ing
-    // the `spawn_blocking` join included.
-    let start = std::time::Instant::now();
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
     let entry = state.authenticated_session(token)?;
 
@@ -272,6 +264,25 @@ async fn viewport(
         return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
     }
 
+    // D-B: the two-stage admission gate. `admit()` sheds with `ApiError::Backpressure` (429) if
+    // the outer slots semaphore has no permit to `try_acquire`, or if the inner compute semaphore
+    // does not free one within `admission_timeout_ms`. `admission_us` is the queue wait —
+    // `x-tessera-admission-us` below (D-E).
+    let (gate_permits, admission_us) = state.compute_gate.admit().await?;
+
+    // Task 16: server-side timing for the exit-criteria measurement (bench_p99.py, plan §5).
+    // Not a wire-format field — an observability-only response header, reported to microseconds
+    // so the <10ms exit gate can be checked without relying on end-to-end (client-observed)
+    // latency, which also includes HTTP/TCP/loopback overhead outside the engine's control.
+    //
+    // D-E: this clock starts AFTER admission, so it keeps its pre-Task-4 meaning of "server
+    // compute, excluding queueing" — bench baselines and the <10 ms exit gate both read it that
+    // way. Note: pre-Task-4 (Task 3, D-A) the value briefly included blocking-pool queue delay
+    // (spawn_blocking's own scheduling wait); the composition is now restored to compute-only,
+    // with that wait folded into `x-tessera-admission-us` instead since it happens after this
+    // gate has already admitted the request.
+    let start = std::time::Instant::now();
+
     // D-A: the engine call through Arrow IPC framing is CPU-bound (and, on a cold row-projection
     // or fragment build, file-IO-bearing) with no `.await` of its own — run synchronously here it
     // would monopolise this reactor thread for the whole viewport, starving every other request
@@ -280,15 +291,16 @@ async fn viewport(
     //
     // Closure capture: `state` is a cloned `Arc<AppState>` (cheap; `Engine: Send + Sync` is what
     // makes this sound — see this task's report), `entry` is the already-cloned
-    // `Arc<SessionEntry>` `authenticated_session` returned, and `req` is moved in whole — its
-    // fields were only ever borrowed above, so ownership is free to hand over. Never behind an
-    // admission gate here (Task 4 adds one in front of this call site later; this closure is
-    // deliberately a single expression so a permit can be moved in without restructuring).
+    // `Arc<SessionEntry>` `authenticated_session` returned, `req` is moved in whole (its fields
+    // were only ever borrowed above), and `gate_permits` (D-B) moves in so both permits release
+    // only when this closure returns — correct accounting even if the client has disconnected.
     let closure_state = Arc::clone(&state);
-    let outcome =
-        tokio::task::spawn_blocking(move || run_viewport(&closure_state, &entry.session, req))
-            .await
-            .map_err(map_join_error)??;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let _gate_permits = gate_permits;
+        run_viewport(&closure_state, &entry.session, req)
+    })
+    .await
+    .map_err(map_join_error)??;
 
     let pin_header = serde_json::to_string(&PinDto::from(&outcome.pin))
         .expect("PinDto serialisation cannot fail");
@@ -298,7 +310,8 @@ async fn viewport(
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
         .header("x-tessera-pin", pin_header)
-        .header("x-tessera-server-us", server_us);
+        .header("x-tessera-server-us", server_us)
+        .header("x-tessera-admission-us", admission_us.to_string());
 
     if state.stage_timing {
         if let Some(value) = stage_header(&outcome.timings, outcome.arrow_serialise_ns) {
@@ -541,13 +554,21 @@ async fn item(
         }
     }
 
+    // D-B: gated the same way as `/v1/viewport` (see its handler's comment) — `admit()` sheds
+    // with 429 `backpressure` on either stage.
+    let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
+
     // D-A: `engine.item` inverts the id (pure, no IO) then reads the external-id sidecar for a
     // visible item — file IO, moved off the reactor. Closure capture: `state` cloned (`Arc`,
-    // cheap), `entry` moved (already an `Arc<SessionEntry>`), `raw` is `Copy`.
+    // cheap), `entry` moved (already an `Arc<SessionEntry>`), `raw` is `Copy`, `gate_permits`
+    // (D-B) moves in so both permits release only when this closure returns.
     let closure_state = Arc::clone(&state);
-    let resp = tokio::task::spawn_blocking(move || run_item(&closure_state, &entry.session, raw))
-        .await
-        .map_err(map_join_error)??;
+    let resp = tokio::task::spawn_blocking(move || {
+        let _gate_permits = gate_permits;
+        run_item(&closure_state, &entry.session, raw)
+    })
+    .await
+    .map_err(map_join_error)??;
 
     Ok(Json(resp))
 }

@@ -59,6 +59,19 @@ pub enum ConfigError {
     /// prevent, reachable through config instead of through a shift bug — so it is refused in the
     /// same spirit.
     ThetaTargetZero,
+    /// `serve.compute_threads = 0` (D-B): the pool this knob sizes must fill the machine, and a
+    /// zero-width pool can run nothing at all. Refused rather than clamped to 1, so a typo cannot
+    /// quietly turn "one thread per core" into "one thread total".
+    ComputeThreadsZero,
+    /// `serve.compute_admission = 0` (D-B): the compute semaphore would have zero permits, so
+    /// every gated request sheds unconditionally — indistinguishable from the server being down,
+    /// but silently. Refused rather than clamped to 1 for the same reason as the floor clause.
+    ComputeAdmissionZero,
+    /// `serve.admission_timeout_ms = 0` (D-E) would silently disable the bounded queue wait —
+    /// every request either starts immediately or sheds instantly, with no queueing at all, which
+    /// is what `serve.compute_queue = 0` (a legal value) already expresses explicitly. Refused so
+    /// a zero here reads as a mistake rather than a second spelling of that same knob.
+    AdmissionTimeoutZero,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -117,6 +130,22 @@ impl std::fmt::Display for ConfigError {
                  nothing, at every depth — so every non-empty tile would draw exactly k_min marks \
                  at every zoom, with the density signal silently gone. Startup refuses rather than \
                  serving a map that looks plausible and conveys nothing"
+            ),
+            ConfigError::ComputeThreadsZero => write!(
+                f,
+                "serve.compute_threads = 0 — the compute pool must fill the machine (D-B); a \
+                 zero-width pool can run nothing. Startup refuses rather than clamping to 1"
+            ),
+            ConfigError::ComputeAdmissionZero => write!(
+                f,
+                "serve.compute_admission = 0 — the compute semaphore would have zero permits, so \
+                 every gated request would shed unconditionally (D-B). Startup refuses rather than \
+                 clamping to 1"
+            ),
+            ConfigError::AdmissionTimeoutZero => write!(
+                f,
+                "serve.admission_timeout_ms = 0 would silently disable the bounded queue wait \
+                 (D-E) — use serve.compute_queue = 0 to disable queueing explicitly instead"
             ),
         }
     }
@@ -190,6 +219,14 @@ struct RawServe {
     operator_credential_file: Option<PathBuf>,
     #[serde(default)]
     operator_credential_env: Option<String>,
+    #[serde(default)]
+    compute_threads: Option<usize>,
+    #[serde(default)]
+    compute_admission: Option<usize>,
+    #[serde(default)]
+    compute_queue: Option<usize>,
+    #[serde(default)]
+    admission_timeout_ms: Option<u64>,
 }
 
 /// The control plane's listen target: a real unix socket, or (tests, and the documented Windows
@@ -231,6 +268,18 @@ pub struct Config {
     pub stage_timing: bool,
     pub session_credential: String,
     pub operator_credential: String,
+    /// D-B: the pool this sizes should fill the machine. This task adds the knob and its
+    /// validation only — the rayon pool that consumes it arrives in a later task.
+    pub compute_threads: usize,
+    /// D-B: the compute semaphore's permit count — one CPU-bound request per core, admitted for
+    /// the viewer/session planes only (never the control plane, D13).
+    pub compute_admission: usize,
+    /// D-B: the outer slots semaphore's *additional* permits beyond `compute_admission` — the
+    /// bounded queue. Legally `0` (shed the instant every compute permit is busy).
+    pub compute_queue: usize,
+    /// D-E: how long a request may wait for a compute permit before it is shed with 429
+    /// `backpressure` and `Retry-After: 1`.
+    pub admission_timeout_ms: u64,
 }
 
 /// The machine ceiling on a viewport's `k` — GPU, transport, handle table.
@@ -296,6 +345,19 @@ const DEFAULT_MAX_UNDERLAY_CELLS: usize = 8192;
 /// latency is the caller's own and now bounded. Refusing it would trade an availability fix for a
 /// functionality regression.
 const DEFAULT_MAX_TILES_PER_REQUEST: usize = 262_144;
+
+/// D-B: the compute pool should fill the machine. `available_parallelism` fails only when the OS
+/// genuinely cannot answer the question (SA has no fallback story for that host); treated as 1
+/// rather than propagated, since a single-threaded fallback still starts the server, and the
+/// `ComputeThreadsZero` refusal exists for the case an operator's *explicit* `0` needs catching,
+/// not this one.
+fn default_compute_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// D-E: 25× the 10 ms p99 target — a request that cannot even *start* in 250 ms is better shed
+/// with `Retry-After: 1` than served at the measured 1.04 s worst case.
+const DEFAULT_ADMISSION_TIMEOUT_MS: u64 = 250;
 
 pub fn load(path: &Path) -> Result<Config> {
     let text = fs::read_to_string(path)?;
@@ -388,6 +450,32 @@ fn parse(text: &str) -> Result<Config> {
         return Err(ConfigError::UnderlayOffsetTooDeep(max_underlay_offset));
     }
 
+    // D-B/D-E's admission knobs. Same refuse-not-clamp discipline as the selection clause above:
+    // each of `compute_threads`/`compute_admission`/`admission_timeout_ms` at 0 has a distinct
+    // silent-failure mode (an empty pool, a gate that sheds everything, a queue wait that never
+    // actually waits) and a typo must not quietly produce any of them. `compute_queue = 0` is
+    // legal (D-B) — it means "shed the instant every compute permit is busy" — so it alone is
+    // never checked.
+    let compute_threads = raw
+        .serve
+        .compute_threads
+        .unwrap_or_else(default_compute_threads);
+    if compute_threads == 0 {
+        return Err(ConfigError::ComputeThreadsZero);
+    }
+    let compute_admission = raw.serve.compute_admission.unwrap_or(compute_threads);
+    if compute_admission == 0 {
+        return Err(ConfigError::ComputeAdmissionZero);
+    }
+    let compute_queue = raw.serve.compute_queue.unwrap_or(2 * compute_admission);
+    let admission_timeout_ms = raw
+        .serve
+        .admission_timeout_ms
+        .unwrap_or(DEFAULT_ADMISSION_TIMEOUT_MS);
+    if admission_timeout_ms == 0 {
+        return Err(ConfigError::AdmissionTimeoutZero);
+    }
+
     Ok(Config {
         bundle_path: raw.bundle.path,
         cache_dir: raw.bundle.cache,
@@ -413,6 +501,10 @@ fn parse(text: &str) -> Result<Config> {
         stage_timing: raw.serve.stage_timing.unwrap_or(false),
         session_credential,
         operator_credential,
+        compute_threads,
+        compute_admission,
+        compute_queue,
+        admission_timeout_ms,
     })
 }
 
@@ -520,6 +612,63 @@ mod tests {
         assert_eq!(config.max_underlay_offset, DEFAULT_MAX_UNDERLAY_OFFSET);
         assert_eq!(config.max_underlay_cells, DEFAULT_MAX_UNDERLAY_CELLS);
         assert_eq!(config.max_k, DEFAULT_MAX_K);
+        assert_eq!(config.compute_threads, default_compute_threads());
+        assert_eq!(config.compute_admission, config.compute_threads);
+        assert_eq!(config.compute_queue, 2 * config.compute_admission);
+        assert_eq!(config.admission_timeout_ms, DEFAULT_ADMISSION_TIMEOUT_MS);
+    }
+
+    /// D-B: `compute_admission` defaults to `compute_threads`, not to a separate constant — an
+    /// explicit `compute_threads` must change the default admission bound too, or the "one
+    /// CPU-bound request per core" argument silently stops holding.
+    #[test]
+    fn compute_admission_defaults_to_compute_threads() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("compute_threads = 7")).expect("must load");
+        assert_eq!(config.compute_threads, 7);
+        assert_eq!(config.compute_admission, 7);
+        assert_eq!(config.compute_queue, 14);
+    }
+
+    /// D-B: `compute_queue = 0` is explicitly legal — it means "shed the instant every compute
+    /// permit is busy" — so it must load, not refuse.
+    #[test]
+    fn a_zero_compute_queue_is_legal() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("compute_queue = 0")).expect("compute_queue = 0 must load");
+        assert_eq!(config.compute_queue, 0);
+    }
+
+    /// D-B: `compute_threads = 0` refuses to start rather than silently running a zero-width
+    /// pool — the same refuse-not-clamp discipline as the selection clause's `k_min = 0`.
+    #[test]
+    fn a_zero_compute_threads_refuses_to_start() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml("compute_threads = 0")).unwrap_err();
+        assert!(matches!(err, ConfigError::ComputeThreadsZero), "{err}");
+    }
+
+    /// D-B: `compute_admission = 0` refuses to start — a zero-permit compute semaphore sheds
+    /// every gated request unconditionally, indistinguishable from the server being down.
+    #[test]
+    fn a_zero_compute_admission_refuses_to_start() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml("compute_admission = 0")).unwrap_err();
+        assert!(matches!(err, ConfigError::ComputeAdmissionZero), "{err}");
+    }
+
+    /// D-E: `admission_timeout_ms = 0` refuses to start — that would silently disable the bounded
+    /// queue wait; `compute_queue = 0` is the correct, explicit way to disable queueing.
+    #[test]
+    fn a_zero_admission_timeout_refuses_to_start() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml("admission_timeout_ms = 0")).unwrap_err();
+        assert!(matches!(err, ConfigError::AdmissionTimeoutZero), "{err}");
     }
 
     /// `k_min = 0` disables §7.2's floor clause, which is the I7 guarantee. Startup must refuse

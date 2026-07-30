@@ -24,7 +24,7 @@ use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
 
 use config::{Config, ControlListen};
-use state::{AppState, SessionRegistry};
+use state::{AppState, ComputeGate, SessionRegistry};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -63,6 +63,13 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         max_k: config.max_k,
+        // D-B: gates only /v1/viewport, /v1/items and /session/authorise (each handler wraps its
+        // own closure); never the control plane, never /healthz/readyz/meta/revoke (D13).
+        compute_gate: ComputeGate::new(
+            config.compute_admission,
+            config.compute_queue,
+            config.admission_timeout_ms,
+        ),
         stage_timing: config.stage_timing,
         min_visible_members: config.min_visible_members,
         session_credential: config.session_credential.clone(),

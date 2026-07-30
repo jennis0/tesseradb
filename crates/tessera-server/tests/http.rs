@@ -22,7 +22,7 @@ use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
-use tessera_server::state::{AppState, SessionRegistry};
+use tessera_server::state::{AppState, ComputeGate, SessionRegistry};
 use tessera_spatial::Extent;
 use tessera_types::IdentityKey;
 
@@ -170,6 +170,14 @@ async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> 
     spawn_server_with_config(bundle_root, cache_dir, wal_path, default_engine_config()).await
 }
 
+/// Task 4's default test gate: generous enough that no test written before this task's admission
+/// gate existed can ever observe it (every one of those tests issues at most a handful of
+/// sequential requests) — only the gate-specific tests below construct a deliberately tiny
+/// [`ComputeGate`] to exercise shedding.
+fn generous_test_gate() -> ComputeGate {
+    ComputeGate::new(64, 64, 250)
+}
+
 /// Like [`spawn_server`], but with a caller-supplied `EngineConfig` — Task 3's concurrency tests
 /// need a much wider underlay budget than every other test in this file to engineer a
 /// deterministic slow request (see `healthz_stays_prompt_while_a_long_viewport_runs`'s doc), and
@@ -181,6 +189,26 @@ async fn spawn_server_with_config(
     wal_path: &Path,
     config: EngineConfig,
 ) -> TestServer {
+    spawn_server_with_config_and_gate(
+        bundle_root,
+        cache_dir,
+        wal_path,
+        config,
+        generous_test_gate(),
+    )
+    .await
+}
+
+/// Like [`spawn_server_with_config`], but also with a caller-supplied [`ComputeGate`] — Task 4's
+/// admission-gate tests need a deliberately tiny gate (`compute_admission=1, compute_queue=0`) to
+/// hold saturated deterministically, which every other test in this file must not be affected by.
+async fn spawn_server_with_config_and_gate(
+    bundle_root: &Path,
+    cache_dir: &Path,
+    wal_path: &Path,
+    config: EngineConfig,
+    compute_gate: ComputeGate,
+) -> TestServer {
     let max_k = config.max_k;
     let engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
         .expect("engine should open against a freshly built bundle");
@@ -189,6 +217,7 @@ async fn spawn_server_with_config(
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         max_k,
+        compute_gate,
         // On, so the header assertions below exercise the emission path rather than only its
         // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
         stage_timing: true,
@@ -2178,4 +2207,430 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
          to all complete -- it queued behind them on the reactor instead of reaching its own \
          spawn_blocking call promptly"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Task 4 (D-B/D-E): the two-stage admission gate, the 429 `backpressure` contract, and the
+// x-tessera-server-us / x-tessera-admission-us timing split.
+// ---------------------------------------------------------------------------------------------
+
+/// A slow viewport request, engineered exactly as `healthz_stays_prompt_while_a_long_viewport_runs`
+/// does (see its doc for the cost-model argument): `zoom = 0`, `underlay_offset = 12` against a
+/// server whose `EngineConfig` has been widened to allow it. Used throughout the gate tests below
+/// to hold the compute permit for long enough to deterministically observe saturation.
+fn slow_viewport_body() -> serde_json::Value {
+    serde_json::json!({
+        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
+        "underlay_offset": 12
+    })
+}
+
+fn fast_viewport_body() -> serde_json::Value {
+    serde_json::json!({ "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1 })
+}
+
+/// A server config wide enough for [`slow_viewport_body`] to pass `Engine::viewport`'s own
+/// bounds checks rather than being refused as `EngineError::UnderlayRefused` before it costs
+/// anything.
+fn engine_config_for_slow_viewport() -> EngineConfig {
+    let mut config = default_engine_config();
+    config.max_underlay_offset = 12;
+    config.max_underlay_cells = 20_000_000;
+    config
+}
+
+/// Poll `/control/status` until `compute.in_flight` reaches `want`, panicking after a generous
+/// bound rather than looping forever. **Deterministic, not a timing bet**: this is the
+/// poll-until-a-real-condition-holds pattern the brief asks for in place of a fixed sleep or a
+/// tuned yield count — it directly observes the gate's own state (derived from the semaphores'
+/// live permit counts, `state::ComputeGate::status`) rather than guessing how long "the slow
+/// request has started" takes on this run's scheduler.
+async fn poll_until_in_flight(server: &TestServer, want: u64) {
+    for _ in 0..2000 {
+        let status = control_status(server).await;
+        if status["compute"]["in_flight"].as_u64() == Some(want) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    panic!("compute.in_flight did not reach {want} within the poll bound");
+}
+
+/// D-B: with `compute_admission = 1, compute_queue = 0` (the deterministic configuration this
+/// task's brief names), a second concurrent `/v1/viewport` while the first is still running gets
+/// an immediate 429 — `try_acquire` on the outer slots semaphore fails synchronously, so this
+/// does not even need `admission_timeout_ms` to elapse. Verifies the full 429 contract: status,
+/// `Retry-After: 1` header, and `{"error": "backpressure", "retry_after_s": 1}` body.
+#[tokio::test]
+async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server_with_config_and_gate(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        engine_config_for_slow_viewport(),
+        ComputeGate::new(1, 0, 250),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let slow_token = token.clone();
+    let slow_task = tokio::spawn(async move {
+        client
+            .post(viewer_url)
+            .bearer_auth(slow_token)
+            .json(&slow_viewport_body())
+            .send()
+            .await
+            .unwrap()
+    });
+
+    // Deterministic: wait until the slow request has actually acquired its compute permit
+    // (`in_flight == 1`), not a guessed delay.
+    poll_until_in_flight(&server, 1).await;
+
+    let second_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(second_resp.status(), 429);
+    assert_eq!(
+        second_resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        Some("1"),
+        "a 429 must carry Retry-After: 1"
+    );
+    let body: serde_json::Value = second_resp.json().await.unwrap();
+    assert_eq!(body["error"], "backpressure");
+    assert_eq!(body["retry_after_s"], 1);
+
+    let slow_resp = slow_task.await.unwrap();
+    assert_eq!(
+        slow_resp.status(),
+        200,
+        "the request that actually held the gate must still succeed"
+    );
+}
+
+/// D-B/D13: `/healthz`, `/v1/meta`, `/session/revoke`, and a `/control/changes` suppress must all
+/// succeed while the viewer/session gate is fully saturated by a slow viewport — none of them is
+/// a gated path (D-B's gated-paths list is exactly `/v1/viewport`, `/v1/items`,
+/// `/session/authorise`), and the deny priority lane (lifecycle §1.3) must never be blocked by
+/// compute-admission pressure on an unrelated plane.
+#[tokio::test]
+async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server_with_config_and_gate(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        engine_config_for_slow_viewport(),
+        ComputeGate::new(1, 0, 250),
+    )
+    .await;
+
+    // Both sessions are minted BEFORE the gate is saturated below: `/session/authorise` IS one of
+    // D-B's gated paths (it shares the viewer/session compute budget), so acquiring a *second*
+    // session token during saturation would itself race the gate rather than testing the
+    // never-gated routes this test is actually about.
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+    let second_auth = authorise(&server, &["0"]).await;
+    let second_token_id = second_auth["token_id"].as_u64().unwrap();
+
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let slow_token = token.clone();
+    let slow_task = tokio::spawn(async move {
+        client
+            .post(viewer_url)
+            .bearer_auth(slow_token)
+            .json(&slow_viewport_body())
+            .send()
+            .await
+            .unwrap()
+    });
+
+    poll_until_in_flight(&server, 1).await;
+
+    // `/healthz`: no bearer, no gate.
+    let healthz_resp = server
+        .client
+        .get(server.viewer_url("/healthz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(healthz_resp.status(), 200, "/healthz must never be gated");
+
+    // `/v1/meta`: viewer-plane bearer, but never gated (D-B's gated-paths list is exact).
+    let meta_resp = server
+        .client
+        .get(server.viewer_url("/v1/meta"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(meta_resp.status(), 200, "/v1/meta must never be gated");
+
+    // `/session/revoke`: session-plane credential, never gated. Revokes the SECOND session
+    // (minted before saturation, above) so the slow request's own `Arc<SessionEntry>` — cloned
+    // into its `spawn_blocking` closure before this point — is unaffected either way; this
+    // assertion is purely about the revoke endpoint's own responsiveness under a saturated gate.
+    let revoke_resp = server
+        .client
+        .post(server.session_url("/session/revoke"))
+        .bearer_auth(SESSION_CREDENTIAL)
+        .json(&serde_json::json!({ "token_id": second_token_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        revoke_resp.status(),
+        204,
+        "/session/revoke must never be gated"
+    );
+
+    // `/control/changes` suppress: the D13 test proper. The entire control plane is off the
+    // viewer/session gate (D-B); a deny op must reach the WAL regardless.
+    const SUPPRESS_SOURCE_ID: u64 = 3;
+    let external_id =
+        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let suppress_resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        suppress_resp.status(),
+        200,
+        "D13: a suppress must succeed while the viewer gate is fully saturated"
+    );
+
+    let slow_resp = slow_task.await.unwrap();
+    assert_eq!(slow_resp.status(), 200);
+}
+
+/// Spec constraint: no permit leak. After a shed (a second request while the gate is saturated)
+/// and after the holder's own completion, both the outer and inner semaphores must show their
+/// permits fully returned — observed twice, live, via `/control/status`'s gauges rather than by
+/// inference from a single before/after snapshot.
+#[tokio::test]
+async fn no_permit_leak_after_a_shed_or_a_completion() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server_with_config_and_gate(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        engine_config_for_slow_viewport(),
+        ComputeGate::new(1, 0, 250),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let slow_token = token.clone();
+    let slow_task = tokio::spawn(async move {
+        client
+            .post(viewer_url)
+            .bearer_auth(slow_token)
+            .json(&slow_viewport_body())
+            .send()
+            .await
+            .unwrap()
+    });
+
+    poll_until_in_flight(&server, 1).await;
+
+    let shed_before = control_status(&server).await["compute"]["shed_total"]
+        .as_u64()
+        .unwrap();
+
+    let shed_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(shed_resp.status(), 429);
+
+    // The shed attempt's own (failed) permit acquisition must not have leaked: `in_flight` still
+    // reads exactly 1 (the still-running slow request, nothing more, nothing less) and
+    // `shed_total` incremented by exactly one.
+    let after_shed = control_status(&server).await;
+    assert_eq!(after_shed["compute"]["in_flight"], 1);
+    assert_eq!(after_shed["compute"]["waiting"], 0);
+    assert_eq!(
+        after_shed["compute"]["shed_total"].as_u64().unwrap(),
+        shed_before + 1
+    );
+
+    let slow_resp = slow_task.await.unwrap();
+    assert_eq!(slow_resp.status(), 200);
+
+    // Deterministic wait for the completed request's permits to be returned, then a fresh
+    // request must succeed — a leaked permit would make it shed too.
+    poll_until_in_flight(&server, 0).await;
+    let after_completion = control_status(&server).await;
+    assert_eq!(after_completion["compute"]["waiting"], 0);
+
+    let third_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        third_resp.status(),
+        200,
+        "a leaked permit would make this request shed too"
+    );
+}
+
+/// D-E: `x-tessera-server-us`'s clock starts AFTER admission, so it stays close to what an
+/// unqueued request measures even when this request was forced to queue for a long time; the
+/// queueing itself shows up only in `x-tessera-admission-us`, which must grow to reflect it.
+///
+/// Self-scaling, not a fixed wall-clock bet (this file's established pattern): rather than
+/// asserting an absolute microsecond bound, this compares the *queued* fast request's own two
+/// headers against each other (`server_us` must be much smaller than `admission_us` — most of
+/// its total time was spent waiting, not computing) and against a genuinely unqueued baseline
+/// request measured in the same run (`server_us` close to baseline; `admission_us` far above the
+/// baseline's own near-zero admission wait).
+#[tokio::test]
+async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    // compute_queue = 1 (not 0): the queued fast request below must be ADMITTED (a slot) and
+    // then WAIT for a compute permit, rather than being shed outright by stage 1 — that wait is
+    // exactly what `x-tessera-admission-us` needs to capture. A generous timeout so it is never
+    // shed by stage 2 either; this test is about the timing split, not the shedding contract.
+    let server = spawn_server_with_config_and_gate(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        engine_config_for_slow_viewport(),
+        ComputeGate::new(1, 1, 60_000),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    // Baseline: a solo fast request with no contention at all.
+    let baseline_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(baseline_resp.status(), 200);
+    let baseline_admission_us: u64 = header_u64(&baseline_resp, "x-tessera-admission-us");
+    let baseline_server_us: u64 = header_u64(&baseline_resp, "x-tessera-server-us");
+
+    // Now hold the gate with a slow request, and send a fast one behind it.
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let slow_token = token.clone();
+    let slow_task = tokio::spawn(async move {
+        client
+            .post(viewer_url)
+            .bearer_auth(slow_token)
+            .json(&slow_viewport_body())
+            .send()
+            .await
+            .unwrap()
+    });
+    poll_until_in_flight(&server, 1).await;
+
+    let queued_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(queued_resp.status(), 200);
+    let queued_admission_us = header_u64(&queued_resp, "x-tessera-admission-us");
+    let queued_server_us = header_u64(&queued_resp, "x-tessera-server-us");
+
+    let slow_resp = slow_task.await.unwrap();
+    assert_eq!(slow_resp.status(), 200);
+
+    assert!(
+        queued_admission_us > baseline_admission_us,
+        "a request forced to queue behind a slow one must show a larger admission wait than an \
+         unqueued baseline: queued={queued_admission_us}us baseline={baseline_admission_us}us"
+    );
+    assert!(
+        queued_server_us < queued_admission_us,
+        "server_us must exclude the queueing this request experienced -- it should be far \
+         smaller than admission_us, not comparable to it: server_us={queued_server_us}us \
+         admission_us={queued_admission_us}us"
+    );
+    // Generous relative bound (self-scaling, not an absolute figure): the queued request's own
+    // compute cost stays within an order of magnitude of the baseline's, plus a fixed epsilon so
+    // a near-zero baseline (a handful of microseconds, quite possible for this fixture's tiny
+    // corpus) cannot make the ratio unstable.
+    assert!(
+        queued_server_us < baseline_server_us.max(2_000) * 10,
+        "server_us should stay close to the unqueued baseline: queued={queued_server_us}us \
+         baseline={baseline_server_us}us"
+    );
+}
+
+fn header_u64(resp: &reqwest::Response, name: &str) -> u64 {
+    resp.headers()
+        .get(name)
+        .unwrap_or_else(|| panic!("response is missing the {name} header"))
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap_or_else(|_| panic!("{name} header is not a valid u64"))
 }

@@ -1,10 +1,13 @@
 //! Shared server state: the engine, and the per-token session registry Task 11's report flags as
 //! the server's (not the engine's) responsibility to own.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use tessera_engine::{Engine, Session};
 use tessera_wire::HandleTable;
@@ -54,11 +57,134 @@ impl SessionRegistry {
     }
 }
 
+/// Both `OwnedSemaphorePermit`s a successful [`ComputeGate::admit`] call returns, held together
+/// so a caller can move one value into a `spawn_blocking` closure (D-B). Dropping this — which
+/// happens when the closure returns, panics, or is otherwise finished — is what releases both
+/// permits, so accounting stays correct even if the client has disconnected: a permit tracks
+/// compute completion, never caller interest. Fields are private; a caller has no reason to touch
+/// either permit once held, only to keep this alive across the closure's body.
+pub struct GatePermits {
+    _slot: OwnedSemaphorePermit,
+    _compute: OwnedSemaphorePermit,
+}
+
+/// D-B: the two-stage admission gate in front of the viewer/session planes' CPU-bound closures
+/// (`/v1/viewport`, `/v1/items`, `/session/authorise`). `compute_admission` is DEFINED as a bound
+/// on *runnable* CPU work — one request per core. Never wraps `/healthz`, `/readyz`, `/v1/meta`,
+/// `/session/revoke`, or any control-plane route (D13: a suppression must always reach the WAL,
+/// gate saturated or not).
+///
+/// Two semaphores, not one, because they bound two different things: `slots` bounds *admitted*
+/// requests (running + queued) and is acquired non-blocking, so a caller arriving once every slot
+/// is taken sheds immediately rather than piling up unboundedly; `compute` bounds *running*
+/// compute and is acquired with a timeout, so a caller that got a slot but still can't start
+/// running within `admission_timeout_ms` is also shed rather than served arbitrarily late.
+pub struct ComputeGate {
+    pub compute_admission: usize,
+    pub compute_queue: usize,
+    pub admission_timeout_ms: u64,
+    slots: Arc<Semaphore>,
+    compute: Arc<Semaphore>,
+    /// Every 429 this gate has produced, from either shed path. No per-principal label (SA §9) —
+    /// a single process-wide counter, `/control/status`'s `shed_total`.
+    shed_total: AtomicU64,
+}
+
+/// `/control/status`'s `compute` block (D-B). `in_flight`/`waiting` are derived from the
+/// semaphores' `available_permits` at read time, not tracked separately, so they can never drift
+/// from what the gate itself believes.
+pub struct ComputeGateStatus {
+    pub admission: usize,
+    pub queue: usize,
+    pub in_flight: usize,
+    pub waiting: usize,
+    pub shed_total: u64,
+}
+
+impl ComputeGate {
+    pub fn new(compute_admission: usize, compute_queue: usize, admission_timeout_ms: u64) -> Self {
+        ComputeGate {
+            compute_admission,
+            compute_queue,
+            admission_timeout_ms,
+            slots: Arc::new(Semaphore::new(compute_admission + compute_queue)),
+            compute: Arc::new(Semaphore::new(compute_admission)),
+            shed_total: AtomicU64::new(0),
+        }
+    }
+
+    /// The two-stage acquire (D-B). On success, returns the held permits — move them into the
+    /// `spawn_blocking` closure alongside the engine call — and the queue wait in microseconds,
+    /// which becomes the `x-tessera-admission-us` header (D-E). Every shed path increments
+    /// `shed_total` before returning `ApiError::Backpressure`, so every 429 this gate produces is
+    /// counted exactly once.
+    pub async fn admit(&self) -> Result<(GatePermits, u64), crate::error::ApiError> {
+        let start = Instant::now();
+
+        // Stage 1: the outer slots semaphore, non-blocking. A caller that cannot even get a
+        // queue slot is shed immediately — no waiting at all.
+        let slot = match Arc::clone(&self.slots).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.shed_total.fetch_add(1, Ordering::Relaxed);
+                return Err(crate::error::ApiError::Backpressure);
+            }
+        };
+
+        // Stage 2: the inner compute semaphore, bounded by `admission_timeout_ms`. Held past
+        // this point only while queued for a compute permit; the `slot` permit above already
+        // accounts for this caller as "admitted", so it stays held across the wait too — that is
+        // what bounds the queue's total occupancy at `compute_queue`.
+        let compute = match tokio::time::timeout(
+            Duration::from_millis(self.admission_timeout_ms),
+            Arc::clone(&self.compute).acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            // `Ok(Err(_))` (the semaphore was closed) can't happen — this gate never calls
+            // `close()` — but is handled identically to a timeout rather than unwrapped, since
+            // both mean "no compute permit arrived in time".
+            Ok(Err(_)) | Err(_) => {
+                self.shed_total.fetch_add(1, Ordering::Relaxed);
+                return Err(crate::error::ApiError::Backpressure);
+            }
+        };
+
+        let admission_us = start.elapsed().as_micros() as u64;
+        Ok((
+            GatePermits {
+                _slot: slot,
+                _compute: compute,
+            },
+            admission_us,
+        ))
+    }
+
+    pub fn status(&self) -> ComputeGateStatus {
+        // `available_permits` on `compute` is what's actually free to run; the number *held* is
+        // the complement against the gate's own fixed capacity.
+        let in_flight = self.compute_admission - self.compute.available_permits();
+        let admitted =
+            (self.compute_admission + self.compute_queue) - self.slots.available_permits();
+        ComputeGateStatus {
+            admission: self.compute_admission,
+            queue: self.compute_queue,
+            in_flight,
+            // Everything admitted but not yet running compute is waiting in the queue.
+            waiting: admitted.saturating_sub(in_flight),
+            shed_total: self.shed_total.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Process-wide server state, shared (behind `Arc`) across every axum handler on every plane.
 pub struct AppState {
     pub engine: Engine,
     pub sessions: Mutex<SessionRegistry>,
     pub max_k: usize,
+    /// D-B: the viewer/session admission gate. Never touched by the control plane (D13).
+    pub compute_gate: ComputeGate,
     /// Runtime half of the `x-tessera-stage-ns` gate (see `Config::stage_timing`). The other half
     /// is the `bench-timing` compile feature; both must hold.
     pub stage_timing: bool,
@@ -101,5 +227,111 @@ impl AppState {
             Some(token) if token == expected => Ok(()),
             _ => Err(ApiError::BadCredential),
         }
+    }
+}
+
+#[cfg(test)]
+mod compute_gate_tests {
+    use super::*;
+
+    /// D-B stage 1: with `compute_admission = 1, compute_queue = 0` (the deterministic
+    /// configuration this task's brief names), a second concurrent `admit()` while the first
+    /// permit is still held sheds via `try_acquire` — no waiting, no timeout elapsed.
+    #[tokio::test]
+    async fn a_second_admit_sheds_immediately_when_slots_are_exhausted() {
+        let gate = ComputeGate::new(1, 0, 250);
+        let (first_permits, _) = gate.admit().await.expect("first admit must succeed");
+
+        let second = gate.admit().await;
+        assert!(
+            matches!(second, Err(ApiError::Backpressure)),
+            "a saturated gate must shed the second admission"
+        );
+        assert_eq!(gate.status().shed_total, 1);
+
+        drop(first_permits);
+    }
+
+    /// D-B stage 2: a slot is available (queue has room) but the compute semaphore is fully
+    /// held, so the second caller waits and is shed only once `admission_timeout_ms` elapses —
+    /// exercised with a near-zero timeout so this test does not depend on wall-clock timing to
+    /// pass reliably.
+    #[tokio::test]
+    async fn a_queued_admit_sheds_after_the_admission_timeout() {
+        let gate = ComputeGate::new(1, 1, 1);
+        let (first_permits, _) = gate.admit().await.expect("first admit must succeed");
+
+        let second = gate.admit().await;
+        assert!(
+            matches!(second, Err(ApiError::Backpressure)),
+            "a caller that cannot get a compute permit within the timeout must be shed"
+        );
+        assert_eq!(gate.status().shed_total, 1);
+
+        drop(first_permits);
+    }
+
+    /// No permit leak (spec constraint): after a shed, both the slot and compute permits the
+    /// shed attempt failed to fully acquire are returned — a fresh `admit()` must succeed again
+    /// once the original holder releases, not stay wedged.
+    #[tokio::test]
+    async fn no_permit_leak_after_a_shed() {
+        let gate = ComputeGate::new(1, 0, 1);
+        let (first_permits, _) = gate.admit().await.expect("first admit must succeed");
+        assert!(matches!(gate.admit().await, Err(ApiError::Backpressure)));
+
+        drop(first_permits);
+
+        // The shed attempt above must not have left the slots semaphore permanently short a
+        // permit -- a third admit, after the only holder releases, must succeed.
+        let third = gate.admit().await;
+        assert!(third.is_ok(), "a permit leak would make this admit shed too");
+    }
+
+    /// No permit leak on the timeout path specifically: `try_acquire_owned` on the outer
+    /// semaphore succeeds (a queue slot is available) but the inner semaphore's timeout expires.
+    /// The slot permit `admit` acquired for that failed attempt must still be returned to the
+    /// pool, not leaked, or the gate's queue capacity would shrink by one on every timeout shed.
+    #[tokio::test]
+    async fn no_slot_leak_on_a_compute_timeout_shed() {
+        let gate = ComputeGate::new(1, 1, 1);
+        let (first_permits, _) = gate.admit().await.expect("first admit must succeed");
+        assert!(matches!(gate.admit().await, Err(ApiError::Backpressure)));
+
+        // Two slots total (admission=1, queue=1); the first holder still has one. A second
+        // *queued* admit (which will itself time out, since compute is still fully held) must
+        // still be able to acquire a SLOT -- proving the previous shed returned its slot permit.
+        let slots_status = gate.status();
+        assert_eq!(
+            slots_status.waiting, 0,
+            "the timed-out attempt must not remain counted as waiting"
+        );
+
+        drop(first_permits);
+        let fourth = gate.admit().await;
+        assert!(fourth.is_ok(), "a slot leak would make this admit shed too");
+    }
+
+    /// `/control/status`'s gauges (D-B): `in_flight` and `waiting` are derived from the
+    /// semaphores' own permit counts, so they must reflect an admitted-and-running permit as
+    /// in_flight = 1, waiting = 0, and go back to 0/0 once released.
+    #[tokio::test]
+    async fn status_reports_in_flight_and_resets_on_release() {
+        let gate = ComputeGate::new(2, 1, 250);
+        let status = gate.status();
+        assert_eq!(status.admission, 2);
+        assert_eq!(status.queue, 1);
+        assert_eq!(status.in_flight, 0);
+        assert_eq!(status.waiting, 0);
+
+        let (permits, _) = gate.admit().await.expect("admit must succeed");
+        let status = gate.status();
+        assert_eq!(status.in_flight, 1);
+        assert_eq!(status.waiting, 0);
+
+        drop(permits);
+        let status = gate.status();
+        assert_eq!(status.in_flight, 0);
+        assert_eq!(status.waiting, 0);
     }
 }

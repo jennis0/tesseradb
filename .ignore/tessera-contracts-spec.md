@@ -234,7 +234,7 @@ JSON requests (`application/json`) unless marked **Arrow** (`application/vnd.apa
 | 409 | `conflict` | duplicate external IDs (detail lists them) or batch-id replay with different bytes; a 409 batch had **no effect** |
 | 410 | `pin-expired` | drained pin; rejected, never reinterpreted (I11) |
 | 422 | `contract` | malformed request, bounds exceeded, unknown filter operand |
-| 429 | `backpressure` | ingest only — `/control/changes` is **never** load-shed (it is small, WAL-appended, and refusing security operations for load is fail-open; overlay pressure schedules rebuilds and alarms instead, SA §6.5) |
+| 429 | `backpressure` | ingest, and the viewer/session planes' compute-admission gate *(r7 amendment, concurrency workstream: D-B's two-stage semaphore in front of `/v1/viewport`, `/v1/items`, `/session/authorise`, plus `EngineError::ProjectionBuilding`/`FragmentBuilding`; `Retry-After: 1`, fixed)* — `/control/changes` is **never** load-shed (it is small, WAL-appended, and refusing security operations for load is fail-open; overlay pressure schedules rebuilds and alarms instead, SA §6.5) |
 | 500 | `fail-closed` | any mask/composition/containment failure; partial results do not exist |
 | 503 | `not-ready` | unverified bundle, unready worker, unloaded plugin |
 

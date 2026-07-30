@@ -34,13 +34,29 @@ pub enum ApiError {
     /// 500: mask construction, WAL durability, or any other fail-closed failure (Global
     /// Constraint 3). Never returned for a partial or best-effort result.
     FailClosed(String),
+    /// 429 (D-B/D-E): the viewer/session compute-admission gate is saturated — either the outer
+    /// slots semaphore had no permit to `try_acquire` at all, or the inner compute semaphore did
+    /// not free one within `admission_timeout_ms`. Whole-request shed, never a partial result or
+    /// a narrowed `k` (spec constraint: shedding must not change WHAT a principal sees). Carries
+    /// `Retry-After: 1` and body `retry_after_s: 1`, both fixed, never a knob. Also reached from
+    /// `EngineError::ProjectionBuilding`/`FragmentBuilding` (D-G): a concurrent single-flight
+    /// build is already in progress, and by the client's retry the slot is warm.
+    Backpressure,
 }
 
 #[derive(Serialize)]
 struct ErrorBody {
     error: &'static str,
     detail: String,
+    /// Contracts §3.1's error body: `retry_after_s` is optional and, until this task, unused —
+    /// present only on `Backpressure`, so every other error body stays byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_s: Option<u64>,
 }
+
+/// D-E: `Retry-After` is fixed at 1 second, never a knob — the same figure the body's
+/// `retry_after_s` carries, so a caller reading either agrees with the other.
+const RETRY_AFTER_SECS: u64 = 1;
 
 impl ApiError {
     fn parts(&self) -> (StatusCode, &'static str, String) {
@@ -70,6 +86,11 @@ impl ApiError {
                 "fail-closed",
                 detail.clone(),
             ),
+            ApiError::Backpressure => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "backpressure",
+                "the server is at its compute-admission bound; retry shortly".to_string(),
+            ),
         }
     }
 }
@@ -77,14 +98,27 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, detail) = self.parts();
-        (
+        // `retry_after_s` and the `Retry-After` header carry the same fixed value and appear
+        // only on `Backpressure` (D-E) — every other error body stays byte-identical to before
+        // this task, since `ErrorBody::retry_after_s` is `skip_serializing_if` `None`.
+        let retry_after_s = matches!(self, ApiError::Backpressure).then_some(RETRY_AFTER_SECS);
+        let mut response = (
             status,
             Json(ErrorBody {
                 error: code,
                 detail,
+                retry_after_s,
             }),
         )
-            .into_response()
+            .into_response();
+        if let Some(secs) = retry_after_s {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_str(&secs.to_string())
+                    .expect("a decimal-digit string is always a valid header value"),
+            );
+        }
+        response
     }
 }
 
@@ -106,18 +140,15 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // the same leak `map_store_error` closes, reached through the engine's error enum instead
         // of directly. One sanitiser for both doors.
         store_or_io @ (EngineError::Store(_) | EngineError::Io(_)) => map_store_error(store_or_io),
-        // D-G (task 1 of the concurrency workstream): a concurrent request is already building
-        // this session's row projection. The honest response is 429 with `Retry-After` — a later
-        // task wires that mapping. Until then this takes the fail-closed 500 arm explicitly
-        // (never fail-open, but not yet the retryable signal it should be) — named here rather
-        // than left to fall into `other` below, so this transitional state is visible at the
-        // call site rather than silently inherited from the catch-all.
-        building @ EngineError::ProjectionBuilding => ApiError::FailClosed(building.to_string()),
-        // D-G (task 2 of the concurrency workstream, lifecycle §3.3): the fragment-cache twin of
-        // the arm above — a concurrent `authorise` call is already building this credential's
-        // mask fragment. Same transitional rule: named explicitly, fail-closed 500 today, HTTP
-        // 429 + `Retry-After` once a later task wires that mapping.
-        building @ EngineError::FragmentBuilding => ApiError::FailClosed(building.to_string()),
+        // D-G / Task 4: a concurrent request is already building this session's row projection.
+        // The single-flight cache never blocks a second caller (D-G's non-blocking-waiters
+        // rule), so the honest response is 429 `backpressure` with `Retry-After: 1` — by the
+        // client's retry the slot is warm. Named explicitly rather than left to the catch-all so
+        // this mapping stays visible at the call site.
+        EngineError::ProjectionBuilding => ApiError::Backpressure,
+        // D-G / Task 4 (lifecycle §3.3): the fragment-cache twin of the arm above — a concurrent
+        // `authorise` call is already building this credential's mask fragment. Same mapping.
+        EngineError::FragmentBuilding => ApiError::Backpressure,
         other => ApiError::FailClosed(other.to_string()),
     }
 }
@@ -204,23 +235,56 @@ mod tests {
         );
     }
 
-    /// D-G, transitional: `ProjectionBuilding` is explicitly named in `map_engine_error`'s match
-    /// (not caught only by the wildcard arm) and takes the fail-closed 500 arm — honest, never
-    /// fail-open, pending the later task that maps it to 429 + `Retry-After`.
+    /// D-G / Task 4: `ProjectionBuilding` is explicitly named in `map_engine_error`'s match (not
+    /// caught only by the wildcard arm) and now maps to 429 `backpressure` — a concurrent
+    /// single-flight build never blocks, so the honest response is retryable, not fail-closed.
     #[test]
-    fn map_engine_error_takes_projection_building_to_the_fail_closed_arm() {
+    fn map_engine_error_takes_projection_building_to_backpressure() {
         let (status, code, _) = map_engine_error(EngineError::ProjectionBuilding).parts();
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(code, "fail-closed");
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(code, "backpressure");
     }
 
-    /// D-G, transitional (task 2): `FragmentBuilding` is explicitly named in `map_engine_error`'s
-    /// match (not caught only by the wildcard arm) and takes the same fail-closed 500 arm as
-    /// `ProjectionBuilding`, pending the later task that maps both to 429 + `Retry-After`.
+    /// D-G / Task 4: `FragmentBuilding` is explicitly named in `map_engine_error`'s match and
+    /// maps to the same 429 `backpressure` arm as `ProjectionBuilding`.
     #[test]
-    fn map_engine_error_takes_fragment_building_to_the_fail_closed_arm() {
+    fn map_engine_error_takes_fragment_building_to_backpressure() {
         let (status, code, _) = map_engine_error(EngineError::FragmentBuilding).parts();
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(code, "fail-closed");
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(code, "backpressure");
+    }
+
+    /// D-E: a `Backpressure` response carries both the `Retry-After: 1` header and the
+    /// `retry_after_s: 1` body field, fixed, so a caller reading either agrees with the other.
+    #[test]
+    fn backpressure_carries_retry_after_header_and_body_field() {
+        let response = ApiError::Backpressure.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+    }
+
+    /// D-E: every OTHER error body stays byte-identical to before this task — `retry_after_s` is
+    /// `skip_serializing_if Option::is_none`, so a non-backpressure error's JSON body must not
+    /// gain the field at all.
+    #[test]
+    fn non_backpressure_errors_omit_retry_after_s_from_the_body() {
+        let (_, code, _) = ApiError::BadCredential.parts();
+        assert_eq!(code, "bad-credential");
+        let body = ErrorBody {
+            error: code,
+            detail: "x".to_string(),
+            retry_after_s: None,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(
+            !json.contains("retry_after_s"),
+            "non-backpressure body must omit retry_after_s entirely, got: {json}"
+        );
     }
 }

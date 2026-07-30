@@ -562,7 +562,18 @@ async fn status(
     // who could reach the control listener at all, which may be loopback TCP, not only a unix
     // socket (config.rs's `ControlListen::Tcp`).
     state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
+    // D-B: the viewer/session admission gate's gauges. `in_flight`/`waiting` are read live off
+    // the semaphores; `shed_total` is a single process-wide counter — no per-principal labels
+    // anywhere on this plane (SA §9).
+    let gate = state.compute_gate.status();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
+        "compute": {
+            "admission": gate.admission,
+            "queue": gate.queue,
+            "in_flight": gate.in_flight,
+            "waiting": gate.waiting,
+            "shed_total": gate.shed_total,
+        },
     })))
 }
