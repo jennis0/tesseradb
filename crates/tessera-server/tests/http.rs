@@ -2684,6 +2684,17 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
 /// other broken connection: axum/hyper notice the peer went away and drop the handler's own
 /// future, which is the ONLY signal this transport gives for "the client left" and exactly what
 /// `CancelGuard` (`tessera-server::viewer`) is wired to.
+///
+/// **What this test does NOT claim.** Like the engine-level timing test
+/// (`cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes` in
+/// `tessera-engine`'s `tests/viewport.rs`), this does not pin down which of `Engine::viewport`'s
+/// three checkpoints the disconnect is caught at — `poll_until_in_flight(&server, 1)` only proves
+/// the request has been admitted and started running compute, not how far into the sweep it has
+/// gotten by the time `abort()` fires. The disconnect could equally land at the pre-compose
+/// checkpoint, before any tile. This test's value is observing permit release end to end (the
+/// drop-guard flips, SOME checkpoint catches it, the gate frees up) rather than proving the
+/// per-tile check specifically fires mid-sweep; per-tile placement is a code-review concern, per
+/// the D-C design brief.
 #[tokio::test]
 async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() {
     let tmp = TempDir::new().unwrap();

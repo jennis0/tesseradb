@@ -2250,22 +2250,30 @@ fn absent_cancel_token_never_aborts() {
 }
 
 /// D-C: cancellation flipped from another thread while a genuinely multi-tile, multi-millisecond
-/// sweep is running aborts it well before the full sweep would have completed — evidence that the
-/// per-tile check actually interrupts in-flight work, not only ever observed before the first
-/// tile starts.
+/// sweep is running aborts it well before the full sweep would have completed.
+///
+/// **What this test does NOT claim.** It does not assert, and cannot reliably force, which of the
+/// three checkpoints (pre-compose, pre-theta-anchor, top-of-tile-loop) catches the flip. The
+/// canceller thread's entire job is one atomic store released from a `Barrier`, and that store can
+/// land anywhere relative to the engine call's own progress — including before the engine call has
+/// even reached `compose`. Warming the cancelled run's session (a cheap request first, building its
+/// row projection) removes the one genuinely slow thing that could precede the checkpoints and so
+/// makes it *more likely* the flip lands during the tile loop rather than before it, but this is a
+/// bias, not a guarantee, and the assertions below hold either way — `cancelled_elapsed` is small
+/// whether the flip is caught pre-compose or mid-sweep. Proving the per-tile check specifically
+/// exists and is correctly placed is left to code review of `Engine::viewport`'s call sites, which
+/// the D-C design brief explicitly sanctions ("a unit-level check that the per-tile check exists
+/// ... is NOT worth adding API for ... rely on code review for the per-tile placement").
 ///
 /// **Self-scaling, not a sleep-based guess.** `baseline_elapsed` is this run's own measured time
 /// for the full, uncancelled 16-tile sweep (`zoom = 2`, `underlay_offset = 8` — 4^8 = 65536
 /// sub-cell evaluations per tile, ~1.05M total; measured at ~270ms in this task's tuning run,
-/// comfortably above the floor asserted below). The cancelled run races a canceller thread whose
-/// ENTIRE job is one atomic store, released from the same `Barrier` the engine call starts from —
-/// that store is overwhelmingly likely to land before the engine call has done more than a tile or
-/// two of a sixteen-tile sweep, so `cancelled_elapsed` should be a small fraction of
-/// `baseline_elapsed` regardless of exactly which of the three checkpoints caught it (measured at
-/// ~4ms cancelled against ~270ms baseline in this task's tuning run — comfortably inside the /2
-/// bound asserted below, with wide margin to spare).
+/// comfortably above the floor asserted below). `cancelled_elapsed` should be a small fraction of
+/// `baseline_elapsed` regardless of which checkpoint caught it (measured at ~4ms cancelled against
+/// ~270ms baseline in this task's tuning run — comfortably inside the /2 bound asserted below, with
+/// wide margin to spare).
 #[test]
-fn cancel_flipped_from_another_thread_aborts_a_multi_tile_sweep_before_it_completes() {
+fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -2284,7 +2292,7 @@ fn cancel_flipped_from_another_thread_aborts_a_multi_tile_sweep_before_it_comple
 
     // Baseline: an uncancelled full sweep over a fresh session, so `baseline_elapsed` reflects
     // this machine's real speed for the whole 16-tile workload (cold row-projection build
-    // included, exactly like the cancelled run below).
+    // included, exactly like the cancelled run below before its own warm-up).
     let baseline_session = engine.authorise(&full_coverage_credential()).unwrap();
     let baseline_start = std::time::Instant::now();
     engine.viewport(&baseline_session, request()).unwrap();
@@ -2295,9 +2303,18 @@ fn cancel_flipped_from_another_thread_aborts_a_multi_tile_sweep_before_it_comple
          test's interruption scenario -- widen the underlay offset or the tile count"
     );
 
-    // A fresh session (a fresh `token_id`, so a fresh, cold row-projection cache key) for the
-    // cancelled run — symmetric with the baseline above, not warmed by it.
+    // A fresh session for the cancelled run — a fresh `token_id`, so a fresh row-projection cache
+    // key, deliberately warmed below (unlike the baseline session above) so the only slow work
+    // left ahead of the checkpoints is the tile loop itself. See this test's doc for why this only
+    // biases which checkpoint catches the flip rather than guaranteeing it lands mid-loop.
     let session = engine.authorise(&full_coverage_credential()).unwrap();
+    engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 1),
+        )
+        .unwrap();
+
     let cancel = CancelToken::new();
     let barrier = Arc::new(std::sync::Barrier::new(2));
 
