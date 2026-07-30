@@ -1932,10 +1932,22 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
 /// plus one bitmap range-count, independent of corpus size), not via corpus size — so the fixture
 /// stays at the file's default `N_ITEMS` and builds in the same sub-second time every other test
 /// here does. `offset = 12` at `zoom = 0` (one tile, so the tile-count bound never engages) asks
-/// for `4^12 ≈ 16.8M` sub-cell evaluations, which reliably takes several seconds even in this
-/// debug-profile test binary — comfortably clearing the `/healthz` bound below even on a heavily
-/// loaded CI runner, since `/healthz` does no engine work at all and the two are asserted against
-/// bounds an order of magnitude apart.
+/// for `4^12 ≈ 16.8M` sub-cell evaluations.
+///
+/// **The passing (post-refactor) bound is self-scaling, not a fixed wall-clock bet.** A fixed
+/// `healthz_elapsed < 1s` assumed this debug-profile binary's absolute speed; on a slower or more
+/// loaded runner the sweep itself takes longer, and there is no reason `/healthz`'s bound should
+/// stay pinned to 1s while the workload it is racing against grows. Instead this asserts
+/// `healthz_elapsed < viewport_elapsed / 4`, computed from the *same run*'s own measurements:
+/// `/healthz` does no engine work at all (a constant in-memory response) and runs on a different
+/// OS thread than the viewport's `spawn_blocking` closure post-refactor, so its cost is bounded by
+/// ambient connection/scheduling overhead only — independent of how long the sweep happens to take
+/// on this particular machine. A quarter is generous headroom over that overhead on any runner,
+/// while still failing loudly if the reactor were starved for anywhere close to the sweep's own
+/// duration. The `viewport_elapsed > 200ms` floor below is a much weaker, absolute sanity check
+/// only — it exists so a degenerate near-zero workload (e.g. a future edit that shrinks `offset`)
+/// cannot make the ratio pass without genuinely engineering slowness — it is not the bound this
+/// test relies on for its pass/fail signal.
 #[tokio::test]
 async fn healthz_stays_prompt_while_a_long_viewport_runs() {
     let tmp = TempDir::new().unwrap();
@@ -1978,11 +1990,27 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
         (resp.status(), start.elapsed())
     });
 
-    // Not load-bearing for correctness (see this test's doc: the viewport task's poll, once
-    // started, cannot be interrupted on this runtime either way) — yielding here just makes the
-    // intent readable: this `/healthz` call races an already-in-flight slow request, not a
-    // hypothetical one.
-    tokio::task::yield_now().await;
+    // A short, empirically-bounded poll rather than a single `yield_now()`: one yield already
+    // reliably gets the freshly-`tokio::spawn`ed viewport task its first turn on this runtime (a
+    // newly spawned task is highly likely to run next), but a couple more give the scheduler a
+    // little extra room to actually get it moving through connect/accept/parse before this task's
+    // own `/healthz` clock starts, without over-polling.
+    //
+    // **This number is deliberately small, and was tuned, not guessed.** Pre-refactor, once the
+    // viewport task's poll reaches the synchronous handler body it runs to completion in that
+    // same turn with no further yield -- there is no observable "started but not finished" state
+    // to poll for. So more polling here does not make the wait-for-start more precise, it just
+    // gives the scheduler more chances to run the *entire* pre-refactor request (client connect
+    // through server response) to completion before `/healthz` is ever sent, which would silently
+    // stop this test from racing anything at all. Measured directly against the pre-refactor code
+    // (temporarily reverting the four `src/` files this task changes): looping 1 or 2 times still
+    // reliably starves `/healthz` (this test correctly fails); looping 3 or more times reliably
+    // lets the whole pre-refactor viewport request finish first, turning this into a no-op race
+    // every time (this test wrongly passes). `2` is the largest value on the correct side of that
+    // measured boundary.
+    for _ in 0..2 {
+        tokio::task::yield_now().await;
+    }
 
     let healthz_start = std::time::Instant::now();
     let healthz_resp = server
@@ -1992,20 +2020,22 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
         .await
         .unwrap();
     let healthz_elapsed = healthz_start.elapsed();
-
     assert_eq!(healthz_resp.status(), 200);
-    assert!(
-        healthz_elapsed < std::time::Duration::from_secs(1),
-        "/healthz took {healthz_elapsed:?} while a viewport request was in flight -- the reactor \
-         was starved"
-    );
 
     let (viewport_status, viewport_elapsed) = viewport_task.await.unwrap();
     assert_eq!(viewport_status, 200);
+
+    // Weak absolute sanity floor only -- see this test's doc for why the real pass/fail signal is
+    // the relative bound below, not this one.
     assert!(
-        viewport_elapsed > std::time::Duration::from_secs(1),
+        viewport_elapsed > std::time::Duration::from_millis(200),
         "the viewport request finished in {viewport_elapsed:?}, too fast to exercise this test's \
          starvation scenario -- widen the underlay offset"
+    );
+    assert!(
+        healthz_elapsed < viewport_elapsed / 4,
+        "/healthz took {healthz_elapsed:?}, more than a quarter of the {viewport_elapsed:?} the \
+         concurrent viewport request took -- the reactor was starved"
     );
 }
 
@@ -2037,16 +2067,34 @@ const CONCURRENT_INGEST_ROWS_PER_BATCH: u64 = 40_000;
 /// and cannot be interrupted" alone: `CONCURRENT_INGEST_BATCHES` separate connections are
 /// accepted in whatever order the kernel happens to deliver their readiness, so pre-refactor the
 /// suppress request is not guaranteed to queue behind literally all of them — only behind
-/// whichever are already executing or queued ahead of it. The margin comes from cost, not
-/// ordering: each `CONCURRENT_INGEST_ROWS_PER_BATCH`-row batch's synchronous handler work is
-/// measured (this test's tuning run) at ~300ms in this debug-profile binary, so
-/// `CONCURRENT_INGEST_BATCHES` of them sum to ~2.4s of reactor-monopolising work pre-refactor —
-/// even a suppress request that gets scheduled unusually early among that flurry of connections
-/// would need implausible luck to be serviced inside the 1s bound below, since it still shares
-/// the single reactor thread with whichever ingest handler(s) the scheduler picked first. All
-/// `CONCURRENT_INGEST_BATCHES` requests are constructed and hand off to `tokio::spawn` before the
-/// suppress request is ever sent, so it always races genuinely in-flight ingests, not
-/// hypothetical future ones.
+/// whichever are already executing or queued ahead of it. All `CONCURRENT_INGEST_BATCHES`
+/// requests are constructed and hand off to `tokio::spawn` before the suppress request is ever
+/// sent, so it always races genuinely in-flight ingests, not hypothetical future ones.
+///
+/// **The passing (post-refactor) bound is self-scaling, not a fixed wall-clock bet** — this was
+/// flagged in review: a fixed `suppress_elapsed < 1s` assumes this debug-profile binary's absolute
+/// speed, but post-refactor the suppress closure still contends with up to `CONCURRENT_INGEST_
+/// BATCHES` blocking-pool threads for CPU and for the (real, intentional, unfair
+/// `std::sync::Mutex`) WAL lock each `accept_ingest` holds across its append+fsync — on a
+/// slow-fsync or few-core runner that contention genuinely grows, and a fixed 1s bound could trip
+/// for reasons that have nothing to do with this task's bug. So this asserts
+/// `suppress_elapsed < total_ingest_elapsed / 2`, where `total_ingest_elapsed` is this same run's
+/// own wall-clock time for every concurrent ingest batch to complete (measured from the same
+/// `Instant` the batches were spawned from, to the last one's `JoinHandle` resolving). That is a
+/// fair comparison because both numbers absorb the same runner's slowness together: whatever a
+/// batch's parse/resolve/WAL cost is on this machine right now, `total_ingest_elapsed` reflects
+/// roughly that cost repeated `CONCURRENT_INGEST_BATCHES` times (parse/resolve run in parallel
+/// across the blocking pool, but the WAL section is serialised by the mutex, so the total is
+/// dominated by something like `CONCURRENT_INGEST_BATCHES` WAL sections plus overhead), while the
+/// suppress request post-refactor only ever has to reach the reactor (bearer check, fast) and
+/// then wait for **at most one** ingest's WAL critical section before it gets the mutex itself —
+/// a small, close-to-constant fraction of the total regardless of how slow that one section is on
+/// this runner. `/2` leaves comfortable headroom over that expected ~1-in-`CONCURRENT_INGEST_
+/// BATCHES` fraction even allowing for the WAL mutex's lack of strict fairness. Pre-refactor this
+/// stays comfortably RED: the suppress request cannot even begin until the reactor is free, so it
+/// queues behind a large share of the full (parse+resolve+WAL) handler bodies, not just one WAL
+/// section — measured at ~3.0s suppress against a ~3.3s total in this task's tuning run, i.e. the
+/// ratio sits near 1, not under 1/2.
 #[tokio::test]
 async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
     let tmp = TempDir::new().unwrap();
@@ -2063,6 +2111,10 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
     )
     .await;
 
+    // Starts here, not just before the suppress request below: `total_ingest_elapsed` (used for
+    // the self-scaling bound at the end of this test) must cover every batch's full wall-clock
+    // life, spawn to completion, not just the portion that overlaps the suppress request.
+    let ingest_start = std::time::Instant::now();
     let mut ingest_tasks = Vec::with_capacity(CONCURRENT_INGEST_BATCHES as usize);
     for batch in 0..CONCURRENT_INGEST_BATCHES {
         let rows: Vec<(u64, f32, f32, &str)> = (0..CONCURRENT_INGEST_ROWS_PER_BATCH)
@@ -2106,13 +2158,7 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
         .await
         .unwrap();
     let suppress_elapsed = suppress_start.elapsed();
-
     assert_eq!(suppress_resp.status(), 200);
-    assert!(
-        suppress_elapsed < std::time::Duration::from_secs(1),
-        "/control/changes suppress took {suppress_elapsed:?} while {CONCURRENT_INGEST_BATCHES} \
-         ingest batches were in flight -- it queued behind them on the reactor"
-    );
 
     for task in ingest_tasks {
         assert_eq!(
@@ -2121,4 +2167,15 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
             "every concurrent ingest batch should still succeed"
         );
     }
+    // Only measured once every batch has actually finished — see this test's doc for why this
+    // (rather than a fixed wall-clock bound) is what `suppress_elapsed` is compared against.
+    let total_ingest_elapsed = ingest_start.elapsed();
+
+    assert!(
+        suppress_elapsed < total_ingest_elapsed / 2,
+        "/control/changes suppress took {suppress_elapsed:?}, more than half of the \
+         {total_ingest_elapsed:?} the {CONCURRENT_INGEST_BATCHES} concurrent ingest batches took \
+         to all complete -- it queued behind them on the reactor instead of reaching its own \
+         spawn_blocking call promptly"
+    );
 }
