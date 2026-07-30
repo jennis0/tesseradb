@@ -11,9 +11,26 @@
 //! argument and the two evaluation routes. This module's job is only to resolve the per-request
 //! parameters (notably θ's anchor, which **must** be the composed visible cardinality — see
 //! [`crate::select::Threshold::anchor`] for the I2 argument) and to gather what selection returns.
+//!
+//! **D-D/D-F: the per-tile body of the count-and-select loop runs on the engine's shared rayon
+//! pool.** [`tile_result`] is the pure per-tile function — no `&self`, no engine method, nothing
+//! but `&`-borrowed inputs and an owned result — that [`Engine::viewport`] fans out over every
+//! tile via `self.pool.install(|| tiles.par_iter().zip(..).map(tile_result).collect::<Vec<_>>())`.
+//! The collect target is deliberately `Vec<Result<Option<TileResult>, EngineError>>`, never
+//! `Result<Vec<TileResult>, EngineError>`: a `Result` collect drops rayon onto its unindexed
+//! reduce path, and this response's byte-equality claim (same request, same bytes, at
+//! `compute_threads = 1` or `8`) would then rest on an implementation detail of that reduce
+//! strategy rather than on anything stated here. Collecting `Vec<Result<..>>` stays on rayon's
+//! *indexed* collect path, so the output vector's order equals the input tiles' order **by
+//! construction** — not by convention, not by observation of the current rayon version. A serial,
+//! in-order fold over that vector (still in `Engine::viewport`) then short-circuits on the first
+//! `Err` (D-C's per-tile cancellation check, moved inside `tile_result` — see its doc) and
+//! concatenates `tile_counts`/`points`/`sub_cells` exactly as the pre-Task-6 serial loop did.
 
 use std::ops::Range;
 use std::sync::Arc;
+
+use rayon::prelude::*;
 
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Extent, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
@@ -23,10 +40,10 @@ use tessera_store::{tile_ranges_all, tile_ranges_within};
 use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 
 use crate::cancel::CancelToken;
-use crate::compose::{compose, visible_to, RowProjection};
+use crate::compose::{compose, visible_to, EffectiveMask, RowProjection};
 use crate::select::{SelectParams, Selection, Threshold};
 use crate::session::{Engine, EngineError, Result, Session};
-use crate::timing::{Probe, StageTimings};
+use crate::timing::{Probe, StageTimings, TileProbe, TileStats};
 use crate::Generation;
 
 /// One declared-scalar value carried alongside a point (mirrors `tessera_spatial::ScalarValue`'s
@@ -430,6 +447,18 @@ impl Engine {
         // this back to "lock, check, build, insert, unlock"; the F4 memo names exactly that as
         // the anti-fix. A concurrent request racing the *same* key while this build is in flight
         // does not wait for it — it gets `EngineError::ProjectionBuilding` and retries.
+        //
+        // **Guardrail (D-D/D-F): nothing reachable from a rayon worker below may touch this
+        // cache.** `base` is resolved once, here, on the calling thread, strictly before the
+        // parallel tile sweep begins, and is then only *borrowed* (via `compose`'s `EffectiveMask`)
+        // by every `tile_result` call — never re-fetched or re-built per tile. If a future change
+        // ever did call `get_or_build` from inside a rayon worker, it would still be safe rather
+        // than corrupting: `SingleFlightCache`'s state machine (this module's doc above) has no
+        // notion of "friendly" re-entrancy, so a worker racing an in-flight build on the *same*
+        // key would simply see `Slot::Building` and get back `EngineError::ProjectionBuilding`,
+        // same as any other concurrent caller. That safety is incidental, not a licence — the
+        // design intent is that this cache is touched once per request, from the serial prefix,
+        // full stop.
         let base: Arc<RowProjection> = self
             .row_projection_cache
             .get_or_build(cache_key, || {
@@ -568,81 +597,59 @@ impl Engine {
         };
         probe.lap(|t| &mut t.tile_ranges_ns);
 
-        for (tile, range) in tiles.iter().zip(ranges) {
-            // D-C checkpoint: once per tile, at the top of the loop — a cancellation observed here
-            // aborts before this tile's own count/select/gather (and any underlay sub-cells) run,
-            // so the extra work done past the moment of cancellation is bounded by at most one
-            // tile's worth (the one already in flight when the flip happened).
-            check_cancelled(&cancel)?;
+        // D-D/D-F: the parallel tile sweep, on the ONE shared pool this engine built at
+        // `Engine::open` — no second, per-request pool, no nested throttling (D-D). Every input
+        // below is borrowed or `Copy`: `mask`/`segment`/`declared_scalars`/`params` are the
+        // generation- and request-derived values already resolved above (lifecycle §1.1 — nothing
+        // is re-loaded per tile), and `cancel` is the D-C token, checked inside `tile_result` at
+        // the very top (moved there from the old loop's first line — Task 5).
+        //
+        // `with_min_len(TILE_PAR_MIN_LEN)` — see that constant's doc for the number. Collecting
+        // `Vec<Result<Option<TileResult>>>` (this crate's `Result<T>` alias for
+        // `std::result::Result<T, EngineError>`) rather than `Result<Vec<TileResult>>` is
+        // load-bearing for the byte-equality claim below — see this module's doc.
+        let tile_outcomes: Vec<Result<Option<TileResult>>> = self.pool.install(|| {
+            tiles
+                .par_iter()
+                .zip(ranges.into_par_iter())
+                .with_min_len(TILE_PAR_MIN_LEN)
+                .map(|(tile, range)| {
+                    tile_result(
+                        tile,
+                        range,
+                        &mask,
+                        segment,
+                        declared_scalars,
+                        &params,
+                        zoom,
+                        underlay_offset,
+                        &cancel,
+                    )
+                })
+                .collect::<Vec<Result<Option<TileResult>>>>()
+        });
+        // D-E: the parallel section's own wall time is not a named stage — it is already fully
+        // accounted for, per tile, inside each `TileResult::stats` (folded below) — so this resets
+        // the clock without charging the stretch to whatever lap runs next, rather than leaving it
+        // to be silently misattributed.
+        probe.skip();
 
-            let Some(segment) = segment else { continue };
-
-            probe.count(|t| &mut t.rows_in_ranges, range.len() as u64);
-
-            let visible = mask.count_range(range.clone());
-            probe.lap(|t| &mut t.count_ns);
-
-            if visible == 0 {
-                // Skip empty: no count row, no selection work for a tile with nothing visible.
+        // D-F: the serial, IN-ORDER fold. `tile_outcomes`' order equals `tiles`' order by
+        // construction (the indexed collect path above — this module's doc), so this reconstructs
+        // exactly the concatenation the pre-Task-6 serial loop produced. Short-circuits on the
+        // first `Err` (D-C's `Cancelled`, or any other per-tile error): every tile's own work is
+        // already done by this point (the parallel sweep does not itself short-circuit — that is
+        // the point of collecting `Vec<Result<..>>` rather than `Result<Vec<..>>`), so bailing out
+        // here costs only the remaining `Result`s' worth of `?`, never any recomputation.
+        for outcome in tile_outcomes {
+            let Some(tr) = outcome? else {
                 continue;
-            }
-            probe.count(|t| &mut t.tiles_nonempty, 1);
-            probe.count(|t| &mut t.sigma_visible, visible);
-
-            let selected = Selection::of(&mask, segment, range.clone(), &params, visible);
-            probe.lap(|t| &mut t.select_ns);
-            // Counted by `Selection::of` itself, inside the loops that do the reading — not from
-            // `visible`, which would make the `visited == sigma_visible` cross-check a tautology.
-            probe.count(|t| &mut t.select_rows_visited, selected.rows_visited);
-
-            tile_counts.push(TileCount {
-                tile: tile.prefix,
-                visible,
-                // Phase 1 has no filters (Reference Sheet R5): matched == visible everywhere.
-                matched: visible,
-                served: selected.rows.len() as u64,
-            });
-
-            points.extend(
-                selected
-                    .rows
-                    .into_iter()
-                    .map(|row| row_to_point(segment, row, declared_scalars)),
-            );
-            probe.lap(|t| &mut t.gather_ns);
-
-            // §3.3: the tile's sub-cells, each an exact masked count over a contiguous Morton
-            // range. Only non-empty cells are emitted, exactly as empty tiles are skipped above.
-            if let Some(offset) = underlay_offset {
-                let sub_depth = zoom + offset;
-                let first = tile.prefix << (2 * offset as u32);
-                for i in 0..(1u64 << (2 * offset as u32)) {
-                    let cell = first + i;
-                    let sub_tile = Tile {
-                        prefix: cell,
-                        depth: sub_depth,
-                    };
-                    // Search only the parent's range: sub-cells partition their parent, so this is
-                    // exactly `tile_ranges` would return, over tens of kilobytes already touched by
-                    // the parent's own `count_range` rather than ~30 levels of a 4 GB mmap.
-                    let count =
-                        mask.count_range(tile_ranges_within(segment, &sub_tile, range.clone()));
-                    if count > 0 {
-                        sub_cells.push(SubCellCount { cell, count });
-                    }
-                }
-                probe.lap(|t| &mut t.underlay_ns);
-                // Evaluated, not emitted: the gap between this and `sub_cells.len()` is the work
-                // spent discovering that a sub-cell was empty, which on a clustered corpus is most
-                // of it.
-                probe.count(
-                    |t| &mut t.underlay_cells_evaluated,
-                    1u64 << (2 * offset as u32),
-                );
-            }
+            };
+            tr.stats.fold_into(&mut probe.t);
+            tile_counts.push(tr.count);
+            points.extend(tr.points);
+            sub_cells.extend(tr.sub_cells);
         }
-
-        probe.count(|t| &mut t.points_gathered, points.len() as u64);
 
         Ok(ViewportOut {
             pin: effective_pin,
@@ -652,6 +659,142 @@ impl Engine {
             timings: probe.finish(),
         })
     }
+}
+
+/// D-F's per-tile scheduling grain: the number of tiles rayon hands to one worker before it will
+/// split the range again. A single-digit constant, deliberately not calibrated by its own probe
+/// (Phase 0's probes covered corpus/mask shape, not this scheduling knob) but argued from the
+/// shape of the workload: measured per-tile cost is highly non-uniform — an empty-tile skip
+/// (`tile_result` returning `Ok(None)` after one `count_range`) is a handful of comparisons, while
+/// a dense tile at a high cap is a bitmap-range read plus a bounded heap sort — so work-stealing
+/// needs to be able to move *individual* tiles between workers rather than being locked into a few
+/// large, coarse chunks; a chunk of, say, 64 tiles handed to one worker while the other workers'
+/// chunks are all-empty would sit unstolen for the length of that chunk. `1` (rayon's own default
+/// for `par_iter` without `with_min_len`) avoids that entirely but pays a scheduling/steal-queue
+/// overhead on every single tile, including the very common empty-tile skip that is otherwise
+/// nearly free. `4` is a conservative middle point: small enough that a viewport of a few hundred
+/// tiles still splits into dozens of independently-stealable chunks (so an unlucky worker with an
+/// all-empty run is never stuck for long), large enough to amortise the per-task overhead over the
+/// cheap tiles that dominate a sparse or clustered corpus.
+const TILE_PAR_MIN_LEN: usize = 4;
+
+/// One tile's contribution to a `/v1/viewport` response (D-F) — the pure per-tile body pulled out
+/// of what was, before this task, a serial `for` loop over `Engine::viewport`'s tiles. Safe to
+/// call concurrently from any rayon worker: every parameter is `&`-borrowed or `Copy`, nothing
+/// here reaches back into `Engine` or any state shared across tiles (see the guardrail comment at
+/// the row-projection cache call site in `Engine::viewport`, above), and the return value is
+/// owned outright by the caller — no shared mutable state, no interior mutability, nothing to
+/// synchronise.
+///
+/// `Ok(None)` — an empty tile: no segment for this slice, or nothing visible in `range`. Exactly
+/// the "skip empty" rule the old inline loop applied (no count row, no selection work). `Err`
+/// carries [`EngineError::Cancelled`] from the D-C per-tile cancellation checkpoint below (moved
+/// here, unchanged, from the top of the old loop body — Task 5) — checked first, so a flip
+/// observed here costs only the one atomic read, never any of this tile's own
+/// count/select/gather/underlay work.
+#[allow(clippy::too_many_arguments)]
+fn tile_result(
+    tile: &Tile,
+    range: Range<u32>,
+    mask: &EffectiveMask,
+    segment: Option<&SegmentData>,
+    declared_scalars: &[DeclaredScalar],
+    params: &SelectParams,
+    zoom: u8,
+    underlay_offset: Option<u8>,
+    cancel: &Option<CancelToken>,
+) -> Result<Option<TileResult>> {
+    check_cancelled(cancel)?;
+
+    let Some(segment) = segment else {
+        return Ok(None);
+    };
+
+    let mut stats = TileProbe::new();
+    stats.count(|t| &mut t.rows_in_ranges, range.len() as u64);
+
+    let visible = mask.count_range(range.clone());
+    stats.lap(|t| &mut t.count_ns);
+
+    if visible == 0 {
+        // Skip empty: no count row, no selection work for a tile with nothing visible — the same
+        // rule the old inline loop applied.
+        return Ok(None);
+    }
+    stats.count(|t| &mut t.tiles_nonempty, 1);
+    stats.count(|t| &mut t.sigma_visible, visible);
+
+    let selected = Selection::of(mask, segment, range.clone(), params, visible);
+    stats.lap(|t| &mut t.select_ns);
+    // Counted by `Selection::of` itself, inside the loops that do the reading — not from
+    // `visible`, which would make the `visited == sigma_visible` cross-check a tautology.
+    stats.count(|t| &mut t.select_rows_visited, selected.rows_visited);
+
+    let count = TileCount {
+        tile: tile.prefix,
+        visible,
+        // Phase 1 has no filters (Reference Sheet R5): matched == visible everywhere.
+        matched: visible,
+        served: selected.rows.len() as u64,
+    };
+
+    let points: Vec<PointOut> = selected
+        .rows
+        .into_iter()
+        .map(|row| row_to_point(segment, row, declared_scalars))
+        .collect();
+    stats.lap(|t| &mut t.gather_ns);
+    stats.count(|t| &mut t.points_gathered, points.len() as u64);
+
+    // §3.3: the tile's sub-cells, each an exact masked count over a contiguous Morton range. Only
+    // non-empty cells are emitted, exactly as empty tiles are skipped above.
+    let mut sub_cells = Vec::new();
+    if let Some(offset) = underlay_offset {
+        let sub_depth = zoom + offset;
+        let first = tile.prefix << (2 * offset as u32);
+        for i in 0..(1u64 << (2 * offset as u32)) {
+            let cell = first + i;
+            let sub_tile = Tile {
+                prefix: cell,
+                depth: sub_depth,
+            };
+            // Search only the parent's range: sub-cells partition their parent, so this is exactly
+            // `tile_ranges` would return, over tens of kilobytes already touched by the parent's
+            // own `count_range` rather than ~30 levels of a 4 GB mmap.
+            let sub_count = mask.count_range(tile_ranges_within(segment, &sub_tile, range.clone()));
+            if sub_count > 0 {
+                sub_cells.push(SubCellCount {
+                    cell,
+                    count: sub_count,
+                });
+            }
+        }
+        stats.lap(|t| &mut t.underlay_ns);
+        // Evaluated, not emitted: the gap between this and `sub_cells.len()` is the work spent
+        // discovering that a sub-cell was empty, which on a clustered corpus is most of it.
+        stats.count(
+            |t| &mut t.underlay_cells_evaluated,
+            1u64 << (2 * offset as u32),
+        );
+    }
+
+    Ok(Some(TileResult {
+        count,
+        points,
+        sub_cells,
+        stats: stats.t,
+    }))
+}
+
+/// One tile's parallel-sweep output — [`tile_result`]'s return payload, folded serially and
+/// in-order into the request's `tile_counts`/`points`/`sub_cells`/[`StageTimings`] by
+/// `Engine::viewport` (D-F). An implementation detail of the parallel sweep, not part of this
+/// crate's public API — `ViewportOut` is what callers see.
+struct TileResult {
+    count: TileCount,
+    points: Vec<PointOut>,
+    sub_cells: Vec<SubCellCount>,
+    stats: TileStats,
 }
 
 /// Gather one row's `entity_id`/`x`/`y`/declared scalars through `ColumnsRef` — zero-copy reads,

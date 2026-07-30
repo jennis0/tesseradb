@@ -17,6 +17,7 @@ members = [
 
 [workspace.dependencies]
 croaring = "2"
+rayon = "1"
 proptest = "1"
 arrow = { version = "59", default-features = false, features = ["ipc"] }
 tempfile = "3"

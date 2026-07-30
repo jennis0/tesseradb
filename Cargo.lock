@@ -2322,6 +2322,7 @@ dependencies = [
  "croaring",
  "parquet",
  "rand 0.8.7",
+ "rayon",
  "rustc-hash 1.1.0",
  "serde_json",
  "sha2",

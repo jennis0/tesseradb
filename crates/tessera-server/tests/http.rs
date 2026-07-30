@@ -163,6 +163,7 @@ fn default_engine_config() -> EngineConfig {
         max_underlay_offset: 4,
         max_underlay_cells: 8192,
         max_tiles_per_request: 262_144,
+        compute_threads: tessera_engine::default_compute_threads(),
     }
 }
 
@@ -1583,6 +1584,7 @@ fn concurrent_ingest_and_change_both_survive() {
                 max_underlay_offset: 4,
                 max_underlay_cells: 8192,
                 max_tiles_per_request: 262_144,
+                compute_threads: tessera_engine::default_compute_threads(),
             },
         )
         .expect("engine should open"),
@@ -2799,5 +2801,129 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
         200,
         "the gate's only slot should already be free after the disconnect -- a 429 here would \
          mean the permit leaked past the client's disconnect"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Concurrency — D-D/D-F intra-request rayon parallelism (Task 6)
+// ---------------------------------------------------------------------------------------------
+
+/// THE HEADLINE TEST, server-side (D-D/D-F): the full Arrow response **body** `POST /v1/viewport`
+/// returns is byte-for-byte identical whether `serve.compute_threads` is 1 or 8 — the same claim
+/// `tessera-engine`'s own
+/// `viewport_output_is_byte_identical_at_compute_threads_1_and_8` pins at the engine level,
+/// carried one layer further to what a real client actually receives on the wire, through
+/// `run_viewport`'s Arrow IPC framing (`viewer.rs`) and axum's response body.
+///
+/// Two servers, same bundle, differing only in `EngineConfig::compute_threads`; the same
+/// authorisation terms (so both sessions see the identical mask) and the identical request body.
+/// Only the response **body** is compared -- `x-tessera-server-us`, `x-tessera-admission-us` and
+/// (when enabled) `x-tessera-stage-ns` are wall-clock/CPU-time measurements of this specific run
+/// and are expected to differ between the two servers, and between runs of the same server; none
+/// of them are part of this byte-equality claim. `x-tessera-pin` IS compared -- it is derived from
+/// the bundle's own `(prefix, segments_version)`, not from timing, so it must agree too.
+#[tokio::test]
+async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let config_1 = EngineConfig {
+        compute_threads: 1,
+        ..default_engine_config()
+    };
+    let config_8 = EngineConfig {
+        compute_threads: 8,
+        ..default_engine_config()
+    };
+
+    let server_1 = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache-1"),
+        &tmp.path().join("wal-1.log"),
+        config_1,
+    )
+    .await;
+    let server_8 = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache-8"),
+        &tmp.path().join("wal-8.log"),
+        config_8,
+    )
+    .await;
+
+    let auth_1 = authorise(&server_1, &["0"]).await;
+    let token_1 = auth_1["token"].as_str().unwrap();
+    let auth_8 = authorise(&server_8, &["0"]).await;
+    let token_8 = auth_8["token"].as_str().unwrap();
+
+    // zoom=3 over the full extent: 64 candidate tiles, most non-empty over this fixture's
+    // `(e*37, e*53) % 1000` scatter across `N_ITEMS = 1000` -- multiple non-empty tiles, so the
+    // response's tile-order/point-concatenation ordering is actually exercised, plus an underlay
+    // request so that per-tile path runs across tiles too.
+    let body = serde_json::json!({
+        "slice": "s0", "zoom": 3, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 50,
+        "underlay_offset": 2
+    });
+
+    let resp_1 = server_1
+        .client
+        .post(server_1.viewer_url("/v1/viewport"))
+        .bearer_auth(token_1)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_1.status(), 200);
+    let pin_1 = resp_1
+        .headers()
+        .get("x-tessera-pin")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let bytes_1 = resp_1.bytes().await.unwrap();
+
+    let resp_8 = server_8
+        .client
+        .post(server_8.viewer_url("/v1/viewport"))
+        .bearer_auth(token_8)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_8.status(), 200);
+    let pin_8 = resp_8
+        .headers()
+        .get("x-tessera-pin")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let bytes_8 = resp_8.bytes().await.unwrap();
+
+    assert_eq!(
+        pin_1, pin_8,
+        "the pin must agree -- same bundle, same generation"
+    );
+
+    let (tiles, points) = decode_viewport(&bytes_1);
+    assert!(
+        tiles.len() > 1,
+        "need more than one non-empty tile to exercise cross-tile ordering, got {}",
+        tiles.len()
+    );
+    assert!(!points.is_empty(), "the fixture must return some points");
+
+    assert_eq!(
+        bytes_1, bytes_8,
+        "the full Arrow response body must be byte-for-byte identical regardless of \
+         compute_threads -- this is also the statement that the Python differential oracle and \
+         the conformance byte-scanner's vectors are unaffected: they consume exactly these bytes \
+         and know nothing about compute_threads"
     );
 }

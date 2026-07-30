@@ -86,6 +86,29 @@ pub struct EngineConfig {
     /// see [`Self::max_tiles_per_request`]) tile set by `4^offset`, so without this a single request
     /// can still ask for ~77k `count_range` calls and blow the 10 ms p99 latency gate.
     pub max_underlay_cells: usize,
+    /// D-D: the size of `Engine::open`'s single shared `rayon::ThreadPool`, which every admitted
+    /// request's tile loop `install`s onto (`Engine::viewport`, D-F). No second throttle exists
+    /// inside the engine — `tessera-server`'s admission gate (Task 4) already bounds how many
+    /// requests are concurrently *in* the engine at all, so this is sized to fill the machine, not
+    /// to further divide it.
+    ///
+    /// Mirrors `tessera-server::config`'s `serve.compute_threads` (D-B, same knob, same default —
+    /// [`default_compute_threads`]) so an embedder constructing this struct directly gets the same
+    /// "fill the machine" behaviour the server's config loader enforces. Unlike the server's config
+    /// loader, this struct does not refuse `0` itself (there is no fail-closed startup path at this
+    /// layer to refuse *through*) — `rayon::ThreadPoolBuilder::num_threads(0)` falls back to
+    /// rayon's own default (`RAYON_NUM_THREADS` or the logical core count), so a `0` here is
+    /// harmless rather than a zero-width pool that can run nothing.
+    pub compute_threads: usize,
+}
+
+/// D-D's default: fill the machine. Identical reasoning and identical fallback (`1`, never
+/// propagated — see `tessera-server::config::default_compute_threads`'s doc) to the server's own
+/// default, kept as a free function here so every non-server construction site (tests, benches,
+/// examples, embedders) gets the same "fill the machine" behaviour without having to know the
+/// number itself.
+pub fn default_compute_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
 /// One authorised viewer session: the credential's granted term set and the mask fragment it
@@ -192,6 +215,13 @@ pub enum EngineError {
     /// still-live connection (today it is not: the server's drop-guard only flips the token when
     /// the whole handler future is dropped, which also means nobody is left to read a response).
     Cancelled,
+    /// D-D: `Engine::open` failed to build the shared `rayon::ThreadPool` from
+    /// `EngineConfig::compute_threads` (e.g. a platform that refuses the requested thread count).
+    /// Fail-closed: an engine that cannot build its compute pool does not open at all — there is
+    /// no fallback to per-request ad hoc threading or to a serial tile loop, because either would
+    /// be a silent behaviour change the D-D design (one shared pool, no second throttle) does not
+    /// admit.
+    ThreadPoolBuild(String),
 }
 
 impl std::fmt::Display for EngineError {
@@ -233,6 +263,9 @@ impl std::fmt::Display for EngineError {
                  shortly"
             ),
             EngineError::Cancelled => write!(f, "request cancelled"),
+            EngineError::ThreadPoolBuild(detail) => {
+                write!(f, "failed to build the shared compute pool: {detail}")
+            }
         }
     }
 }
@@ -263,6 +296,12 @@ pub struct Engine {
     #[allow(clippy::type_complexity)]
     pub(crate) row_projection_cache:
         SingleFlightCache<(u64, String, u64), crate::compose::RowProjection>,
+    /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
+    /// onto (`Engine::viewport`). Built once, here, at open — never per request, and never a
+    /// second pool anywhere else in this crate (no nested throttling). `pool.install` from more
+    /// external (server-side) threads than this pool has workers only queues on rayon's injector;
+    /// it does not deadlock (D-D, verified in plan review).
+    pub(crate) pool: rayon::ThreadPool,
     pub(crate) config: EngineConfig,
     next_token_id: AtomicU64,
     /// The write-ahead log handle, kept open for future ingest/change acceptance (Task 13); not
@@ -461,6 +500,15 @@ impl Engine {
             auth_plugin_hash,
         ));
 
+        // D-D: build the shared compute pool now, not lazily on first request — a pool that
+        // cannot be built is an `Engine` that cannot serve any viewport, and that is a fact about
+        // this engine's *open*-time health, not a fact to discover on whichever request happens
+        // to be first (fail-closed: this engine simply does not open).
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.compute_threads)
+            .build()
+            .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?;
+
         let generation = Generation {
             prefix,
             segments_version,
@@ -478,6 +526,7 @@ impl Engine {
             postings,
             fragment_cache,
             row_projection_cache: SingleFlightCache::new(),
+            pool,
             config,
             next_token_id: AtomicU64::new(0),
             wal: Mutex::new(wal),
@@ -999,5 +1048,42 @@ impl ExternalIdIndex {
         high_water: u64,
     ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
         self.0.external_id_of_checked(entity, high_water)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// I13 pin (D-F): a panic inside `install`/`par_iter` on the engine's shared pool must
+    /// propagate to the caller — never be swallowed into a truncated `Ok`. `Engine::viewport`'s
+    /// parallel tile sweep runs on exactly this pool, built exactly this way (`Engine::open`'s
+    /// `rayon::ThreadPoolBuilder::new().num_threads(..).build()`), via `self.pool.install(...)`;
+    /// if a worker-thread panic never reached `viewport`'s caller, a panicking tile would produce
+    /// a silently-truncated 200 instead of the fail-closed 500 I13 requires (the server's
+    /// `JoinError` arm, already pinned by its own test — this test pins the engine-side half of
+    /// that chain: the pool itself does not eat the panic before it ever reaches `spawn_blocking`).
+    ///
+    /// Deliberately **not** a full `Engine::open` + fixture-bundle test with an injection hook
+    /// into `tile_result` — the brief this task implements against says explicitly that a
+    /// `#[cfg(test)]`-visible injection point in the real per-tile path is not wanted, because it
+    /// would let a test-only branch diverge from the code every real request runs. This is rayon's
+    /// own propagation guarantee, pinned against the identical construction `Engine::open` uses,
+    /// which is what `self.pool.install(...)` in `Engine::viewport` actually relies on.
+    #[test]
+    fn a_panic_inside_the_shared_pool_propagates_to_the_caller() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("pool should build");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.install(|| {
+                panic!("synthetic worker-thread panic");
+            })
+        }));
+
+        assert!(
+            result.is_err(),
+            "a panic inside install() must propagate to the caller, not be swallowed"
+        );
     }
 }

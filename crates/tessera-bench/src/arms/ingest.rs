@@ -377,6 +377,7 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     max_underlay_offset: 4,
                     max_underlay_cells: 8192,
                     max_tiles_per_request: 262_144,
+                    compute_threads: tessera_engine::default_compute_threads(),
                 },
             )?;
 
@@ -482,6 +483,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 max_underlay_offset: 4,
                 max_underlay_cells: 8192,
                 max_tiles_per_request: 262_144,
+                compute_threads: tessera_engine::default_compute_threads(),
             },
         )?;
         let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;

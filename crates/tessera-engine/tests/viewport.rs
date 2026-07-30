@@ -24,7 +24,9 @@ use tempfile::TempDir;
 
 use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{CancelToken, Engine, EngineConfig, EngineError, Session};
+use tessera_engine::{
+    default_compute_threads, CancelToken, Engine, EngineConfig, EngineError, Session,
+};
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord, WalRow};
 use tessera_plugin::Passthrough;
 use tessera_spatial::{morton_of, tiles_for_bbox, Extent};
@@ -74,6 +76,7 @@ fn config() -> EngineConfig {
         max_underlay_offset: 4,
         max_underlay_cells: 8192,
         max_tiles_per_request: 262_144,
+        compute_threads: default_compute_threads(),
     }
 }
 
@@ -545,6 +548,7 @@ fn theta_does_not_move_when_the_viewport_pans() {
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
+            compute_threads: default_compute_threads(),
         },
     )
     .unwrap();
@@ -617,6 +621,7 @@ fn no_visible_tile_is_ever_served_empty() {
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
+            compute_threads: default_compute_threads(),
         },
     )
     .unwrap();
@@ -1313,6 +1318,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
+            compute_threads: default_compute_threads(),
         },
     )
     .expect("engine should open the 2.4M bundle");
@@ -2340,5 +2346,95 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
         "the cancelled run took {cancelled_elapsed:?}, not meaningfully less than the \
          uncancelled sweep's {baseline_elapsed:?} -- cancellation does not appear to interrupt an \
          in-flight multi-tile sweep"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Concurrency — D-D/D-F intra-request rayon parallelism (Task 6)
+// ---------------------------------------------------------------------------------------------
+
+/// THE HEADLINE TEST (D-D/D-F): the same fixture and the same request produce a byte-for-byte
+/// identical `ViewportOut` (`PartialEq` ignores only `timings` — see its hand-written impl)
+/// whether the engine's shared pool has one worker or eight.
+///
+/// This is the whole point of D-F's collect shape — `self.pool.install(|| tiles.par_iter().zip
+/// (..).with_min_len(..).map(tile_result).collect::<Vec<Result<Option<TileResult>>>>())`, never
+/// `Result<Vec<TileResult>>` (see `viewport.rs`'s module doc) — the parallel sweep's output order
+/// equals the input tiles' order **by construction** (rayon's indexed collect path), so the serial
+/// fold's `tile_counts`/`points`/`sub_cells` concatenation is identical regardless of how many
+/// workers ran the sweep or in which order they happened to finish.
+///
+/// A multi-tile request (`zoom = 3`, full bbox — 64 tiles, most non-empty over this fixture's
+/// `(e*37, e*53) % 1000` scatter across `N_ITEMS = 10_000`) with an underlay requested too, so
+/// every per-tile code path this task touched (count, select — both the serve-all and the
+/// heap/threshold branch, since θ is saturated but many tiles exceed the `k = 50` cap — gather,
+/// underlay) runs across more than one tile.
+///
+/// **What this does not (and cannot) test.** It says nothing about the Python differential oracle
+/// or the conformance byte-scanner directly — those consume `ViewportOut`/the wire bytes exactly
+/// as any other test does, and know nothing about `compute_threads`. The claim this test backs is
+/// narrower and sufficient: the engine's own output is invariant in that knob, so anything the
+/// oracle or the scanner already assert about a `compute_threads = 1` response continues to hold
+/// verbatim at any other value — the oracle and the conformance vectors are unaffected because
+/// there is nothing in this response for them to disagree about.
+#[test]
+fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    // Separate cache/WAL directories per engine (same read-only bundle) — two independent
+    // `Engine::open`s over the same bundle, differing only in `compute_threads`. `open_engine_with`
+    // joins `cache`/`wal.log` onto the directory it is given, and `Wal::open` does not create that
+    // directory itself (unlike `tmp.path()`, which `TempDir::new` already created), so each must
+    // be made first.
+    let dir_1 = tmp.path().join("a");
+    let dir_8 = tmp.path().join("b");
+    std::fs::create_dir_all(&dir_1).unwrap();
+    std::fs::create_dir_all(&dir_8).unwrap();
+    let engine_1 = open_engine_with(
+        &bundle_root,
+        &dir_1,
+        EngineConfig {
+            compute_threads: 1,
+            ..config()
+        },
+    );
+    let engine_8 = open_engine_with(
+        &bundle_root,
+        &dir_8,
+        EngineConfig {
+            compute_threads: 8,
+            ..config()
+        },
+    );
+
+    let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
+    let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
+
+    let request =
+        || ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 50).underlay_offset(Some(2));
+
+    let out_1 = engine_1.viewport(&session_1, request()).unwrap();
+    let out_8 = engine_8.viewport(&session_8, request()).unwrap();
+
+    assert!(
+        out_1.tiles.len() > 1,
+        "need more than one non-empty tile to exercise cross-tile ordering, got {}",
+        out_1.tiles.len()
+    );
+    assert!(
+        !out_1.sub_cells.is_empty(),
+        "the underlay request must produce some sub-cells for this test to cover that path too"
+    );
+
+    assert_eq!(
+        out_1, out_8,
+        "ViewportOut must be byte-for-byte identical (PartialEq ignores only `timings`) \
+         regardless of compute_threads"
     );
 }

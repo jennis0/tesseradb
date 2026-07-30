@@ -24,7 +24,7 @@ use tessera_store::Bundle;
 
 pub use cancel::CancelToken;
 pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
-pub use session::{Engine, EngineConfig, EngineError, Session};
+pub use session::{default_compute_threads, Engine, EngineConfig, EngineError, Session};
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
     EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,

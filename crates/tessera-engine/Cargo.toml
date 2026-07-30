@@ -20,6 +20,10 @@ tessera-lifecycle = { path = "../tessera-lifecycle" }
 tessera-plugin = { path = "../tessera-plugin" }
 croaring = { workspace = true }
 arc-swap = { workspace = true }
+# D-D: the engine's shared compute pool for the intra-request tile-loop sweep. No `tokio`
+# anywhere near this crate (lifecycle §7's sync-engine rule; see `scripts/check-layers.sh`'s
+# `deny tessera-engine tokio`) — rayon's work-stealing pool is a plain-thread mechanism.
+rayon = { workspace = true }
 rustc-hash = "1"
 arrow = { workspace = true }
 serde_json = { workspace = true }

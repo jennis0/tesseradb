@@ -50,6 +50,12 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         max_underlay_offset: config.max_underlay_offset,
         max_underlay_cells: config.max_underlay_cells,
         max_tiles_per_request: config.max_tiles_per_request,
+        // D-D: the same knob D-B validated at parse time (`serve.compute_threads`, refused at
+        // `0` — `ConfigError::ComputeThreadsZero`) now also sizes `Engine::open`'s shared rayon
+        // pool, not just the admission semaphore. One number, one meaning: "how many CPU-bound
+        // requests this deployment runs at once" governs both how many are let in and how many
+        // threads the one let in may fan out across.
+        compute_threads: config.compute_threads,
     };
     let engine = Engine::open(
         &config.bundle_path,

@@ -404,6 +404,18 @@ async fn viewport(
 ///
 /// Field order is part of the contract with `scripts/bench_*.py` and `tessera-bench`; append
 /// only, never reorder.
+///
+/// **D-D/D-E (Task 6): several of these fields changed meaning, not shape.** The header's byte
+/// format, field order and count are unchanged (out of contract, free to redefine per this
+/// module's doc, but there was no need to). What changed is what the per-tile fields —
+/// `count_ns`, `select_ns`, `gather_ns`, `underlay_ns`, and the row counters alongside them —
+/// **represent** once `serve.compute_threads > 1`: cross-worker CPU-time sums over the parallel
+/// tile sweep, not a partition of this response's wall clock — see
+/// `tessera_engine::StageTimings`'s doc for the full reasoning. A consumer summing this row's
+/// duration fields and comparing the total against `x-tessera-server-us` will see the sum run
+/// *ahead* of wall time under real parallelism, by roughly the achieved concurrency — that is
+/// correct, not a discrepancy to chase. `arrow_serialise_ns` itself is unaffected: response
+/// assembly (this handler) stays serial regardless of the engine's own `compute_threads`.
 #[cfg(feature = "bench-timing")]
 fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Option<String> {
     // **Append-only.** This is a positional CSV, so inserting a field anywhere but the end silently
