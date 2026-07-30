@@ -57,6 +57,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         max_k: config.max_k,
+        stage_timing: config.stage_timing,
         min_visible_members: config.min_visible_members,
         session_credential: config.session_credential.clone(),
         operator_credential: config.operator_credential.clone(),

@@ -166,6 +166,9 @@ async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> 
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         max_k: 200,
+        // On, so the header assertions below exercise the emission path rather than only its
+        // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
+        stage_timing: true,
         min_visible_members: 10,
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
@@ -1785,4 +1788,85 @@ async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
         tessera_ids[1].as_u64().unwrap(),
         "two null-external-id items must still get distinct entities/tessera_ids"
     );
+}
+
+/// The `x-tessera-stage-ns` header obeys **both** of its gates, and carries no identifier.
+///
+/// `spawn_server` sets `stage_timing: true`, so the runtime gate is open throughout this test.
+/// The compile-time gate therefore decides on its own, and this asserts each direction rather
+/// than only the one the current build happens to take — a release binary that started emitting
+/// the header would otherwise pass a test written for the instrumented build.
+///
+/// The field-count assertion pins the CSV contract `tessera-bench` and `scripts/bench_*.py`
+/// parse. Append-only: adding a stage means bumping the expected count here deliberately.
+#[tokio::test]
+async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let header = resp.headers().get("x-tessera-stage-ns").cloned();
+
+    if cfg!(feature = "bench-timing") {
+        let value = header
+            .expect("bench-timing is on and stage_timing is true, so the header must be present");
+        let text = value.to_str().expect("header is ASCII digits and commas");
+
+        let fields: Vec<&str> = text.split(',').collect();
+        assert_eq!(
+            fields.len(),
+            19,
+            "stage header field count is a contract with the bench harnesses: {text}"
+        );
+        for f in &fields {
+            assert!(
+                f.parse::<u64>().is_ok(),
+                "every field is an unsigned integer — no names, no identifiers: {text}"
+            );
+        }
+
+        // Positions 12..=17 are the work counters (see `stage_header`'s field order).
+        let tiles_nonempty: u64 = fields[13].parse().unwrap();
+        let sigma_visible: u64 = fields[14].parse().unwrap();
+        let materialised: u64 = fields[16].parse().unwrap();
+        let gathered: u64 = fields[17].parse().unwrap();
+        assert_eq!(tiles_nonempty, 1, "zoom 0 is one tile");
+        assert_eq!(sigma_visible, N_ITEMS, "every item carries term 0");
+        assert_eq!(gathered, 5, "k=5");
+        assert_eq!(
+            materialised, N_ITEMS,
+            "F1 over the wire: selection materialises every visible row to return k"
+        );
+    } else {
+        assert!(
+            header.is_none(),
+            "without the bench-timing feature the header must be absent even when \
+             `stage_timing = true` — a release build must not emit it"
+        );
+    }
 }

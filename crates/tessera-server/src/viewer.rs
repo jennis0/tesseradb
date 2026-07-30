@@ -172,6 +172,9 @@ async fn viewport(
     let visible: Vec<u64> = out.tiles.iter().map(|t| t.visible).collect();
     let matched: Vec<u64> = out.tiles.iter().map(|t| t.matched).collect();
 
+    // Everything from the engine's return to here is response assembly, not serialisation; the
+    // engine's own breakdown stops at its last gather. Start the serialise clock at the call.
+    let serialise_start = std::time::Instant::now();
     let bytes = viewport_ipc(
         &tiles,
         &visible,
@@ -181,18 +184,74 @@ async fn viewport(
         &ys,
         &scalar_refs,
     );
+    let arrow_serialise_ns = serialise_start.elapsed().as_nanos() as u64;
 
     let pin_header =
         serde_json::to_string(&PinDto::from(&out.pin)).expect("PinDto serialisation cannot fail");
     let server_us = start.elapsed().as_micros().to_string();
 
-    Ok(Response::builder()
+    let mut response = Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
         .header("x-tessera-pin", pin_header)
-        .header("x-tessera-server-us", server_us)
+        .header("x-tessera-server-us", server_us);
+
+    if state.stage_timing {
+        if let Some(value) = stage_header(&out.timings, arrow_serialise_ns) {
+            response = response.header("x-tessera-stage-ns", value);
+        }
+    }
+
+    Ok(response
         .body(Body::from(bytes))
         .expect("response construction cannot fail"))
+}
+
+/// The `x-tessera-stage-ns` value: a fixed-order CSV of unsigned integers, no names.
+///
+/// **Returns `None` in a build without `bench-timing`**, so a config that turns `stage_timing` on
+/// against a release binary emits nothing rather than a row of zeros that reads like a free
+/// request path. That is the second of the two gates described on `Config::stage_timing`; the
+/// first is the feature on the engine's `Probe`, which leaves every field at zero.
+///
+/// **I10 / SA §9.** Durations and row counts only — no entity id, no descriptor, no token, no
+/// per-principal label. `sigma_visible` and the tile counts are already in the Arrow payload the
+/// same response carries, so nothing here is reachable that was not already. What the header does
+/// expose is the C4 timing channel in quantified form, which is the point: Appendix C leaves C4
+/// open with "quantify before treating as acceptable", and this is the measurement. It is
+/// nonetheless off by default and absent from release builds.
+///
+/// Field order is part of the contract with `scripts/bench_*.py` and `tessera-bench`; append
+/// only, never reorder.
+#[cfg(feature = "bench-timing")]
+fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Option<String> {
+    Some(format!(
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        t.generation_resolve_ns,
+        t.pin_resolve_ns,
+        t.slice_lookup_ns,
+        t.row_projection_ns,
+        t.compose_ns,
+        t.tiles_for_bbox_ns,
+        t.tile_ranges_ns,
+        t.count_ns,
+        t.select_ns,
+        t.gather_ns,
+        arrow_serialise_ns,
+        t.total_ns,
+        t.tiles_resolved,
+        t.tiles_nonempty,
+        t.sigma_visible,
+        t.rows_in_ranges,
+        t.select_rows_materialised,
+        t.points_gathered,
+        u64::from(t.row_projection_built),
+    ))
+}
+
+#[cfg(not(feature = "bench-timing"))]
+fn stage_header(_t: &tessera_engine::StageTimings, _arrow_serialise_ns: u64) -> Option<String> {
+    None
 }
 
 /// A same-typed column of scalar values, owned so it outlives the borrow `viewport_ipc` needs.

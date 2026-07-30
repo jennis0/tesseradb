@@ -59,6 +59,9 @@ pub struct AppState {
     pub engine: Engine,
     pub sessions: Mutex<SessionRegistry>,
     pub max_k: usize,
+    /// Runtime half of the `x-tessera-stage-ns` gate (see `Config::stage_timing`). The other half
+    /// is the `bench-timing` compile feature; both must hold.
+    pub stage_timing: bool,
     /// Parsed and stored (design §7.5/§2.3's startup rule); not consumed by any Phase 1 handler.
     #[allow(dead_code)]
     pub min_visible_members: u64,
