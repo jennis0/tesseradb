@@ -24,15 +24,26 @@ use tempfile::TempDir;
 
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig, EngineError};
-use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
+use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord, WalRow};
 use tessera_plugin::Passthrough;
 use tessera_spatial::{morton_of, tiles_for_bbox, Extent};
 use tessera_store::read::open_bundle;
-use tessera_types::PinId;
+use tessera_store::StoreError;
+use tessera_types::{EntityId, IdentityKey, PinId};
 
 const N_ITEMS: u64 = 10_000;
 const ALL_TERM: u64 = 0;
 const SUBSET_TERM: u64 = 1;
+
+/// A fixed, non-degenerate test key — the same canonical vector used across the identity
+/// construction's own tests (`tessera_types::identity`'s `CANONICAL_KEY`) and
+/// `tessera-build`'s fixture tests, so a mismatch between crates would show up as a vector
+/// disagreement rather than an independently-chosen value.
+const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+
+fn test_key() -> IdentityKey {
+    IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
+}
 
 fn extent() -> Extent {
     Extent {
@@ -128,6 +139,10 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
         extent: extent(),
         slice_id: "s0".to_string(),
         limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
     };
     build(&args).expect("fixture build should succeed");
 }
@@ -150,14 +165,16 @@ fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64> {
             .as_any()
             .downcast_ref::<BinaryArray>()
             .unwrap();
+        // Contracts r6: the external-id extent's entity column is `UInt32` (entities are capped
+        // at `u32::MAX` by the I9 allocator), not the pre-r6 `UInt64`.
         let ent = batch
             .column(1)
             .as_any()
-            .downcast_ref::<UInt64Array>()
+            .downcast_ref::<UInt32Array>()
             .unwrap();
         for i in 0..batch.num_rows() {
             let source = u64::from_le_bytes(ext.value(i).try_into().unwrap());
-            map.insert(source, ent.value(i));
+            map.insert(source, ent.value(i) as u64);
         }
     }
     map
@@ -268,11 +285,16 @@ fn b_subset_session_sees_exactly_its_terms_items() {
     assert_eq!(out.tiles[0].matched, expected);
     assert_eq!(out.points.len(), expected as usize);
 
-    // Every sampled point must actually be a subset-term source item.
+    // Every sampled point must actually be a subset-term source item. Invert the wire-visible
+    // `tessera_id` back to the entity id with the same key the fixture was built under (test-only
+    // — a real client never gets to do this, per I10) before mapping it to its source id.
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let new_to_source: BTreeMap<u64, u64> = source_to_new.iter().map(|(&s, &n)| (n, s)).collect();
+    let key = test_key();
     for point in &out.points {
-        let source = new_to_source[&point.entity_id.raw()];
+        let (shard, entity) = key.invert(point.tessera_id);
+        assert_eq!(shard, 0, "fixture uses shard 0 only");
+        let source = new_to_source[&entity.raw()];
         assert_eq!(
             source % 3,
             0,
@@ -383,7 +405,7 @@ fn f_sampler_returns_first_k_in_row_order() {
 
     let bundle = open_bundle(&bundle_root).unwrap();
     let segment = &bundle.partitions["default"].slices["s0"].segments[0];
-    let expected_entity_ids: Vec<u64> = segment.columns.entity_id()[0..3].to_vec();
+    let expected_tessera_ids: Vec<u64> = segment.columns.tessera_id()[0..3].to_vec();
     let expected_xs: Vec<f32> = segment.columns.x()[0..3].to_vec();
     let expected_ys: Vec<f32> = segment.columns.y()[0..3].to_vec();
 
@@ -400,8 +422,8 @@ fn f_sampler_returns_first_k_in_row_order() {
     assert_eq!(out.points.len(), 3);
     for (i, point) in out.points.iter().enumerate() {
         assert_eq!(
-            point.entity_id.raw(),
-            expected_entity_ids[i],
+            point.tessera_id.raw(),
+            expected_tessera_ids[i],
             "point {i} is not the placeholder's expected first-k row"
         );
         assert_eq!(point.x, expected_xs[i]);
@@ -567,6 +589,272 @@ fn engine_open_seeds_the_allocator_from_the_manifest_high_water() {
     assert_eq!(engine.allocator_high_water(), N_ITEMS);
 }
 
+/// Task 9, Step 1: `Engine::item` inverts the wire `tessera_id` and locates its row via
+/// `Permutation::row_of` — an O(1) bijection lookup, never a linear scan of an identity column
+/// (contracts r6 replaced that column's contents with the opaque `tessera_id`, so a scan of it
+/// would search the wrong space entirely). Asserted against a source item whose signature-sorted
+/// entity id (and therefore its row) is not the first one built — a truncated or
+/// first-rows-only lookup would miss it, while the permutation's O(1) `row_of` does not care
+/// where the row sits.
+#[test]
+fn item_lookup_goes_through_the_permutation_not_a_column_scan() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let source_to_new = source_to_new_map(&bundle_root, "v00000");
+    let last_source = N_ITEMS - 1;
+    let entity = EntityId::new(source_to_new[&last_source]);
+    let id = test_key().forward(0, entity).unwrap();
+
+    let out = engine.item(&session, id).unwrap();
+    assert!(
+        out.is_some(),
+        "an item far from segment start must still resolve through the permutation"
+    );
+    assert_eq!(
+        out.unwrap().external_id,
+        Some(last_source.to_le_bytes().to_vec())
+    );
+}
+
+/// Owner ruling: an identifier naming nothing and one naming an invisible item are indistinguishable
+/// — one `Ok(None)` from one code path, with no error variant separating the two.
+#[test]
+fn an_unknown_id_and_an_invisible_one_are_indistinguishable() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&zero_credential()).unwrap();
+
+    // Unknown: an entity id far beyond anything this bundle ever allocated.
+    let unknown_id = test_key()
+        .forward(0, EntityId::new(N_ITEMS + 1_000_000))
+        .unwrap();
+    assert_eq!(engine.item(&session, unknown_id).unwrap(), None);
+
+    // Known but invisible: a zero-term session sees nothing, so any real item is invisible.
+    let source_to_new = source_to_new_map(&bundle_root, "v00000");
+    let entity = EntityId::new(source_to_new[&0]);
+    let invisible_id = test_key().forward(0, entity).unwrap();
+    assert_eq!(engine.item(&session, invisible_id).unwrap(), None);
+}
+
+/// CRITICAL C-5, closed rather than narrowed: the entity-space visibility test never constructs
+/// a `RowProjection` (the cached artefact that costs 9.5-19.3s at 10^9), for an unknown id or an
+/// invisible one, on a session that has never drawn a viewport.
+#[test]
+fn the_item_path_never_constructs_a_row_projection() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(
+        engine.row_projection_cache_len(),
+        0,
+        "no viewport drawn yet"
+    );
+
+    let unknown_id = test_key().forward(0, EntityId::new(N_ITEMS + 1)).unwrap();
+    engine.item(&session, unknown_id).unwrap();
+    assert_eq!(
+        engine.row_projection_cache_len(),
+        0,
+        "an unknown id must not build a projection"
+    );
+
+    let source_to_new = source_to_new_map(&bundle_root, "v00000");
+    let entity = EntityId::new(source_to_new[&0]);
+    let visible_id = test_key().forward(0, entity).unwrap();
+    engine.item(&session, visible_id).unwrap();
+    assert_eq!(
+        engine.row_projection_cache_len(),
+        0,
+        "a visible id must not build a projection either"
+    );
+}
+
+/// The behaviour the row-space formulation could not offer: a client's FIRST request may be a
+/// drill-down, and a visible item must return `Some` — not a uniform 404 pending a warmed
+/// per-session cache.
+#[test]
+fn drill_down_works_on_a_session_that_has_never_drawn_a_viewport() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let source_to_new = source_to_new_map(&bundle_root, "v00000");
+    let entity = EntityId::new(source_to_new[&0]);
+    let id = test_key().forward(0, entity).unwrap();
+
+    let out = engine.item(&session, id).unwrap();
+    assert!(
+        out.is_some(),
+        "a visible item's first request against this session may be a drill-down"
+    );
+}
+
+/// CRITICAL N-3: a corrupt sidecar must surface as `Err`, never fold into `Ok(None)` (which
+/// would report "this item has no external id" for one that does, at a `200`). The digest check
+/// runs before Arrow decoding (`tessera_store::sidecar`'s `load_validated`), so corrupting any
+/// byte of the extent is sufficient to trip it, regardless of where in the file it lands.
+#[test]
+fn a_sidecar_error_on_drill_down_is_an_error_not_a_missing_external_id() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    // Resolve the target entity, and open the engine, against the *pristine* extent first —
+    // `Engine::open`'s bundle-open protocol (`tessera_store::read::open_bundle`) eagerly
+    // verifies every manifest-listed file's digest up front (a bundle-level integrity property,
+    // independent of the sidecar's own per-extent laziness), so corrupting the file before open
+    // would fail at `Engine::open` itself rather than exercising the drill-down path this test
+    // targets.
+    let source_to_new = source_to_new_map(&bundle_root, "v00000");
+    let entity = EntityId::new(source_to_new[&0]);
+    let id = test_key().forward(0, entity).unwrap();
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    // Now corrupt the extent's bytes on disk — the sidecar's lazy open (Task 8) verifies digest
+    // and sortedness on first touch, so this failure is deferred until `item()` actually
+    // resolves the visible entity's external id.
+    let bundle = open_bundle(&bundle_root).unwrap();
+    let part = &bundle.partitions["default"];
+    let ext_rel = &part.manifest.external_id_extents[0];
+    let ext_path = bundle_root.join("v00000").join(ext_rel);
+    drop(bundle);
+    let mut bytes = std::fs::read(&ext_path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    std::fs::write(&ext_path, bytes).unwrap();
+
+    let err = engine.item(&session, id).unwrap_err();
+    assert!(
+        matches!(err, StoreError::InvalidSidecar { .. }),
+        "a corrupt sidecar must be Err(InvalidSidecar), never a fail-open Ok(None): {err:?}"
+    );
+}
+
+/// IMPORTANT I-9: an entity ingested after the build has no locator slot and no extent entry —
+/// the live map must answer first, or `external_id_of` would wrongly report "this item has no
+/// external id" for one that does.
+#[test]
+fn drill_down_resolves_an_external_id_for_a_post_build_entity() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+
+    let new_entity = EntityId::new(engine.allocator_high_water());
+    let row = WalRow {
+        external_id: b"post-build-key".to_vec(),
+        entity_id: new_entity,
+        descriptors: Vec::new(),
+        x: 0.0,
+        y: 0.0,
+        scalars: Vec::new(),
+    };
+    engine
+        .accept_ingest(
+            vec![row],
+            vec![Vec::new()],
+            "batch-1".to_string(),
+            [0u8; 32],
+        )
+        .unwrap();
+
+    let resolved = engine.resolve_external_id(b"post-build-key").unwrap();
+    assert_eq!(resolved, Some(new_entity));
+
+    let external = engine.external_id_of(new_entity).unwrap();
+    assert_eq!(external.as_deref(), Some(&b"post-build-key"[..]));
+}
+
+/// Residency proxy: `Engine::open` must never touch the external-id sidecar (Task 8's per-extent
+/// laziness guarantee) — the real memory-residency measurement is Task 15's memo; this asserts
+/// the same invariant cheaply via the sidecar's own `is_open` accounting.
+#[test]
+fn engine_open_does_not_touch_the_sidecar() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    assert!(
+        !engine.external_id_sidecar_is_open(),
+        "Engine::open must not touch the external-id sidecar"
+    );
+}
+
 /// Step 3: latency sanity at 2.4M items — a generous local gate (p99 < 50ms); the real 10ms gate
 /// is Task 16, at 10⁹. Builds `/tmp/tessera-2m4` from the real corpus if it is not already there
 /// (disk is tight — this bundle is meant to be reused across runs, not deleted after each one).
@@ -599,6 +887,10 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             },
             slice_id: "s0".to_string(),
             limit: Some(ITEM_LIMIT),
+            identity_key: test_key(),
+            identity_key_hex: TEST_KEY_HEX.to_string(),
+            identity_epoch: 1,
+            shard_id: 0,
         };
         build(&args).expect("2.4M fixture build should succeed");
     }

@@ -14,10 +14,12 @@ use tessera_spatial::{tiles_for_bbox, Extent};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::tile_ranges;
-use tessera_types::{EntityId, PinId, API_VERSION};
+use tessera_store::StoreError;
+use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 
-use crate::compose::{compose, EffectiveMask, RowProjection};
+use crate::compose::{compose, visible_to, EffectiveMask, RowProjection};
 use crate::session::{Engine, EngineError, Result, Session};
+use crate::Generation;
 
 /// One declared-scalar value carried alongside a point (mirrors `tessera_spatial::ScalarValue`'s
 /// three Phase 1 kinds, but on the *output* side — read from `ColumnsRef`, not staged for write).
@@ -40,14 +42,14 @@ pub struct TileCount {
 
 /// One sampled point.
 ///
-/// **I10:** `entity_id` leaves the engine here and *only* here — the caller (`tessera-wire`,
-/// Task 12) is the trust boundary that must translate it to a per-session opaque `Handle` before
-/// anything reaches a viewer. `ViewportOut` deliberately does not derive `serde::Serialize`: the
-/// only legitimate way to get this data onto the wire is through that translation, never through
-/// a generic serialiser that would round-trip `EntityId` as-is.
+/// **I10, strengthened (contracts r6):** no entity ID leaves the engine on this path, because
+/// none is stored. `columns.arrow` carries `tessera_id` at the row, so the gather reads the
+/// identity it is allowed to show and cannot read the one it is not. Entity IDs survive only in
+/// entity-space structures and as `permutation.bin`'s index — never as a value on any path
+/// reaching `tessera-wire`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PointOut {
-    pub entity_id: EntityId,
+    pub tessera_id: TesseraId,
     pub x: f32,
     pub y: f32,
     pub scalars: Vec<ScalarOut>,
@@ -59,6 +61,14 @@ pub struct ViewportOut {
     pub pin: PinId,
     pub tiles: Vec<TileCount>,
     pub points: Vec<PointOut>,
+}
+
+/// `POST /v1/items/{handle}`'s payload (R5): a visible item's scalars plus its caller-supplied
+/// external id, if it has one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemOut {
+    pub scalars: Vec<ScalarOut>,
+    pub external_id: Option<Vec<u8>>,
 }
 
 /// `GET /v1/meta`'s payload (R5) — the bundle-level facts a viewer client needs before it can
@@ -92,57 +102,82 @@ impl Engine {
         }
     }
 
-    /// `POST /v1/items/{handle}` (R5): the scalar payload for one entity, gated by this session's
-    /// effective mask. Phase 1 has no by-entity index (geometry is Morton-ordered, not
-    /// entity-ordered), so this is a linear scan over every segment in every slice of the current
-    /// generation — acceptable at walking-skeleton scale for an endpoint that is not on the
-    /// per-viewport hot path; revisit before this ever needs to scale with corpus size.
-    ///
-    /// Returns `None` if `entity` has no row in this bundle, or has a row but is not currently
-    /// visible to `session` (I2: a denied/unauthorised entity's scalars must not leak through
-    /// this side door either).
-    pub fn item(&self, session: &Session, entity: EntityId) -> Option<Vec<ScalarOut>> {
-        let generation = self.generation.load_full();
-        let declared_scalars = &generation.bundle.manifest.declared_scalars;
+    /// Is `entity` visible to `session` under `generation` — the ONE BIT `/v1/items` needs. An
+    /// **entity-space** question (see `crate::compose::visible_to`'s doc): three constant-time
+    /// probes, no `RowProjection` constructed or consulted, so this costs the same whether
+    /// `entity` exists and is visible, exists and is not, or does not exist at all (Critical
+    /// C-5, closed rather than narrowed).
+    pub fn visible_to(&self, session: &Session, generation: &Generation, entity: EntityId) -> bool {
+        visible_to(
+            &session.fragment,
+            &session.satisfied,
+            &generation.overlay,
+            &generation.buffer,
+            entity,
+        )
+    }
 
+    /// `POST /v1/items/{handle}` (R5): invert `id` to its entity, test visibility in entity
+    /// space, and only then locate a row and read its scalars/external id.
+    ///
+    /// Returns `Ok(None)` both when `id` names nothing in this bundle and when it names an item
+    /// the principal may not see — deliberately one outcome from one code path, so the server
+    /// cannot differentiate what the engine does not tell it (owner ruling; contracts §3.2).
+    ///
+    /// **The timing channel is closed, not narrowed** (Critical C-5; design Appendix C, C4
+    /// annotation). Inversion is a pure function taking no I/O. The visibility test that follows
+    /// is an entity-space question — three constant-time probes — and is **the same three probes
+    /// for an identifier that names nothing and one that names an invisible item**. No
+    /// `RowProjection` is constructed or read, so there is no per-ID cost for an attacker to
+    /// correlate against, warm or cold. A row is located only after the answer is already
+    /// "visible", and the sidecar is read only after that.
+    ///
+    /// **Returns `Err` rather than a fail-open `None`** (Critical N-3). A digest mismatch, an
+    /// out-of-order extent or a short locator is a `500`, never an item served with
+    /// `external_id: null` — `.ok().flatten()` would discard exactly the typed errors Task 8
+    /// exists to produce. This does not reopen C-5: the sidecar is touched only for an item
+    /// already established as visible, so no attacker-drivable path can raise it.
+    pub fn item(
+        &self,
+        session: &Session,
+        id: TesseraId,
+    ) -> std::result::Result<Option<ItemOut>, StoreError> {
+        let generation = self.generation.load_full();
+        let (shard, entity) = self.identity_key.invert(id);
+        if shard != generation.bundle.manifest.identity.shard_id {
+            return Ok(None);
+        }
+
+        // ONE BIT, in entity space, O(1), before anything is looked up in row space.
+        if !self.visible_to(session, &generation, entity) {
+            return Ok(None);
+        }
+
+        // Visible. Now — and only now — find the row, so the cost below is never reachable by
+        // an identifier the principal may not see.
+        let declared_scalars = &generation.bundle.manifest.declared_scalars;
         for partition in generation.bundle.partitions.values() {
             for slice_data in partition.slices.values() {
-                for segment in &slice_data.segments {
-                    let Some(idx) = segment
-                        .columns
-                        .entity_id()
-                        .iter()
-                        .position(|&e| e == entity.raw())
-                    else {
-                        continue;
-                    };
-                    let row = idx as u32;
-
-                    // Ad hoc, uncached mask: this endpoint is not on the per-viewport path, so
-                    // paying `Permutation::project`'s cost here (rather than reusing the cached
-                    // `RowProjection`, keyed for the viewport path only) is acceptable — see this
-                    // method's doc.
-                    let base = Arc::new(RowProjection::new(
-                        &session.fragment,
-                        &slice_data.permutation,
-                    ));
-                    let mask = compose(
-                        &session.fragment,
-                        &session.satisfied,
-                        &generation.overlay,
-                        &generation.buffer,
-                        base,
-                        &slice_data.permutation,
-                    );
-                    if !mask.contains_row(row) {
-                        continue;
-                    }
-
-                    return Some(row_to_point(segment, row, declared_scalars).scalars);
-                }
+                // The permutation is the only entity→row bridge (I4, §5.1) — an O(1)
+                // bounds-checked slot read, not a scan.
+                let Some(row) = slice_data.permutation.row_of(entity) else {
+                    continue;
+                };
+                // Phase 1 always has exactly one segment per (partition, slice) (R4 — the same
+                // invariant `Engine::viewport`'s `MultiSegmentSlice` guard rests on); the
+                // permutation addresses that single segment's row space.
+                let Some(segment) = slice_data.segments.first() else {
+                    continue;
+                };
+                return Ok(Some(ItemOut {
+                    scalars: row_to_point(segment, row.raw(), declared_scalars).scalars,
+                    external_id: self.external_id_of(entity)?, // N-3: propagate, never swallow
+                }));
             }
         }
-        None
+        // Visible in entity space but with no row anywhere: a buffered item awaiting flush. Same
+        // `Ok(None)`, same 404 — it has no geometry to return.
+        Ok(None)
     }
 }
 
@@ -311,7 +346,7 @@ fn sample_tile(
 fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) -> PointOut {
     let idx = row as usize;
     let cols = &segment.columns;
-    let entity_id = EntityId::new(cols.entity_id()[idx]);
+    let tessera_id = TesseraId::new(cols.tessera_id()[idx]);
     let x = cols.x()[idx];
     let y = cols.y()[idx];
 
@@ -330,7 +365,7 @@ fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) ->
     }
 
     PointOut {
-        entity_id,
+        tessera_id,
         x,
         y,
         scalars,

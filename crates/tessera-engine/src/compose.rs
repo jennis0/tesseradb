@@ -24,7 +24,7 @@ use rustc_hash::FxHashSet;
 use tessera_authz::FrozenFragment;
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Permutation;
-use tessera_types::TermId;
+use tessera_types::{EntityId, TermId};
 
 /// A cached row-space projection of one frozen fragment, for one `(token, slice, pin)`.
 ///
@@ -113,6 +113,45 @@ impl EffectiveMask {
     }
 }
 
+/// The per-entity verdict, `deleted > suppressed > evaluate_terms > buffered`, or `None` when
+/// the overlay and the buffer have no opinion and the frozen fragment already carries the
+/// answer. **The single source of this precedence** — [`compose`] turns it into row-space diffs
+/// for range arithmetic, [`visible_to`] reads it directly for a single entity. Two transcriptions
+/// of a precedence rule is how a suppression stops suppressing (lifecycle §3, caught twice in
+/// review) — do not re-derive this logic anywhere else.
+///
+/// An overlay entry — even a *neutral* one (present, but currently no active verdict, e.g. after
+/// `suppress → unsuppress` with no `Predicate` ever applied) — takes precedence over the buffer:
+/// its `None` here is correct, not a fall-through, because rule 4 below only ever applies when
+/// the overlay has no entry at all.
+fn verdict(
+    overlay: &Overlay,
+    buffer: &IngestBuffer,
+    satisfied: &FxHashSet<TermId>,
+    watermark: u64,
+    entity: EntityId,
+) -> Option<bool> {
+    if let Some(entry) = overlay.get(entity) {
+        return if entry.deleted || entry.suppressed {
+            Some(false)
+        } else {
+            entry
+                .evaluate_terms
+                .as_ref()
+                .map(|terms| terms.iter().any(|t| satisfied.contains(t)))
+        };
+    }
+
+    // Rule 4: buffered entities at or past the fragment's own watermark, with no overlay entry
+    // (handled above — an overlay entry, even a neutral one, takes precedence).
+    if entity.raw() < watermark {
+        return None;
+    }
+    buffer
+        .get(entity)
+        .map(|item| item.terms.iter().any(|t| satisfied.contains(t)))
+}
+
 /// Compose the effective mask for one request. See this module's doc for the precedence rule and
 /// the clamp rationale.
 ///
@@ -135,24 +174,14 @@ pub fn compose(
     let mut fail_rows: Vec<u32> = Vec::new();
     let mut pass_rows: Vec<u32> = Vec::new();
 
-    // Rules 1–3: every entity the overlay has an opinion on, resolved exactly once with
-    // precedence deleted > suppressed > evaluate_terms. An entry that is present but currently
-    // neutral (e.g. `suppress → unsuppress`, with no `Predicate` ever applied) yields no verdict
-    // at all — it is correctly already reflected in `base`, and rule 4 does not pick it up either
-    // (see below), so it contributes nothing to the diff. This is deliberate, not an oversight:
-    // recomputing "no verdict" from scratch every time is what makes unsuppress a pure
-    // subtraction from `minus` rather than a special case.
-    for (&entity, entry) in overlay.iter() {
-        let verdict = if entry.deleted || entry.suppressed {
-            Some(false)
-        } else {
-            entry
-                .evaluate_terms
-                .as_ref()
-                .map(|terms| terms.iter().any(|t| satisfied.contains(t)))
-        };
-
-        if let Some(pass) = verdict {
+    // Rules 1–3: every entity the overlay has an opinion on, resolved exactly once via the
+    // shared `verdict` function. A neutral entry yields no verdict at all — it is correctly
+    // already reflected in `base`, and rule 4 does not pick it up either (see `verdict`'s doc),
+    // so it contributes nothing to the diff. This is deliberate, not an oversight: recomputing
+    // "no verdict" from scratch every time is what makes unsuppress a pure subtraction from
+    // `minus` rather than a special case.
+    for (&entity, _) in overlay.iter() {
+        if let Some(pass) = verdict(overlay, buffer, satisfied, watermark, entity) {
             if let Some(row) = perm.row_of(entity) {
                 if pass {
                     pass_rows.push(row.raw());
@@ -168,24 +197,26 @@ pub fn compose(
     // Rule 4: buffered entities at or past the fragment's own watermark, with no overlay entry
     // (an overlay entry — even a neutral one — takes precedence per the rule ordering above, and
     // was already resolved, or deliberately given no verdict, in the loop above).
-    for (&entity, item) in buffer.iter() {
+    for (&entity, _) in buffer.iter() {
         if entity.raw() < watermark {
             continue;
         }
         if overlay.get(entity).is_some() {
             continue;
         }
-        let pass = item.terms.iter().any(|t| satisfied.contains(t));
-        if let Some(row) = perm.row_of(entity) {
-            if pass {
-                pass_rows.push(row.raw());
-            } else {
-                fail_rows.push(row.raw());
+        if let Some(pass) = verdict(overlay, buffer, satisfied, watermark, entity) {
+            if let Some(row) = perm.row_of(entity) {
+                if pass {
+                    pass_rows.push(row.raw());
+                } else {
+                    fail_rows.push(row.raw());
+                }
             }
+            // Phase 1 buffered entities have no row anywhere (no flush yet) — this branch is
+            // kept and tested (with a synthetic permutation) against the day a later phase gives
+            // buffered items provisional rows, but today it always takes the "no row" path
+            // above.
         }
-        // Phase 1 buffered entities have no row anywhere (no flush yet) — this branch is kept
-        // and tested (with a synthetic permutation) against the day a later phase gives buffered
-        // items provisional rows, but today it always takes the "no row" path above.
     }
 
     fail_rows.sort_unstable();
@@ -207,4 +238,38 @@ pub fn compose(
     );
 
     EffectiveMask { base, minus, plus }
+}
+
+/// `entity`'s raw id, cast down to the `u32` the fragment's bitmap operates over. Infallible in
+/// practice — entities are capped at `u32::MAX` by the I9 allocator (see
+/// `tessera_types::IdentityKey::forward`'s identical bound) — but checked rather than a silent
+/// truncating cast, so a violated invariant fails loudly instead of testing the wrong entity.
+fn entity_as_u32(entity: EntityId) -> u32 {
+    u32::try_from(entity.raw())
+        .expect("entity ids are capped at u32::MAX by the I9 allocator (contracts §2.6 r6)")
+}
+
+/// Is `entity` visible to this session — the ONE BIT `/v1/items` needs.
+///
+/// This is an **entity-space** question and is answered in entity space: the overlay and buffer
+/// are hash probes, `fragment.contains` is an O(1) Roaring probe on a borrowed mmap view, and no
+/// `RowProjection` is constructed or consulted. It is therefore **identical work for an entity
+/// that does not exist, one that exists and is invisible, and one that exists and is visible** —
+/// which is what closes the `/v1/items` timing channel outright rather than narrowing it (design
+/// Appendix C, C4 annotation; Critical C-5).
+///
+/// Equivalent to `compose(...).contains_row(perm.row_of(entity))` wherever a row exists — see
+/// this module's clamp doc: a `false` verdict lands in `minus` or outside `base` and is false
+/// either way, a `true` verdict lands in `base` or `plus` and is true either way, and no verdict
+/// falls through to `base`, which is `project`'s image of the fragment. The row-space form exists
+/// for *range cardinalities*; a single-entity test does not need it.
+pub fn visible_to(
+    fragment: &FrozenFragment,
+    satisfied: &FxHashSet<TermId>,
+    overlay: &Overlay,
+    buffer: &IngestBuffer,
+    entity: EntityId,
+) -> bool {
+    verdict(overlay, buffer, satisfied, fragment.watermark, entity)
+        .unwrap_or_else(|| fragment.view().contains(entity_as_u32(entity)))
 }

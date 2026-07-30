@@ -17,8 +17,8 @@ use rand::SeedableRng;
 use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
-use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_authz::{write_postings, FragmentCache, FrozenFragment, PostingsReader};
+use tessera_engine::compose::{compose, visible_to, EffectiveMask, RowProjection};
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_store::write::write_permutation;
 use tessera_store::Permutation;
@@ -110,17 +110,22 @@ fn e(id: u64) -> EntityId {
     EntityId::new(id)
 }
 
-/// Build a `FrozenFragment` handle and compose against `overlay`/`buffer`. Kept as a free
-/// function so every test composes through the exact same call the brief specifies.
-fn compose_with(fx: &Fixture, overlay: &Overlay, buffer: &IngestBuffer) -> EffectiveMask {
-    // Rebuild the same fragment via the cache (cache hit, not a rebuild) so `compose` receives a
-    // real `&FrozenFragment` each call without threading one through the fixture's lifetime.
+/// Rebuild the same fragment via the cache (cache hit, not a rebuild) — the exact `&FrozenFragment`
+/// every test composes against, exposed separately so `visible_to` tests can also get one without
+/// threading it through the fixture's lifetime.
+fn fragment_for(fx: &Fixture) -> Arc<FrozenFragment> {
     let cache_dir = fx._temp.path().join("cache");
     let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32]);
     let granted: Vec<TermId> = vec![TermId::new(0), TermId::new(1)];
-    let fragment = cache
+    cache
         .get_or_build(&granted, [3u8; 32], &fx.postings, WATERMARK)
-        .unwrap();
+        .unwrap()
+}
+
+/// Build a `FrozenFragment` handle and compose against `overlay`/`buffer`. Kept as a free
+/// function so every test composes through the exact same call the brief specifies.
+fn compose_with(fx: &Fixture, overlay: &Overlay, buffer: &IngestBuffer) -> EffectiveMask {
+    let fragment = fragment_for(fx);
 
     compose(
         &fragment,
@@ -541,8 +546,10 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
 
     // Reopen: fresh replay from disk, not the in-memory `Overlay`/`IngestBuffer` above.
     let (_wal, records) = Wal::open(&wal_path).unwrap();
-    let (overlay, buffer, _established, _resolver) =
-        replay(&records, &dict, |_external_id| None).unwrap();
+    let (overlay, buffer, _established, _resolver) = replay(&records, &dict, |_external_id| {
+        Ok::<_, std::convert::Infallible>(None)
+    })
+    .unwrap();
 
     let x_entry = overlay.get(e(ENTITY_X)).expect("X has an overlay entry");
     assert!(x_entry.deleted, "delete must survive replay");
@@ -642,4 +649,84 @@ fn extension_only_term_never_passes_compose() {
         fx.base.bitmap().cardinality()
     );
     assert!(mask.check_structural_invariants());
+}
+
+/// Task 9, Step 1: the equivalence `visible_to` rests on, asserted rather than argued. For a
+/// fixture exercising every precedence branch — deleted, suppressed, evaluate pass, evaluate
+/// fail, a neutral overlay entry (delete → suppress → unsuppress leaves an entry present but not
+/// currently suppressed), a deny outside the fragment (no-op), buffered pass/fail, and plain
+/// fragment membership — `visible_to` must agree with `compose(...).contains_row(row_of(entity))`
+/// for every entity that has a row. If `verdict` was correctly factored out of `compose` (rather
+/// than transcribed a second time), this is what proves the factoring did not change `compose`'s
+/// behaviour — two independent transcriptions of the precedence rule is exactly how a suppression
+/// stops suppressing (lifecycle §3, caught twice in review).
+#[test]
+fn visible_to_agrees_with_compose_over_every_precedence_case() {
+    let fx = build_fixture();
+
+    let mut overlay = Overlay::new();
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress, None);
+    overlay.apply(
+        e(EVAL_NARROW),
+        ChangeOp::Predicate,
+        Some(vec![TermId::new(UNSATISFIED_TERM)]),
+    );
+    overlay.apply(
+        e(EVAL_KEEP),
+        ChangeOp::Predicate,
+        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+    );
+    overlay.apply(
+        e(EVAL_WIDEN),
+        ChangeOp::Predicate,
+        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+    );
+    overlay.apply(e(DELETE_BEATS_EVAL), ChangeOp::Delete, None);
+    overlay.apply(
+        e(DELETE_BEATS_EVAL),
+        ChangeOp::Predicate,
+        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+    );
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Delete, None);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress, None);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Unsuppress, None);
+    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress, None);
+
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_PASS,
+        vec![TermId::new(SATISFIED_TERM_A)],
+    );
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_FAIL,
+        vec![TermId::new(UNSATISFIED_TERM)],
+    );
+
+    let fragment = fragment_for(&fx);
+    let mask = compose(
+        &fragment,
+        &fx.satisfied,
+        &overlay,
+        &buffer,
+        Arc::clone(&fx.base),
+        &fx.perm,
+    );
+    assert!(mask.check_structural_invariants());
+
+    for entity in 0..BOUND as u32 {
+        let Some(row) = fx.perm.row_of(EntityId::new(entity as u64)) else {
+            continue;
+        };
+        let expected = mask.contains_row(row.raw());
+        let got = visible_to(
+            &fragment,
+            &fx.satisfied,
+            &overlay,
+            &buffer,
+            EntityId::new(entity as u64),
+        );
+        assert_eq!(got, expected, "entity {entity}");
+    }
 }

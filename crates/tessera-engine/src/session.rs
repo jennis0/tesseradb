@@ -30,7 +30,7 @@ use tessera_plugin::{Descriptor, Plugin, PluginError};
 use tessera_store::manifest::CurrentPointer;
 use tessera_store::read::open_bundle;
 use tessera_store::StoreError;
-use tessera_types::{EntityId, TermId};
+use tessera_types::{EntityId, IdentityKey, TermId};
 
 use crate::{Generation, GenerationHandle};
 
@@ -77,7 +77,7 @@ pub struct Session {
 pub enum EngineError {
     Store(StoreError),
     Wal(WalError),
-    Overlay(OverlayError),
+    Overlay(OverlayError<StoreError>),
     Plugin(PluginError),
     Io(io::Error),
     /// A presented pin's `(prefix, segments_version)` does not match the live generation (I11) —
@@ -154,6 +154,17 @@ pub struct Engine {
     /// `external_index`, so a `/control/changes` naming an item ingested only seconds ago (not
     /// yet in any bundle) still resolves (Task 13).
     established: Mutex<FxHashMap<Vec<u8>, EntityId>>,
+    /// The inverse of `established` — `entity -> external_id` — for the drill-down direction
+    /// (Important I-9). Written by the same two writers as `established` (`Engine::open`'s
+    /// replay and `Engine::accept_ingest`), in the same critical section each time, so the two
+    /// maps can never disagree about the same item (task-9 brief).
+    established_inverse: Mutex<FxHashMap<EntityId, Vec<u8>>>,
+    /// The `tessera_id` blinding permutation's per-deployment key (contracts §2.6 r6, design
+    /// memo `docs/design-memos/2026-07-30-tessera-id-construction.md`) — parsed once at open from
+    /// MANIFEST's `identity.key` and held for the process lifetime. Never leaves the server (I10)
+    /// and is never logged (`IdentityKey`'s redacted `Debug` impl). `pub(crate)`: `viewport.rs`'s
+    /// `Engine::item` inverts a caller-supplied `tessera_id` with it directly.
+    pub(crate) identity_key: IdentityKey,
     /// The descriptor resolver's extension state (dictionary-miss descriptors interned in
     /// replay/accept order), detached from replay's borrow of `dict` and resumed on every live
     /// resolution — see `DescriptorResolver::resume`'s doc (Task 13).
@@ -227,6 +238,13 @@ impl Engine {
             ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
                 .map_err(EngineError::Store)?;
 
+        // Contracts §2.6 r6: the deployment's `tessera_id` key, parsed once here and held for
+        // the process lifetime. `IdentityKey::from_hex` also rejects a degenerate key — a bundle
+        // this engine would otherwise open is refused rather than silently blinding identities
+        // with a collapsed round schedule.
+        let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
+            .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
+
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
 
         let high_water = bundle
@@ -235,10 +253,21 @@ impl Engine {
             .max(high_water_from(&records));
         let allocator = Allocator::new(high_water);
 
+        // **C3 closed (review round 4, Critical)**: `resolve_from_bundle` propagates a real
+        // sidecar failure through `replay` as `Err`, rather than the closure panicking on it —
+        // `ExternalIdIndex::resolve` below is fallible end to end.
         let (overlay, buffer, established, resolver) = replay(&records, &dict, |external_id| {
             external_index.resolve(external_id)
         })
         .map_err(EngineError::Overlay)?;
+
+        // `established_inverse` — the drill-down direction (Important I-9) — is the exact
+        // inverse of `established`, built once here from the same replay pass; the two are kept
+        // in sync from this point on by `Engine::accept_ingest`'s single critical section.
+        let established_inverse: FxHashMap<EntityId, Vec<u8>> = established
+            .iter()
+            .map(|(ext, ent)| (*ent, ext.clone()))
+            .collect();
         // Detach the resolver's extension state from `dict`'s borrow immediately (Task 13): the
         // live serving path resumes exactly this state on every future descriptor resolution, so
         // novel-descriptor extension ids keep counting down from wherever replay left off, rather
@@ -295,6 +324,8 @@ impl Engine {
             allocator: Mutex::new(allocator),
             external_index,
             established: Mutex::new(established),
+            established_inverse: Mutex::new(established_inverse),
+            identity_key,
             resolver_state: Mutex::new(resolver_state),
             accepted_batches: Mutex::new(accepted_batches),
         })
@@ -362,6 +393,21 @@ impl Engine {
         self.allocator.lock().unwrap().high_water()
     }
 
+    /// The number of cached row-space projections currently held — exposed for tests confirming
+    /// `Engine::item`'s entity-space visibility test never constructs one (Critical C-5: this
+    /// must stay `0` across drill-down calls, warm or cold, unlike `Engine::viewport`'s path,
+    /// which populates this cache deliberately).
+    pub fn row_projection_cache_len(&self) -> usize {
+        self.row_projection_cache.lock().unwrap().len()
+    }
+
+    /// Whether the external-id sidecar has opened any extent (or its locator) yet — exposed for
+    /// tests confirming `Engine::open` never touches it (Task 8's per-extent laziness
+    /// guarantee).
+    pub fn external_id_sidecar_is_open(&self) -> bool {
+        self.external_index.0.is_open()
+    }
+
     /// The plugin this engine was opened with — Task 13's `/control/ingest` handler calls
     /// `terms_of_label` through this to turn an item's `access` bytes into descriptors.
     pub fn plugin(&self) -> &Arc<dyn Plugin> {
@@ -408,19 +454,57 @@ impl Engine {
     /// Resolve an external id to its `EntityId`, checking every item established live (bundle
     /// replay's own `IngestBatch` rows, plus every `/control/ingest` batch accepted since) before
     /// falling back to the bundle's own `entities/external-ids-0.arrow` extent.
-    pub fn resolve_external_id(&self, external_id: &[u8]) -> Option<EntityId> {
+    ///
+    /// **Fallible** (closes review round 4's Critical C3): a real sidecar failure — digest
+    /// mismatch, out-of-order extent, corrupt locator — now propagates as `Err` rather than the
+    /// previous `ExternalIdIndex::resolve` panicking on it. A `/control/changes` request naming
+    /// an external id backed by a corrupt sidecar gets a `500`, never a silent "unknown" *or* a
+    /// panicked worker.
+    pub fn resolve_external_id(
+        &self,
+        external_id: &[u8],
+    ) -> std::result::Result<Option<EntityId>, StoreError> {
         if let Some(&entity) = self.established.lock().unwrap().get(external_id) {
-            return Some(entity);
+            return Ok(Some(entity));
         }
         self.external_index.resolve(external_id)
+    }
+
+    /// `entity -> external_id` for drill-down (`/v1/items`). Ordering mirrors
+    /// `resolve_external_id`'s live-map-first rule, running the other way: post-build ingest has
+    /// no locator slot and no extent entry, so the live map (`established_inverse`) is consulted
+    /// first — Important I-9. `Ok(None)` means "this item genuinely has no caller external id", a
+    /// legitimate state since `external_id` is optional on ingest; it must never mean "I could
+    /// not find out". A `/v1/items` entity that is below the live high-water, past this bundle's
+    /// locator, and unknown to the live map is an inconsistency, not an absent external id, and
+    /// fails closed as `Err(StoreError::InvalidSidecar)` — see
+    /// `ExternalIdSidecar::external_id_of_checked`'s doc.
+    pub fn external_id_of(
+        &self,
+        entity: EntityId,
+    ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
+        if let Some(external_id) = self.established_inverse.lock().unwrap().get(&entity) {
+            return Ok(Some(external_id.clone()));
+        }
+        self.external_index
+            .external_id_of_checked(entity, self.allocator_high_water())
     }
 
     /// Allocate entity ids for a freshly-parsed ingest batch, in signature-sorted order (I9/§11.1)
     /// — must be called after every item's `terms` field is populated (via
     /// [`Engine::resolve_terms`]) and before the batch's `WalRow`s are framed for WAL append.
-    pub fn allocate_sorted(&self, items: &mut [PendingItem]) {
+    ///
+    /// **Propagates `AllocError`** rather than silently discarding it (a pre-existing
+    /// `unused_must_use` gap this task closes incidentally, to keep `cargo clippy -D warnings`
+    /// green): the allocator's ceiling is a real, reachable failure (I9's u32 cap), and an
+    /// ingest batch left with unassigned or partially-assigned ids would frame `WalRow`s the WAL
+    /// must never see.
+    pub fn allocate_sorted(
+        &self,
+        items: &mut [PendingItem],
+    ) -> std::result::Result<(), tessera_lifecycle::alloc::AllocError> {
         let mut alloc = self.allocator.lock().unwrap();
-        assign_sorted(items, &mut alloc);
+        assign_sorted(items, &mut alloc)
     }
 
     /// The body hash a batch id was previously accepted with, if any — the idempotency check for
@@ -481,11 +565,17 @@ impl Engine {
         let generation = self.generation.load_full();
         let mut buffer = (*generation.buffer).clone();
         let mut established = self.established.lock().unwrap();
+        // `established` and `established_inverse` are updated together, in this one critical
+        // section, so a `/control/changes` lookup and a `/v1/items` drill-down can never
+        // disagree about the same item (task-9 brief, Important I-9).
+        let mut established_inverse = self.established_inverse.lock().unwrap();
         for (row, row_terms) in rows.iter().zip(&terms) {
             established.insert(row.external_id.clone(), row.entity_id);
+            established_inverse.insert(row.entity_id, row.external_id.clone());
             buffer.insert_row_with_terms(row, row_terms.clone());
         }
         drop(established);
+        drop(established_inverse);
 
         let next = Generation {
             prefix: generation.prefix.clone(),
@@ -617,10 +707,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 ///
 /// The sidecar is per-extent lazy (Task 8): nothing is opened, mapped or digested until the
 /// first resolution, and then only the one extent the key falls in — never the whole family.
-/// This is the `resolve_from_bundle` seam `tessera_lifecycle::overlay::replay` left open (Task
-/// 10's report flags this as the one thing left to wire in), authorisation-bearing because
-/// `/control/changes` denies whichever entity it resolves to — a wrong resolution denies the
-/// wrong entity and leaves the intended target visible.
+/// This is the `resolve_from_bundle` seam `tessera_lifecycle::overlay::replay` uses,
+/// authorisation-bearing because `/control/changes` denies whichever entity it resolves to — a
+/// wrong resolution denies the wrong entity and leaves the intended target visible.
 struct ExternalIdIndex(tessera_store::ExternalIdSidecar);
 
 impl ExternalIdIndex {
@@ -637,23 +726,25 @@ impl ExternalIdIndex {
         .map(ExternalIdIndex)
     }
 
-    /// `Option<EntityId>`, matching every other resolver in this module
-    /// (`resolve_from_bundle`'s closure signature in `tessera_lifecycle::overlay::replay` is
-    /// permanent and returns a bare `Option`, not a `Result`). The sidecar itself never folds a
-    /// real failure into `Ok(None)` (see `tessera_store::sidecar`'s module doc) — a corrupt
-    /// extent, a digest mismatch or a shuffled extent list is `Err(StoreError::InvalidSidecar)`,
-    /// which this wrapper cannot propagate through the fixed closure signature and so treats as
-    /// a hard failure rather than silently reading it as "not found" (a `None` here would let a
-    /// WAL-resident suppression fail to apply without a trace). Propagating this as a real
-    /// `Result` through `replay`/`resolve_external_id` is left to whichever future task widens
-    /// that seam — not attempted here.
-    fn resolve(&self, external_id: &[u8]) -> Option<EntityId> {
-        match self.0.resolve(external_id) {
-            Ok(found) => found,
-            Err(e) => panic!(
-                "external-ID sidecar failed closed while resolving an external id ({e}) — \
-                 refusing to treat this as \"not found\""
-            ),
-        }
+    /// **Fallible, closing review round 4's Critical C3.** `resolve_from_bundle`'s closure
+    /// signature in `tessera_lifecycle::overlay::replay` now takes a generic error parameter
+    /// rather than a fixed `Option` — `tessera-lifecycle` does not depend on `tessera-store`, so
+    /// the closure cannot name `StoreError` itself, but it can return any `Result<_, E>` and let
+    /// the caller's `E` be inferred as `StoreError` here. A corrupt extent, a digest mismatch or
+    /// a shuffled extent list now propagates as `Err(StoreError::InvalidSidecar)` through
+    /// `replay`/`Engine::open`/`Engine::resolve_external_id`, rather than the previous panic —
+    /// still fail-closed in effect, but no longer a panic in an async handler or at open.
+    fn resolve(&self, external_id: &[u8]) -> std::result::Result<Option<EntityId>, StoreError> {
+        self.0.resolve(external_id)
+    }
+
+    /// `entity -> external_id`, distinguishing "genuinely has none" from "an inconsistency" — see
+    /// `tessera_store::ExternalIdSidecar::external_id_of_checked`'s doc.
+    fn external_id_of_checked(
+        &self,
+        entity: EntityId,
+        high_water: u64,
+    ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
+        self.0.external_id_of_checked(entity, high_water)
     }
 }

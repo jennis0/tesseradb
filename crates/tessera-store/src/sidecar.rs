@@ -552,6 +552,57 @@ impl ExternalIdSidecar {
         Ok(extent.resolve(external_id))
     }
 
+    /// The locator's length — the number of entity-id slots this bundle's build covered
+    /// (`entity_id_high_water` at build time), or `0` if this deployment wrote no locator at all
+    /// (no caller ever supplied an external id). Exposed so a caller (`tessera-engine`'s
+    /// `Engine::external_id_of`, Important I-9) can tell "not covered by this bundle's locator"
+    /// apart from "covered, and genuinely has no external id" **without** being handed the
+    /// locator's path, digest or any other descriptor (Ruling B) — a plain count is none of
+    /// those.
+    pub fn locator_len(&self) -> u64 {
+        self.locator.as_ref().map(|l| l.desc.len).unwrap_or(0)
+    }
+
+    /// `entity -> external_id`, distinguishing three outcomes instead of [`Self::external_id_of`]'s
+    /// two (Important I-9): covered by this bundle's locator (delegates to
+    /// [`Self::external_id_of`]); past the locator but below `high_water` (the live allocator
+    /// high-water, supplied by the caller — this sidecar has no notion of anything ingested after
+    /// build) with no live-map hit **is the caller's job to have already checked** — an
+    /// inconsistency, not an absent external id, so this fails closed rather than returning a
+    /// `None` that would read as "this item has no external id" for one that does; and beyond
+    /// `high_water` entirely, which is `Ok(None)` — a post-build entity the live map doesn't know
+    /// about genuinely has no external id.
+    ///
+    /// The `path` on the `Err` this can return is the locator's own — still never named by the
+    /// caller (Ruling B holds: the caller passes only `entity` and `high_water`, never a path).
+    pub fn external_id_of_checked(
+        &self,
+        entity: EntityId,
+        high_water: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        if entity.raw() < self.locator_len() {
+            return self.external_id_of(entity);
+        }
+        if entity.raw() < high_water {
+            let path = self
+                .locator
+                .as_ref()
+                .map(|l| l.desc.path.clone())
+                .unwrap_or_else(|| PathBuf::from("<no locator extent — deployment wrote none>"));
+            return Err(StoreError::InvalidSidecar {
+                path,
+                detail: format!(
+                    "entity {} is below the live high-water ({high_water}) and past this \
+                     bundle's locator ({} slots), but is not known to the live external-id map — \
+                     an inconsistency, not an absent external id",
+                    entity.raw(),
+                    self.locator_len(),
+                ),
+            });
+        }
+        Ok(None)
+    }
+
     /// Resolve `entity` to its caller-supplied external id via the locator, or `Ok(None)` if
     /// `entity` has none (Ruling A: the ordinary case for an item whose identity is its
     /// `tessera_id`). A missing or corrupt locator, or a locator ordinal that doesn't fall in

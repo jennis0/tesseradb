@@ -18,9 +18,9 @@ use arc_swap::ArcSwap;
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
-pub use compose::{compose, EffectiveMask, RowProjection};
+pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
 pub use session::{Engine, EngineConfig, EngineError, Session};
-pub use viewport::{EngineMeta, PointOut, ScalarOut, TileCount, ViewportOut};
+pub use viewport::{EngineMeta, ItemOut, PointOut, ScalarOut, TileCount, ViewportOut};
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1, slimmed for
 /// Phase 1: no merge/compaction fields yet).

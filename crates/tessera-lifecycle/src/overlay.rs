@@ -101,24 +101,37 @@ impl Overlay {
 /// replay has never seen — neither via an `IngestBatch` row replayed so far, nor via
 /// `resolve_from_bundle` (the bundle's `entities/external-ids-0.arrow` extent, wired in by the
 /// caller) — must not be silently dropped or silently applied to the wrong entity.
+///
+/// Generic over `E`, the caller's `resolve_from_bundle` error type (review round 4, Critical
+/// C3). `tessera-lifecycle` does not depend on `tessera-store`, so this cannot name
+/// `StoreError` directly — `tessera-engine`'s caller instantiates `E = StoreError` and gets a
+/// real propagated error instead of the closure panicking on a corrupt sidecar.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OverlayError {
+pub enum OverlayError<E> {
     /// `404 unknown` (Reference Sheet R5): a `Change` record named an external id no known
     /// entity (bundle or WAL-established) has ever claimed.
     UnknownExternalId(Vec<u8>),
+    /// `resolve_from_bundle` itself failed — a real error, not "not found". Fail-closed: WAL
+    /// replay (and any live resolution reusing the same closure) must propagate this rather than
+    /// read it as `UnknownExternalId`, which would let a WAL-resident suppression silently fail
+    /// to apply.
+    ResolveFailed(E),
 }
 
-impl std::fmt::Display for OverlayError {
+impl<E: std::fmt::Display> std::fmt::Display for OverlayError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OverlayError::UnknownExternalId(id) => {
                 write!(f, "unknown external id: {id:02x?}")
             }
+            OverlayError::ResolveFailed(e) => {
+                write!(f, "resolve_from_bundle failed: {e}")
+            }
         }
     }
 }
 
-impl std::error::Error for OverlayError {}
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for OverlayError<E> {}
 
 /// Replay a WAL's records into an `Overlay` and an `IngestBuffer`.
 ///
@@ -145,10 +158,10 @@ impl std::error::Error for OverlayError {}
 /// [`DescriptorResolver::resume`]'s doc for why restarting descriptor extension ids would be
 /// fail-open).
 #[allow(clippy::type_complexity)]
-pub fn replay<'a>(
+pub fn replay<'a, E>(
     records: &[WalRecord],
     dict: &'a Dict,
-    resolve_from_bundle: impl Fn(&[u8]) -> Option<EntityId>,
+    resolve_from_bundle: impl Fn(&[u8]) -> std::result::Result<Option<EntityId>, E>,
 ) -> Result<
     (
         Overlay,
@@ -156,7 +169,7 @@ pub fn replay<'a>(
         FxHashMap<Vec<u8>, EntityId>,
         DescriptorResolver<'a>,
     ),
-    OverlayError,
+    OverlayError<E>,
 > {
     let mut overlay = Overlay::new();
     let mut buffer = IngestBuffer::new();
@@ -176,11 +189,15 @@ pub fn replay<'a>(
                 op,
                 descriptors,
             } => {
-                let entity = established
-                    .get(external_id.as_slice())
-                    .copied()
-                    .or_else(|| resolve_from_bundle(external_id))
-                    .ok_or_else(|| OverlayError::UnknownExternalId(external_id.clone()))?;
+                let entity = match established.get(external_id.as_slice()).copied() {
+                    Some(entity) => entity,
+                    None => match resolve_from_bundle(external_id)
+                        .map_err(OverlayError::ResolveFailed)?
+                    {
+                        Some(entity) => entity,
+                        None => return Err(OverlayError::UnknownExternalId(external_id.clone())),
+                    },
+                };
 
                 let terms = descriptors
                     .as_ref()
@@ -283,7 +300,9 @@ mod tests {
             descriptors: None,
         }];
 
-        let result = replay(&records, &dict, |_external_id| None);
+        let result = replay(&records, &dict, |_external_id| {
+            Ok::<_, std::convert::Infallible>(None)
+        });
         assert_eq!(
             result.unwrap_err(),
             OverlayError::UnknownExternalId(b"never-ingested".to_vec())
@@ -307,11 +326,11 @@ mod tests {
         }];
 
         let (overlay, _buffer, _established, _resolver) = replay(&records, &dict, |external_id| {
-            if external_id == b"from-a-previous-build" {
+            Ok::<_, std::convert::Infallible>(if external_id == b"from-a-previous-build" {
                 Some(bundle_entity)
             } else {
                 None
-            }
+            })
         })
         .unwrap();
 

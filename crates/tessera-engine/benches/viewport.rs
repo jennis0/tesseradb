@@ -34,9 +34,14 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_plugin::Passthrough;
 use tessera_spatial::Extent;
 use tessera_store::read::open_bundle;
-use tessera_types::TermId;
+use tessera_types::{IdentityKey, TermId};
 
 const ITEM_LIMIT: u64 = 2_422_486;
+
+/// The same fixed, non-degenerate test key `tests/viewport.rs` and `tessera-build`'s own fixture
+/// tests use — arbitrary here (this bench never inverts a `tessera_id`), but a real key all the
+/// same, since `IdentityKey::from_hex` refuses degenerate ones.
+const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
 fn extent() -> Extent {
     Extent {
@@ -70,6 +75,10 @@ fn ensure_bundle() -> PathBuf {
             extent: extent(),
             slice_id: "s0".to_string(),
             limit: Some(ITEM_LIMIT),
+            identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
+            identity_key_hex: TEST_KEY_HEX.to_string(),
+            identity_epoch: 1,
+            shard_id: 0,
         };
         build(&args).expect("2.4M fixture build should succeed");
     }
