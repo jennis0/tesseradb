@@ -128,8 +128,9 @@ impl EffectiveMask {
     /// spanning ~2.5×10⁷ visible rows that is ~100 MB allocated and written per request, on a path
     /// whose entire cost model (this module's doc, and CLAUDE.md) is "O(containers touched), not
     /// O(cardinality)". The bitmap is O(containers) — roughly 3 MB for the same set — and callers
-    /// iterate it lazily, per value with `.iter()` or per run via
-    /// [`Self::for_each_visible_run`]'s diffs-present fallback (selection's decode path).
+    /// iterate it lazily: per value with `.iter()`, per run via
+    /// [`Self::for_each_visible_run`]'s diffs-present fallback, or caller-driven via
+    /// [`Self::decode_source`]'s `Composed` variant (selection's decode paths).
     ///
     /// The eagerness was easy to miss because the old placeholder sampler `break`ed after *k* rows:
     /// the break saved the *gather*, never the materialisation, so the cost did not show up in the
@@ -191,6 +192,41 @@ impl EffectiveMask {
         }
     }
 
+    /// Visit the visible rows of `r` one value at a time, ascending — the run-length-indifferent
+    /// sibling of [`Self::for_each_visible_run`], for masks too scattered for run decoding to
+    /// amortise (the tier gate and its measured basis live at
+    /// `select.rs::RUN_DECODE_MIN_DENSITY_PCT`).
+    ///
+    /// This is the retired materialise-then-`.iter()` mechanism minus the materialisation: on the
+    /// steady-state route the cursor walks `base` in place, so the per-tile temporaries are gone
+    /// while the per-value cost is unchanged (measured marginally *better* —
+    /// `examples/decode_tiers.rs`). A `next_many` batch decoder was measured for this role and
+    /// rejected: the buffer round-trip lost to croaring's plain iterator at **every** density
+    /// tried — see the example's table before reintroducing one. Route structure is the same as
+    /// the run form: any non-empty diff falls back to the materialised composed bitmap.
+    /// The bitmap a caller-driven decode of `r` should walk — the route choice as a value, for
+    /// callers whose hot loop cannot afford a closure boundary.
+    ///
+    /// [`Self::for_each_visible_run`] hands runs to a closure, which is fine per run — the call
+    /// amortises over the run's rows. A **per-value** decode is not so forgiving: the measured
+    /// cost of routing the scan state through a closure environment was ~2× the whole loop, so
+    /// the value tier's loop lives with its state in `select.rs` and only the route decision
+    /// lives here. `examples/decode_tiers.rs`'s mask-batch column pins the shipped shape against
+    /// the local reference loop so the overhead cannot creep back unnoticed.
+    ///
+    /// The contract mirrors the closure forms exactly: walking the returned bitmap clamped to
+    /// `r` — seek to `r.start`, stop at the first row `≥ r.end` — yields `rows_in_range(r)`,
+    /// whichever variant came back. `Base` is the whole projection, NOT clamped to `r` (the
+    /// caller's stop condition does the clamping); `Composed` is already `rows_in_range(r)` and
+    /// the same walk is simply exhaustive on it.
+    pub fn decode_source(&self, r: Range<u32>) -> DecodeSource<'_> {
+        if self.diffs_are_empty() {
+            DecodeSource::Base(self.base.bitmap())
+        } else {
+            DecodeSource::Composed(self.rows_in_range(r))
+        }
+    }
+
     /// The two structural invariants (task-10 brief): `minus ⊆ base` and `plus ∩ base = ∅`.
     /// Exposed for tests; also asserted in debug builds at construction time in [`compose`].
     pub fn check_structural_invariants(&self) -> bool {
@@ -234,6 +270,29 @@ fn for_each_run_in(bitmap: &Bitmap, r: Range<u32>, f: &mut impl FnMut(Range<u32>
                 return;
             }
             f(run.start..run.last + 1);
+        }
+    }
+}
+
+/// See [`EffectiveMask::decode_source`]. Which variant a caller received is the diffs-empty
+/// route choice — observable in timing, never in output, same C19-adjacent note as the closure
+/// decoders.
+pub enum DecodeSource<'a> {
+    /// The whole projection, borrowed — the steady-state (diffs-empty) route. Not clamped to the
+    /// requested range; the caller's walk must stop at its `r.end`.
+    Base(&'a Bitmap),
+    /// The materialised `rows_in_range(r)` — the diffs-present fallback. Already exactly the
+    /// visible set of `r`.
+    Composed(Bitmap),
+}
+
+impl DecodeSource<'_> {
+    /// The bitmap to walk, whichever route produced it.
+    #[inline]
+    pub fn bitmap(&self) -> &Bitmap {
+        match self {
+            DecodeSource::Base(b) => b,
+            DecodeSource::Composed(b) => b,
         }
     }
 }
@@ -483,6 +542,89 @@ mod tests {
         assert_flattens_to_intersection(&b, 0..600);
     }
 
+    /// The documented [`EffectiveMask::decode_source`] contract walk: seek to `r.start`, batch
+    /// decode, stop at the first value `≥ r.end` — the exact loop `select.rs`'s value tier
+    /// drives, transcribed once here so its clamp semantics are pinned at the bitmap level.
+    fn source_walk(bitmap: &Bitmap, r: Range<u32>) -> Vec<u32> {
+        let mut out = Vec::new();
+        if r.start >= r.end {
+            return out;
+        }
+        let mut iter = bitmap.iter();
+        iter.reset_at_or_after(r.start);
+        let mut buf = [0u32; 64];
+        'outer: loop {
+            let n = iter.next_many(&mut buf);
+            if n == 0 {
+                break;
+            }
+            for &v in &buf[..n] {
+                if v >= r.end {
+                    break 'outer;
+                }
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    /// The contract walk yields exactly `bitmap ∩ r` — [`assert_flattens_to_intersection`]'s
+    /// sibling for the caller-driven value decode.
+    fn assert_values_match_intersection(bitmap: &Bitmap, r: Range<u32>) {
+        let expected: Vec<u32> = bitmap.and(&Bitmap::from_range(r.clone())).to_vec();
+        assert_eq!(
+            source_walk(bitmap, r.clone()),
+            expected,
+            "values disagree with bitmap ∩ {r:?}"
+        );
+    }
+
+    #[test]
+    fn value_walk_excludes_u32_max_and_clamps_to_the_range_end() {
+        let mut b = Bitmap::new();
+        b.add_range(u32::MAX - 100..=u32::MAX);
+        // `r.end` is exclusive and cannot exceed u32::MAX, so the value u32::MAX is never
+        // emitted — same parity with `Bitmap::from_range` as the run walk, with no `+ 1`
+        // arithmetic to protect at all.
+        let r = (u32::MAX - 50)..u32::MAX;
+        let got = source_walk(&b, r.clone());
+        assert_eq!(got.first().copied(), Some(u32::MAX - 50));
+        assert_eq!(got.last().copied(), Some(u32::MAX - 1));
+        assert_values_match_intersection(&b, r);
+    }
+
+    #[test]
+    fn value_walk_seeks_to_the_range_start_and_stops_at_its_end() {
+        let mut b = Bitmap::new();
+        b.add_range(0..=9_999);
+        assert_values_match_intersection(&b, 0..10_000);
+        assert_values_match_intersection(&b, 100..5_000);
+        assert_eq!(source_walk(&b, 4_000..6_000).len(), 2_000);
+    }
+
+    #[test]
+    fn value_walk_yields_nothing_on_empty_or_disjoint_inputs() {
+        let empty = Bitmap::new();
+        assert!(source_walk(&empty, 0..1000).is_empty());
+        let mut b = Bitmap::new();
+        b.add_range(100..=200);
+        assert!(source_walk(&b, 50..50).is_empty(), "empty range");
+        assert!(source_walk(&b, 0..100).is_empty(), "range before");
+        assert!(source_walk(&b, 201..300).is_empty(), "range after");
+    }
+
+    #[test]
+    fn decode_source_walk_equals_rows_in_range_on_both_variants() {
+        // At the unit level only the Base variant's bitmap is constructible without a full
+        // compose fixture; the mask-level both-variant equivalence lives in `tests/compose.rs`.
+        let mut b = Bitmap::new();
+        b.add_range(10..=99);
+        b.add(150);
+        let clamped: Vec<u32> = source_walk(&b, 50..151);
+        let from_range: Vec<u32> = b.and(&Bitmap::from_range(50..151)).to_vec();
+        assert_eq!(clamped, from_range);
+    }
+
     #[test]
     fn run_walk_agrees_with_the_bitmap_route_on_random_container_mixes() {
         use rand::rngs::StdRng;
@@ -508,6 +650,7 @@ mod tests {
                 let a = rng.gen_range(0..320_000);
                 let z = rng.gen_range(0..320_000);
                 assert_flattens_to_intersection(&b, a.min(z)..a.max(z));
+                assert_values_match_intersection(&b, a.min(z)..a.max(z));
             }
         }
     }

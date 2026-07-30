@@ -19,7 +19,7 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
-use tessera_engine::select::{SelectParams, Selection, Threshold};
+use tessera_engine::select::{decode_tier, DecodeTier, SelectParams, Selection, Threshold};
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_spatial::{morton_of, tiler::sort_batch, Extent, Tile, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
@@ -798,22 +798,32 @@ fn per_value_selection(
     (rows, rows_visited)
 }
 
-/// **The B9 equivalence property.** `Selection::of`'s run decode is bit-identical — same `rows`,
-/// same `rows_visited` — to the retired per-value path, over randomised masks, ranges and
-/// parameters, on **both** decode routes and **both** internal branches.
+/// **The adaptive-decode equivalence property.** `Selection::of`'s tiered decode is
+/// bit-identical — same `rows`, same `rows_visited` — to the retired per-value path, over
+/// randomised masks, ranges and parameters, on **both** decode routes, **both** internal
+/// branches, and **all three** tiers.
 ///
-/// The diffs-empty arm is the one that exercises the new cursor route; a corpus that always has
-/// non-empty diffs tests only the fallback, which shares its bitmap with the oracle and proves
-/// nothing. The route predicate is `diffs_are_empty` (that is the branch `for_each_visible_run`
-/// takes), so asserting it per mask, plus the fired-counter floors below, pins that all four
-/// route × branch combinations were genuinely reached — mirroring the per-branch coverage
-/// asserts in [`selection_matches_the_definition_over_both_internal_branches`].
+/// The diffs-empty arm is the one that exercises the direct-over-`base` decodes; a corpus that
+/// always has non-empty diffs tests only the fallback, which shares its bitmap with the oracle
+/// and proves nothing. The route predicate is `diffs_are_empty` and the tier predicate is the
+/// engine's own `decode_tier` (imported, not transcribed, so the stratification cannot drift
+/// from the gate), so asserting the route per mask plus the fired-counter floors below pins that
+/// every route × tier and route × branch combination was genuinely reached — mirroring the
+/// per-branch coverage asserts in
+/// [`selection_matches_the_definition_over_both_internal_branches`].
+///
+/// Tier-0 and tier-1 corpora cannot be left to chance (a random range almost never lands with
+/// ≥95% density), so two of the four range flavours are crafted against the block shapes: a
+/// range wholly inside a fully visible stretch (tier 0) and a visible block plus a short
+/// invisible tail (density ≥ the gate constant but not full — tier 1). With diffs present the
+/// overlay is confined to the lower third of the row space and the crafted ranges to the upper
+/// two thirds, so the diffs flip the *route* without dirtying the crafted densities.
 #[test]
-fn run_decode_matches_the_per_value_path_on_both_routes_and_both_branches() {
+fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
     use std::collections::HashSet;
 
-    let mut rng = StdRng::seed_from_u64(0xB9_0001);
-    let points: Vec<(f32, f32, u64)> = (0..3000)
+    let mut rng = StdRng::seed_from_u64(0xB9_0002);
+    let points: Vec<(f32, f32, u64)> = (0..4096)
         .map(|_| {
             (
                 rng.gen_range(0.0f32..1024.0),
@@ -824,31 +834,47 @@ fn run_decode_matches_the_per_value_path_on_both_routes_and_both_branches() {
         .collect();
     let seg = segment_of(&points);
     let n = seg.row_count();
+    let diffs_bound = n / 3; // overlay effects stay below this row
 
-    // Three visibility shapes: sparse scatter, dense scatter, contiguous blocks — the last is the
-    // long-run shape the run decode exists for.
-    let shapes: Vec<Vec<u32>> = vec![
-        (0..n).filter(|_| rng.gen_bool(0.07)).collect(),
-        (0..n).filter(|_| rng.gen_bool(0.7)).collect(),
-        (0..n).filter(|r| (r / 256) % 2 == 0).collect(),
+    // Four visibility shapes, density-stratified: sparse scatter and dense scatter feed tier 2,
+    // 256-row blocks feed tiers 0 (inside a block) and 1 (block + short tail) via the crafted
+    // ranges, and the 95%-scatter shape gives the run tier organic wide-range hits at the gate
+    // boundary.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Shape {
+        Sparse,
+        Dense,
+        Blocks,
+        NearFull,
+    }
+    let shapes: Vec<(Shape, Vec<u32>)> = vec![
+        (Shape::Sparse, (0..n).filter(|_| rng.gen_bool(0.07)).collect()),
+        (Shape::Dense, (0..n).filter(|_| rng.gen_bool(0.7)).collect()),
+        (Shape::Blocks, (0..n).filter(|r| (r / 256) % 2 == 0).collect()),
+        (Shape::NearFull, (0..n).filter(|r| r % 20 != 0).collect()),
     ];
 
-    // fired[route][branch]: route 0 = diffs empty (cursor walk), 1 = diffs present (fallback);
-    // branch 0 = serve-all, 1 = counting/heap.
-    let mut fired = [[0usize; 2]; 2];
+    // fired_branch[route][branch]: branch 0 = serve-all, 1 = counting/heap.
+    // fired_tier[route][tier]: tier by the engine's own gate. Route 0 = diffs empty.
+    let mut fired_branch = [[0usize; 2]; 2];
+    let mut fired_tier = [[0usize; 3]; 2];
 
-    for visible_rows in &shapes {
+    for (shape, visible_rows) in &shapes {
         for diffs_present in [false, true] {
             let mut overlay = Overlay::new();
             if diffs_present {
-                // `minus ⊆ base`: suppress a sample of visible rows. `plus ∩ base = ∅`: widen a
-                // sample of invisible rows via a predicate onto the granted term (entity id ==
-                // row index in this fixture).
-                for &row in visible_rows.iter().step_by(7) {
+                // `minus ⊆ base`: suppress a sample of visible rows below `diffs_bound`.
+                // `plus ∩ base = ∅`: widen a sample of invisible rows below `diffs_bound` via a
+                // predicate onto the granted term (entity id == row index in this fixture).
+                for &row in visible_rows
+                    .iter()
+                    .filter(|&&r| r < diffs_bound)
+                    .step_by(43)
+                {
                     overlay.apply(EntityId::new(row as u64), ChangeOp::Suppress, None);
                 }
                 let vis_set: HashSet<u32> = visible_rows.iter().copied().collect();
-                for row in (0..n).filter(|r| !vis_set.contains(r)).step_by(11) {
+                for row in (0..diffs_bound).filter(|r| !vis_set.contains(r)).step_by(11) {
                     overlay.apply(
                         EntityId::new(row as u64),
                         ChangeOp::Predicate,
@@ -873,17 +899,52 @@ fn run_decode_matches_the_per_value_path_on_both_routes_and_both_branches() {
                 for cap in [1usize, 4, 30, 4096] {
                     for k_min in [1usize, 2] {
                         let p = params(k_min, cap, threshold);
-                        for i in 0..10 {
-                            // Alternate wide and narrow ranges: wide ones exercise the
-                            // counting/heap branch and multi-run decodes, narrow ones give the
-                            // low visible counts the serve-all branch fires on.
-                            let range = if i % 2 == 0 {
-                                let a = rng.gen_range(0..n);
-                                let b = rng.gen_range(0..n);
-                                a.min(b)..a.max(b) + 1
-                            } else {
-                                let a = rng.gen_range(0..n);
-                                a..(a + rng.gen_range(1..64)).min(n)
+                        for i in 0..16 {
+                            let range = match i % 4 {
+                                // Wide random: multi-run decodes, the counting/heap branch.
+                                0 => {
+                                    let a = rng.gen_range(0..n);
+                                    let b = rng.gen_range(0..n);
+                                    a.min(b)..a.max(b) + 1
+                                }
+                                // Narrow random: the low counts the serve-all branch fires on.
+                                1 => {
+                                    let a = rng.gen_range(0..n);
+                                    a..(a + rng.gen_range(1..64)).min(n)
+                                }
+                                // Tier 0 crafted: wholly inside a fully visible stretch.
+                                2 => match shape {
+                                    Shape::Blocks => {
+                                        // Visible blocks start at 512·j; stay above diffs_bound.
+                                        let j = rng.gen_range(3..8u32);
+                                        let start = 512 * j + rng.gen_range(0..200);
+                                        start..start + rng.gen_range(1..56)
+                                    }
+                                    Shape::NearFull => {
+                                        // Rows 20k+1 ..= 20k+19 are all visible.
+                                        let k = rng.gen_range(69..203u32);
+                                        let start = 20 * k + 1 + rng.gen_range(0..10);
+                                        start..start + rng.gen_range(1..9)
+                                    }
+                                    _ => {
+                                        let a = rng.gen_range(0..n);
+                                        a..(a + rng.gen_range(1..64)).min(n)
+                                    }
+                                },
+                                // Tier 1 crafted: a visible block plus a short invisible tail —
+                                // density ≥ the gate constant, strictly below full.
+                                _ => match shape {
+                                    Shape::Blocks => {
+                                        let j = rng.gen_range(3..7u32);
+                                        let start = 512 * j;
+                                        start..start + 256 + rng.gen_range(1..13)
+                                    }
+                                    _ => {
+                                        let a = rng.gen_range(0..n);
+                                        let b = rng.gen_range(0..n);
+                                        a.min(b)..a.max(b) + 1
+                                    }
+                                },
                             };
                             let vis = mask.count_range(range.clone());
                             if vis == 0 {
@@ -894,12 +955,12 @@ fn run_decode_matches_the_per_value_path_on_both_routes_and_both_branches() {
                                 per_value_selection(&seg, &mask, range.clone(), &p, vis);
                             assert_eq!(
                                 got.rows, want_rows,
-                                "run decode diverged from the per-value path: diffs_present=\
+                                "tiered decode diverged from the per-value path: diffs_present=\
                                  {diffs_present} k_min={k_min} cap={cap} threshold={threshold:?} \
                                  range={range:?} visible={vis}"
                             );
-                            // R3: the counter, un-gated. Both sides count clamped rows actually
-                            // read, so both must equal the visible cardinality of the range.
+                            // R3: the counter, un-gated. Every tier counts the clamped rows it
+                            // actually reads, so both sides must equal the visible cardinality.
                             assert_eq!(
                                 got.rows_visited, want_visited,
                                 "rows_visited diverged at diffs_present={diffs_present} \
@@ -909,14 +970,22 @@ fn run_decode_matches_the_per_value_path_on_both_routes_and_both_branches() {
                                 want_visited, vis,
                                 "the per-value oracle itself must read exactly the visible \
                                  cardinality — if this fails the fixture is broken, not the \
-                                 run decode"
+                                 tiered decode"
                             );
 
-                            // The exact internal branch predicate, transcribed.
+                            // Stratify by the engine's own predicates.
+                            let range_len = u64::from(range.end - range.start);
+                            let tier = match decode_tier(vis, range_len) {
+                                DecodeTier::FullRange => 0,
+                                DecodeTier::Runs => 1,
+                                DecodeTier::Values => 2,
+                            };
+                            fired_tier[usize::from(diffs_present)][tier] += 1;
                             let floor = p.k_min.min(p.cap);
                             let serves_all = vis <= floor as u64
                                 || (p.threshold.is_saturated() && vis <= p.cap as u64);
-                            fired[usize::from(diffs_present)][usize::from(!serves_all)] += 1;
+                            fired_branch[usize::from(diffs_present)]
+                                [usize::from(!serves_all)] += 1;
                         }
                     }
                 }
@@ -924,13 +993,21 @@ fn run_decode_matches_the_per_value_path_on_both_routes_and_both_branches() {
         }
     }
 
-    for (route, route_name) in [(0, "diffs-empty cursor"), (1, "diffs-present fallback")] {
+    for (route, route_name) in [(0, "diffs-empty"), (1, "diffs-present fallback")] {
         for (branch, branch_name) in [(0, "serve-all"), (1, "counting/heap")] {
             assert!(
-                fired[route][branch] > 100,
+                fired_branch[route][branch] > 100,
                 "only {} comparisons hit the {route_name} route's {branch_name} branch — that \
                  combination is barely covered and this test's silence proves nothing for it",
-                fired[route][branch]
+                fired_branch[route][branch]
+            );
+        }
+        for (tier, tier_name) in [(0, "full-range"), (1, "runs"), (2, "values")] {
+            assert!(
+                fired_tier[route][tier] > 100,
+                "only {} comparisons hit the {route_name} route's {tier_name} tier — that \
+                 combination is barely covered and this test's silence proves nothing for it",
+                fired_tier[route][tier]
             );
         }
     }

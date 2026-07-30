@@ -60,10 +60,10 @@ pub struct StageTimings {
     pub tile_ranges_ns: u64,
     /// `EffectiveMask::count_range`, summed over tiles. The count loop.
     pub count_ns: u64,
-    /// §7.2's selection, summed over tiles: the run decode of the visible set
-    /// (`EffectiveMask::for_each_visible_run` — a cursor over `base` steady-state, the
-    /// `rows_in_range` bitmap fallback when overlay diffs exist) plus the threshold count and the
-    /// bounded selection over it.
+    /// §7.2's selection, summed over tiles: the tiered decode of the visible set
+    /// (`select::decode_tier` — full-range slice, run decode, or batched value decode, each
+    /// walking `base` steady-state and the `rows_in_range` bitmap fallback when overlay diffs
+    /// exist) plus the threshold count and the bounded selection over it.
     pub select_ns: u64,
     /// The per-row column gather (`row_to_point`), summed over tiles.
     pub gather_ns: u64,
