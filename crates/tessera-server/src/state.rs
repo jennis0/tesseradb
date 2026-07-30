@@ -85,8 +85,18 @@ pub struct ComputeGate {
     pub admission_timeout_ms: u64,
     slots: Arc<Semaphore>,
     compute: Arc<Semaphore>,
-    /// Every 429 this gate has produced, from either shed path. No per-principal label (SA §9) —
+    /// Every 429 *this gate* has produced, from either of its own two shed paths (the outer
+    /// slots semaphore and the inner compute-timeout semaphore). No per-principal label (SA §9) —
     /// a single process-wide counter, `/control/status`'s `shed_total`.
+    ///
+    /// **Does not count every 429 the server can return.** D-G's single-flight builders
+    /// (`EngineError::ProjectionBuilding`/`FragmentBuilding`, Tasks 1-2) also map to 429
+    /// `backpressure` at `map_engine_error`, but those sheds happen *after* this gate has already
+    /// admitted the request — they are a distinct mechanism this counter has no visibility into.
+    /// A caller correlating `shed_total` against the client-observed 429 rate should expect the
+    /// latter to be equal or higher, never a mismatch to chase as a bug (see Task 9's bench report
+    /// for a worked example of this exact confusion, isolated via a direct `shed_total`-vs-observed
+    /// delta).
     shed_total: AtomicU64,
 }
 
@@ -98,6 +108,8 @@ pub struct ComputeGateStatus {
     pub queue: usize,
     pub in_flight: usize,
     pub waiting: usize,
+    /// See [`ComputeGate::shed_total`]'s doc: this gate's own two shed paths only, not the D-G
+    /// single-flight builders' 429s.
     pub shed_total: u64,
 }
 

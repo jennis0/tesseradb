@@ -23,7 +23,7 @@ use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
 use tessera_server::state::{AppState, ComputeGate, SessionRegistry};
-use tessera_spatial::Extent;
+use tessera_spatial::{tiles_for_bbox, Extent};
 use tessera_types::IdentityKey;
 
 const N_ITEMS: u64 = 1_000;
@@ -2248,14 +2248,26 @@ fn engine_config_for_slow_viewport() -> EngineConfig {
 /// live permit counts, `state::ComputeGate::status`) rather than guessing how long "the slow
 /// request has started" takes on this run's scheduler.
 async fn poll_until_in_flight(server: &TestServer, want: u64) {
-    for _ in 0..2000 {
+    // Bound is generous (10s, not the original 2s) precisely so this helper's own panic stays
+    // rare: on a slow or contended runner, a tight bound here fires *this* panic instead of
+    // whichever ratio/timing assertion the calling test actually exists to check, which reads to
+    // a future maintainer as "the gate never reached this state" (implicating the mechanism under
+    // test) rather than "the runner was too slow for the poll bound" (an unrelated, purely
+    // cosmetic failure mode) — both are still test failures either way, just with different, and
+    // differently misleading, messages.
+    for _ in 0..10_000 {
         let status = control_status(server).await;
         if status["compute"]["in_flight"].as_u64() == Some(want) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
-    panic!("compute.in_flight did not reach {want} within the poll bound");
+    panic!(
+        "compute.in_flight did not reach {want} within the 10s poll bound -- this is \
+         poll_until_in_flight's own generous-but-finite timeout firing, not necessarily the \
+         calling test's real assertion; check whether the gate is genuinely stuck before \
+         assuming a regression in the mechanism the calling test targets"
+    );
 }
 
 /// D-B: with `compute_admission = 1, compute_queue = 0` (the deterministic configuration this
@@ -2925,5 +2937,102 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
          compute_threads -- this is also the statement that the Python differential oracle and \
          the conformance byte-scanner's vectors are unaffected: they consume exactly these bytes \
          and know nothing about compute_threads"
+    );
+}
+
+/// Server-level twin of
+/// `tessera-engine`'s `viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles`
+/// (fix-wave minor: the headline test above, like its engine-level counterpart, never exercises
+/// `tile_result`'s `visible == 0 -> Ok(None)` empty-tile skip path). Same trick, no new fixture
+/// data: this file's fixture scatter is `(e*37, e*53) % 1000`, a bijection of `e % 1000` onto the
+/// 1000×1000 residue lattice, so `N_ITEMS = 1_000` items occupy up to 1,000 distinct locations
+/// spread across the full extent -- dense enough at `zoom = 3` (64 candidate tiles) to leave almost
+/// every tile non-empty, but at `zoom = 8` (up to 65,536 candidate tiles) sparse enough that most
+/// candidate tiles are genuinely empty while a real minority are not.
+#[tokio::test]
+async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles(
+) {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let config_1 = EngineConfig {
+        compute_threads: 1,
+        ..default_engine_config()
+    };
+    let config_8 = EngineConfig {
+        compute_threads: 8,
+        ..default_engine_config()
+    };
+
+    let server_1 = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache-1"),
+        &tmp.path().join("wal-1.log"),
+        config_1,
+    )
+    .await;
+    let server_8 = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache-8"),
+        &tmp.path().join("wal-8.log"),
+        config_8,
+    )
+    .await;
+
+    let auth_1 = authorise(&server_1, &["0"]).await;
+    let token_1 = auth_1["token"].as_str().unwrap();
+    let auth_8 = authorise(&server_8, &["0"]).await;
+    let token_8 = auth_8["token"].as_str().unwrap();
+
+    let bbox = [0.0, 0.0, 1000.0, 1000.0];
+    let zoom = 8;
+    let body = serde_json::json!({
+        "slice": "s0", "zoom": zoom, "bbox": bbox, "k": 50
+    });
+    let candidate_tiles = tiles_for_bbox(bbox, zoom, &extent()).len();
+
+    let resp_1 = server_1
+        .client
+        .post(server_1.viewer_url("/v1/viewport"))
+        .bearer_auth(token_1)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_1.status(), 200);
+    let bytes_1 = resp_1.bytes().await.unwrap();
+
+    let resp_8 = server_8
+        .client
+        .post(server_8.viewer_url("/v1/viewport"))
+        .bearer_auth(token_8)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_8.status(), 200);
+    let bytes_8 = resp_8.bytes().await.unwrap();
+
+    let (tiles, _points) = decode_viewport(&bytes_1);
+    assert!(
+        !tiles.is_empty(),
+        "need at least one non-empty tile for this to be a real mixed case, got none"
+    );
+    assert!(
+        tiles.len() < candidate_tiles,
+        "need at least one genuinely empty (Ok(None)-skipped) tile among the {candidate_tiles} \
+         candidates to exercise the skip path this test is for -- got {} non-empty tiles",
+        tiles.len()
+    );
+
+    assert_eq!(
+        bytes_1, bytes_8,
+        "the full Arrow response body must be byte-for-byte identical regardless of \
+         compute_threads, including on the mostly-empty-tile Ok(None) skip path"
     );
 }

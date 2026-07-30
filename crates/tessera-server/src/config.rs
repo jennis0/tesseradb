@@ -72,6 +72,16 @@ pub enum ConfigError {
     /// is what `serve.compute_queue = 0` (a legal value) already expresses explicitly. Refused so
     /// a zero here reads as a mistake rather than a second spelling of that same knob.
     AdmissionTimeoutZero,
+    /// `serve.compute_admission + serve.compute_queue` overflows `usize`, or the sum exceeds
+    /// `tokio::sync::Semaphore::MAX_PERMITS` (`usize::MAX >> 3`) — the two knobs together size
+    /// the outer slots semaphore `AppState::new` builds
+    /// (`Semaphore::new(compute_admission + compute_queue)`), and `Semaphore::new` panics past
+    /// that bound. Refused here, at config parse, rather than left to panic during server
+    /// startup for an absurd but syntactically valid `tessera.toml`.
+    ComputeAdmissionQueueOverflow {
+        compute_admission: usize,
+        compute_queue: usize,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -146,6 +156,17 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "serve.admission_timeout_ms = 0 would silently disable the bounded queue wait \
                  (D-E) — use serve.compute_queue = 0 to disable queueing explicitly instead"
+            ),
+            ConfigError::ComputeAdmissionQueueOverflow {
+                compute_admission,
+                compute_queue,
+            } => write!(
+                f,
+                "serve.compute_admission ({compute_admission}) + serve.compute_queue \
+                 ({compute_queue}) overflows usize or exceeds tokio::sync::Semaphore::MAX_PERMITS \
+                 ({}) — the outer slots semaphore cannot be built at this size; lower one or both \
+                 knobs",
+                tokio::sync::Semaphore::MAX_PERMITS
             ),
         }
     }
@@ -352,7 +373,24 @@ const DEFAULT_MAX_TILES_PER_REQUEST: usize = 262_144;
 /// `ComputeThreadsZero` refusal exists for the case an operator's *explicit* `0` needs catching,
 /// not this one.
 fn default_compute_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+    std::thread::available_parallelism().map_or_else(
+        |e| {
+            // Rare (the OS genuinely could not answer, e.g. an exotic sandboxing setup) but
+            // silently sizing the compute pool/admission gate at 1 thread instead of the
+            // machine's real core count is a startup-time surprise worth a log line, not a
+            // silently-degraded deployment — an operator staring at low throughput later has no
+            // other signal that this fallback, rather than an explicit `compute_threads = 1`,
+            // is why.
+            tracing::warn!(
+                error = %e,
+                "available_parallelism() failed; falling back to compute_threads = 1 — set \
+                 serve.compute_threads explicitly to size the compute pool/admission gate for \
+                 this host"
+            );
+            1
+        },
+        std::num::NonZeroUsize::get,
+    )
 }
 
 /// D-E: 25× the 10 ms p99 target — a request that cannot even *start* in 250 ms is better shed
@@ -468,6 +506,19 @@ fn parse(text: &str) -> Result<Config> {
         return Err(ConfigError::ComputeAdmissionZero);
     }
     let compute_queue = raw.serve.compute_queue.unwrap_or(2 * compute_admission);
+    // The outer slots semaphore is sized `compute_admission + compute_queue` (`AppState::new`);
+    // `Semaphore::new` panics past `MAX_PERMITS`, and a naive `+` panics on overflow first at
+    // absurd (but syntactically valid) configured values. Refuse here instead, at parse, so the
+    // failure is a typed config error rather than a startup panic.
+    match compute_admission.checked_add(compute_queue) {
+        Some(total) if total <= tokio::sync::Semaphore::MAX_PERMITS => {}
+        _ => {
+            return Err(ConfigError::ComputeAdmissionQueueOverflow {
+                compute_admission,
+                compute_queue,
+            })
+        }
+    }
     let admission_timeout_ms = raw
         .serve
         .admission_timeout_ms
@@ -669,6 +720,27 @@ mod tests {
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
         let err = parse(&valid_toml("admission_timeout_ms = 0")).unwrap_err();
         assert!(matches!(err, ConfigError::AdmissionTimeoutZero), "{err}");
+    }
+
+    /// D-B: `compute_admission + compute_queue` at an absurd (but syntactically valid) size
+    /// refuses to start rather than panicking inside `Semaphore::new` during server startup —
+    /// these two knobs together size the outer slots semaphore, and `Semaphore::new` panics past
+    /// `MAX_PERMITS`. Both values here fit comfortably in TOML's i64 range but their sum exceeds
+    /// `tokio::sync::Semaphore::MAX_PERMITS` (`usize::MAX >> 3`), without overflowing `usize`
+    /// itself — the "exceeds the bound" branch, distinct from the defensive `checked_add`
+    /// overflow branch that TOML's i64 ceiling makes unreachable from config alone.
+    #[test]
+    fn an_absurd_admission_plus_queue_refuses_to_start() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml(
+            "compute_admission = 2000000000000000000\ncompute_queue = 2000000000000000000",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(err, ConfigError::ComputeAdmissionQueueOverflow { .. }),
+            "{err}"
+        );
     }
 
     /// `k_min = 0` disables §7.2's floor clause, which is the I7 guarantee. Startup must refuse

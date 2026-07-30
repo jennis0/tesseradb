@@ -634,13 +634,13 @@ async fn item(
     let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
 
     // D-A: `engine.item` inverts the id (pure, no IO) then reads the external-id sidecar for a
-    // visible item — file IO, moved off the reactor. Closure capture: `state` cloned (`Arc`,
-    // cheap), `entry` moved (already an `Arc<SessionEntry>`), `raw` is `Copy`, `gate_permits`
-    // (D-B) moves in so both permits release only when this closure returns.
-    let closure_state = Arc::clone(&state);
+    // visible item — file IO, moved off the reactor. Closure capture: `state` moved in directly
+    // (nothing after this `.await` needs the handler's own copy), `entry` moved (already an
+    // `Arc<SessionEntry>`), `raw` is `Copy`, `gate_permits` (D-B) moves in so both permits release
+    // only when this closure returns.
     let resp = tokio::task::spawn_blocking(move || {
         let _gate_permits = gate_permits;
-        run_item(&closure_state, &entry.session, raw)
+        run_item(&state, &entry.session, raw)
     })
     .await
     .map_err(map_join_error)??;

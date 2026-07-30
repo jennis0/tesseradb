@@ -393,11 +393,11 @@ async fn ingest(
         .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
         .to_string();
 
-    // D-A / review finding 7: closure capture is `state` (cloned `Arc<AppState>`, cheap), `body`
-    // (an owned `Bytes` — cheap, refcounted clone of the request body already read off the
-    // socket, not a copy) and `batch_id` (owned `String`). Never gated (see `run_ingest`'s doc).
-    let closure_state = Arc::clone(&state);
-    let resp = tokio::task::spawn_blocking(move || run_ingest(&closure_state, &body, batch_id))
+    // D-A / review finding 7: closure capture is `state` (moved in directly — nothing after this
+    // `.await` needs the handler's own copy), `body` (an owned `Bytes` — cheap, refcounted clone
+    // of the request body already read off the socket, not a copy) and `batch_id` (owned
+    // `String`). Never gated (see `run_ingest`'s doc).
+    let resp = tokio::task::spawn_blocking(move || run_ingest(&state, &body, batch_id))
         .await
         .map_err(map_join_error)??;
 
@@ -541,11 +541,10 @@ async fn changes(
 ) -> Result<StatusCode, ApiError> {
     state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
 
-    // D-A / review finding 7: closure captures `state` (cloned `Arc<AppState>`, cheap) and
-    // `items` (moved — the request body is already fully decoded to owned `Vec<ChangeItem>` by
-    // this point, so there is nothing left to borrow).
-    let closure_state = Arc::clone(&state);
-    tokio::task::spawn_blocking(move || run_changes(&closure_state, items))
+    // D-A / review finding 7: closure captures `state` (moved in directly — nothing after this
+    // `.await` needs the handler's own copy) and `items` (moved — the request body is already
+    // fully decoded to owned `Vec<ChangeItem>` by this point, so there is nothing left to borrow).
+    tokio::task::spawn_blocking(move || run_changes(&state, items))
         .await
         .map_err(map_join_error)??;
 
@@ -564,7 +563,10 @@ async fn status(
     state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
     // D-B: the viewer/session admission gate's gauges. `in_flight`/`waiting` are read live off
     // the semaphores; `shed_total` is a single process-wide counter — no per-principal labels
-    // anywhere on this plane (SA §9).
+    // anywhere on this plane (SA §9). `shed_total` counts only this gate's own two shed paths —
+    // it does NOT include D-G single-flight builder 429s (`ProjectionBuilding`/`FragmentBuilding`,
+    // Tasks 1-2), which happen after admission and are invisible to this gate (see
+    // `ComputeGate::shed_total`'s doc).
     let gate = state.compute_gate.status();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),

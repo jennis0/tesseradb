@@ -235,6 +235,31 @@ mod tests {
         );
     }
 
+    /// I13, `map_join_error`'s twin of `map_store_error_does_not_forward_the_detail_to_the_caller`
+    /// above: a `JoinError`'s `Display` can echo the panicking closure's payload verbatim (a file
+    /// path, an assertion detail, anything the panic carried), so it must never reach the response
+    /// body either. Spawns a task whose panic message names a path and an entity id, exactly the
+    /// two things this crate's opening doc comment forbids in a body.
+    #[tokio::test]
+    async fn map_join_error_does_not_forward_the_detail_to_the_caller() {
+        let join_error = tokio::spawn(async {
+            panic!(
+                "invalid sidecar at /srv/tessera/v00000/partitions/default/entities/\
+                 ext-locator.u32: entity 123456 is inconsistent"
+            );
+        })
+        .await
+        .expect_err("the spawned task panicked, so awaiting its handle must yield a JoinError");
+
+        let (status, code, detail) = map_join_error(join_error).parts();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(code, "fail-closed");
+        assert!(
+            !detail.contains("123456") && !detail.contains('/'),
+            "the body must carry neither an identifier nor a server path, got: {detail}"
+        );
+    }
+
     /// The same door, reached through the engine's error enum rather than directly.
     #[test]
     fn map_engine_error_sanitises_its_store_and_io_arms() {
