@@ -1,0 +1,405 @@
+<!-- Process reference — INGEST. One diagram.
+     Sources: .ignore/tessera-architecture-design.md §11 and §14,
+     .ignore/tessera-concurrency-lifecycle.md, facts/part-5.md, facts/part-3.md.
+     Every colour comes from a design token; no literal colours. -->
+
+<style>
+  /* Scoped to this figure by id, so the specificity beats the design system's
+     default "figure text is muted" rule where a label needs full-strength ink,
+     and so nothing here can collide with another figure on the page. */
+  #fig-ingest .bx      { fill: var(--surface-2); stroke: var(--rule); stroke-width: 1; }
+  #fig-ingest .hd      { font-size: 13.5px; font-weight: 650; fill: var(--fg); }
+  #fig-ingest .sub     { font-size: 11.5px; fill: var(--muted); }
+  #fig-ingest .subw    { font-size: 12.5px; fill: var(--muted); }
+  #fig-ingest .lead    { font-size: 12px; font-weight: 620; fill: var(--fg); }
+  #fig-ingest .key     { font-size: 12px; font-weight: 700; letter-spacing: 0.09em; fill: var(--fg); }
+  #fig-ingest .keysm   { font-size: 11px; font-weight: 700; letter-spacing: 0.09em; fill: var(--fg); }
+  #fig-ingest .cad     { font-size: 12.5px; letter-spacing: 0; font-weight: 400; fill: var(--muted); }
+  #fig-ingest .big     { font-size: 17px; font-weight: 650; fill: var(--fg); }
+  #fig-ingest .mid     { font-size: 15px; font-weight: 650; fill: var(--fg); }
+  #fig-ingest .pill    { font-size: 12px; fill: var(--fg); }
+  #fig-ingest .pillhi  { font-size: 12.5px; font-weight: 650; fill: var(--fg); }
+  #fig-ingest .comp    { font-size: 13px; fill: var(--fg); }
+  #fig-ingest .flux    { font-size: 11.5px; fill: var(--div-pos); }
+  #fig-ingest .hair    { stroke: var(--rule); stroke-width: 1; }
+  #fig-ingest .ax      { stroke: var(--axis); stroke-width: 1.5; fill: none; }
+</style>
+
+<section class="part" id="proc-ingest">
+
+  <h2>Ingest — how data gets in</h2>
+
+  <p>Ingest is an append: an arriving item is given a fresh identity above
+  everything already allocated, and nothing that already exists is rewritten.
+  The diagram follows one item in, and keeps apart the clocks — per item, per
+  flush, per compaction — that are the easiest thing here to conflate.</p>
+
+  <figure id="fig-ingest" class="full">
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" style="min-width: 1240px;">
+        <svg viewBox="0 0 1240 1608" role="img" aria-labelledby="ing-t ing-d">
+          <title id="ing-t">The ingest path, drawn as four separate clocks</title>
+          <desc id="ing-d">A diagram in five stacked bands. The first band, running once per
+          arriving item in milliseconds, follows it from arrival, through derivation of its opaque
+          permission terms, through allocation of a permanent entity identifier, to being appended
+          to a write-ahead log; the caller is told the write succeeded only after the log has been
+          forced to disk and the new state swapped in. A highlighted panel in that band records the
+          one optimisation on the path: within a batch, entity identifiers are handed out in
+          term-signature order, so items sharing terms get adjacent identifiers and each term's
+          posting list collapses into long runs, measured at 8.9 to 36.7 times smaller posting
+          storage and up to 130 times cheaper mask building at equal coverage. Because identifiers
+          are permanent this cannot be retrofitted. The second band, running once per flush, turns
+          the in-memory buffer into an immutable on-disk segment, appends a new tier of postings to
+          the term index, and advances the watermark; the flush is triggered by size or age,
+          whichever comes first, so the number of segments follows the flush interval rather than
+          the arrival rate. The third band is the central claim: a mask built at watermark W is
+          complete below W, items at or above W are newer than the mask and are checked one at a
+          time, and a short overlay list covers the items below W whose state has changed since. A
+          mask that was correct before an arrival is still correct afterwards, merely incomplete.
+          The fourth band covers changes on their own clock: a deleted item leaves the term index
+          leaving a tombstone, its identifier is never reused, and it joins the overlay. The fifth
+          band covers compaction, the only clock that rewrites anything: it merges segments,
+          re-ranks geometry and rewrites the permutation, folds the overlay into the index and
+          finally drops tombstoned rows, and publishes under a new version. A closing panel
+          explains the two identifier spaces — entity space, where permissions live, and row space,
+          where geometry lives — joined by a permutation, and why a new arrival cannot be slotted
+          into row space in place.</desc>
+
+          <defs>
+            <marker id="ing-ar-mut" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
+            </marker>
+            <marker id="ing-ar-ax" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--axis)"/>
+            </marker>
+            <marker id="ing-ar-acc" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/>
+            </marker>
+          </defs>
+
+          <!-- ================= LEGEND: the clocks ================= -->
+          <text x="30" y="26" class="key">THE CLOCKS</text>
+          <rect x="140" y="16" width="11" height="11" rx="2.5" fill="var(--cat-1)"/>
+          <text x="158" y="26" class="subw">per item, as it arrives</text>
+          <rect x="400" y="16" width="11" height="11" rx="2.5" fill="var(--cat-2)"/>
+          <text x="418" y="26" class="subw">per flush — size or age</text>
+          <rect x="640" y="16" width="11" height="11" rx="2.5" fill="var(--div-pos)"/>
+          <text x="658" y="26" class="subw">per accepted change</text>
+          <rect x="900" y="16" width="11" height="11" rx="2.5" fill="var(--cat-6)"/>
+          <text x="918" y="26" class="subw">per compaction</text>
+          <line x1="30" y1="40" x2="1218" y2="40" class="hair"/>
+
+          <!-- ================= BAND 1 — per item ================= -->
+          <rect x="30" y="55" width="13" height="13" rx="3" fill="var(--cat-1)"/>
+          <text x="52" y="68"><tspan class="key">PER ITEM, AS IT ARRIVES</tspan><tspan
+            class="cad">   —   milliseconds. This runs once for every write.</tspan></text>
+
+          <rect x="30" y="82" width="267" height="110" rx="8" class="bx"/>
+          <rect x="31" y="94" width="4" height="86" rx="2" fill="var(--cat-1)"/>
+          <text x="46" y="106" class="hd">Item arrives</text>
+          <text x="46" y="128" class="sub">Its position on the map, and the</text>
+          <text x="46" y="144" class="sub">label saying who is allowed to</text>
+          <text x="46" y="160" class="sub">see it.</text>
+          <line x1="303" y1="137" x2="331" y2="137" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="337" y="82" width="267" height="110" rx="8" class="bx"/>
+          <rect x="338" y="94" width="4" height="86" rx="2" fill="var(--cat-1)"/>
+          <text x="353" y="106" class="hd">Terms derived and interned</text>
+          <text x="353" y="128" class="sub">The operator's plugin turns the</text>
+          <text x="353" y="144" class="sub">label into a set of opaque term</text>
+          <text x="353" y="160" class="sub">IDs. An unseen one is added to a</text>
+          <text x="353" y="176" class="sub">dictionary that only ever grows.</text>
+          <line x1="610" y1="137" x2="638" y2="137" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="644" y="82" width="267" height="110" rx="8" class="bx"/>
+          <rect x="645" y="94" width="4" height="86" rx="2" fill="var(--cat-1)"/>
+          <text x="660" y="106" class="hd">An entity ID is allocated</text>
+          <text x="660" y="128" class="sub">One permanent number per item,</text>
+          <text x="660" y="144" class="sub">taken from above everything ever</text>
+          <text x="660" y="160" class="sub">handed out. Never renumbered,</text>
+          <text x="660" y="176" class="sub">never reused. See below.</text>
+          <line x1="917" y1="137" x2="945" y2="137" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="951" y="82" width="267" height="110" rx="8" class="bx"/>
+          <rect x="952" y="94" width="4" height="86" rx="2" fill="var(--cat-1)"/>
+          <text x="967" y="106" class="hd">Write-ahead log</text>
+          <text x="967" y="128" class="sub">The batch — its rows and the IDs</text>
+          <text x="967" y="144" class="sub">just handed out — is appended to</text>
+          <text x="967" y="160" class="sub">a log on disk and forced out of</text>
+          <text x="967" y="176" class="sub">the operating system's cache.</text>
+
+          <!-- the acknowledgement strip -->
+          <path d="M1084,192 L1084,204" stroke="var(--accent)" stroke-width="1.4"
+                marker-end="url(#ing-ar-acc)"/>
+          <rect x="30" y="208" width="1188" height="80" rx="10"
+                fill="var(--accent-weak)" stroke="var(--accent)" stroke-width="1.4"/>
+          <text x="52" y="230" class="keysm">THE MOMENT THE CALLER IS TOLD THE WRITE SUCCEEDED</text>
+          <rect x="52" y="244" width="190" height="28" rx="14"
+                fill="var(--surface)" stroke="var(--rule)"/>
+          <text x="147" y="262" class="pill" text-anchor="middle">log forced to disk</text>
+          <line x1="248" y1="258" x2="276" y2="258" stroke="var(--accent)" stroke-width="1.4"
+                marker-end="url(#ing-ar-acc)"/>
+          <rect x="284" y="244" width="200" height="28" rx="14"
+                fill="var(--surface)" stroke="var(--rule)"/>
+          <text x="384" y="262" class="pill" text-anchor="middle">new state swapped in</text>
+          <line x1="490" y1="258" x2="518" y2="258" stroke="var(--accent)" stroke-width="1.4"
+                marker-end="url(#ing-ar-acc)"/>
+          <rect x="526" y="242" width="252" height="32" rx="16"
+                fill="var(--surface)" stroke="var(--accent)" stroke-width="1.8"/>
+          <text x="652" y="262" class="pillhi" text-anchor="middle">the caller hears success</text>
+          <text x="810" y="246" class="sub">Always in that order. Nothing is acknowledged</text>
+          <text x="810" y="262" class="sub">before the log is safely on disk; a crash in</text>
+          <text x="810" y="278" class="sub">between replays it, and no caller was told.</text>
+
+          <!-- the signature-sorted allocation callout -->
+          <rect x="30" y="304" width="1188" height="136" rx="10"
+                fill="var(--surface)" stroke="var(--cat-1)" stroke-width="1.8"/>
+          <rect x="30" y="316" width="5" height="112" rx="2.5" fill="var(--cat-1)"/>
+          <text x="52" y="332" class="mid">The one optimisation on this path: within a batch, entity IDs are handed out in term-signature order</text>
+          <text x="52" y="360" class="sub">Within a batch the order of IDs is a free choice,</text>
+          <text x="52" y="376" class="sub">and it is spent deliberately: items that share terms</text>
+          <text x="52" y="392" class="sub">get adjacent IDs, so each term's list of the items</text>
+          <text x="52" y="408" class="sub">carrying it collapses into long runs instead of</text>
+          <text x="52" y="424" class="sub">scattered singletons.</text>
+          <line x1="428" y1="346" x2="428" y2="428" class="hair"/>
+          <text x="452" y="360" class="lead">Measured</text>
+          <text x="452" y="376" class="sub">8.9–36.7× smaller posting storage, and up to 130×</text>
+          <text x="452" y="392" class="sub">cheaper mask building at equal coverage. Arrival</text>
+          <text x="452" y="408" class="sub">order buys nothing at all — run lengths of 1.00–1.26</text>
+          <text x="452" y="424" class="sub">against a random baseline of 1.000.</text>
+          <line x1="820" y1="346" x2="820" y2="428" class="hair"/>
+          <text x="844" y="360" class="lead">It can never be changed later</text>
+          <text x="844" y="376" class="sub">IDs are permanent, so this ships in the first version</text>
+          <text x="844" y="392" class="sub">or not at all. It is deliberately not spatial order:</text>
+          <text x="844" y="408" class="sub">an ID carrying spatial meaning would leak how much</text>
+          <text x="844" y="424" class="sub">hidden data sits between two visible points.</text>
+
+          <line x1="30" y1="460" x2="1218" y2="460" class="hair"/>
+
+          <!-- ================= BAND 2 — per flush ================= -->
+          <rect x="30" y="479" width="13" height="13" rx="3" fill="var(--cat-2)"/>
+          <text x="52" y="492"><tspan class="key">PER FLUSH</tspan><tspan
+            class="cad">   —   seconds to minutes. Runs once per flush, however many items arrived in between.</tspan></text>
+
+          <rect x="30" y="506" width="205" height="126" rx="8" class="bx"/>
+          <rect x="31" y="518" width="4" height="102" rx="2" fill="var(--cat-2)"/>
+          <text x="46" y="530" class="hd">In-memory buffer</text>
+          <text x="46" y="552" class="sub">Arrivals wait here. They</text>
+          <text x="46" y="568" class="sub">are already visible: each</text>
+          <text x="46" y="584" class="sub">is checked directly against</text>
+          <text x="46" y="600" class="sub">the viewer's terms, which</text>
+          <text x="46" y="616" class="sub">needs no index.</text>
+          <line x1="241" y1="569" x2="269" y2="569" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="276" y="506" width="205" height="126" rx="8" class="bx"/>
+          <rect x="277" y="518" width="4" height="102" rx="2" fill="var(--cat-2)"/>
+          <text x="292" y="530" class="hd">Flush: size or age</text>
+          <text x="292" y="552" class="sub">Whichever trips first. So</text>
+          <text x="292" y="568" class="sub">the number of segments</text>
+          <text x="292" y="584" class="sub">follows the flush interval,</text>
+          <text x="292" y="600" class="sub">not the arrival rate.</text>
+          <line x1="487" y1="569" x2="515" y2="569" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="522" y="506" width="205" height="126" rx="8" class="bx"/>
+          <rect x="523" y="518" width="4" height="102" rx="2" fill="var(--cat-2)"/>
+          <text x="538" y="530" class="hd">Immutable segment</text>
+          <text x="538" y="552" class="sub">Sealed on disk and never</text>
+          <text x="538" y="568" class="sub">edited again. It carries</text>
+          <text x="538" y="584" class="sub">its own map-tile lookup</text>
+          <text x="538" y="600" class="sub">table and its own rows.</text>
+          <line x1="733" y1="569" x2="761" y2="569" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="768" y="506" width="205" height="126" rx="8" class="bx"/>
+          <rect x="769" y="518" width="4" height="102" rx="2" fill="var(--cat-2)"/>
+          <text x="784" y="530" class="hd">Postings appended</text>
+          <text x="784" y="552" class="sub">The term index — term to</text>
+          <text x="784" y="568" class="sub">the items carrying it —</text>
+          <text x="784" y="584" class="sub">gains a new tier. Older</text>
+          <text x="784" y="600" class="sub">tiers are untouched.</text>
+          <line x1="979" y1="569" x2="1007" y2="569" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="1014" y="506" width="205" height="126" rx="8" class="bx"/>
+          <rect x="1015" y="518" width="4" height="102" rx="2" fill="var(--cat-2)"/>
+          <text x="1030" y="530" class="hd">Watermark advances</text>
+          <text x="1030" y="552" class="sub">Every live mask gets a</text>
+          <text x="1030" y="568" class="sub">small patch: the new items</text>
+          <text x="1030" y="584" class="sub">matching terms that mask</text>
+          <text x="1030" y="600" class="sub">already had. A patch, not</text>
+          <text x="1030" y="616" class="sub">a rebuild.</text>
+
+          <line x1="30" y1="652" x2="1218" y2="652" class="hair"/>
+
+          <!-- ================= THE WATERMARK PANEL ================= -->
+          <rect x="22" y="670" width="1196" height="326" rx="12"
+                fill="var(--surface-2)" stroke="var(--accent)" stroke-width="1.8"/>
+          <text x="44" y="708" class="big">Appending never invalidates anything</text>
+          <text x="44" y="734" class="subw">A mask is a set of entity IDs. Because IDs are only ever handed out above everything already allocated, a mask that was correct a moment ago is</text>
+          <text x="44" y="752" class="subw">still correct after an arrival — it is merely incomplete. The watermark records exactly where each mask's knowledge stops, so nothing is thrown away.</text>
+
+          <line x1="60" y1="820" x2="740" y2="820" class="ax" marker-end="url(#ing-ar-ax)"/>
+          <text x="740" y="800" class="sub" text-anchor="end">newest IDs</text>
+          <line x1="560" y1="796" x2="560" y2="844" stroke="var(--accent)" stroke-width="2"/>
+          <text x="560" y="788" class="lead" text-anchor="middle">W</text>
+          <path d="M140,814 L146,820 L140,826 L134,820 z" fill="var(--div-pos)"/>
+          <path d="M230,814 L236,820 L230,826 L224,820 z" fill="var(--div-pos)"/>
+          <path d="M350,814 L356,820 L350,826 L344,820 z" fill="var(--div-pos)"/>
+          <path d="M460,814 L466,820 L460,826 L454,820 z" fill="var(--div-pos)"/>
+          <text x="300" y="800" class="flux" text-anchor="middle">items in flux (see the overlay, right)</text>
+          <path d="M60,832 L60,838 L560,838 L560,832" class="ax"/>
+          <path d="M560,832 L560,838 L740,838 L740,832" class="ax"/>
+          <text x="310" y="858" class="lead" text-anchor="middle">complete below W</text>
+          <text x="310" y="874" class="sub" text-anchor="middle">the mask already covers everything down here</text>
+          <text x="650" y="858" class="lead" text-anchor="middle">at or above W</text>
+          <text x="650" y="874" class="sub" text-anchor="middle">newer than the mask —</text>
+          <text x="650" y="890" class="sub" text-anchor="middle">each item checked one at a time</text>
+
+          <rect x="790" y="784" width="406" height="124" rx="8"
+                fill="var(--surface)" stroke="var(--div-pos)" stroke-width="1.4"/>
+          <path d="M812,802 L818,808 L812,814 L806,808 z" fill="var(--div-pos)"/>
+          <text x="828" y="812" class="hd">The overlay — the items in flux</text>
+          <text x="810" y="834" class="sub">A short list of the items below W whose state has changed</text>
+          <text x="810" y="850" class="sub">since: label changed, deleted, or suppressed. Every query</text>
+          <text x="810" y="866" class="sub">consults it, so a change takes effect at once without</text>
+          <text x="810" y="882" class="sub">rewriting anything in the index. Only compaction empties it.</text>
+
+          <rect x="44" y="924" width="1152" height="46" rx="8"
+                fill="var(--surface)" stroke="var(--rule)"/>
+          <text x="620" y="952" class="comp" text-anchor="middle">what a viewer may see   =   ( the mask built at W,  minus the items in flux )   +   ( those items, and everything above W, evaluated one at a time )</text>
+
+          <!-- ================= BAND 3 — per accepted change ================= -->
+          <rect x="30" y="1015" width="13" height="13" rx="3" fill="var(--div-pos)"/>
+          <text x="52" y="1028"><tspan class="key">PER ACCEPTED CHANGE</tspan><tspan
+            class="cad">   —   its own clock, independent of arrivals and of flushes.</tspan></text>
+
+          <rect x="30" y="1042" width="370" height="126" rx="8" class="bx"/>
+          <rect x="31" y="1054" width="4" height="102" rx="2" fill="var(--div-pos)"/>
+          <text x="46" y="1066" class="hd">An item is deleted</text>
+          <text x="46" y="1088" class="sub">It leaves the term index and a tombstone is recorded.</text>
+          <text x="46" y="1104" class="sub">Its ID is never reused: recycling one would hand the</text>
+          <text x="46" y="1120" class="sub">new item every permission the old one had, in every</text>
+          <text x="46" y="1136" class="sub">mask still cached. The row itself is dropped only at</text>
+          <text x="46" y="1152" class="sub">the next compaction.</text>
+          <line x1="406" y1="1105" x2="434" y2="1105" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="440" y="1042" width="370" height="126" rx="8" class="bx"/>
+          <rect x="441" y="1054" width="4" height="102" rx="2" fill="var(--div-pos)"/>
+          <text x="456" y="1066" class="hd">…or suppressed, or its label changes</text>
+          <text x="456" y="1088" class="sub">The same machinery with a different mark on the entry:</text>
+          <text x="456" y="1104" class="sub">invisible regardless, or re-check this item's terms</text>
+          <text x="456" y="1120" class="sub">against the viewer's. Neither rewrites the index, and</text>
+          <text x="456" y="1136" class="sub">each is retired by its own separate rule.</text>
+          <line x1="816" y1="1105" x2="844" y2="1105" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="850" y="1042" width="368" height="126" rx="8" class="bx"/>
+          <rect x="851" y="1054" width="4" height="102" rx="2" fill="var(--div-pos)"/>
+          <text x="866" y="1066" class="hd">It joins the overlay</text>
+          <text x="866" y="1088" class="sub">Until compaction folds it away, the overlay is what</text>
+          <text x="866" y="1104" class="sub">makes the change take effect. Like an arrival, a change</text>
+          <text x="866" y="1120" class="sub">is written to the log and forced to disk before the</text>
+          <text x="866" y="1136" class="sub">caller is told it succeeded.</text>
+
+          <line x1="30" y1="1188" x2="1218" y2="1188" class="hair"/>
+
+          <!-- ================= BAND 4 — per compaction ================= -->
+          <rect x="30" y="1207" width="13" height="13" rx="3" fill="var(--cat-6)"/>
+          <text x="52" y="1220"><tspan class="key">PER COMPACTION</tspan><tspan
+            class="cad">   —   occasional, and the only clock on this page that rewrites anything.</tspan></text>
+
+          <rect x="30" y="1234" width="267" height="126" rx="8" class="bx"/>
+          <rect x="31" y="1246" width="4" height="102" rx="2" fill="var(--cat-6)"/>
+          <text x="46" y="1258" class="hd">Segments are merged</text>
+          <text x="46" y="1280" class="sub">A map tile costs one lookup per</text>
+          <text x="46" y="1296" class="sub">segment, so the segment count</text>
+          <text x="46" y="1312" class="sub">has to stay bounded. Many small</text>
+          <text x="46" y="1328" class="sub">segments become one large one.</text>
+          <line x1="303" y1="1297" x2="331" y2="1297" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="337" y="1234" width="267" height="126" rx="8" class="bx"/>
+          <rect x="338" y="1246" width="4" height="102" rx="2" fill="var(--cat-6)"/>
+          <text x="353" y="1258" class="hd">Geometry is re-ranked</text>
+          <text x="353" y="1280" class="sub">Rows are put back into strict</text>
+          <text x="353" y="1296" class="sub">spatial order and the permutation</text>
+          <text x="353" y="1312" class="sub">is rewritten — so the ordering is</text>
+          <text x="353" y="1328" class="sub">repaired by large merges rather</text>
+          <text x="353" y="1344" class="sub">than at a scheduled cliff.</text>
+          <line x1="610" y1="1297" x2="638" y2="1297" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="644" y="1234" width="267" height="126" rx="8" class="bx"/>
+          <rect x="645" y="1246" width="4" height="102" rx="2" fill="var(--cat-6)"/>
+          <text x="660" y="1258" class="hd">The overlay is folded in</text>
+          <text x="660" y="1280" class="sub">Changed items are written back</text>
+          <text x="660" y="1296" class="sub">into the index, and tombstoned</text>
+          <text x="660" y="1312" class="sub">rows finally disappear. Nothing</text>
+          <text x="660" y="1328" class="sub">else on this page does either.</text>
+          <line x1="917" y1="1297" x2="945" y2="1297" stroke="var(--muted)" stroke-width="1.4"
+                marker-end="url(#ing-ar-mut)"/>
+
+          <rect x="951" y="1234" width="267" height="126" rx="8" class="bx"/>
+          <rect x="952" y="1246" width="4" height="102" rx="2" fill="var(--cat-6)"/>
+          <text x="967" y="1258" class="hd">Published as a new version</text>
+          <text x="967" y="1280" class="sub">Requests already in flight finish</text>
+          <text x="967" y="1296" class="sub">against the old one. The term</text>
+          <text x="967" y="1312" class="sub">index, the masks and the label</text>
+          <text x="967" y="1328" class="sub">sets are not invalidated.</text>
+
+          <line x1="30" y1="1380" x2="1218" y2="1380" class="hair"/>
+
+          <!-- ================= THE TWO ID SPACES ================= -->
+          <rect x="22" y="1398" width="1196" height="190" rx="12"
+                fill="var(--surface-2)" stroke="var(--rule)"/>
+          <text x="44" y="1428" class="mid">Two ID spaces, joined by one lookup table</text>
+
+          <rect x="44" y="1442" width="386" height="86" rx="8"
+                fill="var(--surface)" stroke="var(--rule)"/>
+          <text x="60" y="1466" class="hd">Entity space — where permissions live</text>
+          <text x="60" y="1488" class="sub">One permanent ID per item, only ever appended to. Masks,</text>
+          <text x="60" y="1504" class="sub">term postings and overlay entries are all sets of these</text>
+          <text x="60" y="1520" class="sub">numbers.</text>
+
+          <line x1="434" y1="1485" x2="446" y2="1485" stroke="var(--muted)" stroke-width="1.4"/>
+          <rect x="450" y="1442" width="340" height="86" rx="8"
+                fill="var(--surface)" stroke="var(--accent)" stroke-width="1.4"/>
+          <text x="466" y="1466" class="hd">The permutation</text>
+          <text x="466" y="1488" class="sub">A lookup table from entity ID to row. It is</text>
+          <text x="466" y="1504" class="sub">the only place the two spaces meet, and</text>
+          <text x="466" y="1520" class="sub">compaction rewrites it.</text>
+          <line x1="794" y1="1485" x2="806" y2="1485" stroke="var(--muted)" stroke-width="1.4"/>
+
+          <rect x="810" y="1442" width="386" height="86" rx="8"
+                fill="var(--surface)" stroke="var(--rule)"/>
+          <text x="826" y="1466" class="hd">Row space — where geometry lives</text>
+          <text x="826" y="1488" class="sub">Items sorted into spatial order, so one square of the</text>
+          <text x="826" y="1504" class="sub">map is one contiguous run of rows — which is what makes</text>
+          <text x="826" y="1520" class="sub">a masked count cheap.</text>
+
+          <text x="44" y="1552" class="subw">Why an arrival cannot simply be slotted into row space: its position falls anywhere in the existing spatial order, so inserting it in place would</text>
+          <text x="44" y="1570" class="subw">renumber a large fraction of the rows, while every cached mask names entities, not rows. New items land in a segment of their own instead.</text>
+        </svg>
+      </div>
+    </div>
+    <figcaption><span class="fig-num">Ingest.</span> The path an arriving item
+    takes — through the write-ahead log and the in-memory buffer to an immutable
+    on-disk segment, and eventually into a compaction. The bands are drawn apart
+    because they run on different clocks: per item, per flush, per accepted
+    change, and per compaction. The load-bearing property is that everything on
+    the arrival path is an append, so a mask that was correct before an arrival
+    is still correct afterwards and merely incomplete; the watermark records
+    where its knowledge stops, and the overlay covers the handful of items whose
+    state has changed since.</figcaption>
+  </figure>
+
+</section>

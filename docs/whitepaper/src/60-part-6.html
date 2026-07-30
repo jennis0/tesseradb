@@ -1,0 +1,533 @@
+<section class="part" id="part-6">
+
+  <p class="eyebrow">Part VI</p>
+
+  <h2>What was measured, and what is still open</h2>
+
+  <h3>16. The billion-row table</h3>
+
+  <p>Phase 0 was a rehearsal: synthetic access-control policies run over a
+  real corpus, at the size the design targets. The corpus is the join of two
+  public sources — the <em>arXiv-Topics-Embeddings</em> dataset, 2,422,486
+  arXiv papers carrying one BGE-large-en-v1.5 topic embedding each, and the
+  Kaggle <code>Cornell-University/arxiv</code> metadata snapshot v296, with
+  3,113,330 records of identifiers, categories, authors and versions. The
+  join probe returned clean: all 2,422,486 embedding IDs match a snapshot
+  identifier verbatim, with no normalisation needed in either direction.
+  That joined set — 2,422,486 rows, 117 MB — is the base corpus, and nothing
+  downstream reads the raw sources.</p>
+
+  <p>Scaling to 10<sup>9</sup> exploits a property of the design: entity IDs
+  are append-only, so a prefix of entity space is a whole, coherent corpus.
+  The larger scales were built by adding transformed replicas rather than
+  duplicating rows, and the distinction is load-bearing. Naive tiling would
+  make the corpus <em>easier</em> than the base, because identical copies
+  give every term N identical posting blocks and every tile the same
+  occupancy, so both mask structure and spatial structure go degenerate.
+  Each replica is instead an affine transform — rotate, reflect,
+  log-uniform scale 0.02–0.55, translate — plus jitter, with 45% of replicas
+  placed on shared hubs.</p>
+
+  <p>The policies over that corpus are synthetic: label generators pinning
+  the distributional knobs real policies would set — realistic skew from
+  categories and surnames, orthogonal controls from a hash, a 361,837-term
+  vocabulary, per-item noise. They were chosen to bracket distributional
+  shapes, not to predict any deployment's. Everything below should be read
+  in that light.</p>
+
+  <figure id="fig-f15" class="wide">
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" style="min-width: 44rem;">
+        <table>
+          <caption class="f15-cap">Masked <code>range_cardinality</code> over
+          real Morton tiles, mask = 6 global terms → 69.3M items, 6.93%
+          coverage</caption>
+          <thead>
+            <tr>
+              <th scope="col" class="num">Depth</th>
+              <th scope="col" class="num">Tiles</th>
+              <th scope="col" class="num">Rows/tile</th>
+              <th scope="col" class="num">Visible</th>
+              <th scope="col" class="num">Total</th>
+              <th scope="col" class="num">µs/tile</th>
+              <th scope="col" class="f15-barhead">Total, to scale</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row" class="num">0</th>
+              <td class="num">1</td>
+              <td class="num">1,000,000,000</td>
+              <td class="num">69,329,737</td>
+              <td class="num"><strong>0.19 ms</strong></td>
+              <td class="num">190.9</td>
+              <td class="f15-bar"><span style="width: 61%"></span></td>
+            </tr>
+            <tr>
+              <th scope="row" class="num">2</th>
+              <td class="num">16</td>
+              <td class="num">62,500,000</td>
+              <td class="num">69,329,737</td>
+              <td class="num"><strong>0.10 ms</strong></td>
+              <td class="num">6.3</td>
+              <td class="f15-bar"><span style="width: 32%"></span></td>
+            </tr>
+            <tr>
+              <th scope="row" class="num">4</th>
+              <td class="num">256</td>
+              <td class="num">3,906,250</td>
+              <td class="num">69,329,737</td>
+              <td class="num"><strong>0.31 ms</strong></td>
+              <td class="num">1.2</td>
+              <td class="f15-bar"><span style="width: 100%"></span></td>
+            </tr>
+            <tr>
+              <th scope="row" class="num">6</th>
+              <td class="num">300</td>
+              <td class="num">266,845</td>
+              <td class="num">6,448,061</td>
+              <td class="num">0.31 ms</td>
+              <td class="num">1.0</td>
+              <td class="f15-bar"><span style="width: 100%"></span></td>
+            </tr>
+            <tr>
+              <th scope="row" class="num">8</th>
+              <td class="num">300</td>
+              <td class="num">22,612</td>
+              <td class="num">584,004</td>
+              <td class="num">0.26 ms</td>
+              <td class="num">0.9</td>
+              <td class="f15-bar"><span style="width: 84%"></span></td>
+            </tr>
+            <tr>
+              <th scope="row" class="num">10</th>
+              <td class="num">300</td>
+              <td class="num">9,597</td>
+              <td class="num">288,780</td>
+              <td class="num">0.25 ms</td>
+              <td class="num">0.8</td>
+              <td class="f15-bar"><span style="width: 81%"></span></td>
+            </tr>
+            <tr>
+              <th scope="row" class="num">12</th>
+              <td class="num">300</td>
+              <td class="num">8,637</td>
+              <td class="num">268,300</td>
+              <td class="num">0.24 ms</td>
+              <td class="num">0.8</td>
+              <td class="f15-bar"><span style="width: 77%"></span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <figcaption><span class="fig-num">Figure 15</span> — The billion-row
+    table. Whole-viewport exact masked counting, by zoom depth, over a
+    10<sup>9</sup>-point corpus. The rows-per-tile column falls by five
+    orders of magnitude from depth 0 to depth 12; the total cost does not
+    move, because the cost is bounded by containers spanned rather than rows
+    counted. Method: <code>range_cardinality</code> over real Morton tiles,
+    minimum of 5 runs — a single-shot first pass reported figures 5–10×
+    higher and was noise. Conditions: WSL2, 12 cores, 39 GB, RTX 3080.
+    Timings are indicative, not certified: WSL2 was chosen for mmap and
+    page-cache fidelity, not latency. Treat the ratios as evidence and the
+    absolutes as a starting point.</figcaption>
+  </figure>
+
+  <p>The headline of Figure 15 is that whole-viewport exact masked counting
+  costs 0.1–0.3 ms at every zoom level, including depth 0, where a single
+  call counts the entire billion rows in 191 µs. The reason it cannot blow
+  up at coarse zoom is structural rather than fortunate. Cost is
+  O(containers spanned), and the mask has only about 15,000 containers, so
+  any set of ranges — one tile or three hundred — is bounded by one full
+  traversal of the mask. There is no zoom level at which the counting gets
+  to be expensive.</p>
+
+  <p>That corrects a worry the design had carried about the zoomed-out
+  overview. The overview <em>is</em> the expensive request, but the expense
+  is mask materialisation and shard fan-out, not counting.</p>
+
+  <p>Which brings the counterweight. In the same measurement run, the
+  permutation of a mask from entity space into row space — the step that
+  makes a mask answerable by contiguous range arithmetic — cost 8.8 seconds
+  for a 69M-item mask. That is four orders of magnitude above the count it
+  serves, and it is the number that governs the architecture around it. It
+  is why the permuted mask is cached per <em>(token, slice, pin)</em> and
+  built once per session rather than once per request, and it makes the
+  consequence of getting that wrong concrete: if the permutation ever drifts
+  onto the per-viewport path, the system dies. A paper reporting only the
+  191 µs would be describing a system that does not exist. The 8.8 seconds
+  is the cliff the design is built around, and naming it is the only way the
+  191 µs means anything.</p>
+
+  <p>Three further findings from the same run bear on the design rather than
+  on latency. First, realistic masks are essentially scattered under Morton
+  order — a flat-hash control at 1.00, surnames at 1.03–1.15, categories at
+  1.7–2.32, an archive head at 5.11 — so Morton order buys no Roaring
+  compression for any policy family. The two clustered families are the ones
+  the measurement itself flags as flattered by topic correlation, so those
+  figures are upper bounds rather than expectations. Second, the compression that does exist
+  is not free from arrival order: created-order entity IDs give run lengths
+  of 1.0–1.26, whereas simulated signature-sorted assignment compresses
+  postings by 8.9× for categories to 36.7× at t=100, and a 25%-coverage
+  session fragment by 6× to 1,614×. That is why signature-sorted assignment
+  is implemented from day one rather than retrofitted. Third, I7's exact
+  direct-evaluation route is load-bearing: for tail-only principals
+  essentially every tile falls below the crossover at which sampling would
+  take over, so the standing warning against simplifying that route away is
+  not hypothetical.</p>
+
+  <p>Three things were deliberately not measured. DNF expansion under the
+  reference plugin was not, because the predicates are the project's own
+  knob and measuring their expansion would be circular. The true terms-per-item
+  distribution, and with it the cap-adequacy criterion, was left unresolved.
+  And retrieve-path latency was left alone entirely, reserved as Phase 1's
+  exit criterion on certified hardware. The overall verdict was go — nothing
+  measured contradicted an invariant-bearing assumption, and several
+  findings closed escape hatches — but almost every headline is
+  policy-dependent. Signature alignment, posting compression and union speed
+  all turn on the shape of the access labels rather than on corpus size; the
+  same histogram decides all three; author-like policies get none of them
+  and category-like policies get all three. The machinery is validated. A
+  deployment's numbers are not.</p>
+
+  <h3>17. What is still open</h3>
+
+  <p>The largest open question is the one the measurements could not reach:
+  how real access labels are shaped. The synthetic policies bracket
+  behaviour, they do not measure it, and the data can say nothing new about
+  how real access-control labels cluster. In an earlier revision this was a
+  gate with go, rework and stop authority attached to a real-label rerun. It
+  is now closed by owner decision, because no real access-labelled corpus is
+  available to this project, and the question converts to deployment
+  guidance: any deployment holding real labels should re-run the Phase 0
+  measurements before trusting the policy-dependent conclusions. That is a
+  weaker resolution than a measurement and is recorded as such.</p>
+
+  <p>Adjacent to it sits term cardinality under the reference plugin — how
+  many distinct terms exist, how many each item carries, what fraction carry
+  more than one. Those three numbers size the index, the ingest cap and the
+  additivity of the histogram machinery, and under the reference plugin they
+  depend on DNF expansion, which published measurement puts as infeasible
+  beyond nesting depth 2 for comparable workloads. Measuring the expansion
+  factor on real predicates therefore comes first. It is where the design
+  fails, if it fails.</p>
+
+  <p>Sharded index placement remains open. So does the compartment
+  question — how many compartments exist and how many combinations actually
+  occur — which sets the fan-out bound and the per-partition overhead
+  budget. So do several sizing questions that only a deployment can answer:
+  how many temporal slices must be simultaneously browsable, how many live
+  segments the per-tile range fan-out tolerates before it is noticeable, and
+  whether source embeddings are served at view time at all. One of these is
+  a hard limit rather than a preference: consumed entity IDs exceed live
+  items without bound, and at 10<sup>9</sup> items the 2<sup>32</sup>
+  headroom is thin, with columns, permutations and standard Roaring all
+  32-bit. The likely answer is shard-local u32 identifiers under a
+  (partition, shard, offset) global ID.</p>
+
+  <p>Some questions closed in directions worth stating plainly, because a
+  reader might otherwise assume the generous answer. Retroactive revocation
+  across temporal slices was resolved as no: current credentials govern all
+  slices, and the shared-mask premise stands. A viewer whose clearance is
+  withdrawn today loses last year's slice too, and a viewer who gains one
+  gains it retroactively. Separation between compartments was resolved as
+  data separation rather than audience separation. Token lifetime carries a
+  default backstop of one hour, deployment-overridable, with the caller's
+  own re-authorisation cadence remaining the governing policy — at measured
+  mask-build costs the extra authorise load is negligible, and the staleness
+  bound tightens by an order of magnitude over the earlier twelve-hour
+  working assumption.</p>
+
+  <p>The last open item is not a question but a table. The invariant that
+  every displayed quantity derives from visible data alone admits known
+  exceptions, and those exceptions are enumerated: C1 to C16, with the
+  channel, what leaks, a severity, a mitigation and a status. The register
+  matters less for any individual row than for the fact that it can be
+  finished. The viewer-facing retrieval surface is about five shapes — a
+  masked count over a range, the <em>k</em> lowest-priority visible items in
+  a range, a label containment test, a region selection and a drill-down —
+  and a surface that small can be walked exhaustively. A system
+  offering a general expression endpoint could not produce this table at
+  all; it could produce a list of channels somebody had thought of. The
+  register is therefore a property of the design rather than an appendix to
+  it, and the sentence that governs it is unambiguous: anything not listed
+  is a bug, not a trade-off.</p>
+
+  <figure id="fig-f16" class="wide">
+    <div class="fig-controls">
+      <label>Filter
+        <input id="f16-q" type="search" placeholder="channel, mitigation, invariant…"
+               autocomplete="off" aria-label="Filter leak register by text">
+      </label>
+      <label>Status
+        <select id="f16-cat" aria-label="Filter leak register by status">
+          <option value="">All</option>
+          <option value="Accepted">Accepted</option>
+          <option value="Closed">Closed</option>
+          <option value="Closed by construction">Closed by construction</option>
+          <option value="Closed by scope">Closed by scope</option>
+          <option value="Not adopted">Not adopted</option>
+          <option value="Open">Open</option>
+        </select>
+      </label>
+      <span id="f16-count" role="status">16 of 16 entries</span>
+    </div>
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" style="min-width: 44rem;">
+        <table id="f16-table">
+          <thead>
+            <tr>
+              <th scope="col">#</th>
+              <th scope="col">Channel</th>
+              <th scope="col">What leaks</th>
+              <th scope="col">Severity</th>
+              <th scope="col">Mitigation</th>
+              <th scope="col">Status</th>
+            </tr>
+          </thead>
+          <tbody id="f16-body"></tbody>
+        </table>
+        <p id="f16-empty" class="f16-empty" hidden>No entry matches that filter.</p>
+      </div>
+    </div>
+    <figcaption><span class="fig-num">Figure 16</span> — The leak register,
+    complete. All sixteen candidate exceptions to the invariant that every
+    displayed quantity must be computable from inside the viewer's
+    authorised set alone, each with its status: accepted, open, closed,
+    closed by construction, closed by scope, or not adopted. Only some are
+    live channels; the rest are recorded so that the reasoning survives.
+    Type in the filter to search channel, disclosure,
+    mitigation and status; the select narrows by status. One entry (C4,
+    response timing) remains open and unmitigated; one (C2) is listed
+    only to record that it was checked and leaks nothing. Owner and review
+    date for C1, C4, C12, C14, C15 and C16 are to be assigned before
+    launch.</figcaption>
+  </figure>
+
+  <p>Tessera began at an empty quadrant: systems that scale interactive
+  cartography over very large corpora do not treat authorisation as part of
+  the aggregate, and systems that reason carefully about authorisation do
+  not usually have to answer a count in a quarter of a millisecond. The
+  claim of this paper is that the two axes are compatible, that the price of
+  compatibility is a narrow query surface and an entity ordering chosen
+  before the first item is ingested, and that the price is worth paying.
+  What has been measured is that the arithmetic holds at 10<sup>9</sup>
+  points. What has not been measured is how a real institution's labels are
+  shaped, and that is a rerun rather than a redesign — but it is a rerun
+  someone still has to do.</p>
+
+  <style>
+    /* Local to Part VI. Additive only: every value is a design token. */
+    #fig-f15 caption.f15-cap {
+      caption-side: top;
+      text-align: left;
+      font-family: var(--font-ui);
+      font-size: var(--fs-xs);
+      color: var(--muted);
+      padding-bottom: 0.5rem;
+    }
+    #fig-f15 th.f15-barhead { width: 8rem; padding-left: 1.4rem; }
+    #fig-f15 td.f15-bar { padding-left: 1.4rem; padding-right: 0; vertical-align: middle; }
+    #fig-f15 td.f15-bar > span {
+      display: block;
+      height: 0.55rem;
+      max-width: 100%;
+      border-radius: 2px;
+      background: var(--cat-1);
+    }
+    #fig-f16 .fig-controls input[type="search"] {
+      font: inherit;
+      color: var(--fg);
+      background: var(--surface);
+      border: var(--hair) solid var(--rule);
+      border-radius: var(--radius);
+      padding: 0.25rem 0.5rem;
+      min-width: 14rem;
+    }
+    #fig-f16 th:nth-child(1) { width: 2rem; }
+    #fig-f16 th:nth-child(2) { width: 7rem; }
+    #fig-f16 th:nth-child(3) { width: 11rem; }
+    #fig-f16 th:nth-child(4) { width: 7.5rem; }
+    #fig-f16 th:nth-child(5) { width: 11rem; }
+    #fig-f16 th:nth-child(6) { width: 6rem; }
+    #fig-f16 td.f16-sev { white-space: nowrap; }
+    #fig-f16 .f16-dot {
+      display: inline-block;
+      width: 0.55rem; height: 0.55rem;
+      border-radius: 50%;
+      margin-right: 0.4rem;
+      background: var(--muted);
+      vertical-align: baseline;
+    }
+    #fig-f16 .f16-dot.sev-low      { background: var(--status-good); }
+    #fig-f16 .f16-dot.sev-medium   { background: var(--status-warning); }
+    #fig-f16 .f16-dot.sev-high     { background: var(--status-serious); }
+    #fig-f16 td.f16-id { font-family: var(--font-mono); color: var(--fg); }
+    #fig-f16 .f16-empty {
+      font-family: var(--font-ui);
+      font-size: var(--fs-sm);
+      color: var(--muted);
+      padding-top: 0.6rem;
+    }
+    #fig-f16 mark { background: var(--accent-weak); color: inherit; }
+  </style>
+
+  <script>
+  (function () {
+    "use strict";
+
+    /* Appendix C, transcribed complete. `group` is the coarse status used by
+       the select; `status` is the register's own wording, shown verbatim. */
+    var ROWS = [
+      ["C1", "Node membership derives from global density",
+       "That the principal's visible items in a region group together — a fact about structure including unseen items",
+       "Low",
+       "min_visible_members against M_auth bounds how finely this is exposed; filtering cannot deepen it (I12)",
+       "Accepted", "Accepted"],
+      ["C2", "Node extent and hull shape",
+       "Recomputed per user from masked members only — no leak by construction; listed to record that it was checked",
+       "None", "—", "Closed", "Closed"],
+      ["C3", "Label existence",
+       "A principal learns only of labels they satisfy",
+       "None", "Response omits all unsatisfied candidates (§10.6)", "Closed", "Closed"],
+      ["C4", "Response timing",
+       "Viewport service time correlates weakly with unauthorised items scanned during candidate-list descent",
+       "Low", "Unmitigated; quantify before treating as acceptable", "Open", "Open"],
+      ["C5", "Extractive-tier background frequencies",
+       "Corpus-wide term distributions, if drawn from the live corpus",
+       "Low", "Fixed public reference corpus (§7.7)", "Closed", "Closed"],
+      ["C6", "Entity ID gaps on the wire",
+       "Count, and under Morton assignment also location, of unauthorised items",
+       "Medium", "I10; opaque per-session handles", "Closed", "Closed"],
+      ["C7", "Generating-set shrinking under deletion",
+       "A label reflecting content the principal may never have been entitled to",
+       "Medium", "Not adopted; caller regenerates (§7.6)", "Not adopted", "Not adopted"],
+      ["C8", "Pre-intersection filter cardinality",
+       "A raw match count is a corpus-wide count over unauthorised records",
+       "High if exposed", "Not exposed on un-intersected intermediates (§8.2)",
+       "Closed by construction", "Closed by construction"],
+      ["C9", "Text relevance scores and ranks",
+       "Corpus-global statistics allow inference of unreadable content",
+       "High if ranking added", "Boolean filtering only (§8.3)",
+       "Closed by scope", "Closed by scope"],
+      ["C10", "Vector similarity results and thresholds",
+       "Post-filtered neighbours vary observably with invisible items",
+       "High if post-filtered", "Threshold filters with candidate push-down (§8.2)",
+       "Closed by construction", "Closed by construction"],
+      ["C11", "Label filter vocabulary",
+       "Offering a filterable label reveals a label the principal cannot see",
+       "Medium", "Vocabulary containment-filtered against M_auth (§8.3)", "Closed", "Closed"],
+      ["C12", "Caller-declared generating sets",
+       "A label supplied with an optimistic generating set is a disclosure the service will faithfully serve",
+       "High", "Contract requirement (§2.4); provenance is unverifiable by the service",
+       "Accepted — caller's control", "Accepted"],
+      ["C13", "Cross-partition node metadata",
+       "A node whose members lie wholly inside a compartment reveals, by existing and having an extent, that something is there",
+       "Medium", "Node metadata held per partition (§12.3); C1 crossing a physical boundary",
+       "Closed", "Closed"],
+      ["C14", "Partition fan-out width",
+       "Query latency correlates with how many compartments a token reaches",
+       "Low", "Unmitigated; the principal already knows their own clearances, so this reveals nothing about data",
+       "Accepted", "Accepted"],
+      ["C15", "Session pin rate of change",
+       "Corpus-wide ingest and compaction activity, visible in how often a viewer's pin identifier changes — activity, not content, and including activity on data the viewer cannot see",
+       "Low", "Pin values are per-session scrambled so no cross-session correlation; the rate itself remains observable. C14-like in character",
+       "Accepted", "Accepted"],
+      ["C16", "Router-held label presence registry",
+       "That some label draws on a given compartment — held by the routing process, which already routes queries into that compartment",
+       "Low", "Registry restricted to label IDs and required-set hashes: no text, no entity IDs, no cardinalities. Required for the I13 merge (a router ignorant of an unreachable slice serves labels it must withhold)",
+       "Accepted", "Accepted"]
+    ];
+
+    var body = document.getElementById("f16-body");
+    var q = document.getElementById("f16-q");
+    var cat = document.getElementById("f16-cat");
+    var count = document.getElementById("f16-count");
+    var empty = document.getElementById("f16-empty");
+    if (!body || !q || !cat) return;
+
+    function sevClass(sev) {
+      var s = sev.toLowerCase();
+      if (s.indexOf("high") === 0) return "sev-high";
+      if (s === "medium") return "sev-medium";
+      if (s === "low") return "sev-low";
+      return "";
+    }
+
+    /* Case-insensitive highlight of the needle, built by DOM node so the
+       register's own text is never re-parsed as markup. */
+    function fill(cell, text, needle) {
+      cell.textContent = "";
+      if (!needle) { cell.textContent = text; return; }
+      var hay = text.toLowerCase(), from = 0, at;
+      while ((at = hay.indexOf(needle, from)) !== -1) {
+        if (at > from) cell.appendChild(document.createTextNode(text.slice(from, at)));
+        var mk = document.createElement("mark");
+        mk.textContent = text.slice(at, at + needle.length);
+        cell.appendChild(mk);
+        from = at + needle.length;
+      }
+      if (from < text.length) cell.appendChild(document.createTextNode(text.slice(from)));
+    }
+
+    function render() {
+      var needle = q.value.trim().toLowerCase();
+      var group = cat.value;
+      body.textContent = "";
+      var shown = 0;
+
+      for (var i = 0; i < ROWS.length; i++) {
+        var r = ROWS[i];
+        if (group && r[6] !== group) continue;
+        var blob = (r[0] + " " + r[1] + " " + r[2] + " " + r[3] + " " + r[4] + " " + r[5]).toLowerCase();
+        if (needle && blob.indexOf(needle) === -1) continue;
+
+        var tr = document.createElement("tr");
+
+        var th = document.createElement("th");
+        th.setAttribute("scope", "row");
+        th.className = "f16-id";
+        fill(th, r[0], needle);
+        tr.appendChild(th);
+
+        var order = [1, 2];
+        for (var k = 0; k < order.length; k++) {
+          var td = document.createElement("td");
+          fill(td, r[order[k]], needle);
+          tr.appendChild(td);
+        }
+
+        var sev = document.createElement("td");
+        sev.className = "f16-sev";
+        var dot = document.createElement("span");
+        dot.className = "f16-dot " + sevClass(r[3]);
+        sev.appendChild(dot);
+        var sevText = document.createElement("span");
+        fill(sevText, r[3], needle);
+        sev.appendChild(sevText);
+        tr.appendChild(sev);
+
+        var mit = document.createElement("td");
+        fill(mit, r[4], needle);
+        tr.appendChild(mit);
+
+        var st = document.createElement("td");
+        fill(st, r[5], needle);
+        tr.appendChild(st);
+
+        body.appendChild(tr);
+        shown++;
+      }
+
+      count.textContent = shown + " of " + ROWS.length + " entries";
+      if (empty) empty.hidden = shown !== 0;
+    }
+
+    q.addEventListener("input", render);
+    cat.addEventListener("change", render);
+    render();
+  })();
+  </script>
+
+</section>

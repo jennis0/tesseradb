@@ -1,0 +1,31 @@
+<title>Tessera — a permission-masked point service</title>
+
+<!-- Opens the paper's single grid container. It is closed in 90-footer.html.
+     Prose tasks add <section> elements between the two; each section
+     re-declares the layout grid, so a <figure> inside one still breaks out
+     of the measure. Direct children of .wp sit in the text column. -->
+<article class="wp">
+
+  <p class="eyebrow">Architecture paper</p>
+
+  <h1>Tessera: a permission-masked point service</h1>
+
+  <p class="standfirst">A pannable, zoomable map over a document corpus in
+  which what a viewer is permitted to see determines not only which items
+  they retrieve, but every count, density, cluster and summary they are
+  shown. Two readers of the same map, holding different clearances, see two
+  internally consistent worlds — and neither can infer the other's from the
+  numbers on screen. The interesting engineering is not the scatterplot; it
+  is the access control that survives contact with aggregation.</p>
+
+  <div class="status-note">
+    <strong>Status.</strong> The architecture described here is specified in
+    full. Phase 0 — the measurement phase — is complete: its numbers were
+    obtained by running synthetic access-control policies over a real corpus
+    of 2.42 million arXiv papers, scaled to 10<sup>9</sup> points. The
+    policies are synthetic because no access-labelled corpus of this size is
+    publicly available; where a figure in this paper depends on the shape of
+    a policy rather than the shape of the data, it is marked as such.
+    Phase 1, the implementation, is in progress. Nothing here describes a
+    deployed production system.
+  </div>

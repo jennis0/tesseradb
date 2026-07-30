@@ -1,0 +1,1166 @@
+<section class="part" id="part-4">
+
+  <p class="eyebrow">Part IV</p>
+  <h2>Making a map out of a bitmap</h2>
+
+  <p>Part III ended with a mask: a Roaring bitmap holding the entity IDs of
+  every item a session is permitted to see. A mask is not yet a map. Between the two
+  lie four questions — which points to draw when there are more of them than
+  pixels, what to call the shapes they form, how a search narrows the view
+  without destroying it, and what happens when some of the data may not share a
+  process with the rest.</p>
+
+  <h3>10 · Level of detail, and sampling after masking</h3>
+
+  <p>A viewport resolves to a small set of tiles. Because geometry is stored in
+  Morton order, each tile is a contiguous range of row IDs within a segment, so
+  the query for a tile is an intersection of the mask with that range. The
+  cheapest thing this buys is counting: <code>range_cardinality</code> gives the
+  exact number of visible items in any tile at any zoom without touching point
+  data, so a full per-user density pyramid is a few thousand range-count calls,
+  exact rather than estimated. Those counts are worth spending immediately,
+  because without them a tile holding twelve visible items and a tile holding
+  four million render identically — and being per-user and exact, they disclose
+  nothing the tile query has not already disclosed.</p>
+
+  <p>Choosing <em>which</em> points to draw is the harder half, and it is
+  governed by an invariant. <strong>I7</strong>: <em>“Sampling happens after
+  masking, never before. The sample of an authorised set is not the authorised
+  portion of a global sample. Any level-of-detail step must be</em> defined
+  <em>over the visible set; precomputed unmasked structures may be used only as a
+  fast path with an exact fallback.”</em> Reversed, the consequence is quiet
+  rather than loud: a principal authorised for a small or clustered slice would
+  see a nearly empty screen while thousands of authorised items sat invisible
+  beneath a global sample that had selected around them.</p>
+
+  <p>The construction that satisfies I7 by definition is priority sampling.
+  Every item carries a fixed pseudo-random priority derived by hashing its
+  entity ID, and a tile's sample is the <em>k</em> lowest-priority items in that
+  tile inside the governing mask, where <em>k</em> is the on-screen mark budget.
+  Nothing in that definition references unmasked data. It also nests provably: an
+  item among the <em>k</em> lowest-priority visible items in a parent tile is
+  necessarily among the <em>k</em> lowest in whichever child contains it, because
+  the child's visible set is a subset — so a representative does not vanish when
+  the reader zooms in on it. An earlier design selected by rank position using a
+  bit-reversal sequence and lacked that property, so essentially every
+  representative popped on zoom-in. Priority also composes across compartmented
+  partitions, where rank position would not.</p>
+
+  <figure id="fig-f9" class="wide">
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" style="width: max-content"><svg id="f9-svg" width="680" height="462" viewBox="0 0 680 462" role="img" aria-label="Two orderings of masking and sampling over the same tile. Masking first yields a full sample of authorised items; sampling first leaves almost nothing after the mask is applied."></svg></div>
+    </div>
+    <div class="fig-legend">
+      <span><span class="swatch" style="background: var(--cat-1)"></span> inside <code>M_auth</code></span>
+      <span><span class="swatch" style="background: var(--masked-out)"></span> outside it</span>
+      <span><span class="swatch" style="background: var(--cat-2)"></span> selected by the sampler</span>
+    </div>
+    <figcaption><span class="fig-num">Figure 9.</span> The same tile, sampled
+    two ways. Masking first and then taking the <em>k</em> lowest-priority
+    survivors fills the mark budget from the viewer's own data. Sampling the tile
+    globally and masking the sample afterwards fills the budget from data the
+    viewer mostly cannot see, and almost nothing survives — the screen goes
+    sparse without any error being raised. Both panels use identical points,
+    priorities and authorisation.</figcaption>
+  </figure>
+
+  <p>Evaluating that definition cheaply is a separate question, with two answers.
+  <em>Candidate lists</em> precompute, per tile node, the top <em>c·k</em> items
+  by priority, unmasked; at query time the list is filtered by the mask and the
+  first <em>k</em> taken. <em>Direct evaluation</em> takes the visible row IDs in
+  the tile's range straight from the mask, reads their priorities, and keeps the
+  <em>k</em> lowest. The tile's exact masked count is known before any selection
+  happens, so the choice costs nothing to make.</p>
+
+  <p>They move in opposite directions. A list of width <em>c·k</em> yields about
+  <em>c·k·</em>coverage survivors, so it produces <em>k</em> of them only above
+  coverage 1/<em>c</em>; at <em>c</em> = 4 that is 25%, which — given on the
+  order of 10<sup>4</sup> grants against 10<sup>5</sup>–10<sup>6</sup> categories
+  — describes very few principals, and widening helps only linearly. Direct
+  evaluation's cost is bounded by the tile's priority block regardless of
+  coverage, and falls as coverage falls. Below the crossover, descent multiplies
+  work rather than dividing it: at <em>c</em> = 4 and <em>k</em> = 30 over
+  10<sup>4</sup>-row tiles, reaching <em>k</em> survivors visits about 21 nodes
+  at 5% coverage against roughly 10 pages for direct evaluation, and 5,461 nodes
+  at 0.01% against a single page.</p>
+
+  <p>So: below roughly 5% coverage evaluate directly, above it use the list. Both
+  compute the same definition, so I7 holds either way. The Phase 0 measurements
+  settled which is the common case: realistic masks are essentially scattered
+  under Morton order, and at working coverages 12–99% of occupied depth-6 tiles
+  fall below the ~5% crossover — for tail-only principals, essentially all do.
+  Direct evaluation is the main selection route, not a fallback; candidate lists
+  serve the dense cores of head principals. Authorisation does not usefully
+  correlate with position, so there is no hidden upside to wait for.</p>
+
+  <h3>11 · Labels, clusters, and the containment frontier</h3>
+
+  <p>Callers supply a cluster hierarchy. Tessera uses it as a tree rather than as
+  a flat partition, and that single choice converts insufficient visibility from
+  suppression into rollup. Each node stores a membership bitmap; the service
+  descends from the root evaluating <code>and_cardinality</code> against the
+  mask, and stops when the visible count falls below a threshold. The set of
+  nodes where the descent stopped is <em>the frontier</em> — the clustering this
+  viewer is shown, coarse where they see little and fine where they see a lot.
+  Nobody gets a blank region; they get a vaguer ancestor. Node geometry —
+  centroid, hull, count — is recomputed per user from masked membership, per I2.
+  The governing threshold, <code>min_visible_members</code>, should be reviewed
+  as a disclosure control: every displayed item is authorised either way, so it
+  bounds not access but a residual structural leak, namely that a node's
+  existence and shape derive from global density.</p>
+
+  <p>Labels are supplied by the caller together with their generating sets — the
+  items a label was generated from — and the service gates them.
+  <strong>I3</strong>: <em>“Labels are served iff their generating set is a
+  subset of</em> <code>M_auth</code>. <em>Never of the filtered selection mask.
+  Evaluated per request, with nothing caching a label decision above the
+  check.”</em> The test is one bitmap operation,
+  <code>and_cardinality(G, M_auth) == |G|</code>. It is the compartment-lattice
+  instance of the derivation axiom from multilevel database security; what
+  appears to be unpublished is applying it to shared, precomputed, generated
+  summaries served to differently-cleared viewers. It suits Part III's term
+  model, because a term is permission-homogeneous: a generating set of the form
+  <em>G</em> = node ∩ postings(<em>T</em>) is satisfied by exactly those
+  principals who satisfy <em>T</em> — no coverage fraction, no threshold to
+  defend. Note the dependency the design attaches to that convenience: it rests
+  entirely on the two authorisation functions agreeing about <em>T</em>, and if
+  they disagreed, every generating set of that form would become unsound at the
+  same instant <em>and the containment test would still return true</em>. The
+  same unverifiability governs the declared sets themselves. Provenance is
+  something the service takes on trust: a label supplied with an optimistic
+  generating set is a disclosure the service will faithfully serve, and the leak
+  register carries it as a high-severity channel accepted as the caller's
+  control rather than closed by the service.</p>
+
+  <p>Which set the caller declares is the second question the containment test
+  cannot settle for itself. Where prompts are built from a <em>sample</em> of a
+  node's members rather than from its whole membership, &ldquo;every item it was
+  generated from&rdquo; can mean the sample or the full membership, and the two
+  differ materially: the sample-based set is far easier to satisfy and therefore
+  far more available, but protects less. The design settles on the prompt
+  sample. It is honest to provenance — only the sampled documents influenced the
+  label text, so the sample <em>is</em> the generating set under I3's
+  definition — and it is the available choice; the consequence, stated plainly,
+  is that a label can reach a principal who is not cleared for every member of
+  the node it describes, only for every member it was written from.
+  Full-membership declaration remains available per deployment as a strict mode,
+  and which was used is recorded in the bundle manifest's provenance. Whichever
+  is declared, it is then fixed. <strong>I8</strong>: <em>“A label's generating
+  set is immutable once supplied. Items arriving later are not part of it and
+  must not be added. A label whose node has since grown is</em> stale<em>, not
+  unsafe. Members leaving is an availability problem.”</em> So ingest can never
+  make a label unsafe; deletion, which drops an item from every mask and so
+  fails containment for every principal at once, makes it unavailable.</p>
+
+  <p>When containment fails, the service falls through a ladder rather than
+  showing nothing: the full node label, then progressively larger cumulative
+  unions, then single-term labels, then an extractive term list computed at view
+  time over mask ∩ node — exactly the visible items, so that tier always
+  satisfies I3 — and finally no label. That tier carries one constraint of its
+  own, and it is an I2 constraint rather than an I3 one: the background document
+  frequencies it scores terms against must come from a fixed public reference
+  corpus, never from the live corpus, because live frequencies are an aggregate
+  over mostly unauthorised data and they determine which terms are shown —
+  violating I2 silently. Because only satisfied candidates are ever
+  evaluated, a principal never learns that a label they cannot see exists, so the
+  refusal itself carries no information.</p>
+
+  <p>Filtering is where the frontier gets interesting, and where the obvious
+  implementation is wrong. The filtered mask is a subset of <code>M_auth</code>,
+  so filtered counts are never higher and descending on them against a fixed
+  threshold stops earlier <em>everywhere</em>: filtering would make the
+  clustering uniformly coarser rather than finer around the hits. The fix is two
+  thresholds with different jobs. <code>min_visible_members</code>, against
+  <code>M_auth</code>, sets the maximum depth and stays a disclosure control that
+  filtering must not relax; a much smaller display threshold, against the
+  filtered mask, decides how far <em>within</em> that bound to descend.
+  <strong>I12</strong> states it operationally: <em>“Filters narrow rendering;
+  they never touch authorisation. A filter may reduce which authorised items are
+  drawn. It may never enlarge the authorised set, relax a label's containment
+  test, or permit the cluster frontier to descend below the depth</em>
+  <code>M_auth</code> <em>alone would allow. Operationally: <strong>a filter may
+  move the frontier up, never down</strong>.”</em></p>
+
+  <figure id="fig-f10" class="wide">
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" style="width: max-content"><svg id="f10-svg" width="700" height="352" viewBox="0 0 700 352" role="img" aria-label="A cluster tree showing the maximum descent depth permitted by the authorisation mask, and the shallower frontier produced once a filter is applied."></svg></div>
+    </div>
+    <div class="fig-legend">
+      <span><span class="swatch" style="background: var(--cat-1)"></span> frontier under <code>M_auth</code> alone — the maximum depth</span>
+      <span><span class="swatch" style="background: var(--cat-2)"></span> frontier with the filter applied</span>
+    </div>
+    <figcaption><span class="fig-num">Figure 10.</span> The containment frontier
+    across one cluster tree. Each node shows its visible count under
+    <code>M_auth</code> and, in brackets, its matched count under the filter.
+    <code>min_visible_members</code> = 80 against <code>M_auth</code> fixes the
+    deepest cut the viewer may ever be shown; the display threshold of 5 against
+    the filtered mask decides how far within that bound to descend. Under
+    <span style="color: var(--cat-2)">B</span>, where almost nothing matches, the
+    filter pulls the frontier up one level; nowhere does it push the frontier
+    below the bound. The table repeats the counts.</figcaption>
+  </figure>
+
+  <div class="wide" id="f10-table"></div>
+
+  <p>The frontier recomputes on every filter change, so labels appear, refine and
+  disappear as someone types: debounce, and add hysteresis so a node does not
+  drop out because a match count wobbled by one.</p>
+
+  <h3>12 · Two masks</h3>
+
+  <p>The mechanism underneath chapter 11 is that there are two masks, not one.
+  <code>M_auth</code> is what the token permits: it governs label containment,
+  maximum frontier depth, node geometry, and the security boundary.
+  <code>M_sel</code> = <code>M_auth</code> ∧ filter₁ ∧ … ∧ filterₙ is what the
+  query asked for: it governs which points render and the matched counts. Every
+  filter is applied to the second and never to the first.</p>
+
+  <p>Collapsing them into a single composed mask is the natural implementation
+  and it dissolves the map. Containment would then be tested against
+  <code>M_auth</code> ∧ text ∧ vector; a generating set contains items that do
+  not match the text query, so containment fails for essentially every label the
+  instant anyone types. A frontier descending on filtered counts would likewise
+  dissolve as the filter narrows, destroying the frame of reference exactly when
+  it is most needed. I3 and I12 prevent both, and there is no leak in preserving
+  labels under filtering: the principal could already see them, and per I12 a
+  filter cannot widen authorisation.</p>
+
+  <p>An affordance falls out for free. <code>range_cardinality</code> over both
+  masks on the same range gives matched-and-visible against total-visible,
+  exactly, for two bitmap operations — which supports highlight-in-context rather
+  than removing everything else and leaving the reader staring at twelve points
+  on a blank canvas. Rendering follows the same split: a context layer sampled
+  from <code>M_auth</code>, where coverage is normal, and a match layer from
+  <code>M_sel</code>, small enough under a selective filter to send in full.</p>
+
+  <figure id="fig-f11" class="wide">
+    <div class="fig-controls">
+      <label for="f11-range">Filter selectivity
+        <input type="range" id="f11-range" min="4" max="100" step="4" value="60"
+               aria-describedby="f11-live">
+      </label>
+      <button type="button" id="f11-fail" aria-pressed="false">Compose into one mask</button>
+      <button type="button" id="f11-reset" aria-pressed="false">Reset</button>
+    </div>
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" style="width: max-content"><svg id="f11-svg" width="704" height="430" viewBox="0 0 704 430" role="img" aria-label="A map under a fixed authorisation mask with a variable filter. Matched points thin out as the filter narrows while the density underlay, the cluster frontier and the served labels stay stable."></svg></div>
+    </div>
+    <div class="fig-legend">
+      <span><span class="swatch" style="background: var(--masked-out)"></span> outside <code>M_auth</code></span>
+      <span><span class="swatch" style="background: var(--cat-1)"></span> context layer — <code>M_auth</code></span>
+      <span><span class="swatch" style="background: var(--cat-2)"></span> match layer — <code>M_sel</code></span>
+      <span><span class="swatch" style="background: var(--cat-6)"></span> cluster frontier</span>
+    </div>
+    <p class="fig-controls" id="f11-live" role="status"></p>
+    <figcaption><span class="fig-num">Figure 11.</span> Two masks, one map.
+    <code>M_auth</code> is fixed; the slider varies <code>M_sel</code>. As the
+    filter narrows, the match layer thins out, but the per-tile visible counts
+    and the served labels are computed from <code>M_auth</code> and do not move,
+    and the frontier only ever pulls <em>up</em>, over regions where nothing
+    matches — never deeper than <code>M_auth</code> alone would allow. The reader
+    keeps a frame of reference to read the matches against.
+    <em>Compose into one mask</em> shows the failure
+    the two-mask model exists to prevent: containment is tested against the
+    filtered mask, so every label vanishes the moment a filter is applied, and
+    the frontier descends on filtered counts, so the clustering coarsens as the
+    query gets more specific. A node with no label is simply unlabelled to the
+    viewer, who is never told that a label exists.</figcaption>
+  </figure>
+
+  <p>What makes this composable is the filter contract: every filter returns a
+  set of entity IDs as a bitmap, and composition is intersection. That is also
+  the extension discipline for the retrieval surface — new filter forms add
+  operands rather than changing the shape of the call. Four rules make it hold.
+  <em>Threshold, never top-k</em>, because a top-<em>k</em> query evaluated alone
+  is computed over the whole corpus, so intersecting afterwards is post-filtering
+  and the principal's nearest neighbours would vary observably with items they
+  cannot see. <em>Optional candidate push-down</em>: filters accept an optional
+  candidate bitmap, which makes vector brute-force viable and removes that
+  post-filter leak in the same move. <em>The mask goes in first, not last</em>,
+  because it is usually the most selective operand and every un-intersected
+  intermediate contains unauthorised IDs. And <em>pre-intersection cardinality is
+  structurally unreachable</em>, because a raw match count is a corpus-wide count
+  over unauthorised records.</p>
+
+  <p>It stays a pipeline rather than becoming a planner. Intersection is the only
+  top-level operator, and the order is fixed at design time by cost class: label,
+  then text, then intersection with <code>M_auth</code>, then a brute-force
+  vector scan over the survivors. Statistics-driven reordering is deliberately
+  absent, because it would make execution time a function of how much the
+  principal can see. Two corollaries are easy to miss: the label vocabulary
+  offered for filtering must itself be containment-filtered, or a filterable
+  label reveals a label the principal is not cleared to see; and text filters but
+  does not rank, because relevance scores computed from corpus-global statistics
+  are a demonstrated channel for inferring the content of unreadable
+  documents.</p>
+
+  <p>The design point is worth stating plainly. Filters narrow which points are
+  shown without dissolving the map, and however expressive the filter surface
+  becomes, none of that expressiveness reaches the authorisation layer. Every
+  filter is one more operand on the same intersection, and <code>M_auth</code> is
+  not an operand the caller can write.</p>
+
+  <h3>13 · Compartmented partitions and required-set gating</h3>
+
+  <p>Masking assumes every item can sit in the same process, distinguished only
+  by a bit in a bitmap. Some terms mark data for which that is not acceptable: it
+  must be held separately at rest and in memory. For those, Tessera uses
+  partitions — a partition being a set of items sharing a required term set,
+  stored in its own files and served by its own process. It is a second sharding
+  axis: by row range for scale, by term for isolation, and the two compose. This
+  is compartmented, lattice-based mandatory access control made structural.</p>
+
+  <p>One distinction decides whether the design is valid at all. If the
+  requirement is that <em>data</em> be separated, so that compartment A's items
+  are not co-resident with compartment B's, the design is correct. If it is that
+  <em>audiences</em> be separated, so that A-cleared and B-cleared principals
+  never touch the same hardware, then items spanning compartments must be
+  rejected rather than placed. Tessera takes the first reading.</p>
+
+  <p>A partition's required set is the intersection of compartment markers across
+  every disjunct of an item's predicate — every route to the item, not merely
+  one. If an item's terms are {a, R} and {b, R}, R is genuinely required; if they
+  are {a, R} and {b}, R is not, because the second term admits a principal
+  without it. The gate follows: a token may query a partition only if it
+  satisfies every term in the required set. That is exactly sound rather than
+  merely conservative — a token satisfying any of an item's terms necessarily
+  satisfies everything in the intersection, so the gate never excludes an
+  authorised token. The mixed case falls out instead of needing a rule: an item
+  with one uncompartmented disjunct has an empty intersection and lands in the
+  default partition, and any compartment marker on its other disjuncts is
+  provably doing nothing. That is almost certainly a labelling error, so warn
+  loudly — but it is not a security violation, so it must not block ingest.</p>
+
+  <figure id="fig-f12" class="wide">
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" style="width: max-content"><svg id="f12-svg" width="700" height="422" viewBox="0 0 700 422" role="img" aria-label="Four partitions with their required sets, a gate admitting a token to two of them, and a coordinator composing counts, samples and label containment across the partitions it could reach."></svg></div>
+    </div>
+    <div class="fig-legend">
+      <span><span class="swatch" style="background: var(--cat-1)"></span> reachable by this token</span>
+      <span><span class="swatch" style="background: var(--masked-out)"></span> gate refuses — counts as nothing satisfied</span>
+    </div>
+    <figcaption><span class="fig-num">Figure 12.</span> A token holding
+    compartment A but not B, gated against four partitions. It may query a
+    partition only if it satisfies every term in that partition's required set,
+    so two of the four are unreachable and no bitmap containing their entity IDs
+    is ever built outside them. Counts sum across the partitions that answered,
+    because tile identity is geometric; priority sampling composes exactly,
+    because priority is a global per-item property. Containment does not compose
+    so forgivingly: per I13, a generating set with a non-empty slice in an
+    unreachable partition must be withheld, never treated as vacuously
+    satisfied.</figcaption>
+  </figure>
+
+  <p>Everything is keyed on entity, so everything partitions with the items: the
+  term index, the columns, the permutation, the tile table, node membership,
+  generating sets, the text index and the vectors. Each partition has its own
+  Morton ranking and row-ID space, preserving the property that a row ID is an
+  array index. The security consequence is that <em>the mask never exists
+  whole</em>: each partition builds its own fragment from its own term index, so
+  no process outside a compartment holds a bitmap containing its entity IDs. That
+  is the isolation property, and it is why authorisation fans out.</p>
+
+  <p>Two of the three quantities compose almost for free. Counts sum, because
+  tile identity is geometric: partitions agree on which tile is which while
+  mapping it to their own rank ranges. Priority sampling composes exactly,
+  because priority is a global per-item property — the <em>k</em> lowest-priority
+  visible items in a tile are the <em>k</em> lowest of the union of each
+  partition's own <em>k</em> lowest. The rank-position scheme rejected in chapter
+  10 would not have composed at all.</p>
+
+  <p>Containment is the one that bites. Generating sets and masks both partition
+  by entity, so <em>G</em> ⊆ <em>M</em> if and only if <em>G<sub>p</sub></em> ⊆
+  <em>M<sub>p</sub></em> for every partition <em>p</em> — subject to
+  <strong>I13</strong>, which says that a partition not consulted fails closed: a
+  partition the token cannot reach counts as contributing <em>nothing
+  satisfied</em>, never as vacuously satisfied. A label whose generating set has a
+  non-empty slice in an unreachable compartment must be withheld. The natural
+  implementation, which checks only the partitions it queried, serves labels it
+  should withhold, and does so silently.</p>
+
+  <p>Partitions are discovered rather than declared: an item arriving with a
+  previously unseen required set creates one, leaving existing partitions
+  untouched. Identity is a canonical hash of the sorted required set, which makes
+  creation idempotent under racing ingest workers, and creation should raise an
+  alarm, because a new combination means either a data error or a policy change.
+  The count needs a cap: a token fans out to as many as
+  2<sup><em>n</em></sup> − 1 partitions where <em>n</em> is the number of
+  compartments it holds, and fan-out p99 is the slowest partition.</p>
+
+  <p>Isolation strength is a ladder rather than a switch: separate processes with
+  separately mapped files is the cheapest meaningful rung; a separate memory
+  cgroup and no shared page cache closes core dumps and swap; a separate host
+  with its own keys and operator access closes the rest. The compartment map
+  itself, though, is not a runtime knob. An item whose required set changes
+  simply moves stores, but changing policy — compartmenting a previously open
+  term, splitting or merging compartments — means re-evaluating placement for
+  every affected item. That is a reindex, mitigated only by immutable versioned
+  prefixes, which let a repartitioning be built under a new prefix and cut over
+  by flipping a pointer.</p>
+
+  <p>These four chapters are what turns a bitmap into something a person can
+  read. The recurring shape is that every quantity on screen — the count in a
+  tile, the point representing a thousand others, the word attached to a cluster
+  — is computed from inside the viewer's own visible set, while in each case the
+  cheap version is computed from something larger. Part V turns to what happens
+  when that visible set changes underneath a reader already looking at it.</p>
+
+<script>
+/* ---------------------------------------------------------------------------
+   Part IV figures. Four independent IIFEs; nothing shared but TF.
+   All data is generated from seeded PRNGs, so every load is identical.
+   --------------------------------------------------------------------------- */
+
+/* F9 — sampling after masking (static) --------------------------------- */
+(function () {
+  "use strict";
+  var root = document.getElementById("f9-svg");
+  if (!root) return;
+  var S = TF.svg;
+  /* The design system paints all figure text --muted. Headings and the few
+     semantic-coloured labels need to beat that rule, so they go through the
+     style attribute — still tokens, never a literal colour. */
+  function TX(a) {
+    if (a && a.fill) { a.style = "fill: " + a.fill; delete a.fill; }
+    return S("text", a);
+  }
+
+  function rng(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  var PW = 196, PH = 148, GAP = 46, K = 6;
+  var cols = [0, PW + GAP, 2 * (PW + GAP)];
+
+  /* One tile of points. Authorisation is ~22%, matching a principal who holds
+     a narrow slice; priority is the hashed value the sampler orders on. */
+  var r = rng(910231);
+  var pts = [];
+  for (var gy = 0; gy < 7; gy++) {
+    for (var gx = 0; gx < 8; gx++) {
+      pts.push({
+        x: 18 + gx * 23 + (r() - 0.5) * 13,
+        y: 18 + gy * 18 + (r() - 0.5) * 11,
+        auth: r() < 0.22,
+        pri: r()
+      });
+    }
+  }
+  var byPri = pts.slice().sort(function (a, b) { return a.pri - b.pri; });
+  var authPts = pts.filter(function (p) { return p.auth; });
+  var maskThenSample = authPts.slice().sort(function (a, b) { return a.pri - b.pri; }).slice(0, K);
+  var globalSample = byPri.slice(0, K);
+  var sampleThenMask = globalSample.filter(function (p) { return p.auth; });
+
+  function inSet(set, p) { return set.indexOf(p) !== -1; }
+
+  /* A panel: outer frame, optional heading, and the points drawn in one of
+     four roles — plain, masked, chosen, or discarded. */
+  function panel(x, y, title, draw) {
+    var g = S("g", { transform: "translate(" + x + "," + y + ")" });
+    g.appendChild(S("rect", {
+      x: 0, y: 0, width: PW, height: PH, rx: 3,
+      fill: "var(--surface-2)", stroke: "var(--rule)"
+    }));
+    g.appendChild(TX({
+      x: 0, y: -8, "font-size": 12, "font-weight": 600, fill: "var(--fg)", text: title
+    }));
+    draw(g);
+    return g;
+  }
+
+  function dot(p, fill, rad, stroke) {
+    return S("circle", {
+      cx: p.x.toFixed(1), cy: p.y.toFixed(1), r: rad,
+      fill: fill, stroke: stroke || null, "stroke-width": stroke ? 1.4 : null
+    });
+  }
+
+  function note(g, txt) {
+    g.appendChild(TX({ x: 0, y: PH + 16, "font-size": 11.5, text: txt }));
+  }
+
+  function arrow(x, y) {
+    return S("path", {
+      d: "M" + x + " " + y + " l 22 0 M" + (x + 17) + " " + (y - 4) + " l 5 4 l -5 4",
+      stroke: "var(--annotation)", "stroke-width": 1.4, fill: "none"
+    });
+  }
+
+  var rows = [
+    {
+      y: 44,
+      label: "Mask, then sample — the definition in I7",
+      bad: false,
+      panels: [
+        ["1 · the tile", function (g) {
+          pts.forEach(function (p) { g.appendChild(dot(p, "var(--muted)", 3)); });
+        }, pts.length + " items in the tile"],
+        ["2 · intersect with M_auth", function (g) {
+          pts.forEach(function (p) {
+            g.appendChild(dot(p, p.auth ? "var(--cat-1)" : "var(--masked-out)", 3));
+          });
+        }, authPts.length + " visible to this principal"],
+        ["3 · k lowest priorities", function (g) {
+          pts.forEach(function (p) {
+            if (inSet(maskThenSample, p)) return;
+            g.appendChild(dot(p, p.auth ? "var(--cat-1)" : "var(--masked-out)", 2.4));
+          });
+          maskThenSample.forEach(function (p) {
+            g.appendChild(dot(p, "var(--cat-2)", 5, "var(--surface)"));
+          });
+        }, maskThenSample.length + " of k = " + K + " marks drawn"]
+      ]
+    },
+    {
+      y: 262,
+      label: "Sample, then mask — the failure",
+      bad: true,
+      panels: [
+        ["1 · the tile", function (g) {
+          pts.forEach(function (p) { g.appendChild(dot(p, "var(--muted)", 3)); });
+        }, pts.length + " items in the tile"],
+        ["2 · k lowest priorities, unmasked", function (g) {
+          pts.forEach(function (p) {
+            if (inSet(globalSample, p)) return;
+            g.appendChild(dot(p, "var(--muted)", 2.4, null));
+          });
+          globalSample.forEach(function (p) {
+            g.appendChild(dot(p, "var(--cat-2)", 5, "var(--surface)"));
+          });
+        }, "k = " + K + " chosen from the whole tile"],
+        ["3 · intersect with M_auth", function (g) {
+          pts.forEach(function (p) {
+            if (inSet(sampleThenMask, p)) return;
+            g.appendChild(dot(p, "var(--masked-out)", 2.4));
+          });
+          sampleThenMask.forEach(function (p) {
+            g.appendChild(dot(p, "var(--cat-2)", 5, "var(--surface)"));
+          });
+        }, sampleThenMask.length + " of k = " + K + " marks survive"]
+      ]
+    }
+  ];
+
+  rows.forEach(function (row) {
+    var head = TX({
+      x: 0, y: row.y - 26, "font-size": 13, "font-weight": 650,
+      fill: row.bad ? "var(--cat-2)" : "var(--fg)", text: row.label
+    });
+    root.appendChild(head);
+    row.panels.forEach(function (spec, i) {
+      var g = panel(cols[i], row.y, spec[0], spec[1]);
+      note(g, spec[2]);
+      root.appendChild(g);
+      if (i < 2) root.appendChild(arrow(cols[i] + PW + 12, row.y + PH / 2));
+    });
+  });
+
+  root.appendChild(TX({
+    x: cols[2] + PW, y: rows[1].y + PH + 34, "font-size": 11.5,
+    "text-anchor": "end", fill: "var(--cat-2)",
+    text: "the same principal, " + (K - sampleThenMask.length) + " marks lost silently"
+  }));
+})();
+
+/* F10 — the containment frontier (static) ------------------------------ */
+(function () {
+  "use strict";
+  var root = document.getElementById("f10-svg");
+  if (!root) return;
+  var S = TF.svg;
+  /* The design system paints all figure text --muted. Headings and the few
+     semantic-coloured labels need to beat that rule, so they go through the
+     style attribute — still tokens, never a literal colour. */
+  function TX(a) {
+    if (a && a.fill) { a.style = "fill: " + a.fill; delete a.fill; }
+    return S("text", a);
+  }
+
+  var MIN_VISIBLE = 80;   /* against M_auth  — a disclosure control */
+  var DISPLAY = 5;        /* against M_sel   — a rendering threshold */
+
+  /* visible count under M_auth, matched count under the filter */
+  var tree = {
+    id: "root", vis: 900, mat: 128, kids: [
+      { id: "A", vis: 620, mat: 127, kids: [
+        { id: "A1", vis: 430, mat: 125, kids: [
+          { id: "A1a", vis: 260, mat: 84 },
+          { id: "A1b", vis: 170, mat: 41 }
+        ] },
+        { id: "A2", vis: 190, mat: 2, kids: [
+          { id: "A2a", vis: 120, mat: 2 },
+          { id: "A2b", vis: 70, mat: 0 }
+        ] }
+      ] },
+      { id: "B", vis: 280, mat: 1, kids: [
+        { id: "B1", vis: 210, mat: 1, kids: [
+          { id: "B1a", vis: 150, mat: 1 },
+          { id: "B1b", vis: 60, mat: 0 }
+        ] },
+        { id: "B2", vis: 100, mat: 0, kids: [
+          { id: "B2a", vis: 55, mat: 0 },
+          { id: "B2b", vis: 45, mat: 0 }
+        ] }
+      ] }
+    ]
+  };
+
+  /* The descent is all-or-nothing into a node's children: it may proceed only
+     if every child clears min_visible_members on M_auth (the bound I12 forbids
+     crossing), and, when a filter is active, only if the node itself still
+     carries enough matches to be worth resolving further. */
+  function descend(node, useFilter) {
+    if (!node.kids) return [node];
+    var clears = node.kids.every(function (c) { return c.vis >= MIN_VISIBLE; });
+    if (!clears) return [node];
+    if (useFilter && node.mat < DISPLAY) return [node];
+    var out = [];
+    node.kids.forEach(function (c) { out = out.concat(descend(c, useFilter)); });
+    return out;
+  }
+  var boundFrontier = descend(tree, false);
+  var filtFrontier = descend(tree, true);
+  function has(list, n) { return list.indexOf(n) !== -1; }
+
+  /* layout */
+  var LEFT = 108, W = 560, TOP = 44, DY = 74, NW = 62, NH = 34;
+  var levels = [[tree], tree.kids, [], []];
+  tree.kids.forEach(function (c) { levels[2] = levels[2].concat(c.kids || []); });
+  levels[2].forEach(function (c) { levels[3] = levels[3].concat(c.kids || []); });
+
+  levels.forEach(function (row, d) {
+    row.forEach(function (n, i) {
+      n.cx = LEFT + W * (i + 0.5) / row.length;
+      n.cy = TOP + d * DY;
+      n.depth = d;
+    });
+  });
+
+  /* depth guides */
+  ["depth 0", "depth 1", "depth 2", "depth 3"].forEach(function (t, d) {
+    root.appendChild(S("line", {
+      x1: LEFT - 26, y1: TOP + d * DY + NH / 2, x2: LEFT + W + 10, y2: TOP + d * DY + NH / 2,
+      stroke: "var(--grid)", "stroke-width": 1
+    }));
+    root.appendChild(TX({
+      x: 0, y: TOP + d * DY + NH / 2 + 4, "font-size": 11, text: t
+    }));
+  });
+
+  /* edges */
+  function walk(n) {
+    (n.kids || []).forEach(function (c) {
+      root.appendChild(S("line", {
+        x1: n.cx, y1: n.cy + NH, x2: c.cx, y2: c.cy,
+        stroke: "var(--axis)", "stroke-width": 1
+      }));
+      walk(c);
+    });
+  }
+  walk(tree);
+
+  /* nodes */
+  function drawNode(n) {
+    var onBound = has(boundFrontier, n), onFilt = has(filtFrontier, n);
+    var g = S("g", { transform: "translate(" + (n.cx - NW / 2) + "," + n.cy + ")" });
+    g.appendChild(S("rect", {
+      x: 0, y: 0, width: NW, height: NH, rx: 3,
+      fill: onFilt ? "var(--accent-weak)" : "var(--surface-2)",
+      stroke: onFilt ? "var(--cat-2)" : (onBound ? "var(--cat-1)" : "var(--rule)"),
+      "stroke-width": (onFilt || onBound) ? 2 : 1
+    }));
+    g.appendChild(TX({
+      x: NW / 2, y: 14, "text-anchor": "middle", "font-size": 11,
+      "font-weight": 600, fill: "var(--fg)", text: n.id
+    }));
+    g.appendChild(TX({
+      x: NW / 2, y: 27, "text-anchor": "middle", "font-size": 10.5,
+      text: n.vis + " [" + n.mat + "]"
+    }));
+    root.appendChild(g);
+    (n.kids || []).forEach(drawNode);
+  }
+  drawNode(tree);
+
+  /* frontier markers */
+  boundFrontier.forEach(function (n) {
+    root.appendChild(S("path", {
+      d: "M" + (n.cx - NW / 2 - 9) + " " + (n.cy + NH / 2) + " l 6 -5 l 0 10 z",
+      fill: "var(--cat-1)"
+    }));
+  });
+  filtFrontier.forEach(function (n) {
+    root.appendChild(S("path", {
+      d: "M" + (n.cx + NW / 2 + 9) + " " + (n.cy + NH / 2) + " l -6 -5 l 0 10 z",
+      fill: "var(--cat-2)"
+    }));
+  });
+
+  /* the one node the filter moved */
+  var moved = filtFrontier.filter(function (n) { return !has(boundFrontier, n); })[0];
+  if (moved) {
+    root.appendChild(S("path", {
+      d: "M" + (moved.cx + 76) + " 32 C " + (moved.cx + 76) + " 66, " +
+         (moved.cx + 30) + " 72, " + (moved.cx + 6) + " " + (moved.cy - 6),
+      stroke: "var(--cat-2)", "stroke-width": 1.3, fill: "none"
+    }));
+    root.appendChild(TX({
+      x: 694, y: 26, "font-size": 11.5, fill: "var(--cat-2)",
+      "text-anchor": "end",
+      text: "only " + moved.mat + " match below here — the descent stops one level up"
+    }));
+  }
+
+  root.appendChild(TX({
+    x: 0, y: 328, "font-size": 11.5,
+    text: "min_visible_members = " + MIN_VISIBLE + " against M_auth fixes the deepest cut."
+  }));
+  root.appendChild(TX({
+    x: 0, y: 344, "font-size": 11.5,
+    text: "display threshold = " + DISPLAY + " against M_sel decides how far within it to descend."
+  }));
+
+  /* accessible duplicate of the counts */
+  var host = document.getElementById("f10-table");
+  if (host) {
+    var rowsHtml = "";
+    function status(n) {
+      var b = has(boundFrontier, n), f = has(filtFrontier, n);
+      if (b && f) return "bound + filtered";
+      if (b) return "bound";
+      if (f) return "filtered";
+      return "—";
+    }
+    function emit(n) {
+      rowsHtml += "<tr><th>" + n.id + "</th>" +
+        "<td class=\"num\">" + n.depth + "</td>" +
+        "<td class=\"num\">" + n.vis + "</td>" +
+        "<td class=\"num\">" + n.mat + "</td>" +
+        "<td style=\"padding-left:0.9rem\">" + status(n) + "</td></tr>";
+      (n.kids || []).forEach(emit);
+    }
+    emit(tree);
+    host.innerHTML =
+      "<table><caption>Figure 10 counts. “Bound” marks the deepest cut " +
+      "min_visible_members allows against M_auth; “filtered” marks the frontier " +
+      "actually served under the filter.</caption><thead><tr>" +
+      "<th>node</th><th class=\"num\">depth</th><th class=\"num\">visible (M_auth)</th>" +
+      "<th class=\"num\">matched (M_sel)</th>" +
+      "<th style=\"padding-left:0.9rem\">on frontier</th></tr></thead><tbody>" +
+      rowsHtml + "</tbody></table>";
+  }
+})();
+
+/* F11 — two masks (interactive) ---------------------------------------- */
+(function () {
+  "use strict";
+  var root = document.getElementById("f11-svg");
+  if (!root) return;
+  var S = TF.svg;
+  /* The design system paints all figure text --muted. Headings and the few
+     semantic-coloured labels need to beat that rule, so they go through the
+     style attribute — still tokens, never a literal colour. */
+  function TX(a) {
+    if (a && a.fill) { a.style = "fill: " + a.fill; delete a.fill; }
+    return S("text", a);
+  }
+
+  function rng(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  var MX = 14, MY = 34, MS = 336;            /* map origin and side */
+  var PX = 376;                              /* readout panel origin */
+  var MIN_VISIBLE = 8, DISPLAY = 3, MAXD = 2;
+
+  /* --- corpus ---------------------------------------------------------
+     Three clusters plus a scatter. `auth` is membership of M_auth and never
+     changes; `score` is the per-item value the filter thresholds on. */
+  var r = rng(4407781);
+  function gauss() { return (r() + r() + r() + r() - 2) / 1.2; }
+  var blobs = [
+    { cx: 0.28, cy: 0.30, sd: 0.10, n: 150, auth: 0.78 },
+    { cx: 0.70, cy: 0.26, sd: 0.07, n: 110, auth: 0.55 },
+    { cx: 0.58, cy: 0.72, sd: 0.12, n: 170, auth: 0.72 }
+  ];
+  var pts = [];
+  blobs.forEach(function (b) {
+    for (var i = 0; i < b.n; i++) {
+      var x = b.cx + gauss() * b.sd, y = b.cy + gauss() * b.sd;
+      if (x < 0.01 || x > 0.99 || y < 0.01 || y > 0.99) { i--; continue; }
+      pts.push({ x: x, y: y, auth: r() < b.auth, score: r() });
+    }
+  });
+  for (var i = 0; i < 120; i++) {
+    pts.push({ x: 0.02 + r() * 0.96, y: 0.02 + r() * 0.96, auth: r() < 0.4, score: r() });
+  }
+  var authPts = pts.filter(function (p) { return p.auth; });
+
+  /* --- quadtree over the viewport ------------------------------------- */
+  function node(x, y, w, d, members) {
+    return { x: x, y: y, w: w, d: d, m: members };
+  }
+  function kids(n) {
+    var h = n.w / 2, out = [];
+    for (var j = 0; j < 4; j++) {
+      var ox = n.x + (j % 2) * h, oy = n.y + (j >> 1) * h;
+      out.push(node(ox, oy, h, n.d + 1, n.m.filter(function (p) {
+        return p.x >= ox && p.x < ox + h && p.y >= oy && p.y < oy + h;
+      })));
+    }
+    return out;
+  }
+  function nAuth(n) { return n.m.filter(function (p) { return p.auth; }).length; }
+
+  /* Labels. A term is permission-homogeneous, so a generating set of the form
+     node ∩ postings(T) is satisfied by exactly the principals who satisfy T:
+     the containment test is constant in the filter. This token satisfies the
+     first three terms and not the fourth. */
+  var TERMS = ["transport", "materials", "climate", "genomics", "restricted", "optics"];
+  function termOf(n) {
+    var key = Math.round(n.x * 8) * 13 + Math.round(n.y * 8) * 29 + n.d * 7;
+    return TERMS[Math.abs(key) % TERMS.length];
+  }
+  function served(n) { return termOf(n) !== "restricted"; }
+
+  /* --- state ----------------------------------------------------------- */
+  var state = { sel: 60, fail: false };
+  function matched(p) { return p.auth && p.score * 100 < state.sel; }
+  function nMatch(n) { return n.m.filter(matched).length; }
+
+  function frontier(n) {
+    if (n.d >= MAXD) return [n];
+    var ks = kids(n);
+    var gate = state.fail
+      ? ks.every(function (c) { return nMatch(c) >= MIN_VISIBLE; })
+      : ks.every(function (c) { return nAuth(c) >= MIN_VISIBLE; });
+    if (!gate) return [n];
+    if (!state.fail && nMatch(n) < DISPLAY) return [n];
+    var out = [];
+    ks.forEach(function (c) { out = out.concat(frontier(c)); });
+    return out;
+  }
+
+  /* --- static chrome ---------------------------------------------------- */
+  var gDensity = S("g", null), gPts = S("g", null), gFront = S("g", null), gPanel = S("g", null);
+  root.appendChild(TX({
+    x: MX, y: 20, "font-size": 12.5, "font-weight": 650, fill: "var(--fg)",
+    text: "The viewport"
+  }));
+  root.appendChild(TX({
+    x: PX, y: 20, "font-size": 12.5, "font-weight": 650, fill: "var(--fg)",
+    text: "What the service computed"
+  }));
+  root.appendChild(S("rect", {
+    x: MX, y: MY, width: MS, height: MS, rx: 3,
+    fill: "var(--surface-2)", stroke: "var(--rule)"
+  }));
+  root.appendChild(gDensity);
+  root.appendChild(gPts);
+  root.appendChild(gFront);
+  root.appendChild(gPanel);
+
+  function sx(v) { return MX + v * MS; }
+  function sy(v) { return MY + v * MS; }
+
+  /* density underlay: exact per-tile counts over M_auth, 4x4, never filtered */
+  var TILES = 4, tileCount = [];
+  for (var ty = 0; ty < TILES; ty++) {
+    for (var tx = 0; tx < TILES; tx++) {
+      var lo = tx / TILES, hi = (tx + 1) / TILES, lo2 = ty / TILES, hi2 = (ty + 1) / TILES;
+      tileCount.push(authPts.filter(function (p) {
+        return p.x >= lo && p.x < hi && p.y >= lo2 && p.y < hi2;
+      }).length);
+    }
+  }
+  var maxTile = Math.max.apply(null, tileCount);
+  function seq(c) {
+    var band = Math.min(5, Math.floor(c / (maxTile + 1) * 6));
+    return "var(--seq-" + (band + 1) + ")";
+  }
+  tileCount.forEach(function (c, idx) {
+    var tx = idx % TILES, ty = Math.floor(idx / TILES);
+    gDensity.appendChild(S("rect", {
+      x: sx(tx / TILES), y: sy(ty / TILES), width: MS / TILES, height: MS / TILES,
+      fill: seq(c), opacity: 0.24
+    }));
+  });
+
+  /* points: drawn once, restyled on change */
+  var marks = pts.map(function (p) {
+    var el = S("circle", { cx: sx(p.x).toFixed(1), cy: sy(p.y).toFixed(1), r: 2.4 });
+    gPts.appendChild(el);
+    return { p: p, el: el };
+  });
+
+  /* --- panel ------------------------------------------------------------ */
+  var lines = [], LY = 44;
+  ["Authorisation mask M_auth", "", "Selection mask M_sel", "", "", "Cluster frontier", "", ""]
+    .forEach(function (t, i) {
+      var el = TX({
+        x: PX, y: LY + i * 21, "font-size": 12,
+        "font-weight": t ? 650 : 400,
+        fill: t ? "var(--fg)" : "var(--muted)", text: t
+      });
+      gPanel.appendChild(el);
+      lines.push(el);
+    });
+
+  gPanel.appendChild(TX({
+    x: PX, y: 218, "font-size": 12, "font-weight": 650, fill: "var(--fg)",
+    text: "Per-tile visible counts (M_auth)"
+  }));
+  var CELL = 34, GX = PX, GY = 228;
+  tileCount.forEach(function (c, idx) {
+    var tx = idx % TILES, ty = Math.floor(idx / TILES);
+    gPanel.appendChild(S("rect", {
+      x: GX + tx * CELL, y: GY + ty * CELL, width: CELL - 3, height: CELL - 3, rx: 2,
+      fill: seq(c), opacity: 0.5, stroke: "var(--rule)"
+    }));
+    gPanel.appendChild(TX({
+      x: GX + tx * CELL + (CELL - 3) / 2, y: GY + ty * CELL + 24,
+      "text-anchor": "middle", "font-size": 11, fill: "var(--fg)", text: c
+    }));
+  });
+  var footnote = TX({ x: PX, y: GY + 4 * CELL + 18, "font-size": 11.5, text: "" });
+  gPanel.appendChild(footnote);
+  var warn1 = TX({ x: MX, y: 400, "font-size": 11.5, fill: "var(--cat-2)", text: "" });
+  var warn2 = TX({ x: MX, y: 416, "font-size": 11.5, fill: "var(--cat-2)", text: "" });
+  gPanel.appendChild(warn1);
+  gPanel.appendChild(warn2);
+
+  /* --- render ----------------------------------------------------------- */
+  var live = document.getElementById("f11-live");
+
+  function render() {
+    var nMatched = 0;
+    marks.forEach(function (m) {
+      var p = m.p;
+      if (!p.auth) {
+        m.el.setAttribute("fill", "var(--masked-out)");
+        m.el.setAttribute("r", 2);
+      } else if (matched(p)) {
+        nMatched++;
+        m.el.setAttribute("fill", "var(--cat-2)");
+        m.el.setAttribute("r", 3.4);
+      } else {
+        m.el.setAttribute("fill", "var(--cat-1)");
+        m.el.setAttribute("r", 2.4);
+        m.el.setAttribute("opacity", state.sel < 100 ? 0.42 : 1);
+      }
+      if (matched(p) || !p.auth) m.el.setAttribute("opacity", p.auth ? 1 : 1);
+    });
+
+    while (gFront.firstChild) gFront.removeChild(gFront.firstChild);
+    var front = frontier(node(0, 0, 1, 0, pts));
+    var nServed = 0;
+    front.forEach(function (n) {
+      gFront.appendChild(S("rect", {
+        x: sx(n.x) + 1.5, y: sy(n.y) + 1.5,
+        width: MS * n.w - 3, height: MS * n.w - 3, rx: 2,
+        fill: "none", stroke: "var(--cat-6)", "stroke-width": 1.6
+      }));
+      var showLabel = state.fail ? (served(n) && state.sel >= 100) : served(n);
+      if (showLabel) nServed++;
+      var lx = sx(n.x) + 7, ly = sy(n.y) + 16;
+      var txt = showLabel ? termOf(n) : "(no label)";
+      var w = txt.length * 6.2 + 10;
+      gFront.appendChild(S("rect", {
+        x: lx - 4, y: ly - 11, width: w, height: 15, rx: 2,
+        fill: "var(--surface)", stroke: showLabel ? "var(--cat-6)" : "var(--rule)",
+        "stroke-dasharray": showLabel ? null : "2 2"
+      }));
+      gFront.appendChild(TX({
+        x: lx, y: ly, "font-size": 10.5,
+        fill: showLabel ? "var(--fg)" : "var(--muted)", text: txt
+      }));
+    });
+
+    var depths = front.map(function (n) { return n.d; });
+    var noFilter = state.sel >= 100;
+    lines[1].textContent = TF.fmt(authPts.length) + " visible of " +
+      TF.fmt(pts.length) + " in view — fixed";
+    lines[3].textContent = noFilter ? "no filter — M_sel = M_auth" :
+      "threshold at " + state.sel + "% of the score range";
+    lines[4].textContent = TF.fmt(nMatched) + " matched and visible of " +
+      TF.fmt(authPts.length) + " visible";
+    lines[6].textContent = front.length + (front.length === 1 ? " node, depth " : " nodes, depth ") +
+      Math.min.apply(null, depths) + "–" + Math.max.apply(null, depths);
+    lines[7].textContent = nServed + " of " + front.length + " labels served";
+    footnote.textContent = "Exact, per user, and unchanged by the filter.";
+    warn1.textContent = state.fail
+      ? "One mask: containment is tested against M_sel, so every label vanishes as soon as anyone types,"
+      : "";
+    warn2.textContent = state.fail
+      ? "and the frontier descends on filtered counts, so the clustering coarsens as the query narrows."
+      : "";
+    if (live) {
+      live.textContent = lines[3].textContent + ". " + lines[4].textContent + ". " +
+        lines[6].textContent + ", " + lines[7].textContent +
+        (state.fail ? ". One-mask failure mode is on." : ".");
+    }
+  }
+
+  var range = document.getElementById("f11-range");
+  var failBtn = document.getElementById("f11-fail");
+  var resetBtn = document.getElementById("f11-reset");
+  range.addEventListener("input", function () {
+    state.sel = parseInt(range.value, 10);
+    render();
+  });
+  failBtn.addEventListener("click", function () {
+    state.fail = !state.fail;
+    failBtn.setAttribute("aria-pressed", state.fail ? "true" : "false");
+    render();
+  });
+  resetBtn.addEventListener("click", function () {
+    state.sel = 60; state.fail = false;
+    range.value = "60";
+    failBtn.setAttribute("aria-pressed", "false");
+    render();
+  });
+  render();
+})();
+
+/* F12 — compartments and required sets (static) ------------------------ */
+(function () {
+  "use strict";
+  var root = document.getElementById("f12-svg");
+  if (!root) return;
+  var S = TF.svg;
+  /* The design system paints all figure text --muted. Headings and the few
+     semantic-coloured labels need to beat that rule, so they go through the
+     style attribute — still tokens, never a literal colour. */
+  function TX(a) {
+    if (a && a.fill) { a.style = "fill: " + a.fill; delete a.fill; }
+    return S("text", a);
+  }
+
+  var parts = [
+    { id: "P0", req: "required set: { }", items: "412 items", ok: true, note: "default partition" },
+    { id: "PA", req: "required set: { A }", items: "96 items", ok: true, note: "own files, own process" },
+    { id: "PB", req: "required set: { B }", items: "58 items", ok: false, note: "gate refuses" },
+    { id: "PAB", req: "required set: { A, B }", items: "17 items", ok: false, note: "gate refuses" }
+  ];
+
+  var BW = 152, BH = 92, BX = 24, BY = 116, GAPX = 16;
+
+  root.appendChild(TX({
+    x: BX, y: 22, "font-size": 12.5, "font-weight": 650, fill: "var(--fg)",
+    text: "Token holds compartment A. It does not hold B."
+  }));
+  root.appendChild(S("rect", {
+    x: BX, y: 34, width: 236, height: 34, rx: 3,
+    fill: "var(--accent-weak)", stroke: "var(--accent)"
+  }));
+  root.appendChild(TX({
+    x: BX + 12, y: 55, "font-size": 12, fill: "var(--fg)",
+    text: "satisfies: team-x, project-nine, A"
+  }));
+  root.appendChild(TX({
+    x: BX + 250, y: 49, "font-size": 11.5,
+    text: "the gate admits a token to a partition only if the token"
+  }));
+  root.appendChild(TX({
+    x: BX + 250, y: 64, "font-size": 11.5,
+    text: "satisfies every term in that partition's required set"
+  }));
+
+  parts.forEach(function (p, i) {
+    var x = BX + i * (BW + GAPX);
+    var g = S("g", { transform: "translate(" + x + "," + BY + ")" });
+    g.appendChild(S("rect", {
+      x: 0, y: 0, width: BW, height: BH, rx: 4,
+      fill: p.ok ? "var(--surface)" : "var(--surface-2)",
+      stroke: p.ok ? "var(--cat-1)" : "var(--rule)",
+      "stroke-width": p.ok ? 2 : 1,
+      "stroke-dasharray": p.ok ? null : "4 3"
+    }));
+    g.appendChild(TX({
+      x: 10, y: 20, "font-size": 12.5, "font-weight": 650,
+      fill: p.ok ? "var(--fg)" : "var(--muted)", text: p.id
+    }));
+    g.appendChild(TX({ x: 10, y: 38, "font-size": 11, text: p.req }));
+    g.appendChild(TX({ x: 10, y: 55, "font-size": 11, text: p.items }));
+    g.appendChild(TX({
+      x: 10, y: 76, "font-size": 10.5,
+      fill: p.ok ? "var(--cat-1)" : "var(--cat-2)",
+      text: p.ok ? "admitted" : p.note
+    }));
+    root.appendChild(g);
+
+    /* gate arrow from the token bar down into the partition */
+    root.appendChild(S("path", {
+      d: "M" + (x + BW / 2) + " 74 L " + (x + BW / 2) + " " + (BY - 6),
+      stroke: p.ok ? "var(--cat-1)" : "var(--masked-out)",
+      "stroke-width": p.ok ? 2 : 1.5,
+      "stroke-dasharray": p.ok ? null : "3 3",
+      fill: "none"
+    }));
+    if (!p.ok) {
+      root.appendChild(S("path", {
+        d: "M" + (x + BW / 2 - 6) + " 90 l 12 12 M" + (x + BW / 2 + 6) + " 90 l -12 12",
+        stroke: "var(--cat-2)", "stroke-width": 1.6, fill: "none"
+      }));
+    }
+  });
+
+  /* coordinator */
+  var CY = 238;
+  root.appendChild(S("rect", {
+    x: BX, y: CY, width: 4 * BW + 3 * GAPX, height: 78, rx: 4,
+    fill: "var(--surface)", stroke: "var(--rule)"
+  }));
+  root.appendChild(TX({
+    x: BX + 12, y: CY + 22, "font-size": 12.5, "font-weight": 650, fill: "var(--fg)",
+    text: "Coordinator — composes only what answered"
+  }));
+  root.appendChild(TX({
+    x: BX + 12, y: CY + 42, "font-size": 11.5,
+    text: "counts sum: 412 + 96 = 508 visible in this tile — tile identity is geometric"
+  }));
+  root.appendChild(TX({
+    x: BX + 12, y: CY + 60, "font-size": 11.5,
+    text: "priority sampling: the global k lowest of each partition's own k lowest"
+  }));
+  [0, 1].forEach(function (i) {
+    var x = BX + i * (BW + GAPX) + BW / 2;
+    root.appendChild(S("path", {
+      d: "M" + x + " " + (BY + BH) + " L " + x + " " + (CY - 6),
+      stroke: "var(--cat-1)", "stroke-width": 2, fill: "none"
+    }));
+  });
+
+  /* containment across partitions */
+  var LY = 340;
+  root.appendChild(S("rect", {
+    x: BX, y: LY, width: 4 * BW + 3 * GAPX, height: 66, rx: 4,
+    fill: "var(--surface-2)", stroke: "var(--rule)"
+  }));
+  root.appendChild(TX({
+    x: BX + 12, y: LY + 21, "font-size": 12.5, "font-weight": 650, fill: "var(--fg)",
+    text: "Containment: G ⊆ M iff every slice is contained"
+  }));
+  root.appendChild(TX({
+    x: BX + 12, y: LY + 40, "font-size": 11.5,
+    text: "label “transport”  ·  G∩P0 ⊆ M — contained  ·  G∩PA ⊆ M — contained  ·  G∩PB — partition unreachable"
+  }));
+  root.appendChild(TX({
+    x: BX + 12, y: LY + 58, "font-size": 11.5, fill: "var(--cat-2)",
+    text: "I13: the unreachable slice counts as nothing satisfied, not as vacuously satisfied — the label is withheld."
+  }));
+})();
+</script>
+
+</section>
