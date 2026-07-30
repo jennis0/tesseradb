@@ -68,7 +68,11 @@ same reason the original `x`/`y` gap was: `tessera_id` is a declared `u64` end-t
 implementation bug bad enough to smuggle a raw entity id into only half of it, non-zero-extended,
 is a stranger and less likely failure mode than the direct zero-extension case this scan does
 catch, and `test_identity.py`'s known-answer vectors and `Bundle.verify_identity_cross_check`
-(Task 12) independently scrutinise the identity construction itself. The `tessera_id` column
+(Task 12) independently scrutinise the identity construction itself — the latter **is actually
+run** against the fixture bundle by
+`reference/tests/test_identity.py::test_fixture_bundle_identity_column_agrees_with_the_key`, which
+is what makes this citation load-bearing rather than a reference to an uncalled method (it was the
+latter until the seam review caught it; do not remove that test without revisiting this paragraph). The `tessera_id` column
 remains the one place I10 is actually at risk on the wire, and it gets the width that matters most.
 
 **Why `x`/`y` keep exactly the pre-r6 scan shape (8-byte scan across all three columns, no 4-byte

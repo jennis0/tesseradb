@@ -1,8 +1,10 @@
 //! HTTP error mapping to Reference Sheet R5's closed code list.
 //!
 //! Every response body is `{"error": code, "detail": string}`. `detail` strings built by this
-//! crate never carry a bearer token, auth-data bytes, or an entity id (the logging rule Task 15
-//! tests, honoured here too even though these are response bodies, not log lines).
+//! crate never carry a bearer token, auth-data bytes, an entity id, or a server filesystem path
+//! (the logging rule Task 15 tests, honoured here too even though these are response bodies, not
+//! log lines). That is enforced, not merely intended: a lower layer's error `Display` is never
+//! forwarded into a body — see [`map_store_error`], which logs it and substitutes a fixed string.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -93,6 +95,10 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
     match e {
         EngineError::PinExpired => ApiError::PinExpired,
         EngineError::UnknownSlice(slice) => ApiError::Unknown(format!("unknown slice '{slice}'")),
+        // `Store`/`Io` wrap a `StoreError`/`io::Error` whose `Display` names a filesystem path —
+        // the same leak `map_store_error` closes, reached through the engine's error enum instead
+        // of directly. One sanitiser for both doors.
+        store_or_io @ (EngineError::Store(_) | EngineError::Io(_)) => map_store_error(store_or_io),
         other => ApiError::FailClosed(other.to_string()),
     }
 }
@@ -103,6 +109,61 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
 /// types only). `Engine::item`/`Engine::resolve_external_id` surface `StoreError` only for a
 /// genuinely unreadable sidecar or bundle file — a server fault, never a shape an attacker can
 /// choose by picking an identifier (see each call site's doc for why).
+///
+/// **The detail never crosses to the caller.** A `StoreError`'s `Display` is written for an
+/// operator reading a server log: the sidecar's two inconsistency arms name the sidecar's
+/// absolute path, and `StoreError::Io` names whatever path failed. Forwarding it verbatim put a
+/// filesystem path in a viewer-plane 500 body, and — before the store's messages were made
+/// entity-independent — an entity ID with it, contradicting this module's own opening claim.
+///
+/// Both arms are unreachable in Phase 1, but they go live in Phase 2: once a flush gives buffered
+/// entities rows, a post-build item whose external ID is genuinely null (a legitimate state under
+/// §3.4) takes the sidecar's inconsistency branch, and the caller gets a 500 for a perfectly
+/// correct item. Whatever else that costs, it must not also be a disclosure.
+///
+/// Diagnosability moves to the log, not to the client: the full `Display` is emitted at
+/// `error!`, and the body is a fixed, entity-independent string. Uniform across all three planes
+/// deliberately — a per-plane branch here is a rule that gets applied to the wrong plane exactly
+/// once.
 pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
-    ApiError::FailClosed(e.to_string())
+    tracing::error!(detail = %e, "bundle/sidecar read failed; answering fail-closed");
+    ApiError::FailClosed(
+        "could not read this bundle's stored data; the request was refused rather than answered \
+         partially"
+            .to_string(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S7: a lower layer's `Display` must never reach the caller. The sidecar's inconsistency arms
+    /// name its absolute path (and, before this fix, an entity id); both arms go live in Phase 2,
+    /// when a post-build item with a null external ID takes them for a perfectly correct item.
+    #[test]
+    fn map_store_error_does_not_forward_the_detail_to_the_caller() {
+        let leaky = "invalid sidecar at /srv/tessera/v00000/partitions/default/entities/\
+                     ext-locator.u32: entity 123456 is inconsistent";
+        let (status, code, detail) = map_store_error(leaky).parts();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(code, "fail-closed");
+        assert!(
+            !detail.contains("123456") && !detail.contains('/'),
+            "the body must carry neither an identifier nor a server path, got: {detail}"
+        );
+    }
+
+    /// The same door, reached through the engine's error enum rather than directly.
+    #[test]
+    fn map_engine_error_sanitises_its_store_and_io_arms() {
+        let engine_err = EngineError::Io(std::io::Error::other(
+            "/srv/tessera/v00000/partitions/default/terms/postings.arrow: bad",
+        ));
+        let (_, _, detail) = map_engine_error(engine_err).parts();
+        assert!(
+            !detail.contains('/'),
+            "the body must not carry a server path, got: {detail}"
+        );
+    }
 }

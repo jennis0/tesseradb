@@ -291,12 +291,12 @@ def test_no_collisions_over_a_dense_range(canonical_key):
 
 # --- Row-order re-derivation, on synthetic data ------------------------------------------
 #
-# No post-r6 fixture bundle exists in this checkout to test `Bundle.derive_row_order`
-# end-to-end against (tessera-build/tessera-store have not yet been repointed at the
-# tessera_id column or the identity object -- only tessera-types/identity.rs is landing, as
-# of this task). These tests exercise the same logic -- `_entity_of_rows`'s permutation
-# inversion and the `(morton, tessera_id)` sort -- against synthetic data built in-process,
-# which is available without rebuilding anything.
+# These exercise the pieces -- `_entity_of_rows`'s permutation inversion and the
+# `(morton, tessera_id)` sort -- against synthetic data built in-process, so a failure points
+# at one function rather than at "the bundle". The end-to-end assertions against a **real**
+# fixture bundle are at the bottom of this file: they are what actually establishes that a
+# bundle's stored row order is the contract order, and they were missing while the fixture's
+# absence (true only up to `7c1f9b6`) went on being cited as the reason.
 
 
 def test_entity_of_rows_inverts_permutation_for_touched_rows(canonical_key):
@@ -369,3 +369,51 @@ def test_row_order_is_morton_then_tessera_id_ascending(canonical_key):
         key=lambda i: (morton_codes[i], priorities[i], tessera_ids[i]),
     )
     assert expected_with_priority == expected_order
+
+
+# --- End to end, against a real fixture bundle --------------------------------------------
+#
+# S4/S5: `Bundle.derive_row_order`, `Bundle.verify_identity_cross_check` and
+# `Bundle.sidecar_round_trips` were all written and none was ever called against a bundle.
+# The row-order check is the only thing that asserts a *real* bundle's stored order is the
+# contract order `(morton_of(x, y), forward(key, shard, entity))`; the cross-check is cited by
+# name in `conformance/tests/test_byte_scan.py`'s residual-gap argument, which was therefore
+# leaning on a check that never ran. `bundle_root` (conftest) builds the fixture via the CLI if
+# it is absent, so these are as cheap as the rest of this suite after the first run.
+
+
+@pytest.fixture(scope="module")
+def fixture_bundle(bundle_root):
+    from oracle.bundle import Bundle
+
+    return Bundle(bundle_root)
+
+
+def test_fixture_bundle_rows_are_stored_in_morton_then_tessera_id_order(fixture_bundle):
+    """The storage sort order, re-derived from geometry and the permutation and compared against
+    the stored order. Deliberately independent of the stored `morton`/`tessera_id` columns
+    (finding 5): a build that emitted a wrong `tessera_id` and sorted consistently by its own
+    wrong values must fail this, not pass it."""
+    import numpy as np
+
+    slice_id = fixture_bundle.segments_manifest["segments"][0]["slice"]
+    order = fixture_bundle.derive_row_order(slice_id)
+    expected = np.arange(len(order), dtype=order.dtype)
+    assert np.array_equal(order, expected), (
+        "the bundle's stored rows are not in (morton, tessera_id) order; first divergence at "
+        f"row {int(np.flatnonzero(order != expected)[0])}"
+    )
+
+
+def test_fixture_bundle_identity_column_agrees_with_the_key(fixture_bundle):
+    """`forward(key, shard, entity_of_row[r]) == tessera_id[r]`, where `entity_of_row` comes from
+    the permutation (key-independent) and `tessera_id` from the stored column. The only check
+    that catches a key/column disagreement — and the one `test_byte_scan.py` cites."""
+    slice_id = fixture_bundle.segments_manifest["segments"][0]["slice"]
+    fixture_bundle.verify_identity_cross_check(slice_id)
+
+
+def test_fixture_bundle_sidecar_round_trips_through_the_locator(fixture_bundle):
+    """`entity -> ext-locator ordinal -> concatenated sorted extents` names the same key the
+    sorted extents do. Raises on any disagreement; nothing to assert beyond it returning."""
+    fixture_bundle.sidecar_round_trips()

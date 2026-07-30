@@ -32,6 +32,10 @@ const OPERATOR_CREDENTIAL: &str = "operator-secret";
 /// contains no real deployment key.
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
+/// The fixture bundle's `identity.epoch` — contracts §2.2's transport-identity epoch, which
+/// `/v1/meta` reports and `/v1/items` compares an optional `epoch` against.
+const FIXTURE_EPOCH: u32 = 1;
+
 fn test_key() -> IdentityKey {
     IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
 }
@@ -114,7 +118,7 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
-        identity_epoch: 1,
+        identity_epoch: FIXTURE_EPOCH,
         shard_id: 0,
     };
     build(&args).expect("fixture build should succeed");
@@ -1293,6 +1297,134 @@ async fn viewer_meta_requires_bearer() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+}
+
+/// Contracts §2.2 r6: `GET /v1/meta` reports the transport-identity epoch as `identity_epoch` —
+/// and reports **only** the epoch: the identity key appears in no API response on any plane.
+/// Nothing asserted either half before, which is what let S2's epoch regression sit untested.
+#[tokio::test]
+async fn viewer_meta_reports_the_identity_epoch_and_never_the_key() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let resp = server
+        .client
+        .get(server.viewer_url("/v1/meta"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["identity_epoch"], FIXTURE_EPOCH,
+        "/v1/meta must report the bundle's identity_epoch: {body}"
+    );
+    let raw = body.to_string();
+    assert!(
+        !raw.contains(TEST_KEY_HEX),
+        "/v1/meta must never carry the identity key: {raw}"
+    );
+}
+
+/// Contracts §2.2/§3.2 r6: `POST /v1/items/{tessera_id}` accepts an optional `epoch` and answers
+/// `409 conflict` — "stale identity epoch; re-resolve by external_id" — when it does not match.
+/// The 409 had no test at any level, and the check is decided before inversion, so a matching
+/// epoch must not alter the answer for the same id.
+#[tokio::test]
+async fn item_with_a_stale_epoch_is_409_and_a_matching_epoch_changes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+
+    // A real, visible id, so the 409 is not confusable with the 404 an unknown id would give.
+    let viewport = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(viewport.status(), 200);
+    let (_tiles, points) = decode_viewport(&viewport.bytes().await.unwrap());
+    let tessera_id = points[0].0;
+
+    // Baseline: no epoch at all → 200.
+    let plain = post_item(&server, token, tessera_id).await;
+    assert_eq!(plain.status(), 200);
+
+    // A stale epoch → 409, with the contract's own detail string.
+    let stale = server
+        .client
+        .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "epoch": FIXTURE_EPOCH + 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), 409);
+    let body: serde_json::Value = stale.json().await.unwrap();
+    assert_eq!(body["error"], "conflict");
+    assert_eq!(
+        body["detail"],
+        "stale identity epoch; re-resolve by external_id"
+    );
+
+    // The matching epoch is a no-op: same 200, same body as the epoch-less request.
+    let matching = server
+        .client
+        .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "epoch": FIXTURE_EPOCH }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(matching.status(), 200);
+
+    // And a stale epoch on an id naming nothing is still the 409, decided before inversion —
+    // identical for every identifier, so it opens no channel (Appendix C, C4).
+    let stale_unknown = server
+        .client
+        .post(server.viewer_url("/v1/items/0"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "epoch": FIXTURE_EPOCH + 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        stale_unknown.status(),
+        409,
+        "the epoch check must be entity-independent, not fall through to 404"
+    );
 }
 
 /// Important 2: a `/control/changes` batch whose *later* item fails validation (unknown external

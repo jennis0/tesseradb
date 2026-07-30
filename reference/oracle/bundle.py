@@ -278,15 +278,32 @@ class Bundle:
         return self._entity_to_external[entity_id]
 
     def _ext_locator_path(self) -> Path:
-        # memo §7: "one positional u32 locator into the sorted external-ID extents
-        # (entities/ext-locator.u32, singular -- no <k> suffix)".
-        return self.prefix_dir / "entities" / "ext-locator.u32"
+        """The locator's real path: memo §7 gives it a fixed name (`ext-locator.u32`, singular,
+        no `<k>` suffix) *alongside the extents*, which the build writes under
+        `partitions/<phash>/entities/`. It is derived from the first extent's own
+        prefix-relative path -- exactly as `tessera-store`'s
+        `ExternalIdSidecar::deferred_from_manifest` derives it -- rather than assumed, because
+        the earlier `prefix_dir / "entities" / ...` guess named a path that never exists, and
+        the caller's `if locator_path.exists()` guard then turned the whole check into a no-op.
+        """
+        extents = self.segments_manifest.get("external_id_extents", [])
+        if not extents:
+            raise ValueError("bundle names no external-id extents, so it has no locator either")
+        first = extents[0]
+        rel = first.rsplit("/", 1)[0] + "/ext-locator.u32" if "/" in first else "ext-locator.u32"
+        return self.prefix_dir / rel
 
     def sidecar_round_trips(self, sample: int = 50) -> None:
         """For a sample of entities: `external_id_of(e)` resolves back to `e` through the
-        sorted extents. Both directions of a mapping stored once sorted by key and once
-        indexed by entity; they must agree or `/control/changes` addresses the wrong item
-        (memo §7)."""
+        sorted extents, **and** that entity's `ext-locator.u32` slot names the same key. Both
+        directions of a mapping stored once sorted by key and once indexed by entity; they must
+        agree or `/control/changes` addresses the wrong item (memo §7).
+
+        The locator is **required**, not probed for: a bundle that names external-id extents
+        names a locator too (contracts §2.4 r6). The former `if locator_path.exists()` guard
+        silently skipped the only part of this method that checked the locator at all -- and,
+        paired with a locator path that never existed, made a green run mean nothing.
+        """
         entities = list(getattr(self, "_entity_to_external", {}) or {})
         if not entities:
             self.external_id_of(next(iter(self._known_entity_ids())))  # populate the cache
@@ -296,31 +313,52 @@ class Bundle:
         if n == 0:
             return
         chosen = rng.choice(entities, size=n, replace=False)
+
+        # Read once, outside the loop: the locator (raw u32s, no header) and the concatenated
+        # sorted key list the locator's ordinals index into.
+        locator_path = self._ext_locator_path()
+        locator = np.fromfile(locator_path, dtype="<u4")
+        concatenated = self._concatenated_external_keys()
+
         for entity_id in chosen:
             entity_id = int(entity_id)
             ext = self.external_id_of(entity_id)
-            # Re-derive entity -> external via the locator sidecar, if present (post-r6
-            # shape); otherwise the check degenerates to "the map is self-consistent",
-            # which is still a real (if weaker) check on a pre-r6 bundle.
-            locator_path = self._ext_locator_path()
-            if locator_path.exists():
-                locator = np.fromfile(locator_path, dtype="<u4")
-                if entity_id >= len(locator):
-                    raise ValueError(
-                        f"entity {entity_id} has no ext-locator slot (locator has "
-                        f"{len(locator)} entries)"
-                    )
-                slot = int(locator[entity_id])
-                if slot == 0xFFFFFFFF:
-                    raise ValueError(
-                        f"entity {entity_id} has an external_id ({ext!r}) but its "
-                        "ext-locator slot is the no-external-id sentinel"
-                    )
-            resolved = self._entity_to_external[entity_id]
-            if resolved != ext:
+            if entity_id >= len(locator):
                 raise ValueError(
-                    f"sidecar round-trip failed for entity {entity_id}: {resolved!r} != {ext!r}"
+                    f"entity {entity_id} has no ext-locator slot (locator has "
+                    f"{len(locator)} entries)"
                 )
+            slot = int(locator[entity_id])
+            if slot == 0xFFFFFFFF:
+                raise ValueError(
+                    f"entity {entity_id} has an external_id ({ext!r}) but its "
+                    "ext-locator slot is the no-external-id sentinel"
+                )
+            if slot >= len(concatenated):
+                raise ValueError(
+                    f"entity {entity_id}'s locator ordinal {slot} is past the "
+                    f"{len(concatenated)} concatenated external-id rows"
+                )
+            # The load-bearing comparison: the key the LOCATOR names against the key the sorted
+            # extents name. Comparing `_entity_to_external[e]` with `external_id_of(e)`, as this
+            # method used to, compares one dict against itself.
+            via_locator = concatenated[slot]
+            if via_locator != ext:
+                raise ValueError(
+                    f"sidecar round-trip failed for entity {entity_id}: the locator's ordinal "
+                    f"{slot} names {via_locator!r}, the sorted extents name {ext!r}"
+                )
+
+    def _concatenated_external_keys(self) -> list[bytes]:
+        """Every extent's `external_id` column, in extent order -- the row space the locator's
+        ordinals index into (contracts §2.4 r6: "that entity's ordinal in the concatenated sorted
+        external-ID extents")."""
+        keys: list[bytes] = []
+        for rel in self.segments_manifest.get("external_id_extents", []):
+            with ipc.open_file(self.prefix_dir / rel) as reader:
+                table = reader.read_all()
+            keys.extend(table.column("external_id").to_pylist())
+        return keys
 
     def _known_entity_ids(self):
         for rel in self.segments_manifest.get("external_id_extents", []):

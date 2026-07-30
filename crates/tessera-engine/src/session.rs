@@ -161,8 +161,12 @@ pub struct Engine {
     established_inverse: Mutex<FxHashMap<EntityId, Vec<u8>>>,
     /// The `tessera_id` blinding permutation's per-deployment key (contracts §2.6 r6, design
     /// memo `docs/design-memos/2026-07-30-tessera-id-construction.md`) — parsed once at open from
-    /// MANIFEST's `identity.key` and held for the process lifetime. Never leaves the server (I10)
-    /// and is never logged (`IdentityKey`'s redacted `Debug` impl). `pub(crate)`: `viewport.rs`'s
+    /// MANIFEST's `identity.key` and held for the process lifetime. Never leaves the server (I10).
+    /// `IdentityKey`'s `Debug` is redacted and it has no hex accessor, so *this* field cannot be
+    /// logged; the plaintext hex carried beside it in MANIFEST is redacted at its own carriers
+    /// (`IdentityDescriptor`'s and `BuildArgs`' hand-written `Debug` impls print a fingerprint) —
+    /// stated precisely because "the key is never logged" is a property of every carrier, not of
+    /// this type alone. `pub(crate)`: `viewport.rs`'s
     /// `Engine::item` inverts a caller-supplied `tessera_id` with it directly.
     pub(crate) identity_key: IdentityKey,
     /// The descriptor resolver's extension state (dictionary-miss descriptors interned in
@@ -254,7 +258,20 @@ impl Engine {
             .manifest
             .entity_id_high_water
             .max(high_water_from(&records));
-        let allocator = Allocator::new(high_water);
+        // `try_new`, not `new`: the seed comes from durable state this process did not write in
+        // this run (MANIFEST's `entity_id_high_water`, or a replayed WAL row/lease), so a
+        // corrupt or hand-edited value at or above `u32::MAX` must be refused **here**, before
+        // any ingest, rather than surfacing later as an opaque exhaustion error on whichever
+        // request happened to allocate first. This is the check `Allocator::try_new`'s own doc
+        // says "belongs at open" — open is this function.
+        let allocator = Allocator::try_new(high_water).map_err(|e| {
+            EngineError::Malformed(format!(
+                "entity-ID allocator seed from durable state (MANIFEST high-water {}, WAL \
+                 high-water {}): {e}",
+                bundle.manifest.entity_id_high_water,
+                high_water_from(&records),
+            ))
+        })?;
 
         // **C3 closed (review round 4, Critical)**: `resolve_from_bundle` propagates a real
         // sidecar failure through `replay` as `Err`, rather than the closure panicking on it —

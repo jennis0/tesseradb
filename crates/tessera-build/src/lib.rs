@@ -42,8 +42,8 @@ use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::Extent;
 use tessera_store::manifest::{
-    CurrentPointer, DictExtent, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
-    Quantisation, SegmentDescriptor, SegmentsManifest, SliceDescriptor,
+    identity_key_fingerprint, CurrentPointer, DictExtent, FileDigest, IdentityDescriptor, Manifest,
+    PartitionDescriptor, Quantisation, SegmentDescriptor, SegmentsManifest, SliceDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_types::{
@@ -62,7 +62,7 @@ const PHASH: &str = "default";
 const SEG_ID: &str = "seg-0";
 
 /// Arguments to [`build`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BuildArgs {
     /// Parquet file of points: `entity_id` plus either `x`/`y` or `morton` (see [`input`]).
     pub points: PathBuf,
@@ -92,6 +92,31 @@ pub struct BuildArgs {
     pub identity_epoch: u32,
     /// The §13.3 row-range shard this build produces. Phase 1: 0.
     pub shard_id: u32,
+}
+
+/// **Hand-written, not derived: `identity_key_hex` is the deployment key in plaintext.**
+/// `IdentityKey`'s `Debug` is redacted and it has no hex accessor, but a derived `Debug` here
+/// would print the hex carried beside it — so one `tracing::error!("{args:?}")` on a build
+/// failure would put the deployment key in a log. The redaction is only worth as much as its
+/// weakest carrier.
+impl std::fmt::Debug for BuildArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuildArgs")
+            .field("points", &self.points)
+            .field("pairs", &self.pairs)
+            .field("out", &self.out)
+            .field("extent", &self.extent)
+            .field("slice_id", &self.slice_id)
+            .field("limit", &self.limit)
+            .field("identity_key", &self.identity_key)
+            .field(
+                "identity_key_hex",
+                &identity_key_fingerprint(&self.identity_key_hex),
+            )
+            .field("identity_epoch", &self.identity_epoch)
+            .field("shard_id", &self.shard_id)
+            .finish()
+    }
 }
 
 /// What a completed build produced.
@@ -966,6 +991,36 @@ fn relative_to(prefix_dir: &Path, path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `BuildArgs` carries the deployment key's plaintext hex beside the redacted `IdentityKey`.
+    /// A derived `Debug` would undo the redaction on the first `tracing::error!("{args:?}")`.
+    #[test]
+    fn build_args_debug_does_not_print_the_identity_key() {
+        const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+        let args = BuildArgs {
+            points: PathBuf::from("points.parquet"),
+            pairs: PathBuf::from("pairs.parquet"),
+            out: PathBuf::from("out"),
+            extent: Extent {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            slice_id: "s0".to_string(),
+            limit: None,
+            identity_key: tessera_types::IdentityKey::from_hex(KEY_HEX).unwrap(),
+            identity_key_hex: KEY_HEX.to_string(),
+            identity_epoch: 1,
+            shard_id: 0,
+        };
+        let printed = format!("{args:?}");
+        assert!(
+            !printed.contains(KEY_HEX),
+            "Debug must not print key material, got: {printed}"
+        );
+        assert!(printed.contains("fp:"), "got: {printed}");
+    }
 
     #[test]
     fn signature_key_is_sorted_deduplicated_and_order_independent() {

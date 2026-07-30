@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use tessera_spatial::Extent;
+use tessera_store::manifest::identity_key_fingerprint;
 use tessera_types::{IdentityKey, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 #[derive(Parser)]
@@ -45,8 +46,9 @@ enum Command {
         #[arg(long, value_name = "BUNDLE_ROOT")]
         carry_id_key_from: Option<PathBuf>,
         /// Read the deployment's identity key from a config file named explicitly on the
-        /// command line (owner ruling Q6) — `[identity]\nkey = "<32 lowercase hex>"`. There is
-        /// no default search path and no environment variable: the path must always be typed.
+        /// command line (owner ruling Q6) — `[identity]\nkey = "<32 lowercase hex>"`, plus an
+        /// optional `epoch = <n>`. There is no default search path and no environment variable:
+        /// the path must always be typed.
         #[arg(long, value_name = "PATH")]
         id_key_file: Option<PathBuf>,
         /// Use the given 32-lowercase-hex-character key directly. Discouraged in practice — a
@@ -68,7 +70,10 @@ enum Command {
         /// (contracts §2a).
         #[arg(long)]
         bump_id_epoch: bool,
-        /// Accompanies `--id-key` to set `identity.epoch` explicitly (default 1).
+        /// Set `identity.epoch` explicitly. Accompanies **any** key source — `--id-key`,
+        /// `--id-key-file` (whose `[identity].epoch`, if present, it overrides) or
+        /// `--carry-id-key-from` (whose carried epoch it overrides) — and is the only way to
+        /// state an epoch for a key source that records none. Default 1.
         #[arg(long)]
         epoch: Option<u32>,
     },
@@ -165,14 +170,23 @@ fn read_carried_identity(bundle_root: &Path) -> Result<(String, u32, String, u32
     ))
 }
 
-/// Read `--id-key-file`'s minimal TOML shape: `[identity]\nkey = "<32 lowercase hex>"`.
+/// Read `--id-key-file`'s minimal TOML shape: `[identity]\nkey = "<32 lowercase hex>"`, plus an
+/// **optional** `epoch = <u32>`.
+///
+/// **The epoch belongs in this file** (contracts §2.2 designates it as the key's home outside the
+/// bundle and leaves "the file's wider schema … not specified here", so extending it is
+/// legitimate). Without it, a deployment that advanced to epoch 2 for a repartition and then
+/// rebuilt from its key file — the spec's own recommended rebuild path — republished epoch 1, and
+/// a stale pre-repartition `tessera_id` then compared *equal* and was accepted: exactly the
+/// failure §2.2 says the epoch exists to prevent. A key file that records no epoch still means
+/// epoch 1 (the lineage never advanced), and `--epoch` overrides whatever the file says.
 ///
 /// Unknown top-level sections are ignored (so a later phase's wider deployment config file can
 /// grow without breaking this binary); an unknown key *inside* `[identity]` is an error, so a
 /// misspelt `kye =` does not fall through to a refusal that reads "no key given". There is no
 /// default search path — the caller always names this path explicitly, which is the only reason
 /// this flag counts as an explicit decision under N-1.
-fn read_id_key_file(path: &Path) -> Result<String, String> {
+fn read_id_key_file(path: &Path) -> Result<(String, Option<u32>), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("--id-key-file {}: {e}", path.display()))?;
     let value: toml::Value = text
@@ -194,9 +208,10 @@ fn read_id_key_file(path: &Path) -> Result<String, String> {
         )
     })?;
     for key_name in identity_table.keys() {
-        if key_name != "key" {
+        if key_name != "key" && key_name != "epoch" {
             return Err(format!(
-                "--id-key-file {}: unknown key '{key_name}' in [identity] (did you mean 'key'?)",
+                "--id-key-file {}: unknown key '{key_name}' in [identity] (expected 'key' or \
+                 'epoch')",
                 path.display()
             ));
         }
@@ -210,7 +225,35 @@ fn read_id_key_file(path: &Path) -> Result<String, String> {
                 path.display()
             )
         })?;
-    Ok(key.to_string())
+    let epoch = match identity_table.get("epoch") {
+        None => None,
+        Some(value) => {
+            let raw = value.as_integer().ok_or_else(|| {
+                format!(
+                    "--id-key-file {}: [identity].epoch must be an integer",
+                    path.display()
+                )
+            })?;
+            // §2.2: conforming writers start at 1 and advance; 0 (or a value past `u32`) is a
+            // config error, and `IdentityDescriptor::validate` would refuse it at read time
+            // anyway — refuse it here, where the operator can still see which file said it.
+            let epoch = u32::try_from(raw).map_err(|_| {
+                format!(
+                    "--id-key-file {}: [identity].epoch {raw} is out of range for a u32",
+                    path.display()
+                )
+            })?;
+            if epoch == 0 {
+                return Err(format!(
+                    "--id-key-file {}: [identity].epoch is 0; conforming writers start at 1 and \
+                     advance (contracts §2.2)",
+                    path.display()
+                ));
+            }
+            Some(epoch)
+        }
+    };
+    Ok((key.to_string(), epoch))
 }
 
 /// Draw a fresh 16-byte key from the OS CSPRNG, retrying on a degenerate draw (`k1 == 0`,
@@ -243,6 +286,7 @@ fn resolve_identity(
 ) -> Result<ResolvedIdentity, String> {
     let mut sources: Vec<(&'static str, String)> = Vec::new();
     let mut carried_epoch: Option<u32> = None;
+    let mut file_epoch: Option<u32> = None;
 
     if let Some(root) = carry_id_key_from {
         let (hex, epoch, construction, rounds) = read_carried_identity(root)?;
@@ -259,7 +303,9 @@ fn resolve_identity(
         carried_epoch = Some(epoch);
     }
     if let Some(path) = id_key_file {
-        sources.push(("--id-key-file", read_id_key_file(path)?));
+        let (hex, epoch) = read_id_key_file(path)?;
+        sources.push(("--id-key-file", hex));
+        file_epoch = epoch;
     }
     if let Some(hex) = id_key {
         sources.push(("--id-key", hex.clone()));
@@ -296,9 +342,14 @@ fn resolve_identity(
     let first_hex = parsed[0].1.clone();
     let disagreement = parsed.iter().any(|(_, hex)| *hex != first_hex);
     if disagreement && !rotate_id_key {
+        // Fingerprints, never the keys themselves: this message goes to stderr on a CLI whose own
+        // `--id-key` documentation warns that a key on a command line reaches shell history,
+        // process listings and CI logs — printing both disagreeing keys in full would put them
+        // there through the *refusal* path as well. A fingerprint is enough to tell an operator
+        // which source is the odd one out, which is all the message needs to do.
         let described = parsed
             .iter()
-            .map(|(label, hex)| format!("{label}={hex}"))
+            .map(|(label, hex)| format!("{label}={}", identity_key_fingerprint(hex)))
             .collect::<Vec<_>>()
             .join(", ");
         return Err(format!(
@@ -325,16 +376,45 @@ fn resolve_identity(
     };
     let final_key = IdentityKey::from_hex(&final_hex).map_err(|e| format!("identity key: {e}"))?;
 
+    // Epoch resolution, most explicit source first: `--epoch`, then the key file's own
+    // `[identity].epoch`, then the epoch carried out of an existing bundle, then 1.
+    //
+    // The order matters for the reason `--id-key-file` exists: it is *the* home for a
+    // deployment's key (contracts §2.2), so a normal rebuild from it must not silently republish
+    // epoch 1 after the deployment advanced to 2 for a repartition — a stale pre-repartition
+    // `tessera_id` would then compare equal and be accepted, which is precisely the failure the
+    // epoch prevents. Two *recorded* epochs that disagree are refused rather than silently
+    // ranked: whichever we picked, the other could be the true one, and getting it wrong is
+    // fail-open. `--epoch` is how the operator resolves that.
     let mut epoch = if disagreement {
         // A rotation resets the epoch (contracts §2.2), unless the operator also supplied an
-        // explicit --epoch to accompany --id-key.
+        // explicit --epoch to accompany the new key.
         epoch_flag.unwrap_or(1)
     } else {
-        carried_epoch.unwrap_or_else(|| epoch_flag.unwrap_or(1))
+        if let (None, Some(carried), Some(from_file)) = (epoch_flag, carried_epoch, file_epoch) {
+            if carried != from_file {
+                return Err(format!(
+                    "identity epoch sources disagree (--carry-id-key-from={carried}, \
+                     --id-key-file={from_file}); pass --epoch <n> to state which epoch this \
+                     build publishes — guessing risks republishing a superseded epoch, under \
+                     which a stale pre-repartition tessera_id compares equal and is accepted"
+                ));
+            }
+        }
+        epoch_flag.or(file_epoch).or(carried_epoch).unwrap_or(1)
     };
     if bump_id_epoch {
         epoch += 1;
     }
+
+    // NOT IMPLEMENTED, deliberately, and flagged rather than built: contracts §2.2 also requires
+    // a build whose **partitioning or sharding differs** from the bundle it carried the key from
+    // to advance the epoch *or refuse*. Nothing here checks that, because nothing here can
+    // differ: Phase 1 emits exactly one partition (`default`) and shard 0, both hard-coded in
+    // `tessera_build` (`PHASH`, `shard_id`). The refusal becomes reachable — and required — the
+    // moment either becomes a build input; it belongs next to this epoch resolution, comparing
+    // this build's partition/shard plan against `--carry-id-key-from`'s manifest and refusing
+    // unless `--bump-id-epoch` (or an explicit `--epoch`) accompanies the change.
 
     Ok(ResolvedIdentity {
         key: final_key,

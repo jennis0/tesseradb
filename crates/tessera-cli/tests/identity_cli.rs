@@ -249,6 +249,217 @@ fn disagreeing_key_sources_refuse_without_rotate_and_succeed_with_it() {
     assert_eq!(manifest_b["identity"]["epoch"], 1);
 }
 
+/// S2: `--id-key-file` is *the* home for a deployment's key (contracts §2.2), so the epoch must
+/// travel with it. Before this, a deployment that advanced to epoch 2 for a repartition and then
+/// rebuilt from its key file silently republished epoch 1 — under which a stale pre-repartition
+/// `tessera_id` compares equal and is accepted, exactly the failure the epoch exists to prevent.
+#[test]
+fn the_key_file_carries_the_epoch_and_epoch_flag_overrides_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tiny_points(tmp.path());
+    let pairs = tiny_pairs(tmp.path());
+    let key = "000102030405060708090a0b0c0d0e0f";
+
+    let build_with = |out: &Path, key_file: &Path, extra: &[&str]| {
+        let mut cmd = tessera();
+        cmd.args(["build", "--points"])
+            .arg(&points)
+            .args(["--pairs"])
+            .arg(&pairs)
+            .args(["--out"])
+            .arg(out)
+            .args(["--extent", "0,10,0,10", "--slice", "s0"])
+            .args(["--id-key-file"])
+            .arg(key_file)
+            .args(extra);
+        cmd.output().unwrap()
+    };
+
+    // (a) No epoch in the file: the lineage never advanced, so epoch 1.
+    let plain = tmp.path().join("plain.toml");
+    std::fs::write(&plain, format!("[identity]\nkey = \"{key}\"\n")).unwrap();
+    let out_a = tmp.path().join("bundle-a");
+    assert!(build_with(&out_a, &plain, &[]).status.success());
+    assert_eq!(manifest_of(&out_a)["identity"]["epoch"], 1);
+
+    // (b) The file records epoch 2 — a normal rebuild must republish 2, not regress to 1.
+    let with_epoch = tmp.path().join("epoch2.toml");
+    std::fs::write(
+        &with_epoch,
+        format!("[identity]\nkey = \"{key}\"\nepoch = 2\n"),
+    )
+    .unwrap();
+    let out_b = tmp.path().join("bundle-b");
+    let built = build_with(&out_b, &with_epoch, &[]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert_eq!(
+        manifest_of(&out_b)["identity"]["epoch"],
+        2,
+        "a rebuild from a key file recording epoch 2 must not republish epoch 1"
+    );
+
+    // (c) `--epoch` accompanies `--id-key-file` and wins over the file.
+    let out_c = tmp.path().join("bundle-c");
+    assert!(build_with(&out_c, &with_epoch, &["--epoch", "5"])
+        .status
+        .success());
+    assert_eq!(manifest_of(&out_c)["identity"]["epoch"], 5);
+
+    // (d) `--bump-id-epoch` still advances from whatever the file said.
+    let out_d = tmp.path().join("bundle-d");
+    assert!(build_with(&out_d, &with_epoch, &["--bump-id-epoch"])
+        .status
+        .success());
+    assert_eq!(manifest_of(&out_d)["identity"]["epoch"], 3);
+
+    // (e) An epoch of 0 is refused where the operator can still see which file said it.
+    let zero = tmp.path().join("zero.toml");
+    std::fs::write(&zero, format!("[identity]\nkey = \"{key}\"\nepoch = 0\n")).unwrap();
+    let out_e = tmp.path().join("bundle-e");
+    let refused = build_with(&out_e, &zero, &[]);
+    assert!(!refused.status.success());
+    assert!(!out_e.exists());
+}
+
+/// Two *recorded* epochs that disagree are refused rather than silently ranked: whichever were
+/// picked, the other could be the true one, and picking the lower one is fail-open.
+#[test]
+fn disagreeing_epoch_sources_refuse_until_epoch_is_stated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tiny_points(tmp.path());
+    let pairs = tiny_pairs(tmp.path());
+    let key = "000102030405060708090a0b0c0d0e0f";
+
+    // A bundle at epoch 2 (the post-repartition state).
+    let out_a = tmp.path().join("bundle-a");
+    let key_file = tmp.path().join("key.toml");
+    std::fs::write(
+        &key_file,
+        format!("[identity]\nkey = \"{key}\"\nepoch = 2\n"),
+    )
+    .unwrap();
+    let first = tessera()
+        .args(["build", "--points"])
+        .arg(&points)
+        .args(["--pairs"])
+        .arg(&pairs)
+        .args(["--out"])
+        .arg(&out_a)
+        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--id-key-file"])
+        .arg(&key_file)
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+    assert_eq!(manifest_of(&out_a)["identity"]["epoch"], 2);
+
+    // A key file that still says epoch 1, carried alongside that bundle: same key, two epochs.
+    let stale_file = tmp.path().join("stale.toml");
+    std::fs::write(
+        &stale_file,
+        format!("[identity]\nkey = \"{key}\"\nepoch = 1\n"),
+    )
+    .unwrap();
+    let out_b = tmp.path().join("bundle-b");
+    let refused = tessera()
+        .args(["build", "--points"])
+        .arg(&points)
+        .args(["--pairs"])
+        .arg(&pairs)
+        .args(["--out"])
+        .arg(&out_b)
+        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--carry-id-key-from"])
+        .arg(&out_a)
+        .args(["--id-key-file"])
+        .arg(&stale_file)
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "two recorded epochs that disagree must refuse"
+    );
+    assert!(!out_b.exists());
+
+    // `--epoch` is how the operator resolves it.
+    let resolved = tessera()
+        .args(["build", "--points"])
+        .arg(&points)
+        .args(["--pairs"])
+        .arg(&pairs)
+        .args(["--out"])
+        .arg(&out_b)
+        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--carry-id-key-from"])
+        .arg(&out_a)
+        .args(["--id-key-file"])
+        .arg(&stale_file)
+        .args(["--epoch", "2"])
+        .output()
+        .unwrap();
+    assert!(
+        resolved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resolved.stderr)
+    );
+    assert_eq!(manifest_of(&out_b)["identity"]["epoch"], 2);
+}
+
+/// S3: the rotation refusal must not print either key. It goes to stderr on a CLI whose own
+/// `--id-key` doc warns that keys on a command line reach CI logs — printing both disagreeing
+/// keys in full put them there through the refusal path too.
+#[test]
+fn the_rotation_refusal_prints_fingerprints_not_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tiny_points(tmp.path());
+    let pairs = tiny_pairs(tmp.path());
+    let key_a = "000102030405060708090a0b0c0d0e0f";
+    let key_b = "100f0e0d0c0b0a090807060504030201";
+    let out_a = tmp.path().join("bundle-a");
+    let out_b = tmp.path().join("bundle-b");
+
+    assert!(tessera()
+        .args(["build", "--points"])
+        .arg(&points)
+        .args(["--pairs"])
+        .arg(&pairs)
+        .args(["--out"])
+        .arg(&out_a)
+        .args(["--extent", "0,10,0,10", "--slice", "s0", "--id-key", key_a])
+        .output()
+        .unwrap()
+        .status
+        .success());
+
+    let refused = tessera()
+        .args(["build", "--points"])
+        .arg(&points)
+        .args(["--pairs"])
+        .arg(&pairs)
+        .args(["--out"])
+        .arg(&out_b)
+        .args(["--extent", "0,10,0,10", "--slice", "s0"])
+        .args(["--carry-id-key-from"])
+        .arg(&out_a)
+        .args(["--id-key", key_b])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !stderr.contains(key_a) && !stderr.contains(key_b),
+        "the refusal must not print key material, got: {stderr}"
+    );
+    assert!(
+        stderr.matches("fp:").count() >= 2,
+        "the refusal must fingerprint each disagreeing source, got: {stderr}"
+    );
+}
+
 fn current_prefix(bundle: &Path) -> String {
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(bundle.join("CURRENT")).unwrap()).unwrap();

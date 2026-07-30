@@ -42,12 +42,40 @@ pub struct Quantisation {
     pub y_max: f64,
 }
 
+/// A safe-to-print stand-in for a deployment identity key: `fp:` plus the first 8 hex characters
+/// of a domain-separated SHA-256 over the key's canonical hex form.
+///
+/// **Why this exists.** `IdentityKey` has a redacted `Debug` and no hex accessor, but the key's
+/// plaintext hex is deliberately carried alongside it (MANIFEST must record it), and that hex
+/// then sits in `Debug`-deriving carriers — `IdentityDescriptor`, and through it `Manifest` and
+/// `Bundle`. One `tracing::error!("{bundle:?}")` would print the deployment key. Operators still
+/// need to be able to say "these two keys differ" (a rotation refusal, a support ticket), so the
+/// answer is a fingerprint rather than nothing: it distinguishes keys without disclosing one.
+///
+/// Domain-separated so a fingerprint can never be confused with, or compared against, one of the
+/// bundle's file digests; truncated because 32 bits is ample to tell two keys apart and leaves
+/// nothing worth attacking.
+pub fn identity_key_fingerprint(key_hex: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"tessera-identity-key-fingerprint-v1\0");
+    hasher.update(key_hex.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::from("fp:");
+    for byte in &digest[..4] {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 /// `MANIFEST.json`'s `identity` object (contracts §2.2/§2.6 r6): the `tessera_id`
 /// permutation's construction, round count, per-deployment key and shard id. **Required** —
 /// no `#[serde(default)]` — because an absent object cannot invert a `tessera_id`, and a
 /// *defaulted* key would invert every identifier to the wrong entity, suppressing the wrong
 /// item on `/control/changes`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written and redacting — see the impl below.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IdentityDescriptor {
     pub construction: String,
     pub rounds: u32,
@@ -67,6 +95,23 @@ pub struct IdentityDescriptor {
     /// resolved". An absent `epoch` is a typed reader error, exactly as an absent `identity`
     /// object is.
     pub epoch: u32,
+}
+
+/// **Hand-written, not derived: `key` is the deployment's identity key in plaintext hex.**
+/// `IdentityKey`'s own `Debug` is redacted, but that redaction is worthless if the same bytes
+/// print from the `String` carried beside it — and this struct is reachable from `Manifest` and
+/// `Bundle`, both `Debug`, so a single `{:?}` on either would emit the key. `Serialize` is
+/// untouched: MANIFEST.json must still contain the key verbatim.
+impl std::fmt::Debug for IdentityDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityDescriptor")
+            .field("construction", &self.construction)
+            .field("rounds", &self.rounds)
+            .field("key", &identity_key_fingerprint(&self.key))
+            .field("shard_id", &self.shard_id)
+            .field("epoch", &self.epoch)
+            .finish()
+    }
 }
 
 impl IdentityDescriptor {
@@ -185,4 +230,56 @@ pub struct SegmentsManifest {
     #[serde(default)]
     pub deny: Vec<DenyEntry>,
     pub files: BTreeMap<String, FileDigest>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+
+    fn descriptor() -> IdentityDescriptor {
+        IdentityDescriptor {
+            construction: IDENTITY_CONSTRUCTION.to_string(),
+            rounds: IDENTITY_ROUNDS,
+            key: KEY_HEX.to_string(),
+            shard_id: 0,
+            epoch: 1,
+        }
+    }
+
+    /// `IdentityKey`'s `Debug` is redacted, but the key's plaintext hex is deliberately carried
+    /// beside it, and `IdentityDescriptor` is reachable from `Manifest` and `Bundle` — both
+    /// `Debug`. One `tracing::error!("{bundle:?}")` would otherwise print the deployment key.
+    #[test]
+    fn identity_descriptor_debug_does_not_print_the_key() {
+        let printed = format!("{:?}", descriptor());
+        assert!(
+            !printed.contains(KEY_HEX),
+            "Debug must not print key material, got: {printed}"
+        );
+        assert!(
+            printed.contains(&identity_key_fingerprint(KEY_HEX)),
+            "Debug should still distinguish keys by fingerprint, got: {printed}"
+        );
+    }
+
+    /// The redaction must not touch `Serialize`: MANIFEST.json must still record the key verbatim,
+    /// or no rebuild can carry the lineage forward.
+    #[test]
+    fn identity_descriptor_serialises_the_key_verbatim() {
+        let json = serde_json::to_string(&descriptor()).unwrap();
+        assert!(
+            json.contains(KEY_HEX),
+            "MANIFEST must carry the key: {json}"
+        );
+    }
+
+    #[test]
+    fn fingerprints_distinguish_keys_and_are_not_the_key() {
+        let a = identity_key_fingerprint(KEY_HEX);
+        let b = identity_key_fingerprint("100f0e0d0c0b0a090807060504030201");
+        assert_ne!(a, b);
+        assert!(a.starts_with("fp:") && a.len() == 3 + 8);
+    }
 }

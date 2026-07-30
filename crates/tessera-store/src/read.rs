@@ -382,6 +382,11 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
 /// Verify every entry of `files` (path relative to `base`, forward slashes per R1) by exact
 /// size and SHA-256 hex digest. Any missing, mis-sized or mismatched file is a hard error.
 ///
+/// **One exemption, and only one:** the external-ID sidecar's extents and locator
+/// ([`is_sidecar_deferred`]) are skipped here, per contracts §0.3 deviation 9 — they are still
+/// named, still digested in the manifest, and still fully verified by `crate::sidecar` at first
+/// touch. See that predicate's doc for why open-time verification would defeat the deviation.
+///
 /// **TOCTOU note:** this reads each file's bytes once, here, to check size+digest; the loader
 /// (`Permutation::load`, `MortonSlice::load`, `ColumnsRef::load`) then separately mmaps the
 /// same path. These two accesses are not atomic. That gap is accepted, not overlooked: every
@@ -398,6 +403,32 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
 /// through.
 const DIGEST_CHUNK_BYTES: usize = 1 << 20;
 
+/// `true` if `rel` names a file belonging to the external-ID sidecar — an
+/// `external-ids-<k>.arrow` extent or the `ext-locator.u32` locator, both under an `entities/`
+/// directory (contracts §2.4 r6 fixes both names).
+///
+/// **Contracts §0.3 deviation 9**: these paths are *"exempt from the §2.3 reader protocol's
+/// readiness gate… Nothing is mapped, scanned or verified at open"*. [`verify_files`] therefore
+/// skips them — and that exemption is the whole point of the sidecar's per-extent laziness: at
+/// 10⁹ items the family runs to ~18.9 GB, and digesting it at open would reimpose exactly the
+/// sequential read (and page-cache churn) the deviation exists to remove, for a structure no
+/// viewport request ever touches.
+///
+/// **Their digests stay in the manifest, and verification is deferred, not dropped.**
+/// `ExternalIdSidecar` verifies the extent's (or the locator's) SHA-256 against the manifest
+/// entry at first touch, plus sortedness and declared length, before any answer comes out of it
+/// — see `crate::sidecar`. A file skipped here is a file no request path has read yet; the first
+/// read of it is fully checked.
+fn is_sidecar_deferred(rel: &str) -> bool {
+    let Some((dir, file)) = rel.rsplit_once('/') else {
+        return false;
+    };
+    if dir != "entities" && !dir.ends_with("/entities") {
+        return false;
+    }
+    file == "ext-locator.u32" || (file.starts_with("external-ids-") && file.ends_with(".arrow"))
+}
+
 fn verify_files(base: &Path, files: &BTreeMap<String, FileDigest>) -> Result<()> {
     // Read in fixed-size chunks, never whole: at 10^9 items `columns.arrow` alone is over 20 GB,
     // and slurping every file to hash it would make opening a bundle cost more memory than
@@ -407,6 +438,11 @@ fn verify_files(base: &Path, files: &BTreeMap<String, FileDigest>) -> Result<()>
     let mut buffer = vec![0u8; DIGEST_CHUNK_BYTES];
     for (rel_path, digest) in files {
         let path = safe_join(base, rel_path)?;
+        // The path is still validated (above) even when its bytes are not read here, so an
+        // unsafe `files`-map key cannot hide behind the sidecar's deferral.
+        if is_sidecar_deferred(rel_path) {
+            continue;
+        }
         let mut file = File::open(&path).map_err(|source| StoreError::Io {
             path: path.clone(),
             source,

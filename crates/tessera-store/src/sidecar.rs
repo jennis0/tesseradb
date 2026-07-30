@@ -35,6 +35,14 @@
 //! right answer, and a build bug emitting an out-of-order extent produces a correctly-digested
 //! file. Every failure is a typed error ([`StoreError::InvalidSidecar`]), never a `None` that
 //! would read as "unknown external ID".
+//!
+//! **No error detail here names an entity ID.** These strings are the ones that would reach a
+//! server log — and contracts §4 has the byte-scanner sweep payloads *and logs* for entity IDs
+//! (I10). Every message therefore states the structural facts (which file, how many slots, the
+//! high-water it was compared against) and not the identifier: a corrupt sidecar is a systematic
+//! build or flush fault, so the file and the shape of the inconsistency are what an operator
+//! needs, and naming the item buys nothing an entity-independent message does not. The server
+//! separately refuses to forward any of this to a client — see `tessera_server::error`.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -641,10 +649,9 @@ impl ExternalIdSidecar {
             return Err(StoreError::InvalidSidecar {
                 path,
                 detail: format!(
-                    "entity {} is below the live high-water ({high_water}) and past this \
-                     bundle's locator ({} slots), but is not known to the live external-id map — \
-                     an inconsistency, not an absent external id",
-                    entity.raw(),
+                    "an entity below the live high-water ({high_water}) and past this bundle's \
+                     locator ({} slots) is not known to the live external-id map — an \
+                     inconsistency, not an absent external id",
                     self.locator_len(),
                 ),
             });
@@ -680,11 +687,8 @@ impl ExternalIdSidecar {
 
         Err(StoreError::InvalidSidecar {
             path: locator.desc.path.clone(),
-            detail: format!(
-                "locator ordinal {ordinal} for entity {} exceeds the total external-id row \
-                 count across all extents",
-                entity.raw()
-            ),
+            detail: "a locator ordinal exceeds the total external-id row count across all extents"
+                .to_string(),
         })
     }
 }

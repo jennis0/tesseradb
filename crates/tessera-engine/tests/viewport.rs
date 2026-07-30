@@ -180,6 +180,12 @@ fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64> {
     map
 }
 
+/// The external id `tessera-build` writes for a source row: the source corpus id, 8 bytes
+/// little-endian (see `source_to_new_map`'s decode of the same convention).
+fn source_id_key(source_id: u64) -> Vec<u8> {
+    source_id.to_le_bytes().to_vec()
+}
+
 fn open_engine(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Engine {
     Engine::open(
         bundle_root,
@@ -831,9 +837,60 @@ fn drill_down_resolves_an_external_id_for_a_post_build_entity() {
     assert_eq!(external.as_deref(), Some(&b"post-build-key"[..]));
 }
 
+/// S6: `Allocator::try_new`'s own doc calls it "the check that belongs at open", and `Engine::open`
+/// is open — it must refuse a seed at or above `u32::MAX` before any ingest, rather than let the
+/// first allocation surface it as an opaque exhaustion error. The seed comes from durable state
+/// this process did not write (MANIFEST's high-water, or a replayed WAL lease), so a hand-edited or
+/// corrupt value has to fail closed here.
+#[test]
+fn engine_open_refuses_an_out_of_range_allocator_seed() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    // A lease claiming the whole u32 space — `high_water_from` folds `Lease.hi` into the seed, so
+    // this is the WAL-side half of the seeding rule, reached without touching MANIFEST's digest.
+    let wal_path = tmp.path().join("wal.log");
+    {
+        let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
+        wal.append(&WalRecord::Lease {
+            lo: u32::MAX as u64 - 1,
+            hi: u32::MAX as u64,
+        })
+        .unwrap();
+        wal.fsync().unwrap();
+    }
+
+    let opened = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &wal_path,
+        Passthrough::new(),
+        config(),
+    );
+    let Err(err) = opened else {
+        panic!("a seed at u32::MAX must be refused at open, not at the first ingest");
+    };
+    assert!(
+        matches!(err, EngineError::Malformed(ref d) if d.contains("allocator")),
+        "expected a typed refusal naming the allocator, got {err:?}"
+    );
+}
+
 /// Residency proxy: `Engine::open` must never touch the external-id sidecar (Task 8's per-extent
-/// laziness guarantee) — the real memory-residency measurement is Task 15's memo; this asserts
-/// the same invariant cheaply via the sidecar's own `is_open` accounting.
+/// laziness guarantee, contracts §0.3 deviation 9) — the real memory-residency measurement is
+/// Task 15's memo.
+///
+/// **The files are removed from disk before the engine opens.** `is_open()` alone was not a test
+/// of this: it only reports the sidecar's own `OnceLock` state, and `open_bundle`'s `verify_files`
+/// pass — which read and SHA-256'd every extent and the locator, the whole 18.9 GB sequential read
+/// the deviation exists to remove — never sets it. That defect was green under an `is_open()`
+/// assertion for a whole commit sequence. Deleting the files makes any read of them, at any layer,
+/// a hard failure of `Engine::open`, which is the property actually claimed.
 #[test]
 fn engine_open_does_not_touch_the_sidecar() {
     let tmp = TempDir::new().unwrap();
@@ -844,6 +901,35 @@ fn engine_open_does_not_touch_the_sidecar() {
         &tmp.path().join("pairs.parquet"),
     );
 
+    // Every sidecar file the build wrote, named from MANIFEST's own `files` map rather than
+    // guessed, so this cannot silently check nothing if the layout moves.
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle_root.join("CURRENT")).unwrap()).unwrap();
+    let prefix_dir = bundle_root.join(current["prefix"].as_str().unwrap());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prefix_dir.join("MANIFEST.json")).unwrap()).unwrap();
+    let sidecar_files: Vec<PathBuf> = manifest["files"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|rel| rel.contains("/entities/"))
+        .map(|rel| prefix_dir.join(rel))
+        .collect();
+    assert!(
+        sidecar_files.len() >= 2,
+        "fixture must write at least an extent and the locator, found {sidecar_files:?}"
+    );
+    // The digests stay in MANIFEST — the deviation defers verification, it does not drop it.
+    for path in &sidecar_files {
+        let rel = path.strip_prefix(&prefix_dir).unwrap().to_string_lossy();
+        let rel = rel.replace('\\', "/");
+        assert!(
+            manifest["files"][&rel]["sha256"].is_string(),
+            "{rel} must keep its digest in MANIFEST so the sidecar can verify it at first touch"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
     let engine = open_engine(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -852,6 +938,19 @@ fn engine_open_does_not_touch_the_sidecar() {
     assert!(
         !engine.external_id_sidecar_is_open(),
         "Engine::open must not touch the external-id sidecar"
+    );
+
+    // Deferred, not dropped: the first resolution *does* reach for the file, and fails closed
+    // because it is gone.
+    let err = engine
+        .resolve_external_id(&source_id_key(0))
+        .expect_err("the first resolution must reach the (now absent) extent and fail closed");
+    assert!(
+        matches!(
+            err,
+            StoreError::InvalidSidecar { .. } | StoreError::Io { .. }
+        ),
+        "expected a typed sidecar/IO error, got {err:?}"
     );
 }
 

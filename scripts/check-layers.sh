@@ -37,6 +37,13 @@ if grep -rn "IdentityKey" crates/tessera-wire/src/ crates/tessera-server/src/vie
   fail=1
 fi
 
+# The grep above cannot see the key's *plaintext hex*, which is a plain `String` carried beside
+# the redacted `IdentityKey` (seam finding S3). Name its carrier explicitly.
+if grep -rn "identity_key_hex" crates/tessera-wire/src/ crates/tessera-server/src/; then
+  echo "FAIL: the identity key's plaintext hex must not appear in the wire or server layers"
+  fail=1
+fi
+
 # Do NOT add a `priority` grep here (2026-07-30 fold). `priority` is `high16(tessera_id)` -- a
 # keyed prefix of a value the payload already carries in full -- so publishing it discloses
 # nothing beyond the id itself, and Important I-4 (which this would-be grep enforced) is
