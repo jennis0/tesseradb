@@ -355,8 +355,14 @@ def run_cpu_saturation_cell(args, descriptors: list[str], srv, proc, summary: di
         args, tokens, len(tokens), args.run_dir, False, srv, args.scale, args.label_set,
         open_rate=rate, tag="cpu-openloop",
     )
-    cpu_mean = sample_cpu_mean(proc.pid, stop, samples)
+    # Fix-wave minor: stop-JOIN-read, matching the matrix loop's own pattern above (`stop.set()`
+    # then `sampler.join()` then read `samples`) -- `sample_cpu_mean` used to be called before the
+    # join, reading `samples` while the sampler thread might still be mid-append (benign in
+    # practice under the GIL, since list.append is atomic, but the ordering was needlessly
+    # inconsistent with the rest of the file and worth matching exactly).
+    stop.set()
     sampler.join()
+    cpu_mean = sample_cpu_mean(proc.pid, stop, samples)
 
     result = {"target_rate": rate, "available_cores": available_cores,
               "threshold_pct": threshold_pct, "cpu_mean_pct": cpu_mean}
@@ -402,6 +408,11 @@ def run_shed_cell(args, descriptors: list[str], summary: dict) -> None:
         args.bundle, tmp_dir, 1800.0, max(args.k, 200),
         compute_admission=args.shed_compute_admission,
         compute_queue=args.shed_compute_queue,
+        # Fix-wave minor: this was previously omitted here while the hang-timeout computation a
+        # few lines below already reads `args.admission_timeout_ms` -- a latent desync if
+        # `--admission-timeout-ms` is ever passed alongside `--criteria shed` (the server would
+        # boot at the default timeout while the client's watchdog assumed the overridden one).
+        admission_timeout_ms=args.admission_timeout_ms,
     )
     try:
         levels = [int(c) for c in args.concurrency.split(",")]
