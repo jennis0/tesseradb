@@ -21,11 +21,6 @@ base64 = "0.22"
 arrow = { workspace = true }
 rustc-hash = "1"
 
-[features]
-# Pass-through only (Task 2, tail discrimination): the actual gate lives on
-# `tessera-engine`. Never enable in a serving build.
-skip-id-index = ["tessera-engine/skip-id-index"]
-
 [dev-dependencies]
 tempfile = { workspace = true }
 tessera-build = { path = "../tessera-build" }

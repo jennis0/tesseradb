@@ -18,12 +18,6 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
 
-[features]
-# Measurement only: skip loading the bundle's external-ID extents at open, so a
-# tail-latency run can attribute page faults. Every resolution errors. Never
-# enable in a serving build.
-skip-id-index = []
-
 [dev-dependencies]
 tempfile = { workspace = true }
 tessera-build = { path = "../tessera-build" }

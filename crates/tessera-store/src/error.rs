@@ -56,15 +56,12 @@ pub enum StoreError {
     /// reader doesn't implement — a bundle written by a different `tessera_id` construction
     /// must not be silently read by this one (contracts §2.6 r6).
     InvalidIdentity { detail: String },
-    /// An `external-ids-<n>.arrow` extent failed Arrow IPC / schema validation, or failed the
-    /// within-extent ascending-order check (R4).
-    InvalidExternalIds { path: PathBuf, detail: String },
-    /// TEMPORARY (Task 2, `skip-id-index` measurement feature — removed in Task 8): the
-    /// external-ID index was never loaded (`ExternalIdIndex::disabled`) and every resolution
-    /// fails closed with this variant rather than silently returning `None`, which would read as
-    /// "no such external id" and turn a WAL-resident suppression into a no-op. Never returned
-    /// outside a `skip-id-index` build.
-    IdIndexDisabled,
+    /// The external-ID sidecar (contracts §2.4 r6, §0.3 deviation 9) failed closed: a missing
+    /// digest entry, a digest mismatch, a schema mismatch, an out-of-order extent, a shuffled
+    /// extent list, or a missing/corrupt/out-of-range locator. Every one of these is fail-closed
+    /// on purpose (see `crate::sidecar`'s module doc) — a `None` here would read as "no such
+    /// external id" and could turn a WAL-resident suppression into a silent no-op.
+    InvalidSidecar { path: PathBuf, detail: String },
 }
 
 impl fmt::Display for StoreError {
@@ -127,18 +124,13 @@ impl fmt::Display for StoreError {
             StoreError::InvalidIdentity { detail } => {
                 write!(f, "invalid identity descriptor: {detail}")
             }
-            StoreError::InvalidExternalIds { path, detail } => {
+            StoreError::InvalidSidecar { path, detail } => {
                 write!(
                     f,
-                    "invalid external-ids extent at {}: {detail}",
+                    "invalid external-ID sidecar at {}: {detail}",
                     path.display()
                 )
             }
-            StoreError::IdIndexDisabled => write!(
-                f,
-                "external-ID index disabled (skip-id-index measurement build) — refusing to \
-                 resolve rather than returning a fail-open None"
-            ),
         }
     }
 }

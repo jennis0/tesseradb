@@ -25,10 +25,3 @@ tempfile = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 
-[features]
-# Pass-through only (Task 2, tail discrimination): the actual gate lives on
-# `tessera-engine`. Never enable in a serving build. Enable via
-# `cargo build --release --features tessera-cli/skip-id-index` (or, per the
-# discrimination script, `--features tessera-engine/skip-id-index` — either
-# reaches the same feature since this workspace's binary crate re-exports it).
-skip-id-index = ["tessera-server/skip-id-index"]
