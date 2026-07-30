@@ -23,7 +23,7 @@ use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
 use tessera_build::{build, BuildArgs};
-use tessera_engine::viewport::ViewportRequest;
+use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
 use tessera_engine::{
     default_compute_threads, CancelToken, Engine, EngineConfig, EngineError, Session,
 };
@@ -37,6 +37,17 @@ use tessera_types::{EntityId, IdentityKey, PinId};
 const N_ITEMS: u64 = 10_000;
 const ALL_TERM: u64 = 0;
 const SUBSET_TERM: u64 = 1;
+
+/// Calibration task: item count for the byte-equality tests that must exercise the GENUINE
+/// parallel fan-out (`Engine::viewport`'s `SERIAL_FALLBACK_MAX_ROWS`, currently 200,000). The
+/// scatter these fixtures use (`write_points_n`: `(e*37, e*53) % 1000`) confines every item to the
+/// SAME fixed 1000x1000 extent regardless of `n`, and a full-extent request's resolved tiles
+/// partition the whole permutation, so `Σ range.len()` over such a request equals `n` exactly —
+/// 300,000 clears the threshold with 50% margin, comfortably outside measurement noise. Kept
+/// separate from `N_ITEMS` (10,000, well BELOW the threshold) rather than raising it globally: the
+/// two headline tests below need genuinely different regimes, and every other test in this file
+/// still wants the small, fast fixture.
+const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
 
 /// A fixed, non-degenerate test key — the same canonical vector used across the identity
 /// construction's own tests (`tessera_types::identity`'s `CANONICAL_KEY`) and
@@ -2370,10 +2381,21 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 /// workers ran the sweep or in which order they happened to finish.
 ///
 /// A multi-tile request (`zoom = 3`, full bbox — 64 tiles, most non-empty over this fixture's
-/// `(e*37, e*53) % 1000` scatter across `N_ITEMS = 10_000`) with an underlay requested too, so
-/// every per-tile code path this task touched (count, select — both the serve-all and the
-/// heap/threshold branch, since θ is saturated but many tiles exceed the `k = 50` cap — gather,
-/// underlay) runs across more than one tile.
+/// `(e*37, e*53) % 1000` scatter across `PARALLEL_HEADLINE_ITEMS = 300,000` items) with an
+/// underlay requested too, so every per-tile code path this task touched (count, select — both
+/// the serve-all and the heap/threshold branch, since θ is saturated but many tiles exceed the
+/// `k = 50` cap — gather, underlay) runs across more than one tile.
+///
+/// **Calibration task fix-wave note.** This test used the file's default `N_ITEMS = 10,000`
+/// fixture until the serial-fallback threshold (`SERIAL_FALLBACK_MAX_ROWS`, `viewport.rs`) landed
+/// below it — at 10,000 items this request's `Σ range.len()` cannot reach the 200,000-row
+/// threshold, so `compute_threads = 1` and `= 8` would both silently take the SAME serial-fold
+/// branch and the comparison below would no longer test what its own doc claims (fan-out
+/// invariance), only that the serial path is deterministic, which was never in question.
+/// `PARALLEL_HEADLINE_ITEMS` (300,000, comfortable margin above the threshold) restores that: see
+/// its own doc for why the fixture's fixed-extent scatter makes `Σ range.len() == n` exactly for
+/// a full-extent request, and the `rows_in_ranges` assertion below for the belt-and-braces runtime
+/// check under `bench-timing`.
 ///
 /// **What this does not (and cannot) test.** It says nothing about the Python differential oracle
 /// or the conformance byte-scanner directly — those consume `ViewportOut`/the wire bytes exactly
@@ -2386,10 +2408,11 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
-    build_fixture(
+    build_fixture_n(
         &bundle_root,
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
+        PARALLEL_HEADLINE_ITEMS,
     );
 
     // Separate cache/WAL directories per engine (same read-only bundle) — two independent
@@ -2436,6 +2459,20 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
         !out_1.sub_cells.is_empty(),
         "the underlay request must produce some sub-cells for this test to cover that path too"
     );
+    // Belt-and-braces alongside the fixture-size argument above (this only runs under
+    // `bench-timing`, since `StageTimings` is all-zero without it — `enabled` says which):
+    // directly confirm `engine_8`'s run crossed `SERIAL_FALLBACK_MAX_ROWS` and therefore actually
+    // took the `pool.install` branch rather than degrading to serial-vs-serial.
+    if out_8.timings.enabled {
+        assert!(
+            out_8.timings.rows_in_ranges >= SERIAL_FALLBACK_MAX_ROWS,
+            "rows_in_ranges = {} did not clear the serial-fallback threshold ({}) -- this test \
+             would silently be comparing serial against serial, not exercising the parallel \
+             fan-out its own doc claims to cover",
+            out_8.timings.rows_in_ranges,
+            SERIAL_FALLBACK_MAX_ROWS
+        );
+    }
 
     assert_eq!(
         out_1, out_8,
@@ -2452,20 +2489,28 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
 ///
 /// **Why zoom = 8 over the same fixture, no new fixture data.** The fixture's scatter
 /// (`x = (e*37) % 1000, y = (e*53) % 1000`) is a bijection of `e % 1000` onto the 1000×1000 residue
-/// lattice, repeated every 1,000-item cycle of `N_ITEMS` — so `N_ITEMS = 10_000` items occupy only
-/// 1,000 distinct locations (each hit 10 times), not 10,000. At `zoom = 3` (64 candidate tiles) that
-/// is dense enough to leave almost every tile non-empty; at `zoom = 8` (up to 65,536 candidate tiles
-/// over the full extent) it is over 65 empty candidate cells per occupied one on average, so most
-/// tiles are genuinely empty while a real minority are not — the mix this test needs, produced by
+/// lattice, repeated every 1,000-item cycle — so `n` items occupy only 1,000 distinct locations
+/// (each hit `n / 1000` times), not `n` of them. At `zoom = 3` (64 candidate tiles) that is dense
+/// enough to leave almost every tile non-empty; at `zoom = 8` (up to 65,536 candidate tiles over
+/// the full extent) it is over 65 empty candidate cells per occupied one on average, so most tiles
+/// are genuinely empty while a real minority are not — the mix this test needs, produced by
 /// changing only the requested zoom, not by hand-building a new sparse corpus.
+///
+/// **Calibration task fix-wave note.** Same reasoning as the headline test above:
+/// `PARALLEL_HEADLINE_ITEMS` (300,000) replaces the file's default `N_ITEMS` (10,000) so `Σ
+/// range.len()` clears `SERIAL_FALLBACK_MAX_ROWS` and `compute_threads = 1` vs `= 8` are
+/// genuinely comparing serial against parallel, not serial against serial. The occupied/empty
+/// tile MIX this test is actually for is unaffected by the item count (still 1,000 distinct
+/// locations either way, just more items stacked on each) — see the doc above.
 #[test]
 fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
-    build_fixture(
+    build_fixture_n(
         &bundle_root,
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
+        PARALLEL_HEADLINE_ITEMS,
     );
 
     let dir_1 = tmp.path().join("a");
@@ -2511,10 +2556,89 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empt
          none were skipped",
         out_1.tiles.len()
     );
+    // Belt-and-braces, same as the headline test above.
+    if out_8.timings.enabled {
+        assert!(
+            out_8.timings.rows_in_ranges >= SERIAL_FALLBACK_MAX_ROWS,
+            "rows_in_ranges = {} did not clear the serial-fallback threshold ({}) -- this test \
+             would silently be comparing serial against serial",
+            out_8.timings.rows_in_ranges,
+            SERIAL_FALLBACK_MAX_ROWS
+        );
+    }
 
     assert_eq!(
         out_1, out_8,
         "ViewportOut must be byte-for-byte identical (PartialEq ignores only `timings`) \
          regardless of compute_threads, including on the mostly-empty-tile Ok(None) skip path"
+    );
+}
+
+/// The calibration task's own below-threshold companion to the two headline tests above: at the
+/// file's default `N_ITEMS = 10,000` (well under `SERIAL_FALLBACK_MAX_ROWS`), `compute_threads =
+/// 1` and `= 8` both take the SERIAL fold branch, never `pool.install` — so this is not "does the
+/// fan-out preserve order" (the headline tests' claim) but "does the new branch exist at all and
+/// still produce byte-identical output regardless of the pool a request never enters" (trivially
+/// true by construction, since neither run touches `self.pool` — asserted rather than assumed,
+/// per the guard-rail's own preference for behavioural coverage over trusting the diff by eye).
+#[test]
+fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_below_the_serial_fallback_threshold(
+) {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let dir_1 = tmp.path().join("a");
+    let dir_8 = tmp.path().join("b");
+    std::fs::create_dir_all(&dir_1).unwrap();
+    std::fs::create_dir_all(&dir_8).unwrap();
+    let engine_1 = open_engine_with(
+        &bundle_root,
+        &dir_1,
+        EngineConfig {
+            compute_threads: 1,
+            ..config()
+        },
+    );
+    let engine_8 = open_engine_with(
+        &bundle_root,
+        &dir_8,
+        EngineConfig {
+            compute_threads: 8,
+            ..config()
+        },
+    );
+
+    let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
+    let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
+
+    // Same request shape as the headline test (multi-tile, underlay) — only the fixture size
+    // differs, which is the whole point of this variant.
+    let request =
+        || ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 50).underlay_offset(Some(2));
+
+    let out_1 = engine_1.viewport(&session_1, request()).unwrap();
+    let out_8 = engine_8.viewport(&session_8, request()).unwrap();
+
+    assert!(out_1.tiles.len() > 1, "need more than one non-empty tile");
+    if out_8.timings.enabled {
+        assert!(
+            out_8.timings.rows_in_ranges < SERIAL_FALLBACK_MAX_ROWS,
+            "rows_in_ranges = {} unexpectedly cleared the serial-fallback threshold ({}) at \
+             N_ITEMS = {N_ITEMS} -- this test's whole premise (both configs take the serial \
+             branch) no longer holds",
+            out_8.timings.rows_in_ranges,
+            SERIAL_FALLBACK_MAX_ROWS
+        );
+    }
+
+    assert_eq!(
+        out_1, out_8,
+        "ViewportOut must be byte-for-byte identical regardless of compute_threads, including \
+         below the serial-fallback threshold where neither run touches the pool"
     );
 }

@@ -30,6 +30,17 @@ tessera-build = { path = "../tessera-build" }
 tessera-server = { path = "../tessera-server" }
 
 croaring = { workspace = true }
+# Calibration task: the load arm decodes just enough of a 200 response's tile-stream Arrow IPC
+# batch (the leading `u32 LE` length-prefixed stream — `tessera-wire::payload`'s framing doc) to
+# sum the `served` column, for the points-served-per-second/per-user/per-request metrics. Checked
+# against `scripts/check-layers.sh`'s deny list first: nothing there forbids `tessera-bench` (the
+# harness, already above every other crate) from depending on `arrow` directly, and every crate
+# this one already depends on (`tessera-engine`, `tessera-store`, `tessera-server`) pulls `arrow`
+# in transitively anyway — this makes an existing transitive dependency a direct one, not a new
+# edge into the trusted computing base. `tessera-wire` itself was the other option (same crate the
+# server's own encoder lives in) but offers no matching *decoder*, so it would not have saved the
+# `arrow` dependency, only added an unused one.
+arrow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

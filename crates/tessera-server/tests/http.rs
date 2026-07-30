@@ -28,6 +28,15 @@ use tessera_types::IdentityKey;
 
 const N_ITEMS: u64 = 1_000;
 const SESSION_CREDENTIAL: &str = "session-secret";
+
+/// Calibration task: item count for the two byte-equality tests below that must exercise the
+/// GENUINE parallel fan-out (`tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS`, currently
+/// 200,000) — see `tessera-engine/tests/viewport.rs`'s identically-named constant for the full
+/// argument (same fixed-extent scatter, so `Σ range.len() == n` exactly for a full-extent
+/// request). This crate does not depend on `tessera-engine`'s test binary, so the constant and its
+/// reasoning are duplicated rather than shared, matching this file's own existing "same fixture
+/// pattern" duplication of `tests/viewport.rs`'s fixture builder (this file's module doc).
+const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
 const OPERATOR_CREDENTIAL: &str = "operator-secret";
 /// Fixed test key, matching `tessera-build`'s own test fixtures — not sensitive, this repository
 /// contains no real deployment key.
@@ -58,13 +67,16 @@ fn terms_of(source_id: u64) -> Vec<u64> {
     }
 }
 
-fn write_points(path: &Path) {
+/// Parameterised over the item count — see [`build_fixture_n`]'s doc for why (calibration task:
+/// the byte-equality tests below need a regime that clears `SERIAL_FALLBACK_MAX_ROWS`, well above
+/// this file's default `N_ITEMS`).
+fn write_points_n(path: &Path, n: u64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
     ]));
-    let ids: Vec<u64> = (0..N_ITEMS).collect();
+    let ids: Vec<u64> = (0..n).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let batch = RecordBatch::try_new(
@@ -81,14 +93,15 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
-fn write_pairs(path: &Path) {
+/// Parameterised over the item count — see [`build_fixture_n`]'s doc for why.
+fn write_pairs_n(path: &Path, n: u64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("term_id", DataType::UInt32, false),
     ]));
     let mut entities = Vec::new();
     let mut terms = Vec::new();
-    for e in 0..N_ITEMS {
+    for e in 0..n {
         for t in terms_of(e) {
             entities.push(e);
             terms.push(t as u32);
@@ -107,9 +120,10 @@ fn write_pairs(path: &Path) {
     w.close().unwrap();
 }
 
-fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
-    write_points(points_path);
-    write_pairs(pairs_path);
+/// See [`build_fixture`] — parameterised, same reason as [`write_points_n`].
+fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
+    write_points_n(points_path, n);
+    write_pairs_n(pairs_path, n);
     let args = BuildArgs {
         points: points_path.to_path_buf(),
         pairs: pairs_path.to_path_buf(),
@@ -123,6 +137,10 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
         shard_id: 0,
     };
     build(&args).expect("fixture build should succeed");
+}
+
+fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
+    build_fixture_n(out, points_path, pairs_path, N_ITEMS)
 }
 
 /// `tessera_build`'s external-id convention (see its `write_external_ids` doc): the source
@@ -2834,14 +2852,22 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
 /// and are expected to differ between the two servers, and between runs of the same server; none
 /// of them are part of this byte-equality claim. `x-tessera-pin` IS compared -- it is derived from
 /// the bundle's own `(prefix, segments_version)`, not from timing, so it must agree too.
+///
+/// **Calibration task fix-wave note.** Uses `PARALLEL_HEADLINE_ITEMS` (300,000), not this file's
+/// default `N_ITEMS` (1,000) — at 1,000 items this request's `Σ range.len()` cannot reach
+/// `tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS` (200,000), so both servers would silently
+/// take the same serial-fold branch regardless of `compute_threads` and this test would no longer
+/// exercise the fan-out its own doc claims to. See that constant's doc, and
+/// `tessera-engine/tests/viewport.rs`'s identically-named constant, for the fixture-size argument.
 #[tokio::test]
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
-    build_fixture(
+    build_fixture_n(
         &bundle_root,
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
+        PARALLEL_HEADLINE_ITEMS,
     );
 
     let config_1 = EngineConfig {
@@ -2949,15 +2975,22 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
 /// spread across the full extent -- dense enough at `zoom = 3` (64 candidate tiles) to leave almost
 /// every tile non-empty, but at `zoom = 8` (up to 65,536 candidate tiles) sparse enough that most
 /// candidate tiles are genuinely empty while a real minority are not.
+///
+/// **Calibration task fix-wave note.** Same reasoning as the headline test above:
+/// `PARALLEL_HEADLINE_ITEMS` replaces `N_ITEMS` so `Σ range.len()` clears
+/// `SERIAL_FALLBACK_MAX_ROWS` and the two servers are genuinely comparing serial against
+/// parallel. The occupied/empty tile mix (still 1,000 distinct locations, more items stacked on
+/// each) is unaffected — see the doc above.
 #[tokio::test]
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles(
 ) {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
-    build_fixture(
+    build_fixture_n(
         &bundle_root,
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
+        PARALLEL_HEADLINE_ITEMS,
     );
 
     let config_1 = EngineConfig {

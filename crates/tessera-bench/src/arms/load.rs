@@ -158,6 +158,8 @@ struct Sample {
     retry_after_ok: Option<bool>,
     /// This worker was one of the cold-build storm's `cold_workers` (see [`StormOptions`]).
     cold: bool,
+    /// New bench metric: this 200 response's summed `served` column (`0` for any other status).
+    points_served: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -294,6 +296,23 @@ pub fn run(
         "closed"
     };
 
+    // New bench metrics (user-requested): points delivered, not just requests served. A 429 or a
+    // hang delivers zero points by definition, so these are sums over `ok` only — same population
+    // `throughput`/`server_timing` already use, for the same reason.
+    let total_points_served: u64 = ok.iter().map(|s| s.points_served).sum();
+    // Same denominator as `throughput` above (the cell's own measured window), so the two divide
+    // consistently: `points_per_second / throughput` recovers mean points-per-response exactly.
+    let points_per_second = total_points_served as f64 / duration_s;
+    // `concurrency` is "how many simultaneous users", matching this arm's own module doc — not
+    // `distinct_tokens`, which can be smaller (Arm B) and would inflate the per-user figure for a
+    // shared-fragment cell that is not actually serving that many distinct principals faster.
+    let points_per_user_per_second = points_per_second / concurrency.max(1) as f64;
+    let points_per_request = if ok.is_empty() {
+        0.0
+    } else {
+        total_points_served as f64 / ok.len() as f64
+    };
+
     let mut flags = Vec::new();
     if unexpected_errors > 0 {
         flags.push(format!("errors={unexpected_errors}"));
@@ -428,6 +447,11 @@ pub fn run(
             "max_wall_ms": max_wall_ms,
             "throughput_rps": throughput,
             "mean_bytes": bytes as f64 / ok.len().max(1) as f64,
+            // New bench metrics (user-requested): delivered work, not just request counts.
+            "points_served_total": total_points_served,
+            "points_per_second": points_per_second,
+            "points_per_user_per_second": points_per_user_per_second,
+            "points_per_request": points_per_request,
             "server_us_p50": server_timing.as_ref().map(|t| t.median_ns / 1000).unwrap_or(0),
             "server_us_p99": server_timing.as_ref().map(|t| t.p99_ns / 1000).unwrap_or(0),
             "server_us_max": server_timing.as_ref().map(|t| t.max_ns / 1000).unwrap_or(0),
@@ -458,6 +482,47 @@ struct RawOutcome {
     body_len: u64,
     /// Whether a 429's body carries `retry_after_s: 1`; always `false` for any other status.
     retry_after_body_is_one: bool,
+    /// Sum of the tile batch's `served` column — points_gathered per §7.2's `m(T)`, contract-equal
+    /// to the points-stream row count (`tessera-wire::payload`'s module doc). `0` for any status
+    /// other than 200 (a 429's body is a JSON error, never an Arrow tile stream).
+    points_served: u64,
+}
+
+/// Decode just the tile stream's `served` column and sum it — new bench metric (points served per
+/// second/user/request). Per the wire framing (`tessera-wire::payload`'s module doc): `u32 LE`
+/// byte length of the tile stream, then the tile stream itself (an Arrow IPC stream, schema
+/// `tile/visible/matched/served`, all `uint64`). The points stream and any subcell stream follow
+/// but are never touched — the length prefix is exactly what makes that possible without parsing
+/// Arrow metadata first, and `served` alone is sufficient (equal by contract to the points-stream
+/// row count, so there is nothing the points stream itself would add).
+///
+/// Returns `0` on any malformed input (too short for the length prefix, length prefix past the
+/// body's end, or an Arrow decode failure) rather than panicking — a load generator must never
+/// crash the whole run over one malformed response; the caller's accounting simply undercounts
+/// that one response's points, which a near-zero rate elsewhere in the cell would already flag.
+fn sum_served(body: &[u8]) -> u64 {
+    if body.len() < 4 {
+        return 0;
+    }
+    let tile_len = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    let Some(tile_bytes) = body.get(4..4 + tile_len) else {
+        return 0;
+    };
+    let Ok(reader) = arrow::ipc::reader::StreamReader::try_new(tile_bytes, None) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for batch in reader {
+        let Ok(batch) = batch else { return total };
+        let Some(col) = batch.column_by_name("served") else {
+            continue;
+        };
+        let Some(arr) = col.as_any().downcast_ref::<arrow::array::UInt64Array>() else {
+            continue;
+        };
+        total += arr.values().iter().sum::<u64>();
+    }
+    total
 }
 
 async fn issue(
@@ -505,12 +570,20 @@ async fn issue(
             .ok()
             .and_then(|v| v.get("retry_after_s").and_then(serde_json::Value::as_u64))
             == Some(1);
+    // Only a 200's body is a tile stream at all; decoding a 429's small JSON body through the
+    // Arrow length-prefix path would just read garbage bytes as a "length" for nothing.
+    let points_served = if status == 200 && !target_healthz {
+        sum_served(&body)
+    } else {
+        0
+    };
     Ok(RawOutcome {
         status,
         server_us,
         retry_after_header_is_one,
         body_len: body.len() as u64,
         retry_after_body_is_one,
+        points_served,
     })
 }
 
@@ -618,6 +691,7 @@ async fn drive(
                             hung: !is_abort,
                             retry_after_ok: None,
                             cold,
+                            points_served: 0,
                         },
                     },
                     None => from_result(outcome.await, &start, cold),
@@ -651,6 +725,7 @@ fn from_result(result: reqwest::Result<RawOutcome>, start: &Instant, cold: bool)
             retry_after_ok: (o.status == 429)
                 .then_some(o.retry_after_header_is_one && o.retry_after_body_is_one),
             cold,
+            points_served: o.points_served,
         },
         Err(_) => Sample {
             wall_ns,
@@ -661,6 +736,7 @@ fn from_result(result: reqwest::Result<RawOutcome>, start: &Instant, cold: bool)
             hung: false,
             retry_after_ok: None,
             cold,
+            points_served: 0,
         },
     }
 }

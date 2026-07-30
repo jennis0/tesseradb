@@ -26,6 +26,16 @@
 //! in-order fold over that vector (still in `Engine::viewport`) then short-circuits on the first
 //! `Err` (D-C's per-tile cancellation check, moved inside `tile_result` — see its doc) and
 //! concatenates `tile_counts`/`points`/`sub_cells` exactly as the pre-Task-6 serial loop did.
+//!
+//! **Calibration task: below [`SERIAL_FALLBACK_MAX_ROWS`], the fan-out above does not run at
+//! all.** Measured (2.42M-fixture, w=10 grant, zoom 8) at 2.97x-13x slower at
+//! `compute_threads = default` than at `compute_threads = 1` for a typical small viewport — the
+//! `pool.install` fan-out's own entry/scheduling cost dominates the ~µs of real per-tile work a
+//! sparse, ~256-tile request produces. `Engine::viewport` instead folds `tile_result` serially,
+//! in tile order, producing the identical `Vec<Result<Option<TileResult>>>` shape the fold below
+//! already consumes — so the fold, and therefore the response, is unaffected by which branch ran.
+//! See [`SERIAL_FALLBACK_MAX_ROWS`]'s doc for the predictor argument and the sweep data, and the
+//! calibration report for the full method.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -618,33 +628,46 @@ impl Engine {
         };
         probe.lap(|t| &mut t.tile_ranges_ns);
 
-        // D-D/D-F: the parallel tile sweep, on the ONE shared pool this engine built at
-        // `Engine::open` — no second, per-request pool, no nested throttling (D-D). Every input
-        // below is borrowed or `Copy`: `mask`/`segment`/`declared_scalars`/`params` are the
-        // generation- and request-derived values already resolved above (lifecycle §1.1 — nothing
-        // is re-loaded per tile), and `cancel` is the D-C token, checked inside `tile_result` at
-        // the very top (moved there from the old loop's first line — Task 5).
+        // Calibration task: the predictor decides serial-fold vs `pool.install` fan-out, and it
+        // must be available BEFORE either path runs — `Σ range.len()`, the total rows every
+        // resolved tile spans (pre-mask, pre-select), is exactly that: already materialised by
+        // the `tile_ranges_all` sweep above, costs one pass over `ranges` to sum, and needs no
+        // work from either candidate path to compute. See [`SERIAL_FALLBACK_MAX_ROWS`]'s doc for
+        // why this predictor (and not tile count) is the one the sweep data supports.
+        let total_rows_in_ranges: u64 = ranges.iter().map(|r| r.len() as u64).sum();
+
+        // D-D/D-F, calibrated: below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_result` in place —
+        // same function, same input order, no `pool.install` — since below that line the fan-out's
+        // own entry/scheduling cost exceeds the per-tile work it would parallelise (measured; see
+        // the constant's doc). At or above it, the existing `pool.install` fan-out runs, on the
+        // ONE shared pool this engine built at `Engine::open` — no second, per-request pool, no
+        // nested throttling (D-D). Every input to `tile_result` is borrowed or `Copy`:
+        // `mask`/`segment`/`declared_scalars`/`params` are the generation- and request-derived
+        // values already resolved above (lifecycle §1.1 — nothing is re-loaded per tile), and
+        // `cancel` is the D-C token, checked inside `tile_result` at the very top (moved there
+        // from the old loop's first line — Task 5).
         //
-        // `with_min_len(TILE_PAR_MIN_LEN)` — see that constant's doc for the number. Collecting
-        // `Vec<Result<Option<TileResult>>>` (this crate's `Result<T>` alias for
-        // `std::result::Result<T, EngineError>`) rather than `Result<Vec<TileResult>>` is
-        // load-bearing for the byte-equality claim below — see this module's doc.
+        // Both branches produce `Vec<Result<Option<TileResult>>>` (this crate's `Result<T>` alias
+        // for `std::result::Result<T, EngineError>`), in `tiles`' order, so the fold below is
+        // identical either way — this is what makes the two paths byte-identical (see this
+        // module's doc; `with_min_len(TILE_PAR_MIN_LEN)` and the parallel branch's own collect
+        // shape are unchanged from Task 6, still load-bearing for THAT claim within the parallel
+        // branch itself).
         //
-        // D-C cancellation bound at this sweep: the parallel section itself does not
-        // short-circuit on a flip (see the serial fold's own comment below) — every tile that has
-        // already passed `tile_result`'s checkpoint keeps running to completion regardless. What
-        // bounds the wasted work is the pool, not the fold: at most `compute_threads` tiles can be
-        // past that checkpoint and still in flight at any instant (one per worker), so a
-        // cancellation observed mid-sweep wastes at most `compute_threads` tiles' worth of
-        // count/select/gather/underlay work — every tile whose worker had not yet reached the
-        // checkpoint observes the flip there instead and returns immediately. The fold below then
-        // discards every result after the first `Cancelled` it walks, so none of that (bounded)
-        // extra work reaches the response either way.
-        let tile_outcomes: Vec<Result<Option<TileResult>>> = self.pool.install(|| {
+        // D-C cancellation bound, both branches: a `Cancelled` observed inside `tile_result`
+        // propagates to the fold below regardless of path, which discards every result after the
+        // first `Err` it walks (see the fold's own comment). What differs is how much wasted work
+        // can be IN FLIGHT past the checkpoint at the instant of cancellation. Serial fold: at
+        // most ONE tile — the one `tile_result` call currently running, since nothing else is
+        // concurrently past the checkpoint by construction. Parallel fan-out: at most
+        // `compute_threads` tiles (one per worker) — every tile that had already passed the
+        // checkpoint keeps running to completion; every tile whose worker had not yet reached it
+        // observes the flip there instead and returns immediately. The serial path's bound is
+        // therefore strictly tighter, not merely no-worse.
+        let tile_outcomes: Vec<Result<Option<TileResult>>> = if should_fold_serially(total_rows_in_ranges) {
             tiles
-                .par_iter()
-                .zip(ranges.into_par_iter())
-                .with_min_len(TILE_PAR_MIN_LEN)
+                .iter()
+                .zip(ranges)
                 .map(|(tile, range)| {
                     tile_result(
                         tile,
@@ -659,11 +682,33 @@ impl Engine {
                     )
                 })
                 .collect::<Vec<Result<Option<TileResult>>>>()
-        });
-        // D-E: the parallel section's own wall time is not a named stage — it is already fully
-        // accounted for, per tile, inside each `TileResult::stats` (folded below) — so this resets
-        // the clock without charging the stretch to whatever lap runs next, rather than leaving it
-        // to be silently misattributed.
+        } else {
+            self.pool.install(|| {
+                tiles
+                    .par_iter()
+                    .zip(ranges.into_par_iter())
+                    .with_min_len(TILE_PAR_MIN_LEN)
+                    .map(|(tile, range)| {
+                        tile_result(
+                            tile,
+                            range,
+                            &mask,
+                            segment,
+                            declared_scalars,
+                            &params,
+                            zoom,
+                            underlay_offset,
+                            &cancel,
+                        )
+                    })
+                    .collect::<Vec<Result<Option<TileResult>>>>()
+            })
+        };
+        // D-E: neither branch's own wall time is a named stage — it is already fully accounted
+        // for, per tile, inside each `TileResult::stats` (folded below) — so this resets the clock
+        // without charging the stretch to whatever lap runs next, rather than leaving it to be
+        // silently misattributed. True of the serial branch too: its per-tile costs are equally
+        // captured in `TileStats`, so `skip()` here keeps both branches' accounting symmetric.
         probe.skip();
 
         // D-F: the serial, IN-ORDER fold. `tile_outcomes`' order equals `tiles`' order by
@@ -697,22 +742,82 @@ impl Engine {
     }
 }
 
+/// Calibration task threshold: below this many total rows spanned by a request's resolved tiles
+/// (`Σ range.len()`, pre-mask — see the call site's `total_rows_in_ranges`), `Engine::viewport`
+/// folds `tile_result` serially instead of calling `self.pool.install`.
+///
+/// `pub` (unlike [`TILE_PAR_MIN_LEN`]) so the byte-equality tests in `tests/viewport.rs` can
+/// assert a fixture genuinely cleared it, rather than duplicating the number and risking drift.
+///
+/// **Why this predictor and not tile count.** Both were measured (2.42M `categories-subclass`
+/// fixture, w=10 spread grant, 2026-07-31, 12-core WSL2 box — sweep table and method in
+/// `.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/calibration-report.md`). Tile count does NOT
+/// discriminate: the "natural" viewport family (a fixed-size client window at increasing zoom)
+/// resolves a near-constant ~289 tiles at every zoom from 6 to 14 regardless of density, yet the
+/// measured serial/parallel verdict at that SAME tile count ranged from "serial wins 18x"
+/// (near-empty tiles) to "parallel wins 1.8x" (dense tiles) purely as a function of how many rows
+/// those tiles actually spanned. Conversely, a request touching as few as 4 tiles but spanning the
+/// WHOLE 2.42M-row corpus (a maximally zoomed-out view) still measured parallel breaking even or
+/// winning, despite the low tile count — there being few units to schedule did not make the
+/// spanned work small. `rows_in_ranges` tracks the real driver directly and is consistent with the
+/// measured cost model this codebase designs against (module doc, and CLAUDE.md: "bitmap
+/// operations cost O(containers touched)", which scales with the range read, not the tile count).
+///
+/// **Why 200,000 and not the exact crossover.** The sweep found a clean split below ~165,000 rows
+/// (serial wins or ties in every sample) and above ~316,000 rows (parallel wins in every sample),
+/// with a noisy, inconsistently-ordered band between them (a `Σ range.len()` figure is a proxy for
+/// containers touched, not identical to it, so it does not order perfectly against measured cost
+/// in that band). 200,000 sits inside the gap, close to its lower edge. The two misclassification
+/// costs are asymmetric — wrongly choosing the parallel path on genuinely small work measured
+/// 6-20x slower than serial in this sweep, while wrongly choosing serial on work that would have
+/// benefited measured at most ~1.3x slower than parallel — so the threshold is placed to bias
+/// toward serial in the ambiguous band rather than centred on it.
+///
+/// No corpus- or deployment-dependent knob is exposed for this: the sweep did not show the
+/// crossover moving with anything this engine's callers control (grant width and viewport size
+/// both feed into `rows_in_ranges` directly, which is exactly the point of using it as the
+/// predictor), so a fixed constant is what the data supports — see the calibration report's
+/// concerns section if a future corpus at a very different scale calls this back into question.
+pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 200_000;
+
+/// The predictor, pulled out as its own pure function so it is unit-testable without an `Engine`
+/// or a bundle (see the `tests` module at the bottom of this file) — the behavioural claim ("a
+/// below-threshold request runs the serial fold") is otherwise only observable through output
+/// equality or timing, neither of which makes a good unit test on its own.
+#[inline]
+fn should_fold_serially(total_rows_in_ranges: u64) -> bool {
+    total_rows_in_ranges < SERIAL_FALLBACK_MAX_ROWS
+}
+
 /// D-F's per-tile scheduling grain: the number of tiles rayon hands to one worker before it will
-/// split the range again. A single-digit constant, deliberately not calibrated by its own probe
-/// (Phase 0's probes covered corpus/mask shape, not this scheduling knob) but argued from the
-/// shape of the workload: measured per-tile cost is highly non-uniform — an empty-tile skip
-/// (`tile_result` returning `Ok(None)` after one `count_range`) is a handful of comparisons, while
-/// a dense tile at a high cap is a bitmap-range read plus a bounded heap sort — so work-stealing
-/// needs to be able to move *individual* tiles between workers rather than being locked into a few
-/// large, coarse chunks; a chunk of, say, 64 tiles handed to one worker while the other workers'
-/// chunks are all-empty would sit unstolen for the length of that chunk. `1` (rayon's own default
-/// for `par_iter` without `with_min_len`) avoids that entirely but pays a scheduling/steal-queue
-/// overhead on every single tile, including the very common empty-tile skip that is otherwise
-/// nearly free. `4` is a conservative middle point: small enough that a viewport of a few hundred
-/// tiles still splits into dozens of independently-stealable chunks (so an unlucky worker with an
-/// all-empty run is never stuck for long), large enough to amortise the per-task overhead over the
-/// cheap tiles that dominate a sparse or clustered corpus.
-const TILE_PAR_MIN_LEN: usize = 4;
+/// split the range again. Only reachable once `total_rows_in_ranges >= SERIAL_FALLBACK_MAX_ROWS`
+/// (the calibration task's serial fallback, above) — this grain governs the fan-out's own
+/// behaviour, not whether it runs at all.
+///
+/// **Measured (2.42M `categories-subclass`, w=10, 12-core WSL2 box, 2026-07-31)**, sweeping
+/// 4/8/16/32/64 across six clearly-parallel shapes (natural client windows and full-extent views
+/// spanning 16-1,024 tiles — table in the calibration report). 16 and above were consistently and
+/// often substantially worse than 4 or 8 (e.g. a 16-tile full-extent view: ~1.6 ms at 4 vs ~2.8 ms
+/// at 16 vs ~3.2 ms at 64) — confirming this constant's original "keep it small" reasoning, kept
+/// below verbatim. Between 4 and 8, two repeated trials found 8 reproducibly at least as fast
+/// everywhere tested and meaningfully faster on the lower-tile-count shapes (a 289-tile natural
+/// window: ~1.0 ms at 4 vs ~0.8 ms at 8; a 16-tile full-extent view: ~1.8 ms at 4 vs ~1.6 ms at
+/// 8), with no shape favouring 4. `8` replaces the original argued-not-measured `4`.
+///
+/// **The original reasoning, still the shape of the argument, only the number moves.** Measured
+/// per-tile cost is highly non-uniform — an empty-tile skip (`tile_result` returning `Ok(None)`
+/// after one `count_range`) is a handful of comparisons, while a dense tile at a high cap is a
+/// bitmap-range read plus a bounded heap sort — so work-stealing needs to be able to move
+/// *individual* tiles between workers rather than being locked into a few large, coarse chunks; a
+/// chunk of, say, 64 tiles handed to one worker while the other workers' chunks are all-empty
+/// would sit unstolen for the length of that chunk. `1` (rayon's own default for `par_iter`
+/// without `with_min_len`) avoids that entirely but pays a scheduling/steal-queue overhead on
+/// every single tile, including the very common empty-tile skip that is otherwise nearly free.
+/// `8` is a conservative middle point: small enough that a viewport of a few hundred tiles still
+/// splits into dozens of independently-stealable chunks, large enough to amortise the per-task
+/// overhead over the cheap tiles that dominate a sparse or clustered corpus — and, unlike `4`, the
+/// value the sweep actually measured as best or tied-best on every shape tried.
+const TILE_PAR_MIN_LEN: usize = 8;
 
 /// One tile's contribution to a `/v1/viewport` response (D-F) — the pure per-tile body pulled out
 /// of what was, before this task, a serial `for` loop over `Engine::viewport`'s tiles. Safe to
@@ -861,5 +966,21 @@ fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) ->
         x,
         y,
         scalars,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Calibration task's own behavioural test on the predictor, per the brief's preference for
+    /// this over test-only instrumentation: exact boundary behaviour, both edges.
+    #[test]
+    fn should_fold_serially_is_a_strict_less_than_at_the_calibrated_boundary() {
+        assert!(should_fold_serially(0));
+        assert!(should_fold_serially(SERIAL_FALLBACK_MAX_ROWS - 1));
+        assert!(!should_fold_serially(SERIAL_FALLBACK_MAX_ROWS));
+        assert!(!should_fold_serially(SERIAL_FALLBACK_MAX_ROWS + 1));
+        assert!(!should_fold_serially(u64::MAX));
     }
 }

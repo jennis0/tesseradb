@@ -192,6 +192,7 @@ def run_load(
     cold_workers: int = 0,
     truncate_tokens: bool = True,
     tag: str = "",
+    zoom: int | None = None,
 ) -> dict | None:
     suffix = f"-{tag}" if tag else ""
     tokens_file = run_dir / f"tokens-{concurrency}-{'h' if healthz else 'v'}{suffix}.txt"
@@ -208,7 +209,7 @@ def run_load(
         "--bundle-scale", str(scale),
         "--bundle-label-set", label_set,
         "--k", str(args.k),
-        "--zoom", str(args.zoom),
+        "--zoom", str(zoom if zoom is not None else args.zoom),
         "--run-dir", str(run_dir),
     ]
     if healthz:
@@ -260,7 +261,8 @@ def run_matrix(args, descriptors: list[str], srv, proc, summary: dict) -> None:
         label = "A (distinct principals)" if distinct else "B (shared fragments)"
         print(f"\nArm {label}")
         print(f"  {'conc':>6} {'rps':>10} {'p50_ms':>9} {'p99_ms':>9} {'srv_p99_ms':>11} "
-              f"{'shed%':>7} {'hung':>5} {'rss_gib':>9} {'cpu%':>7}  flags")
+              f"{'shed%':>7} {'hung':>5} {'rss_gib':>9} {'cpu%':>7} "
+              f"{'pts/s':>12} {'pts/user/s':>12} {'pts/req':>9}  flags")
 
         for c in levels:
             rss_before = 0
@@ -295,6 +297,12 @@ def run_matrix(args, descriptors: list[str], srv, proc, summary: dict) -> None:
             rps = rec["params"]["throughput_rps"]
             shed_rate = rec["params"].get("shed_rate", 0.0)
             hung = rec["params"].get("requests_hung", 0)
+            # New bench metrics (user-requested): delivered work, not just request counts. Absent
+            # in a `load.jsonl` produced by a pre-calibration-task binary (`.get(..., 0)` keeps an
+            # old summary re-print from crashing on a missing key).
+            points_per_second = rec["params"].get("points_per_second", 0.0)
+            points_per_user_per_second = rec["params"].get("points_per_user_per_second", 0.0)
+            points_per_request = rec["params"].get("points_per_request", 0.0)
 
             flags = list(rec.get("flags", []))
             if c in ceiling and rps > ceiling[c] / 3.0:
@@ -305,7 +313,9 @@ def run_matrix(args, descriptors: list[str], srv, proc, summary: dict) -> None:
             print(f"  {c:>6} {rps:>10,.0f} {rec['timing']['median_ns']/1e6:>9.2f} "
                   f"{rec['timing']['p99_ns']/1e6:>9.2f} {rec['params']['server_us_p99']/1000:>11.2f} "
                   f"{shed_rate*100:>6.1f}% {hung:>5} "
-                  f"{rss_peak/1048576:>9.2f} {cpu_mean:>7.0f}  {','.join(flags)}")
+                  f"{rss_peak/1048576:>9.2f} {cpu_mean:>7.0f} "
+                  f"{points_per_second:>12,.0f} {points_per_user_per_second:>12,.1f} "
+                  f"{points_per_request:>9,.1f}  {','.join(flags)}")
 
             summary["cells"].append({
                 "arm": arm, "concurrency": c, "rps": rps,
@@ -322,6 +332,10 @@ def run_matrix(args, descriptors: list[str], srv, proc, summary: dict) -> None:
                 "authorise_s": auth_s, "server_cpu_pct_mean": cpu_mean,
                 "distinct_tokens": rec["params"]["distinct_tokens"],
                 "generator_ceiling_rps": ceiling.get(c),
+                "points_served_total": rec["params"].get("points_served_total", 0),
+                "points_per_second": points_per_second,
+                "points_per_user_per_second": points_per_user_per_second,
+                "points_per_request": points_per_request,
                 "flags": flags,
             })
 
@@ -374,6 +388,18 @@ def run_cpu_saturation_cell(args, descriptors: list[str], srv, proc, summary: di
     summary["cpu_saturation_cell"] = result
 
     print("\ncriterion 4b: c=1 latency, multi-tile viewport, compute_threads 1 vs machine default")
+    # Calibration task: a SECOND viewport shape alongside the small one below, deliberately
+    # constructed to sit well above `tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS`
+    # (200,000 rows spanned), so this cell shows BOTH halves of the calibrated behaviour in one
+    # run -- default not regressing the small/sparse case AND still winning the large one. The
+    # `load` arm's own client (`gen_viewports`) floors its span at half the extent for any zoom
+    # <=5 (`extent / 2^max(zoom-4, 1)`), so `--zoom 4` is the largest span reachable through this
+    # CLI (no `--underlay-offset` flag exists on `load`, unlike `viewport`) -- within
+    # `max_tiles_per_request` (262,144) by three orders of magnitude, so "within config bounds" is
+    # not a close call. The calibration report's own engine-level sweep measured this exact shape
+    # (`natural/z4`) at ~1.2-1.7M rows spanned, 0.34x-0.61x (parallel faster) -- this cell is the
+    # real-server confirmation of that engine-level finding, not a fresh guess.
+    LARGE_WORK_ZOOM = 4
     thread_result = {}
     for threads_label, compute_threads in (("threads=1", 1), ("threads=default", None)):
         tmp_dir = args.run_dir / f"server-threads-{compute_threads or 'default'}"
@@ -383,6 +409,9 @@ def run_cpu_saturation_cell(args, descriptors: list[str], srv, proc, summary: di
         )
         try:
             tok = build_tokens(s, descriptors, 1, False, args.w, args.seed)
+            # Warms the token's row projection ONCE (keyed on (token, slice, segments_version),
+            # not on bbox/zoom -- `tessera-engine/src/viewport.rs`'s cache-key comment), so both
+            # measured cells below reuse it rather than each paying a fresh warm-up cost.
             warm_viewport(s, tok[0], args.zoom, args.k)
             rec = run_load(
                 args, tok, 1, args.run_dir, False, s, args.scale, args.label_set,
@@ -391,10 +420,44 @@ def run_cpu_saturation_cell(args, descriptors: list[str], srv, proc, summary: di
             if rec:
                 p50_ms = rec["timing"]["median_ns"] / 1e6
                 thread_result[threads_label] = p50_ms
-                print(f"  {threads_label:<16} c=1 p50={p50_ms:.3f} ms  "
-                      f"server_p50={rec['params']['server_us_p50']/1000:.3f} ms")
+                thread_result[f"{threads_label}_points_per_second"] = rec["params"].get(
+                    "points_per_second", 0.0
+                )
+                print(f"  {threads_label:<16} c=1 (small, z{args.zoom}) p50={p50_ms:.3f} ms  "
+                      f"server_p50={rec['params']['server_us_p50']/1000:.3f} ms  "
+                      f"pts/s={rec['params'].get('points_per_second', 0.0):,.0f}  "
+                      f"pts/req={rec['params'].get('points_per_request', 0.0):,.1f}")
+
+            rec_large = run_load(
+                args, tok, 1, args.run_dir, False, s, args.scale, args.label_set,
+                duration=5.0, tag=f"c1-large-{compute_threads or 'default'}", zoom=LARGE_WORK_ZOOM,
+            )
+            if rec_large:
+                p50_large_ms = rec_large["timing"]["median_ns"] / 1e6
+                thread_result[f"{threads_label}_large_work"] = p50_large_ms
+                thread_result[f"{threads_label}_large_work_points_per_second"] = rec_large[
+                    "params"
+                ].get("points_per_second", 0.0)
+                print(f"  {threads_label:<16} c=1 (large, z{LARGE_WORK_ZOOM}) "
+                      f"p50={p50_large_ms:.3f} ms  "
+                      f"server_p50={rec_large['params']['server_us_p50']/1000:.3f} ms  "
+                      f"pts/s={rec_large['params'].get('points_per_second', 0.0):,.0f}  "
+                      f"pts/req={rec_large['params'].get('points_per_request', 0.0):,.1f}")
         finally:
             harness.stop_server(p)
+
+    if "threads=1" in thread_result and "threads=default" in thread_result:
+        small_ratio = thread_result["threads=default"] / thread_result["threads=1"]
+        thread_result["small_ratio_default_over_1"] = small_ratio
+        print(f"  small-viewport ratio (default/1) = {small_ratio:.2f} "
+              f"({'within ~10%' if small_ratio <= 1.10 else 'OUTSIDE the ~10% target'})")
+    if "threads=1_large_work" in thread_result and "threads=default_large_work" in thread_result:
+        large_ratio = (
+            thread_result["threads=default_large_work"] / thread_result["threads=1_large_work"]
+        )
+        thread_result["large_work_ratio_default_over_1"] = large_ratio
+        print(f"  large-work ratio (default/1) = {large_ratio:.2f} "
+              f"({'default WINS' if large_ratio < 1.0 else 'default did NOT win'})")
     summary["thread_scaling_cell"] = thread_result
 
 
@@ -445,12 +508,20 @@ def run_shed_cell(args, descriptors: list[str], summary: dict) -> None:
                 "served_p50_ms": rec["timing"]["median_ns"] / 1e6,
                 "served_p99_ms": rec["timing"]["p99_ns"] / 1e6,
                 "max_wall_ms": rec["params"]["max_wall_ms"],
+                # New bench metrics: the points-drop interpretation this cell exists for needs
+                # delivered work, not just the request-count shed rate above.
+                "points_served_total": rec["params"].get("points_served_total", 0),
+                "points_per_second": rec["params"].get("points_per_second", 0.0),
+                "points_per_user_per_second": rec["params"].get("points_per_user_per_second", 0.0),
+                "points_per_request": rec["params"].get("points_per_request", 0.0),
             })
             print(f"  compute_admission={args.shed_compute_admission} compute_queue="
                   f"{args.shed_compute_queue} c={concurrency}: shed_rate="
                   f"{rec['params']['shed_rate']*100:.1f}% ok={rec['params']['requests_ok']} "
                   f"retry_after_violations={rec['params']['retry_after_violations']} "
-                  f"served_p99={rec['timing']['p99_ns']/1e6:.2f}ms hung={rec['params']['requests_hung']}")
+                  f"served_p99={rec['timing']['p99_ns']/1e6:.2f}ms hung={rec['params']['requests_hung']} "
+                  f"pts/s={rec['params'].get('points_per_second', 0.0):,.0f} "
+                  f"pts/user/s={rec['params'].get('points_per_user_per_second', 0.0):,.1f}")
         summary["shed_cell"] = result
     finally:
         harness.stop_server(proc)
