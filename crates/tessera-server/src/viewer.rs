@@ -16,6 +16,7 @@ use tessera_types::{PinId, TesseraId};
 use tessera_wire::{viewport_ipc, ScalarColumn, ViewportColumns};
 
 use tessera_engine::viewport::ViewportRequest;
+use tessera_engine::CancelToken;
 
 use crate::error::{map_engine_error, map_join_error, map_store_error, ApiError};
 use crate::health::{healthz, readyz};
@@ -63,6 +64,41 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
+}
+
+/// D-C: flips a [`CancelToken`] on drop. Created before the admission-gate acquire so it lives
+/// for the whole `viewport` handler body, and held as a local there — axum dropping the handler's
+/// future (the only signal this transport gives for "the client went away": there is no explicit
+/// disconnect callback) drops this guard too, which is what flips the flag the `spawn_blocking`
+/// closure's engine call is polling. Only a *clone* of the token moves into that closure (D-C);
+/// this guard keeps the original.
+///
+/// **Disarmed on the normal path**, just before the handler constructs its response, so a
+/// completed request's own guard drop (at function return) does not flip a token nobody is
+/// reading any more. Flipping it late would in fact be harmless — the engine call has already
+/// returned by the time this guard would drop on that path — but disarming keeps "cancelled"
+/// meaning what it says: this request was cut short, not merely finished.
+struct CancelGuard {
+    token: CancelToken,
+    armed: bool,
+}
+
+impl CancelGuard {
+    fn new(token: CancelToken) -> Self {
+        CancelGuard { token, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.token.cancel();
+        }
+    }
 }
 
 async fn meta(
@@ -153,6 +189,7 @@ fn run_viewport(
     state: &AppState,
     session: &tessera_engine::Session,
     req: ViewportReq,
+    cancel: CancelToken,
 ) -> Result<ViewportOutcome, ApiError> {
     let pin = req.pin.map(PinId::from);
     // Contracts §3.2's default. It is the deployment's own overplot ceiling rather than a
@@ -171,7 +208,8 @@ fn run_viewport(
             session,
             ViewportRequest::new(&req.slice, req.zoom, req.bbox, k)
                 .pin(pin)
-                .underlay_offset(req.underlay_offset),
+                .underlay_offset(req.underlay_offset)
+                .cancel(Some(cancel)),
         )
         .map_err(map_engine_error)?;
 
@@ -264,6 +302,14 @@ async fn viewport(
         return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
     }
 
+    // D-C: the cancellation token and its drop-guard, created before the admission-gate acquire
+    // below so the guard's lifetime spans the whole handler — a disconnect during the (D-B) queue
+    // wait is already free (dropping the `admit().await` future releases nothing that was ever
+    // acquired), but creating the guard here rather than after admission keeps one token identity
+    // for the entire request and costs nothing extra.
+    let cancel = CancelToken::new();
+    let mut cancel_guard = CancelGuard::new(cancel.clone());
+
     // D-B: the two-stage admission gate. `admit()` sheds with `ApiError::Backpressure` (429) if
     // the outer slots semaphore has no permit to `try_acquire`, or if the inner compute semaphore
     // does not free one within `admission_timeout_ms`. `admission_us` is the queue wait —
@@ -298,13 +344,27 @@ async fn viewport(
     // `Arc<SessionEntry>` `authenticated_session` returned, `req` is moved in whole (its fields
     // were only ever borrowed above), and `gate_permits` (D-B) moves in so both permits release
     // only when this closure returns — correct accounting even if the client has disconnected.
+    // D-C: only a *clone* of `cancel` moves in — `cancel_guard` keeps the original outside the
+    // closure, on the reactor, where a client disconnect can flip it. If the client disconnects
+    // (axum drops this whole handler future), `cancel_guard` drops and flips the flag; the engine
+    // call inside the closure observes it at its next checkpoint and returns
+    // `Err(EngineError::Cancelled)`, so the closure itself returns `Err` and `_gate_permits` drops
+    // — releasing both `OwnedSemaphorePermit`s well before the closure would otherwise have run to
+    // completion.
     let closure_state = Arc::clone(&state);
+    let closure_cancel = cancel.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         let _gate_permits = gate_permits;
-        run_viewport(&closure_state, &entry.session, req)
+        run_viewport(&closure_state, &entry.session, req, closure_cancel)
     })
     .await
     .map_err(map_join_error)??;
+
+    // D-C: normal path reached — disarm the guard so its own drop (at this function's return,
+    // whichever branch below) does not pointlessly flip a token nobody downstream is reading any
+    // more. See `CancelGuard`'s doc for why leaving it armed here would be harmless, not merely
+    // wrong-looking.
+    cancel_guard.disarm();
 
     let pin_header = serde_json::to_string(&PinDto::from(&outcome.pin))
         .expect("PinDto serialisation cannot fail");

@@ -24,7 +24,7 @@ use tempfile::TempDir;
 
 use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig, EngineError, Session};
+use tessera_engine::{CancelToken, Engine, EngineConfig, EngineError, Session};
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord, WalRow};
 use tessera_plugin::Passthrough;
 use tessera_spatial::{morton_of, tiles_for_bbox, Extent};
@@ -2146,5 +2146,182 @@ fn f1_selection_visits_exactly_the_visible_set() {
          lists, a cached threshold bitmap), sub-Σvisible visits become legitimate — revise this \
          with the differential oracle rather than deleting it.",
         t.select_rows_visited, t.sigma_visible
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Concurrency — D-C cooperative cancellation (the rapid-pan case)
+// ---------------------------------------------------------------------------------------------
+//
+// `Engine::viewport` checks a caller-supplied `CancelToken` at three points (see its own doc):
+// once before `compose`, once before θ's anchor (`mask.visible_total()`), and once per tile at
+// the top of the tile loop. A hit at any of these aborts the WHOLE request with
+// `EngineError::Cancelled` — I13: no partial `ViewportOut` is ever constructed past that point.
+//
+// The first test below is fully deterministic: the token is flipped before the call is even
+// made, so the outcome does not depend on scheduling at all. Genuinely interrupting a request
+// *mid-flight* inherently needs a second thread racing the engine call, and the engine call
+// itself is synchronous with no hook to pause it at a specific tile — adding one purely for a
+// test is exactly what the design brief calls out as not worth it. The second test instead
+// proves interruption indirectly and robustly: it compares the wall-clock time of a genuinely
+// interrupted run against this same run's own baseline for the full (uncancelled) sweep,
+// following the self-scaling wall-clock-ratio pattern this file and `tessera-server`'s test suite
+// already use elsewhere (e.g. `distinct_key_first_viewports_overlap_instead_of_serialising`
+// above) rather than a fixed wall-clock bet. Which exact checkpoint caught the cancellation is
+// left to code review of the call sites above; both tests only assert the externally-observable
+// contract (whole-request abort, `Cancelled`, no partial output, and — for the second test —
+// abandoned well before the full sweep would have finished).
+
+/// D-C: a config wide enough to let a many-tile, high-fan-out §3.3 underlay request through
+/// `Engine::viewport`'s own bounds checks — used only by the timing test below to engineer a
+/// multi-tile sweep long enough to interrupt mid-flight. Same cost-model trick
+/// `tessera-server`'s own slow-viewport test fixtures use: each sub-cell costs one small binary
+/// search plus one bitmap range-count, independent of corpus size, so slowness is engineered via
+/// fan-out rather than growing `N_ITEMS`.
+fn config_for_slow_multi_tile_sweep() -> EngineConfig {
+    EngineConfig {
+        max_underlay_offset: 8,
+        max_underlay_cells: 20_000_000,
+        max_tiles_per_request: 262_144,
+        ..config()
+    }
+}
+
+/// D-C, I13: a token cancelled before the call is even made aborts the whole request with
+/// `Cancelled` specifically — not swallowed into some other error arm, and (since the call
+/// returns `Err`) no `ViewportOut`, partial or otherwise, is ever constructed.
+#[test]
+fn pre_flipped_cancel_token_aborts_immediately_with_no_partial_output() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let cancel = CancelToken::new();
+    cancel.cancel();
+
+    let result = engine.viewport(
+        &session,
+        ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5).cancel(Some(cancel)),
+    );
+
+    assert!(
+        matches!(result, Err(EngineError::Cancelled)),
+        "a pre-flipped token must abort the whole request with Cancelled, got {result:?}"
+    );
+}
+
+/// D-C: a request with no `cancel` set at all behaves exactly as before this task — every other
+/// test in this file already exercises that path implicitly, but this makes the "opt-in, zero
+/// effect otherwise" claim an explicit assertion rather than an inference from the rest of the
+/// suite staying green.
+#[test]
+fn absent_cancel_token_never_aborts() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let out = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+        )
+        .unwrap();
+    assert_eq!(out.tiles.len(), 1);
+}
+
+/// D-C: cancellation flipped from another thread while a genuinely multi-tile, multi-millisecond
+/// sweep is running aborts it well before the full sweep would have completed — evidence that the
+/// per-tile check actually interrupts in-flight work, not only ever observed before the first
+/// tile starts.
+///
+/// **Self-scaling, not a sleep-based guess.** `baseline_elapsed` is this run's own measured time
+/// for the full, uncancelled 16-tile sweep (`zoom = 2`, `underlay_offset = 8` — 4^8 = 65536
+/// sub-cell evaluations per tile, ~1.05M total; measured at ~270ms in this task's tuning run,
+/// comfortably above the floor asserted below). The cancelled run races a canceller thread whose
+/// ENTIRE job is one atomic store, released from the same `Barrier` the engine call starts from —
+/// that store is overwhelmingly likely to land before the engine call has done more than a tile or
+/// two of a sixteen-tile sweep, so `cancelled_elapsed` should be a small fraction of
+/// `baseline_elapsed` regardless of exactly which of the three checkpoints caught it (measured at
+/// ~4ms cancelled against ~270ms baseline in this task's tuning run — comfortably inside the /2
+/// bound asserted below, with wide margin to spare).
+#[test]
+fn cancel_flipped_from_another_thread_aborts_a_multi_tile_sweep_before_it_completes() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = Arc::new(open_engine_with(
+        &bundle_root,
+        tmp.path(),
+        config_for_slow_multi_tile_sweep(),
+    ));
+
+    let request =
+        || ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], 1).underlay_offset(Some(8));
+
+    // Baseline: an uncancelled full sweep over a fresh session, so `baseline_elapsed` reflects
+    // this machine's real speed for the whole 16-tile workload (cold row-projection build
+    // included, exactly like the cancelled run below).
+    let baseline_session = engine.authorise(&full_coverage_credential()).unwrap();
+    let baseline_start = std::time::Instant::now();
+    engine.viewport(&baseline_session, request()).unwrap();
+    let baseline_elapsed = baseline_start.elapsed();
+    assert!(
+        baseline_elapsed > std::time::Duration::from_millis(20),
+        "the uncancelled sweep finished in {baseline_elapsed:?}, too fast to exercise this \
+         test's interruption scenario -- widen the underlay offset or the tile count"
+    );
+
+    // A fresh session (a fresh `token_id`, so a fresh, cold row-projection cache key) for the
+    // cancelled run — symmetric with the baseline above, not warmed by it.
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let cancel = CancelToken::new();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+
+    let canceller_barrier = Arc::clone(&barrier);
+    let canceller_cancel = cancel.clone();
+    let canceller = std::thread::spawn(move || {
+        canceller_barrier.wait();
+        canceller_cancel.cancel();
+    });
+
+    barrier.wait();
+    let cancelled_start = std::time::Instant::now();
+    let result = engine.viewport(&session, request().cancel(Some(cancel)));
+    let cancelled_elapsed = cancelled_start.elapsed();
+    canceller.join().unwrap();
+
+    assert!(
+        matches!(result, Err(EngineError::Cancelled)),
+        "expected Cancelled, got {result:?}"
+    );
+    assert!(
+        cancelled_elapsed < baseline_elapsed / 2,
+        "the cancelled run took {cancelled_elapsed:?}, not meaningfully less than the \
+         uncancelled sweep's {baseline_elapsed:?} -- cancellation does not appear to interrupt an \
+         in-flight multi-tile sweep"
     );
 }

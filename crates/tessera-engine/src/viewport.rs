@@ -22,6 +22,7 @@ use tessera_store::StoreError;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
 use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 
+use crate::cancel::CancelToken;
 use crate::compose::{compose, visible_to, RowProjection};
 use crate::select::{SelectParams, Selection, Threshold};
 use crate::session::{Engine, EngineError, Result, Session};
@@ -124,6 +125,13 @@ pub struct ViewportRequest<'a> {
     /// Request §3.3 underlay sub-cell counts at depth `zoom + offset`. `None` or `Some(0)` serves
     /// none and costs nothing.
     pub underlay_offset: Option<u8>,
+    /// D-C: cooperative cancellation (the rapid-pan case) — checked once per tile and before each
+    /// long serial-prefix stage; see [`Engine::viewport`]'s doc for the exact checkpoints. `None`
+    /// costs one `Option` branch per check and nothing else, so every non-server embedder of this
+    /// API is unaffected. Never threaded into the slot-state single-flight builders (Tasks 1-2,
+    /// D-G) — a build already in flight runs to completion regardless of this token, because its
+    /// result serves later arrivals too (D-C's scope note: bounded, useful work).
+    pub cancel: Option<CancelToken>,
 }
 
 impl<'a> ViewportRequest<'a> {
@@ -136,6 +144,7 @@ impl<'a> ViewportRequest<'a> {
             k,
             pin: None,
             underlay_offset: None,
+            cancel: None,
         }
     }
 
@@ -146,6 +155,13 @@ impl<'a> ViewportRequest<'a> {
 
     pub fn underlay_offset(mut self, offset: Option<u8>) -> Self {
         self.underlay_offset = offset;
+        self
+    }
+
+    /// D-C: attach a cooperative-cancellation token. See [`Self::cancel`]'s field doc for the
+    /// checkpoints and the single-flight-builder exemption.
+    pub fn cancel(mut self, cancel: Option<CancelToken>) -> Self {
+        self.cancel = cancel;
         self
     }
 }
@@ -302,9 +318,30 @@ impl Engine {
     }
 }
 
+/// D-C: `Err(EngineError::Cancelled)` if `cancel` has been flipped, `Ok(())` otherwise (including
+/// when `cancel` is `None` — most callers, and every non-server embedder of this API, never set
+/// one). Called at the checkpoints [`Engine::viewport`]'s doc lists; **not** called around the
+/// row-projection single-flight build (D-G) — that stage is deliberately not gated by this check,
+/// so a build already in flight always runs to completion regardless of this particular caller's
+/// interest in it (its result serves later arrivals too).
+#[inline]
+fn check_cancelled(cancel: &Option<CancelToken>) -> Result<()> {
+    if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+        return Err(EngineError::Cancelled);
+    }
+    Ok(())
+}
+
 impl Engine {
     /// The masked viewport query — see [`ViewportRequest`] for the parameters and for the
     /// non-decreasing-`k` obligation that §7.2's nesting property rests on.
+    ///
+    /// **D-C cancellation checkpoints** (cooperative, the rapid-pan case): once per tile, at the
+    /// top of the tile loop below; once before [`compose`] runs; once before θ's anchor
+    /// (`mask.visible_total()`). A hit at any of these aborts the WHOLE request with
+    /// [`EngineError::Cancelled`] — no partial `ViewportOut` is ever returned (I13). The
+    /// row-projection single-flight build (D-G, above the compose checkpoint) is deliberately
+    /// NOT gated — see [`check_cancelled`]'s doc.
     pub fn viewport(&self, session: &Session, req: ViewportRequest<'_>) -> Result<ViewportOut> {
         let ViewportRequest {
             slice,
@@ -313,6 +350,7 @@ impl Engine {
             k,
             pin,
             underlay_offset,
+            cancel,
         } = req;
         // Load the generation pointer exactly once, at request start (see `GenerationHandle`'s
         // doc at its definition) — every subsequent read below (pin check, row-projection cache,
@@ -405,6 +443,12 @@ impl Engine {
             .map_err(|_building| EngineError::ProjectionBuilding)?;
         probe.lap(|t| &mut t.row_projection_ns);
 
+        // D-C checkpoint: before compose, one of the two long serial-prefix stages this task
+        // guards. Placed after the (non-cancellable, D-G) row-projection build so a cancellation
+        // observed here never interrupts that build — only work this request would otherwise go
+        // on to do itself.
+        check_cancelled(&cancel)?;
+
         let mask = compose(
             &session.fragment,
             &session.satisfied,
@@ -488,6 +532,8 @@ impl Engine {
         // forbids. It does move on an overlay swap, which is accepted: swaps are rare against pans,
         // and because the served set is a `tessera_id` prefix, a small θ move perturbs only the
         // marks nearest the cut.
+        // D-C checkpoint: before θ's anchor, the second long serial-prefix stage this task guards.
+        check_cancelled(&cancel)?;
         let v_total = mask.visible_total();
         probe.lap(|t| &mut t.theta_anchor_ns);
         let params = SelectParams {
@@ -523,6 +569,12 @@ impl Engine {
         probe.lap(|t| &mut t.tile_ranges_ns);
 
         for (tile, range) in tiles.iter().zip(ranges) {
+            // D-C checkpoint: once per tile, at the top of the loop — a cancellation observed here
+            // aborts before this tile's own count/select/gather (and any underlay sub-cells) run,
+            // so the extra work done past the moment of cancellation is bounded by at most one
+            // tile's worth (the one already in flight when the flip happened).
+            check_cancelled(&cancel)?;
+
             let Some(segment) = segment else { continue };
 
             probe.count(|t| &mut t.rows_in_ranges, range.len() as u64);

@@ -2634,3 +2634,159 @@ fn header_u64(resp: &reqwest::Response, name: &str) -> u64 {
         .parse()
         .unwrap_or_else(|_| panic!("{name} header is not a valid u64"))
 }
+
+// ---------------------------------------------------------------------------------------------
+// Task 5 (D-C): cooperative cancellation wired to client disconnect (the rapid-pan case).
+// ---------------------------------------------------------------------------------------------
+
+/// A slow viewport request engineered to spread its cost across MANY tiles rather than
+/// [`slow_viewport_body`]'s one giant tile. D-C's per-tile cancellation check sits at the top of
+/// the tile loop — it is deliberately not checked mid-tile (a tile's own underlay sweep is
+/// bounded, in-flight work, same as every other per-tile stage) — so a single-tile fixture like
+/// `slow_viewport_body` (`zoom = 0`) cannot demonstrate early interruption at all: cancellation
+/// would only ever be observed once that one tile's entire sweep has already finished, which is
+/// indistinguishable from no cancellation. `zoom = 2` gives 16 tiles; `underlay_offset = 9` costs
+/// ~262144 sub-cell evaluations per tile (~4.2M total, tens of tiles' worth of real work), so a
+/// disconnect landing after any prefix of tiles releases the gate long before the rest would have
+/// run.
+fn slow_multi_tile_viewport_body() -> serde_json::Value {
+    serde_json::json!({
+        "slice": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
+        "underlay_offset": 9
+    })
+}
+
+/// D-C, warm-session scope: a client that drops its connection mid-viewport — the rapid-pan case
+/// — releases the compute-admission gate's permit well before the full service time an
+/// uncancelled request of the same shape takes. Observed two ways: directly, via `/control/
+/// status`'s `compute.in_flight` gauge dropping back to 0 promptly rather than only once the full
+/// sweep would naturally finish; and indirectly, via a follow-up request being admitted at once
+/// instead of shed.
+///
+/// **Warm-session scope, deliberately.** A slot-state row-projection build (Tasks 1-2, D-G) is
+/// non-cancellable bounded work by design — D-C's scope note: its result serves later arrivals,
+/// so it always runs to completion. A COLD first viewport's build cost would dominate this test's
+/// timing regardless of cancellation and would prove nothing about the per-tile checks this task
+/// adds. A fast warm-up request first, on the SAME token, gets this token/slice's row projection
+/// to `Ready` before either slow request below, so the slow request's cost is entirely its
+/// (cancellation-interruptible, per-tile) [`slow_multi_tile_viewport_body`] sweep.
+///
+/// **Self-scaling, not a fixed wall-clock bet** — same pattern as this file's other slow-viewport
+/// tests (see e.g. `healthz_stays_prompt_while_a_long_viewport_runs`'s doc): `baseline_elapsed` is
+/// this run's own measured time for the full, uncancelled sweep to complete on this machine, and
+/// the disconnected run's release time is compared against a fraction of it, never an absolute
+/// figure.
+///
+/// **Why `slow_task.abort()` is a faithful stand-in for a real client disconnect.** Aborting the
+/// tokio task driving the `reqwest` request drops that request's future at its next await point —
+/// which drops the underlying (not-yet-complete) connection, the same event a real browser
+/// tearing down a stale fetch produces. On the server side this is indistinguishable from any
+/// other broken connection: axum/hyper notice the peer went away and drop the handler's own
+/// future, which is the ONLY signal this transport gives for "the client left" and exactly what
+/// `CancelGuard` (`tessera-server::viewer`) is wired to.
+#[tokio::test]
+async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server_with_config_and_gate(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        engine_config_for_slow_viewport(),
+        ComputeGate::new(1, 0, 250),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    // Warm-session scope (see this test's doc): warms this token/slice's row-projection cache
+    // before either slow request below.
+    let warm = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(warm.status(), 200);
+
+    // Baseline: the full, uncancelled slow sweep's own wall-clock time on this run/machine, over
+    // the now-warm session.
+    let baseline_start = std::time::Instant::now();
+    let baseline_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&slow_multi_tile_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    let baseline_elapsed = baseline_start.elapsed();
+    assert_eq!(baseline_resp.status(), 200);
+    assert!(
+        baseline_elapsed > std::time::Duration::from_millis(50),
+        "the uncancelled baseline finished in {baseline_elapsed:?}, too fast to exercise this \
+         test's early-release scenario -- widen the underlay offset"
+    );
+
+    // The actual scenario: a second slow request, admitted and genuinely running
+    // (`in_flight == 1`, a deterministic poll rather than a guessed delay) before the client
+    // disconnects.
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let slow_token = token.clone();
+    let slow_task = tokio::spawn(async move {
+        client
+            .post(viewer_url)
+            .bearer_auth(slow_token)
+            .json(&slow_multi_tile_viewport_body())
+            .send()
+            .await
+    });
+
+    poll_until_in_flight(&server, 1).await;
+
+    let release_start = std::time::Instant::now();
+    slow_task.abort();
+    // The task is cancelled at its next await point -- whether it resolves at all (and with what)
+    // depends on exactly where the abort landed; this test only cares about server-side gate
+    // state below, so the client-side outcome is discarded either way.
+    let _ = slow_task.await;
+
+    // D-C: the drop-guard flips the token when axum drops the handler future on disconnect; the
+    // engine's per-tile check observes it and aborts; the `spawn_blocking` closure returns `Err`
+    // and drops `_gate_permits` -- releasing both `OwnedSemaphorePermit`s well before the full
+    // sweep would naturally finish.
+    poll_until_in_flight(&server, 0).await;
+    let release_elapsed = release_start.elapsed();
+
+    assert!(
+        release_elapsed < baseline_elapsed / 2,
+        "the gate took {release_elapsed:?} to free its permit after the client disconnected, \
+         not meaningfully less than the {baseline_elapsed:?} an uncancelled sweep takes on this \
+         run -- the engine does not appear to be aborting on disconnect"
+    );
+
+    // Observable via a follow-up request being admitted promptly, not shed with 429.
+    let follow_up = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        follow_up.status(),
+        200,
+        "the gate's only slot should already be free after the disconnect -- a 429 here would \
+         mean the permit leaked past the client's disconnect"
+    );
+}

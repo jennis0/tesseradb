@@ -149,6 +149,19 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // D-G / Task 4 (lifecycle §3.3): the fragment-cache twin of the arm above — a concurrent
         // `authorise` call is already building this credential's mask fragment. Same mapping.
         EngineError::FragmentBuilding => ApiError::Backpressure,
+        // D-C: cooperative cancellation (the rapid-pan case). Named explicitly, rather than left
+        // to the catch-all below, so the response body can NEVER carry this variant's own
+        // `Display` — a fixed string only, the same rule `map_store_error`/`map_join_error` apply
+        // to a lower layer's text. Fail-closed 500, never a 2xx or any 4xx: in practice this arm
+        // is unreachable today (the server's drop-guard only flips the token when the whole
+        // handler future is dropped, which means nobody is left to read a response either), but it
+        // must stay fail-closed-shaped in case a future refactor makes it reachable on a still-live
+        // connection.
+        EngineError::Cancelled => ApiError::FailClosed(
+            "request cancelled before completion; the request was refused rather than answered \
+             partially"
+                .to_string(),
+        ),
         other => ApiError::FailClosed(other.to_string()),
     }
 }
@@ -252,6 +265,18 @@ mod tests {
         let (status, code, _) = map_engine_error(EngineError::FragmentBuilding).parts();
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(code, "backpressure");
+    }
+
+    /// D-C: `Cancelled` is explicitly named in `map_engine_error`'s match (not caught only by the
+    /// wildcard arm) and maps to the fail-closed 500 — never a 2xx or any 4xx. This is the arm's
+    /// defence-in-depth case (see its comment at the match site): the server-side drop-guard fires
+    /// on ANY future drop, so a future refactor could in principle reach this arm on a still-live
+    /// connection, and the response it produces must stay fail-closed-shaped regardless.
+    #[test]
+    fn map_engine_error_takes_cancelled_to_fail_closed_500() {
+        let (status, code, _) = map_engine_error(EngineError::Cancelled).parts();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(code, "fail-closed");
     }
 
     /// D-E: a `Backpressure` response carries both the `Retry-After: 1` header and the
