@@ -21,6 +21,7 @@
 
 pub mod error;
 pub mod input;
+pub mod observer;
 mod pipeline;
 
 use std::collections::BTreeMap;
@@ -52,6 +53,7 @@ use tessera_types::{
 };
 
 pub use error::{BuildError, Result};
+pub use observer::{BuildObserver, BuildStage, NoopObserver};
 
 /// The single bundle prefix a batch build writes. Later publications get their own prefix; the
 /// batch build always starts a bundle from scratch.
@@ -199,7 +201,19 @@ struct StagedItem {
 /// arrays rather than one struct per item. [`build_in_memory`] is the older, linear
 /// implementation, kept as the byte-equality oracle the two are tested against.
 pub fn build(args: &BuildArgs) -> Result<BuildReport> {
-    pipeline::build(args)
+    pipeline::build(args, &observer::NoopObserver)
+}
+
+/// [`build`], reporting each pipeline stage's duration to `observer` as it completes.
+///
+/// Identical to `build` in every respect but the notifications — the same code path, not a
+/// parallel one, so a measurement taken here describes the build that actually ships. Exists for
+/// `tessera-bench`'s ingest arm, which asks which of the eleven stages bends with scale.
+pub fn build_observed(
+    args: &BuildArgs,
+    observer: &dyn observer::BuildObserver,
+) -> Result<BuildReport> {
+    pipeline::build(args, observer)
 }
 
 /// The original linear, fully in-memory build (Task 8).

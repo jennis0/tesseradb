@@ -84,6 +84,7 @@ use tessera_types::{EntityId, IdentityKey, SMALL_TERM_THRESHOLD_DEFAULT};
 
 use crate::error::{BuildError, Result};
 use crate::input;
+use crate::observer::{BuildObserver, BuildStage, StageTimer};
 use crate::{
     fsync_file, validate_args, write_ext_locator, write_external_id_extents, write_manifests,
     BuildArgs, BuildReport, BundleFiles, ExternalIdRow, PairsParquetWriter,
@@ -185,8 +186,9 @@ fn term_of(packed_entry: u64) -> u32 {
     packed_entry as u32
 }
 
-pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
+pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<BuildReport> {
     validate_args(args)?;
+    let mut timer = StageTimer::new(observer);
     let plugin = Passthrough::new();
     require_decomposable_labelling(&plugin)?;
     let bounds = plugin.declared_bounds();
@@ -215,6 +217,8 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
         )));
     }
 
+    timer.end(BuildStage::SourceIds, source_ids.len() as u64);
+
     // ---- 2. the dictionary -----------------------------------------------------------
     let dict_dir = args.out.join(PREFIX).join("dictionary");
     std::fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
@@ -230,6 +234,8 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
             "{term_count} distinct terms exceeds the 2^32 term-ID space"
         )));
     }
+
+    timer.end(BuildStage::Dictionary, term_count);
 
     // ---- 3. the pairs relation, packed as `ordinal << 32 | term_id` -------------------
     let mut packed: Vec<u64> = Vec::with_capacity(pair_rows);
@@ -268,6 +274,8 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
     // into a repeated posting (the linear build deduplicates in `read_pairs`).
     packed.dedup();
     let pair_count = packed.len() as u64;
+
+    timer.end(BuildStage::PairsPack, packed.len() as u64);
 
     // ---- 4. the signature sort (I9, permanent — see the module docs) ------------------
     let mut long_sig: Vec<u64> = vec![0; (n as usize).div_ceil(64)];
@@ -315,6 +323,8 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
     drop(packed);
     drop(long_sig);
 
+    timer.end(BuildStage::SignatureSort, recs.len() as u64);
+
     // ---- 5. the permanent assignment: entity id = position in the signature order -----
     let mut entity_of_ordinal: Vec<u32> = vec![0; n as usize];
     for (entity, rec) in recs.iter().enumerate() {
@@ -336,6 +346,8 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
     let mut source_ids = read_source_ids(args, Some(n as usize))?;
     source_ids.sort_unstable();
 
+    timer.end(BuildStage::Assignment, n);
+
     // ---- 6. postings and pairs.parquet -----------------------------------------------
     let postings_path = terms_dir.join("postings.arrow");
     let pairs_path = terms_dir.join("pairs.parquet");
@@ -353,6 +365,8 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
     drop(term_of_source);
     drop(row_counts);
 
+    timer.end(BuildStage::PostingsWrite, pair_count);
+
     // ---- 7. external ids -------------------------------------------------------------
     // Sorted by the external id's *bytes* (R4); `ExternalIdRow` holds each id as the sort key
     // that makes that a plain integer comparison, in twelve bytes rather than a padded sixteen.
@@ -367,6 +381,8 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
     // what the locator addresses (contracts §2.4/§2.6 r6).
     let ext_locator_path = write_ext_locator(&entities_dir, &external, n)?;
     drop(external);
+
+    timer.end(BuildStage::ExternalIds, n);
 
     // ---- 8. geometry, in entity order ------------------------------------------------
     let mut x_of_entity: Vec<f32> = vec![0.0; n as usize];
@@ -393,6 +409,8 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
     drop(source_ids);
     drop(entity_of_ordinal);
 
+    timer.end(BuildStage::GeometryScan, n);
+
     // ---- 9. the tiler: (morton, tessera_id) ascending, no further tiebreak (contracts
     // §2.6 r6) — `tessera_id` is computed here, BEFORE the sort (2026-07-30 fold, memo §6):
     // `priority = high16(tessera_id)` is now the sort key, so the identity must exist before
@@ -415,6 +433,8 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
         });
     }
     rows.sort_unstable_by(|a, b| a.cmp(b, &args.identity_key, args.shard_id));
+
+    timer.end(BuildStage::TilerSort, n);
 
     // ---- 10. the segment -------------------------------------------------------------
     let morton_path = segment_dir.join("morton.u32");
@@ -466,8 +486,10 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
     fsync_file(&columns_path)?;
     fsync_file(&morton_path)?;
 
+    timer.end(BuildStage::SegmentWrite, n);
+
     // ---- 11. manifests ---------------------------------------------------------------
-    write_manifests(
+    let report = write_manifests(
         args,
         &BundleFiles {
             dict_paths,
@@ -486,7 +508,11 @@ pub(crate) fn build(args: &BuildArgs) -> Result<BuildReport> {
         n,
         term_count,
         pair_count,
-    )
+    )?;
+    // Reported in bytes, not rows: this stage re-reads and SHA-256s every byte the build wrote,
+    // so it scales with bundle size rather than with item count.
+    timer.end(BuildStage::Manifests, report.bundle_bytes);
+    Ok(report)
 }
 
 /// The selected source ids, in file order, in an exactly-sized allocation.
