@@ -20,7 +20,7 @@ use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
-use tessera_authz::{Dict, FragmentCache, FrozenFragment, PostingsReader};
+use tessera_authz::{Dict, FragmentCache, FragmentCacheError, FrozenFragment, PostingsReader};
 use tessera_lifecycle::alloc::{high_water_from, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::overlay::replay;
@@ -174,6 +174,14 @@ pub enum EngineError {
     /// server's fail-closed 500 arm, which is honest — never fail-open — but not yet the
     /// retryable signal it should be.
     ProjectionBuilding,
+    /// D-G (task 2 of the concurrency workstream, lifecycle §3.3): this credential's mask fragment
+    /// (keyed by the canonical `(bundle_identity, auth_plugin_hash, satisfied terms)` key, never
+    /// `auth_data_hash` — see `tessera_authz::FragmentCache::get_or_build`'s doc) is being built by
+    /// a concurrent `authorise` call right now. Same non-blocking-waiters rule and the same
+    /// transitional mapping as [`Self::ProjectionBuilding`]: this call does not wait, the caller
+    /// retries, and the server takes the fail-closed 500 arm until a later task wires HTTP 429 +
+    /// `Retry-After`.
+    FragmentBuilding,
 }
 
 impl std::fmt::Display for EngineError {
@@ -207,6 +215,11 @@ impl std::fmt::Display for EngineError {
             EngineError::ProjectionBuilding => write!(
                 f,
                 "this session's row projection is being built by a concurrent request; retry \
+                 shortly"
+            ),
+            EngineError::FragmentBuilding => write!(
+                f,
+                "this credential's mask fragment is being built by a concurrent request; retry \
                  shortly"
             ),
         }
@@ -471,6 +484,11 @@ impl Engine {
     /// simply drop out, never an error) → `FragmentCache::get_or_build`. A zero-term credential
     /// (or one whose every descriptor is unknown) is a valid, zero-visibility session (R5) — not
     /// an error.
+    ///
+    /// D-G (lifecycle §3.3): `FragmentCache::get_or_build` single-flights concurrent same-key
+    /// misses and doubles as an in-memory cache for warm hits (see its doc); a concurrent
+    /// in-flight build on this exact canonical key surfaces here as `Err(EngineError::
+    /// FragmentBuilding)` rather than blocking.
     pub fn authorise(&self, auth_data: &[u8]) -> Result<Session> {
         let auth_terms = self
             .plugin
@@ -499,7 +517,10 @@ impl Engine {
                 &self.postings,
                 generation.watermark,
             )
-            .map_err(EngineError::Io)?;
+            .map_err(|e| match e {
+                FragmentCacheError::Building => EngineError::FragmentBuilding,
+                FragmentCacheError::Io(io_err) => EngineError::Io(io_err),
+            })?;
 
         let mut token_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut token_bytes);

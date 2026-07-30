@@ -6,12 +6,13 @@
 //! bug — Reference Sheet R4, brief §Task 6).
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use tempfile::TempDir;
 
-use tessera_authz::{build_fragment, write_postings, FragmentCache};
+use tessera_authz::{build_fragment, write_postings, FragmentCache, FragmentCacheError};
 use tessera_types::TermId;
 
 const UNIVERSE: u32 = 100_000;
@@ -292,4 +293,163 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
             "the rebuilt fragment must still be the correct one"
         );
     }
+}
+
+/// D-G / lifecycle §3.3: concurrent same-key misses must build exactly once, not once per
+/// thread. Every thread races through `get_or_build` on the same canonical key from a cold
+/// cache; a losing arrival gets `FragmentCacheError::Building` (never blocks — the
+/// non-blocking-waiters rule) and retries itself until it observes the one real build's result.
+/// Deterministic despite the retry loop: no sleeps, and a bounded attempt count turns a D-G
+/// regression (e.g. a arrival stuck forever seeing `Building`) into a fast, clear failure rather
+/// than a hang.
+#[test]
+fn concurrent_cold_builds_single_flight_to_one_real_build() {
+    let corpus_dir = TempDir::new().unwrap();
+    let (path, _per_term) = write_random_postings(corpus_dir.path(), 41, 20);
+    let reader = Arc::new(tessera_authz::PostingsReader::open(&path, false).unwrap());
+
+    let cache_dir = TempDir::new().unwrap();
+    let cache = Arc::new(FragmentCache::new(cache_dir.path(), [1u8; 32], [2u8; 32]));
+    let terms: Vec<TermId> = (0..20u32).map(TermId::new).collect();
+    let auth_data_hash = [9u8; 32];
+
+    const THREADS: usize = 8;
+    let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let cache = Arc::clone(&cache);
+            let reader = Arc::clone(&reader);
+            let terms = terms.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let mut attempts = 0u32;
+                loop {
+                    attempts += 1;
+                    assert!(
+                        attempts < 1_000_000,
+                        "get_or_build never converged out of Building -- looks like a D-G \
+                         regression (a stuck waiter), not an ordinary race"
+                    );
+                    match cache.get_or_build(&terms, auth_data_hash, &reader, 7) {
+                        Ok(frozen) => return frozen,
+                        Err(FragmentCacheError::Building) => continue,
+                        Err(e) => panic!("unexpected error: {e}"),
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let results: Vec<Arc<tessera_authz::FrozenFragment>> =
+        handles.into_iter().map(|h| h.join().unwrap()).collect();
+    for r in &results {
+        assert!(
+            Arc::ptr_eq(&results[0], r),
+            "every thread must end up with the same Arc<FrozenFragment>, not independent builds"
+        );
+    }
+    assert_eq!(
+        cache.rebuild_count(),
+        1,
+        "lifecycle §3.3: concurrent same-key misses must build once, not once per racing thread"
+    );
+}
+
+/// The `Ready` slot doubles as the in-memory cache (D-G): a warm hit must do no file IO at all.
+/// Proven by deleting the on-disk `.frag`/`.meta` pair after warm-up — if the second call touched
+/// disk at all it would find nothing there, fall through to a rebuild, and `rebuild_count` would
+/// climb to 2 (the postings reader is still perfectly valid, so a rebuild would still succeed,
+/// just wastefully); instead it must stay at 1, and the returned `Arc` must be the identical
+/// warm-up instance.
+#[test]
+fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
+    let corpus_dir = TempDir::new().unwrap();
+    let (path, per_term) = write_random_postings(corpus_dir.path(), 51, 6);
+    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+
+    let cache_dir = TempDir::new().unwrap();
+    let cache = FragmentCache::new(cache_dir.path(), [3u8; 32], [4u8; 32]);
+    let terms: Vec<TermId> = (0..6u32).map(TermId::new).collect();
+    let auth_data_hash = [5u8; 32];
+
+    let mut expected: HashSet<u32> = HashSet::new();
+    for t in &terms {
+        expected.extend(per_term[t.raw() as usize].iter().copied());
+    }
+
+    let first = cache
+        .get_or_build(&terms, auth_data_hash, &reader, 11)
+        .unwrap();
+    assert_eq!(cache.rebuild_count(), 1);
+
+    // Poison the backing files: remove every file the cache directory holds.
+    for entry in std::fs::read_dir(cache_dir.path()).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+
+    let second = cache
+        .get_or_build(&terms, auth_data_hash, &reader, 11)
+        .expect("a warm in-memory hit must succeed even with the backing files gone");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "warm hit must return the same in-memory Arc, not attempt to reopen (now-missing) disk \
+         state"
+    );
+    assert_eq!(
+        cache.rebuild_count(),
+        1,
+        "warm hit must not touch the filesystem at all, so it must not trigger a rebuild either"
+    );
+    let got: HashSet<u32> = second.view().iter().collect();
+    assert_eq!(got, expected);
+}
+
+/// Fail-closed (I13): a build failure must never cache the error and must never leave a wedged
+/// `Building` entry. Here the failure is a real IO error (the cache directory's parent is a
+/// plain file, so `create_dir_all` fails with `ENOTDIR`) rather than an injected panic, exercising
+/// the same drop-guard path through its `Err` arm. After "repairing" the filesystem (turning the
+/// blocking file into a real directory) a retry with the same `FragmentCache` instance succeeds.
+#[test]
+fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
+    let corpus_dir = TempDir::new().unwrap();
+    let (path, per_term) = write_random_postings(corpus_dir.path(), 61, 4);
+    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+
+    let root = TempDir::new().unwrap();
+    let blocker_path = root.path().join("blocker");
+    std::fs::write(&blocker_path, b"not a directory").unwrap();
+    let cache_dir = blocker_path.join("cache");
+
+    let cache = FragmentCache::new(&cache_dir, [6u8; 32], [7u8; 32]);
+    let terms: Vec<TermId> = (0..4u32).map(TermId::new).collect();
+    let auth_data_hash = [8u8; 32];
+
+    let result = cache.get_or_build(&terms, auth_data_hash, &reader, 1);
+    assert!(
+        matches!(result, Err(FragmentCacheError::Io(_))),
+        "expected an Io error from a cache dir whose parent is a plain file, got {:?}",
+        result.is_ok()
+    );
+    assert_eq!(
+        cache.slot_count(),
+        0,
+        "a failed build must not leave a wedged Building entry, nor cache the Err (I13)"
+    );
+    assert_eq!(cache.rebuild_count(), 0);
+
+    // Repair: replace the blocking file with a real directory so `create_dir_all` can succeed.
+    std::fs::remove_file(&blocker_path).unwrap();
+    std::fs::create_dir_all(&blocker_path).unwrap();
+
+    let mut expected: HashSet<u32> = HashSet::new();
+    for t in &terms {
+        expected.extend(per_term[t.raw() as usize].iter().copied());
+    }
+    let frozen = cache
+        .get_or_build(&terms, auth_data_hash, &reader, 1)
+        .expect("retry after repair must succeed");
+    assert_eq!(cache.rebuild_count(), 1);
+    let got: HashSet<u32> = frozen.view().iter().collect();
+    assert_eq!(got, expected);
 }

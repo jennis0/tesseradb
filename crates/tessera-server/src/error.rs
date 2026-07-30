@@ -113,6 +113,11 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // than left to fall into `other` below, so this transitional state is visible at the
         // call site rather than silently inherited from the catch-all.
         building @ EngineError::ProjectionBuilding => ApiError::FailClosed(building.to_string()),
+        // D-G (task 2 of the concurrency workstream, lifecycle §3.3): the fragment-cache twin of
+        // the arm above — a concurrent `authorise` call is already building this credential's
+        // mask fragment. Same transitional rule: named explicitly, fail-closed 500 today, HTTP
+        // 429 + `Retry-After` once a later task wires that mapping.
+        building @ EngineError::FragmentBuilding => ApiError::FailClosed(building.to_string()),
         other => ApiError::FailClosed(other.to_string()),
     }
 }
@@ -187,6 +192,16 @@ mod tests {
     #[test]
     fn map_engine_error_takes_projection_building_to_the_fail_closed_arm() {
         let (status, code, _) = map_engine_error(EngineError::ProjectionBuilding).parts();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(code, "fail-closed");
+    }
+
+    /// D-G, transitional (task 2): `FragmentBuilding` is explicitly named in `map_engine_error`'s
+    /// match (not caught only by the wildcard arm) and takes the same fail-closed 500 arm as
+    /// `ProjectionBuilding`, pending the later task that maps both to 429 + `Retry-After`.
+    #[test]
+    fn map_engine_error_takes_fragment_building_to_the_fail_closed_arm() {
+        let (status, code, _) = map_engine_error(EngineError::FragmentBuilding).parts();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(code, "fail-closed");
     }
