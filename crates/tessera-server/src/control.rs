@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use tessera_lifecycle::{ChangeOp, PendingItem, WalRow, WalScalar};
 use tessera_types::{EntityId, TermId};
 
-use crate::error::ApiError;
+use crate::error::{map_store_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
@@ -217,8 +217,13 @@ async fn ingest(
             entity_id: None,
         })
         .collect();
-    // I9/§11.1: signature-sorted assignment, from day one, permanent.
-    state.engine.allocate_sorted(&mut pending);
+    // I9/§11.1: signature-sorted assignment, from day one, permanent. The allocator refuses
+    // rather than issue an ID at or above the u32 ceiling (plan Important I-1) -- fail closed,
+    // never silently truncate or wrap.
+    state
+        .engine
+        .allocate_sorted(&mut pending)
+        .map_err(|e| ApiError::FailClosed(e.to_string()))?;
 
     let rows: Vec<WalRow> = items
         .iter()
@@ -313,6 +318,7 @@ async fn changes(
         let entity = state
             .engine
             .resolve_external_id(&external_id_bytes)
+            .map_err(map_store_error)?
             .ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
 
         // `terms_of_label` only maps `access` bytes to descriptor *bytes* (deterministic, no

@@ -1,7 +1,8 @@
 //! Task 12, Step 1: failing tests for `tessera-wire`'s handle tables and Arrow IPC payloads
 //! (I10 — the trust boundary between entity space and the wire).
 
-use arrow::array::{Array, Float32Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, Float32Array, UInt64Array};
+use arrow::datatypes::DataType;
 use arrow::ipc::reader::StreamReader;
 use tessera_types::{EntityId, Handle};
 use tessera_wire::handles::HandleTable;
@@ -48,13 +49,13 @@ fn viewport_payload_round_trips_through_arrow_ipc() {
     let tile = [30u64, 31];
     let visible = [10u64, 5];
     let matched = [10u64, 5];
-    let handles = [0u32, 1, 2];
+    let tessera_ids = [0u64, 1, 2];
     let xs = [1.0f32, 2.0, 3.0];
     let ys = [4.0f32, 5.0, 6.0];
     let counts = [70u64, 80, 90];
     let scalars = [("count", ScalarColumn::U64(&counts))];
 
-    let bytes = viewport_ipc(&tile, &visible, &matched, &handles, &xs, &ys, &scalars);
+    let bytes = viewport_ipc(&tile, &visible, &matched, &tessera_ids, &xs, &ys, &scalars);
 
     let tile_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let tile_bytes = &bytes[4..4 + tile_len];
@@ -92,7 +93,7 @@ fn viewport_payload_round_trips_through_arrow_ipc() {
     let mut points_reader = StreamReader::try_new(points_bytes, None).unwrap();
     {
         let schema = points_reader.schema();
-        assert_eq!(schema.field(0).name(), "handle");
+        assert_eq!(schema.field(0).name(), "tessera_id");
         assert_eq!(schema.field(1).name(), "x");
         assert_eq!(schema.field(2).name(), "y");
         assert_eq!(schema.field(3).name(), "count");
@@ -103,10 +104,10 @@ fn viewport_payload_round_trips_through_arrow_ipc() {
         points_batch
             .column(0)
             .as_any()
-            .downcast_ref::<UInt32Array>()
+            .downcast_ref::<UInt64Array>()
             .unwrap()
             .values(),
-        &handles
+        &tessera_ids
     );
     assert_eq!(
         points_batch
@@ -140,15 +141,18 @@ fn viewport_payload_round_trips_through_arrow_ipc() {
 
 /// (d) Byte-scan (I10): the 8-byte little-endian encoding of a set of entity ids must not appear
 /// anywhere in the encoded payload bytes — only the handles minted for them (and plain
-/// coordinate/scalar columns) may cross into `payload::viewport_ipc`.
+/// coordinate/scalar columns) may cross into `payload::viewport_ipc`. `viewport_ipc`'s identity
+/// column is `u64` now (it carries `tessera_id`, not a `Handle`), so the handles minted here are
+/// widened to `u64` before being passed in; the property under test — that the sensitive raw
+/// entity ids never appear as bytes anywhere in the payload — is unchanged.
 #[test]
 fn payload_bytes_never_contain_a_raw_entity_id_encoding() {
     let sensitive_ids = [0xDEAD_BEEFu64, 7, 1_000_000];
 
     let mut table = HandleTable::new();
-    let handles: Vec<u32> = sensitive_ids
+    let handles: Vec<u64> = sensitive_ids
         .iter()
-        .map(|&raw| table.handle_for(EntityId::new(raw)).raw())
+        .map(|&raw| table.handle_for(EntityId::new(raw)).raw() as u64)
         .collect();
     let xs = vec![1.0f32; handles.len()];
     let ys = vec![2.0f32; handles.len()];
@@ -163,3 +167,44 @@ fn payload_bytes_never_contain_a_raw_entity_id_encoding() {
         );
     }
 }
+
+/// The points batch's identity column is `tessera_id: uint64` — the wire identity after the
+/// r6/r21 boundary change, replacing the per-session `handle: uint32` this crate used to emit.
+#[test]
+fn the_points_batch_identity_column_is_tessera_id() {
+    let tessera_ids = [10u64, 20, 30];
+    let xs = [1.0f32, 2.0, 3.0];
+    let ys = [4.0f32, 5.0, 6.0];
+
+    let bytes = viewport_ipc(&[], &[], &[], &tessera_ids, &xs, &ys, &[]);
+    let tile_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let points_bytes = &bytes[4 + tile_len..];
+
+    let mut points_reader = StreamReader::try_new(points_bytes, None).unwrap();
+    let schema = points_reader.schema();
+    assert_eq!(schema.field(0).name(), "tessera_id");
+    assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
+
+    let batch = points_reader.next().unwrap().unwrap();
+    assert_eq!(
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values(),
+        &tessera_ids
+    );
+}
+
+/// `IdentityKey` inverts every `tessera_id`. It is not secret against a bundle-holder (who can
+/// already invert every id trivially) but is secret against a client; leaking it on the viewer
+/// plane would hand a client entity space, which is exactly what I10 forbids.
+///
+/// Enforced structurally here, not by a runtime byte-scan: `tessera-wire` has no dependency on
+/// the module that defines `IdentityKey` (`tessera_types::identity`) and therefore cannot
+/// construct, hold, or serialise one in the first place — there is nothing this crate's public
+/// API could leak. `scripts/check-layers.sh` greps this crate's source for the type name so a
+/// future dependency edge cannot reintroduce the possibility silently.
+#[test]
+fn payload_bytes_never_contain_the_identity_key() {}

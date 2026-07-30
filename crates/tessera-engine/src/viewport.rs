@@ -81,6 +81,11 @@ pub struct EngineMeta {
     pub slices: Vec<(String, String)>,
     pub quantisation: Quantisation,
     pub declared_scalars: Vec<DeclaredScalar>,
+    /// The transport-identity epoch (contracts §2.2/§2.6 r6). `GET /v1/meta` reports this
+    /// verbatim as `identity_epoch`; `POST /v1/items/{tessera_id}` compares an optional
+    /// caller-supplied `epoch` against it. Never the identity **key** — that never leaves the
+    /// server, on any plane (design Appendix C, C17; I10).
+    pub identity_epoch: u32,
 }
 
 impl Engine {
@@ -99,6 +104,7 @@ impl Engine {
                 .collect(),
             quantisation: manifest.quantisation,
             declared_scalars: manifest.declared_scalars.clone(),
+            identity_epoch: manifest.identity.epoch,
         }
     }
 

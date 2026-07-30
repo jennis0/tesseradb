@@ -1,5 +1,5 @@
-//! The viewer plane (R5): `GET /v1/meta`, `POST /v1/viewport`, `POST /v1/items/{handle}`, plus
-//! `/healthz`/`/readyz`. Bearer auth is a session token (Task 11's `Session::token`).
+//! The viewer plane (R5): `GET /v1/meta`, `POST /v1/viewport`, `POST /v1/items/{tessera_id}`,
+//! plus `/healthz`/`/readyz`. Bearer auth is a session token (Task 11's `Session::token`).
 
 use std::sync::Arc;
 
@@ -9,12 +9,13 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use tessera_types::{Handle, PinId};
+use tessera_types::{PinId, TesseraId};
 use tessera_wire::{viewport_ipc, ScalarColumn};
 
-use crate::error::{map_engine_error, ApiError};
+use crate::error::{map_engine_error, map_store_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
@@ -22,7 +23,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/meta", get(meta))
         .route("/v1/viewport", post(viewport))
-        .route("/v1/items/{handle}", post(item))
+        .route("/v1/items/{tessera_id}", post(item))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .with_state(state)
@@ -77,6 +78,10 @@ async fn meta(
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
+        // contracts §2.2/§2.6 r6: the transport-identity epoch. The identity KEY never appears
+        // in any response, log line or metric label (I10, Appendix C C17) -- this is the epoch
+        // only, which is meaningless without the key and is what `POST /v1/items` checks against.
+        "identity_epoch": meta.identity_epoch,
         "slices": meta.slices.iter().map(|(id, name)| serde_json::json!({"id": id, "display_name": name})).collect::<Vec<_>>(),
         "quantisation": {
             "x_min": meta.quantisation.x_min,
@@ -136,19 +141,20 @@ async fn viewport(
         .viewport(&entry.session, &req.slice, req.zoom, req.bbox, k, pin)
         .map_err(map_engine_error)?;
 
-    let mut handles = entry.handles.lock();
     let n = out.points.len();
-    let mut point_handles = Vec::with_capacity(n);
+    let mut point_ids = Vec::with_capacity(n);
     let mut xs = Vec::with_capacity(n);
     let mut ys = Vec::with_capacity(n);
     for point in &out.points {
-        // I10: the entity id leaves `tessera-engine` here and is translated to a per-session
-        // opaque handle immediately — nothing downstream of this line ever sees it again.
-        point_handles.push(handles.handle_for(point.entity_id).raw());
+        // I10, strengthened (contracts r6): no entity id is available to leak here — the engine
+        // never gathers one on this path (see `tessera_engine::viewport::PointOut`'s doc). The
+        // wire identity is `tessera_id` directly, carried through unchanged; there is no
+        // per-session translation left to do (`tessera-wire`'s `HandleTable` is retained for
+        // Phase 3's node handles, not this path — see its module doc).
+        point_ids.push(point.tessera_id.raw());
         xs.push(point.x);
         ys.push(point.y);
     }
-    drop(handles);
 
     let meta = state.engine.meta();
     let scalar_names: Vec<String> = meta
@@ -170,7 +176,7 @@ async fn viewport(
         &tiles,
         &visible,
         &matched,
-        &point_handles,
+        &point_ids,
         &xs,
         &ys,
         &scalar_refs,
@@ -264,35 +270,78 @@ struct ItemReq {
     #[allow(dead_code)]
     #[serde(default)]
     pin: Option<PinDto>,
+    /// Optional (contracts §2.2/§2.6 r6, owner ruling): the durable identifier is `external_id`,
+    /// so a conforming consumer has no stale `tessera_id` to present in the first place, and
+    /// rotation/repartitioning are deliberate breaking changes rather than scheduled hygiene. A
+    /// caller that omits this accepts that a `tessera_id` from a past epoch may now name a
+    /// different item after a repartitioning.
+    #[serde(default)]
+    epoch: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
 struct ItemResp {
     scalars: Vec<serde_json::Value>,
+    /// Base64, present only when the item has a caller-supplied external id. This is the only
+    /// place a caller external id appears on the viewer plane (D4, D6) — the conformance
+    /// byte-scanner's viewer-plane sweep must be scoped to exclude this endpoint's response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    external_id: Option<String>,
 }
 
+/// `POST /v1/items/{tessera_id}`.
+///
+/// **The epoch check runs before inversion and is entity-independent** — identical work and an
+/// identical `409` for every presented `tessera_id`, so it opens no channel (contracts §2.2, C4).
+///
+/// **`404 unknown` is returned identically** for "no such id" and "exists but is not visible to
+/// this principal" (owner ruling; contracts §3.2): one `Ok(None)` arm, one `ApiError::Unknown`
+/// construction, no branch-dependent logging or metrics anywhere on this path — a second
+/// construction site with a different detail string, or a `tracing`/metric call inside only one
+/// of the two `None`-shaped cases, would be exactly the oracle this rule exists to prevent.
+///
+/// **The `Err` arm can never be reached by anything an attacker chooses.** `Engine::item` inverts
+/// `id` (a pure function, no I/O) and tests visibility in entity space — the *same* O(1) work for
+/// an id naming nothing and an id naming an invisible item (Critical C-5, closed not narrowed) —
+/// before it ever touches the external-ID sidecar. `StoreError` can therefore only be raised for
+/// an item already established visible, so a probing client can see a `500` only for an item it
+/// can already see; it can never use `500` vs `404` to learn whether an id exists. **A future
+/// edit that moves the sidecar read earlier than the visibility test would silently turn this
+/// status into a visibility oracle — don't.**
 async fn item(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    AxumPath(handle_raw): AxumPath<u32>,
-    Json(_req): Json<ItemReq>,
+    AxumPath(raw): AxumPath<u64>,
+    Json(req): Json<ItemReq>,
 ) -> Result<Json<ItemResp>, ApiError> {
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
     let entry = state.authenticated_session(token)?;
 
-    let handle = Handle::new(handle_raw);
-    let entity = entry
-        .handles
-        .lock()
-        .entity_of(handle)
-        .ok_or_else(|| ApiError::Unknown("unknown handle".to_string()))?;
+    // Checked HERE -- before inversion, and identically for every identifier, so it opens no
+    // channel (contracts §2.2). Entity-independent: this branch does not depend on `raw` at all.
+    if let Some(e) = req.epoch {
+        if e != state.engine.meta().identity_epoch {
+            return Err(ApiError::Conflict(
+                "stale identity epoch; re-resolve by external_id".to_string(),
+            ));
+        }
+    }
 
-    let scalars = state
-        .engine
-        .item(&entry.session, entity)
-        .ok_or_else(|| ApiError::Unknown("item not found or not visible".to_string()))?;
+    let item = match state.engine.item(&entry.session, TesseraId::new(raw)) {
+        // A corrupt or unreadable sidecar is a SERVER fault, not "no such item". `.ok().flatten()`
+        // here would serve a 200 with `external_id: null` and call a digest mismatch a missing
+        // field -- fail-open, and precisely what Task 8's typed errors exist to prevent (Critical
+        // N-3). See this function's doc for why this arm is unreachable by identifier choice.
+        Err(e) => return Err(map_store_error(e)),
+        // Owner ruling: identical 404 for "no such ID" and "exists but not visible". ONE arm, one
+        // message, no branch above it -- a second construction site with a different detail
+        // string would be the oracle this rule prevents.
+        Ok(None) => return Err(ApiError::Unknown("unknown".to_string())),
+        Ok(Some(item)) => item,
+    };
 
-    let scalars = scalars
+    let scalars = item
+        .scalars
         .into_iter()
         .map(|s| match s {
             tessera_engine::ScalarOut::U64(v) => serde_json::json!(v),
@@ -301,5 +350,12 @@ async fn item(
         })
         .collect();
 
-    Ok(Json(ItemResp { scalars }))
+    let external_id = item
+        .external_id
+        .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
+
+    Ok(Json(ItemResp {
+        scalars,
+        external_id,
+    }))
 }

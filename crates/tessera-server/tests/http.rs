@@ -23,10 +23,18 @@ use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
 use tessera_server::state::{AppState, SessionRegistry};
 use tessera_spatial::Extent;
+use tessera_types::IdentityKey;
 
 const N_ITEMS: u64 = 1_000;
 const SESSION_CREDENTIAL: &str = "session-secret";
 const OPERATOR_CREDENTIAL: &str = "operator-secret";
+/// Fixed test key, matching `tessera-build`'s own test fixtures — not sensitive, this repository
+/// contains no real deployment key.
+const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+
+fn test_key() -> IdentityKey {
+    IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
+}
 
 fn extent() -> Extent {
     Extent {
@@ -104,6 +112,10 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
         extent: extent(),
         slice_id: "s0".to_string(),
         limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
     };
     build(&args).expect("fixture build should succeed");
 }
@@ -193,12 +205,24 @@ async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value {
     resp.json().await.unwrap()
 }
 
+/// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no epoch).
+async fn post_item(server: &TestServer, token: &str, tessera_id: u64) -> reqwest::Response {
+    server
+        .client
+        .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
+        .bearer_auth(token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+}
+
 type TileRow = (u64, u64, u64);
-type PointRow = (u32, f32, f32);
+type PointRow = (u64, f32, f32);
 
 /// Decode the framed Arrow payload `tessera_wire::viewport_ipc` builds: a 4-byte LE length, the
 /// tile stream, then the points stream. Returns `(tiles, points)` where each tile is
-/// `(tile, visible, matched)` and each point is `(handle, x, y)`.
+/// `(tile, visible, matched)` and each point is `(tessera_id, x, y)`.
 fn decode_viewport(bytes: &[u8]) -> (Vec<TileRow>, Vec<PointRow>) {
     let tile_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let tile_bytes = &bytes[4..4 + tile_len];
@@ -232,10 +256,10 @@ fn decode_viewport(bytes: &[u8]) -> (Vec<TileRow>, Vec<PointRow>) {
     let reader = StreamReader::try_new(Cursor::new(points_bytes), None).unwrap();
     for batch in reader {
         let batch = batch.unwrap();
-        let handle = batch
+        let tessera_id = batch
             .column(0)
             .as_any()
-            .downcast_ref::<UInt32Array>()
+            .downcast_ref::<UInt64Array>()
             .unwrap();
         let x = batch
             .column(1)
@@ -248,7 +272,7 @@ fn decode_viewport(bytes: &[u8]) -> (Vec<TileRow>, Vec<PointRow>) {
             .downcast_ref::<Float32Array>()
             .unwrap();
         for i in 0..batch.num_rows() {
-            points.push((handle.value(i), x.value(i), y.value(i)));
+            points.push((tessera_id.value(i), x.value(i), y.value(i)));
         }
     }
 
@@ -324,6 +348,89 @@ async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
     assert_eq!(tiles[0].1, N_ITEMS, "every item carries term 0");
     assert_eq!(tiles[0].1, tiles[0].2, "matched == visible (no filters)");
     assert_eq!(points.len(), 5, "k=5 caps sampled points, not the count");
+}
+
+/// Owner ruling (contracts §3.2): `/v1/items` returns the identical `404` for "no such id" and
+/// "exists but is not visible to this principal" -- same status, same body, byte for byte. This
+/// test deliberately never learns which *external id* the invisible `tessera_id` names (that
+/// would require inverting the identity, which I10 forbids even to a test): it gets a genuinely
+/// existing id from session A's own viewport (everyone carries term "0") and finds one that
+/// session B -- authorised for term "1" only, so it sees strictly fewer items (`terms_of`'s
+/// multiples-of-3 subset) -- cannot see, entirely through the HTTP surface a client has.
+#[tokio::test]
+async fn i_item_404s_identically_for_unknown_and_invisible() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    // Session A: term "0" -- every item carries it, so A sees the whole bundle.
+    let auth_a = authorise(&server, &["0"]).await;
+    let token_a = auth_a["token"].as_str().unwrap();
+    // Session B: term "1" only -- `terms_of`'s multiples-of-3 subset, strictly fewer items.
+    let auth_b = authorise(&server, &["1"]).await;
+    let token_b = auth_b["token"].as_str().unwrap();
+
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token_a)
+        .json(&serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    assert!(
+        !points.is_empty(),
+        "session A's viewport must return some points to pick from"
+    );
+
+    // Find a tessera_id that is real (session A's own viewport returned it) but invisible to B.
+    let mut invisible_to_b = None;
+    for &(tessera_id, _, _) in &points {
+        let resp_b = post_item(&server, token_b, tessera_id).await;
+        if resp_b.status() == 404 {
+            invisible_to_b = Some(tessera_id);
+            break;
+        }
+    }
+    let invisible_to_b = invisible_to_b
+        .expect("the fixture's multiples-of-3 term split must leave something invisible to B");
+
+    // Sanity: A, which is the session that surfaced this id in its own viewport, can fetch it.
+    let resp_a = post_item(&server, token_a, invisible_to_b).await;
+    assert_eq!(
+        resp_a.status(),
+        200,
+        "session A must be able to fetch an id its own viewport just returned"
+    );
+
+    let unknown_to_everyone = 0xDEAD_BEEF_DEAD_BEEFu64;
+    let resp_unknown = post_item(&server, token_b, unknown_to_everyone).await;
+    let resp_invisible = post_item(&server, token_b, invisible_to_b).await;
+
+    assert_eq!(resp_unknown.status(), 404);
+    assert_eq!(resp_invisible.status(), 404);
+    assert_eq!(resp_unknown.status(), resp_invisible.status());
+
+    let unknown_body = resp_unknown.text().await.unwrap();
+    let invisible_body = resp_invisible.text().await.unwrap();
+    assert_eq!(
+        unknown_body, invisible_body,
+        "identical 404 required byte-for-byte -- any difference is an oracle for \"this id exists\""
+    );
 }
 
 #[tokio::test]
@@ -913,6 +1020,7 @@ fn concurrent_ingest_and_change_both_survive() {
     const SUPPRESS_SOURCE_ID: u64 = 3;
     let suppress_entity = engine
         .resolve_external_id(&external_id_of(SUPPRESS_SOURCE_ID))
+        .expect("resolve_external_id should not fail for a healthy bundle")
         .expect("fixture item must resolve");
 
     let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -988,7 +1096,9 @@ fn concurrent_ingest_and_change_both_survive() {
     // versa) would make this `None`.
     let new_external_id = external_id_of(N_ITEMS + 100);
     assert_eq!(
-        engine.resolve_external_id(&new_external_id),
+        engine
+            .resolve_external_id(&new_external_id)
+            .expect("resolve_external_id should not fail for a healthy bundle"),
         Some(tessera_types::EntityId::new(N_ITEMS + 100)),
         "the concurrent ingest must have survived — a lost update would drop it from the live \
          buffer/established state"

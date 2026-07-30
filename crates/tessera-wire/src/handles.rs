@@ -1,29 +1,35 @@
-//! Per-session handle tables — the I10 trust boundary.
+//! Per-session handle tables.
 //!
-//! `EntityId` never crosses to a viewer (design §4, I10): every point a session receives is
-//! addressed by an opaque, per-session [`Handle`] instead. [`HandleTable`] is the sole place in
-//! this crate — indeed, per the layer check (`scripts/check-layers.sh`), the sole place *outside*
-//! this module in the whole crate — permitted to import `EntityId`; `crate::payload` accepts
-//! `Handle` and plain columns exclusively.
+//! **Retired from the viewer plane by owner decision (2026-07-29; contracts §0.3
+//! deviation 8).** Handles existed because entity IDs could not cross the trust
+//! boundary and the gather had nothing else to show. `columns.arrow` now carries a
+//! `tessera_id` at the row — a keyed permutation of `(shard, entity)` that is
+//! order-free and invertible only inside the boundary — so the engine shows an
+//! identity that was always safe to show, and a point's identity is stable across
+//! sessions, which is what lets a client bookmark, share and reconcile it. I10 is not
+//! weakened by the retirement: it is what made the retirement possible, since after
+//! contracts r6 no request-path artifact stores an entity ID at all (see
+//! `tessera_engine::viewport::row_to_point`).
 //!
-//! A caller (`tessera-server`, Task 13) holds one `HandleTable` per session, typically behind a
-//! `parking_lot::Mutex` since a session's requests are not necessarily single-threaded; this
-//! module has no opinion on that locking and exposes plain `&mut self` methods.
+//! Kept, not deleted, because Phase 3's node handles (`/v1/labels` returns
+//! `node_handle`) are genuinely per-session and need exactly this machinery — and
+//! because deleting the type would delete the argument with it.
 //!
-//! **Sequential-mint leak rationale.** `handle_for` mints handles `0, 1, 2, …` in first-visit
-//! order within a session. That order is not free of information: it discloses the sequence in
-//! which distinct entities were first returned to *this* viewer across *their own* requests. But
-//! the viewer already observes that order directly — it is exactly the order in which their own
-//! viewport/pan/zoom calls surfaced those entities to them in the first place — so encoding it
-//! into the handle assignment discloses nothing beyond what the viewer's own request history
-//! already tells them. It does **not** disclose anything about *other* sessions (each table is
-//! independent, see the isolation test below), nor about entity IDs, entity-ID density, or
-//! insertion order in the underlying store. The one property this construction deliberately
-//! defers is SA §4.5's per-session **keyed permutation** encoding, which additionally hides
-//! within-session visit order from a viewer correlating handles across their own requests over
-//! time (e.g. to infer whether two viewport calls re-surfaced the same entity without it being
-//! obviously "the same handle again"); that hardening arrives with router/worker fan-out, not
-//! Phase 1's single-process walking skeleton.
+//! **Sequential-mint leak rationale** (preserved from the viewer-plane design this module
+//! originally served, and still the rationale a future Phase 3 caller inherits). `handle_for`
+//! mints handles `0, 1, 2, …` in first-visit order within a session. That order is not free of
+//! information: it discloses the sequence in which distinct entities were first returned to
+//! *this* viewer across *their own* requests. But the viewer already observes that order
+//! directly — it is exactly the order in which their own viewport/pan/zoom calls surfaced those
+//! entities to them in the first place — so encoding it into the handle assignment discloses
+//! nothing beyond what the viewer's own request history already tells them. It does **not**
+//! disclose anything about *other* sessions (each table is independent, see the isolation test
+//! below), nor about entity IDs, entity-ID density, or insertion order in the underlying store.
+//! The one property this construction deliberately defers is SA §4.5's per-session **keyed
+//! permutation** encoding, which additionally hides within-session visit order from a viewer
+//! correlating handles across their own requests over time (e.g. to infer whether two viewport
+//! calls re-surfaced the same entity without it being obviously "the same handle again"); that
+//! hardening arrives with router/worker fan-out, not Phase 1's single-process walking skeleton.
 
 use std::collections::HashMap;
 
@@ -34,6 +40,9 @@ use tessera_types::{EntityId, Handle};
 /// Handles are minted sequentially on first sight of an entity within *this* table and are
 /// stable for the table's lifetime; a fresh `HandleTable` (e.g. a new session) starts its
 /// numbering over, so the same entity gets an independent handle in each session (I10).
+// Phase 3: node handles (`/v1/labels`'s `node_handle`) are genuinely per-session and will
+// consume this type; until then nothing on the viewer plane constructs one.
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct HandleTable {
     entity_to_handle: HashMap<EntityId, Handle>,

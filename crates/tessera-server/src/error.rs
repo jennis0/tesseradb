@@ -96,3 +96,13 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         other => ApiError::FailClosed(other.to_string()),
     }
 }
+
+/// Map a `tessera-store` read failure to `500 fail-closed` — generic over the error type so this
+/// crate never names `StoreError` (Ruling B; `scripts/check-layers.sh` forbids a direct
+/// `tessera-server -> tessera-store` dependency edge, since the server is meant to see engine API
+/// types only). `Engine::item`/`Engine::resolve_external_id` surface `StoreError` only for a
+/// genuinely unreadable sidecar or bundle file — a server fault, never a shape an attacker can
+/// choose by picking an identifier (see each call site's doc for why).
+pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
+    ApiError::FailClosed(e.to_string())
+}
