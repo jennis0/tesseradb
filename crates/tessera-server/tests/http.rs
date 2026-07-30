@@ -1851,7 +1851,7 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
         let fields: Vec<&str> = text.split(',').collect();
         assert_eq!(
             fields.len(),
-            19,
+            22,
             "stage header field count is a contract with the bench harnesses: {text}"
         );
         for f in &fields {
@@ -1869,9 +1869,30 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
         assert_eq!(tiles_nonempty, 1, "zoom 0 is one tile");
         assert_eq!(sigma_visible, N_ITEMS, "every item carries term 0");
         assert_eq!(gathered, 5, "k=5");
+        // NOT re-asserted here. This test's job is the two gates and the no-identifier property;
+        // the counter's semantics belong to the engine-side canary, which uses a partial-coverage
+        // fixture so that both directions of the comparison are detectable. This session is
+        // full-coverage, where `sigma_visible == rows_in_ranges` and the comparison is half blind.
+        // Asserting it here anyway would read as coverage it does not provide.
+        assert!(
+            materialised > 0,
+            "the counter must reach the wire at all: {text}"
+        );
+
+        // The three fields appended for §7.2's θ anchor and §7.3's underlay. This request asks for
+        // no underlay, so both underlay fields must be zero — the default path must not pay for a
+        // feature it did not request.
+        let theta_anchor_ns: u64 = fields[19].parse().unwrap();
+        let underlay_ns: u64 = fields[20].parse().unwrap();
+        let underlay_cells: u64 = fields[21].parse().unwrap();
+        let _ = theta_anchor_ns; // a duration; only its presence and parseability are contractual
         assert_eq!(
-            materialised, N_ITEMS,
-            "F1 over the wire: selection materialises every visible row to return k"
+            underlay_ns, 0,
+            "no underlay was requested, so it must cost nothing"
+        );
+        assert_eq!(
+            underlay_cells, 0,
+            "no underlay was requested, so no cells were evaluated"
         );
     } else {
         assert!(

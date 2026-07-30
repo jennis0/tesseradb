@@ -489,6 +489,7 @@ impl Engine {
         // and because the served set is a `tessera_id` prefix, a small θ move perturbs only the
         // marks nearest the cut.
         let v_total = mask.visible_total();
+        probe.lap(|t| &mut t.theta_anchor_ns);
         let params = SelectParams {
             k_min: self.config.k_min,
             // The client may ask for less than the overplot ceiling; it may not ask for more.
@@ -523,23 +524,9 @@ impl Engine {
 
             let selected = Selection::of(&mask, segment, range.clone(), &params, visible);
             probe.lap(|t| &mut t.select_ns);
-            // The F1 memo asks that this counter stay alive as the regression detector for
-            // selection cost, and it does — but its MEANING changed with §7.2's density rule and
-            // the change is worth stating rather than leaving for a reader to infer from a number.
-            //
-            // Before, "materialised" counted rows copied into a `Vec` that the placeholder then
-            // discarded after `k` — pure waste, and the memo's Win 1 was to stop it. That waste is
-            // gone: `rows_in_range` returns a bitmap and nothing is copied.
-            //
-            // What remains is rows *visited*, and under the density rule that is `visible` by
-            // definition, not by defect: `C_θ` is a masked count over the whole tile, so the
-            // threshold clause cannot be evaluated without looking at every visible row. So this
-            // counter no longer converges on `points_gathered` after a fix — it converges on
-            // `sigma_visible`, and a reading of `materialised ≈ gathered` now means the serve-all
-            // branch took every tile, not that selection got cheaper. Reducing visits below
-            // `Σvisible` was the memo's Win 2, which needed the route chooser the owner has since
-            // ruled out.
-            probe.count(|t| &mut t.select_rows_materialised, visible);
+            // Counted by `Selection::of` itself, inside the loops that do the reading — not from
+            // `visible`, which would make the `visited == sigma_visible` cross-check a tautology.
+            probe.count(|t| &mut t.select_rows_visited, selected.rows_visited);
 
             tile_counts.push(TileCount {
                 tile: tile.prefix,
@@ -577,6 +564,14 @@ impl Engine {
                         sub_cells.push(SubCellCount { cell, count });
                     }
                 }
+                probe.lap(|t| &mut t.underlay_ns);
+                // Evaluated, not emitted: the gap between this and `sub_cells.len()` is the work
+                // spent discovering that a sub-cell was empty, which on a clustered corpus is most
+                // of it.
+                probe.count(
+                    |t| &mut t.underlay_cells_evaluated,
+                    1u64 << (2 * offset as u32),
+                );
             }
         }
 

@@ -140,7 +140,18 @@ pub struct SelectParams {
     /// is a `tessera_id` prefix, so computing at `min(k, k_max_marks)` and computing at
     /// `k_max_marks` then truncating to `k` give identical output. Doing it inside bounds the
     /// selection heap and the output gather. **It does not bound the count pass** — `C_θ` is a
-    /// masked count, so the tile's visible rows must be walked regardless.
+    /// masked count over the tile, and the direct-evaluation route implemented here reads every
+    /// visible row to obtain it.
+    ///
+    /// That is a property of *this route*, not of the definition, and the distinction is worth
+    /// keeping straight because the opposite claim is easy to make and wrong. Exact sub-Σvisible
+    /// evaluations exist: storage order is `(morton, tessera_id)`, so within a single leaf Morton
+    /// cell the identity column is **sorted** — one binary search finds where ids reach `P_d`, and
+    /// `C_θ` for that cell is a range cardinality over the mask, which is O(containers touched)
+    /// rather than O(rows). A coarser tile is a merge of `4^(16-d)` such runs, so the trick pays
+    /// where the runs are few or the tile is dense, and the scan wins where they are many. Phase 1
+    /// builds none of it, preferring the obviously-correct single pass (CLAUDE.md: audit before
+    /// performance); §7.2 records the trigger for revisiting.
     pub cap: usize,
     pub threshold: Threshold,
 }
@@ -194,6 +205,14 @@ fn serves_all_visible(params: &SelectParams, visible: u64) -> bool {
 pub struct Selection {
     /// Row indices, **ascending by the row's `tessera_id`** — not by row index.
     pub rows: Vec<u32>,
+    /// How many rows this call actually read, counted **inside** the loops that read them.
+    ///
+    /// Counted here rather than inferred by the caller, and that distinction is the whole value of
+    /// the field. An earlier version had the caller increment its stage counter from the tile's
+    /// `visible` count instead — which made the resulting `visited == sigma_visible` assertion a
+    /// tautology, since both sides came from the same variable and no behaviour of this function
+    /// fed either. A counter derived from the thing it is supposed to be watching watches nothing.
+    pub rows_visited: u64,
 }
 
 impl Selection {
@@ -213,12 +232,16 @@ impl Selection {
         // benches measure). Without this the general branch would run a full counting pass whose
         // result is discarded, and the count-only benchmark would stop measuring counting.
         if params.cap == 0 {
-            return Selection { rows: Vec::new() };
+            return Selection {
+                rows: Vec::new(),
+                rows_visited: 0,
+            };
         }
 
         let ids = segment.columns.tessera_id();
         let visible_rows = mask.rows_in_range(range);
 
+        let mut rows_visited: u64 = 0;
         let rows: Vec<u32> = if serves_all_visible(params, visible) {
             // Everything visible is served, so there is nothing to count and nothing to select —
             // only ordering. Decorate-sort-undecorate rather than `sort_unstable_by_key`: the latter
@@ -227,7 +250,10 @@ impl Selection {
             // ~1.4M lookups per viewport against ~150k.
             let mut decorated: Vec<(u64, u32)> = visible_rows
                 .iter()
-                .map(|row| (ids[row as usize], row))
+                .map(|row| {
+                    rows_visited += 1;
+                    (ids[row as usize], row)
+                })
                 .collect();
             decorated.sort_unstable();
             decorated.into_iter().map(|(_, row)| row).collect()
@@ -253,6 +279,7 @@ impl Selection {
             let heap_cap = params.cap.min(visible as usize).saturating_add(1);
             let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(heap_cap);
             for row in visible_rows.iter() {
+                rows_visited += 1;
                 let id = ids[row as usize];
                 if params.threshold.admits(id) {
                     c_theta += 1;
@@ -281,7 +308,7 @@ impl Selection {
              one row per entity (contracts §2.6), and the determinism of the whole selection rests \
              on that being true"
         );
-        Selection { rows }
+        Selection { rows, rows_visited }
     }
 }
 

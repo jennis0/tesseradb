@@ -70,6 +70,21 @@ impl Mode {
     }
 }
 
+/// The server's own defaults. A bench cell that does not sweep these must measure them, or it
+/// measures a deployment nobody runs. Keep in step with `tessera-server`'s `DEFAULT_*` constants.
+pub const DEFAULT_K_MAX_MARKS: usize = 500;
+pub const DEFAULT_THETA_TARGET: u64 = 16;
+
+/// Design §7.2's clause parameters to sweep. Grouped rather than passed loose because they are
+/// resolved together, default together, and are the two knobs whose effect on selection cost is
+/// independent of `k`.
+pub struct SelectionSweep<'a> {
+    /// The cap clause. One `Engine::open` per value.
+    pub k_max_marks: &'a [usize],
+    /// The θ anchor target. One `Engine::open` per value.
+    pub theta_targets: &'a [u64],
+}
+
 pub fn run(
     ctx: &Context,
     modes: &[String],
@@ -77,6 +92,7 @@ pub fn run(
     coverages: &[f64],
     zoom: u8,
     seed: u64,
+    selection: &SelectionSweep<'_>,
 ) -> Result<()> {
     let mut run = ctx.open("viewport")?;
 
@@ -107,163 +123,189 @@ pub fn run(
             .unwrap_or_else(|| "s0".to_string());
         drop(bundle);
 
-        for &coverage_target in coverages {
-            let (grant, coverage) = build_grant_to_coverage(
-                &stats,
-                &postings,
-                GrantShape::Random,
-                coverage_target,
-                fixture.scale,
-                seed,
-            )?;
-            if grant.terms.is_empty() {
-                continue;
-            }
+        // §7.2's clause parameters are resolved from `EngineConfig` at open, not per request, so
+        // sweeping them costs one `Engine::open` per combination — and `open` digest-verifies every
+        // byte of the bundle. Both lists therefore default to a single value (the server's own), so
+        // an ordinary run pays nothing; pass more than one only when the sweep is the point.
+        let selection_grid: Vec<(usize, u64)> = selection
+            .k_max_marks
+            .iter()
+            .copied()
+            .flat_map(|cap| {
+                selection
+                    .theta_targets
+                    .iter()
+                    .copied()
+                    .map(move |th| (cap, th))
+            })
+            .collect();
 
-            // One engine per (fixture, coverage). `Engine::open` digest-verifies every byte, so
-            // this is the expensive setup — never inside a timed loop.
-            let tmp = std::env::temp_dir().join(format!(
-                "tessera-bench-engine-{}-{}",
-                std::process::id(),
-                coverage_target
-            ));
-            let _ = std::fs::remove_dir_all(&tmp);
-            std::fs::create_dir_all(&tmp)?;
-            let engine = Engine::open(
-                &fixture.root,
-                &tmp.join("cache"),
-                &tmp.join("wal.log"),
-                Passthrough::new(),
-                EngineConfig {
-                    token_max_lifetime_secs: 3600,
-                    max_k: *ks.iter().max().unwrap_or(&200),
-                    // §7.2's selection constants, at the server's own defaults — a bench measuring
-                    // anything else measures a configuration nobody runs. Keep in step with
-                    // `tessera-server`'s DEFAULT_* constants.
-                    k_min: 2,
-                    k_max_marks: 500,
-                    theta_target_marks: 16,
-                    max_underlay_offset: 4,
-                    max_underlay_cells: 8192,
-                    max_tiles_per_request: 262_144,
-                },
-            )?;
-            let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;
+        for &(cap_marks, theta_target) in &selection_grid {
+            for &coverage_target in coverages {
+                let (grant, coverage) = build_grant_to_coverage(
+                    &stats,
+                    &postings,
+                    GrantShape::Random,
+                    coverage_target,
+                    fixture.scale,
+                    seed,
+                )?;
+                if grant.terms.is_empty() {
+                    continue;
+                }
 
-            for &mode in &modes {
-                let plan = if matches!(mode, Mode::Battery | Mode::CoverageSweep) {
-                    density_deciles(&engine, &session, &slice_id, extent_span, zoom, seed)?
-                } else {
-                    build_plan(mode, extent_span, zoom, seed)
-                };
-                if plan.is_empty() {
-                    eprintln!(
+                // One engine per (fixture, coverage). `Engine::open` digest-verifies every byte, so
+                // this is the expensive setup — never inside a timed loop.
+                let tmp = std::env::temp_dir().join(format!(
+                    "tessera-bench-engine-{}-{}",
+                    std::process::id(),
+                    coverage_target
+                ));
+                let _ = std::fs::remove_dir_all(&tmp);
+                std::fs::create_dir_all(&tmp)?;
+                let engine = Engine::open(
+                    &fixture.root,
+                    &tmp.join("cache"),
+                    &tmp.join("wal.log"),
+                    Passthrough::new(),
+                    EngineConfig {
+                        token_max_lifetime_secs: 3600,
+                        max_k: *ks.iter().max().unwrap_or(&200).max(&cap_marks),
+                        k_min: 2,
+                        k_max_marks: cap_marks,
+                        theta_target_marks: theta_target,
+                        max_underlay_offset: 4,
+                        max_underlay_cells: 8192,
+                        max_tiles_per_request: 262_144,
+                    },
+                )?;
+                let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;
+
+                for &mode in &modes {
+                    let plan = if matches!(mode, Mode::Battery | Mode::CoverageSweep) {
+                        density_deciles(&engine, &session, &slice_id, extent_span, zoom, seed)?
+                    } else {
+                        build_plan(mode, extent_span, zoom, seed)
+                    };
+                    if plan.is_empty() {
+                        eprintln!(
                         "viewport: no non-empty viewport found at zoom {zoom} for {}/{} cov{:.4} \
                          — skipping",
                         fixture.scale, fixture.label_set, coverage_target
                     );
-                    continue;
-                }
+                        continue;
+                    }
 
-                for &k in ks {
-                    // **The row-projection cache fill must not land in a sample.** The first
-                    // viewport of a session crosses entity space into row space over the whole
-                    // fragment; Phase 0 measured 8.8 s for a 69M-item mask and the 10^9 k-sweep
-                    // recorded a 9.46 s warm-up. Every existing harness excludes it and reports
-                    // it separately; so does this one.
-                    let warm = engine.viewport(
-                        &session,
-                        ViewportRequest::new(&slice_id, plan[0].0, plan[0].1, k),
-                    )?;
-                    let warmup_ns = warm.timings.total_ns;
-                    let built = warm.timings.row_projection_built;
-
-                    for (index, (vz, bbox)) in plan.iter().enumerate() {
-                        let cell_id = format!(
-                            "viewport/{}/{}/{}/cov{:.4}/k{}/z{}/v{}",
-                            fixture.scale,
-                            fixture.label_set,
-                            mode.name(),
-                            coverage_target,
-                            k,
-                            vz,
-                            index
-                        );
-                        if run.ledger.is_done(&cell_id) {
-                            run.skipped += 1;
-                            continue;
-                        }
-
-                        let mut last = None;
-                        let samples = crate::metrics::repeat(ctx.repeat, || {
-                            let out = engine
-                                .viewport(&session, ViewportRequest::new(&slice_id, *vz, *bbox, k))
-                                .expect("viewport");
-                            let t = out.timings;
-                            last = Some(t);
-                            out
-                        });
-                        let Some(t) = last else { continue };
-
-                        let work = Work {
-                            containers: 0, // filled below from the engine's own counters
-                            mask_cardinality: 0,
-                            coverage,
-                            run_ratio: 0.0,
-                            tiles_resolved: t.tiles_resolved,
-                            tiles_nonempty: t.tiles_nonempty,
-                            sigma_visible: t.sigma_visible,
-                            rows_in_ranges: t.rows_in_ranges,
-                            rows_materialised: t.select_rows_materialised,
-                            points_gathered: t.points_gathered,
-                            pages_touched: 0,
-                            bytes_touched: 0,
-                            degenerate: coverage >= 0.999,
-                        };
-
-                        let mut flags = Vec::new();
-                        if built {
-                            flags.push("row_projection_built_in_warmup".to_string());
-                        }
-                        // F1, reported per cell rather than only in the canary test: when
-                        // selection materialises far more rows than it returns, the selection
-                        // path is O(Sigma-visible) and design §10.4's prescription is unapplied.
-                        if t.select_rows_materialised > t.points_gathered.saturating_mul(4)
-                            && t.points_gathered > 0
-                        {
-                            flags.push(format!(
-                                "selection_overdraw={}x",
-                                t.select_rows_materialised / t.points_gathered.max(1)
-                            ));
-                        }
-
-                        run.emit(
-                            cell_id,
-                            fixture,
-                            serde_json::json!({
-                                "mode": mode.name(),
-                                "k": k,
-                                "zoom": vz,
-                                "bbox": bbox,
-                                "viewport_index": index,
-                                "coverage_target": coverage_target,
-                                "coverage_actual": coverage,
-                                "w": grant.terms.len(),
-                                "warmup_ns": warmup_ns,
-                                // C4's numerator: rows scanned this principal cannot see.
-                                "unauthorised_rows_scanned":
-                                    t.rows_in_ranges.saturating_sub(t.sigma_visible),
-                                "seed": seed,
-                            }),
-                            work,
-                            samples,
-                            Some(Stages::from_engine(&t, run.clock_lap_ns)),
-                            flags,
+                    for &k in ks {
+                        // **The row-projection cache fill must not land in a sample.** The first
+                        // viewport of a session crosses entity space into row space over the whole
+                        // fragment; Phase 0 measured 8.8 s for a 69M-item mask and the 10^9 k-sweep
+                        // recorded a 9.46 s warm-up. Every existing harness excludes it and reports
+                        // it separately; so does this one.
+                        let warm = engine.viewport(
+                            &session,
+                            ViewportRequest::new(&slice_id, plan[0].0, plan[0].1, k),
                         )?;
+                        let warmup_ns = warm.timings.total_ns;
+                        let built = warm.timings.row_projection_built;
+
+                        for (index, (vz, bbox)) in plan.iter().enumerate() {
+                            let cell_id = format!(
+                                "viewport/{}/{}/{}/cov{:.4}/k{}/z{}/v{}",
+                                fixture.scale,
+                                fixture.label_set,
+                                mode.name(),
+                                coverage_target,
+                                k,
+                                vz,
+                                index
+                            );
+                            if run.ledger.is_done(&cell_id) {
+                                run.skipped += 1;
+                                continue;
+                            }
+
+                            let mut last = None;
+                            let samples = crate::metrics::repeat(ctx.repeat, || {
+                                let out = engine
+                                    .viewport(
+                                        &session,
+                                        ViewportRequest::new(&slice_id, *vz, *bbox, k),
+                                    )
+                                    .expect("viewport");
+                                let t = out.timings;
+                                last = Some(t);
+                                out
+                            });
+                            let Some(t) = last else { continue };
+
+                            let work = Work {
+                                containers: 0, // filled below from the engine's own counters
+                                mask_cardinality: 0,
+                                coverage,
+                                run_ratio: 0.0,
+                                tiles_resolved: t.tiles_resolved,
+                                tiles_nonempty: t.tiles_nonempty,
+                                sigma_visible: t.sigma_visible,
+                                rows_in_ranges: t.rows_in_ranges,
+                                rows_materialised: t.select_rows_visited,
+                                underlay_cells_evaluated: t.underlay_cells_evaluated,
+                                points_gathered: t.points_gathered,
+                                pages_touched: 0,
+                                bytes_touched: 0,
+                                degenerate: coverage >= 0.999,
+                            };
+
+                            let mut flags = Vec::new();
+                            if built {
+                                flags.push("row_projection_built_in_warmup".to_string());
+                            }
+                            // F1, reported per cell rather than only in the canary test: when
+                            // selection materialises far more rows than it returns, the selection
+                            // path is O(Sigma-visible) and design §10.4's prescription is unapplied.
+                            if t.select_rows_visited > t.points_gathered.saturating_mul(4)
+                                && t.points_gathered > 0
+                            {
+                                flags.push(format!(
+                                    "selection_overdraw={}x",
+                                    t.select_rows_visited / t.points_gathered.max(1)
+                                ));
+                            }
+
+                            run.emit(
+                                cell_id,
+                                fixture,
+                                serde_json::json!({
+                                    "mode": mode.name(),
+                                    "k": k,
+                                    "zoom": vz,
+                                    "bbox": bbox,
+                                    "viewport_index": index,
+                                    "coverage_target": coverage_target,
+                                    "coverage_actual": coverage,
+                                    // §7.2's clause parameters. Selection cost depends on these and not
+                                    // only on `k`: `k_max_marks` bounds the heap and the gather, while
+                                    // `theta_target_marks` decides how many tiles take the serve-all
+                                    // branch rather than counting and selecting.
+                                    "k_max_marks": cap_marks,
+                                    "theta_target_marks": theta_target,
+                                    "w": grant.terms.len(),
+                                    "warmup_ns": warmup_ns,
+                                    // C4's numerator: rows scanned this principal cannot see.
+                                    "unauthorised_rows_scanned":
+                                        t.rows_in_ranges.saturating_sub(t.sigma_visible),
+                                    "seed": seed,
+                                }),
+                                work,
+                                samples,
+                                Some(Stages::from_engine(&t, run.clock_lap_ns)),
+                                flags,
+                            )?;
+                        }
                     }
                 }
+                let _ = std::fs::remove_dir_all(&tmp);
             }
-            let _ = std::fs::remove_dir_all(&tmp);
         }
     }
 

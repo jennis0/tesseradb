@@ -46,17 +46,33 @@ pub struct StageTimings {
     pub row_projection_ns: u64,
     /// `compose()` — the I1 effective-mask composition. Cost is linear in overlay + buffer size.
     pub compose_ns: u64,
+    /// `EffectiveMask::visible_total()` — resolving §7.2's θ anchor, once per request.
+    ///
+    /// Separated from `compose_ns` because the claim made for it is specific and worth holding to
+    /// account: the anchor is advertised as O(containers in the overlay diffs), since `base`'s
+    /// cardinality is memoised on the immutable projection and only the diffs are counted. If this
+    /// ever tracks `sigma_visible` or the projection's size, that memoisation has been lost and the
+    /// anchor has quietly become a per-viewport scan.
+    pub theta_anchor_ns: u64,
     /// `tiles_for_bbox` — pure geometry, no data touched.
     pub tiles_for_bbox_ns: u64,
     /// `tile_ranges` binary searches, summed over tiles.
     pub tile_ranges_ns: u64,
     /// `EffectiveMask::count_range`, summed over tiles. The count loop.
     pub count_ns: u64,
-    /// `EffectiveMask::iter_range`, summed over tiles — the eager bitmap work and materialisation
-    /// that produces the row set the sampler then truncates to `k`.
+    /// §7.2's selection, summed over tiles: `rows_in_range`'s bitmap work plus the threshold count
+    /// and the bounded selection over it.
     pub select_ns: u64,
     /// The per-row column gather (`row_to_point`), summed over tiles.
     pub gather_ns: u64,
+    /// Design §7.3's density underlay: the sub-cell `count_range` calls, summed over tiles. Zero
+    /// when the request did not ask for the underlay, which is the default.
+    ///
+    /// A cost centre with no other visibility, and one whose shape differs from every other stage
+    /// here: it is `tiles × 4^offset` range-cardinality calls, so it grows with a *request
+    /// parameter* rather than with the corpus or the viewer's coverage. That is why it is capped
+    /// (`max_underlay_cells`) and why the cap needs a number behind it rather than a guess.
+    pub underlay_ns: u64,
     /// Whole-request wall time inside `Engine::viewport`.
     pub total_ns: u64,
 
@@ -75,17 +91,33 @@ pub struct StageTimings {
     /// `rows_in_ranges - sigma_visible` is C4's numerator: rows scanned that this principal
     /// cannot see, which is the correlate the leak register says to quantify.
     pub rows_in_ranges: u64,
-    /// Σ over tiles of the row count `iter_range` actually materialised.
+    /// Σ over tiles of the rows selection actually **read**, counted inside the loops that read
+    /// them (`Selection::rows_visited`).
     ///
-    /// **This is the field that decides F1.** `sample_tile` takes `k` rows per tile, so a sampler
-    /// whose cost is O(tiles × k) would leave this at roughly `tiles_nonempty × k`. If instead it
-    /// tracks `rows_in_ranges`, the selection path is paying O(Σvisible) — materialising every
-    /// visible row in the range and discarding all but `k` — and design §10.4's prescription
-    /// (`roaring_bitmap_range_uint32_array` into a k-sized buffer; `rank`/`select` for positioned
-    /// access) is unimplemented.
-    pub select_rows_materialised: u64,
+    /// Renamed from `select_rows_materialised`: nothing is materialised any more — `rows_in_range`
+    /// returns a bitmap — so the old name described a `Vec` that no longer exists.
+    ///
+    /// **It must be an observation of the selection path, never a restatement of another counter.**
+    /// A version of this briefly took its value from the caller's `visible`, which made the natural
+    /// `visited == sigma_visible` assertion a tautology: both sides came from one variable and no
+    /// behaviour of selection reached either. Compare it against `sigma_visible` to detect an early
+    /// exit or a prefix sample (fewer) or a walk of the raw row range rather than the mask (more) —
+    /// and only where the fixture makes `sigma_visible < rows_in_ranges`, or the second direction is
+    /// structurally invisible.
+    ///
+    /// It pins the **implemented route**, not the definition. Design §7.2 admits exact routes that
+    /// visit fewer than Σvisible rows — within a leaf Morton cell the `tessera_id` column is sorted,
+    /// so `C_θ` there is a binary search plus a range cardinality — and Phase 1 declines to build
+    /// them, preferring the obviously-correct scan. If one ever lands, revise this alongside the
+    /// differential oracle rather than deleting it.
+    pub select_rows_visited: u64,
     /// Points actually returned.
     pub points_gathered: u64,
+    /// Sub-cells *evaluated* for the underlay — `tiles_nonempty × 4^offset`, not the number
+    /// emitted. The two differ by however many sub-cells were empty, and that gap is the useful
+    /// number: it is the work spent discovering emptiness, which on a clustered corpus is most of
+    /// it. Compare against `ViewportOut::sub_cells.len()` for the emitted count.
+    pub underlay_cells_evaluated: u64,
     /// Number of clock reads taken. Multiply by the per-lap cost from `tessera-bench calibrate`
     /// to get the perturbation this instrumentation itself introduced, and subtract it honestly
     /// rather than pretending it is zero.
@@ -103,9 +135,11 @@ impl StageTimings {
             + self.compose_ns
             + self.tiles_for_bbox_ns
             + self.tile_ranges_ns
+            + self.theta_anchor_ns
             + self.count_ns
             + self.select_ns
-            + self.gather_ns;
+            + self.gather_ns
+            + self.underlay_ns;
         self.total_ns.saturating_sub(named)
     }
 }

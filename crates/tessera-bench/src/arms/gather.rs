@@ -331,6 +331,7 @@ pub fn run(
                                 sigma_visible: visible.len() as u64,
                                 rows_in_ranges: rows_in_range as u64,
                                 rows_materialised: visible.len() as u64,
+                                underlay_cells_evaluated: 0,
                                 points_gathered: selection.len() as u64,
                                 pages_touched: pages,
                                 bytes_touched: bytes,

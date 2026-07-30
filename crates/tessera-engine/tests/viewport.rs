@@ -1702,28 +1702,37 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
     }
 }
 
-/// **The F1 canary, kept alive and re-pointed.**
+/// **The F1 canary — repaired, having been briefly worthless.**
 ///
-/// Its origin: `docs/design-memos/2026-07-30-f1-selection-overdraw.md` found that the retired
-/// placeholder sampler asked `iter_range` for a tile's visible rows and kept the first `k` — and
-/// that `iter_range` was *eager*, so every visible row was copied into a `Vec<u32>` and all but `k`
-/// discarded. At 10⁹ that was ~100 MB allocated per request. This test asserted the waste as an
-/// equality so it could not drift unnoticed, and its own message asked whoever fixed it to re-point
-/// the assertion rather than delete the test.
+/// Origin: `docs/design-memos/2026-07-30-f1-selection-overdraw.md`. The retired placeholder sampler
+/// asked `iter_range` for a tile's visible rows and kept the first `k`, and `iter_range` was eager —
+/// so every visible row was copied into a `Vec<u32>` and all but `k` discarded, ~100 MB per request
+/// at 10⁹. The memo asserted that waste as an equality and asked whoever fixed it to re-point the
+/// test rather than delete it.
 ///
-/// **Win 1 is done and the assertion still holds — for a different reason, which is the point.**
-/// `rows_in_range` now returns a bitmap and nothing is copied, so the *allocation* is gone. But
-/// §7.2's density rule made the *visit* count inherent rather than wasteful: `C_θ` is a masked count
-/// over the whole tile, so the threshold clause cannot be evaluated without looking at every visible
-/// row. `select_rows_materialised` therefore still equals `sigma_visible`, and will keep doing so.
+/// **Win 1 is done** — `rows_in_range` returns a bitmap and nothing is copied. But the memo's
+/// suggested replacement (`<= tiles_nonempty * k`) would be wrong: §7.2's served set is not a
+/// per-tile prefix of size `k`, and no *exact* evaluation of the threshold clause is O(k).
 ///
-/// So the memo's suggested replacement (`<= tiles_nonempty * k`) would be **wrong** here: it encodes
-/// an O(k) selection that §7.2 does not permit. Reducing visits below Σvisible was the memo's Win 2,
-/// which needed the CL/MD/SS route chooser the owner has since ruled out.
+/// **And the first re-pointing was a tautology**, which is why this comment is long. It asserted
+/// `select_rows_materialised == sigma_visible` while `viewport.rs` incremented *both* counters from
+/// the same `visible` variable, twenty lines apart, with `select.rs` having no knowledge of the
+/// probe at all. It could not fail for any behavioural change to selection. The counter is now
+/// incremented by `Selection::of` inside the loops that read rows, so the comparison is an
+/// observation against a reference rather than a variable against itself.
 ///
-/// What this test guards now: that selection visits exactly the visible set — no more (a regression
-/// to scanning the raw row range rather than the mask) and no less (a regression to sampling a
-/// prefix, which would silently break I7 by ordering the sample on permission signature).
+/// **The fixture must be partial-coverage.** Under a full-coverage credential
+/// `sigma_visible == rows_in_ranges`, so "walked the mask" and "walked the raw row range" produce
+/// identical counts and one of the two directions this test claims to guard is undetectable in
+/// principle. The precondition below states that requirement rather than relying on it.
+///
+/// **What this does and does not own.** It pins the *implemented route*: direct evaluation reads
+/// every visible row in a tile. It does **not** own I7 — that the served set is §7.2's and not a
+/// row-order prefix is established by output-level tests in `tests/selection.rs` and by the Python
+/// oracle, in default builds, at every zoom. This test runs only under `--features bench-timing`.
+/// Design §7.2 admits exact routes visiting fewer than Σvisible rows (within a leaf Morton cell the
+/// `tessera_id` column is sorted, so `C_θ` there is a binary search plus a range cardinality); if
+/// one lands, revise this test alongside the differential oracle rather than deleting it.
 #[cfg(feature = "bench-timing")]
 #[test]
 fn f1_selection_visits_exactly_the_visible_set() {
@@ -1740,7 +1749,8 @@ fn f1_selection_visits_exactly_the_visible_set() {
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
     );
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    // Partial coverage, deliberately: see the doc above. Every third item carries SUBSET_TERM.
+    let session = engine.authorise(&subset_credential()).unwrap();
 
     const K: usize = 5;
     let out = engine
@@ -1756,28 +1766,25 @@ fn f1_selection_visits_exactly_the_visible_set() {
         "built with bench-timing, so timings must be real"
     );
     assert_eq!(t.tiles_nonempty, 1, "zoom 0 is one tile");
-    assert_eq!(t.sigma_visible, N_ITEMS, "full-coverage session sees all");
+    assert!(
+        t.sigma_visible < t.rows_in_ranges,
+        "this fixture must be partial-coverage — {} visible of {} spanned. At full coverage the \
+         two are equal and the 'walked the raw range' direction below cannot be detected at all.",
+        t.sigma_visible,
+        t.rows_in_ranges
+    );
     assert_eq!(
         t.points_gathered, K as u64,
         "the cap governs what is returned"
     );
 
     assert_eq!(
-        t.select_rows_materialised, t.sigma_visible,
-        "selection must visit exactly the visible set: {} visited against {} visible. Fewer means \
-         something is sampling a prefix rather than evaluating the threshold over the tile (which \
-         would order the sample on permission signature — the I7 defect §7.2 exists to close); \
-         more means something is walking the raw row range rather than the mask.",
-        t.select_rows_materialised, t.sigma_visible
-    );
-
-    // The allocation the memo actually objected to is gone, but the visit:return ratio it tracked
-    // remains large — and is now expected. Kept because it is the number the tail-attribution memo
-    // correlates against.
-    assert!(
-        t.select_rows_materialised >= t.points_gathered * 100,
-        "expected a large visit:return ratio at zoom 0, got {}:{}",
-        t.select_rows_materialised,
-        t.points_gathered
+        t.select_rows_visited, t.sigma_visible,
+        "selection visited {} rows against {} visible. Fewer means an early exit or a prefix \
+         sample, which would evaluate §7.2's threshold clause over part of the tile. More means \
+         iterating the raw row range rather than the mask. If an exact fast path lands (candidate \
+         lists, a cached threshold bitmap), sub-Σvisible visits become legitimate — revise this \
+         with the differential oracle rather than deleting it.",
+        t.select_rows_visited, t.sigma_visible
     );
 }

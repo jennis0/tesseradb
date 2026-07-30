@@ -118,6 +118,15 @@ enum Command {
         zoom: u8,
         #[arg(long, default_value_t = 0)]
         seed: u64,
+        /// Design §7.2's cap clause. Selection cost depends on this, not only on `k`: it bounds the
+        /// heap and the gather, and it decides which tiles the serve-all branch can claim. More than
+        /// one value costs an `Engine::open` per value, so the default is the server's own.
+        #[arg(long = "k-max-marks", value_delimiter = ',', default_values_t = [arms::viewport::DEFAULT_K_MAX_MARKS])]
+        k_max_marks: Vec<usize>,
+        /// Design §7.2's θ anchor target. Decides how many tiles skip the counting pass entirely,
+        /// so it moves selection cost independently of `k`. One `Engine::open` per value.
+        #[arg(long = "theta-target", value_delimiter = ',', default_values_t = [arms::viewport::DEFAULT_THETA_TARGET])]
+        theta_target: Vec<u64>,
     },
 
     /// The `/control/changes` write path: deletes, suppressions, predicate changes.
@@ -267,7 +276,20 @@ fn main() -> std::process::ExitCode {
             coverage,
             zoom,
             seed,
-        } => arms::viewport::run(&ctx, &mode, &k, &coverage, zoom, seed),
+            k_max_marks,
+            theta_target,
+        } => arms::viewport::run(
+            &ctx,
+            &mode,
+            &k,
+            &coverage,
+            zoom,
+            seed,
+            &arms::viewport::SelectionSweep {
+                k_max_marks: &k_max_marks,
+                theta_targets: &theta_target,
+            },
+        ),
         Command::Load {
             viewer_url,
             tokens,

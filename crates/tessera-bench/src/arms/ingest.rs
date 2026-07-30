@@ -551,7 +551,8 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 tiles_nonempty: t.tiles_nonempty,
                 sigma_visible: t.sigma_visible,
                 rows_in_ranges: t.rows_in_ranges,
-                rows_materialised: t.select_rows_materialised,
+                rows_materialised: t.select_rows_visited,
+                underlay_cells_evaluated: t.underlay_cells_evaluated,
                 points_gathered: t.points_gathered,
                 ..Default::default()
             };

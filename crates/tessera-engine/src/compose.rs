@@ -137,10 +137,11 @@ impl EffectiveMask {
     /// `docs/design-memos/2026-07-30-f1-selection-overdraw.md`.
     ///
     /// **Where that memo's row counter went.** It asked for `iter_range`'s `ExactSizeIterator` so
-    /// `StageTimings::select_rows_materialised` could be incremented by a free `.len()`. Returning a
-    /// bitmap loses `ExactSizeIterator` — but the counter is *still* free, and by a better route:
-    /// the caller already holds the tile's exact masked `visible` count from step 6, so it needs no
-    /// length at all. See `crate::select`, which increments it there.
+    /// the row counter could be incremented by a free `.len()`. Returning a bitmap loses
+    /// `ExactSizeIterator`, so `Selection::of` counts the rows it reads as it reads them
+    /// (`Selection::rows_visited`) — one increment on a loop that was already running. Deriving it
+    /// from the caller's `visible` instead would be cheaper still and worthless: the counter exists
+    /// to be compared against `visible`.
     pub fn rows_in_range(&self, r: Range<u32>) -> Bitmap {
         let range_mask = Bitmap::from_range(r);
         let mut result = self.base.bitmap().and(&range_mask);

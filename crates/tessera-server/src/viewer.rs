@@ -280,8 +280,14 @@ async fn viewport(
 /// only, never reorder.
 #[cfg(feature = "bench-timing")]
 fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Option<String> {
+    // **Append-only.** This is a positional CSV, so inserting a field anywhere but the end silently
+    // misaligns every existing consumer — the same reason `served` was appended to the tiles batch
+    // rather than slotted next to `visible`. The three trailing fields (theta_anchor_ns,
+    // underlay_ns, underlay_cells_evaluated) are therefore out of the durations-then-counters
+    // grouping the rest follows; `tessera_bench::report::Stages` is JSON-by-name and keeps the
+    // readable order.
     Some(format!(
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         t.generation_resolve_ns,
         t.pin_resolve_ns,
         t.slice_lookup_ns,
@@ -298,9 +304,12 @@ fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Op
         t.tiles_nonempty,
         t.sigma_visible,
         t.rows_in_ranges,
-        t.select_rows_materialised,
+        t.select_rows_visited,
         t.points_gathered,
         u64::from(t.row_projection_built),
+        t.theta_anchor_ns,
+        t.underlay_ns,
+        t.underlay_cells_evaluated,
     ))
 }
 

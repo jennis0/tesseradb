@@ -76,6 +76,10 @@ pub struct Work {
     pub rows_in_ranges: u64,
     pub rows_materialised: u64,
     pub points_gathered: u64,
+    /// Sub-cells §7.3's underlay evaluated — `tiles_nonempty x 4^offset`, not the number emitted.
+    /// The gap between the two is work spent discovering emptiness. Zero when unrequested.
+    #[serde(default)]
+    pub underlay_cells_evaluated: u64,
     /// Distinct 4 KiB pages touched. Exact arithmetic, not an estimate: a row's byte offset in a
     /// fixed-width column is `index * width`.
     pub pages_touched: u64,
@@ -164,11 +168,17 @@ pub struct Stages {
     pub slice_lookup_ns: u64,
     pub row_projection_ns: u64,
     pub compose_ns: u64,
+    /// §7.2's θ anchor. `#[serde(default)]` so runs recorded before this stage existed still parse.
+    #[serde(default)]
+    pub theta_anchor_ns: u64,
     pub tiles_for_bbox_ns: u64,
     pub tile_ranges_ns: u64,
     pub count_ns: u64,
     pub select_ns: u64,
     pub gather_ns: u64,
+    /// §7.3's density underlay. Zero unless the request asked for it.
+    #[serde(default)]
+    pub underlay_ns: u64,
     #[serde(default)]
     pub arrow_serialise_ns: u64,
     pub total_ns: u64,
@@ -188,11 +198,13 @@ impl Stages {
             slice_lookup_ns: t.slice_lookup_ns,
             row_projection_ns: t.row_projection_ns,
             compose_ns: t.compose_ns,
+            theta_anchor_ns: t.theta_anchor_ns,
             tiles_for_bbox_ns: t.tiles_for_bbox_ns,
             tile_ranges_ns: t.tile_ranges_ns,
             count_ns: t.count_ns,
             select_ns: t.select_ns,
             gather_ns: t.gather_ns,
+            underlay_ns: t.underlay_ns,
             arrow_serialise_ns: 0,
             total_ns: t.total_ns,
             unattributed_ns: t.unattributed_ns(),
@@ -213,6 +225,13 @@ pub struct Normalised {
     pub ns_per_tile: f64,
     pub ns_per_container: f64,
     pub ns_per_row_materialised: f64,
+    /// Cost per sub-cell *evaluated* (not emitted) by §7.3's underlay. Zero when unrequested.
+    ///
+    /// Gated as its own quantity because the underlay's cost scales with a **request parameter**
+    /// (`4^offset`) rather than with the corpus or the viewer's coverage, so it moves independently
+    /// of every other normalised figure here and would otherwise contaminate them.
+    #[serde(default)]
+    pub ns_per_underlay_cell: f64,
 }
 
 impl Normalised {
@@ -230,6 +249,7 @@ impl Normalised {
             ns_per_tile: per(work.tiles_nonempty),
             ns_per_container: per(work.containers),
             ns_per_row_materialised: per(work.rows_materialised),
+            ns_per_underlay_cell: per(work.underlay_cells_evaluated),
         }
     }
 }
