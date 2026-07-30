@@ -1050,3 +1050,71 @@ fn first_dictionary_descriptor(bundle_root: &Path) -> String {
     let len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
     String::from_utf8(data[4..4 + len].to_vec()).unwrap()
 }
+
+/// **The F1 canary.** Selection cost is O(rows visible in the range), not O(k).
+///
+/// `sample_tile` asks `EffectiveMask::iter_range` for the tile's visible rows and then keeps only
+/// the first `k`. `iter_range` is eager (`compose.rs`: `Bitmap::from_range` → `and`/`andnot`/`or`
+/// → `to_vec`), so *every* visible row in the range is materialised into a `Vec<u32>` and all but
+/// `k` are immediately discarded. At zoom 0 — one tile, the whole grid — that is 10,000 rows
+/// materialised to return 5.
+///
+/// This is what `docs/design-memos/2026-07-30-tail-attribution.md` inferred but could not
+/// attribute: at k=50 it measured latency correlating with Σvisible at r=0.83 and with
+/// points-returned at r=0.008, which is this shape exactly. Design §10.4 prescribes the fix
+/// (`roaring_bitmap_range_uint32_array` into a k-sized buffer, `rank`/`select` for positioned
+/// access); none of it is used today.
+///
+/// The assertion is written to fail **in either direction**, because both directions are news:
+/// if selection starts costing O(k) this test must be updated to record that the defect is fixed,
+/// and if it silently regresses further the ratio moves. Do not delete it to make a change pass —
+/// change the expectation and say why.
+#[cfg(feature = "bench-timing")]
+#[test]
+fn f1_selection_materialises_every_visible_row_not_k_of_them() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    const K: usize = 5;
+    let out = engine
+        .viewport(&session, "s0", 0, [0.0, 0.0, 1000.0, 1000.0], K, None)
+        .unwrap();
+    let t = out.timings;
+
+    assert!(
+        t.enabled,
+        "built with bench-timing, so timings must be real"
+    );
+    assert_eq!(t.tiles_nonempty, 1, "zoom 0 is one tile");
+    assert_eq!(t.sigma_visible, N_ITEMS, "full-coverage session sees all");
+    assert_eq!(t.points_gathered, K as u64, "k caps what is returned");
+
+    // The defect, stated as an equality rather than an inequality so it cannot drift unnoticed.
+    assert_eq!(
+        t.select_rows_materialised, N_ITEMS,
+        "selection materialised {} rows to return {K}: cost is O(Σvisible), not O(k). \
+         If this now fails because selection was fixed to O(k), update this test to assert \
+         `select_rows_materialised <= tiles_nonempty * k` and note the fix.",
+        t.select_rows_materialised
+    );
+
+    // Stated as a ratio too, because that is the number the tail memo cares about.
+    assert!(
+        t.select_rows_materialised >= t.points_gathered * 100,
+        "expected a large materialise:return ratio, got {}:{}",
+        t.select_rows_materialised,
+        t.points_gathered
+    );
+}

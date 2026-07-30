@@ -19,6 +19,7 @@ use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 
 use crate::compose::{compose, visible_to, EffectiveMask, RowProjection};
 use crate::session::{Engine, EngineError, Result, Session};
+use crate::timing::{Probe, StageTimings};
 use crate::Generation;
 
 /// One declared-scalar value carried alongside a point (mirrors `tessera_spatial::ScalarValue`'s
@@ -56,11 +57,26 @@ pub struct PointOut {
 }
 
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ViewportOut {
     pub pin: PinId,
     pub tiles: Vec<TileCount>,
     pub points: Vec<PointOut>,
+    /// Per-stage breakdown, all zeros unless built with `bench-timing` (see
+    /// [`crate::timing`]). **Excluded from `PartialEq`** — see the hand-written impl below.
+    pub timings: StageTimings,
+}
+
+/// `PartialEq` ignoring `timings`, hand-written rather than derived.
+///
+/// Two responses carrying the same pin, tiles and points *are* the same response; the wall-clock
+/// it took to produce them is not part of that identity. A derived impl would make every
+/// `assert_eq!` over a whole `ViewportOut` in the test suite timing-dependent, and therefore
+/// flaky the moment `bench-timing` is enabled — which is exactly when those tests matter most.
+impl PartialEq for ViewportOut {
+    fn eq(&self, other: &Self) -> bool {
+        self.pin == other.pin && self.tiles == other.tiles && self.points == other.points
+    }
 }
 
 /// `POST /v1/items/{handle}`'s payload (R5): a visible item's scalars plus its caller-supplied
@@ -205,7 +221,10 @@ impl Engine {
         // doc at its definition) — every subsequent read below (pin check, row-projection cache,
         // composition) comes from this one snapshot, so a concurrent overlay/bundle swap
         // mid-request can never mix state from two generations.
+        let mut probe = Probe::new();
+
         let generation = self.generation.load_full();
+        probe.lap(|t| &mut t.generation_resolve_ns);
 
         let effective_pin = match pin {
             Some(presented) => {
@@ -226,6 +245,8 @@ impl Engine {
             },
         };
 
+        probe.lap(|t| &mut t.pin_resolve_ns);
+
         let k = k.min(self.config.max_k);
 
         let slice_data = generation
@@ -245,6 +266,7 @@ impl Engine {
             return Err(EngineError::MultiSegmentSlice(slice.to_string()));
         }
         let segment = slice_data.segments.first();
+        probe.lap(|t| &mut t.slice_lookup_ns);
 
         let cache_key = (
             session.token_id,
@@ -265,10 +287,12 @@ impl Engine {
                         &slice_data.permutation,
                     ));
                     cache.insert(cache_key, Arc::clone(&projected));
+                    probe.mark_projection_built();
                     projected
                 }
             }
         };
+        probe.lap(|t| &mut t.row_projection_ns);
 
         let mask = compose(
             &session.fragment,
@@ -278,6 +302,7 @@ impl Engine {
             base,
             &slice_data.permutation,
         );
+        probe.lap(|t| &mut t.compose_ns);
 
         let q = &generation.bundle.manifest.quantisation;
         let extent = Extent {
@@ -288,6 +313,9 @@ impl Engine {
         };
 
         let tiles = tiles_for_bbox(bbox, zoom, &extent);
+        probe.lap(|t| &mut t.tiles_for_bbox_ns);
+        probe.count(|t| &mut t.tiles_resolved, tiles.len() as u64);
+
         let declared_scalars = &generation.bundle.manifest.declared_scalars;
 
         let mut tile_counts = Vec::new();
@@ -299,11 +327,18 @@ impl Engine {
             let Some(segment) = segment else { continue };
 
             let range = tile_ranges(segment, &tile);
+            probe.lap(|t| &mut t.tile_ranges_ns);
+            probe.count(|t| &mut t.rows_in_ranges, range.len() as u64);
+
             let visible = mask.count_range(range.clone());
+            probe.lap(|t| &mut t.count_ns);
+
             if visible == 0 {
                 // Skip empty: no count row, no sampling work for a tile with nothing visible.
                 continue;
             }
+            probe.count(|t| &mut t.tiles_nonempty, 1);
+            probe.count(|t| &mut t.sigma_visible, visible);
 
             tile_counts.push(TileCount {
                 tile: tile.prefix,
@@ -312,13 +347,24 @@ impl Engine {
                 matched: visible,
             });
 
-            sample_tile(&mask, segment, range, declared_scalars, k, &mut points);
+            sample_tile(
+                &mask,
+                segment,
+                range,
+                declared_scalars,
+                k,
+                &mut points,
+                &mut probe,
+            );
         }
+
+        probe.count(|t| &mut t.points_gathered, points.len() as u64);
 
         Ok(ViewportOut {
             pin: effective_pin,
             tiles: tile_counts,
             points,
+            timings: probe.finish(),
         })
     }
 }
@@ -336,15 +382,26 @@ fn sample_tile(
     declared_scalars: &[DeclaredScalar],
     k: usize,
     out: &mut Vec<PointOut>,
+    probe: &mut Probe,
 ) {
+    // `iter_range` is eager: all the bitmap work and the materialisation happen here, before the
+    // first `next()`. Splitting the lap at this line is therefore a real boundary between
+    // *selecting* rows and *reading* their columns, not an arbitrary one — and it is what lets
+    // `select_rows_materialised` be compared against `points_gathered` to see whether the
+    // selection path is doing O(k) work or O(rows visible in the range). See `StageTimings`.
+    let selected = mask.iter_range(range);
+    probe.lap(|t| &mut t.select_ns);
+    probe.count(|t| &mut t.select_rows_materialised, selected.len() as u64);
+
     let mut remaining = k;
-    for row in mask.iter_range(range) {
+    for row in selected {
         if remaining == 0 {
             break;
         }
         out.push(row_to_point(segment, row, declared_scalars));
         remaining -= 1;
     }
+    probe.lap(|t| &mut t.gather_ns);
 }
 
 /// Gather one row's `entity_id`/`x`/`y`/declared scalars through `ColumnsRef` — zero-copy reads,

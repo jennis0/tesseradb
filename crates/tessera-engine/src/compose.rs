@@ -88,7 +88,15 @@ impl EffectiveMask {
 
     /// Merged, ascending iteration over the effective mask restricted to `r`: `(base ∩ r) ∖ minus
     /// ∪ (plus ∩ r)`.
-    pub fn iter_range(&self, r: Range<u32>) -> impl Iterator<Item = u32> + '_ {
+    ///
+    /// **`ExactSizeIterator`, deliberately.** The bitmap work below is eager and the result is
+    /// fully materialised before the first `next()`, so the row count is already known and
+    /// `len()` is free. Callers that cap at `k` use it to record how many rows this call
+    /// materialised versus how many it kept — the measurement that shows whether selection costs
+    /// O(k) or O(rows visible in the range). Exposing the tighter bound is what makes that
+    /// counter cost nothing; without it the caller would have to increment per row, on the
+    /// hottest loop in the request.
+    pub fn iter_range(&self, r: Range<u32>) -> impl ExactSizeIterator<Item = u32> + '_ {
         let range_mask = Bitmap::from_range(r.clone());
         let mut result = self.base.bitmap().and(&range_mask);
         result.andnot_inplace(&self.minus);
