@@ -40,9 +40,8 @@ use crate::{Generation, GenerationHandle};
 pub struct EngineConfig {
     /// How long a freshly minted session token remains valid, in seconds.
     pub token_max_lifetime_secs: u64,
-    /// The hard cap on a viewport request's `k` (Reference Sheet R1: default 30, cap `max_k`
-    /// 200). [`Engine::viewport`] clamps to this defensively even though Task 13's server is
-    /// expected to enforce it at the HTTP boundary too.
+    /// The hard cap on a viewport request's `k`. [`Engine::viewport`] clamps to this defensively
+    /// even though the server is expected to enforce it at the HTTP boundary too.
     ///
     /// **This is the MACHINE ceiling** — GPU, transport, handle table — and it is the number the
     /// drawn-mark budget spec's probes calibrate. It is deliberately *not* the same knob as

@@ -219,12 +219,17 @@ import pytest
 from oracle import mask as mask_mod
 from oracle.bundle import Bundle
 from oracle.harness import spawn_server, stop_server
-from oracle.wire import split_frames
+from oracle.wire import decode_viewport_with_subcells, split_frames
 
 SLICE = "s0"
 GRID_MAX = 65536.0
 ZOOM_RANGE = range(0, 5)  # shallow — see module doc for why this bounds the decimal-scan floor
 K = 20
+# §3.3 underlay depth offset for the scan. Small on purpose: 4^2 = 16 sub-cells per tile is enough
+# to produce a populated third stream at every zoom in ZOOM_RANGE without tripping the server's
+# max_underlay_cells budget, and the sweep cares that the bytes EXIST and are clean, not that there
+# are many of them.
+UNDERLAY_OFFSET = 2
 # See module doc's "SAFE_ID_FLOOR, re-derived rather than inherited" section: this now protects
 # only the decimal-text scans (log, /v1/items) against legitimate small integers this harness
 # emits (ports <= 65535, k <= 500, zoom <= 6, epoch, shard id, HTTP status). The binary,
@@ -317,6 +322,53 @@ def _points_value_buffer_windows(points_bytes: bytes) -> tuple[set[int], set[int
     return tessera_windows, xy_windows
 
 
+def _points_stream_length(points_and_beyond: bytes) -> int:
+    """Byte length of the points stream inside `points-and-everything-after`.
+
+    Only the tile boundary carries a length prefix (contracts §5), so this is how a reader finds
+    where the appended sub-cell stream begins: parse the points stream to its end-of-stream marker
+    and take the cursor.
+    """
+    buf = io.BytesIO(points_and_beyond)
+    with ipc.open_stream(buf) as reader:
+        for _ in reader:
+            pass
+    return buf.tell()
+
+
+def _subcell_value_buffer_windows(subcell_bytes: bytes) -> set[int]:
+    """8-byte-aligned LE windows over the sub-cell batch's `cell` and `count` value buffers.
+
+    The §3.3 underlay's third Arrow stream is **appended** after the points stream with no length
+    prefix, so `split_frames` hands it back glued to `points_bytes` and `ipc.open_stream` stops at
+    the points stream's end-of-stream marker without ever looking at it. Before this, every
+    underlay byte was outside the scan — and the columns are exactly the shape that matters: `cell`
+    is a Morton prefix up to 2^32-1 and `count` a small integer, both landing squarely in the dense
+    entity-id neighbourhood the module doc's `SAFE_ID_FLOOR` reasoning was built for.
+
+    Both columns are `uint64`, so a window is a single element rather than a straddle; they are
+    returned together and compared against the FLOOR-FILTERED target set, for the same reason `x`/`y`
+    are — a genuine `count` of 0 or a `cell` prefix of 0 is an all-zero window that numerically
+    equals entity id 0.
+    """
+    windows: set[int] = set()
+    if not subcell_bytes:
+        return windows
+    with ipc.open_stream(io.BytesIO(subcell_bytes)) as reader:
+        for batch in reader:
+            for name in ("cell", "count"):
+                col = batch.column(name)
+                buf = col.buffers()[1]
+                if buf is None:
+                    continue
+                # Trim Arrow's alignment padding, as the points sweep does — an untrimmed tail
+                # reads as spurious zero windows.
+                raw = buf.to_pybytes()[: len(col) * 8]
+                for off in range(0, len(raw) - 7, 8):
+                    windows.add(int.from_bytes(raw[off : off + 8], "little"))
+    return windows
+
+
 def _decode_tessera_ids(points_bytes: bytes) -> list[int]:
     with ipc.open_stream(io.BytesIO(points_bytes)) as reader:
         ids: list[int] = []
@@ -388,10 +440,24 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     all_raw_responses: list[bytes] = []
     bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
     requests_made = 0
+    subcell_windows: set[int] = set()
+    subcell_rows_seen = 0
     for zoom in ZOOM_RANGE:
-        raw = server.viewport(token, SLICE, zoom, bbox, k=K)
+        # Ask for the §3.3 underlay on every request, so the appended third stream is actually
+        # produced and swept. Without this the stream never existed during the scan at all.
+        raw = server.viewport(token, SLICE, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
         all_raw_responses.append(raw)
         _tile_bytes, points_bytes = split_frames(raw)
+
+        # `split_frames` returns points-and-everything-after, so recover the sub-cell stream by
+        # parsing the points stream to its end and taking what follows.
+        _t2, _p2, sub_cells = decode_viewport_with_subcells(raw)
+        subcell_rows_seen += len(sub_cells)
+        consumed = _points_stream_length(points_bytes)
+        subcell_windows |= _subcell_value_buffer_windows(points_bytes[consumed:])
+        # Nothing may sit unscanned between the two: if a fourth stream is ever appended, this
+        # fails rather than letting it arrive unswept.
+        assert consumed <= len(points_bytes)
         # Scope decision (module doc): the tile batch (visible/matched counts) is deliberately
         # excluded from the scan — those are I2-legitimate aggregates, not a surface I10 governs.
         # Only the points batch's decoded column *value buffers* are scanned.
@@ -404,6 +470,18 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     # Used for checks (identity key, external ids) that need to look at the whole points batch,
     # not just the entity-id sweep's column-specific split above.
     all_points_windows = tessera_id_windows | xy_windows
+
+    # The identity key must not appear ANYWHERE, sub-cell stream included — it is a 128-bit random
+    # value, so there is no chance-collision hazard in widening the haystack for it.
+    #
+    # The external-id check below deliberately does **not** widen: the sub-cell batch's `count`
+    # column holds small integers by construction, so it genuinely contains 1, 2, 3..., and a
+    # low-valued external id (entity 0's is the 8-byte encoding of 1) collides with them by pure
+    # arithmetic rather than by leaking. That is the same hazard the external-id check's own comment
+    # already records for flatbuffer framing; including sub-cell counts turns it from unlikely into
+    # certain. The sub-cell columns are checked against the floor-filtered entity-id set above, which
+    # is the check that actually bears on I10 here.
+    all_windows_including_underlay = all_points_windows | subcell_windows
 
     # --- explicit negative control: the scan must find a REAL tessera_id, or it proves nothing ---
     assert sampled_ids, "must have decoded at least one tessera_id to exercise the scan at all"
@@ -430,9 +508,24 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
         f"columns of a viewport points batch: {sorted(leaked_xy)[:20]}"
     )
 
+    # --- I10: the §3.3 underlay's appended sub-cell stream, which was previously unscanned -------
+    assert subcell_rows_seen > 0, (
+        "no sub-cells were served, so the underlay sweep proves nothing — check UNDERLAY_OFFSET "
+        "against the server's max_underlay_offset and max_underlay_cells"
+    )
+    leaked_sub = subcell_windows & target_ids_high
+    assert not leaked_sub, (
+        f"found {len(leaked_sub)} entity id(s) encoded as an 8-byte-aligned LE integer in the "
+        f"cell/count columns of a viewport sub-cell batch: {sorted(leaked_sub)[:20]}"
+    )
+
     # --- identity key: must never appear in a viewport payload, at any width tried above --------
-    assert identity_key.k0 not in all_points_windows, "identity key half k0 found on the wire"
-    assert identity_key.k1 not in all_points_windows, "identity key half k1 found on the wire"
+    assert (
+        identity_key.k0 not in all_windows_including_underlay
+    ), "identity key half k0 found on the wire"
+    assert (
+        identity_key.k1 not in all_windows_including_underlay
+    ), "identity key half k1 found on the wire"
     for raw in all_raw_responses:
         assert identity_key_raw not in raw, "identity key's raw 16 bytes found in a viewport response"
 

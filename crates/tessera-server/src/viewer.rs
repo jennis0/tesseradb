@@ -160,7 +160,15 @@ async fn viewport(
     }
 
     let pin = req.pin.map(PinId::from);
-    let k = req.k.unwrap_or(30).min(state.max_k);
+    // Contracts §3.2's default. It is the deployment's own overplot ceiling rather than a
+    // literal, so a client that expresses no preference gets the full budget this deployment will
+    // serve and §7.2's proportional window is realised in full — at the old default of 30 against a
+    // cap of 128 the window was 15 rather than 64, i.e. the default silently threw away most of the
+    // density range the parameters were chosen for.
+    let k = req
+        .k
+        .unwrap_or_else(|| state.engine.config().k_max_marks)
+        .min(state.max_k);
 
     let out = state
         .engine

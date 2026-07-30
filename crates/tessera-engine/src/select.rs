@@ -111,10 +111,10 @@ impl Threshold {
     /// density ratio of `cap/k_min`, **independent of θ**. θ positions that window on the density
     /// axis; the floor and cap set its width.
     ///
-    /// **That width is `min(request_k, k_max_marks)/k_min`, not `k_max_marks/k_min`.** Contracts
-    /// §3.2 defaults `k` to 30, so the *default* request realises a window of 15 (~1.2 decades);
-    /// density memo §4's figure of 64 is reached only by a client that explicitly asks for
-    /// `k >= k_max_marks`. This narrowing is independent of the occupancy deficit above.
+    /// **That width is `min(request_k, k_max_marks)/k_min`, not `k_max_marks/k_min`** — so a request
+    /// default below the cap silently narrows it, independently of the occupancy deficit above. An
+    /// earlier default of `k = 30` against `k_max_marks = 128` realised 15 rather than 64; contracts
+    /// §3.2 now defaults `k` to the deployment's own `k_max_marks`.
     pub fn anchor(v_total: u64, m_target: u64) -> Self {
         if v_total == 0 {
             // No visible rows anywhere: every tile is empty and skipped. Saturated is the

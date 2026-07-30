@@ -3,7 +3,7 @@
 //! `[disclosure]` has no defaults at all: absence of the section, or of either key inside it, is
 //! a startup error naming design §7.5/§2.3 — `min_visible_members` is parsed and stored even
 //! though nothing consumes it until Phase 3; the startup rule, not the value, is the point.
-//! Every other section either has a documented default (`max_k = 200`) or is required outright.
+//! Every other section either has a documented default (`max_k = 1000`) or is required outright.
 //! Credentials are never inline: `[serve]`'s `*_credential_file`/`*_credential_env` pairs are the
 //! only way to supply the session/operator bearer secrets.
 
@@ -213,18 +213,45 @@ pub struct Config {
     pub operator_credential: String,
 }
 
-/// Reference Sheet R1: viewport `k`'s cap default. **The machine ceiling** — the drawn-mark budget
-/// spec's probes calibrate this number, and that calibration is blocked on the external-ID identity
-/// plan's rebuild, so this value must not be changed here.
-const DEFAULT_MAX_K: usize = 200;
+/// The machine ceiling on a viewport's `k` — GPU, transport, handle table.
+///
+/// **A working value, not a calibration** *(owner, 2026-07-30; was 200)*. The drawn-mark budget
+/// spec's probes P1–P3 are what calibrate this number, and they have not run; the identity plan
+/// blocks committing a *calibrated* value until its own rebuild lands, because a `k` measured
+/// against the pre-rebuild bundle would be measured against the wrong box and the wrong identity
+/// width. Nothing about that blocks setting a sane working default in the meantime, and 200 was
+/// itself never calibrated either.
+///
+/// Deliberately **above** [`DEFAULT_K_MAX_MARKS`]: the machine ceiling should not be the binding one
+/// — the overplot ceiling should be — so that raising what a screen can legibly show does not also
+/// require re-reasoning about transport.
+const DEFAULT_MAX_K: usize = 1_000;
 
 /// §7.2's floor clause: the fewest marks a non-empty tile draws. Provisional (density memo §4),
 /// pending that memo's §0 visual experiments.
 const DEFAULT_K_MIN: usize = 2;
 
-/// §7.2's cap clause: the most marks any one tile draws. **The overplot ceiling** — density memo §4
-/// sizes it from ink coverage at ~80x80 px per tile, not from machine limits. Provisional.
-const DEFAULT_K_MAX_MARKS: usize = 128;
+/// §7.2's cap clause: the most marks any one tile draws. **The overplot ceiling** — sized by what a
+/// screen can legibly show, not by machine limits.
+///
+/// *(owner, 2026-07-30; was 128)*. Density memo §4 argued 128 from ink coverage at ~80x80 px per
+/// tile, on the premise that a viewport draws a few hundred tiles and that mark count stops reading
+/// as density somewhere around 50–100 marks per tile. That premise is **untested** — the memo says
+/// so itself, and it is exactly what the drawn-mark budget's P1 probe exists to settle — and it sits
+/// against an owner decision that the drawn-mark budget should be the largest a client can render.
+/// This value takes the owner's side of that pending the probe.
+///
+/// It is the number that actually binds: with `k` defaulting to the same value, the effective cap is
+/// this. Raising it widens §7.2's proportional window, which is `cap / k_min`, from 64 at the old
+/// pair to 250 here.
+const DEFAULT_K_MAX_MARKS: usize = 500;
+
+/// The MACHINE ceiling must sit at or above the OVERPLOT ceiling, so the overplot one is what binds.
+/// Inverted, raising what a screen can legibly show would silently do nothing until someone also
+/// raised a transport limit — a confusing failure, and exactly the conflation these two constants
+/// were split apart to prevent. Checked at compile time rather than in a test: it is a property of
+/// the two literals, so it should fail the build.
+const _: () = assert!(DEFAULT_MAX_K >= DEFAULT_K_MAX_MARKS);
 
 /// θ's anchor target: marks the mean occupied tile should draw at any depth. Provisional.
 const DEFAULT_THETA_TARGET_MARKS: u64 = 16;
@@ -467,10 +494,7 @@ mod tests {
         assert_eq!(config.theta_target_marks, DEFAULT_THETA_TARGET_MARKS);
         assert_eq!(config.max_underlay_offset, DEFAULT_MAX_UNDERLAY_OFFSET);
         assert_eq!(config.max_underlay_cells, DEFAULT_MAX_UNDERLAY_CELLS);
-        assert_eq!(
-            config.max_k, DEFAULT_MAX_K,
-            "max_k is the machine ceiling and is not this plan's to change"
-        );
+        assert_eq!(config.max_k, DEFAULT_MAX_K);
     }
 
     /// `k_min = 0` disables §7.2's floor clause, which is the I7 guarantee. Startup must refuse
