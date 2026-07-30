@@ -191,6 +191,13 @@ pub struct ViewportOut {
     pub points: Vec<PointOut>,
     /// The §3.3 density underlay, when requested — empty otherwise. Only non-empty cells appear.
     pub sub_cells: Vec<SubCellCount>,
+    /// The declared-scalar names, in manifest order, from the SAME generation this response's
+    /// points were gathered from (Task 8). Carried here rather than left for the caller to
+    /// re-fetch via `Engine::meta()` — that second call would `load_full()` the generation
+    /// pointer a second time, against lifecycle §1.1's "exactly once, at request start". The
+    /// names come from the same manifest either way, so response bytes are unaffected; this only
+    /// removes a redundant load.
+    pub scalar_names: Vec<String>,
     /// Per-stage breakdown, all zeros unless built with `bench-timing` (see
     /// [`crate::timing`]). **Excluded from `PartialEq`** — see the hand-written impl below.
     pub timings: StageTimings,
@@ -198,16 +205,23 @@ pub struct ViewportOut {
 
 /// `PartialEq` ignoring `timings`, hand-written rather than derived.
 ///
-/// Two responses carrying the same pin, tiles and points *are* the same response; the wall-clock
-/// it took to produce them is not part of that identity. A derived impl would make every
-/// `assert_eq!` over a whole `ViewportOut` in the test suite timing-dependent, and therefore
-/// flaky the moment `bench-timing` is enabled — which is exactly when those tests matter most.
+/// Two responses carrying the same pin, tiles, points and scalar names *are* the same response;
+/// the wall-clock it took to produce them is not part of that identity. A derived impl would make
+/// every `assert_eq!` over a whole `ViewportOut` in the test suite timing-dependent, and
+/// therefore flaky the moment `bench-timing` is enabled — which is exactly when those tests
+/// matter most.
+///
+/// `scalar_names` joins the comparison (Task 8): it is drawn from the same manifest as `points`'
+/// values, in the same generation, so two responses that agree on `points` already agree on it —
+/// including it costs nothing and is more honest than silently exempting a field that happens
+/// never to differ in practice.
 impl PartialEq for ViewportOut {
     fn eq(&self, other: &Self) -> bool {
         self.pin == other.pin
             && self.tiles == other.tiles
             && self.points == other.points
             && self.sub_cells == other.sub_cells
+            && self.scalar_names == other.scalar_names
     }
 }
 
@@ -663,6 +677,10 @@ impl Engine {
             tiles: tile_counts,
             points,
             sub_cells,
+            // Task 8: from the SAME `declared_scalars` slice `row_to_point` read for every point
+            // above (`generation.bundle.manifest.declared_scalars`), not a fresh `meta()` call —
+            // that would `load_full()` the generation pointer a second time.
+            scalar_names: declared_scalars.iter().map(|d| d.name.clone()).collect(),
             timings: probe.finish(),
         })
     }

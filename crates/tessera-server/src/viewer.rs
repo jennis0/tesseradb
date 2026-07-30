@@ -228,13 +228,12 @@ fn run_viewport(
         ys.push(point.y);
     }
 
-    let meta = state.engine.meta();
-    let scalar_names: Vec<String> = meta
-        .declared_scalars
-        .iter()
-        .map(|d| d.name.clone())
-        .collect();
-    let scalar_cols = build_scalar_columns(&out.points, &scalar_names);
+    // Task 8: names come from `out.scalar_names`, populated by `Engine::viewport` from the SAME
+    // generation it already loaded for this request — not a second `state.engine.meta()` call.
+    // That second call would `load_full()` the generation pointer again, against lifecycle
+    // §1.1's "exactly once, at request start"; the names are identical either way (same
+    // manifest, same order), so this changes no response byte.
+    let scalar_cols = build_scalar_columns(&out.points, &out.scalar_names);
     let scalar_refs: Vec<(&str, ScalarColumn)> = scalar_cols
         .iter()
         .map(|(name, col)| (name.as_str(), col.as_ref()))
