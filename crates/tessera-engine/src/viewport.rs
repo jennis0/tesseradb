@@ -467,7 +467,14 @@ impl Engine {
                 // (token, slice, segments_version) and cached here, never recomputed on a
                 // per-viewport path (shared-context constraint 8).
                 probe.mark_projection_built();
-                RowProjection::new(&session.fragment, &slice_data.permutation)
+                // Task 7: `Permutation::project` parallelises internally (ambient rayon,
+                // `par_chunks`/`par_sort_unstable`) but owns no pool of its own — this is the
+                // one call site that supplies one, the same shared pool `Engine::viewport`'s
+                // tile sweep uses (D-D: no second, per-request pool). Wrapping only this build,
+                // not the whole `get_or_build`, keeps the single-flight map lock's O(1) hold
+                // time (D-G) unaffected by the pool boundary.
+                self.pool
+                    .install(|| RowProjection::new(&session.fragment, &slice_data.permutation))
             })
             .map_err(|_building| EngineError::ProjectionBuilding)?;
         probe.lap(|t| &mut t.row_projection_ns);

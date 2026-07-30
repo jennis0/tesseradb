@@ -7,6 +7,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
+use rayon::prelude::*;
 
 use tessera_types::{EntityId, RowId, ROW_ABSENT};
 
@@ -179,17 +180,50 @@ impl Permutation {
     /// then sorts the results — at 10⁹ rows this costs *seconds*, not the microseconds a
     /// viewport query budgets for. Never call this on the per-viewport path; the engine caches
     /// the result per `(token, slice, pin)` and reuses it across viewports within a session.
+    ///
+    /// **Parallel (task 7), executor-agnostic.** This crate owns no `rayon::ThreadPool` of its
+    /// own — `par_chunks`/`par_sort_unstable` below run on whatever pool the caller has
+    /// `install`ed (the engine wraps its cold-session build in `self.pool.install(..)`, D-D), or
+    /// on rayon's own global pool if nobody has. Chunk boundaries never change the result — each
+    /// chunk's matches are independent of every other chunk's, and are simply concatenated and
+    /// then sorted — only throughput does, so this stays correct under any thread count,
+    /// including 1 (see the `--ignored` gate test and the correctness tests in
+    /// `tests/permutation_project_parallel.rs`, both of which run this at several thread counts).
+    ///
+    /// **Transient memory (brief's constraint):** `entities` and `rows` are both live at once, so
+    /// this call's peak transient memory is roughly double `mask.cardinality()` `u32`s, on top of
+    /// the mmap-backed `slots()` array (never copied — `slots` is only ever borrowed, read
+    /// concurrently by every chunk).
+    ///
+    /// Output is a sorted set of *unique* row IDs — unique because `self` is a permutation (a
+    /// bijection), so no two entities can ever map to the same row, whichever chunk found them —
+    /// and the sort makes the result order-independent of chunk scheduling, so the output bytes
+    /// cannot change with the thread count.
     pub fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         let slots = self.slots();
-        let mut rows: Vec<u32> = Vec::with_capacity(mask.cardinality() as usize);
-        for entity in mask.iter() {
-            if let Some(&slot) = slots.get(entity as usize) {
-                if slot != ROW_ABSENT {
-                    rows.push(slot);
-                }
-            }
-        }
-        rows.sort_unstable();
+        let entities: Vec<u32> = mask.to_vec();
+
+        // Aim for a handful of chunks per worker so a run of mostly-sentinel entities in one
+        // chunk doesn't leave a worker idle while the others are still busy — the same
+        // over-subscription reasoning as `tessera-engine::viewport`'s `TILE_PAR_MIN_LEN`, just
+        // computed from the ambient pool's size rather than a fixed constant, since this crate
+        // does not know (and must not assume) how large that pool is.
+        let threads = rayon::current_num_threads().max(1);
+        let chunk_len = (entities.len() / (threads * 8)).max(1);
+
+        let per_chunk: Vec<Vec<u32>> = entities
+            .par_chunks(chunk_len)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .filter_map(|&entity| slots.get(entity as usize).copied())
+                    .filter(|&slot| slot != ROW_ABSENT)
+                    .collect()
+            })
+            .collect();
+        let mut rows: Vec<u32> = per_chunk.concat();
+
+        rows.par_sort_unstable();
         // croaring 2.x has no dedicated "construct from sorted slice" entry point; `of` /
         // `add_many` (`roaring_bitmap_add_many`) is CRoaring's bulk-add path and is what the
         // design's "build from sorted output" guidance (§10.4) maps onto in this binding.
