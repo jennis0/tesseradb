@@ -206,7 +206,7 @@ fn project_on_the_global_pool_without_an_explicit_install_still_matches() {
 /// cold-session projection build drops >= 2x at 8 threads vs 1 thread.
 ///
 /// Sized to stay well under the box's memory ceiling (WSL2, previously OOM-killed by a
-/// >4G-allocating test): `n` entities means a full mask puts two `n * 4`-byte `Vec<u32>`s live at
+/// \>4G-allocating test): `n` entities means a full mask puts two `n * 4`-byte `Vec<u32>`s live at
 /// their peak overlap inside `project` (`entities` overlapping the just-finished `per_chunk`,
 /// then `per_chunk` overlapping `rows`'s reserved capacity -- see `Permutation::project`'s doc,
 /// "fix round 1" note, for why it is two and not three) -- at `n = 16_000_000` that is ~128 MB
