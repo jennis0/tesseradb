@@ -56,6 +56,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run a declared campaign of arms, resumably.
+    Matrix {
+        #[arg(long, default_value = "bench/matrix.toml")]
+        matrix: PathBuf,
+        /// Run only this arm.
+        #[arg(long)]
+        only: Option<String>,
+        /// Print the campaign's fixture selection and stop, without measuring anything.
+        #[arg(long, default_value_t = false)]
+        plan: bool,
+    },
+
     /// List discovered fixtures and their sizes.
     Fixtures,
 
@@ -250,6 +262,9 @@ fn main() -> std::process::ExitCode {
     };
 
     let result = match cli.command {
+        Command::Matrix { matrix, only, plan } => {
+            arms::matrix::run(&ctx, &matrix, only.as_deref(), plan)
+        }
         Command::Fixtures => arms::list_fixtures(&ctx),
         Command::Calibrate => arms::calibrate(&ctx),
         Command::Authorise { w, shape, seed } => arms::authorise::run(&ctx, &w, &shape, seed),

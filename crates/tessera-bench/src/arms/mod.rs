@@ -5,6 +5,7 @@ pub mod changes;
 pub mod gather;
 pub mod ingest;
 pub mod load;
+pub mod matrix;
 pub mod tiles;
 pub mod viewport;
 
