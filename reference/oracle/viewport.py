@@ -1,4 +1,4 @@
-"""Brute-force tile counts and first-k sampling — the entity-space vs row-space differential.
+"""Brute-force tile counts and §7.2 selection — the entity-space vs row-space differential.
 
 `counts` walks every row of a slice's segment (row-space) and buckets it into whichever depth-`d`
 tile it belongs to, counting only rows whose entity is in the caller-supplied mask. This is
@@ -7,14 +7,16 @@ deliberately the slow, obviously-correct construction (module scope's "obviously
 array with binary search for tile boundaries (the boundaries are found by searching a sorted
 array — reading, not indexing tricks with authorisation semantics).
 
-`first_k` mirrors the *placeholder* first-k sampler the Phase 1 engine actually ships
-(`tessera-engine`'s `sample_tile` doc: "deliberately wrong... not the priority-sample
-definition" — R3's priority order is Phase 2 work). It takes the first `k` visible rows in
-ascending row (Morton) order within the tile's range, which is what the server currently returns.
-When the differential test compares point sets it must therefore either request `k` at least as
-large as a tile's visible count (an untruncated comparison, safe to compare as full sets) or
-compare containment rather than exact order — see `tests/test_differential.py`'s comments at the
-call site.
+`served` implements design §7.2's selection definition — floor ∪ threshold ∪ cap over `tessera_id`,
+evaluated inside the mask. It replaces the pre-2026-07-30 `first_k`, which mirrored the engine's
+placeholder row-order sampler; that placeholder is gone, and with it the whole reason the point-set
+differential used to be expected to disagree.
+
+**This is written from the definition, not from the Rust.** The arithmetic here is deliberately
+shaped differently from `crates/tessera-engine/src/select.rs` — a brute-force sort of the tile's
+visible identities and a slice, against the engine's single-pass bounded heap — because a
+differential between two transcriptions of the same code proves only that copy-paste works. What is
+shared is the *definition*, which is the contract between them.
 """
 
 from __future__ import annotations
@@ -64,39 +66,89 @@ def counts(
     return out
 
 
-def first_k(
+def visible_total(bundle: Bundle, mask: set[int], slice_id: str) -> int:
+    """The viewer's total visible count over the whole slice — θ's anchor input.
+
+    Computed independently from the segment and the pairs-derived mask, deliberately **not** read
+    back from a server response: θ's anchor is the one input the oracle would otherwise have to take
+    on trust, and taking it from the thing under test would make the differential circular for every
+    density assertion.
+    """
+    seg = bundle.segment(slice_id)
+    return sum(1 for row in range(seg.row_count) if int(seg.entity_id[row]) in mask)
+
+
+def theta_cut(v_total: int, m_target: int, depth: int) -> int | None:
+    """θ_d as a cut point over the identity space, or `None` for "saturated: admits everything".
+
+    `P_0 = m_target * 2**64 // v_total`, then `P_d = P_0 << 2d`, saturating at `2**64` — §7.2's
+    closed-form anchor. The ×4 per depth is what makes the per-tile expectation depth-stable, and
+    saturation is a distinct state rather than a clamp to `2**64 - 1`, because at θ ≥ 1 the threshold
+    must admit *every* identity including `2**64 - 1`.
+
+    `v_total` is the viewer's **composed** visible total over the whole slice — the mask after the
+    overlay diff, not the raw fragment. I2: the pre-overlay figure is not computable from inside
+    `M_auth`.
+    """
+    if v_total <= 0:
+        return None
+    p0 = (m_target << 64) // v_total
+    if p0 >= 1 << 64:
+        return None
+    p_d = p0 << (2 * depth)
+    if p_d >= 1 << 64:
+        return None
+    return p_d
+
+
+def served(
     bundle: Bundle,
     mask: set[int],
     slice_id: str,
     zoom: int,
     tile: int,
-    k: int,
+    *,
+    k_min: int,
+    cap: int,
+    v_total: int,
+    m_target: int,
 ) -> list[tuple[float, float]]:
-    """The first `k` mask-visible rows in ascending row (Morton) order within `tile`.
+    """Design §7.2's served set for one tile, as `(x, y)` pairs in served order.
 
-    Matches the engine's current placeholder sampler (`sample_tile`'s doc) — see this module's
-    doc for why this, and not an R3 priority order, is what the differential compares against.
+        C_theta = |{ i in vis(T) : tessera_id(i) < P_d }|
+        m       = min(cap, max(min(k_min, cap), C_theta))
+        served  = the min(m, |vis(T)|) smallest of vis(T) by tessera_id
 
-    PHASE2-TODO: this function's ordering is a deliberate, TEMPORARY mirror of
-    `tessera-engine`'s placeholder `sample_tile` (ascending row/Morton order), not the R3
-    priority-sample definition (`priority(e) = splitmix64(e) >> 48`, tiebreak `(morton, priority,
-    entity_id)`). The moment Phase 2 replaces that placeholder with the real priority sampler,
-    this function MUST be re-pointed to sort candidates by `morton.priority(entity_id)` (ties
-    broken by entity id) instead of row order — and until that landing PR does so, the
-    differential test in `tests/test_differential.py` covering point sets (item (c)) is EXPECTED
-    TO DISAGREE with a server that has already switched to priority order. Leaving this comment
-    unresolved past that point is a bug, not a style note — grep for "PHASE2-TODO" before
-    declaring Phase 2's sampler done.
+    Brute force on purpose: collect the tile's visible rows, sort them by stored `tessera_id`, count
+    how many fall below the cut, and slice. The engine reaches the same answer with a single pass and
+    a bounded heap; the differential is only evidence because the two constructions differ.
+
+    Returned in ascending `tessera_id` order, which is the order the payload must arrive in — both
+    engine routes emit it, and the nesting argument's client-truncation clause depends on the served
+    set being a prefix.
     """
     seg = bundle.segment(slice_id)
     lo, hi = morton.code_range(tile, zoom)
     lo_idx = int(np.searchsorted(seg.morton, lo, side="left"))
     hi_idx = int(np.searchsorted(seg.morton, hi, side="left"))
 
-    out: list[tuple[float, float]] = []
+    if seg.tessera_id is None:
+        raise ValueError("segment has no stored tessera_id column (pre-r6 bundle)")
+
+    visible: list[tuple[int, int]] = []
     for row in range(lo_idx, hi_idx):
         if int(seg.entity_id[row]) in mask:
-            out.append((float(seg.x[row]), float(seg.y[row])))
-            if len(out) >= k:
-                break
-    return out
+            visible.append((int(seg.tessera_id[row]), row))
+    visible.sort()
+
+    cut = theta_cut(v_total, m_target, zoom)
+    if cut is None:
+        c_theta = len(visible)
+    else:
+        c_theta = sum(1 for ident, _ in visible if ident < cut)
+
+    floor = min(k_min, cap)
+    m = min(cap, max(floor, c_theta))
+    m = min(m, len(visible))
+
+    return [(float(seg.x[row]), float(seg.y[row])) for _, row in visible[:m]]

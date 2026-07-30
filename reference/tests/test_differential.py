@@ -8,7 +8,7 @@ Five things are proven, kept deliberately separate (task brief):
     tile a random viewport touches — the union-vs-semi-join differential, and the entity-space
     vs row-space-diff composition-equivalence check.
 (c) point sets: server handles are opaque, so points are compared as (x, y) multisets against the
-    oracle's own `first_k` (which mirrors the engine's current placeholder sampler — see
+    oracle's own `served` (design §7.2's definition, implemented independently — see
     `oracle/viewport.py`'s doc).
 (d) suppress over the control plane -> oracle told to drop it -> counts re-agree.
 (e) a mixed-change composition stress (delete, suppress, predicate-widen onto an entity the grant
@@ -107,6 +107,12 @@ def test_grid_differential(server, oracle_bundle: Bundle):
             postings_union |= set(oracle_bundle.postings(term_id).tolist())
         assert postings_union == base_mask, "postings union must equal the pairs-derived mask"
 
+        # The deployment constants §7.2's definition needs. They are config, so the oracle cannot
+        # know them; `GET /v1/meta` publishes them precisely so an independent implementation can
+        # reproduce the served set. theta's anchor is computed independently below, not read back.
+        selection = server.meta(token)["selection"]
+        v_total = _oracle_visible_total(oracle_bundle, base_mask, SLICE)
+
         for _ in range(N_VIEWPORTS_PER_GRANT):
             zoom = rng.randint(*ZOOM_RANGE)
             bbox = _random_bbox(rng)
@@ -117,8 +123,8 @@ def test_grid_differential(server, oracle_bundle: Bundle):
 
             oracle_tile_counts = _oracle_counts(oracle_bundle, base_mask, SLICE, zoom, bbox)
 
-            server_tile_map = {t: v for t, v, m in server_tiles}
-            for t, v, m in server_tiles:
+            server_tile_map = {t: v for t, v, m, _s in server_tiles}
+            for t, v, m, _s in server_tiles:
                 assert v == m, "Phase 1 has no filters: matched must equal visible"
             assert server_tile_map == oracle_tile_counts, (
                 f"tile counts disagree for zoom={zoom} bbox={bbox} grant_size={len(grant)}: "
@@ -126,20 +132,30 @@ def test_grid_differential(server, oracle_bundle: Bundle):
             )
             tiles_checked += len(oracle_tile_counts)
 
-            # (c): split the flat points list back into per-tile groups (sample_tile appends a
-            # tile's up-to-k points contiguously, in tile-iteration order — see
-            # tessera-engine/src/viewport.rs's loop).
+            # (c): split the flat points list back into per-tile groups. The split key is the tile
+            # batch's own `served` column (contracts r7), NOT `min(k, visible)` — under §7.2's
+            # density rule the per-tile count is min(cap, max(k_min, C_theta)) clamped to visible,
+            # which cannot be recomputed from k and visible alone. That is the whole reason `served`
+            # is on the wire.
             cursor = 0
-            for t, visible, _matched in server_tiles:
-                expected_n = min(k, visible)
-                tile_points = server_points[cursor : cursor + expected_n]
-                cursor += expected_n
+            for t, _visible, _matched, served_n in server_tiles:
+                tile_points = server_points[cursor : cursor + served_n]
+                cursor += served_n
                 # Counter, not set: two distinct entities can share rounded coordinates within a
                 # tile, and a set would silently absorb a server bug that dropped one of them
                 # while duplicating another (the brief calls for a multiset comparison here).
                 server_xy = Counter((round(x, 4), round(y, 4)) for _h, x, y in tile_points)
 
-                oracle_xy_list = _oracle_first_k(oracle_bundle, base_mask, SLICE, zoom, t, k)
+                oracle_xy_list = _oracle_served(
+                    oracle_bundle,
+                    base_mask,
+                    SLICE,
+                    zoom,
+                    t,
+                    k=k,
+                    selection=selection,
+                    v_total=v_total,
+                )
                 oracle_xy = Counter((round(x, 4), round(y, 4)) for x, y in oracle_xy_list)
 
                 assert server_xy == oracle_xy, (
@@ -153,16 +169,37 @@ def test_grid_differential(server, oracle_bundle: Bundle):
     assert points_checked > 0
 
 
+def _oracle_visible_total(bundle, mask, slice_id):
+    from oracle import viewport as vp
+
+    return vp.visible_total(bundle, mask, slice_id)
+
+
 def _oracle_counts(bundle, base_mask, slice_id, zoom, bbox):
     from oracle import viewport as vp
 
     return vp.counts(bundle, base_mask, slice_id, zoom, bbox)
 
 
-def _oracle_first_k(bundle, mask, slice_id, zoom, tile, k):
+def _oracle_served(bundle, mask, slice_id, zoom, tile, *, k, selection, v_total):
+    """§7.2's served set, from the definition, with the deployment constants the server published.
+
+    The oracle cannot know `k_min`/`k_max_marks`/`theta_target_marks` — they are deployment config —
+    so it reads them from `GET /v1/meta`. `cap` is `min(k, k_max_marks)`, matching the engine.
+    """
     from oracle import viewport as vp
 
-    return vp.first_k(bundle, mask, slice_id, zoom, tile, k)
+    return vp.served(
+        bundle,
+        mask,
+        slice_id,
+        zoom,
+        tile,
+        k_min=selection["k_min"],
+        cap=min(k, selection["k_max_marks"]),
+        v_total=v_total,
+        m_target=selection["theta_target_marks"],
+    )
 
 
 def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bundle):
@@ -180,7 +217,7 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
 
     raw_before = server.viewport(token, SLICE, zoom, bbox, k=200)
     tiles_before, _ = decode_viewport(raw_before)
-    counts_before = {t: v for t, v, m in tiles_before}
+    counts_before = {t: v for t, v, m, _s in tiles_before}
     oracle_before = _oracle_counts(oracle_bundle, base_mask, SLICE, zoom, bbox)
     assert counts_before == oracle_before
 
@@ -194,7 +231,7 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
 
     raw_after = server.viewport(token, SLICE, zoom, bbox, k=200)
     tiles_after, _ = decode_viewport(raw_after)
-    counts_after = {t: v for t, v, m in tiles_after}
+    counts_after = {t: v for t, v, m, _s in tiles_after}
     resolved_mask = changes.resolve(base_mask, {term_id})
     oracle_after = _oracle_counts(oracle_bundle, resolved_mask, SLICE, zoom, bbox)
 
@@ -274,7 +311,7 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
 
     raw = server.viewport(token, SLICE, zoom, bbox, k=200)
     tiles, _ = decode_viewport(raw)
-    server_counts = {t: v for t, v, m in tiles}
+    server_counts = {t: v for t, v, m, _s in tiles}
     oracle_counts = _oracle_counts(oracle_bundle, resolved_mask, SLICE, zoom, bbox)
 
     assert server_counts == oracle_counts

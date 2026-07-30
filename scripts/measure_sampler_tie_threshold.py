@@ -2,6 +2,13 @@
 """Confirmation probe (2026-07-30) for
 docs/design-memos/2026-07-30-priority-as-identity-prefix.md.
 
+**HISTORICAL — the defect this probe quantifies has been fixed.** The memo's redefinition landed
+(contracts §2.6 r6: `priority = high16(tessera_id)`), and design §7.2's selection now compares the
+full `tessera_id`, which is unique per row — so there is no tiebreak left to be dominated by, at any
+V. This script is kept because it measures how *exposed* the shipped system was, which is evidence
+about the fix's value rather than about the current code. It still runs: `decode_viewport` now
+returns 4-tuples `(tile, visible, matched, served)` and this script reads `visible` positionally.
+
 Question: over the existing 10^9 bundle, count the (tile, principal) pairs with V (the
 per-tile `visible` count, i.e. the masked cardinality of a tile before the k-cap) greater
 than 2*10^6 -- the point above which every candidate in a tile shares the same 16-bit
@@ -16,7 +23,8 @@ Prior baselines were checked first and do NOT carry the needed granularity:
 Neither lets you recover a per-(tile, principal) V, so a new server run against the
 EXISTING /tmp/tessera-1e9 bundle (not rebuilt) is required. This script decodes the
 per-tile `visible` column directly from `decode_viewport` (reference/oracle/wire.py),
-which already returns `tiles = [(tile_id, visible, matched), ...]` per Arrow batch.
+which returns `tiles = [(tile_id, visible, matched, served), ...]` per Arrow batch (`served` is
+contracts r7's addition; this script reads `visible` at index 1 and is unaffected).
 
 k is fixed at 1 throughout: `visible`/`matched` are full masked tile counts computed
 before the k-cap (bench_work_correlation.py's own comment: "Sigma visible ... over the

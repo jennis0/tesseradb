@@ -165,19 +165,49 @@ class Server:
         resp.raise_for_status()
         return resp.json()
 
-    def viewport(self, token: str, slice_id: str, zoom: int, bbox, k: int | None = None) -> bytes:
+    def viewport(
+        self,
+        token: str,
+        slice_id: str,
+        zoom: int,
+        bbox,
+        k: int | None = None,
+        underlay_offset: int | None = None,
+    ) -> bytes:
         """Returns the raw framed body (matches the pre-refactor `reference/tests/conftest.py`
         behaviour exactly — the differential suite depends on getting bytes back here)."""
-        return self.viewport_response(token, slice_id, zoom, bbox, k=k).content
+        return self.viewport_response(
+            token, slice_id, zoom, bbox, k=k, underlay_offset=underlay_offset
+        ).content
+
+    def meta(self, token: str) -> dict:
+        """`GET /v1/meta`. Carries the §7.2 selection constants (`selection.k_min`,
+        `selection.k_max_marks`, `selection.theta_target_marks`) the oracle needs to reproduce the
+        served set — it cannot know deployment config any other way."""
+        resp = requests.get(
+            f"{self.viewer_base}/v1/meta",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     def viewport_response(
-        self, token: str, slice_id: str, zoom: int, bbox, k: int | None = None
+        self,
+        token: str,
+        slice_id: str,
+        zoom: int,
+        bbox,
+        k: int | None = None,
+        underlay_offset: int | None = None,
     ) -> requests.Response:
         """Like `viewport`, but returns the full `requests.Response` — for callers that need
         headers (e.g. `x-tessera-pin`) alongside the body."""
         body = {"slice": slice_id, "zoom": zoom, "bbox": list(bbox)}
         if k is not None:
             body["k"] = k
+        if underlay_offset is not None:
+            body["underlay_offset"] = underlay_offset
         resp = requests.post(
             f"{self.viewer_base}/v1/viewport",
             headers={"Authorization": f"Bearer {token}"},
@@ -247,7 +277,29 @@ def write_config(
     viewer_port: int,
     session_port: int,
     control_port: int,
+    *,
+    theta_target_marks: int | None = None,
+    k_min: int = 2,
+    k_max_marks: int | None = None,
+    max_k: int | None = None,
 ) -> Path:
+    """Write a `tessera.toml`.
+
+    `theta_target_marks` defaults to a value large enough to **saturate** theta, which turns §7.2's
+    selection into "serve every visible row up to the cap". Suites that assert masking or wire shape
+    want that: with theta live, every point-set assertion would also depend on the density rule's
+    threshold clause, so a masking bug and a theta bug would be indistinguishable. Pass a real value
+    to exercise density deliberately.
+    """
+    if theta_target_marks is None:
+        theta_target_marks = 1 << 40
+    # Both caps default well above any harness fixture, for the same reason as theta: a suite
+    # asserting masking or wire shape should not have its point sets silently truncated by a cap
+    # it did not choose. Suites that mean to exercise a cap pass one.
+    if k_max_marks is None:
+        k_max_marks = 1_000_000
+    if max_k is None:
+        max_k = 1_000_000
     config_text = f"""
 [bundle]
 path = "{bundle_root}"
@@ -267,6 +319,10 @@ session = "127.0.0.1:{session_port}"
 control = "127.0.0.1:{control_port}"
 session_credential_env = "TESSERA_REFERENCE_SESSION_CRED"
 operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"
+max_k = {max_k}
+k_min = {k_min}
+k_max_marks = {k_max_marks}
+theta_target_marks = {theta_target_marks}
 """
     config_path = tmp_dir / "tessera.toml"
     config_path.write_text(config_text)
@@ -281,6 +337,9 @@ def spawn_server(
     wal_path: Path | None = None,
     log_path: Path | None = None,
     env_extra: dict[str, str] | None = None,
+    max_k: int | None = None,
+    k_max_marks: int | None = None,
+    theta_target_marks: int | None = None,
 ) -> tuple[Server, subprocess.Popen]:
     """Start `tessera serve` against `bundle_root`, using `cache_dir`/`wal_path` (defaulting to
     `tmp_dir/cache`, `tmp_dir/wal.log`) for its durable state. Passing the SAME `cache_dir`/
@@ -303,7 +362,16 @@ def spawn_server(
     control_port = free_port()
 
     config_path = write_config(
-        tmp_dir, bundle_root, cache_dir, wal_path, viewer_port, session_port, control_port
+        tmp_dir,
+        bundle_root,
+        cache_dir,
+        wal_path,
+        viewer_port,
+        session_port,
+        control_port,
+        max_k=max_k,
+        k_max_marks=k_max_marks,
+        theta_target_marks=theta_target_marks,
     )
 
     env = os.environ.copy()

@@ -108,11 +108,11 @@ def tiles_for_bbox(
     return tiles
 
 
-def priority(entity_id: int) -> int:
-    """priority(e) = (splitmix64(e) >> 48) as u16 — Reference Sheet R3, contracts §2.6."""
-    mask64 = (1 << 64) - 1
-    z = (entity_id + 0x9E3779B97F4A7C15) & mask64
-    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & mask64
-    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & mask64
-    z = z ^ (z >> 31)
-    return (z >> 48) & 0xFFFF
+# `priority(entity_id)` is DELETED, not moved (2026-07-30 priority-as-identity-prefix fold).
+#
+# It was `(splitmix64(entity_id) >> 48) as u16` — an *unkeyed* residue of the entity ID, and a
+# second hash construction alongside the identity's own. Contracts §2.6 r6 redefines `priority` as
+# `high16(tessera_id)`, a prefix of the keyed bijection, so there is exactly one hash construction
+# in the format and `identity.forward()` is the only place it lives. This deletion is on the memo's
+# own change list; reintroducing a standalone priority function here would give the oracle a second
+# source of truth for the sort order and for selection, which is the whole thing the fold removed.

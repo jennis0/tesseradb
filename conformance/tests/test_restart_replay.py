@@ -193,7 +193,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(bundle_root: Path, restar
         zoom = 4
         raw = srv.viewport(token, SLICE, zoom, bbox, k=200)
         tiles, _points = decode_viewport(raw)
-        counts_before = {t: v for t, v, m in tiles}
+        counts_before = {t: v for t, v, m, _s in tiles}
 
         from_oracle_before = _oracle_counts(oracle_bundle, resolved_mask_before, SLICE, zoom, bbox)
         assert counts_before == from_oracle_before
@@ -218,7 +218,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(bundle_root: Path, restar
             token2 = auth2["token"]
             raw2 = srv2.viewport(token2, SLICE, zoom, bbox, k=200)
             tiles2, _points2 = decode_viewport(raw2)
-            counts_after_restart = {t: v for t, v, m in tiles2}
+            counts_after_restart = {t: v for t, v, m, _s in tiles2}
 
             assert counts_after_restart == from_oracle_before, (
                 "the delete/suppress deny ops must survive a SIGKILL + WAL replay unchanged"

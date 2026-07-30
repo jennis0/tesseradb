@@ -21,6 +21,11 @@ N_TERMS = 6
 EXTENT = "0,65536,0,65536"
 SLICE_ID = "s0"
 SEED = 20260729
+# One fixed identity key for BOTH bundles. See the build-args comment below for why an independent
+# per-bundle key made the point-set comparison vacuous under identity-ordered selection. The value
+# is arbitrary but must be a real key (`IdentityKey::from_hex` refuses degenerate ones); it is the
+# same canonical vector the Rust fixture tests use.
+CANARY_ID_KEY_HEX = "000102030405060708090a0b0c0d0e0f"
 
 # The canary's own term id — deliberately one past the base terms, and never granted to any
 # session `test_canary.py` authorises.
@@ -111,12 +116,22 @@ def build_canary_pair(work_dir: Path) -> tuple[Path, Path]:
                 SLICE_ID,
                 "--out",
                 str(out_dir),
-                # Contracts r6 refuses to build unless a human names the identity key's
-                # lineage. Each canary fixture (free and canary bundles alike) is a genuinely
-                # new, from-scratch lineage every run (`oracle.harness.ensure_fixture_bundle`'s
-                # module doc makes the same call for the main fixture) — naming
-                # `--mint-id-key` here satisfies the rule rather than working around it.
-                "--mint-id-key",
+                # Contracts r6 refuses to build unless a human names the identity key's lineage.
+                #
+                # **Both bundles must carry the SAME key, and this is load-bearing, not tidiness.**
+                # `--mint-id-key` was passed here originally, which minted an *independent random
+                # key per bundle*. `tessera_id = FPE_key(shard_id || entity_id)`, so under two keys
+                # the two bundles' identities are unrelated — and since design §7.2 selects the
+                # lowest identities in a tile, the two bundles necessarily draw different samples
+                # whatever the corpus. That made the point-set half of this canary vacuous the
+                # moment selection stopped being position-based: it could only ever have compared
+                # two unrelated permutations. Contracts §2.6 states the property directly — "row
+                # order is key-dependent: a key rotation reorders tied rows".
+                #
+                # Fixing the key isolates the variable this canary is actually about: the presence
+                # of one extra item carrying an ungranted term.
+                "--id-key",
+                CANARY_ID_KEY_HEX,
             ],
             cwd=REPO_ROOT,
             check=True,

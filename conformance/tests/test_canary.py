@@ -47,11 +47,15 @@ SLICE = "s0"
 # depths; a scaffold, not an exhaustive per-depth sweep (see module doc: this is what Phase 2
 # extends).
 ZOOM_RANGE = range(0, 7)
-# K = 500 is comfortably >= N_BASE_ITEMS (400), so no tile's point set is ever truncated by the
-# `k` cap for either bundle — deliberately: this test is about comparing full membership between
-# two bundles, not about exercising the first-k selector/priority-tiebreak machinery itself (that
-# is Task 7/9's job). Worth stating explicitly: `k`-truncation and its interaction with the canary
-# item's priority ordering is therefore NOT exercised by this test.
+# K = 500 exceeds N_BASE_ITEMS (400), and the fixture below spawns both servers with `max_k`,
+# `k_max_marks` and a saturating `theta_target_marks` all far above the fixture size — so no tile's
+# point set is truncated for either bundle. That matters: conformance §4.2 requires the canonicalised
+# comparison to include the points batches, and under design §7.2's density rule a truncating cap or
+# a live theta would silently degrade this from a full-membership comparison to a prefix comparison
+# with no test failing. The three overrides keep the surface at full strength.
+#
+# Deliberately still NOT exercised here: cap truncation and theta's threshold clause themselves.
+# Those are tested in `crates/tessera-engine/tests/selection.rs`, against fixtures built for them.
 K = 500
 
 
@@ -68,8 +72,11 @@ def canary_servers(tmp_path_factory, canary_bundles):
     free_tmp = tmp_path_factory.mktemp("canary-free-serve")
     canary_tmp = tmp_path_factory.mktemp("canary-serve")
 
-    free_srv, free_proc = spawn_server(free_bundle, free_tmp)
-    canary_srv, canary_proc = spawn_server(canary_bundle, canary_tmp)
+    # See K's comment: keep the point-set comparison at full membership rather than letting a cap
+    # or a live theta quietly turn it into a prefix comparison.
+    untruncated = {"max_k": 100_000, "k_max_marks": 100_000, "theta_target_marks": 1 << 40}
+    free_srv, free_proc = spawn_server(free_bundle, free_tmp, **untruncated)
+    canary_srv, canary_proc = spawn_server(canary_bundle, canary_tmp, **untruncated)
     yield free_srv, canary_srv
     stop_server(free_proc)
     stop_server(canary_proc)
@@ -78,7 +85,19 @@ def canary_servers(tmp_path_factory, canary_bundles):
 def _decoded_viewport(server, token, zoom, bbox):
     raw = server.viewport(token, SLICE, zoom, bbox, k=K)
     tiles, points = decode_viewport(raw)
-    tile_map = {t: (v, m) for t, v, m in tiles}
+    tile_map = {t: (v, m) for t, v, m, _s in tiles}
+    # The untruncated premise, asserted rather than assumed. Conformance §4.2 wants this canary
+    # comparing full point-set *membership*; if a cap or a live theta ever truncated a tile, the
+    # comparison would quietly weaken to "two prefixes agree" and still pass. Checking
+    # `served == visible` fails loudly instead, and points at K's comment for the fix.
+    for tile, (visible, _matched, served) in {
+        t: (v, m, s) for t, v, m, s in tiles
+    }.items():
+        assert served == visible, (
+            f"tile {tile} at zoom {zoom} served {served} of {visible} visible — this canary's "
+            f"point-set comparison must be untruncated to mean what §4.2 asks of it; see K's "
+            f"comment and the spawn_server overrides"
+        )
     point_multiset = Counter((round(x, 4), round(y, 4)) for _h, x, y in points)
     return tile_map, point_multiset
 
