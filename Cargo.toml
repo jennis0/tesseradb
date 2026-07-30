@@ -12,6 +12,7 @@ members = [
     "crates/tessera-server",
     "crates/tessera-build",
     "crates/tessera-cli",
+    "crates/tessera-bench",
 ]
 
 [workspace.dependencies]

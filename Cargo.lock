@@ -2249,6 +2249,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "tessera-bench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "croaring",
+ "rand 0.8.7",
+ "reqwest",
+ "rustc-hash 1.1.0",
+ "serde",
+ "serde_json",
+ "tessera-authz",
+ "tessera-build",
+ "tessera-engine",
+ "tessera-lifecycle",
+ "tessera-plugin",
+ "tessera-server",
+ "tessera-spatial",
+ "tessera-store",
+ "tessera-types",
+ "tokio",
+]
+
+[[package]]
 name = "tessera-build"
 version = "0.1.0"
 dependencies = [
