@@ -18,6 +18,13 @@
 //! under 1/cap of the total and far below the effect being measured.
 //!
 //! Run: `cargo run --release --example route_saving -p tessera-engine`
+//!
+//! **Reports the minimum of [`TRIALS`] trials, not a single timing or a mean.** This is a
+//! microbenchmark on a shared box: a competing load (another bench, a test suite, a build) inflates
+//! individual timings by 2-4x and a mean carries that straight into the result, while a single shot
+//! can land anywhere. The minimum is the standard robust estimator for "how fast can this go" — it
+//! discards scheduler interference rather than averaging it in. Check `uptime` before trusting a
+//! reading anyway: no estimator rescues a measurement taken against a saturated CPU.
 
 use std::hint::black_box;
 use std::sync::Arc;
@@ -45,6 +52,9 @@ const EXTENT: Extent = Extent {
 
 /// A realistic viewport: a few hundred tiles.
 const TILES: usize = 300;
+
+/// Timing trials per configuration; the minimum is reported. See the module doc.
+const TRIALS: u32 = 7;
 
 /// splitmix64, so identities are uniform without pulling in the real keyed bijection.
 fn mix(mut z: u64) -> u64 {
@@ -104,7 +114,7 @@ fn main() {
                 assert_eq!(served, cap, "expected the selecting branch at V = cap + 1");
             }
 
-            timings.push(time(200, &ranges, &mask, &seg, &params));
+            timings.push(best_of(TRIALS, 50, &ranges, &mask, &seg, &params));
         }
 
         let (fast, general) = (timings[0], timings[1]);
@@ -126,6 +136,21 @@ fn main() {
         "\nPer viewport of {TILES} tiles, release build. `saving` is what deleting the fast path\n\
          would cost; compare against the 10 ms p99 exit criterion."
     );
+}
+
+/// The fastest of `trials` timings, each averaging `reps` viewports.
+fn best_of(
+    trials: u32,
+    reps: u32,
+    ranges: &[(std::ops::Range<u32>, u64)],
+    mask: &EffectiveMask,
+    seg: &SegmentData,
+    params: &SelectParams,
+) -> u128 {
+    (0..trials)
+        .map(|_| time(reps, ranges, mask, seg, params))
+        .min()
+        .expect("TRIALS must be non-zero")
 }
 
 fn time(

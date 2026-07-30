@@ -388,6 +388,8 @@ fn the_accepted_cap_flat_region_serves_equally_from_unequal_tiles() {
 /// [`cap_decreasing_on_descent_can_drop_a_mark`] pins the documented consequence of not doing so.
 #[test]
 fn a_drawn_mark_is_still_drawn_in_the_child_that_contains_it() {
+    use std::collections::{HashMap, HashSet};
+
     let mut rng = StdRng::seed_from_u64(0xD0_1CE);
     let points: Vec<(f32, f32, u64)> = (0..600)
         .map(|_| {
@@ -405,36 +407,82 @@ fn a_drawn_mark_is_still_drawn_in_the_child_that_contains_it() {
 
     let anchor = Threshold::anchor(visible.len() as u64, 8);
     let cap = 12;
+    // Counted and asserted below: without it this test can pass vacuously if the fixture, the mask
+    // or the parameters ever drift such that no mark is drawn in a tile that has a populated child.
+    let mut checked = 0usize;
 
     for depth in 0..6u8 {
         let parent_params = params(2, cap, anchor.at_depth(depth));
         let child_params = params(2, cap, anchor.at_depth(depth + 1));
 
-        for (x, y, _) in points.iter().copied() {
-            let parent = tile_of(x, y, depth);
+        // Deduplicate: the loop is over points, but many points share a tile — at depth 0 all 600
+        // do. Without this the same tile is re-selected hundreds of times.
+        let parents: HashSet<u64> = points
+            .iter()
+            .map(|&(x, y, _)| tile_of(x, y, depth).prefix)
+            .collect();
+
+        for parent_prefix in parents {
+            let parent = Tile {
+                prefix: parent_prefix,
+                depth,
+            };
             let drawn = served_ids(&seg, &mask, &parent, &parent_params);
             if drawn.is_empty() {
                 continue;
             }
-            let child = tile_of(x, y, depth + 1);
-            let drawn_child = served_ids(&seg, &mask, &child, &child_params);
 
-            // Only assert about the marks that actually live in this child.
-            let child_range = tile_ranges(&seg.data, &child);
-            for id in &drawn {
-                let in_this_child = (child_range.start..child_range.end)
-                    .any(|r| seg.id_at(r) == *id && mask.contains_row(r));
-                if !in_this_child {
+            // Which child holds each drawn identity — built once per parent by walking the parent's
+            // rows, rather than rescanning each child range per identity.
+            let parent_range = tile_ranges(&seg.data, &parent);
+            let mut child_of: HashMap<u64, u64> = HashMap::new();
+            for row in parent_range.start..parent_range.end {
+                if !mask.contains_row(row) {
                     continue;
                 }
+                let (x, y, _) = points_of(&seg, row);
+                child_of.insert(seg.id_at(row), tile_of(x, y, depth + 1).prefix);
+            }
+
+            let mut served_by_child: HashMap<u64, Vec<u64>> = HashMap::new();
+            for id in &drawn {
+                let Some(&child_prefix) = child_of.get(id) else {
+                    continue;
+                };
+                let entry = served_by_child.entry(child_prefix).or_insert_with(|| {
+                    served_ids(
+                        &seg,
+                        &mask,
+                        &Tile {
+                            prefix: child_prefix,
+                            depth: depth + 1,
+                        },
+                        &child_params,
+                    )
+                });
                 assert!(
-                    drawn_child.contains(id),
+                    entry.contains(id),
                     "mark {id:#x} drawn at depth {depth} vanished in its own child at depth {}",
                     depth + 1
                 );
+                checked += 1;
             }
         }
     }
+
+    assert!(
+        checked > 200,
+        "only {checked} drawn marks were followed into a child — this test is not exercising \
+         nesting, so its silence proves nothing"
+    );
+}
+
+/// Row `row`'s `(x, y, tessera_id)` as stored — the inverse of `segment_of`'s input, read back from
+/// the segment so a test never assumes the pre-sort order.
+fn points_of(seg: &Segment, row: u32) -> (f32, f32, u64) {
+    let cols = &seg.data.columns;
+    let i = row as usize;
+    (cols.x()[i], cols.y()[i], cols.tessera_id()[i])
 }
 
 /// The documented consequence of breaking the nesting premise: a client that reduces `cap` on

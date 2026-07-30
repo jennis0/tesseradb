@@ -1201,10 +1201,16 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
         Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
-            max_k: 200,
+            // **Production defaults, deliberately.** Everything else in this file saturates theta
+            // so that masking assertions do not also depend on the density rule — but this is the
+            // only latency gate in the tree, and under saturation the threshold clause never binds,
+            // `admits` is a constant `true`, and the counting/selecting branch is barely exercised.
+            // It would have measured a path the server does not take. Keep these in step with
+            // `tessera-server`'s DEFAULT_* constants.
+            max_k: 1_000,
             k_min: 2,
-            k_max_marks: 200,
-            theta_target_marks: u64::MAX,
+            k_max_marks: 500,
+            theta_target_marks: 16,
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,

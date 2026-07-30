@@ -1,7 +1,6 @@
-//! Per-user LOD selection (§7.2, design r22) — the definition, and the two ways of evaluating it.
+//! Per-user LOD selection — design §7.2's definition, evaluated inside the mask (I7).
 //!
-//! **The definition.** For a tile *T* at depth *d*, with `vis(T)` its visible row set ordered
-//! ascending by the row's `tessera_id`:
+//! For a tile *T* at depth *d*, with `vis(T)` its visible row set ordered ascending by `tessera_id`:
 //!
 //! ```text
 //! cap    = min(request_k, k_max_marks)
@@ -10,44 +9,24 @@
 //! served(T) = the min(m(T), |vis(T)|) smallest members of vis(T) by tessera_id
 //! ```
 //!
-//! Three clauses: a **floor** of `k_min` (the I7 guarantee — the sparsest principals' maps are
-//! never empty), a **threshold** at `P_d` (the density signal: a tile with *n* visible draws
-//! `θ_d·n` marks, and tiles are equal screen area, so mark count *is* density), and a **cap** at
-//! `cap` (bounds work, wire and overplot).
+//! A **floor** of `k_min` (the I7 guarantee — the sparsest principals' maps are never empty), a
+//! **threshold** at `P_d` (the density signal: a tile with *n* visible draws `θ_d·n` marks, and
+//! tiles are equal screen area, so mark count *is* density), and a **cap**. §7.2 carries the
+//! reasoning, the nesting proof and the accepted residuals; this module implements it.
 //!
-//! # Nesting holds for a fixed `cap`, and `k` must not decrease on zoom-in
+//! **Two things a reader needs that are not obvious from the code:**
 //!
-//! The stability property is that an item drawn in a parent tile is still drawn in whichever child
-//! contains it, so marks never pop out on zoom-in. It rests on ranks only falling under a subset
-//! (`vis(T') ⊆ vis(T)`) and on θ being monotone in depth — **and on `cap` being the same at both
-//! depths**. Both surviving clauses need that:
-//!
-//! - *Threshold clause.* `i ∈ served(T)` gives `rank_{T'}(i) ≤ rank_T(i) ≤ cap`. If the child is
-//!   evaluated at a smaller `cap'`, then `m(T') ≤ cap' < rank_{T'}(i)` is reachable and `i` pops.
-//! - *Floor clause.* The effective floor is `min(k_min, cap)`, so a smaller `cap'` weakens the
-//!   floor as well.
-//!
-//! `k_max_marks` is a server constant, so `cap = min(request_k, k_max_marks)` varies across depths
-//! only through `request_k`. **A client that reduces `k` while zooming in therefore forfeits
-//! nesting**; `k` must be non-decreasing on descent. This is a client obligation, stated in
-//! contracts §3.2, not something the engine can enforce — it sees one request at a time. It is
-//! recorded here because §7.2 keeps the bit-reversal note precisely because this class of mistake
-//! gets re-derived.
-//!
-//! **Why the comparator is the full `tessera_id` and not the `priority` prefix.** `priority` is
-//! defined as `high16(tessera_id)` (contracts §2.6 r6), so "k lowest by priority then by
-//! `tessera_id`" is *identically* "k lowest by `tessera_id`" — there is no composite comparator to
-//! get subtly wrong, and the sample is correct at any prefix width. Design §7.2 (r21) directs that
-//! no runtime prefix-scan-then-fall-through path be built in Phase 1, so this module reads the
-//! `tessera_id` column directly. The cost of not having that path is recorded rather than hidden:
-//! the per-viewport *scanned* column goes from `priority` at 2 B/row to `tessera_id` at 8 B/row, a
-//! 4x rise in page traffic. Contracts §2.6 already permits comparing the prefix first as an
-//! optimisation; the design's trigger for doing so is `w ≈ log₂(V_max/k)`.
-//!
-//! **What this module does not do.** No candidate lists, no storage-order-scan route, no route
-//! chooser (owner ruling 2026-07-30: those routes rested on an error in reasoning). The two
-//! routes here are the definition evaluated directly, and an *exact* fast path for the case where
-//! the definition provably serves everything visible.
+//! - **Nesting holds only for a fixed `cap`.** `cap = min(request_k, k_max_marks)` and
+//!   `k_max_marks` is a server constant, so it varies only through the client's `k` — and a client
+//!   that *reduces* `k` while zooming in forfeits nesting and will see marks pop out. The engine
+//!   sees one request at a time and cannot enforce it; contracts §3.2 states it as a client
+//!   obligation. Recorded here because §7.2 keeps its bit-reversal note for exactly this class of
+//!   mistake being re-derived.
+//! - **The comparator is the full `tessera_id`, not the `priority` prefix**, and no
+//!   prefix-scan-then-fall-through path exists (§7.2 r21 directs that none be built in Phase 1).
+//!   The two orders are identical because `priority` is a prefix, so this costs no correctness —
+//!   only 8 B/row of scanned column where 2 B would do. Design Appendix A records that cost and
+//!   §7.2 the trigger for revisiting it.
 
 use std::collections::BinaryHeap;
 use std::ops::Range;
@@ -73,48 +52,23 @@ pub enum Threshold {
 impl Threshold {
     /// Anchor θ at depth 0 from the viewer's own total visible count.
     ///
-    /// `P_0 = m_target · 2⁶⁴ / v_total`, so that the *mean* occupied tile at any depth draws
-    /// `m_target` marks: priorities are uniform over the identity space by construction, so
-    /// `P(id < P) = P / 2⁶⁴`, and a tile of *n* visible items serves `n · P_d / 2⁶⁴`.
+    /// `P_0 = m_target · 2⁶⁴ / v_total`, so the *mean* occupied tile at any depth draws `m_target`
+    /// marks: priorities are uniform over the identity space, so `P(id < P) = P / 2⁶⁴` and a tile of
+    /// *n* visible items serves `n · P_d / 2⁶⁴`.
     ///
     /// **`v_total` must be the COMPOSED visible cardinality** — the mask *after* the overlay diff,
-    /// not the cached `RowProjection`'s cardinality. I2 requires every aggregate be computable
-    /// from inside `M_auth` alone, and the pre-overlay projection is not: after any accepted
-    /// delete or suppression it strictly contains `M_auth`. Anchoring on it would let a viewer
-    /// aggregate mark counts across a few hundred tiles, solve for the anchor, difference it
-    /// against its own summed per-tile `visible` (which §7.1 discloses exactly), and recover **a
-    /// running estimate of how many of its own items have been denied** — a count of items outside
-    /// `M_auth`, which no Appendix C row admits. The composed figure costs almost nothing: the
-    /// overlay diffs are tiny by construction.
+    /// not the cached `RowProjection`'s. This is an I2 requirement, not a preference: the
+    /// pre-overlay projection strictly contains `M_auth` after any accepted delete or suppression,
+    /// so anchoring there would let a viewer aggregate mark counts across tiles, solve for the
+    /// anchor, difference it against its own summed per-tile `visible` (which §7.1 discloses
+    /// exactly), and recover **a running estimate of how many of its own items have been denied**.
+    /// See [`EffectiveMask::visible_total`]; the property is pinned by
+    /// `the_theta_anchor_falls_when_an_item_is_suppressed`.
     ///
-    /// **The accepted approximation** (§7.2 r22, owner decision 2026-07-30). The `4^d` progression
-    /// assumes the viewer's items spread over ~`4^d` occupied tiles. Real corpora cluster, so the
-    /// true occupied-cell count `O_d` is smaller and actual marks per tile is
-    /// `m_target · 4^d / O_d` — inflated geometrically in depth for a point set of box-counting
-    /// dimension below 2. The owner accepted this over both a measured per-session anchor and a
-    /// client-supplied θ; memo §9 already accepts cap-flat regions, and the §3.3 underlay
-    /// backstops them.
-    ///
-    /// **The cap-flat region, stated precisely, because the loose version misleads.** It is exactly
-    /// the set of tiles with `C_θ >= cap`, which after θ saturates is the set with `V_tile > cap`.
-    /// Its lower edge is depth 0, where the inflation is exactly 1 whatever the clustering
-    /// (`O_0 = 4^0 = 1`). Its upper edge is **not** the saturation depth: after saturation
-    /// `served = min(cap, V_tile)` — today's flat-`k` behaviour — which stays flat at every depth
-    /// where occupied cells still hold more than `cap` items. Worked: 10^6 visible with
-    /// `m_target = 16` saturates at `d >= 8`, but clustered into 6,400 cells at `d = 8` gives
-    /// `V_tile ~= 156 > 128`, still pinned. The true upper edge is the depth at which the *largest*
-    /// occupied cell falls below `cap`. Bounded either way — but a reader told "θ has saturated"
-    /// would wrongly conclude flatness vanishes at fine zoom.
-    ///
-    /// Note what θ does *not* control: a cell with *n* visible draws `θ·n` marks, exactly
-    /// proportional to density, and proportionality holds while `min(k_min, cap) <= θ·n <= cap` — a
-    /// density ratio of `cap/k_min`, **independent of θ**. θ positions that window on the density
-    /// axis; the floor and cap set its width.
-    ///
-    /// **That width is `min(request_k, k_max_marks)/k_min`, not `k_max_marks/k_min`** — so a request
-    /// default below the cap silently narrows it, independently of the occupancy deficit above. An
-    /// earlier default of `k = 30` against `k_max_marks = 128` realised 15 rather than 64; contracts
-    /// §3.2 now defaults `k` to the deployment's own `k_max_marks`.
+    /// The `4^d` progression assumes the viewer's items spread over ~`4^d` occupied tiles, which
+    /// clustered corpora violate — so real tiles draw more than `m_target` and a band of mid-range
+    /// depths pins at the cap. Accepted by the owner over both a measured anchor and a
+    /// client-supplied θ; §7.2 carries the worked numbers and the exact extent of the flat region.
     pub fn anchor(v_total: u64, m_target: u64) -> Self {
         if v_total == 0 {
             // No visible rows anywhere: every tile is empty and skipped. Saturated is the
@@ -173,15 +127,10 @@ impl Threshold {
 
 /// The selection parameters for one request, resolved once and shared across every tile.
 ///
-/// **θ's anchor must be a whole-slice total, never per-segment or per-partition.** Phase 1 fails
-/// closed on a slice with more than one segment (`EngineError::MultiSegmentSlice`), so this is spec
-/// ahead of code — but the trap is worth naming now, because the fix is not local. Where a tile
-/// spans several segments the definition applies to the *union* of their visible sets: sum `C_θ`
-/// across segments, then serve the global bottom-`m` of the union (each segment need only offer its
-/// own bottom-`cap` for that merge to be exact). That is only well-formed while `P_d` is a single
-/// predicate over the union — so a per-segment anchor would make "below the cut" mean different
-/// things in different segments and the merge would stop computing the definition. The same holds
-/// across partitions (§12.3).
+/// **θ's anchor must be a whole-slice total, never per-segment or per-partition** — a local anchor
+/// makes "below the cut" mean different things in different segments, and the merge stops computing
+/// the definition. Both cases fail closed today (`MultiSegmentSlice`, `MultiPartitionSlice`);
+/// §7.2 and §12.3 carry the merge rule for when they no longer do.
 #[derive(Debug, Clone, Copy)]
 pub struct SelectParams {
     /// The floor clause (§7.2's `k_min`) — the I7 guarantee. Clamped to `cap` at use, so a request
@@ -220,30 +169,22 @@ pub fn served_count(c_theta: u64, params: &SelectParams, visible: u64) -> usize 
 
 /// Does the definition provably serve **every** visible row in a tile with `visible` of them?
 ///
-/// A private decision, not a route the caller picks: both branches compute the same definition and
-/// return byte-identical output, so the distinction is an implementation detail and is deliberately
-/// not visible in this module's API.
-///
 /// **Both conditions are exact, not conservative.** Serving all of `vis(T)` is correct iff
-/// `m(T) >= |vis(T)|`. `C_θ <= V` and is unknowable without reading the column, so exactly two
+/// `m(T) >= |vis(T)|`, and `C_θ` is unknowable without reading the column — so exactly two
 /// conditions discharge it from quantities already in hand:
 ///
-/// - `V <= min(k_min, cap)` — the floor alone covers the tile, so `m >= min(cap, k_min) >= V`.
-/// - `Saturated ∧ V <= cap` — θ ≥ 1 means `C_θ = V` *by construction*, so `m >= min(cap, V) = V`.
-///   This is why [`Threshold::Saturated`] is a variant rather than `Cut(u64::MAX)`: the latter would
-///   exclude `id == u64::MAX` and break the equivalence at the boundary.
+/// - `V <= min(k_min, cap)`, the floor alone covering the tile; or
+/// - `Saturated ∧ V <= cap`, since θ ≥ 1 means `C_θ = V` *by construction*. This is why
+///   [`Threshold::Saturated`] is a variant rather than `Cut(u64::MAX)` — the latter would exclude
+///   `id == u64::MAX` and break the equivalence at the boundary.
 ///
-/// **`V <= k` alone would be unsound here.** Under the density rule the threshold clause
-/// deliberately serves *fewer* than `V` — a tile with `V = 100` and `C_θ = 5` serves 5 — so serving
-/// all 100 would destroy the density signal that is the point of the rule.
+/// `V <= k` alone would be unsound: the threshold clause deliberately serves fewer than `V`, so a
+/// tile with `V = 100` and `C_θ = 5` serves 5, and serving all 100 would destroy the density signal.
 ///
-/// **What skipping the counting pass is worth** (measured, `examples/route_saving.rs`): about 30% of
-/// selection cost on every tile it covers, so it scales with the visible rows in those tiles — 67 µs
-/// per 300-tile viewport at `cap = 30`, and **2.76 ms at `cap = 1000`**, against a 10 ms p99 budget.
-/// An earlier review costed it at ~60 µs and recommended deleting it; that figure is right at
-/// `cap = 30` and does not survive the larger mark budgets. Both conditions bite hardest for tail
-/// principals, where θ saturates early (`d >= log₄(V_total / m_target)`: depth ~2 at 10² visible,
-/// ~7 at 10⁵) — the population I7 exists to protect.
+/// Worth ~30% of selection cost on the tiles it covers — 75 µs per 300-tile viewport at `cap = 30`,
+/// 2.7 ms at `cap = 1000` against a 10 ms p99 budget (`examples/route_saving.rs`, re-runnable). A
+/// review costed it at the smaller figure and recommended deletion; the saving scales with `cap`,
+/// which is why it survived.
 fn serves_all_visible(params: &SelectParams, visible: u64) -> bool {
     visible <= params.floor() as u64
         || (params.threshold.is_saturated() && visible <= params.cap as u64)
@@ -278,11 +219,18 @@ impl Selection {
         let ids = segment.columns.tessera_id();
         let visible_rows = mask.rows_in_range(range);
 
-        let rows = if serves_all_visible(params, visible) {
-            // Everything visible is served, so there is nothing to count and nothing to select.
-            let mut rows: Vec<u32> = visible_rows.iter().collect();
-            rows.sort_unstable_by_key(|&row| ids[row as usize]);
-            rows
+        let rows: Vec<u32> = if serves_all_visible(params, visible) {
+            // Everything visible is served, so there is nothing to count and nothing to select —
+            // only ordering. Decorate-sort-undecorate rather than `sort_unstable_by_key`: the latter
+            // re-reads the identity column on every comparison, so V log V strided lookups into an
+            // 8 B/row mmap where V suffice. Immaterial at the old default cap of 30; at cap 500 it is
+            // ~1.4M lookups per viewport against ~150k.
+            let mut decorated: Vec<(u64, u32)> = visible_rows
+                .iter()
+                .map(|row| (ids[row as usize], row))
+                .collect();
+            decorated.sort_unstable();
+            decorated.into_iter().map(|(_, row)| row).collect()
         } else {
             // One pass. `m(T) <= cap` always, so the `cap` smallest ids in the tile contain the
             // served set for *any* m the counting pass can produce — which is what makes a single

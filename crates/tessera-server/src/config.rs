@@ -44,6 +44,12 @@ pub enum ConfigError {
         cap_name: &'static str,
         cap: usize,
     },
+    /// `serve.max_underlay_offset` above the grid's own depth. The §5.2 grid is 2¹⁶ × 2¹⁶, so an
+    /// offset beyond 16 can never be usable at any zoom — every request naming it would be refused
+    /// at the depth check. It is refused at startup instead, because the value also feeds a
+    /// `1 << (2 * offset)` shift and this file validates every other selection constant; leaving one
+    /// shift input unbounded is an inconsistent standard rather than a considered exemption.
+    UnderlayOffsetTooDeep(u8),
     /// `serve.theta_target_marks = 0`, which anchors θ at `Cut(0)` — a threshold that admits
     /// **nothing**, at every depth, because `0u64.leading_zeros() == 64` so the per-depth shift
     /// always "fits". Every non-empty tile would then draw exactly `k_min` marks at every zoom
@@ -99,6 +105,11 @@ impl std::fmt::Display for ConfigError {
                 "serve.k_min ({k_min}) exceeds serve.{cap_name} ({cap}) — the floor would be \
                  clamped to that cap on every tile, so one of the two is not doing what its author \
                  intended"
+            ),
+            ConfigError::UnderlayOffsetTooDeep(offset) => write!(
+                f,
+                "serve.max_underlay_offset ({offset}) exceeds the grid's own depth of 16 (§5.2), so \
+                 no zoom could ever use it"
             ),
             ConfigError::ThetaTargetZero => write!(
                 f,
@@ -360,6 +371,13 @@ fn parse(text: &str) -> Result<Config> {
     if theta_target_marks == 0 {
         return Err(ConfigError::ThetaTargetZero);
     }
+    let max_underlay_offset = raw
+        .serve
+        .max_underlay_offset
+        .unwrap_or(DEFAULT_MAX_UNDERLAY_OFFSET);
+    if max_underlay_offset > 16 {
+        return Err(ConfigError::UnderlayOffsetTooDeep(max_underlay_offset));
+    }
 
     Ok(Config {
         bundle_path: raw.bundle.path,
@@ -374,10 +392,7 @@ fn parse(text: &str) -> Result<Config> {
         k_min,
         k_max_marks,
         theta_target_marks,
-        max_underlay_offset: raw
-            .serve
-            .max_underlay_offset
-            .unwrap_or(DEFAULT_MAX_UNDERLAY_OFFSET),
+        max_underlay_offset,
         max_underlay_cells: raw
             .serve
             .max_underlay_cells
@@ -545,6 +560,17 @@ mod tests {
     /// `theta_target_marks = 0` anchors θ at a cut admitting nothing, so every tile would draw
     /// exactly `k_min` at every zoom with no error — the identical silent failure that
     /// `Threshold::at_depth`'s `leading_zeros` guard prevents, reached through config instead.
+    #[test]
+    fn an_underlay_offset_deeper_than_the_grid_refuses_to_start() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml("max_underlay_offset = 17")).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::UnderlayOffsetTooDeep(17)),
+            "{err}"
+        );
+    }
+
     #[test]
     fn a_zero_theta_target_refuses_to_start() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
