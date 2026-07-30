@@ -24,6 +24,7 @@ use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 use crate::compose::{compose, visible_to, RowProjection};
 use crate::select::{SelectParams, Selection, Threshold};
 use crate::session::{Engine, EngineError, Result, Session};
+use crate::timing::{Probe, StageTimings};
 use crate::Generation;
 
 /// One declared-scalar value carried alongside a point (mirrors `tessera_spatial::ScalarValue`'s
@@ -149,13 +150,31 @@ impl<'a> ViewportRequest<'a> {
 }
 
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ViewportOut {
     pub pin: PinId,
     pub tiles: Vec<TileCount>,
     pub points: Vec<PointOut>,
     /// The §3.3 density underlay, when requested — empty otherwise. Only non-empty cells appear.
     pub sub_cells: Vec<SubCellCount>,
+    /// Per-stage breakdown, all zeros unless built with `bench-timing` (see
+    /// [`crate::timing`]). **Excluded from `PartialEq`** — see the hand-written impl below.
+    pub timings: StageTimings,
+}
+
+/// `PartialEq` ignoring `timings`, hand-written rather than derived.
+///
+/// Two responses carrying the same pin, tiles and points *are* the same response; the wall-clock
+/// it took to produce them is not part of that identity. A derived impl would make every
+/// `assert_eq!` over a whole `ViewportOut` in the test suite timing-dependent, and therefore
+/// flaky the moment `bench-timing` is enabled — which is exactly when those tests matter most.
+impl PartialEq for ViewportOut {
+    fn eq(&self, other: &Self) -> bool {
+        self.pin == other.pin
+            && self.tiles == other.tiles
+            && self.points == other.points
+            && self.sub_cells == other.sub_cells
+    }
 }
 
 /// `POST /v1/items/{handle}`'s payload (R5): a visible item's scalars plus its caller-supplied
@@ -298,7 +317,10 @@ impl Engine {
         // doc at its definition) — every subsequent read below (pin check, row-projection cache,
         // composition) comes from this one snapshot, so a concurrent overlay/bundle swap
         // mid-request can never mix state from two generations.
+        let mut probe = Probe::new();
+
         let generation = self.generation.load_full();
+        probe.lap(|t| &mut t.generation_resolve_ns);
 
         let effective_pin = match pin {
             Some(presented) => {
@@ -318,6 +340,8 @@ impl Engine {
                 segments_version: generation.segments_version,
             },
         };
+
+        probe.lap(|t| &mut t.pin_resolve_ns);
 
         let k = k.min(self.config.max_k);
 
@@ -353,6 +377,7 @@ impl Engine {
             return Err(EngineError::MultiSegmentSlice(slice.to_string()));
         }
         let segment = slice_data.segments.first();
+        probe.lap(|t| &mut t.slice_lookup_ns);
 
         let cache_key = (
             session.token_id,
@@ -373,10 +398,12 @@ impl Engine {
                         &slice_data.permutation,
                     ));
                     cache.insert(cache_key, Arc::clone(&projected));
+                    probe.mark_projection_built();
                     projected
                 }
             }
         };
+        probe.lap(|t| &mut t.row_projection_ns);
 
         let mask = compose(
             &session.fragment,
@@ -386,6 +413,7 @@ impl Engine {
             base,
             &slice_data.permutation,
         );
+        probe.lap(|t| &mut t.compose_ns);
 
         let q = &generation.bundle.manifest.quantisation;
         let extent = Extent {
@@ -413,6 +441,9 @@ impl Engine {
             });
         }
         let tiles = tiles_for_bbox(bbox, zoom, &extent);
+        probe.lap(|t| &mut t.tiles_for_bbox_ns);
+        probe.count(|t| &mut t.tiles_resolved, tiles.len() as u64);
+
         let declared_scalars = &generation.bundle.manifest.declared_scalars;
 
         // §3.3 underlay bounds, all three checked up front and all three *rejecting* rather than
@@ -477,13 +508,38 @@ impl Engine {
             let Some(segment) = segment else { continue };
 
             let range = tile_ranges(segment, &tile);
+            probe.lap(|t| &mut t.tile_ranges_ns);
+            probe.count(|t| &mut t.rows_in_ranges, range.len() as u64);
+
             let visible = mask.count_range(range.clone());
+            probe.lap(|t| &mut t.count_ns);
+
             if visible == 0 {
                 // Skip empty: no count row, no selection work for a tile with nothing visible.
                 continue;
             }
+            probe.count(|t| &mut t.tiles_nonempty, 1);
+            probe.count(|t| &mut t.sigma_visible, visible);
 
             let selected = Selection::of(&mask, segment, range.clone(), &params, visible);
+            probe.lap(|t| &mut t.select_ns);
+            // The F1 memo asks that this counter stay alive as the regression detector for
+            // selection cost, and it does — but its MEANING changed with §7.2's density rule and
+            // the change is worth stating rather than leaving for a reader to infer from a number.
+            //
+            // Before, "materialised" counted rows copied into a `Vec` that the placeholder then
+            // discarded after `k` — pure waste, and the memo's Win 1 was to stop it. That waste is
+            // gone: `rows_in_range` returns a bitmap and nothing is copied.
+            //
+            // What remains is rows *visited*, and under the density rule that is `visible` by
+            // definition, not by defect: `C_θ` is a masked count over the whole tile, so the
+            // threshold clause cannot be evaluated without looking at every visible row. So this
+            // counter no longer converges on `points_gathered` after a fix — it converges on
+            // `sigma_visible`, and a reading of `materialised ≈ gathered` now means the serve-all
+            // branch took every tile, not that selection got cheaper. Reducing visits below
+            // `Σvisible` was the memo's Win 2, which needed the route chooser the owner has since
+            // ruled out.
+            probe.count(|t| &mut t.select_rows_materialised, visible);
 
             tile_counts.push(TileCount {
                 tile: tile.prefix,
@@ -499,6 +555,7 @@ impl Engine {
                     .into_iter()
                     .map(|row| row_to_point(segment, row, declared_scalars)),
             );
+            probe.lap(|t| &mut t.gather_ns);
 
             // §3.3: the tile's sub-cells, each an exact masked count over a contiguous Morton
             // range. Only non-empty cells are emitted, exactly as empty tiles are skipped above.
@@ -523,11 +580,14 @@ impl Engine {
             }
         }
 
+        probe.count(|t| &mut t.points_gathered, points.len() as u64);
+
         Ok(ViewportOut {
             pin: effective_pin,
             tiles: tile_counts,
             points,
             sub_cells,
+            timings: probe.finish(),
         })
     }
 }

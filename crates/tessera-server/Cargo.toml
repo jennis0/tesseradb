@@ -3,6 +3,14 @@ name = "tessera-server"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# Emit `x-tessera-stage-ns` on `/v1/viewport`. Compiling this in is NECESSARY BUT NOT SUFFICIENT:
+# emission also requires `[serve] stage_timing = true` at runtime, which defaults to false. Two
+# gates because cargo unifies features across a `--workspace` build, so the compile-time gate
+# alone cannot be trusted to stay off in a binary built alongside `tessera-bench`.
+bench-timing = ["tessera-engine/bench-timing"]
+
 [dependencies]
 tessera-types = { path = "../tessera-types" }
 tessera-engine = { path = "../tessera-engine" }

@@ -10,6 +10,7 @@
 pub mod compose;
 pub mod select;
 pub mod session;
+pub mod timing;
 pub mod viewport;
 
 use std::sync::Arc;
@@ -21,6 +22,7 @@ use tessera_store::Bundle;
 
 pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
 pub use session::{Engine, EngineConfig, EngineError, Session};
+pub use timing::{Probe, StageTimings};
 pub use viewport::{
     EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,
 };

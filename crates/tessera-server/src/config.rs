@@ -166,6 +166,10 @@ struct RawServe {
     control: String,
     #[serde(default)]
     max_k: Option<usize>,
+    /// Emit the `x-tessera-stage-ns` breakdown header. Defaults to **false**, and has no effect
+    /// at all unless the binary was also built with the `bench-timing` feature.
+    #[serde(default)]
+    stage_timing: Option<bool>,
     #[serde(default)]
     k_min: Option<usize>,
     #[serde(default)]
@@ -220,6 +224,11 @@ pub struct Config {
     pub max_underlay_cells: usize,
     /// Availability bound on the base viewport path. See `EngineConfig::max_tiles_per_request`.
     pub max_tiles_per_request: usize,
+    /// Emit `x-tessera-stage-ns` on viewport responses. **Fails closed**: absent means false, and
+    /// even true does nothing in a binary built without the `bench-timing` feature. The header
+    /// carries only durations and row counts — no identifier, no per-principal label (SA §9) —
+    /// but it quantifies the C4 timing channel, so it stays off unless a measurement asked for it.
+    pub stage_timing: bool,
     pub session_credential: String,
     pub operator_credential: String,
 }
@@ -401,6 +410,7 @@ fn parse(text: &str) -> Result<Config> {
             .serve
             .max_tiles_per_request
             .unwrap_or(DEFAULT_MAX_TILES_PER_REQUEST),
+        stage_timing: raw.serve.stage_timing.unwrap_or(false),
         session_credential,
         operator_credential,
     })

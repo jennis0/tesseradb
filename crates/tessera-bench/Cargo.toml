@@ -1,0 +1,39 @@
+[package]
+name = "tessera-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The measurement harness. NOTHING may depend on this crate — `scripts/check-layers.sh` asserts
+# that. It sits above every other crate precisely so it can reach across layers (authz + store +
+# spatial + engine + build together) without any shipped crate being allowed to.
+#
+# `bench-timing` is enabled by default HERE and only here. That is safe for this binary and
+# unsafe for the workspace: cargo's resolver-2 unifies features across a `--workspace` build, so
+# `tessera-cli` compiled in the same invocation also gets it. The second gate — `[serve]
+# stage_timing`, default false — is what makes that harmless, and `scripts/check-no-stage-header.sh`
+# asserts the shipped binary stays quiet.
+
+[features]
+default = ["bench-timing"]
+bench-timing = ["tessera-engine/bench-timing", "tessera-server/bench-timing"]
+
+[dependencies]
+tessera-types = { path = "../tessera-types" }
+tessera-plugin = { path = "../tessera-plugin" }
+tessera-authz = { path = "../tessera-authz" }
+tessera-spatial = { path = "../tessera-spatial" }
+tessera-store = { path = "../tessera-store" }
+tessera-lifecycle = { path = "../tessera-lifecycle" }
+tessera-engine = { path = "../tessera-engine" }
+tessera-build = { path = "../tessera-build" }
+tessera-server = { path = "../tessera-server" }
+
+croaring = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+rustc-hash = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

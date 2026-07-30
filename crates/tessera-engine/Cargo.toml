@@ -3,6 +3,14 @@ name = "tessera-engine"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# Per-stage viewport timing (see `src/timing.rs`). OFF by default and must stay off in anything
+# shipped: `tessera-server` additionally gates header emission on a config flag, and CI asserts a
+# release `tessera-cli` emits no `x-tessera-stage-ns`. Enabling it here does NOT enable it there —
+# but cargo's feature unification will, on a `--workspace` build, so both gates matter.
+bench-timing = []
+
 [dependencies]
 tessera-types = { path = "../tessera-types" }
 tessera-authz = { path = "../tessera-authz" }

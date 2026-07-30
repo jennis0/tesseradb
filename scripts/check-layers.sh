@@ -49,4 +49,29 @@ fi
 # nothing beyond the id itself, and Important I-4 (which this would-be grep enforced) is
 # retired. See task-10-brief.md's "The routing principle" note before reinstating anything here.
 
+# `tessera-bench` sits ABOVE every other crate: it reaches across authz + store + spatial +
+# engine + build + server together, which no shipped crate may do. The edge must stay one-way, so
+# nothing may depend on it.
+for c in types plugin authz store spatial lifecycle engine wire server build cli; do
+  # Match a dependency declaration (`tessera-bench = ...` or a path to it), not prose -- these
+  # manifests discuss the harness in comments, and a substring grep flags its own documentation.
+  if grep -nE '^[[:space:]]*tessera-bench[[:space:]]*=|\.\./tessera-bench' "crates/tessera-$c/Cargo.toml" >/dev/null 2>&1; then
+    echo "FAIL: tessera-$c depends on tessera-bench; the measurement harness must stay a leaf"
+    fail=1
+  fi
+done
+
+# The stage-timing header must not exist in a shipped binary. `tessera-bench` enables
+# `bench-timing` by default, and cargo unifies features across a `--workspace` build, so the
+# compile gate alone is not enough -- `tessera-server` also gates emission on `[serve]
+# stage_timing`, default false. Assert the runtime gate is still there and still defaults closed.
+if ! grep -q "stage_timing" crates/tessera-server/src/config.rs; then
+  echo "FAIL: the [serve] stage_timing runtime gate is missing from the server config"
+  fail=1
+fi
+if ! grep -q "stage_timing.unwrap_or(false)" crates/tessera-server/src/config.rs; then
+  echo "FAIL: stage_timing must default to false (fail closed)"
+  fail=1
+fi
+
 exit $fail
