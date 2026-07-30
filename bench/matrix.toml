@@ -1,0 +1,155 @@
+# The benchmark campaign: which arms run, at which scales, against which label sets.
+#
+#   cargo build --release -p tessera-bench
+#   ./target/release/tessera-bench matrix --plan          # preview, measure nothing
+#   ./target/release/tessera-bench matrix --run-dir /tmp/tessera-bench/runs/$(date +%F)
+#
+# Resumable at cell granularity: every arm skips what the run directory's ledger records as done,
+# so a killed run is resumed by re-invoking the same command. `--only <arm>` runs one arm.
+#
+# Empty `scales` or `label_sets` means "every fixture discovered under --fixtures". Fixtures come
+# from scripts/bench_build_fixtures.sh; a scale is a `--limit` prefix filter on the source entity
+# id, never a separate corpus file (probes/dataset.md §5 rule 1).
+#
+# --- how this file is balanced -----------------------------------------------------------------
+#
+# `--plan` reports cell counts, and they are worth reading before a long run. Sweeping every axis
+# across all 18 fixtures is ~27,000 cells; this file is ~5,600. The trim is deliberate and follows
+# what the label-set axis actually buys.
+#
+# Within one bundle you can synthesise principals of any width, coverage and scatter for free by
+# choosing grants. What you CANNOT synthesise is signature-sorted entity contiguity — that is
+# fixed at build time and permanent under I9. So the label set earns its cost only where that
+# property is under test, and three sets span the spectrum: `categories-archive` (maximal
+# contiguity), `categories-subclass` (realistic), `hash-flat` (maximal scatter).
+#
+# The cheap arms therefore run everywhere; the expensive ones run on the spanning sets. To sweep
+# wider, widen `label_sets` — the axes themselves are already declared.
+#
+# `hash-flat` must appear somewhere: it is gate G0b's control arm, and its run ratio must come
+# back at exactly 1.00 or the estimator is broken and no other ratio in the run is interpretable
+# (probes/results.md §5). `authorise` covers all 18 fixtures and reports run_ratio, so it does.
+#
+# Two arms are absent by design:
+#   * `load` needs a booted server, N authorised sessions and server-side RSS/CPU sampling ->
+#     scripts/bench_concurrency.py, which reuses reference/oracle/harness.py's boot machinery.
+#   * `ingest-build` is minutes per cell and writes a whole bundle to temp -> run it explicitly,
+#     `tessera-bench ingest-build --scale ... --data-root .`. Putting a two-minute cell beside a
+#     two-microsecond one makes the default run useless.
+
+[defaults]
+repeat = 3
+seed = 0
+
+# --- reads -------------------------------------------------------------------------------------
+
+# Ask 1, and cheap enough to run everywhere — which is also what makes it the natural home for the
+# G0b control. Swept over grant width and *shape*, not only point count: Phase 0 measured the
+# drivers as w and posting shape (~130x on entity contiguity at equal coverage), while dictionary
+# scale is free on this path. A point-count-only sweep draws a flat, misleading line.
+[[arm]]
+name = "authorise"
+w = [1, 10, 100, 1000, 10000]
+shape = ["random", "clustered", "head", "tail"]
+
+# Ask 2. Zooms 0-3 included deliberately: every prior harness swept 4-12, and the coarse zooms are
+# where a tile holds the most points, so they are where "points in cell" is actually exercised.
+[[arm]]
+name = "tiles"
+zoom = [0, 1, 2, 3, 4, 6, 8, 10, 12]
+coverage = [0.001, 0.01, 0.05, 0.25]
+
+# Ask 3, and the probe probes/optimisations.md §3.5 records as owed. Priority-independent by
+# construction — it supplies its own row selection and never goes through the sampler, so whichever
+# sampler ships cannot move these numbers.
+#
+# One column set by default: `xy+id` is what the real viewport path reads. The `xy` / full sweep
+# tests design §10.4's per-column paging claim and triples the cell count, so it is opt-in.
+# 1M-row ranges only exist at 25M; smaller fixtures skip those cells rather than clamp them.
+[[arm]]
+name = "gather"
+label_sets = ["categories-archive", "categories-subclass", "hash-flat"]
+pattern = ["contiguous", "strided", "scattered", "scattered-unsorted", "full-scan"]
+k = [30, 200, 1000, 10000]
+coverage = [0.001, 0.01, 0.05, 0.25]
+range_rows = [1000, 10000, 100000, 1000000]
+columns = ["xy+id"]
+repeat = 5
+
+# Ask 3 proper: single viewport, panning, zooming. `battery` probes the corpus for density deciles
+# first — the geometry is UMAP output, so a uniform-random window at zoom 8 usually contains
+# nothing and an unprobed battery measures the cost of finding nothing ten times.
+# `coverage-sweep` doubles as the C4 timing-channel quantification (Appendix C: "quantify before
+# treating as acceptable"), so it is built once and read twice.
+# `k_max_marks` and `theta_target` are design §7.2's clause parameters, and selection cost depends
+# on them rather than on `k` alone: the cap bounds the heap and the gather, while theta decides how
+# many tiles skip the counting pass entirely. Both are resolved at `Engine::open`, so each extra
+# value costs a full open (which digest-verifies the bundle) — they are left at the server's own
+# defaults here and swept only in the dedicated arm below.
+[[arm]]
+name = "viewport"
+label_sets = ["categories-archive", "categories-subclass", "hash-flat"]
+mode = ["battery", "pan", "zoom", "coverage-sweep"]
+k = [30, 1000]
+coverage = [0.001, 0.01, 0.05, 0.25]
+fixed_zoom = 8
+repeat = 5
+
+# --- writes ------------------------------------------------------------------------------------
+
+# Ask 6, batch half. Expect an fsync amortisation curve: a batch of 1 and a batch of 1000 cost the
+# same ~3.2 ms, so throughput rises ~4400x across this range with the knee near 1000.
+[[arm]]
+name = "ingest-batch"
+label_sets = ["categories-archive", "categories-subclass", "hash-flat"]
+batch = [1, 10, 100, 1000, 10000]
+repeat = 5
+
+# Ask 6, continuous half. Checkpoints stay far below SA §7's intended overlay_soft_limit of
+# 500,000 because every single-item write costs one fsync (~3.2 ms measured) — reaching 500k would
+# be ~27 minutes of pure fsync before any per-item cost is counted. The curve is established here
+# and extrapolated.
+#
+# Note the ingested rows never become *visible*: Phase 1 has no flush, so a buffered entity has no
+# row in the segment and `compose` skips it. This measures composition over rejected entries, which
+# is F2's per-item lower bound; the `changes` arm below measures the resolved-entry upper bound.
+[[arm]]
+name = "ingest-continuous"
+label_sets = ["categories-archive", "categories-subclass"]
+checkpoint = [500, 2000, 5000, 10000, 25000]
+k = [30]
+
+# The other write path, and the one where a latency regression is a security regression
+# (lifecycle §1.3 bounds deny visibility by queue-front + fsync, and /control/changes is never
+# refused for capacity because refusing a security operation under load is fail-open).
+#
+# Also checks that a deny actually denies: at zoom 0 the masked count must drop by exactly one per
+# suppressed entity. A suppression benchmark that never checks the suppression took effect would
+# happily report throughput for a no-op.
+[[arm]]
+name = "changes"
+label_sets = ["categories-archive", "categories-subclass"]
+op = ["suppress", "delete", "predicate"]
+checkpoint = [100, 1000, 5000, 20000]
+
+# §7.2's density rule, swept over its own parameters at one label set and one coverage.
+#
+# Separate from the `viewport` arm above because it varies the axes that arm holds fixed, and
+# because each combination costs an `Engine::open`. What it is for: the cap and theta move selection
+# cost independently of `k`, and the serve-all branch's saving scales with the cap — 75 us per
+# 300-tile viewport at cap 30, ~2.7 ms at cap 1000 (`crates/tessera-engine/examples/route_saving.rs`
+# measures the same thing in isolation). This arm is what turns that from a number someone re-runs
+# by hand into one tracked over time.
+#
+# `theta_target` at 1<<40 saturates theta on any real fixture, which makes every tile take the
+# serve-all branch — the control arm for the other two values.
+[[arm]]
+name = "viewport"
+label_sets = ["categories-subclass"]
+mode = ["battery"]
+k = [1000]
+coverage = [0.05]
+fixed_zoom = 8
+k_max_marks = [30, 128, 500, 1000]
+theta_target = [16, 128, 1099511627776]
+repeat = 5
