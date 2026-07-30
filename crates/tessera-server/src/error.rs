@@ -106,6 +106,13 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // the same leak `map_store_error` closes, reached through the engine's error enum instead
         // of directly. One sanitiser for both doors.
         store_or_io @ (EngineError::Store(_) | EngineError::Io(_)) => map_store_error(store_or_io),
+        // D-G (task 1 of the concurrency workstream): a concurrent request is already building
+        // this session's row projection. The honest response is 429 with `Retry-After` — a later
+        // task wires that mapping. Until then this takes the fail-closed 500 arm explicitly
+        // (never fail-open, but not yet the retryable signal it should be) — named here rather
+        // than left to fall into `other` below, so this transitional state is visible at the
+        // call site rather than silently inherited from the catch-all.
+        building @ EngineError::ProjectionBuilding => ApiError::FailClosed(building.to_string()),
         other => ApiError::FailClosed(other.to_string()),
     }
 }
@@ -172,5 +179,15 @@ mod tests {
             !detail.contains('/'),
             "the body must not carry a server path, got: {detail}"
         );
+    }
+
+    /// D-G, transitional: `ProjectionBuilding` is explicitly named in `map_engine_error`'s match
+    /// (not caught only by the wildcard arm) and takes the fail-closed 500 arm — honest, never
+    /// fail-open, pending the later task that maps it to 429 + `Retry-After`.
+    #[test]
+    fn map_engine_error_takes_projection_building_to_the_fail_closed_arm() {
+        let (status, code, _) = map_engine_error(EngineError::ProjectionBuilding).parts();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(code, "fail-closed");
     }
 }

@@ -24,7 +24,7 @@ use tempfile::TempDir;
 
 use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig, EngineError};
+use tessera_engine::{Engine, EngineConfig, EngineError, Session};
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord, WalRow};
 use tessera_plugin::Passthrough;
 use tessera_spatial::{morton_of, tiles_for_bbox, Extent};
@@ -97,13 +97,17 @@ fn terms_of(source_id: u64) -> Vec<u64> {
     }
 }
 
-fn write_points(path: &Path) {
+/// Parameterised over item count so the D-G concurrency tests near the end of this file (which
+/// need `RowProjection::new` to take long enough to give a race a real window) can ask for a
+/// larger synthetic corpus without duplicating the whole writer. [`build_fixture`] is the
+/// `N_ITEMS`-sized default every other test in this file uses.
+fn write_points_n(path: &Path, n: u64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
     ]));
-    let ids: Vec<u64> = (0..N_ITEMS).collect();
+    let ids: Vec<u64> = (0..n).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let batch = RecordBatch::try_new(
@@ -120,14 +124,15 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
-fn write_pairs(path: &Path) {
+/// See [`write_points_n`]'s doc.
+fn write_pairs_n(path: &Path, n: u64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("term_id", DataType::UInt32, false),
     ]));
     let mut entities = Vec::new();
     let mut terms = Vec::new();
-    for e in 0..N_ITEMS {
+    for e in 0..n {
         for t in terms_of(e) {
             entities.push(e);
             terms.push(t as u32);
@@ -146,10 +151,11 @@ fn write_pairs(path: &Path) {
     w.close().unwrap();
 }
 
-/// Build the fixture bundle at `out` (Task 8's library API — `tessera_build::build`).
-fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
-    write_points(points_path);
-    write_pairs(pairs_path);
+/// Build the fixture bundle at `out` (Task 8's library API — `tessera_build::build`), over an
+/// `n`-item synthetic corpus. See [`write_points_n`]'s doc for why this is parameterised.
+fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
+    write_points_n(points_path, n);
+    write_pairs_n(pairs_path, n);
     let args = BuildArgs {
         points: points_path.to_path_buf(),
         pairs: pairs_path.to_path_buf(),
@@ -163,6 +169,11 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
         shard_id: 0,
     };
     build(&args).expect("fixture build should succeed");
+}
+
+/// Build the fixture bundle at `out` (Task 8's library API — `tessera_build::build`).
+fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
+    build_fixture_n(out, points_path, pairs_path, N_ITEMS)
 }
 
 /// Read the bundle's external-ids extent into a `source_id -> new entity_id` map — the same
@@ -1788,6 +1799,267 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Concurrency — D-G's slot-state single-flight over the row-projection cache (F4)
+// ---------------------------------------------------------------------------------------------
+//
+// F4 (`tessera-bench/src/arms/load.rs:34-76`): the previous cache ran `RowProjection::new` —
+// seconds at 10⁹ rows — *inside* the map lock on a miss, so distinct sessions' first viewports
+// serialised behind one global mutex. D-G replaces the cache value with a slot-state map
+// (`Building` | `Ready`); the map lock is now held only for the O(1) state transition, and a
+// concurrent arrival on the *same* key observed mid-build does not wait — it gets
+// `EngineError::ProjectionBuilding` immediately, never a parked thread.
+//
+// The state machine itself (single-flight, non-blocking waiters, panic safety) is proven
+// deterministically — no sleeps, no timing slack — by `tessera-engine`'s own `single_flight`
+// unit tests, which control a build's start and finish with channels because the map is directly
+// reachable there. The tests below instead exercise the real, public `Engine::viewport` path
+// end to end, which cannot inject a pause into `RowProjection::new`; they use a large enough
+// synthetic fixture that a cold build takes tens of milliseconds even unoptimised, well above OS
+// thread-wake jitter, and — for the single-flight case — retry across fresh sessions until the
+// race is actually observed rather than asserting it lands on a specific attempt.
+
+/// D-G / F4: a concurrent arrival on the same `(token_id, slice, segments_version)` key while
+/// another request is still building that key's `RowProjection` gets
+/// `EngineError::ProjectionBuilding` immediately rather than blocking; once the build publishes
+/// `Ready`, a retried loser succeeds, and the cache never ends up with more than one slot per
+/// key.
+#[test]
+fn concurrent_same_key_viewports_single_flight_others_get_projection_building() {
+    const ROUNDS: usize = 25;
+    const THREADS: usize = 16;
+    const ITEMS: u64 = 150_000;
+
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_n(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        ITEMS,
+    );
+
+    let engine = Arc::new(open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    ));
+
+    for round in 0..ROUNDS {
+        // A fresh session -> a fresh `token_id` -> a cache key this engine has never built,
+        // regardless of what earlier rounds warmed (`Session::token_id` is a process-lifetime
+        // monotone counter — see `Engine::authorise`).
+        let session = Arc::new(engine.authorise(&full_coverage_credential()).unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let engine = Arc::clone(&engine);
+                let session = Arc::clone(&session);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    engine.viewport(
+                        &session,
+                        ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        let building = results
+            .iter()
+            .filter(|r| matches!(r, Err(EngineError::ProjectionBuilding)))
+            .count();
+        assert_eq!(
+            successes + building,
+            THREADS,
+            "round {round}: every racing viewport must either succeed or fail with \
+             ProjectionBuilding — no other outcome is possible from a single-flight cache"
+        );
+        assert!(
+            successes >= 1,
+            "round {round}: the winning builder must always succeed"
+        );
+
+        if building == 0 {
+            // No contention landed this round (every thread happened to queue behind the map
+            // lock only after the builder had already published `Ready`) -- not a failure of
+            // the property, just an unlucky schedule. Try another fresh key.
+            continue;
+        }
+
+        // Contention observed: retry every loser and confirm it now succeeds -- the build must
+        // have published `Ready` (never left the key wedged at `Building`, never cached a
+        // failure).
+        for result in &results {
+            if matches!(result, Err(EngineError::ProjectionBuilding)) {
+                engine
+                    .viewport(
+                        &session,
+                        ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+                    )
+                    .expect("a retried loser must succeed once the build has published Ready");
+            }
+        }
+
+        assert_eq!(
+            engine.row_projection_cache_len(),
+            round + 1,
+            "exactly one Ready slot per round's fresh key, never more than one build's worth"
+        );
+        return;
+    }
+
+    panic!(
+        "never observed same-key contention in {ROUNDS} rounds of {THREADS} threads -- either \
+         the race window is too narrow on this machine (widen ITEMS) or single-flight regressed \
+         to blocking waiters"
+    );
+}
+
+/// D-G / F4: distinct sessions' first viewports must build their row projections
+/// **concurrently**, not serialise behind one global lock — the exact regression F4 measured
+/// (Arm A at c=1000: throughput halves while server CPU *drops* from 712% to 426%, the signature
+/// of threads blocked on a lock rather than doing work).
+///
+/// Measured directly: `serial` times N fresh sessions' cold first viewports run one after
+/// another; `concurrent` times N *different* fresh sessions' cold first viewports released
+/// together on N threads. Both exclude `Engine::authorise` (sessions are minted before either
+/// timer starts) so only the row-projection build itself is measured. If builds still serialised
+/// behind one lock, `concurrent` would be roughly `serial` (same total work, funnelled through
+/// one mutex, plus contention overhead); genuine overlap should land `concurrent` well under
+/// `serial` given more than one core.
+#[test]
+fn distinct_key_first_viewports_overlap_instead_of_serialising() {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    if cores < 2 {
+        eprintln!("skipping distinct_key_first_viewports_overlap_instead_of_serialising: single-core machine, nothing can overlap");
+        return;
+    }
+
+    const N: usize = 4;
+    const ITEMS: u64 = 150_000;
+
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_n(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        ITEMS,
+    );
+    let engine = Arc::new(open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    ));
+
+    let serial_sessions: Vec<_> = (0..N)
+        .map(|_| engine.authorise(&full_coverage_credential()).unwrap())
+        .collect();
+    let serial_start = std::time::Instant::now();
+    for session in &serial_sessions {
+        engine
+            .viewport(
+                session,
+                ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+            )
+            .unwrap();
+    }
+    let serial = serial_start.elapsed();
+
+    let concurrent_sessions: Vec<Arc<Session>> = (0..N)
+        .map(|_| Arc::new(engine.authorise(&full_coverage_credential()).unwrap()))
+        .collect();
+    let barrier = Arc::new(std::sync::Barrier::new(N));
+    let concurrent_start = std::time::Instant::now();
+    let handles: Vec<_> = concurrent_sessions
+        .into_iter()
+        .map(|session| {
+            let engine = Arc::clone(&engine);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                engine
+                    .viewport(
+                        &session,
+                        ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+                    )
+                    .unwrap();
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    let concurrent = concurrent_start.elapsed();
+
+    println!(
+        "distinct-key overlap ({cores} cores, N={N}): serial={serial:?} concurrent={concurrent:?}"
+    );
+    assert!(
+        concurrent < serial * 7 / 10,
+        "concurrent ({concurrent:?}) should be well under serial ({serial:?}) if distinct \
+         sessions' first-viewport builds genuinely overlap rather than serialising behind one \
+         lock (F4); generous 70% slack on a {cores}-core machine"
+    );
+}
+
+/// Byte-format/wire behaviour is unchanged by the D-G refactor: a warm cache must serve output
+/// identical to a cold one for the same request — the refactor changes when and how the
+/// projection is built and read, never what a request is served.
+#[test]
+fn warm_row_projection_cache_serves_output_identical_to_cold() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&subset_credential()).unwrap();
+
+    assert_eq!(engine.row_projection_cache_len(), 0, "nothing built yet");
+    let cold = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 4, [0.0, 0.0, 1000.0, 1000.0], 30),
+        )
+        .unwrap();
+    assert_eq!(
+        engine.row_projection_cache_len(),
+        1,
+        "the cold call must have published exactly one Ready slot"
+    );
+
+    let warm = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 4, [0.0, 0.0, 1000.0, 1000.0], 30),
+        )
+        .unwrap();
+    assert_eq!(
+        engine.row_projection_cache_len(),
+        1,
+        "a warm hit must not add a second slot"
+    );
+
+    assert_eq!(
+        cold, warm,
+        "warm-cache output must be byte-identical to cold (PartialEq ignores only `timings`)"
+    );
 }
 
 /// **The F1 canary — repaired, having been briefly worthless.**

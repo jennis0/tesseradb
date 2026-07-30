@@ -10,6 +10,7 @@
 pub mod compose;
 pub mod select;
 pub mod session;
+mod single_flight;
 pub mod timing;
 pub mod viewport;
 

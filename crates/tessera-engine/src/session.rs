@@ -32,6 +32,7 @@ use tessera_store::read::open_bundle;
 use tessera_store::StoreError;
 use tessera_types::{EntityId, IdentityError, IdentityKey, TermId, TesseraId};
 
+use crate::single_flight::SingleFlightCache;
 use crate::{Generation, GenerationHandle};
 
 /// Engine-wide configuration (SA §7's `[disclosure]`/`[serve]` sections, the subset this task
@@ -164,6 +165,15 @@ pub enum EngineError {
     /// depth of its own, so a silently-reduced offset would hand the client cells it cannot
     /// interpret; rejecting means the depth is always `zoom + offset` from the caller's own request.
     UnderlayRefused(String),
+    /// D-G: this session's row projection for `(token_id, slice, segments_version)` is being
+    /// built by a concurrent request right now. Non-blocking waiters (F4,
+    /// `tessera-bench/src/arms/load.rs:34-76`): a parked waiter would hold the server's admission
+    /// budget while burning zero CPU, so this call does not wait for the in-flight build — it
+    /// returns immediately and the caller is expected to retry. Maps to HTTP 429 with
+    /// `Retry-After` once the server wires that mapping (a later task); until then it takes the
+    /// server's fail-closed 500 arm, which is honest — never fail-open — but not yet the
+    /// retryable signal it should be.
+    ProjectionBuilding,
 }
 
 impl std::fmt::Display for EngineError {
@@ -194,6 +204,11 @@ impl std::fmt::Display for EngineError {
                  narrow the bbox or request a shallower zoom"
             ),
             EngineError::UnderlayRefused(detail) => write!(f, "underlay refused: {detail}"),
+            EngineError::ProjectionBuilding => write!(
+                f,
+                "this session's row projection is being built by a concurrent request; retry \
+                 shortly"
+            ),
         }
     }
 }
@@ -214,9 +229,16 @@ pub struct Engine {
     /// Cached row-space projections, keyed `(token_id, slice, segments_version)` — never
     /// recomputed on the per-viewport path (shared-context constraint 8; see
     /// `crate::compose::RowProjection`'s doc for the cost this avoids).
+    ///
+    /// D-G slot-state single-flight (F4, `tessera-bench/src/arms/load.rs:34-76`): the map lock is
+    /// held only for the O(1) `Building`/`Ready` transition, never across `RowProjection::new`
+    /// itself — see [`SingleFlightCache`]'s doc. A concurrent arrival on the same key while a
+    /// build is in flight does not wait for it; it gets [`EngineError::ProjectionBuilding`] and
+    /// retries. Unbounded growth (eviction) is out of scope here — a memory concern, not the
+    /// concurrency one this cache exists to fix.
     #[allow(clippy::type_complexity)]
     pub(crate) row_projection_cache:
-        Mutex<FxHashMap<(u64, String, u64), Arc<crate::compose::RowProjection>>>,
+        SingleFlightCache<(u64, String, u64), crate::compose::RowProjection>,
     pub(crate) config: EngineConfig,
     next_token_id: AtomicU64,
     /// The write-ahead log handle, kept open for future ingest/change acceptance (Task 13); not
@@ -431,7 +453,7 @@ impl Engine {
             dict,
             postings,
             fragment_cache,
-            row_projection_cache: Mutex::new(FxHashMap::default()),
+            row_projection_cache: SingleFlightCache::new(),
             config,
             next_token_id: AtomicU64::new(0),
             wal: Mutex::new(wal),
@@ -507,12 +529,12 @@ impl Engine {
         self.allocator.lock().unwrap().high_water()
     }
 
-    /// The number of cached row-space projections currently held — exposed for tests confirming
-    /// `Engine::item`'s entity-space visibility test never constructs one (Critical C-5: this
-    /// must stay `0` across drill-down calls, warm or cold, unlike `Engine::viewport`'s path,
-    /// which populates this cache deliberately).
+    /// The number of cached row-space projection slots currently held (`Building` and `Ready`
+    /// both counted) — exposed for tests confirming `Engine::item`'s entity-space visibility test
+    /// never constructs one (Critical C-5: this must stay `0` across drill-down calls, warm or
+    /// cold, unlike `Engine::viewport`'s path, which populates this cache deliberately).
     pub fn row_projection_cache_len(&self) -> usize {
-        self.row_projection_cache.lock().unwrap().len()
+        self.row_projection_cache.len()
     }
 
     /// Whether the external-id sidecar has opened any extent (or its locator) yet — exposed for

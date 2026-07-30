@@ -385,25 +385,24 @@ impl Engine {
             slice.to_string(),
             generation.segments_version,
         );
-        let base: Arc<RowProjection> = {
-            let mut cache = self.row_projection_cache.lock().unwrap();
-            match cache.get(&cache_key) {
-                Some(existing) => Arc::clone(existing),
-                None => {
-                    // Crosses entity space into row space over the *whole* fragment
-                    // (`Permutation::project`'s cost note: seconds at 10⁹ rows) — paid once per
-                    // (token, slice, segments_version) and cached here, never recomputed on a
-                    // per-viewport path (shared-context constraint 8).
-                    let projected = Arc::new(RowProjection::new(
-                        &session.fragment,
-                        &slice_data.permutation,
-                    ));
-                    cache.insert(cache_key, Arc::clone(&projected));
-                    probe.mark_projection_built();
-                    projected
-                }
-            }
-        };
+        // D-G slot-state single-flight (F4, `tessera-bench/src/arms/load.rs:34-76`): the map
+        // lock (`SingleFlightCache`) is held only for the O(1) `Building`/`Ready` transition —
+        // never across the build below — so distinct sessions' first viewports no longer
+        // serialise behind one global lock. Do NOT reintroduce that serialisation by narrowing
+        // this back to "lock, check, build, insert, unlock"; the F4 memo names exactly that as
+        // the anti-fix. A concurrent request racing the *same* key while this build is in flight
+        // does not wait for it — it gets `EngineError::ProjectionBuilding` and retries.
+        let base: Arc<RowProjection> = self
+            .row_projection_cache
+            .get_or_build(cache_key, || {
+                // Crosses entity space into row space over the *whole* fragment
+                // (`Permutation::project`'s cost note: seconds at 10⁹ rows) — paid once per
+                // (token, slice, segments_version) and cached here, never recomputed on a
+                // per-viewport path (shared-context constraint 8).
+                probe.mark_projection_built();
+                RowProjection::new(&session.fragment, &slice_data.permutation)
+            })
+            .map_err(|_building| EngineError::ProjectionBuilding)?;
         probe.lap(|t| &mut t.row_projection_ns);
 
         let mask = compose(
