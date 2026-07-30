@@ -12,7 +12,7 @@ pub mod write;
 pub use error::{Result, StoreError};
 pub use permutation::Permutation;
 pub use read::{
-    open_bundle, tile_ranges, tile_ranges_within, Bundle, ColumnsRef, MortonSlice, PartitionData,
-    ScalarSlice, SegmentData, SliceData,
+    open_bundle, tile_ranges, tile_ranges_all, tile_ranges_within, Bundle, ColumnsRef, MortonSlice,
+    PartitionData, ScalarSlice, SegmentData, SliceData,
 };
 pub use sidecar::ExternalIdSidecar;

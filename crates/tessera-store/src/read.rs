@@ -1,5 +1,6 @@
 //! The bundle read protocol (contracts §2.3), the zero-copy `columns.arrow` / `morton.u32`
-//! loader, and `tile_ranges`.
+//! loader, and the tile lookup — `tile_ranges` for one tile, `tile_ranges_all` for the whole
+//! tile set of a viewport in one sweep.
 //!
 //! `tessera-store` never depends on `tessera-authz`, and this module has its own Arrow IPC
 //! reader — `columns.arrow`'s schema (fixed-width primitive columns) differs from
@@ -968,4 +969,161 @@ pub fn tile_ranges_within(seg: &SegmentData, tile: &Tile, within: Range<u32>) ->
     let start = lo_idx + window.partition_point(|&c| (c as u64) < lo);
     let end = lo_idx + window.partition_point(|&c| (c as u64) < hi);
     start as u32..end as u32
+}
+
+/// `from + codes[from..].partition_point(|&c| (c as u64) < target)`, reached by doubling out
+/// from `from` before binary searching the bracket that lands in — "galloping" (exponential)
+/// search.
+///
+/// **The contract is relative and unconditional**: whatever `from` is, this returns the
+/// partition point *of the tail beginning at `from`*. It never inspects `codes[..from]`, so it
+/// is not a drop-in for a full-column search — it equals one exactly when `from` is at or below
+/// the true partition point, which is the caller's obligation to establish. Stating it this way
+/// is deliberate: the property test can then check it against `partition_point` over arbitrary
+/// slices and arbitrary `from`, with nothing assumed.
+///
+/// **Why galloping and not a binary search of the tail.** [`tile_ranges_all`] sweeps tiles in
+/// ascending code order, so successive searches are a short hop apart — usually zero rows apart
+/// in a sparse viewport, where most tiles are empty and share a partition point. A binary search
+/// costs `log2(tail)` regardless; galloping costs `log2(distance actually travelled)`, which is
+/// one or two comparisons in exactly that case. That difference is the measured win (see
+/// [`tile_ranges_all`]).
+fn gallop(codes: &[u32], from: usize, target: u64) -> usize {
+    let tail = &codes[from.min(codes.len())..];
+    // Double the probe until it reaches an element that is NOT below `target`, or runs off the
+    // end. `lo` trails one step behind and is the last index proven to be entirely below
+    // `target`, so the answer is bracketed in `[lo, hi)` when the loop exits.
+    let mut lo = 0usize;
+    let mut hi = 1usize;
+    while hi <= tail.len() && (tail[hi - 1] as u64) < target {
+        lo = hi;
+        // Saturating so the doubling cannot wrap on a pathologically long column; a saturated
+        // `hi` simply fails the loop condition and clamps to the length below.
+        hi = hi.saturating_mul(2);
+    }
+    let hi = hi.min(tail.len());
+    from.min(codes.len()) + lo + tail[lo..hi].partition_point(|&c| (c as u64) < target)
+}
+
+/// Resolve every tile in `tiles` against `seg` in one forward sweep, returning ranges
+/// **positionally aligned with `tiles`** — `out[i]` is `tile_ranges(seg, &tiles[i])`, for every
+/// `i`, with no exceptions and no reordering.
+///
+/// # Why this exists
+///
+/// Called once per tile, [`tile_ranges`] does two full-column binary searches. A viewport asks
+/// for a few hundred tiles, so a sparse request spends most of its time binary searching
+/// `morton.u32` several hundred times over — measured at 26–64% of a low-density request
+/// (`docs/design-memos/2026-07-30-f1-selection-overdraw.md`), and *flat in density*, because the
+/// cost is the searching, not the rows found. At 2.42M rows, zoom 8, 289 tiles, that is ~20 µs of
+/// a 31 µs request.
+///
+/// This replaces `2 × tiles` independent `log2(rows)` searches with one monotone sweep of
+/// [`gallop`]s, each costing `log2(distance from the previous tile)` — measured at 20.0 µs →
+/// 4.5 µs on that request, and 21.8 µs → 4.6 µs on the same viewport over 25M rows.
+///
+/// Note what the win is *not*. The doubling was expected to pay mostly in avoided page faults on
+/// a cold 4 GB column; at these fixture scales the column is resident and it pays in avoided
+/// *probes* instead, which is why the ratio is roughly the probe-count ratio and not larger. The
+/// page-fault saving is still there at 10^9 rows, and only makes the case stronger.
+///
+/// # Why it is correct
+///
+/// One lemma carries the whole thing: `partition_point(|c| c < t)` over an ascending column is
+/// **non-decreasing in `t`** — a larger threshold can only admit more codes. `MortonSlice::load`
+/// is what guarantees the column is ascending (it refuses to open one that is not), so the lemma
+/// is not an assumption about the data.
+///
+/// [`gallop`]'s contract holds for any `from`, and equals the full-column search exactly when
+/// `from` is at or below the answer. This sweep establishes that in both places it calls it:
+///
+/// - `start`: the floor begins at 0, and thereafter is the previous tile's `start`. Tiles are
+///   visited in ascending `code_range().0`, so by the lemma their starts are ascending too.
+/// - `end`: floored at this tile's own `start`, and `lo <= hi` for every tile's code range, so
+///   by the lemma `start <= end`.
+///
+/// # The three traps
+///
+/// **Sort by the code-range low bound, never by `prefix`.** Prefixes are only comparable at
+/// equal depth — prefix 1 at depth 1 covers a lower code range than prefix 3 at depth 16, but
+/// compares greater. `tiles_for_bbox` happens to hand back one depth, but this function is
+/// public and its correctness must not rest on its caller's habits. Ordering by `lo` assumes
+/// nothing about the tiles at all: not equal depth, not disjointness, not uniqueness.
+///
+/// **The floor for the next tile is this tile's `start`, not its `end`.** `end` would be
+/// tighter, and is sound only while no two tiles share a code range; a repeated tile would then
+/// be searched from beyond its own start and silently come back empty. `start` is monotone
+/// whatever the tile set contains, and the extra ground a gallop re-covers is one tile's worth
+/// of rows — logarithmic, and not the cost this function exists to remove.
+///
+/// **`tiles_for_bbox`'s raster order is not Morton order**, and the response's tile order is
+/// load-bearing: `ViewportOut.tiles` orders the wire payload's flat point concatenation and the
+/// reference oracle's comparison. The sweep therefore reorders an index vector, never `tiles`,
+/// and writes each result back at its caller-supplied index.
+pub fn tile_ranges_all(seg: &SegmentData, tiles: &[Tile]) -> Vec<Range<u32>> {
+    let mut out = vec![0u32..0u32; tiles.len()];
+    if tiles.is_empty() {
+        return out;
+    }
+    let codes = seg.morton.u32();
+
+    let mut order: Vec<usize> = (0..tiles.len()).collect();
+    order.sort_unstable_by_key(|&i| tiles[i].code_range().0);
+
+    let mut floor = 0usize;
+    for i in order {
+        let (lo, hi) = tiles[i].code_range();
+        let start = gallop(codes, floor, lo);
+        let end = gallop(codes, start, hi);
+        floor = start;
+        out[i] = start as u32..end as u32;
+    }
+    out
+}
+
+#[cfg(test)]
+mod gallop_tests {
+    use super::gallop;
+
+    /// [`gallop`]'s whole contract, checked against the standard-library function it stands in
+    /// for, over every `from` and every target of interest on a range of slice shapes — empty,
+    /// singleton, strictly ascending, and heavily duplicated (equal codes are what a Morton
+    /// column of co-located points actually looks like, and they are where an off-by-one in the
+    /// bracket shows up).
+    #[test]
+    fn gallop_equals_the_tails_partition_point_for_every_start_and_target() {
+        let columns: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![5],
+            (0..64u32).collect(),
+            (0..64u32).map(|c| c * 7).collect(),
+            (0..64u32).map(|c| c / 8).collect(), // eight-fold duplicates
+            vec![0; 33],
+            vec![u32::MAX; 9],
+        ];
+        for codes in &columns {
+            for from in 0..=codes.len() + 2 {
+                // Every stored value, its neighbours, and both extremes of the u64-widened
+                // comparison space `Tile::code_range` produces (its depth-0 end is `1 << 32`).
+                let mut targets: Vec<u64> = vec![0, 1, u64::from(u32::MAX), 1u64 << 32];
+                for &c in codes {
+                    targets.extend([
+                        u64::from(c).saturating_sub(1),
+                        u64::from(c),
+                        u64::from(c) + 1,
+                    ]);
+                }
+                for target in targets {
+                    let clamped = from.min(codes.len());
+                    let expected =
+                        clamped + codes[clamped..].partition_point(|&c| u64::from(c) < target);
+                    assert_eq!(
+                        gallop(codes, from, target),
+                        expected,
+                        "codes {codes:?} from {from} target {target}"
+                    );
+                }
+            }
+        }
+    }
 }

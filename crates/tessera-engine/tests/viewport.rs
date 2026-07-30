@@ -721,6 +721,94 @@ fn tile_counts_match_brute_force_at_a_non_degenerate_zoom_and_bbox_subset() {
     }
 }
 
+/// **The response's tile order is `tiles_for_bbox`'s raster order, not Morton order — and the
+/// points are a flat concatenation in exactly that order.**
+///
+/// `Engine::viewport` resolves every tile's row range in one bounded sweep
+/// (`tessera_store::tile_ranges_all`), and that sweep visits tiles in ascending Morton code
+/// order, which `tiles_for_bbox`'s `(ty outer, tx inner)` enumeration is *not*. If the sweep's
+/// order ever leaked into the response, this test is what catches it: both `ViewportOut.tiles`
+/// and the point concatenation the wire format splits by the `served` column depend on the
+/// caller's order, and so does the reference oracle.
+///
+/// The oracle here deliberately bypasses `tile_ranges_all` and goes tile-by-tile through
+/// `tile_ranges` — the untouched full-column search — so a sweep that is internally
+/// self-consistent but differently ordered cannot satisfy both sides.
+#[test]
+fn response_tile_order_and_point_concatenation_follow_tiles_for_bbox_not_morton_order() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    const ZOOM: u8 = 4;
+    const K: usize = 2;
+    let bbox = [0.0, 0.0, 250.0, 250.0];
+
+    let engine = open_engine_uncapped(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let out = engine
+        .viewport(&session, ViewportRequest::new("s0", ZOOM, bbox, K))
+        .unwrap();
+
+    let bundle = open_bundle(&bundle_root).unwrap();
+    let segment = &bundle.partitions["default"].slices["s0"].segments[0];
+    let tessera_ids = segment.columns.tessera_id();
+
+    let tiles = tiles_for_bbox(bbox, ZOOM, &extent());
+    let mut expected_prefixes: Vec<u64> = Vec::new();
+    let mut expected_points: Vec<u64> = Vec::new();
+    for tile in &tiles {
+        let range = tessera_store::tile_ranges(segment, tile);
+        if range.is_empty() {
+            continue;
+        }
+        expected_prefixes.push(tile.prefix);
+        // §7.2's served set, not the retired placeholder's "first k rows in row order". This
+        // session is full-coverage and `open_engine_uncapped` saturates θ, so `C_θ` is the tile's
+        // whole visible count and `m` is `min(K, visible)` — the K LOWEST identities in the tile,
+        // ascending. Row order would be wrong here: storage sorts by `(morton, tessera_id)`, so
+        // within one leaf cell the two coincide, but a depth-4 tile spans many cells.
+        let mut ids_in_tile: Vec<u64> = range.clone().map(|r| tessera_ids[r as usize]).collect();
+        ids_in_tile.sort_unstable();
+        ids_in_tile.truncate(K);
+        expected_points.extend(ids_in_tile);
+    }
+
+    // Guard the test's own premise: if the tile set happened to come back already in Morton
+    // order the assertions below would pass for the wrong reason.
+    let mut morton_order = expected_prefixes.clone();
+    morton_order.sort_unstable();
+    assert_ne!(
+        expected_prefixes, morton_order,
+        "this bbox/zoom must produce a raster order that differs from Morton order, or the \
+         test cannot distinguish the two"
+    );
+    assert!(
+        expected_prefixes.len() > 1,
+        "the bbox must touch more than one non-empty tile"
+    );
+
+    let got_prefixes: Vec<u64> = out.tiles.iter().map(|t| t.tile).collect();
+    assert_eq!(
+        got_prefixes, expected_prefixes,
+        "tiles must be reported in `tiles_for_bbox` enumeration order, with empty tiles skipped"
+    );
+
+    let got_points: Vec<u64> = out.points.iter().map(|p| p.tessera_id.raw()).collect();
+    assert_eq!(
+        got_points, expected_points,
+        "points must be a flat concatenation in the reported tile order"
+    );
+}
+
 /// A minted pin round-trips (re-presenting it succeeds and yields the same counts), and a pin
 /// naming the wrong `segments_version` is rejected as expired (I11) — never silently accepted or
 /// reinterpreted.

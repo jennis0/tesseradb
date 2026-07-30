@@ -22,7 +22,7 @@ use tessera_engine::{compose, EffectiveMask};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::{tiles_for_bbox, Extent};
 use tessera_store::read::open_bundle;
-use tessera_store::tile_ranges;
+use tessera_store::tile_ranges_all;
 
 use crate::arms::{Context, Result};
 use crate::corpus::{build_grant_to_coverage, GrantShape, TermStats};
@@ -105,12 +105,16 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
 
                 let tiles = tiles_for_bbox(full_bbox, zoom, &extent);
 
+                // `tile_ranges_all`, not a per-tile `tile_ranges` loop. This arm's whole claim is
+                // that it measures design §2.6's retrieve steps 5 and 6 *as the engine performs
+                // them*, and the engine resolves a viewport's tiles in one galloping sweep. Timing
+                // the per-tile primitive instead would report a number that no request pays — and
+                // would have kept reporting the pre-sweep cost as though nothing had changed.
                 let samples = crate::metrics::repeat(ctx.repeat, || {
                     let mut sigma = 0u64;
                     let mut spanned = 0u64;
                     let mut nonempty = 0u64;
-                    for tile in &tiles {
-                        let range = tile_ranges(segment, tile);
+                    for range in tile_ranges_all(segment, &tiles) {
                         spanned += range.len() as u64;
                         let visible = mask.count_range(range);
                         if visible > 0 {
@@ -123,8 +127,7 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
 
                 // Re-derive the counters once, unmeasured.
                 let (mut sigma, mut spanned, mut nonempty) = (0u64, 0u64, 0u64);
-                for tile in &tiles {
-                    let range = tile_ranges(segment, tile);
+                for range in tile_ranges_all(segment, &tiles) {
                     spanned += range.len() as u64;
                     let visible = mask.count_range(range);
                     if visible > 0 {
