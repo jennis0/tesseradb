@@ -297,7 +297,22 @@ def test_items_drilldown_returns_expected_external_id(server, oracle_bundle: Bun
     auth = server.authorise([_descriptor_str(descriptor)])
     token = auth["token"]
 
-    target_entity = min(base_mask)
+    # Take the LAST entity of the mask, not the first.
+    #
+    # `server` is session-scoped (a boot is expensive) and
+    # `test_mixed_change_composition_stress` mutates `sorted(base_mask)[0..3]` of this same
+    # mask — including a **delete**, which is terminal in Phase 1 by design: nothing clears
+    # it, because deletion denies retire only via the epoch ledger and that does not exist
+    # until compaction lands (lifecycle §3.1's three retirement rules). So `min(base_mask)`
+    # is permanently invisible to every test that runs after the stress test, and this test
+    # correctly got a 404 when it targeted it — the product was right and the fixture sharing
+    # was wrong.
+    #
+    # Reserving disjoint ends of the mask is the cheap fix. Do not "fix" a future failure here
+    # by unsuppressing or by re-ordering the file: a terminal delete cannot be undone, and
+    # ordering dependence between tests sharing a mutable server is exactly what this comment
+    # exists to stop someone reintroducing.
+    target_entity = max(base_mask)
     tessera_id = oracle_bundle.tessera_id_of(target_entity)
     expected_external_id = oracle_bundle.external_id_of(target_entity)
 

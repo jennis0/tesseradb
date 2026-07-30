@@ -39,10 +39,15 @@ def decode_viewport(data: bytes):
     points = []
     with ipc.open_stream(io.BytesIO(points_bytes)) as reader:
         for batch in reader:
-            handle_col = batch.column("handle").to_pylist()
+            # `tessera_id` (u64), not `handle` (u32): contracts r6 retires the per-session
+            # handle from the viewer plane and puts the stable wire identity at the row. The
+            # oracle must not translate it — it is opaque here, and the differential compares
+            # point sets by `(x, y)` multiset precisely so that agreement never depends on
+            # either side interpreting an identifier.
+            id_col = batch.column("tessera_id").to_pylist()
             x_col = batch.column("x").to_pylist()
             y_col = batch.column("y").to_pylist()
-            for h, x, y in zip(handle_col, x_col, y_col):
-                points.append((h, x, y))
+            for ident, x, y in zip(id_col, x_col, y_col):
+                points.append((ident, x, y))
 
     return tiles, points

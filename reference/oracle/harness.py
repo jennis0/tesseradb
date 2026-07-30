@@ -18,6 +18,7 @@ import base64
 import json
 import os
 import signal
+import shutil
 import socket
 import subprocess
 import time
@@ -80,9 +81,26 @@ def ensure_fixture_bundle(
     extent: str = DEFAULT_EXTENT,
     slice_id: str = DEFAULT_SLICE,
 ) -> None:
-    """Build a bundle at `bundle_root` via the CLI, if one doesn't already exist there."""
+    """Build a bundle at `bundle_root` via the CLI, if one doesn't already exist there.
+
+    A **pre-r6 bundle at `bundle_root` is rebuilt rather than reused.** Contracts r6 makes
+    MANIFEST's `identity` object required — an absent one is a typed reader error, not a
+    default — so `tessera serve` correctly refuses a bundle built before r6. Testing for
+    `CURRENT` alone would hand every test a bundle the server will not open, and the failure
+    surfaces as an opaque fixture-setup error rather than "your fixture is stale".
+
+    The build is given `--mint-id-key` explicitly. r6 requires a build to refuse unless one of
+    `--carry-id-key-from` / `--id-key-file` / `--id-key` / `--mint-id-key` is named, precisely so
+    a human decides the key's lineage rather than a tool inventing one silently. A test fixture is
+    a genuinely new lineage each time it is built, so minting is the correct answer here — and
+    stating it satisfies the rule rather than circumventing it. Note that this makes the fixture's
+    `tessera_id`s differ between rebuilds, which is why nothing may persist them across runs.
+    """
     if (bundle_root / "CURRENT").exists():
-        return
+        if _bundle_has_identity(bundle_root):
+            return
+        print(f"fixture at {bundle_root} predates contracts r6 (no MANIFEST identity) — rebuilding")
+        shutil.rmtree(bundle_root)
     ensure_cli_built()
     args = [
         str(CLI_BIN),
@@ -100,7 +118,23 @@ def ensure_fixture_bundle(
     ]
     if limit is not None:
         args += ["--limit", str(limit)]
+    args += ["--mint-id-key"]
     subprocess.run(args, cwd=REPO_ROOT, check=True)
+
+
+def _bundle_has_identity(bundle_root: Path) -> bool:
+    """True if `bundle_root`'s manifest carries the r6-required `identity` object.
+
+    Deliberately tolerant of an unreadable or malformed bundle: anything we cannot confirm as
+    r6-shaped is treated as needing a rebuild. Being wrong in that direction costs a rebuild;
+    being wrong in the other hands every test a bundle the server refuses to open.
+    """
+    try:
+        current = json.loads((bundle_root / "CURRENT").read_text())
+        manifest_path = bundle_root / current["prefix"] / "MANIFEST.json"
+        return "identity" in json.loads(manifest_path.read_text())
+    except (OSError, KeyError, ValueError):
+        return False
 
 
 class Server:
