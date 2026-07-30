@@ -19,7 +19,7 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
-use tessera_engine::select::{route_for, Route, SelectParams, Selection, Threshold};
+use tessera_engine::select::{SelectParams, Selection, Threshold};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::{morton_of, tiler::sort_batch, Extent, Tile, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
@@ -484,13 +484,17 @@ fn cap_decreasing_on_descent_can_drop_a_mark() {
 // The fast path (Task 2)
 // ---------------------------------------------------------------------------------------------
 
-/// **The fast path is exact, established by comparison rather than by re-deriving its reasoning.**
+/// **Selection matches the definition, computed independently, over both internal branches.**
 ///
-/// Wherever [`route_for`] chooses [`Route::AllVisible`], forcing [`Route::Direct`] over the same
-/// tile must return byte-identical output — same rows, same order. A test that instead re-computed
-/// "all visible, sorted" would be asserting the fast path against itself.
+/// The serve-all branch is no longer reachable as a public route, so this asserts against a
+/// brute-force reference rather than against the other branch — which is the stronger check anyway:
+/// comparing two branches proves only that they agree, while this proves both compute §7.2.
+///
+/// The sweep is counted **per branch** and both counts are asserted. An earlier version asserted a
+/// single `compared > 200`, which a review pointed out was two orders of magnitude below what the
+/// sweep produces and would still have passed if one branch had stopped being exercised entirely.
 #[test]
-fn the_fast_path_returns_exactly_what_the_general_route_returns() {
+fn selection_matches_the_definition_over_both_internal_branches() {
     let mut rng = StdRng::seed_from_u64(0xFA_57);
     let points: Vec<(f32, f32, u64)> = (0..400)
         .map(|_| {
@@ -505,9 +509,12 @@ fn the_fast_path_returns_exactly_what_the_general_route_returns() {
     let visible: Vec<u32> = (0..seg.row_count()).filter(|r| r % 2 == 0).collect();
     let (_t, mask) = mask_over(&visible, seg.row_count());
 
-    let mut compared = 0usize;
-    // Sweep parameters and depths so both limbs fire: saturated-and-under-cap at shallow depths
-    // with a generous cap, floor-covered at deep depths where tiles hold one or two rows.
+    let mut served_all = 0usize;
+    let mut selected = 0usize;
+
+    // Parameters and depths chosen so both branches fire: saturated-and-under-cap at shallow depths
+    // with a generous cap, floor-covered at deep depths where tiles hold one or two rows, and a live
+    // cut with a small cap to force real selection.
     for threshold in [
         Threshold::Saturated,
         Threshold::anchor(visible.len() as u64, 4).at_depth(3),
@@ -520,40 +527,61 @@ fn the_fast_path_returns_exactly_what_the_general_route_returns() {
                         let tile = tile_of(x, y, depth);
                         let range = tile_ranges(&seg.data, &tile);
                         let vis = mask.count_range(range.clone());
-                        if vis == 0 || route_for(&p, vis) != Route::AllVisible {
+                        if vis == 0 {
                             continue;
                         }
-                        let fast = Selection::via(
-                            &mask,
-                            &seg.data,
-                            range.clone(),
-                            &p,
-                            vis,
-                            Route::AllVisible,
-                        );
-                        let general =
-                            Selection::via(&mask, &seg.data, range, &p, vis, Route::Direct);
+                        let got = Selection::of(&mask, &seg.data, range.clone(), &p, vis);
+                        let want = reference_served(&seg, &mask, range, &p);
                         assert_eq!(
-                            fast.rows, general.rows,
-                            "fast path diverged from the general route at depth {depth}, \
+                            got.rows, want,
+                            "selection disagrees with the definition at depth {depth}, \
                              k_min={k_min}, cap={cap}, visible={vis}, threshold={threshold:?}"
                         );
-                        compared += 1;
+                        if want.len() as u64 == vis {
+                            served_all += 1;
+                        } else {
+                            selected += 1;
+                        }
                     }
                 }
             }
         }
     }
     assert!(
-        compared > 200,
-        "only {compared} tiles took the fast path — the sweep is not exercising it"
+        served_all > 100,
+        "only {served_all} tiles served everything visible — the serve-all branch is barely covered"
+    );
+    assert!(
+        selected > 100,
+        "only {selected} tiles needed real selection — the counting/heap branch is barely covered"
     );
 }
 
-/// The fast path must **not** fire when θ is saturated but the tile is over the cap: that tile still
-/// needs selecting, and taking the shortcut there would serve more marks than the definition allows.
+/// §7.2's definition, brute force: materialise the tile's visible rows, sort by `tessera_id`, count
+/// how many fall below the cut, and slice. Deliberately shaped unlike the engine's single-pass
+/// bounded heap — a reference that mirrored the implementation would prove nothing.
+fn reference_served(
+    seg: &Segment,
+    mask: &EffectiveMask,
+    range: std::ops::Range<u32>,
+    p: &SelectParams,
+) -> Vec<u32> {
+    let mut vis: Vec<(u64, u32)> = mask
+        .rows_in_range(range)
+        .iter()
+        .map(|row| (seg.id_at(row), row))
+        .collect();
+    vis.sort_unstable();
+    let c_theta = vis.iter().filter(|(id, _)| p.threshold.admits(*id)).count();
+    let floor = p.k_min.min(p.cap);
+    let m = p.cap.min(floor.max(c_theta)).min(vis.len());
+    vis[..m].iter().map(|&(_, row)| row).collect()
+}
+
+/// A saturated tile **over** the cap still needs real selection: taking the serve-all shortcut there
+/// would emit more marks than the definition allows.
 #[test]
-fn a_saturated_tile_over_the_cap_still_takes_the_general_route() {
+fn a_saturated_tile_over_the_cap_is_still_capped() {
     let points: Vec<(f32, f32, u64)> = (0..40u64)
         .map(|i| (2.0 * i as f32, 2.0, spread(i, 40)))
         .collect();
@@ -566,17 +594,15 @@ fn a_saturated_tile_over_the_cap_still_takes_the_general_route() {
     let range = tile_ranges(&seg.data, &tile);
     let vis = mask.count_range(range.clone());
     assert_eq!(vis, 40);
-    assert_eq!(route_for(&p, vis), Route::Direct);
 
     let got = Selection::of(&mask, &seg.data, range, &p, vis);
-    assert_eq!(got.route, Route::Direct);
     assert_eq!(got.rows.len(), 10, "the cap must still bind");
 }
 
-/// A request for no points still yields no points, on either route, without running a counting pass
-/// — the count-only arm the benches measure.
+/// A request for no points yields no points — the count-only arm the benches measure — and does so
+/// whichever branch the parameters would otherwise select.
 #[test]
-fn a_zero_cap_serves_no_points_on_either_route() {
+fn a_zero_cap_serves_no_points() {
     let points: Vec<(f32, f32, u64)> = (0..8u64)
         .map(|i| (2.0 * i as f32, 2.0, spread(i, 8)))
         .collect();
@@ -584,15 +610,15 @@ fn a_zero_cap_serves_no_points_on_either_route() {
     let all_rows: Vec<u32> = (0..seg.row_count()).collect();
     let (_t, mask) = mask_over(&all_rows, seg.row_count());
 
-    let p = params(2, 0, Threshold::Saturated);
     let tile = tile_of(0.0, 2.0, 0);
     let range = tile_ranges(&seg.data, &tile);
     let vis = mask.count_range(range.clone());
-    for route in [Route::AllVisible, Route::Direct] {
-        let got = Selection::via(&mask, &seg.data, range.clone(), &p, vis, route);
+    for threshold in [Threshold::Saturated, Threshold::Cut(1)] {
+        let p = params(2, 0, threshold);
+        let got = Selection::of(&mask, &seg.data, range.clone(), &p, vis);
         assert!(
             got.rows.is_empty(),
-            "cap 0 must serve nothing via {route:?}"
+            "cap 0 must serve nothing ({threshold:?})"
         );
     }
 }

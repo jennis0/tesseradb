@@ -218,67 +218,49 @@ pub fn served_count(c_theta: u64, params: &SelectParams, visible: u64) -> usize 
     usize::try_from(visible).unwrap_or(usize::MAX).min(m)
 }
 
-/// Which route a tile takes, decided from quantities already in hand.
+/// Does the definition provably serve **every** visible row in a tile with `visible` of them?
 ///
-/// Recorded as a **C4 widening** in Appendix C: this is a per-tile branch keyed on the viewer's own
-/// `V` and θ, so branch selection correlates with the principal's own coverage. C14's reasoning
-/// already accepts that shape as benign; the point is that it is written down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Route {
-    /// The definition provably serves every visible row in the tile — emit them all, run no
-    /// counting pass and no selection.
-    AllVisible,
-    /// Evaluate the definition directly: one pass over the tile's visible rows.
-    Direct,
-}
-
-/// Choose the route for a tile with `visible` visible rows.
+/// A private decision, not a route the caller picks: both branches compute the same definition and
+/// return byte-identical output, so the distinction is an implementation detail and is deliberately
+/// not visible in this module's API.
 ///
-/// **Both fast-path conditions are exact, not conservative.** Serving all of `vis(T)` is correct
-/// iff `m(T) >= |vis(T)|`. `C_θ <= V` and is unknowable without reading the column, so exactly two
+/// **Both conditions are exact, not conservative.** Serving all of `vis(T)` is correct iff
+/// `m(T) >= |vis(T)|`. `C_θ <= V` and is unknowable without reading the column, so exactly two
 /// conditions discharge it from quantities already in hand:
 ///
 /// - `V <= min(k_min, cap)` — the floor alone covers the tile, so `m >= min(cap, k_min) >= V`.
-/// - `Saturated ∧ V <= cap` — θ ≥ 1 means `C_θ = V` *by construction*, so
-///   `m >= min(cap, V) = V`. This is why [`Threshold::Saturated`] is an enum variant rather than
-///   `Cut(u64::MAX)`: the latter would exclude `id == u64::MAX` and break the equivalence at the
-///   boundary.
+/// - `Saturated ∧ V <= cap` — θ ≥ 1 means `C_θ = V` *by construction*, so `m >= min(cap, V) = V`.
+///   This is why [`Threshold::Saturated`] is a variant rather than `Cut(u64::MAX)`: the latter would
+///   exclude `id == u64::MAX` and break the equivalence at the boundary.
 ///
-/// **The selection-route plan's original condition was `V <= k`, and that is unsound here.** Under
-/// the density rule the threshold clause deliberately serves *fewer* than `V` — a tile with
-/// `V = 100` and `C_θ = 5` serves 5, and serving 100 would destroy the density signal that is the
-/// entire point of the rule. So the fast path survives only in the two forms above.
+/// **`V <= k` alone would be unsound here.** Under the density rule the threshold clause
+/// deliberately serves *fewer* than `V` — a tile with `V = 100` and `C_θ = 5` serves 5 — so serving
+/// all 100 would destroy the density signal that is the point of the rule.
 ///
-/// **Where the win actually comes from.** θ saturates at `d >= log₄(V_total / m_target)`: depth ~2
-/// for a viewer with 10² visible, ~7 at 10⁵, ~13 at 10⁹. So for tail principals most of the zoom
-/// range takes `AllVisible` — the case probes/results.md measured as dominant. The drawn-mark
-/// budget's framing that "at k=10⁷ … V ≤ k across the board" does **not** survive the density
-/// rule, because that rule exists to draw fewer than `V`; the win arrives through saturation
-/// instead.
-pub fn route_for(params: &SelectParams, visible: u64) -> Route {
-    if visible <= params.floor() as u64 {
-        return Route::AllVisible;
-    }
-    if params.threshold.is_saturated() && visible <= params.cap as u64 {
-        return Route::AllVisible;
-    }
-    Route::Direct
+/// **What skipping the counting pass is worth** (measured, `examples/route_saving.rs`): about 30% of
+/// selection cost on every tile it covers, so it scales with the visible rows in those tiles — 67 µs
+/// per 300-tile viewport at `cap = 30`, and **2.76 ms at `cap = 1000`**, against a 10 ms p99 budget.
+/// An earlier review costed it at ~60 µs and recommended deleting it; that figure is right at
+/// `cap = 30` and does not survive the larger mark budgets. Both conditions bite hardest for tail
+/// principals, where θ saturates early (`d >= log₄(V_total / m_target)`: depth ~2 at 10² visible,
+/// ~7 at 10⁵) — the population I7 exists to protect.
+fn serves_all_visible(params: &SelectParams, visible: u64) -> bool {
+    visible <= params.floor() as u64
+        || (params.threshold.is_saturated() && visible <= params.cap as u64)
 }
 
-/// One tile's selected rows, ascending by `tessera_id`, together with the route taken.
+/// One tile's selected rows, ascending by `tessera_id`.
 pub struct Selection {
     /// Row indices, **ascending by the row's `tessera_id`** — not by row index.
     pub rows: Vec<u32>,
-    pub route: Route,
 }
 
 impl Selection {
     /// Evaluate §7.2's definition over `range` under `mask`.
     ///
-    /// Points are ordered by `tessera_id` on **both** routes. Two reasons, and neither is
-    /// cosmetic: the nesting argument's client-truncation clause requires that a client truncating
-    /// to its own budget is truncating a *prefix*, and a route-dependent payload order would be a
-    /// differential-oracle landmine — the two routes must be indistinguishable from outside.
+    /// Rows come back ascending by `tessera_id` whichever branch runs — the nesting argument's
+    /// client-truncation clause needs the payload to be a *prefix*, and a branch-dependent order
+    /// would be a differential-oracle landmine.
     pub fn of(
         mask: &EffectiveMask,
         segment: &SegmentData,
@@ -286,94 +268,62 @@ impl Selection {
         params: &SelectParams,
         visible: u64,
     ) -> Self {
-        Self::via(
-            mask,
-            segment,
-            range,
-            params,
-            visible,
-            route_for(params, visible),
-        )
-    }
-
-    /// Evaluate the definition over an explicitly chosen `route`.
-    ///
-    /// The route is a parameter rather than an internal decision so that a test can force
-    /// [`Route::Direct`] on a tile the fast path would have claimed, and **compare** the two
-    /// outputs. That comparison is the only thing that actually establishes the fast path's
-    /// exactness — a test that re-derived the fast path's own reasoning would prove nothing. Both
-    /// routes must be indistinguishable from outside, point order included.
-    pub fn via(
-        mask: &EffectiveMask,
-        segment: &SegmentData,
-        range: Range<u32>,
-        params: &SelectParams,
-        visible: u64,
-        route: Route,
-    ) -> Self {
         // A request that asks for no points still wants counts (the `k = 0` count-only arm the
-        // benches measure). Without this, `Route::Direct` would run a full counting pass whose
-        // result is discarded, and the count-only benchmark would silently stop measuring counting.
+        // benches measure). Without this the general branch would run a full counting pass whose
+        // result is discarded, and the count-only benchmark would stop measuring counting.
         if params.cap == 0 {
-            return Selection {
-                rows: Vec::new(),
-                route,
-            };
+            return Selection { rows: Vec::new() };
         }
 
         let ids = segment.columns.tessera_id();
+        let visible_rows = mask.rows_in_range(range);
 
-        let rows = match route {
-            Route::AllVisible => {
-                let mut rows: Vec<u32> = mask.rows_in_range(range).iter().collect();
-                rows.sort_unstable_by_key(|&row| ids[row as usize]);
-                rows
-            }
-            Route::Direct => {
-                // One pass. `m(T) <= cap` always, so the `cap` smallest ids in the tile contain the
-                // served set for *any* m the counting pass can produce — which is what makes a
-                // single pass sufficient.
-                //
-                // A `BinaryHeap` is a max-heap, which is what is wanted: the largest of the `cap`
-                // best-so-far sits at the root, so it is both the eviction candidate and the
-                // rejection threshold.
-                //
-                // **The peek-reject is not a micro-optimisation.** Without it, every visible row is
-                // pushed and sifted before being thrown away, which is O(V log cap) sift work
-                // against O(V) compares — measured at 19x the irreducible counting cost, ~36 ms for
-                // 300 tiles of 4,000 visible rows against a 10 ms p99 budget, and worsening with V
-                // because the reject rate rises. With it, a row past the current cut costs one
-                // compare. Output is identical either way: a row not smaller than the largest of
-                // the `cap` smallest cannot be among them.
-                //
-                // Memory: O(min(cap, V)) for the heap, plus `rows_in_range`'s bitmap, which is
-                // O(containers touched) rather than O(V) — see its doc for why that distinction
-                // used to be the other way round and what it cost.
-                let mut c_theta: u64 = 0;
-                let heap_cap = params.cap.min(visible as usize).saturating_add(1);
-                let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(heap_cap);
-                let visible_rows = mask.rows_in_range(range);
-                for row in visible_rows.iter() {
-                    let id = ids[row as usize];
-                    if params.threshold.admits(id) {
-                        c_theta += 1;
-                    }
-                    if heap.len() == params.cap {
-                        // Safe: len == cap >= 1 here, since cap == 0 returned early above.
-                        if id >= heap.peek().expect("non-empty at len == cap").0 {
-                            continue;
-                        }
-                        heap.pop();
-                    }
-                    heap.push((id, row));
+        let rows = if serves_all_visible(params, visible) {
+            // Everything visible is served, so there is nothing to count and nothing to select.
+            let mut rows: Vec<u32> = visible_rows.iter().collect();
+            rows.sort_unstable_by_key(|&row| ids[row as usize]);
+            rows
+        } else {
+            // One pass. `m(T) <= cap` always, so the `cap` smallest ids in the tile contain the
+            // served set for *any* m the counting pass can produce — which is what makes a single
+            // pass sufficient.
+            //
+            // A `BinaryHeap` is a max-heap, which is what is wanted: the largest of the `cap`
+            // best-so-far sits at the root, so it is both the eviction candidate and the rejection
+            // threshold.
+            //
+            // **The peek-reject is not a micro-optimisation.** Without it every visible row is
+            // pushed and sifted before being thrown away — O(V log cap) sift work against O(V)
+            // compares, measured at 19x the irreducible counting cost (~36 ms for 300 tiles of
+            // 4,000 visible rows, against a 10 ms p99 budget) and worsening with V as the reject
+            // rate rises. Output is identical: a row not smaller than the largest of the `cap`
+            // smallest cannot be among them.
+            //
+            // Memory: O(min(cap, V)) for the heap, plus `rows_in_range`'s bitmap, which is
+            // O(containers touched) rather than O(V) — see its doc for what that used to cost.
+            let mut c_theta: u64 = 0;
+            let heap_cap = params.cap.min(visible as usize).saturating_add(1);
+            let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(heap_cap);
+            for row in visible_rows.iter() {
+                let id = ids[row as usize];
+                if params.threshold.admits(id) {
+                    c_theta += 1;
                 }
-
-                let m = served_count(c_theta, params, visible);
-                let mut kept: Vec<(u64, u32)> = heap.into_vec();
-                kept.sort_unstable();
-                kept.truncate(m);
-                kept.into_iter().map(|(_, row)| row).collect()
+                if heap.len() == params.cap {
+                    // Safe: len == cap >= 1 here, since cap == 0 returned early above.
+                    if id >= heap.peek().expect("non-empty at len == cap").0 {
+                        continue;
+                    }
+                    heap.pop();
+                }
+                heap.push((id, row));
             }
+
+            let m = served_count(c_theta, params, visible);
+            let mut kept: Vec<(u64, u32)> = heap.into_vec();
+            kept.sort_unstable();
+            kept.truncate(m);
+            kept.into_iter().map(|(_, row)| row).collect()
         };
 
         debug_assert!(
@@ -383,7 +333,7 @@ impl Selection {
              one row per entity (contracts §2.6), and the determinism of the whole selection rests \
              on that being true"
         );
-        Selection { rows, route }
+        Selection { rows }
     }
 }
 
@@ -502,37 +452,37 @@ mod tests {
     }
 
     #[test]
-    fn the_fast_path_fires_on_exactly_the_two_exact_conditions() {
+    fn the_serve_all_predicate_holds_on_exactly_the_two_exact_conditions() {
         let sat = params(2, 128, Threshold::Saturated);
         let cut = params(2, 128, Threshold::Cut(1 << 32));
 
         // Limb A: the floor alone covers the tile, whatever the threshold.
-        assert_eq!(route_for(&cut, 1), Route::AllVisible);
-        assert_eq!(route_for(&cut, 2), Route::AllVisible);
-        assert_eq!(route_for(&cut, 3), Route::Direct);
+        assert!(serves_all_visible(&cut, 1));
+        assert!(serves_all_visible(&cut, 2));
+        assert!(!serves_all_visible(&cut, 3));
 
         // Limb B: saturated and under the cap.
-        assert_eq!(route_for(&sat, 3), Route::AllVisible);
-        assert_eq!(route_for(&sat, 128), Route::AllVisible);
-        assert_eq!(
-            route_for(&sat, 129),
-            Route::Direct,
+        assert!(serves_all_visible(&sat, 3));
+        assert!(serves_all_visible(&sat, 128));
+        assert!(
+            !serves_all_visible(&sat, 129),
             "saturated but over the cap still needs selection"
         );
     }
 
     #[test]
     fn served_count_agrees_with_the_fast_path_wherever_it_fires() {
-        // The fast path claims to be exact, not conservative. That means: wherever `route_for`
-        // says AllVisible, the definition's own `served_count` must equal the visible count for
-        // every reachable C_theta — otherwise the fast path serves a different set from the
-        // definition it claims to evaluate.
+        // The serve-all branch claims to be exact, not conservative. That means: wherever
+        // `serves_all_visible` holds, the definition's own `served_count` must equal the visible
+        // count for every reachable C_theta — otherwise that branch serves a different set from the
+        // definition it claims to evaluate. This is the algebraic half; `tests/selection.rs` checks
+        // the same property against real data.
         for &threshold in &[Threshold::Saturated, Threshold::Cut(1 << 40)] {
             for cap in [1usize, 2, 30, 128] {
                 for k_min in [0usize, 1, 2, 5] {
                     let p = params(k_min, cap, threshold);
                     for visible in 0..200u64 {
-                        if route_for(&p, visible) != Route::AllVisible {
+                        if !serves_all_visible(&p, visible) {
                             continue;
                         }
                         // Under Saturated, C_theta == visible by construction. Under a cut, the
