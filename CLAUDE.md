@@ -15,9 +15,9 @@ All design docs in [.ignore/](.ignore/), which default file-search tooling skips
 | | |
 |---|---|
 | [README.md](.ignore/README.md) | Start here. Reading order, what is settled, what was measured |
-| [tessera-architecture-design.md](.ignore/tessera-architecture-design.md) | **The specification** (r18). §2.6 walks a request end to end; §4 is the thirteen invariants; Appendix C is the leak register; Appendix G the revision history |
+| [tessera-architecture-design.md](.ignore/tessera-architecture-design.md) | **The specification** (r22). §2.6 walks a request end to end; §4 is the thirteen invariants; Appendix C is the leak register; Appendix G the revision history |
 | [tessera-system-architecture.md](.ignore/tessera-system-architecture.md) | The built system (r4): processes and planes, crate decomposition, lifecycle, config, packaging; decisions D1–D16 |
-| [tessera-contracts-spec.md](.ignore/tessera-contracts-spec.md) | Byte level (r3): bundle format, service API, plugin ABI, wire |
+| [tessera-contracts-spec.md](.ignore/tessera-contracts-spec.md) | Byte level (r7): bundle format, service API, plugin ABI, wire |
 | [tessera-concurrency-lifecycle.md](.ignore/tessera-concurrency-lifecycle.md) | Mechanisms (r3): generations, pins, the **three** retirement rules, WAL, merge-vs-snapshot, router/worker protocol |
 | [tessera-conformance-design.md](.ignore/tessera-conformance-design.md) | The suite (r3): definitions-oracle, canonicalised canaries, byte-scanner, eight interleaving scripts |
 | [tessera-implementation-plan.md](.ignore/tessera-implementation-plan.md) | Phases, conformance matrix (§10), effort sizing |
