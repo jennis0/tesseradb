@@ -637,6 +637,15 @@ impl ExternalIdSidecar {
         entity: EntityId,
         high_water: u64,
     ) -> Result<Option<Vec<u8>>> {
+        // A deployment that wrote no sidecar at all (contracts §2.4: callers supplied no
+        // external IDs, so the build minted none — no extents, no locator). Every item's
+        // identity is its `tessera_id` and `None` is the ordinary answer, not an inconsistency.
+        // This state is unambiguous: `deferred_from_manifest` refuses a manifest whose extents
+        // exist without a verifiable locator, so "no extents and no locator" can only mean the
+        // build wrote none — a *lost* locator never reaches here as this state.
+        if self.extents.is_empty() && self.locator.is_none() {
+            return Ok(None);
+        }
         if entity.raw() < self.locator_len() {
             return self.external_id_of(entity);
         }

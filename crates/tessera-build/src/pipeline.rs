@@ -57,9 +57,13 @@
 //! would therefore be read as two different corpora. That cannot be prevented from inside the
 //! process, so it is checked instead: every place a later pass depends on an earlier one — a
 //! source id that must resolve to an ordinal, a term bucket that must have room — is a typed
-//! error, never an `unwrap`, and the postings pass ends by confirming it emitted exactly as many
-//! pairs as the relation held. A mutated input fails the build; it never silently produces a
-//! bundle whose postings belong to a different corpus than its geometry.
+//! error, never an `unwrap`; each later pass additionally re-accumulates an order-independent
+//! **content anchor** ([`mix64`] sums over the ids, and over the resolved `(ordinal, term)`
+//! relation) and compares it against the first pass's, because counts alone accept
+//! substitutions that preserve them. A mutated input fails the build. (The anchors are
+//! avalanche-mixed sums, not cryptographic hashes: they make an accidental compensating
+//! mutation implausible, and an adversary who can rewrite build inputs mid-run is outside this
+//! defence's scope.)
 //!
 //! **The labelling plugin is `builtin:passthrough`.** [`build_dictionary`] exploits the fact that
 //! passthrough's label rule is *decomposable*: an item's descriptors are its comma-separated
@@ -95,10 +99,11 @@
 //!   term, which is the same ascending list the linear build accumulates by walking items in
 //!   entity order.
 
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use tessera_authz::{encode_posting, write_posting_records, DictWriter};
 use tessera_plugin::{Passthrough, Plugin};
@@ -186,6 +191,20 @@ fn input_changed(detail: &str) -> BuildError {
         "the input files changed while the build was reading them ({detail}); \
          the points and pairs files must be immutable for the duration of a build"
     ))
+}
+
+/// The order-independent content anchor the multi-pass checks accumulate: a wrapping sum of
+/// `mix64` over each element. A plain sum of raw values can be *compensated* — replace rows
+/// `{1, 3}` with `{2, 2}` and count and sum both survive — so each value is put through a
+/// full-avalanche mixer first, which makes an accidental compensating mutation implausible
+/// rather than easy. (splitmix64's finalizer, same constants contracts §2.6 fixes for the
+/// identity construction. Not cryptographic, and not meant to be: an adversary who can rewrite
+/// build inputs mid-run does not need hash collisions.)
+fn mix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
 }
 
 /// Bit `i` of a packed bitset.
@@ -319,12 +338,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "{n} items exceeds bundle_format 1's 2^32 entity-ID ceiling"
         )));
     }
-    // Anchors for step 5's re-read of this same file: the re-read used to be verified against
-    // nothing, so a points file swapped mid-build could silently hand every item the wrong
-    // external id. Order-independent sum plus the extrema make that loud instead.
-    let ids_sum = source_ids
+    // Anchors for the later passes over this same file (step 5's re-read, step 8's geometry
+    // scan): the re-read used to be verified against nothing, so a points file swapped
+    // mid-build could silently hand every item the wrong external id. An order-independent
+    // mixed sum ([`mix64`]) plus the extrema make that loud instead.
+    let ids_anchor = source_ids
         .iter()
-        .fold(0u64, |acc, &id| acc.wrapping_add(id));
+        .fold(0u64, |acc, &id| acc.wrapping_add(mix64(id)));
     let (ids_first, ids_last) = (source_ids[0], *source_ids.last().expect("non-empty"));
 
     timer.end(BuildStage::SourceIds, source_ids.len() as u64);
@@ -352,9 +372,14 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // immediately below, so the order rows are pushed in — file order before, chunk-sorted
     // order now — never reaches the output.
     let mut packed: Vec<u64> = Vec::with_capacity(pair_rows);
+    // Anchor for stage 6's re-read of the same relation: an order-independent mixed sum over
+    // the pre-deduplication resolved rows. Without it, a same-count substitution between the
+    // two passes — one entity's rows for another's, bucket counts preserved — would put an
+    // entity into a term's posting whose label does not carry the term, silently (fail-open).
+    let mut pairs_anchor = 0u64;
     let mut failure: Option<BuildError> = None;
     let mut chunk: Vec<(u64, u64)> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(pair_rows.max(1)));
-    let resolve = |chunk: &mut Vec<(u64, u64)>, packed: &mut Vec<u64>| {
+    let mut resolve = |chunk: &mut Vec<(u64, u64)>, packed: &mut Vec<u64>| {
         join_chunk(chunk, &source_ids, |ordinal, source_id, source_term| {
             // Both lookups were established by the dictionary pass over this same file. A miss
             // here means the file is not the one that pass read.
@@ -364,20 +389,21 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                      first pass did not"
                 )));
             };
-            packed.push(((ordinal as u64) << 32) | term as u64);
+            let value = ((ordinal as u64) << 32) | term as u64;
+            pairs_anchor = pairs_anchor.wrapping_add(mix64(value));
+            packed.push(value);
             Ok(())
         })
     };
     input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
-        if failure.is_some() {
-            return;
-        }
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
             if let Err(e) = resolve(&mut chunk, &mut packed) {
                 failure = Some(e);
+                return ControlFlow::Break(());
             }
         }
+        ControlFlow::Continue(())
     })?;
     if let Some(error) = failure {
         return Err(error);
@@ -478,18 +504,23 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // this, a points file swapped since stage 1 would silently pair every entity with a wrong
     // external id — the geometry pass's own checks compare the changed file against itself.
     let mut source_ids = read_source_ids(args, Some(n as usize))?;
-    if source_ids.len() as u64 != n
-        || source_ids
-            .iter()
-            .fold(0u64, |acc, &id| acc.wrapping_add(id))
-            != ids_sum
-    {
+    if source_ids.len() as u64 != n {
         return Err(input_changed(&format!(
             "the points file re-read for external ids yielded {} rows, not the {} its first \
              pass did",
             source_ids.len(),
             n
         )));
+    }
+    if source_ids
+        .iter()
+        .fold(0u64, |acc, &id| acc.wrapping_add(mix64(id)))
+        != ids_anchor
+    {
+        return Err(input_changed(
+            "the points file re-read for external ids carries different ids than its first \
+             pass did (row count unchanged)",
+        ));
     }
     source_ids.par_sort_unstable();
     if source_ids[0] != ids_first || *source_ids.last().expect("non-empty") != ids_last {
@@ -514,6 +545,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         &term_of_source,
         &row_counts,
         pair_count,
+        pairs_anchor,
     )?;
     fsync_file(&postings_path)?;
     drop(term_of_source);
@@ -550,17 +582,20 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // ---- 8. geometry, in entity order ------------------------------------------------
     // Chunk-order insensitivity ([`join_chunk`]): source ids are duplicate-checked, so every
     // `(x_of_entity, y_of_entity)` slot is written exactly once — there is no order to observe.
-    // (A file that *does* repeat an id since the first pass writes twice and is caught by the
-    // row-count check below, where it was previously last-write-wins silent.)
+    // (A file that repeats or substitutes ids since the first pass fails the id-anchor check
+    // below — a row count alone would accept a repeat that compensates a removal, and this was
+    // previously last-write-wins silent.)
     let mut x_of_entity: Vec<f32> = vec![0.0; n as usize];
     let mut y_of_entity: Vec<f32> = vec![0.0; n as usize];
     let mut points_seen = 0u64;
+    let mut geom_anchor = 0u64;
     let mut failure: Option<BuildError> = None;
     let mut chunk: Vec<(u64, (f32, f32))> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
     let resolve = |chunk: &mut Vec<(u64, (f32, f32))>,
                        x_of_entity: &mut Vec<f32>,
                        y_of_entity: &mut Vec<f32>,
-                       points_seen: &mut u64| {
+                       points_seen: &mut u64,
+                       geom_anchor: &mut u64| {
         join_chunk(chunk, &source_ids, |ordinal, source_id, (x, y)| {
             let Some(ordinal) = ordinal else {
                 return Err(input_changed(&format!(
@@ -571,13 +606,11 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             x_of_entity[entity] = x;
             y_of_entity[entity] = y;
             *points_seen += 1;
+            *geom_anchor = geom_anchor.wrapping_add(mix64(source_id));
             Ok(())
         })
     };
     input::scan_points(&args.points, &args.extent, args.limit, |point| {
-        if failure.is_some() {
-            return;
-        }
         chunk.push((point.source_id, (point.x, point.y)));
         if chunk.len() == JOIN_CHUNK_ROWS {
             if let Err(e) = resolve(
@@ -585,10 +618,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 &mut x_of_entity,
                 &mut y_of_entity,
                 &mut points_seen,
+                &mut geom_anchor,
             ) {
                 failure = Some(e);
+                return ControlFlow::Break(());
             }
         }
+        ControlFlow::Continue(())
     })?;
     if let Some(error) = failure {
         return Err(error);
@@ -598,6 +634,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         &mut x_of_entity,
         &mut y_of_entity,
         &mut points_seen,
+        &mut geom_anchor,
     )?;
     drop(chunk);
     // A shrunk points file resolves every id it still presents and would previously leave the
@@ -607,6 +644,14 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "the points file yielded {points_seen} geometry rows, but its first pass \
              selected {n}"
         )));
+    }
+    // And a count alone accepts a repeat that compensates a removal ({1,2,3} become {2,2,2}):
+    // the multiset of ids must be the first pass's, so entity slots are written exactly once.
+    if geom_anchor != ids_anchor {
+        return Err(input_changed(
+            "the points file's geometry pass carries different ids than its first pass did \
+             (row count unchanged)",
+        ));
     }
     drop(source_ids);
     drop(entity_of_ordinal);
@@ -724,7 +769,8 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     Ok(report)
 }
 
-/// The selected source ids, in file order, in an exactly-sized allocation.
+/// The selected source ids, in scan order (which is **no particular order** — the decode is
+/// parallel; every consumer sorts), in an exactly-sized allocation.
 ///
 /// Counted first and then read: letting a `Vec` double its way to 8 GB would peak at three times
 /// the final size during the last reallocation, which is precisely the kind of transient this
@@ -737,13 +783,17 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
         None if args.limit.is_none() => input::count_point_rows(&args.points)? as usize,
         None => {
             let mut count = 0usize;
-            input::scan_points(&args.points, &args.extent, args.limit, |_| count += 1)?;
+            input::scan_points(&args.points, &args.extent, args.limit, |_| {
+                count += 1;
+                ControlFlow::Continue(())
+            })?;
             count
         }
     };
     let mut ids = Vec::with_capacity(count);
     input::scan_points(&args.points, &args.extent, args.limit, |point| {
-        ids.push(point.source_id)
+        ids.push(point.source_id);
+        ControlFlow::Continue(())
     })?;
     Ok(ids)
 }
@@ -821,7 +871,11 @@ fn build_dictionary(
     // Chunk-order insensitivity ([`join_chunk`]): per-term min-ordinal and row counts are
     // commutative aggregations — no arrival order is observable in them.
     let mut first_ordinal: FxHashMap<u64, (u64, u64)> = FxHashMap::default();
-    let mut absent: FxHashSet<u64> = FxHashSet::default();
+    // Absent ids are reported by count and minimum, never collected: a mispaired input naming
+    // billions of missing ids would otherwise accumulate a multi-gigabyte set — the exact
+    // transient class this module exists to avoid — before producing its typed error.
+    let mut absent_count = 0u64;
+    let mut absent_min = u64::MAX;
     let mut pair_rows = 0usize;
     // Grows toward `JOIN_CHUNK_ROWS` only if the relation is actually that large; this pass
     // has no row count in hand yet.
@@ -835,26 +889,34 @@ fn build_dictionary(
                     slot.1 += 1;
                 }
                 None => {
-                    absent.insert(source_id);
+                    absent_count += 1;
+                    absent_min = absent_min.min(source_id);
                 }
             }
             Ok(())
         })
     };
+    let mut failure: Option<BuildError> = None;
     input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
         pair_rows += 1;
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
-            resolve(&mut chunk).expect("the dictionary pass's join reports no errors");
+            if let Err(e) = resolve(&mut chunk) {
+                failure = Some(e);
+                return ControlFlow::Break(());
+            }
         }
+        ControlFlow::Continue(())
     })?;
-    resolve(&mut chunk).expect("the dictionary pass's join reports no errors");
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    resolve(&mut chunk)?;
     drop(chunk);
-    if !absent.is_empty() {
+    if absent_count > 0 {
         return Err(BuildError::Invalid(format!(
-            "pairs file references {} entity ids absent from the points file (first: {})",
-            absent.len(),
-            absent.iter().min().copied().unwrap_or_default()
+            "pairs file references {absent_count} entity ids absent from the points file \
+             (smallest: {absent_min})"
         )));
     }
 
@@ -964,6 +1026,10 @@ struct RefineScratch {
     shorts: Vec<SortRec>,
     /// `(tail start in `arena`, tail length, the rec)` per long member.
     longs: Vec<(usize, usize, SortRec)>,
+    /// Worst case for one group is all long tails in the corpus sharing one two-term prefix —
+    /// 4 bytes per tail term, approaching 4P in the fully degenerate one-group corpus. The
+    /// Phase 0 shape stays in the tens of megabytes; a corpus pathological enough to matter
+    /// here would already be pathological for `flat` (4P, resident in the same build).
     arena: Vec<u32>,
 }
 
@@ -1036,6 +1102,7 @@ fn write_terms(
     term_of_source: &FxHashMap<u64, u32>,
     row_counts: &[u64],
     pair_count: u64,
+    pairs_anchor: u64,
 ) -> Result<()> {
     let mut offsets: Vec<u64> = Vec::with_capacity(row_counts.len() + 1);
     let mut total = 0u64;
@@ -1050,9 +1117,13 @@ fn write_terms(
     // the fill order never reaches the output.
     let mut flat: Vec<u32> = vec![0; total as usize];
     let mut cursor: Vec<u64> = offsets[..row_counts.len()].to_vec();
+    // This pass's accumulation of the stage-3 anchor: the same mixed sum over the same
+    // pre-deduplication `(ordinal, term)` multiset, compared below. Counts alone cannot catch
+    // a substitution that preserves per-term row counts; the anchor does.
+    let mut seen_anchor = 0u64;
     let mut failure: Option<BuildError> = None;
     let mut chunk: Vec<(u64, u64)> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(total as usize));
-    let resolve = |chunk: &mut Vec<(u64, u64)>, flat: &mut Vec<u32>, cursor: &mut Vec<u64>| {
+    let mut resolve = |chunk: &mut Vec<(u64, u64)>, flat: &mut Vec<u32>, cursor: &mut Vec<u64>| {
         join_chunk(chunk, source_ids, |ordinal, source_id, source_term| {
             let (Some(ordinal), Some(&term)) = (ordinal, term_of_source.get(&source_term)) else {
                 return Err(input_changed(&format!(
@@ -1060,6 +1131,7 @@ fn write_terms(
                      first pass did not"
                 )));
             };
+            seen_anchor = seen_anchor.wrapping_add(mix64(((ordinal as u64) << 32) | term as u64));
             let slot = &mut cursor[term as usize];
             // The bucket was sized by the dictionary pass's count for this term. Writing past
             // its end would land in the *next* term's bucket — one term's entities silently
@@ -1077,21 +1149,26 @@ fn write_terms(
         })
     };
     input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
-        if failure.is_some() {
-            return;
-        }
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
             if let Err(e) = resolve(&mut chunk, &mut flat, &mut cursor) {
                 failure = Some(e);
+                return ControlFlow::Break(());
             }
         }
+        ControlFlow::Continue(())
     })?;
     if let Some(error) = failure {
         return Err(error);
     }
     resolve(&mut chunk, &mut flat, &mut cursor)?;
     drop(chunk);
+    if seen_anchor != pairs_anchor {
+        return Err(input_changed(
+            "the pairs file resolved to a different (entity, term) multiset than the relation \
+             pass read (row counts unchanged)",
+        ));
+    }
     // The mirror of the overflow check: a bucket left short would leave its tail zeroed, and a
     // zero is a valid entity id, so an under-filled bucket must be caught by count, not by value.
     for (term, slot) in cursor.iter().enumerate() {

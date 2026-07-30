@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -62,7 +63,10 @@ pub const IDENTITY_EXTENT: Extent = Extent {
 ///    with real coordinates must ship `x`/`y` and take branch 1.
 pub fn read_points(path: &Path, extent: &Extent, limit: Option<u64>) -> Result<Vec<PointRow>> {
     let mut out = Vec::new();
-    scan_points(path, extent, limit, |row| out.push(row))?;
+    scan_points(path, extent, limit, |row| {
+        out.push(row);
+        ControlFlow::Continue(())
+    })?;
     Ok(out)
 }
 
@@ -91,8 +95,11 @@ fn decode_worker_count(row_groups: usize) -> usize {
 /// bounded number of decoded record batches. The batch build uses this so the points file —
 /// 10⁹ rows in the Phase 0 corpus — can be traversed several times without ever being
 /// materialised. Row groups are decoded in parallel; rows are therefore visited in **no
-/// guaranteed order** (see [`decode_worker_count`]).
-pub fn scan_points<F: FnMut(PointRow)>(
+/// guaranteed order** (see [`decode_worker_count`]). `visit` returns [`ControlFlow`]:
+/// `Break(())` stops the scan promptly (remaining rows are skipped and the decode workers wind
+/// down) — the escape hatch for a caller whose own bookkeeping has already failed, so a fatal
+/// error does not decode the rest of a multi-gigabyte file first.
+pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     path: &Path,
     extent: &Extent,
     limit: Option<u64>,
@@ -220,11 +227,15 @@ pub fn scan_points<F: FnMut(PointRow)>(
                             if limit.is_some_and(|l| ids[i] >= l) {
                                 continue;
                             }
-                            visit(PointRow {
+                            if visit(PointRow {
                                 source_id: ids[i],
                                 x: xs[i],
                                 y: ys[i],
-                            });
+                            })
+                            .is_break()
+                            {
+                                return Ok(());
+                            }
                         }
                     }
                     PointCols::Morton(ids, codes) => {
@@ -237,11 +248,15 @@ pub fn scan_points<F: FnMut(PointRow)>(
                                 detail: format!("morton code {} does not fit in u32", codes[i]),
                             })?;
                             let (cx, cy) = deinterleave(code);
-                            visit(PointRow {
+                            if visit(PointRow {
                                 source_id: ids[i],
                                 x: cx as f32,
                                 y: cy as f32,
-                            });
+                            })
+                            .is_break()
+                            {
+                                return Ok(());
+                            }
                         }
                     }
                 }
@@ -262,7 +277,8 @@ pub fn scan_points<F: FnMut(PointRow)>(
 pub fn read_pairs(path: &Path, limit: Option<u64>) -> Result<HashMap<u64, Vec<u64>>> {
     let mut grouped: HashMap<u64, Vec<u64>> = HashMap::new();
     scan_pairs(path, limit, |source_id, term| {
-        grouped.entry(source_id).or_default().push(term)
+        grouped.entry(source_id).or_default().push(term);
+        ControlFlow::Continue(())
     })?;
     for terms in grouped.values_mut() {
         terms.sort_unstable();
@@ -276,8 +292,13 @@ pub fn read_pairs(path: &Path, limit: Option<u64>) -> Result<HashMap<u64, Vec<u6
 /// grouped, sorted or deduplicated — that is the caller's business, and at 1.72 × 10⁹ pairs it
 /// is the difference between a bounded traversal and a 70 GB `HashMap`. Row groups are decoded
 /// in parallel; rows are therefore visited in **no guaranteed order** (see
-/// [`decode_worker_count`]).
-pub fn scan_pairs<F: FnMut(u64, u64)>(path: &Path, limit: Option<u64>, mut visit: F) -> Result<()> {
+/// [`decode_worker_count`]), and `visit`'s `Break` stops the scan promptly (see
+/// [`scan_points`]).
+pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
+    path: &Path,
+    limit: Option<u64>,
+    mut visit: F,
+) -> Result<()> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
@@ -333,7 +354,9 @@ pub fn scan_pairs<F: FnMut(u64, u64)>(path: &Path, limit: Option<u64>, mut visit
                     if limit.is_some_and(|l| ids[i] >= l) {
                         continue;
                     }
-                    visit(ids[i], terms[i]);
+                    if visit(ids[i], terms[i]).is_break() {
+                        return Ok(());
+                    }
                 }
             }
             Ok(())
@@ -444,6 +467,16 @@ fn read_u64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
         DataType::Int64 | DataType::Int32 => {
             let cast = arrow::compute::cast(column, &DataType::UInt64)
                 .map_err(|e| BuildError::arrow(path, e))?;
+            // Arrow's default cast is *safe*: a negative value becomes a null, and reading
+            // `.values()` underneath a null yields an arbitrary id silently. Nulls were checked
+            // on the source column above; check again after the cast so a negative id is a
+            // schema error, never a wrong id.
+            if cast.null_count() > 0 {
+                return Err(BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!("column '{name}' contains negative values"),
+                });
+            }
             cast.as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("cast to UInt64")
