@@ -2254,6 +2254,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "croaring",
+ "libc",
  "rand 0.8.7",
  "reqwest",
  "rustc-hash 1.1.0",

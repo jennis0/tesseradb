@@ -42,13 +42,13 @@ struct Cli {
     #[arg(long, default_value_t = 3, global = true)]
     repeat: u32,
 
-    /// Restrict to one scale.
-    #[arg(long, global = true)]
-    scale: Option<u64>,
+    /// Restrict to these scales (comma-separated). Omit for every fixture found.
+    #[arg(long, global = true, value_delimiter = ',')]
+    scale: Vec<u64>,
 
-    /// Restrict to one label set.
-    #[arg(long, global = true)]
-    label_set: Option<String>,
+    /// Restrict to these label sets (comma-separated). Omit for every fixture found.
+    #[arg(long, global = true, value_delimiter = ',')]
+    label_set: Vec<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -235,6 +235,15 @@ enum Command {
 }
 
 fn main() -> std::process::ExitCode {
+    // Restore the default SIGPIPE disposition. Rust ignores SIGPIPE and turns the failed write
+    // into an error, which `println!` then panics on — so `tessera-bench fixtures | head` prints
+    // a panic backtrace that reads like a real failure. Every listing subcommand here is meant to
+    // be piped, so exit quietly instead, as every other CLI does.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::parse();
 
     let fixtures = match fixture::discover(&cli.fixtures) {
@@ -246,14 +255,22 @@ fn main() -> std::process::ExitCode {
     };
     let selected: Vec<fixture::Fixture> = fixtures
         .into_iter()
-        .filter(|f| cli.scale.map(|s| f.scale == s).unwrap_or(true))
-        .filter(|f| {
-            cli.label_set
-                .as_ref()
-                .map(|l| &f.label_set == l)
-                .unwrap_or(true)
-        })
+        .filter(|f| cli.scale.is_empty() || cli.scale.contains(&f.scale))
+        .filter(|f| cli.label_set.is_empty() || cli.label_set.contains(&f.label_set))
         .collect();
+
+    if selected.is_empty() && !matches!(cli.command, Command::Fixtures) {
+        // A typo in --label-set silently selecting nothing is worse than selecting everything:
+        // the run "succeeds" with no cells and a reader sees an empty file, not an error.
+        eprintln!(
+            "no fixture matches --scale {:?} --label-set {:?} under {}. \
+             Run `tessera-bench fixtures` to see what exists.",
+            cli.scale,
+            cli.label_set,
+            cli.fixtures.display()
+        );
+        return std::process::ExitCode::FAILURE;
+    }
 
     let ctx = arms::Context {
         run_dir: cli.run_dir.clone(),
