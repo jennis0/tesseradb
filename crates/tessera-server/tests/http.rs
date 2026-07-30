@@ -19,6 +19,7 @@ use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
 use tessera_build::{build, BuildArgs};
+use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
 use tessera_server::state::{AppState, SessionRegistry};
@@ -173,6 +174,10 @@ async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> 
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         max_k: 200,
+        k_min: 2,
+        k_max_marks: 200,
+        theta_target_marks: u64::MAX,
+        max_underlay_offset: 4,
         min_visible_members: 10,
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
@@ -1598,11 +1603,7 @@ fn concurrent_ingest_and_change_both_survive() {
     let out = engine
         .viewport(
             &session,
-            "s0",
-            0,
-            [0.0, 0.0, 1000.0, 1000.0],
-            (N_ITEMS + 10) as usize,
-            None,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], (N_ITEMS + 10) as usize),
         )
         .expect("viewport should succeed");
 

@@ -22,7 +22,9 @@ use tessera_store::Bundle;
 pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
 pub use select::{route_for, served_count, Route, SelectParams, Selection, Threshold};
 pub use session::{Engine, EngineConfig, EngineError, Session};
-pub use viewport::{EngineMeta, ItemOut, PointOut, ScalarOut, TileCount, ViewportOut};
+pub use viewport::{
+    EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,
+};
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1, slimmed for
 /// Phase 1: no merge/compaction fields yet).

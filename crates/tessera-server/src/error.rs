@@ -95,6 +95,10 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
     match e {
         EngineError::PinExpired => ApiError::PinExpired,
         EngineError::UnknownSlice(slice) => ApiError::Unknown(format!("unknown slice '{slice}'")),
+        // A refused underlay is a request the caller can fix by asking for less, so it is a
+        // contract error (422) rather than a fail-closed 500. Its `Display` names only the
+        // offending numbers and the configured bounds — no path, no corpus fact.
+        EngineError::UnderlayRefused(detail) => ApiError::Contract(detail),
         // `Store`/`Io` wrap a `StoreError`/`io::Error` whose `Display` names a filesystem path —
         // the same leak `map_store_error` closes, reached through the engine's error enum instead
         // of directly. One sanitiser for both doors.

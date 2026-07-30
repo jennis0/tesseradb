@@ -13,4 +13,4 @@ pub mod handles;
 pub mod payload;
 
 pub use handles::HandleTable;
-pub use payload::{viewport_ipc, ScalarColumn};
+pub use payload::{viewport_ipc, ScalarColumn, ViewportColumns};

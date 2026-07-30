@@ -13,7 +13,9 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use tessera_types::{PinId, TesseraId};
-use tessera_wire::{viewport_ipc, ScalarColumn};
+use tessera_wire::{viewport_ipc, ScalarColumn, ViewportColumns};
+
+use tessera_engine::viewport::ViewportRequest;
 
 use crate::error::{map_engine_error, map_store_error, ApiError};
 use crate::health::{healthz, readyz};
@@ -93,6 +95,21 @@ async fn meta(
         // Reference Sheet R5: filter operand names are `[]` in Phase 1 (no filters — scope
         // constraint 11).
         "filter_operands": Vec::<String>::new(),
+        // §7.2's selection constants. A client cannot read mark count as density without knowing
+        // where the floor and the cap sit, so these are a genuine client need rather than test
+        // convenience -- and the reference oracle cannot reproduce the definition without them.
+        //
+        // They disclose nothing. All three are deployment constants, identical for every principal.
+        // Publishing `theta_target_marks` lets a client solve for theta's anchor, which is the
+        // composed cardinality of its OWN mask over the whole slice -- precisely what a `zoom = 0`,
+        // full-bbox request already returns as `visible` in a single call (§7.1). Already
+        // obtainable, exactly.
+        "selection": {
+            "k_min": state.k_min,
+            "k_max_marks": state.k_max_marks,
+            "theta_target_marks": state.theta_target_marks,
+            "max_underlay_offset": state.max_underlay_offset,
+        },
     })))
 }
 
@@ -105,6 +122,14 @@ struct ViewportReq {
     k: Option<usize>,
     #[serde(default)]
     pin: Option<PinDto>,
+    /// §3.3 density underlay: serve exact masked counts at depth `zoom + underlay_offset`. Absent
+    /// or `0` means no underlay and no extra bytes.
+    ///
+    /// Rejected, never clamped, on all three bounds (configured maximum, the depth-16 grid limit,
+    /// and the total sub-cell budget) — a Morton prefix carries no depth of its own, so a silently
+    /// reduced offset would hand back cells the client could not interpret.
+    #[serde(default)]
+    underlay_offset: Option<u8>,
 }
 
 async fn viewport(
@@ -138,7 +163,12 @@ async fn viewport(
 
     let out = state
         .engine
-        .viewport(&entry.session, &req.slice, req.zoom, req.bbox, k, pin)
+        .viewport(
+            &entry.session,
+            ViewportRequest::new(&req.slice, req.zoom, req.bbox, k)
+                .pin(pin)
+                .underlay_offset(req.underlay_offset),
+        )
         .map_err(map_engine_error)?;
 
     let n = out.points.len();
@@ -171,16 +201,32 @@ async fn viewport(
     let tiles: Vec<u64> = out.tiles.iter().map(|t| t.tile).collect();
     let visible: Vec<u64> = out.tiles.iter().map(|t| t.visible).collect();
     let matched: Vec<u64> = out.tiles.iter().map(|t| t.matched).collect();
+    let served: Vec<u64> = out.tiles.iter().map(|t| t.served).collect();
 
-    let bytes = viewport_ipc(
-        &tiles,
-        &visible,
-        &matched,
-        &point_ids,
-        &xs,
-        &ys,
-        &scalar_refs,
-    );
+    // Absent, not empty, when the underlay was not requested: `viewport_ipc` emits zero trailing
+    // bytes for `None`, which is what keeps the default payload byte-identical to the pre-underlay
+    // format (see `tessera_wire::payload`'s module doc).
+    let sub_cells: Option<(Vec<u64>, Vec<u64>)> =
+        req.underlay_offset.filter(|&o| o > 0).map(|_| {
+            (
+                out.sub_cells.iter().map(|c| c.cell).collect(),
+                out.sub_cells.iter().map(|c| c.count).collect(),
+            )
+        });
+
+    let bytes = viewport_ipc(&ViewportColumns {
+        tile: &tiles,
+        visible: &visible,
+        matched: &matched,
+        served: &served,
+        points_tessera_ids: &point_ids,
+        xs: &xs,
+        ys: &ys,
+        scalars: &scalar_refs,
+        sub_cells: sub_cells
+            .as_ref()
+            .map(|(cells, counts)| (cells.as_slice(), counts.as_slice())),
+    });
 
     let pin_header =
         serde_json::to_string(&PinDto::from(&out.pin)).expect("PinDto serialisation cannot fail");

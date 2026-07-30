@@ -6,7 +6,7 @@ use arrow::datatypes::DataType;
 use arrow::ipc::reader::StreamReader;
 use tessera_types::{EntityId, Handle};
 use tessera_wire::handles::HandleTable;
-use tessera_wire::payload::{viewport_ipc, ScalarColumn};
+use tessera_wire::payload::{viewport_ipc, ScalarColumn, ViewportColumns};
 
 /// (a) Handle stability + per-session isolation: the same entity, minted in two independent
 /// tables, gets a handle stable within each table but not necessarily equal across tables.
@@ -55,7 +55,21 @@ fn viewport_payload_round_trips_through_arrow_ipc() {
     let counts = [70u64, 80, 90];
     let scalars = [("count", ScalarColumn::U64(&counts))];
 
-    let bytes = viewport_ipc(&tile, &visible, &matched, &tessera_ids, &xs, &ys, &scalars);
+    // Two tiles serving 2 and 1 of the three points: `served` must sum to the points length, and
+    // `viewport_ipc` asserts that, because the points batch is a flat concatenation whose only
+    // grouping key is `served`.
+    let served = [2u64, 1];
+    let bytes = viewport_ipc(&ViewportColumns {
+        tile: &tile,
+        visible: &visible,
+        matched: &matched,
+        served: &served,
+        points_tessera_ids: &tessera_ids,
+        xs: &xs,
+        ys: &ys,
+        scalars: &scalars,
+        sub_cells: None,
+    });
 
     let tile_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let tile_bytes = &bytes[4..4 + tile_len];
@@ -67,6 +81,10 @@ fn viewport_payload_round_trips_through_arrow_ipc() {
         assert_eq!(schema.field(0).name(), "tile");
         assert_eq!(schema.field(1).name(), "visible");
         assert_eq!(schema.field(2).name(), "matched");
+        // Appended, not inserted: decoders that index this batch positionally exist, so the
+        // position of `served` is contract.
+        assert_eq!(schema.field(3).name(), "served");
+        assert_eq!(schema.fields().len(), 4);
     }
     let tile_batch = tile_reader.next().unwrap().unwrap();
     assert_eq!(tile_batch.num_rows(), 2);
@@ -157,7 +175,19 @@ fn payload_bytes_never_contain_a_raw_entity_id_encoding() {
     let xs = vec![1.0f32; handles.len()];
     let ys = vec![2.0f32; handles.len()];
 
-    let bytes = viewport_ipc(&[], &[], &[], &handles, &xs, &ys, &[]);
+    let one_tile = [0u64];
+    let n = [handles.len() as u64];
+    let bytes = viewport_ipc(&ViewportColumns {
+        tile: &one_tile,
+        visible: &n,
+        matched: &n,
+        served: &n,
+        points_tessera_ids: &handles,
+        xs: &xs,
+        ys: &ys,
+        scalars: &[],
+        sub_cells: None,
+    });
 
     for &raw in &sensitive_ids {
         let needle = raw.to_le_bytes();
@@ -176,7 +206,19 @@ fn the_points_batch_identity_column_is_tessera_id() {
     let xs = [1.0f32, 2.0, 3.0];
     let ys = [4.0f32, 5.0, 6.0];
 
-    let bytes = viewport_ipc(&[], &[], &[], &tessera_ids, &xs, &ys, &[]);
+    let one_tile = [0u64];
+    let n = [tessera_ids.len() as u64];
+    let bytes = viewport_ipc(&ViewportColumns {
+        tile: &one_tile,
+        visible: &n,
+        matched: &n,
+        served: &n,
+        points_tessera_ids: &tessera_ids,
+        xs: &xs,
+        ys: &ys,
+        scalars: &[],
+        sub_cells: None,
+    });
     let tile_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let points_bytes = &bytes[4 + tile_len..];
 
@@ -208,3 +250,160 @@ fn the_points_batch_identity_column_is_tessera_id() {
 /// future dependency edge cannot reintroduce the possibility silently.
 #[test]
 fn payload_bytes_never_contain_the_identity_key() {}
+
+/// **The appended sub-cell stream must be invisible to a reader that does not know about it.**
+///
+/// This is the falsifiable form of the backward-compatibility claim in `payload`'s module doc.
+/// Rather than asserting that Arrow's `StreamReader` stops at the end-of-stream marker, it decodes
+/// a *three*-stream payload using exactly the two-stream procedure a pre-underlay reader used —
+/// take the `u32` prefix, slice the tile stream, treat **all** the rest as the points stream — and
+/// asserts the points batch still decodes with the right rows. If Arrow ever began rejecting
+/// trailing bytes, this fails rather than the claim quietly becoming false.
+#[test]
+fn a_pre_underlay_reader_still_decodes_a_payload_carrying_sub_cells() {
+    let tile = [7u64];
+    let visible = [9u64];
+    let matched = [9u64];
+    let served = [2u64];
+    let tessera_ids = [11u64, 22];
+    let xs = [1.0f32, 2.0];
+    let ys = [3.0f32, 4.0];
+    let cells = [100u64, 101, 102];
+    let counts = [5u64, 3, 1];
+
+    let with_underlay = viewport_ipc(&ViewportColumns {
+        tile: &tile,
+        visible: &visible,
+        matched: &matched,
+        served: &served,
+        points_tessera_ids: &tessera_ids,
+        xs: &xs,
+        ys: &ys,
+        scalars: &[],
+        sub_cells: Some((&cells, &counts)),
+    });
+
+    // The pre-underlay decode procedure, verbatim: everything after the tile stream is "the points
+    // stream", trailing bytes included.
+    let tile_len = u32::from_le_bytes(with_underlay[0..4].try_into().unwrap()) as usize;
+    let points_and_beyond = &with_underlay[4 + tile_len..];
+    let mut reader = StreamReader::try_new(points_and_beyond, None).unwrap();
+    let batch = reader.next().unwrap().unwrap();
+    assert_eq!(batch.num_rows(), 2);
+    assert_eq!(
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values(),
+        &tessera_ids,
+        "an old reader must still see the points, with the sub-cell stream trailing it"
+    );
+}
+
+/// Not requested means **zero trailing bytes**, not an empty schema-only stream — which is what
+/// makes a default payload byte-identical to the pre-underlay format, and therefore what makes the
+/// absence of an `API_VERSION` bump correct rather than convenient.
+#[test]
+fn an_unrequested_underlay_adds_no_bytes_at_all() {
+    let tile = [7u64];
+    let visible = [9u64];
+    let matched = [9u64];
+    let served = [2u64];
+    let tessera_ids = [11u64, 22];
+    let xs = [1.0f32, 2.0];
+    let ys = [3.0f32, 4.0];
+
+    let cols = |sub_cells| ViewportColumns {
+        tile: &tile,
+        visible: &visible,
+        matched: &matched,
+        served: &served,
+        points_tessera_ids: &tessera_ids,
+        xs: &xs,
+        ys: &ys,
+        scalars: &[],
+        sub_cells,
+    };
+
+    let without = viewport_ipc(&cols(None));
+    let empty_cells: [u64; 0] = [];
+    let empty_counts: [u64; 0] = [];
+    let with_empty = viewport_ipc(&cols(Some((&empty_cells, &empty_counts))));
+
+    assert!(
+        with_empty.len() > without.len(),
+        "an empty sub-cell stream still costs schema bytes — which is exactly why `None` must mean \
+         zero bytes rather than an empty stream"
+    );
+}
+
+/// The sub-cell stream decodes as `(cell, count)` when a reader does look for it, found by parsing
+/// the points stream to its end and taking the cursor — there is no length prefix for points, which
+/// `payload`'s module doc records as the deliberate cost of appending rather than reframing.
+#[test]
+fn the_sub_cell_stream_decodes_as_cell_and_count() {
+    let tile = [7u64];
+    let visible = [9u64];
+    let matched = [9u64];
+    let served = [1u64];
+    let tessera_ids = [11u64];
+    let xs = [1.0f32];
+    let ys = [3.0f32];
+    let cells = [100u64, 101];
+    let counts = [5u64, 3];
+
+    let bytes = viewport_ipc(&ViewportColumns {
+        tile: &tile,
+        visible: &visible,
+        matched: &matched,
+        served: &served,
+        points_tessera_ids: &tessera_ids,
+        xs: &xs,
+        ys: &ys,
+        scalars: &[],
+        sub_cells: Some((&cells, &counts)),
+    });
+
+    let tile_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let rest = &bytes[4 + tile_len..];
+
+    // Parse the points stream, then resume from wherever it stopped. `StreamReader` borrows the
+    // cursor (`impl Read for &mut R`), so the position is readable once the reader is dropped —
+    // which is exactly the "parse to end-of-stream and take the cursor" procedure the module doc
+    // says an underlay-aware reader must perform, since only the tile boundary is length-prefixed.
+    let mut cursor = std::io::Cursor::new(rest);
+    {
+        let mut points_reader = StreamReader::try_new(&mut cursor, None).unwrap();
+        while points_reader.next().is_some() {}
+    }
+    let consumed = cursor.position() as usize;
+
+    let mut sub_reader = StreamReader::try_new(&rest[consumed..], None).unwrap();
+    {
+        let schema = sub_reader.schema();
+        assert_eq!(schema.field(0).name(), "cell");
+        assert_eq!(schema.field(1).name(), "count");
+    }
+    let batch = sub_reader.next().unwrap().unwrap();
+    assert_eq!(batch.num_rows(), 2);
+    assert_eq!(
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values(),
+        &cells
+    );
+    assert_eq!(
+        batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values(),
+        &counts
+    );
+}

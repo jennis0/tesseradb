@@ -9,16 +9,33 @@
 //! resulting plain slice here; there is no per-session translation left to do on this path (see
 //! `crate::handles` for why the module that used to do that translation is retained, not deleted).
 //!
-//! The two batches have different schemas, so they cannot share one Arrow IPC stream. The
-//! returned bytes are therefore two independent, complete Arrow IPC streams concatenated, framed
-//! by a leading 4-byte little-endian length so a reader can find the boundary without parsing
-//! Arrow metadata first:
+//! The batches have different schemas, so they cannot share one Arrow IPC stream. The returned
+//! bytes are therefore independent, complete Arrow IPC streams concatenated, framed by a leading
+//! 4-byte little-endian length so a reader can find the *first* boundary without parsing Arrow
+//! metadata first:
 //!
 //! ```text
 //! u32 LE: byte length of the tile stream
-//! <tile stream bytes>      -- Arrow IPC stream, schema (tile: uint64, visible: uint64, matched: uint64)
+//! <tile stream bytes>      -- Arrow IPC stream, schema (tile: uint64, visible: uint64, matched: uint64, served: uint64)
 //! <points stream bytes>    -- Arrow IPC stream, schema (tessera_id: uint64, x: float32, y: float32, ...scalars)
+//! <subcell stream bytes>   -- Arrow IPC stream, schema (cell: uint64, count: uint64); ABSENT ENTIRELY
+//!                             (zero bytes) unless the request asked for the §3.3 underlay
 //! ```
+//!
+//! **`served` is appended after `matched`, and the position is contract.** Decoders that index the
+//! tile batch positionally exist, so inserting rather than appending would silently rebind
+//! `visible`/`matched` in them.
+//!
+//! **The sub-cell stream is appended without a length prefix, and that is a deliberate relaxation
+//! of the framing property above.** A reader that wants the sub-cells must parse the points stream
+//! to its end-of-stream marker and take the cursor position, because only the *tile* boundary is
+//! prefixed. Two reasons this is the right trade: the property survives untouched for every reader
+//! that does not ask for the underlay, and the alternative — inserting a second length prefix — is
+//! a breaking change to a frame that today's readers already parse. Because a request that does not
+//! ask for the underlay produces **zero** trailing bytes (not an empty schema-only stream), such a
+//! payload is byte-identical to what this module produced before the underlay existed, so no
+//! `API_VERSION` bump is warranted: Arrow's `StreamReader` and `pyarrow.ipc.open_stream` both stop
+//! at the end-of-stream marker without inspecting what follows.
 
 use std::sync::Arc;
 
@@ -37,84 +54,129 @@ pub enum ScalarColumn<'a> {
     Utf8(&'a [String]),
 }
 
-/// Build the framed Arrow IPC payload for one `/v1/viewport` response.
+/// One `/v1/viewport` response's columns, ready to encode.
 ///
-/// `tile`/`visible`/`matched` must be the same length (one row per non-empty tile in the
-/// response). `points_tessera_ids`/`xs`/`ys` and every slice inside `scalars` must be the same
-/// length (one row per sampled point); `scalars` supplies the declared-scalar columns in the
-/// schema's declared order, each tagged with its field name.
+/// A struct rather than a positional argument list because the count reached double figures once
+/// `served` and the §3.3 underlay landed, and four of them are `&[u64]` — positional arguments of
+/// the same type are exactly the shape a silent transposition hides in.
+pub struct ViewportColumns<'a> {
+    /// Tile batch: one row per non-empty tile. All four must be the same length.
+    pub tile: &'a [u64],
+    pub visible: &'a [u64],
+    pub matched: &'a [u64],
+    /// How many points this tile contributed to `points_tessera_ids`, in tile order — §7.2's
+    /// `m(T)`. The points batch is a flat concatenation, so this is what lets a reader split it.
+    pub served: &'a [u64],
+
+    /// Points batch: one row per served point. All must be the same length.
+    pub points_tessera_ids: &'a [u64],
+    pub xs: &'a [f32],
+    pub ys: &'a [f32],
+    /// Declared-scalar columns in the schema's declared order, each tagged with its field name.
+    pub scalars: &'a [(&'a str, ScalarColumn<'a>)],
+
+    /// §3.3 underlay sub-cells: `(morton prefix at depth zoom+offset, exact masked count)`. `None`
+    /// when the request did not ask for the underlay, which emits **zero** trailing bytes rather
+    /// than an empty stream — see this module's doc. Both slices must be the same length.
+    pub sub_cells: Option<(&'a [u64], &'a [u64])>,
+}
+
+/// Build the framed Arrow IPC payload for one `/v1/viewport` response.
 ///
 /// # Panics
 ///
-/// Panics if the length invariants above are violated, or if Arrow's batch/stream construction
-/// fails — both indicate a caller bug (mismatched slice lengths), not a runtime condition this
-/// crate can recover from.
-pub fn viewport_ipc(
-    tile: &[u64],
-    visible: &[u64],
-    matched: &[u64],
-    points_tessera_ids: &[u64],
-    xs: &[f32],
-    ys: &[f32],
-    scalars: &[(&str, ScalarColumn)],
-) -> Vec<u8> {
+/// Panics if [`ViewportColumns`]' stated length invariants are violated, or if Arrow's batch/stream
+/// construction fails — both indicate a caller bug, not a runtime condition this crate can recover
+/// from.
+pub fn viewport_ipc(cols: &ViewportColumns<'_>) -> Vec<u8> {
+    let tiles = cols.tile.len();
+    assert_eq!(tiles, cols.visible.len(), "tile/visible length mismatch");
+    assert_eq!(tiles, cols.matched.len(), "tile/matched length mismatch");
+    assert_eq!(tiles, cols.served.len(), "tile/served length mismatch");
+
+    let points = cols.points_tessera_ids.len();
+    assert_eq!(points, cols.xs.len(), "points/xs length mismatch");
+    assert_eq!(points, cols.ys.len(), "points/ys length mismatch");
+    // The points batch is a flat concatenation whose only grouping key is `served`; if they
+    // disagree, every consumer mis-splits it, so catch it here rather than at the client.
+    let served_total: u64 = cols.served.iter().sum();
     assert_eq!(
-        tile.len(),
-        visible.len(),
-        "viewport_ipc: tile/visible length mismatch"
+        served_total, points as u64,
+        "sum of served ({served_total}) != number of points ({points})"
     );
-    assert_eq!(
-        tile.len(),
-        matched.len(),
-        "viewport_ipc: tile/matched length mismatch"
-    );
-    assert_eq!(
-        points_tessera_ids.len(),
-        xs.len(),
-        "viewport_ipc: points_tessera_ids/xs length mismatch"
-    );
-    assert_eq!(
-        points_tessera_ids.len(),
-        ys.len(),
-        "viewport_ipc: points_tessera_ids/ys length mismatch"
-    );
-    for (name, col) in scalars {
+    for (name, col) in cols.scalars {
         let len = match col {
             ScalarColumn::U64(s) => s.len(),
             ScalarColumn::F32(s) => s.len(),
             ScalarColumn::Utf8(s) => s.len(),
         };
-        assert_eq!(
-            points_tessera_ids.len(),
-            len,
-            "viewport_ipc: scalar column {name:?} length mismatch"
-        );
+        assert_eq!(points, len, "scalar column {name:?} length mismatch");
+    }
+    if let Some((cells, counts)) = cols.sub_cells {
+        assert_eq!(cells.len(), counts.len(), "sub-cell length mismatch");
     }
 
-    let tile_stream = encode_tile_batch(tile, visible, matched);
-    let points_stream = encode_points_batch(points_tessera_ids, xs, ys, scalars);
+    let tile_stream = encode_tile_batch(cols.tile, cols.visible, cols.matched, cols.served);
+    let points_stream =
+        encode_points_batch(cols.points_tessera_ids, cols.xs, cols.ys, cols.scalars);
+    let subcell_stream = cols
+        .sub_cells
+        .map(|(cells, counts)| encode_subcell_batch(cells, counts));
 
-    let mut out = Vec::with_capacity(4 + tile_stream.len() + points_stream.len());
+    let mut out = Vec::with_capacity(
+        4 + tile_stream.len()
+            + points_stream.len()
+            + subcell_stream.as_ref().map_or(0, |s| s.len()),
+    );
     out.extend_from_slice(&(tile_stream.len() as u32).to_le_bytes());
     out.extend_from_slice(&tile_stream);
     out.extend_from_slice(&points_stream);
+    // Absent means zero bytes, not an empty stream — that is what keeps a no-underlay payload
+    // byte-identical to the pre-underlay format.
+    if let Some(subcells) = subcell_stream {
+        out.extend_from_slice(&subcells);
+    }
     out
 }
 
-fn encode_tile_batch(tile: &[u64], visible: &[u64], matched: &[u64]) -> Vec<u8> {
+fn encode_tile_batch(tile: &[u64], visible: &[u64], matched: &[u64], served: &[u64]) -> Vec<u8> {
+    // `served` is APPENDED. Decoders that index this batch positionally exist, so inserting it
+    // earlier would silently rebind `visible`/`matched` in them.
     let schema = Arc::new(Schema::new(vec![
         Field::new("tile", DataType::UInt64, false),
         Field::new("visible", DataType::UInt64, false),
         Field::new("matched", DataType::UInt64, false),
+        Field::new("served", DataType::UInt64, false),
     ]));
 
-    let tile_col: ArrayRef = Arc::new(UInt64Array::from_iter_values(tile.iter().copied()));
-    let visible_col: ArrayRef = Arc::new(UInt64Array::from_iter_values(visible.iter().copied()));
-    let matched_col: ArrayRef = Arc::new(UInt64Array::from_iter_values(matched.iter().copied()));
+    let columns: Vec<ArrayRef> = [tile, visible, matched, served]
+        .into_iter()
+        .map(|c| Arc::new(UInt64Array::from_iter_values(c.iter().copied())) as ArrayRef)
+        .collect();
 
-    let batch = RecordBatch::try_new(schema.clone(), vec![tile_col, visible_col, matched_col])
+    let batch = RecordBatch::try_new(schema.clone(), columns)
         .expect("viewport_ipc: tile batch construction");
 
+    write_stream(&schema, &batch)
+}
+
+/// The §3.3 density underlay's sub-cell counts: exact masked cardinalities over contiguous Morton
+/// ranges at depth `zoom + offset`.
+///
+/// The depth is **not** carried here: it is `zoom + offset` from the caller's own request, and the
+/// server rejects rather than clamps an out-of-range offset, so the client always knows it. A Morton
+/// prefix does not encode its own depth, so the alternative would have been to echo it.
+fn encode_subcell_batch(cells: &[u64], counts: &[u64]) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("cell", DataType::UInt64, false),
+        Field::new("count", DataType::UInt64, false),
+    ]));
+    let columns: Vec<ArrayRef> = [cells, counts]
+        .into_iter()
+        .map(|c| Arc::new(UInt64Array::from_iter_values(c.iter().copied())) as ArrayRef)
+        .collect();
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .expect("viewport_ipc: sub-cell batch construction");
     write_stream(&schema, &batch)
 }
 

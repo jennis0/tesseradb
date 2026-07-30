@@ -23,6 +23,7 @@ use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
 use tessera_build::{build, BuildArgs};
+use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig, EngineError};
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord, WalRow};
 use tessera_plugin::Passthrough;
@@ -256,7 +257,10 @@ fn a_full_coverage_session_sees_every_point_small_k_caps_sampling() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
     let out = engine
-        .viewport(&session, "s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5, None)
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+        )
         .unwrap();
 
     assert_eq!(out.tiles.len(), 1, "zoom 0 is always exactly one tile");
@@ -294,11 +298,7 @@ fn b_subset_session_sees_exactly_its_terms_items() {
     let out = engine
         .viewport(
             &session,
-            "s0",
-            0,
-            [0.0, 0.0, 1000.0, 1000.0],
-            N_ITEMS as usize,
-            None,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], N_ITEMS as usize),
         )
         .unwrap();
 
@@ -349,7 +349,10 @@ fn c_zero_term_session_sees_nothing() {
     );
 
     let out = engine
-        .viewport(&session, "s0", 0, [0.0, 0.0, 1000.0, 1000.0], 30, None)
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 30),
+        )
         .unwrap();
 
     assert!(
@@ -380,7 +383,10 @@ fn d_suppressing_an_item_drops_the_count_by_one() {
     );
     let session_a = engine_a.authorise(&full_coverage_credential()).unwrap();
     let out_a = engine_a
-        .viewport(&session_a, "s0", 0, [0.0, 0.0, 1000.0, 1000.0], 1, None)
+        .viewport(
+            &session_a,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 1),
+        )
         .unwrap();
 
     // A WAL pre-populated with a suppression of source item 5 (established in the bundle, not
@@ -401,7 +407,10 @@ fn d_suppressing_an_item_drops_the_count_by_one() {
     let engine_b = open_engine(&bundle_root, &tmp.path().join("cache_b"), &wal_path_b);
     let session_b = engine_b.authorise(&full_coverage_credential()).unwrap();
     let out_b = engine_b
-        .viewport(&session_b, "s0", 0, [0.0, 0.0, 1000.0, 1000.0], 1, None)
+        .viewport(
+            &session_b,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 1),
+        )
         .unwrap();
 
     assert_eq!(
@@ -457,7 +466,10 @@ fn f_selection_returns_the_lowest_tessera_ids_not_the_first_rows() {
     );
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let out = engine
-        .viewport(&session, "s0", 0, [0.0, 0.0, 1000.0, 1000.0], 3, None)
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 3),
+        )
         .unwrap();
 
     assert_eq!(out.points.len(), 3);
@@ -527,10 +539,16 @@ fn theta_does_not_move_when_the_viewport_pans() {
 
     // Two overlapping viewports at zoom 3, chosen so their tile sets intersect.
     let wide = engine
-        .viewport(&session, "s0", 3, [0.0, 0.0, 1000.0, 1000.0], 30, None)
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 30),
+        )
         .unwrap();
     let narrow = engine
-        .viewport(&session, "s0", 3, [400.0, 400.0, 700.0, 700.0], 30, None)
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 3, [400.0, 400.0, 700.0, 700.0], 30),
+        )
         .unwrap();
 
     let shared: Vec<u64> = narrow
@@ -593,7 +611,10 @@ fn no_visible_tile_is_ever_served_empty() {
 
     for zoom in 0..8u8 {
         let out = engine
-            .viewport(&session, "s0", zoom, [0.0, 0.0, 1000.0, 1000.0], 30, None)
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", zoom, [0.0, 0.0, 1000.0, 1000.0], 30),
+            )
             .unwrap();
         for tile in &out.tiles {
             assert!(tile.visible > 0, "an empty tile should not be reported");
@@ -646,7 +667,10 @@ fn tile_counts_match_brute_force_at_a_non_degenerate_zoom_and_bbox_subset() {
     let bbox = [0.0, 0.0, 250.0, 250.0];
 
     let out = engine
-        .viewport(&session, "s0", ZOOM, bbox, N_ITEMS as usize, None)
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", ZOOM, bbox, N_ITEMS as usize),
+        )
         .unwrap();
 
     let e = extent();
@@ -715,17 +739,17 @@ fn pin_round_trips_and_rejects_a_mismatched_segments_version() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
     let first = engine
-        .viewport(&session, "s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5, None)
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+        )
         .unwrap();
 
     let again = engine
         .viewport(
             &session,
-            "s0",
-            0,
-            [0.0, 0.0, 1000.0, 1000.0],
-            5,
-            Some(first.pin.clone()),
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5)
+                .pin(Some(first.pin.clone())),
         )
         .unwrap();
     assert_eq!(
@@ -740,11 +764,7 @@ fn pin_round_trips_and_rejects_a_mismatched_segments_version() {
     let err = engine
         .viewport(
             &session,
-            "s0",
-            0,
-            [0.0, 0.0, 1000.0, 1000.0],
-            5,
-            Some(stale_pin),
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5).pin(Some(stale_pin)),
         )
         .unwrap_err();
     assert!(matches!(err, EngineError::PinExpired));
@@ -1209,7 +1229,10 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
 
         let start = Instant::now();
         engine
-            .viewport(&session, "s0", zoom, [x0, y0, x1, y1], 30, None)
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", zoom, [x0, y0, x1, y1], 30),
+            )
             .expect("viewport should succeed");
         latencies.push(start.elapsed());
     }
@@ -1230,4 +1253,211 @@ fn first_dictionary_descriptor(bundle_root: &Path) -> String {
     let data = std::fs::read(dict_path).unwrap();
     let len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
     String::from_utf8(data[4..4 + len].to_vec()).unwrap()
+}
+
+// ---------------------------------------------------------------------------------------------
+// §3.3 — the density underlay
+// ---------------------------------------------------------------------------------------------
+
+fn config_with_underlay(max_cells: usize) -> EngineConfig {
+    EngineConfig {
+        max_underlay_cells: max_cells,
+        ..config()
+    }
+}
+
+fn open_engine_with(bundle_root: &Path, tmp: &Path, cfg: EngineConfig) -> Engine {
+    Engine::open(
+        bundle_root,
+        &tmp.join("cache"),
+        &tmp.join("wal.log"),
+        Passthrough::new(),
+        cfg,
+    )
+    .unwrap()
+}
+
+/// **I2.** Sub-cell counts are exact *masked* cardinalities, so a tile's sub-cells must sum to that
+/// tile's own `visible` — for every principal, not just the fully-authorised one.
+///
+/// This is the assertion that would fail if the underlay ever read raw row counts and gated
+/// afterwards: an unmasked sub-cell sum would equal the tile's stored row count instead, which for
+/// the subset principal is three times larger.
+#[test]
+fn underlay_sub_cells_sum_to_the_tile_s_masked_visible_count() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine_with(&bundle_root, tmp.path(), config());
+
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let session = engine.authorise(&credential).unwrap();
+        for (zoom, offset) in [(0u8, 2u8), (2, 3), (4, 2)] {
+            let out = engine
+                .viewport(
+                    &session,
+                    ViewportRequest::new("s0", zoom, [0.0, 0.0, 1000.0, 1000.0], 30)
+                        .underlay_offset(Some(offset)),
+                )
+                .unwrap();
+            assert!(!out.sub_cells.is_empty(), "zoom {zoom}: underlay was empty");
+
+            for tile in &out.tiles {
+                let summed: u64 = out
+                    .sub_cells
+                    .iter()
+                    .filter(|c| (c.cell >> (2 * offset as u32)) == tile.tile)
+                    .map(|c| c.count)
+                    .sum();
+                assert_eq!(
+                    summed, tile.visible,
+                    "zoom {zoom} offset {offset}, tile {}: sub-cells summed to {summed} but the \
+                     masked visible count is {} — an unmasked underlay would over-count here (I2)",
+                    tile.tile, tile.visible
+                );
+            }
+            assert!(
+                out.sub_cells.iter().all(|c| c.count > 0),
+                "empty sub-cells must be omitted, exactly as empty tiles are"
+            );
+        }
+    }
+}
+
+/// A less-authorised principal sees strictly smaller sub-cell totals than a fully-authorised one —
+/// the underlay is per-viewer, like every other count (§7.1).
+#[test]
+fn underlay_totals_are_per_viewer() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine_with(&bundle_root, tmp.path(), config());
+
+    let total = |credential: Vec<u8>| -> u64 {
+        let session = engine.authorise(&credential).unwrap();
+        engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], 30)
+                    .underlay_offset(Some(2)),
+            )
+            .unwrap()
+            .sub_cells
+            .iter()
+            .map(|c| c.count)
+            .sum()
+    };
+
+    let full = total(full_coverage_credential());
+    let subset = total(subset_credential());
+    assert_eq!(full, N_ITEMS, "the full principal sees every item");
+    assert!(
+        subset < full,
+        "the subset principal's underlay ({subset}) must be smaller than the full one's ({full})"
+    );
+}
+
+/// Absent, or explicitly zero, means no underlay and no cost.
+#[test]
+fn no_underlay_is_requested_by_default() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine_with(&bundle_root, tmp.path(), config());
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    for offset in [None, Some(0)] {
+        let out = engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], 30)
+                    .underlay_offset(offset),
+            )
+            .unwrap();
+        assert!(
+            out.sub_cells.is_empty(),
+            "underlay_offset {offset:?} must serve no sub-cells"
+        );
+    }
+}
+
+/// All three underlay bounds **reject** rather than clamp, and that is one rule rather than three.
+///
+/// A Morton prefix carries no depth of its own, so a silently-reduced offset would hand the client
+/// cells it could not interpret; rejecting keeps the depth pinned to `zoom + offset` from the
+/// caller's own request. The cell budget is checked before any counting work, because
+/// `tiles_for_bbox` is uncapped and the underlay multiplies its output by `4^offset`.
+#[test]
+fn every_underlay_bound_rejects_rather_than_clamping() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    // (a) Above the configured maximum offset.
+    let engine = open_engine_with(&bundle_root, tmp.path(), config());
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let err = engine
+        .viewport(
+            &session,
+            // config()'s max_underlay_offset is 4
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 30).underlay_offset(Some(5)),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::UnderlayRefused(_)),
+        "offset above the configured maximum must be refused, got {err:?}"
+    );
+
+    // (b) Beyond the depth-16 grid (§5.2 fixes the grid at 2^16 x 2^16).
+    let err = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 14, [0.0, 0.0, 1000.0, 1000.0], 30).underlay_offset(Some(4)),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::UnderlayRefused(_)),
+        "zoom 14 + offset 4 needs depth 18 and must be refused, got {err:?}"
+    );
+
+    // (c) Over the total sub-cell budget — checked before any counting happens.
+    let tmp2 = TempDir::new().unwrap();
+    let tight = open_engine_with(&bundle_root, tmp2.path(), config_with_underlay(8));
+    let session = tight.authorise(&full_coverage_credential()).unwrap();
+    let err = tight
+        .viewport(
+            &session,
+            // 64 cells per tile, well past a budget of 8
+            ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], 30).underlay_offset(Some(3)),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::UnderlayRefused(_)),
+        "a request over the cell budget must be refused, got {err:?}"
+    );
+
+    // And the same request without the underlay still succeeds — the refusal is scoped to the
+    // underlay, not to the viewport.
+    tight
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], 30),
+        )
+        .expect("the viewport itself must still be served");
 }

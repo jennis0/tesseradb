@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use tessera_spatial::{tiles_for_bbox, Extent};
+use tessera_spatial::{tiles_for_bbox, Extent, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::tile_ranges;
@@ -77,12 +77,85 @@ pub struct PointOut {
     pub scalars: Vec<ScalarOut>,
 }
 
+/// One §3.3 underlay sub-cell: a Morton prefix at depth `zoom + offset`, and the exact number of
+/// visible items inside it.
+///
+/// **I2 no-op, and here is the argument rather than the assertion.** A depth-`d+s` sub-cell count is
+/// exactly what a `zoom = d+s` viewport request already returns — §7.1 gives the exact masked count
+/// of any tile at any zoom. The underlay saves round-trips and discloses no quantity a viewer could
+/// not already obtain in one request. Omitting empty sub-cells conveys `count == 0`, itself a masked
+/// count, exactly as the existing whole-tile skip does. Differencing across zooms or pans yields
+/// only differences of masked counts.
+///
+/// The depth is not carried: it is `zoom + offset` from the request, and an out-of-range offset is
+/// rejected rather than clamped, so the caller always knows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubCellCount {
+    /// The sub-cell's Morton prefix at depth `zoom + offset`.
+    pub cell: u64,
+    pub count: u64,
+}
+
+/// One `/v1/viewport` request, as the engine sees it.
+///
+/// A struct rather than a positional argument list: the query is the system's main entry point and
+/// keeps acquiring parameters (`served`, the §3.3 underlay, and the §8.2 filter contract next), so
+/// naming them at the call site keeps both the signature and every caller readable as it grows.
+/// Construct with [`ViewportRequest::new`] and add the optional parts.
+#[derive(Debug, Clone)]
+pub struct ViewportRequest<'a> {
+    /// A slice id from `GET /v1/meta`.
+    pub slice: &'a str,
+    /// Tile depth, 0–16.
+    pub zoom: u8,
+    /// `[x0, y0, x1, y1]` in the bundle's declared extent.
+    pub bbox: [f64; 4],
+    /// The client's per-tile mark budget. Clamped to `max_k` (the machine ceiling) and then to
+    /// `k_max_marks` (§7.2's cap clause).
+    ///
+    /// **Must be non-decreasing as the client zooms in.** §7.2's nesting property holds for a fixed
+    /// cap; lowering `k` on descent forfeits it and marks will pop out. The engine sees one request
+    /// at a time and cannot enforce this — see [`crate::select`]'s module doc.
+    pub k: usize,
+    /// Re-pin geometry to a prior response's `(prefix, segments_version)` (I11).
+    pub pin: Option<PinId>,
+    /// Request §3.3 underlay sub-cell counts at depth `zoom + offset`. `None` or `Some(0)` serves
+    /// none and costs nothing.
+    pub underlay_offset: Option<u8>,
+}
+
+impl<'a> ViewportRequest<'a> {
+    /// The required parameters; `pin` and `underlay_offset` default to absent.
+    pub fn new(slice: &'a str, zoom: u8, bbox: [f64; 4], k: usize) -> Self {
+        ViewportRequest {
+            slice,
+            zoom,
+            bbox,
+            k,
+            pin: None,
+            underlay_offset: None,
+        }
+    }
+
+    pub fn pin(mut self, pin: Option<PinId>) -> Self {
+        self.pin = pin;
+        self
+    }
+
+    pub fn underlay_offset(mut self, offset: Option<u8>) -> Self {
+        self.underlay_offset = offset;
+        self
+    }
+}
+
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewportOut {
     pub pin: PinId,
     pub tiles: Vec<TileCount>,
     pub points: Vec<PointOut>,
+    /// The §3.3 density underlay, when requested — empty otherwise. Only non-empty cells appear.
+    pub sub_cells: Vec<SubCellCount>,
 }
 
 /// `POST /v1/items/{handle}`'s payload (R5): a visible item's scalars plus its caller-supplied
@@ -210,19 +283,17 @@ impl Engine {
 }
 
 impl Engine {
-    /// The masked viewport query. `slice` names a slice id; `zoom` is the tile depth (0–16);
-    /// `bbox` is `[x0, y0, x1, y1]` in the bundle's declared extent; `k` caps points sampled per
-    /// tile (clamped to `config.max_k` defensively); `pin` optionally re-pins geometry to a prior
-    /// response's `(prefix, segments_version)`.
-    pub fn viewport(
-        &self,
-        session: &Session,
-        slice: &str,
-        zoom: u8,
-        bbox: [f64; 4],
-        k: usize,
-        pin: Option<PinId>,
-    ) -> Result<ViewportOut> {
+    /// The masked viewport query — see [`ViewportRequest`] for the parameters and for the
+    /// non-decreasing-`k` obligation that §7.2's nesting property rests on.
+    pub fn viewport(&self, session: &Session, req: ViewportRequest<'_>) -> Result<ViewportOut> {
+        let ViewportRequest {
+            slice,
+            zoom,
+            bbox,
+            k,
+            pin,
+            underlay_offset,
+        } = req;
         // Load the generation pointer exactly once, at request start (see `GenerationHandle`'s
         // doc at its definition) — every subsequent read below (pin check, row-projection cache,
         // composition) comes from this one snapshot, so a concurrent overlay/bundle swap
@@ -312,6 +383,41 @@ impl Engine {
         let tiles = tiles_for_bbox(bbox, zoom, &extent);
         let declared_scalars = &generation.bundle.manifest.declared_scalars;
 
+        // §3.3 underlay bounds, all three checked up front and all three *rejecting* rather than
+        // clamping (see `EngineError::UnderlayRefused`). Checking the cell budget before doing any
+        // work is the point of doing it here: `tiles_for_bbox` is itself uncapped, and the underlay
+        // multiplies its output by 4^offset, so a large offset over a wide bbox is an easy way to
+        // ask for tens of thousands of `count_range` calls and blow the latency budget.
+        let underlay_offset = match underlay_offset {
+            None | Some(0) => None,
+            Some(offset) => {
+                if offset > self.config.max_underlay_offset {
+                    return Err(EngineError::UnderlayRefused(format!(
+                        "underlay_offset {offset} exceeds the configured maximum {}",
+                        self.config.max_underlay_offset
+                    )));
+                }
+                let sub_depth = zoom as u32 + offset as u32;
+                if sub_depth > 16 {
+                    return Err(EngineError::UnderlayRefused(format!(
+                        "underlay_offset {offset} at zoom {zoom} needs depth {sub_depth}, but the \
+                         grid is fixed at 2^16 x 2^16 so depth may not exceed 16 (§5.2)"
+                    )));
+                }
+                let per_tile = 1usize << (2 * offset as u32);
+                let demanded = tiles.len().saturating_mul(per_tile);
+                if demanded > self.config.max_underlay_cells {
+                    return Err(EngineError::UnderlayRefused(format!(
+                        "underlay_offset {offset} over {} tiles demands {demanded} sub-cells, \
+                         above the configured budget of {}",
+                        tiles.len(),
+                        self.config.max_underlay_cells
+                    )));
+                }
+                Some(offset)
+            }
+        };
+
         // θ's anchor: the session's **composed** visible cardinality over this slice's whole row
         // space. It must be the composed figure and not `base`'s — see `Threshold::anchor`'s doc
         // for the I2 argument and the concrete channel the pre-overlay figure opens.
@@ -333,6 +439,7 @@ impl Engine {
 
         let mut tile_counts = Vec::new();
         let mut points = Vec::new();
+        let mut sub_cells = Vec::new();
 
         // A slice with zero segments (an empty build) has nothing visible in any tile; the loop
         // below simply never finds a non-empty range in that case.
@@ -362,12 +469,31 @@ impl Engine {
                     .into_iter()
                     .map(|row| row_to_point(segment, row, declared_scalars)),
             );
+
+            // §3.3: the tile's sub-cells, each an exact masked count over a contiguous Morton
+            // range. Only non-empty cells are emitted, exactly as empty tiles are skipped above.
+            if let Some(offset) = underlay_offset {
+                let sub_depth = zoom + offset;
+                let first = tile.prefix << (2 * offset as u32);
+                for i in 0..(1u64 << (2 * offset as u32)) {
+                    let cell = first + i;
+                    let sub_tile = Tile {
+                        prefix: cell,
+                        depth: sub_depth,
+                    };
+                    let count = mask.count_range(tile_ranges(segment, &sub_tile));
+                    if count > 0 {
+                        sub_cells.push(SubCellCount { cell, count });
+                    }
+                }
+            }
         }
 
         Ok(ViewportOut {
             pin: effective_pin,
             tiles: tile_counts,
             points,
+            sub_cells,
         })
     }
 }

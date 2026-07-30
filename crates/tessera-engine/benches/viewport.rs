@@ -29,6 +29,7 @@ use tempfile::TempDir;
 use tessera_authz::{build_fragment, FragmentCache, PostingsReader};
 use tessera_build::{build, BuildArgs};
 use tessera_engine::compose::{compose, RowProjection};
+use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_plugin::Passthrough;
@@ -185,14 +186,14 @@ fn bench_viewport(c: &mut Criterion) {
     group.bench_function("tile_sweep_k0", |b| {
         b.iter(|| {
             engine
-                .viewport(&session, "s0", ZOOM, bbox, 0, None)
+                .viewport(&session, ViewportRequest::new("s0", ZOOM, bbox, 0))
                 .expect("viewport should succeed")
         });
     });
     group.bench_function("gather_k30", |b| {
         b.iter(|| {
             engine
-                .viewport(&session, "s0", ZOOM, bbox, 30, None)
+                .viewport(&session, ViewportRequest::new("s0", ZOOM, bbox, 30))
                 .expect("viewport should succeed")
         });
     });

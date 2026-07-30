@@ -134,6 +134,13 @@ pub enum EngineError {
     MultiSegmentSlice(String),
     /// A bundle-level file (`CURRENT`, a plugin hash) was not the shape this engine expects.
     Malformed(String),
+    /// A `/v1/viewport` request asked for a §3.3 underlay this engine will not serve.
+    ///
+    /// **Rejected, never clamped** — and that is one rule for all three bounds (config offset, the
+    /// depth-16 grid limit, and the total cell budget), deliberately. A Morton prefix carries no
+    /// depth of its own, so a silently-reduced offset would hand the client cells it cannot
+    /// interpret; rejecting means the depth is always `zoom + offset` from the caller's own request.
+    UnderlayRefused(String),
 }
 
 impl std::fmt::Display for EngineError {
@@ -152,6 +159,7 @@ impl std::fmt::Display for EngineError {
                  handling does not yet support (see EngineError::MultiSegmentSlice's doc)"
             ),
             EngineError::Malformed(detail) => write!(f, "malformed: {detail}"),
+            EngineError::UnderlayRefused(detail) => write!(f, "underlay refused: {detail}"),
         }
     }
 }
