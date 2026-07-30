@@ -153,6 +153,24 @@ pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
     )
 }
 
+/// Map a `spawn_blocking` `JoinError` (Task 3, D-A) to the fail-closed 500 arm. A `JoinError` here
+/// means the closure running the engine call panicked — I13: a panic is a failed request, never
+/// an empty one, so this is a typed 500, not a dropped connection or a silently empty body.
+///
+/// **The panic payload never crosses into the response body** — same rule as
+/// [`map_store_error`]: `JoinError`'s `Display` can echo whatever `&str`/`String` payload the
+/// panic carried, which may originate deep in the engine (a file path, an assertion detail) and
+/// was never written with a caller-facing audience in mind. Logged in full at `error!`, replaced
+/// here with the same fixed string this crate already uses for other internal faults.
+pub fn map_join_error(e: tokio::task::JoinError) -> ApiError {
+    tracing::error!(detail = %e, "spawn_blocking closure panicked; answering fail-closed");
+    ApiError::FailClosed(
+        "an internal error occurred while handling this request; the request was refused rather \
+         than answered partially"
+            .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

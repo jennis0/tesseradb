@@ -150,31 +150,45 @@ impl TestServer {
     }
 }
 
+/// The `EngineConfig` every test but the Task 3 concurrency tests uses.
+fn default_engine_config() -> EngineConfig {
+    EngineConfig {
+        token_max_lifetime_secs: 3600,
+        max_k: 200,
+        k_min: 2,
+        k_max_marks: 200,
+        // Saturate theta: these tests assert HTTP shape and masking, not density. See
+        // tessera-engine's tests/viewport.rs `config()` for the full reasoning.
+        theta_target_marks: u64::MAX,
+        max_underlay_offset: 4,
+        max_underlay_cells: 8192,
+        max_tiles_per_request: 262_144,
+    }
+}
+
 async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> TestServer {
-    let engine = Engine::open(
-        bundle_root,
-        cache_dir,
-        wal_path,
-        Passthrough::new(),
-        EngineConfig {
-            token_max_lifetime_secs: 3600,
-            max_k: 200,
-            k_min: 2,
-            k_max_marks: 200,
-            // Saturate theta: these tests assert HTTP shape and masking, not density. See
-            // tessera-engine's tests/viewport.rs `config()` for the full reasoning.
-            theta_target_marks: u64::MAX,
-            max_underlay_offset: 4,
-            max_underlay_cells: 8192,
-            max_tiles_per_request: 262_144,
-        },
-    )
-    .expect("engine should open against a freshly built bundle");
+    spawn_server_with_config(bundle_root, cache_dir, wal_path, default_engine_config()).await
+}
+
+/// Like [`spawn_server`], but with a caller-supplied `EngineConfig` — Task 3's concurrency tests
+/// need a much wider underlay budget than every other test in this file to engineer a
+/// deterministic slow request (see `healthz_stays_prompt_while_a_long_viewport_runs`'s doc), and
+/// duplicating the whole engine-open-plus-three-listeners dance per test would be worse than one
+/// extra parameter.
+async fn spawn_server_with_config(
+    bundle_root: &Path,
+    cache_dir: &Path,
+    wal_path: &Path,
+    config: EngineConfig,
+) -> TestServer {
+    let max_k = config.max_k;
+    let engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+        .expect("engine should open against a freshly built bundle");
 
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
-        max_k: 200,
+        max_k,
         // On, so the header assertions below exercise the emission path rather than only its
         // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
         stage_timing: true,
@@ -1899,6 +1913,212 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
             header.is_none(),
             "without the bench-timing feature the header must be absent even when \
              `stage_timing = true` — a release build must not emit it"
+        );
+    }
+}
+
+/// Task 3 (D-A): `/healthz` must stay prompt while a viewport request runs, even on this test's
+/// single-threaded (`#[tokio::test]` default, current-thread) runtime — the strongest possible
+/// demonstration of the bug this task fixes. Pre-refactor, `viewport`'s whole body (the engine
+/// call through Arrow IPC framing) is synchronous Rust with no `.await` inside it; once tokio's
+/// one worker thread starts polling that task it cannot be interrupted, so a concurrent
+/// `/healthz` task cannot even be *polled* — let alone answered — until the viewport handler
+/// returns. `spawn_blocking` gives the viewport task a genuine `.await` point: the blocking work
+/// moves to tokio's separate blocking-thread pool (a real OS thread, regardless of runtime
+/// flavor), freeing the one reactor thread to service `/healthz` while it runs.
+///
+/// Slowness is engineered deterministically via the §3.3 density underlay's `4^offset` sub-cell
+/// fan-out (`tessera_engine::viewport`'s cost model — each sub-cell costs one small binary search
+/// plus one bitmap range-count, independent of corpus size), not via corpus size — so the fixture
+/// stays at the file's default `N_ITEMS` and builds in the same sub-second time every other test
+/// here does. `offset = 12` at `zoom = 0` (one tile, so the tile-count bound never engages) asks
+/// for `4^12 ≈ 16.8M` sub-cell evaluations, which reliably takes several seconds even in this
+/// debug-profile test binary — comfortably clearing the `/healthz` bound below even on a heavily
+/// loaded CI runner, since `/healthz` does no engine work at all and the two are asserted against
+/// bounds an order of magnitude apart.
+#[tokio::test]
+async fn healthz_stays_prompt_while_a_long_viewport_runs() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let mut config = default_engine_config();
+    // Wide enough to let the request below through `Engine::viewport`'s own bounds checks
+    // (`EngineError::UnderlayRefused`) rather than being rejected before it ever costs anything.
+    config.max_underlay_offset = 12;
+    config.max_underlay_cells = 20_000_000;
+    let server = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        config,
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let viewport_task = tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        let resp = client
+            .post(viewer_url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
+                "underlay_offset": 12
+            }))
+            .send()
+            .await
+            .unwrap();
+        (resp.status(), start.elapsed())
+    });
+
+    // Not load-bearing for correctness (see this test's doc: the viewport task's poll, once
+    // started, cannot be interrupted on this runtime either way) — yielding here just makes the
+    // intent readable: this `/healthz` call races an already-in-flight slow request, not a
+    // hypothetical one.
+    tokio::task::yield_now().await;
+
+    let healthz_start = std::time::Instant::now();
+    let healthz_resp = server
+        .client
+        .get(server.viewer_url("/healthz"))
+        .send()
+        .await
+        .unwrap();
+    let healthz_elapsed = healthz_start.elapsed();
+
+    assert_eq!(healthz_resp.status(), 200);
+    assert!(
+        healthz_elapsed < std::time::Duration::from_secs(1),
+        "/healthz took {healthz_elapsed:?} while a viewport request was in flight -- the reactor \
+         was starved"
+    );
+
+    let (viewport_status, viewport_elapsed) = viewport_task.await.unwrap();
+    assert_eq!(viewport_status, 200);
+    assert!(
+        viewport_elapsed > std::time::Duration::from_secs(1),
+        "the viewport request finished in {viewport_elapsed:?}, too fast to exercise this test's \
+         starvation scenario -- widen the underlay offset"
+    );
+}
+
+/// `/control/ingest`'s external ids for [`concurrent_ingests_do_not_delay_a_control_changes_suppress`],
+/// chosen well clear of every other test's ranges in this file (`N_ITEMS`, and the `N_ITEMS +
+/// 10_000 ..` range `a_batch_resolution_opens_each_extent_at_most_once` uses) so a shared-fixture
+/// mistake would show up as a collision 409 rather than silently aliasing another test's ids.
+const CONCURRENT_INGEST_BASE_ID: u64 = 50_000_000;
+const CONCURRENT_INGEST_BATCHES: u64 = 8;
+const CONCURRENT_INGEST_ROWS_PER_BATCH: u64 = 40_000;
+
+/// Task 3 (D-A), review finding 7: a `/control/changes` suppression must not queue behind N
+/// concurrent `/control/ingest` batches durability-syncing (lifecycle §1.3's deny priority lane,
+/// reached through the reactor) — and this must hold even though `/control/ingest` and
+/// `/control/changes` are NEVER behind the Task 4 admission gate (that gate is viewer/session
+/// only). Same single-threaded-runtime argument as
+/// `healthz_stays_prompt_while_a_long_viewport_runs`: pre-refactor, each ingest handler's Arrow
+/// decode, term resolution and WAL append/fsync run synchronously with no `.await`, so once the
+/// reactor thread starts executing one, it cannot service any other task — including accepting
+/// or reading the suppress request's own connection — until that handler returns. Post-refactor,
+/// both handlers do only their bearer check and header/body parse on the reactor, then hand off
+/// to `spawn_blocking`'s separate thread pool — so the suppress request's own closure only has to
+/// wait, at most, for whichever ONE ingest happens to be inside `Engine::accept_ingest`'s WAL
+/// critical section at that instant (the WAL mutex is real and intentional — Critical 1's
+/// atomicity fix — the bug this task closes is reactor-thread occupation, not that lock).
+///
+/// **Why this is unflaky despite real TCP connections being involved.** Unlike the single
+/// `/healthz` race above, this test cannot rely on "the one other task must already be running
+/// and cannot be interrupted" alone: `CONCURRENT_INGEST_BATCHES` separate connections are
+/// accepted in whatever order the kernel happens to deliver their readiness, so pre-refactor the
+/// suppress request is not guaranteed to queue behind literally all of them — only behind
+/// whichever are already executing or queued ahead of it. The margin comes from cost, not
+/// ordering: each `CONCURRENT_INGEST_ROWS_PER_BATCH`-row batch's synchronous handler work is
+/// measured (this test's tuning run) at ~300ms in this debug-profile binary, so
+/// `CONCURRENT_INGEST_BATCHES` of them sum to ~2.4s of reactor-monopolising work pre-refactor —
+/// even a suppress request that gets scheduled unusually early among that flurry of connections
+/// would need implausible luck to be serviced inside the 1s bound below, since it still shares
+/// the single reactor thread with whichever ingest handler(s) the scheduler picked first. All
+/// `CONCURRENT_INGEST_BATCHES` requests are constructed and hand off to `tokio::spawn` before the
+/// suppress request is ever sent, so it always races genuinely in-flight ingests, not
+/// hypothetical future ones.
+#[tokio::test]
+async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let mut ingest_tasks = Vec::with_capacity(CONCURRENT_INGEST_BATCHES as usize);
+    for batch in 0..CONCURRENT_INGEST_BATCHES {
+        let rows: Vec<(u64, f32, f32, &str)> = (0..CONCURRENT_INGEST_ROWS_PER_BATCH)
+            .map(|row| {
+                let id = CONCURRENT_INGEST_BASE_ID + batch * CONCURRENT_INGEST_ROWS_PER_BATCH + row;
+                (id, row as f32, row as f32, "0")
+            })
+            .collect();
+        let body = build_ingest_batch(&rows);
+        let client = server.client.clone();
+        let url = server.control_url("/control/ingest");
+        let batch_id = format!("concurrent-{batch}");
+        ingest_tasks.push(tokio::spawn(async move {
+            client
+                .post(url)
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .header("x-tessera-batch-id", batch_id)
+                .header("content-type", "application/octet-stream")
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }));
+    }
+
+    // Every ingest task is now on the runtime's queue, none of them awaited yet — the suppress
+    // request below genuinely races them, not a hypothetical future batch.
+    tokio::task::yield_now().await;
+
+    const SUPPRESS_SOURCE_ID: u64 = 7;
+    let external_id =
+        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let suppress_start = std::time::Instant::now();
+    let suppress_resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .send()
+        .await
+        .unwrap();
+    let suppress_elapsed = suppress_start.elapsed();
+
+    assert_eq!(suppress_resp.status(), 200);
+    assert!(
+        suppress_elapsed < std::time::Duration::from_secs(1),
+        "/control/changes suppress took {suppress_elapsed:?} while {CONCURRENT_INGEST_BATCHES} \
+         ingest batches were in flight -- it queued behind them on the reactor"
+    );
+
+    for task in ingest_tasks {
+        assert_eq!(
+            task.await.unwrap(),
+            200,
+            "every concurrent ingest batch should still succeed"
         );
     }
 }

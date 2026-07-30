@@ -12,7 +12,7 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{map_engine_error, ApiError};
+use crate::error::{map_engine_error, map_join_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
@@ -55,9 +55,16 @@ async fn authorise(
         .decode(&req.auth_data)
         .map_err(|e| ApiError::Contract(format!("auth_data is not valid base64: {e}")))?;
 
-    let session = state
-        .engine
-        .authorise(&auth_data)
+    // D-A: `engine.authorise` resolves the credential's granted terms and unions them into a
+    // fragment (I2) — on a fragment-cache miss this builds and writes the frozen fragment to
+    // disk (file IO), and either way is CPU work with no `.await` of its own. Moved off the
+    // reactor so a cold `authorise` cannot starve concurrent requests on this process's tokio
+    // worker threads. Closure capture: `state` is a cloned `Arc<AppState>` (cheap; sound because
+    // `Engine: Send + Sync`), `auth_data` is moved (owned `Vec<u8>`, only ever borrowed above).
+    let closure_state = Arc::clone(&state);
+    let session = tokio::task::spawn_blocking(move || closure_state.engine.authorise(&auth_data))
+        .await
+        .map_err(map_join_error)?
         .map_err(map_engine_error)?;
 
     let resp = AuthoriseResp {

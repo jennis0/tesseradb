@@ -17,7 +17,7 @@ use tessera_wire::{viewport_ipc, ScalarColumn, ViewportColumns};
 
 use tessera_engine::viewport::ViewportRequest;
 
-use crate::error::{map_engine_error, map_store_error, ApiError};
+use crate::error::{map_engine_error, map_join_error, map_store_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
@@ -133,32 +133,27 @@ struct ViewportReq {
     underlay_offset: Option<u8>,
 }
 
-async fn viewport(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(req): Json<ViewportReq>,
-) -> Result<Response, ApiError> {
-    // Task 16: server-side timing for the exit-criteria measurement (bench_p99.py, plan §5).
-    // Not a wire-format field — an observability-only response header, measured around the whole
-    // handler body (auth check through Arrow IPC serialisation), reported to microseconds so the
-    // <10ms exit gate can be checked without relying on end-to-end (client-observed) latency,
-    // which also includes HTTP/TCP/loopback overhead outside the engine's control.
-    let start = std::time::Instant::now();
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+/// Everything a `spawn_blocking` viewport closure hands back to the async side: the wire bytes
+/// already framed by `viewport_ipc`, the pin to echo in `x-tessera-pin`, and the timing figures
+/// `x-tessera-stage-ns` needs — computed inside the closure since they describe work done there
+/// (`arrow_serialise_ns`) or by the engine call it wraps (`timings`). Response/header
+/// construction is deliberately NOT here (D-A): that stays on the reactor.
+struct ViewportOutcome {
+    bytes: Vec<u8>,
+    pin: PinId,
+    timings: tessera_engine::StageTimings,
+    arrow_serialise_ns: u64,
+}
 
-    if req.bbox.iter().any(|v| !v.is_finite())
-        || req.bbox[0] > req.bbox[2]
-        || req.bbox[1] > req.bbox[3]
-    {
-        return Err(ApiError::Contract(
-            "bbox must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite".to_string(),
-        ));
-    }
-    if req.zoom > 16 {
-        return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
-    }
-
+/// The engine call through Arrow IPC framing (D-A scope for this handler): everything CPU-bound
+/// or file-IO-bearing, run inside `spawn_blocking`. Takes `&AppState`/`&Session` by reference —
+/// the caller owns both as `'static` values moved into the closure, so a reference borrowed for
+/// the closure's own body lifetime is all this needs.
+fn run_viewport(
+    state: &AppState,
+    session: &tessera_engine::Session,
+    req: ViewportReq,
+) -> Result<ViewportOutcome, ApiError> {
     let pin = req.pin.map(PinId::from);
     // Contracts §3.2's default. It is the deployment's own overplot ceiling rather than a
     // literal, so a client that expresses no preference gets the full budget this deployment will
@@ -173,7 +168,7 @@ async fn viewport(
     let out = state
         .engine
         .viewport(
-            &entry.session,
+            session,
             ViewportRequest::new(&req.slice, req.zoom, req.bbox, k)
                 .pin(pin)
                 .underlay_offset(req.underlay_offset),
@@ -241,8 +236,62 @@ async fn viewport(
     });
     let arrow_serialise_ns = serialise_start.elapsed().as_nanos() as u64;
 
-    let pin_header =
-        serde_json::to_string(&PinDto::from(&out.pin)).expect("PinDto serialisation cannot fail");
+    Ok(ViewportOutcome {
+        bytes,
+        pin: out.pin,
+        timings: out.timings,
+        arrow_serialise_ns,
+    })
+}
+
+async fn viewport(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ViewportReq>,
+) -> Result<Response, ApiError> {
+    // Task 16: server-side timing for the exit-criteria measurement (bench_p99.py, plan §5).
+    // Not a wire-format field — an observability-only response header, measured around the whole
+    // handler body (auth check through Arrow IPC serialisation), reported to microseconds so the
+    // <10ms exit gate can be checked without relying on end-to-end (client-observed) latency,
+    // which also includes HTTP/TCP/loopback overhead outside the engine's control. Unaffected by
+    // moving the engine call off the reactor: `start` still spans the whole handler, `.await`ing
+    // the `spawn_blocking` join included.
+    let start = std::time::Instant::now();
+    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
+    let entry = state.authenticated_session(token)?;
+
+    if req.bbox.iter().any(|v| !v.is_finite())
+        || req.bbox[0] > req.bbox[2]
+        || req.bbox[1] > req.bbox[3]
+    {
+        return Err(ApiError::Contract(
+            "bbox must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite".to_string(),
+        ));
+    }
+    if req.zoom > 16 {
+        return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
+    }
+
+    // D-A: the engine call through Arrow IPC framing is CPU-bound (and, on a cold row-projection
+    // or fragment build, file-IO-bearing) with no `.await` of its own — run synchronously here it
+    // would monopolise this reactor thread for the whole viewport, starving every other request
+    // sharing this process's tokio worker threads, `/healthz` included. `spawn_blocking` moves it
+    // to tokio's blocking-thread pool instead.
+    //
+    // Closure capture: `state` is a cloned `Arc<AppState>` (cheap; `Engine: Send + Sync` is what
+    // makes this sound — see this task's report), `entry` is the already-cloned
+    // `Arc<SessionEntry>` `authenticated_session` returned, and `req` is moved in whole — its
+    // fields were only ever borrowed above, so ownership is free to hand over. Never behind an
+    // admission gate here (Task 4 adds one in front of this call site later; this closure is
+    // deliberately a single expression so a permit can be moved in without restructuring).
+    let closure_state = Arc::clone(&state);
+    let outcome =
+        tokio::task::spawn_blocking(move || run_viewport(&closure_state, &entry.session, req))
+            .await
+            .map_err(map_join_error)??;
+
+    let pin_header = serde_json::to_string(&PinDto::from(&outcome.pin))
+        .expect("PinDto serialisation cannot fail");
     let server_us = start.elapsed().as_micros().to_string();
 
     let mut response = Response::builder()
@@ -252,13 +301,13 @@ async fn viewport(
         .header("x-tessera-server-us", server_us);
 
     if state.stage_timing {
-        if let Some(value) = stage_header(&out.timings, arrow_serialise_ns) {
+        if let Some(value) = stage_header(&outcome.timings, outcome.arrow_serialise_ns) {
             response = response.header("x-tessera-stage-ns", value);
         }
     }
 
     Ok(response
-        .body(Body::from(bytes))
+        .body(Body::from(outcome.bytes))
         .expect("response construction cannot fail"))
 }
 
@@ -431,26 +480,15 @@ struct ItemResp {
 /// can already see; it can never use `500` vs `404` to learn whether an id exists. **A future
 /// edit that moves the sidecar read earlier than the visibility test would silently turn this
 /// status into a visibility oracle — don't.**
-async fn item(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    AxumPath(raw): AxumPath<u64>,
-    Json(req): Json<ItemReq>,
-) -> Result<Json<ItemResp>, ApiError> {
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
-
-    // Checked HERE -- before inversion, and identically for every identifier, so it opens no
-    // channel (contracts §2.2). Entity-independent: this branch does not depend on `raw` at all.
-    if let Some(e) = req.epoch {
-        if e != state.engine.meta().identity_epoch {
-            return Err(ApiError::Conflict(
-                "stale identity epoch; re-resolve by external_id".to_string(),
-            ));
-        }
-    }
-
-    let item = match state.engine.item(&entry.session, TesseraId::new(raw)) {
+/// `engine.item`'s sidecar read plus the scalar/external-id shaping that follows it (D-A scope
+/// for this handler) — run inside `spawn_blocking`. See [`item`]'s doc for why the ordering
+/// (visibility test before any sidecar touch) must not move.
+fn run_item(
+    state: &AppState,
+    session: &tessera_engine::Session,
+    raw: u64,
+) -> Result<ItemResp, ApiError> {
+    let item = match state.engine.item(session, TesseraId::new(raw)) {
         // A corrupt or unreadable sidecar is a SERVER fault, not "no such item". `.ok().flatten()`
         // here would serve a 200 with `external_id: null` and call a digest mismatch a missing
         // field -- fail-open, and precisely what Task 8's typed errors exist to prevent (Critical
@@ -477,8 +515,39 @@ async fn item(
         .external_id
         .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
 
-    Ok(Json(ItemResp {
+    Ok(ItemResp {
         scalars,
         external_id,
-    }))
+    })
+}
+
+async fn item(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(raw): AxumPath<u64>,
+    Json(req): Json<ItemReq>,
+) -> Result<Json<ItemResp>, ApiError> {
+    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
+    let entry = state.authenticated_session(token)?;
+
+    // Checked HERE -- before inversion, and identically for every identifier, so it opens no
+    // channel (contracts §2.2). Entity-independent: this branch does not depend on `raw` at all.
+    // Stays on the reactor: a pure in-memory comparison against `meta()`, no engine mask work.
+    if let Some(e) = req.epoch {
+        if e != state.engine.meta().identity_epoch {
+            return Err(ApiError::Conflict(
+                "stale identity epoch; re-resolve by external_id".to_string(),
+            ));
+        }
+    }
+
+    // D-A: `engine.item` inverts the id (pure, no IO) then reads the external-id sidecar for a
+    // visible item — file IO, moved off the reactor. Closure capture: `state` cloned (`Arc`,
+    // cheap), `entry` moved (already an `Arc<SessionEntry>`), `raw` is `Copy`.
+    let closure_state = Arc::clone(&state);
+    let resp = tokio::task::spawn_blocking(move || run_item(&closure_state, &entry.session, raw))
+        .await
+        .map_err(map_join_error)??;
+
+    Ok(Json(resp))
 }
