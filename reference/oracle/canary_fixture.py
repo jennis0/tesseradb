@@ -111,6 +111,12 @@ def build_canary_pair(work_dir: Path) -> tuple[Path, Path]:
                 SLICE_ID,
                 "--out",
                 str(out_dir),
+                # Contracts r6 refuses to build unless a human names the identity key's
+                # lineage. Each canary fixture (free and canary bundles alike) is a genuinely
+                # new, from-scratch lineage every run (`oracle.harness.ensure_fixture_bundle`'s
+                # module doc makes the same call for the main fixture) — naming
+                # `--mint-id-key` here satisfies the rule rather than working around it.
+                "--mint-id-key",
             ],
             cwd=REPO_ROOT,
             check=True,
