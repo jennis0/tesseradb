@@ -277,10 +277,14 @@ async fn viewport(
     //
     // D-E: this clock starts AFTER admission, so it keeps its pre-Task-4 meaning of "server
     // compute, excluding queueing" — bench baselines and the <10 ms exit gate both read it that
-    // way. Note: pre-Task-4 (Task 3, D-A) the value briefly included blocking-pool queue delay
-    // (spawn_blocking's own scheduling wait); the composition is now restored to compute-only,
-    // with that wait folded into `x-tessera-admission-us` instead since it happens after this
-    // gate has already admitted the request.
+    // way. Note: pre-Task-4 (Task 3, D-A) the value could include a real blocking-pool scheduling
+    // wait, because nothing bounded how many closures could be in flight on tokio's (512-thread)
+    // blocking pool at once. `start` is still taken here, before `spawn_blocking` — a scheduling
+    // wait still lands inside `server_us`, not `x-tessera-admission-us` — but the gate now BOUNDS
+    // that wait rather than removing it from this measurement: at most `compute_admission`
+    // closures are ever admitted at a time, far under the pool's size, so in practice the wait is
+    // ~0 and this header is effectively compute-only again. `admission_us` carries only the gate
+    // wait itself (`admit()`'s own two-stage acquire), never any blocking-pool scheduling delay.
     let start = std::time::Instant::now();
 
     // D-A: the engine call through Arrow IPC framing is CPU-bound (and, on a cold row-projection
