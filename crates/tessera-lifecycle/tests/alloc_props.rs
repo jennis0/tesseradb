@@ -65,7 +65,7 @@ proptest! {
                         batch_id: format!("batch-{id}"),
                         body_hash: [0u8; 32],
                         rows: vec![WalRow {
-                            external_id: id.to_le_bytes().to_vec(),
+                            external_id: Some(id.to_le_bytes().to_vec()),
                             entity_id: EntityId::new(id),
                             descriptors: Vec::new(),
                             x: 0.0,
@@ -90,7 +90,7 @@ proptest! {
             .iter()
             .enumerate()
             .map(|(i, sig)| PendingItem {
-                external_id: format!("ext-{i:05}").into_bytes(),
+                external_id: Some(format!("ext-{i:05}").into_bytes()),
                 terms: sig.iter().map(|&t| TermId::new(t)).collect(),
                 entity_id: None,
             })

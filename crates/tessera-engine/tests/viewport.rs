@@ -808,7 +808,7 @@ fn drill_down_resolves_an_external_id_for_a_post_build_entity() {
 
     let new_entity = EntityId::new(engine.allocator_high_water());
     let row = WalRow {
-        external_id: b"post-build-key".to_vec(),
+        external_id: Some(b"post-build-key".to_vec()),
         entity_id: new_entity,
         descriptors: Vec::new(),
         x: 0.0,

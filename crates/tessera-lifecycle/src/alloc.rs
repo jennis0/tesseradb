@@ -136,7 +136,12 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
 /// assigns to novel descriptors (see `tessera_lifecycle::wal`'s module docs). Resolution happens
 /// in the caller, not here, so this module stays free of the dictionary/interning machinery.
 pub struct PendingItem {
-    pub external_id: Vec<u8>,
+    /// Optional (contracts §3.4 r6): `None` when the caller supplied no external id, in which
+    /// case the item is addressable only by its `tessera_id`. Used here only as (part of) the
+    /// tie-break in [`assign_sorted`]'s sort key — `None` sorts before every `Some`, which is
+    /// fine because it is only a tie-break within an already-equal signature, never itself a
+    /// visibility-bearing order.
+    pub external_id: Option<Vec<u8>>,
     pub terms: Vec<TermId>,
     /// Filled in by [`assign_sorted`]; `None` beforehand.
     pub entity_id: Option<EntityId>,
@@ -231,7 +236,7 @@ mod tests {
             batch_id: "b".into(),
             body_hash: [0u8; 32],
             rows: vec![crate::wal::WalRow {
-                external_id: entity_id.to_le_bytes().to_vec(),
+                external_id: Some(entity_id.to_le_bytes().to_vec()),
                 entity_id: EntityId::new(entity_id),
                 descriptors: Vec::new(),
                 x: 0.0,

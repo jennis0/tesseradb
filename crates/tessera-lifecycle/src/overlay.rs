@@ -180,7 +180,11 @@ pub fn replay<'a, E>(
         match record {
             WalRecord::IngestBatch { rows, .. } => {
                 for row in rows {
-                    established.insert(row.external_id.clone(), row.entity_id);
+                    // Contracts §3.4 r6: no external id means no sidecar entry and nothing to
+                    // establish here either — the item is addressable only by its `tessera_id`.
+                    if let Some(external_id) = &row.external_id {
+                        established.insert(external_id.clone(), row.entity_id);
+                    }
                     buffer.insert_row(row, &mut resolver);
                 }
             }
@@ -335,5 +339,53 @@ mod tests {
         .unwrap();
 
         assert!(overlay.get(bundle_entity).unwrap().deleted);
+    }
+
+    /// Contracts §3.4 r6: an ingested item with no external id gets no `established` entry at
+    /// all — two such items in the same batch must not collide with each other (`None` is not a
+    /// key that can be inserted twice and clobber itself), and both rows must still land in the
+    /// buffer.
+    #[test]
+    fn two_null_external_ids_in_one_batch_do_not_collide() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let writer = tessera_authz::DictWriter::new(temp.path());
+        let paths = writer.finish().unwrap();
+        let dict = Dict::load(&paths).unwrap();
+
+        let records = vec![WalRecord::IngestBatch {
+            batch_id: "b".to_string(),
+            body_hash: [0u8; 32],
+            rows: vec![
+                crate::wal::WalRow {
+                    external_id: None,
+                    entity_id: EntityId::new(100),
+                    descriptors: Vec::new(),
+                    x: 0.0,
+                    y: 0.0,
+                    scalars: Vec::new(),
+                },
+                crate::wal::WalRow {
+                    external_id: None,
+                    entity_id: EntityId::new(101),
+                    descriptors: Vec::new(),
+                    x: 0.0,
+                    y: 0.0,
+                    scalars: Vec::new(),
+                },
+            ],
+        }];
+
+        let (_overlay, buffer, established, _resolver) = replay(&records, &dict, |_external_id| {
+            Ok::<_, std::convert::Infallible>(None)
+        })
+        .unwrap();
+
+        assert!(
+            established.is_empty(),
+            "no external id was supplied, so nothing should be established"
+        );
+        assert_eq!(buffer.len(), 2, "both null-external-id rows still buffer");
     }
 }

@@ -30,7 +30,7 @@ use tessera_plugin::{Descriptor, Plugin, PluginError};
 use tessera_store::manifest::CurrentPointer;
 use tessera_store::read::open_bundle;
 use tessera_store::StoreError;
-use tessera_types::{EntityId, IdentityKey, TermId};
+use tessera_types::{EntityId, IdentityError, IdentityKey, TermId, TesseraId};
 
 use crate::{Generation, GenerationHandle};
 
@@ -169,9 +169,12 @@ pub struct Engine {
     /// replay/accept order), detached from replay's borrow of `dict` and resumed on every live
     /// resolution — see `DescriptorResolver::resume`'s doc (Task 13).
     resolver_state: Mutex<(FxHashMap<Vec<u8>, TermId>, u32)>,
-    /// `/control/ingest` idempotency index: accepted batch id -> the body hash it was accepted
-    /// with (Task 13).
-    accepted_batches: Mutex<FxHashMap<String, [u8; 32]>>,
+    /// `/control/ingest` idempotency index: accepted batch id -> `(body hash, entity ids)` it was
+    /// accepted with (Task 13). The entity ids ride along so a byte-identical replay can answer
+    /// with the same `tessera_id`s per row (contracts §3.4 r6) without needing to re-resolve them
+    /// from `external_id` — which a null-external-id row has none of.
+    #[allow(clippy::type_complexity)]
+    accepted_batches: Mutex<FxHashMap<String, ([u8; 32], Vec<EntityId>)>>,
 }
 
 impl Engine {
@@ -276,17 +279,21 @@ impl Engine {
         let resolver_state = resolver.into_state();
 
         // The idempotency index for `/control/ingest` (Task 13): every previously-accepted batch
-        // id, mapped to the body hash it was accepted with, so a retried request with the same id
-        // and body is recognised as a no-op 200 rather than re-applied.
-        let mut accepted_batches: FxHashMap<String, [u8; 32]> = FxHashMap::default();
+        // id, mapped to the body hash it was accepted with plus the entity ids that batch's rows
+        // were assigned, so a retried request with the same id and body is recognised as a no-op
+        // 200 rather than re-applied, and can still answer with the same `tessera_id`s (contracts
+        // §3.4 r6) even for a row that carried no external id to re-resolve from.
+        let mut accepted_batches: FxHashMap<String, ([u8; 32], Vec<EntityId>)> =
+            FxHashMap::default();
         for record in &records {
             if let WalRecord::IngestBatch {
                 batch_id,
                 body_hash,
-                ..
+                rows,
             } = record
             {
-                accepted_batches.insert(batch_id.clone(), *body_hash);
+                let entity_ids = rows.iter().map(|row| row.entity_id).collect();
+                accepted_batches.insert(batch_id.clone(), (*body_hash, entity_ids));
             }
         }
 
@@ -545,20 +552,42 @@ impl Engine {
         assign_sorted(items, &mut alloc)
     }
 
-    /// The body hash a batch id was previously accepted with, if any — the idempotency check for
-    /// `/control/ingest`'s replay rule (R5): equal hash -> 200 no-op; different hash -> 409.
-    pub fn accepted_batch(&self, batch_id: &str) -> Option<[u8; 32]> {
-        self.accepted_batches.lock().unwrap().get(batch_id).copied()
+    /// The body hash and per-row entity ids a batch id was previously accepted with, if any — the
+    /// idempotency check for `/control/ingest`'s replay rule (R5): equal hash -> 200 no-op
+    /// (returning the same `tessera_id`s, via the entity ids here); different hash -> 409.
+    pub fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
+        self.accepted_batches.lock().unwrap().get(batch_id).cloned()
     }
 
     /// Record a batch id as accepted. Must only be called after the batch's `IngestBatch` record
     /// has been WAL-appended and fsynced (the ack contract) — this index is purely an in-memory
     /// accelerant for the idempotency check above, not itself a durability boundary.
-    pub fn record_accepted_batch(&self, batch_id: String, body_hash: [u8; 32]) {
+    pub fn record_accepted_batch(
+        &self,
+        batch_id: String,
+        body_hash: [u8; 32],
+        entity_ids: Vec<EntityId>,
+    ) {
         self.accepted_batches
             .lock()
             .unwrap()
-            .insert(batch_id, body_hash);
+            .insert(batch_id, (body_hash, entity_ids));
+    }
+
+    /// Compute the wire `tessera_id` for `entity` under this deployment's current shard id and
+    /// identity key (contracts §2.6/§3.4 r6). `/control/ingest`'s 200 response returns each
+    /// accepted row's `tessera_id` this way rather than its raw `EntityId` (I10: entity ids never
+    /// cross the trust boundary).
+    ///
+    /// **Fallible, not `.unwrap()`-able**: `IdentityKey::forward` refuses an entity at or above
+    /// `u32::MAX` (Important I-1). The I9 allocator's ceiling makes that unreachable in practice
+    /// for any entity this method is ever called with, but this stays a typed error rather than a
+    /// panic — an internal invariant violation must fail closed (500), never crash the request
+    /// thread or silently truncate.
+    pub fn tessera_id_of(&self, entity: EntityId) -> std::result::Result<TesseraId, IdentityError> {
+        let generation = self.generation.load_full();
+        self.identity_key
+            .forward(generation.bundle.manifest.identity.shard_id, entity)
     }
 
     /// Accept an ingest batch atomically: WAL append -> fsync -> apply (buffer clone + insert) ->
@@ -582,13 +611,21 @@ impl Engine {
     /// On success, also records `batch_id`/`body_hash` as accepted (the idempotency index) before
     /// releasing the lock, so a concurrent replay of the same batch id can never observe a window
     /// where the generation has swapped but the idempotency index hasn't caught up yet.
+    ///
+    /// Returns each accepted row's `EntityId`, in the same order as `rows` — never the caller's
+    /// raw entity ids to keep (I10 stays server-side), but the caller (`/control/ingest`) needs
+    /// them for exactly as long as it takes to turn each into a `tessera_id` (via
+    /// [`Engine::tessera_id_of`]) for the 200 response (contracts §3.4 r6). Also recorded, keyed
+    /// by `batch_id`, so a byte-identical replay of an already-acked batch can answer with the
+    /// same `tessera_id`s without re-deriving them from `external_id` — which would not work at
+    /// all for a row that has none.
     pub fn accept_ingest(
         &self,
         rows: Vec<WalRow>,
         terms: Vec<Vec<TermId>>,
         batch_id: String,
         body_hash: [u8; 32],
-    ) -> std::result::Result<(), WalError> {
+    ) -> std::result::Result<Vec<EntityId>, WalError> {
         debug_assert_eq!(rows.len(), terms.len());
         let record = WalRecord::IngestBatch {
             batch_id: batch_id.clone(),
@@ -608,8 +645,14 @@ impl Engine {
         // disagree about the same item (task-9 brief, Important I-9).
         let mut established_inverse = self.established_inverse.lock().unwrap();
         for (row, row_terms) in rows.iter().zip(&terms) {
-            established.insert(row.external_id.clone(), row.entity_id);
-            established_inverse.insert(row.entity_id, row.external_id.clone());
+            // Contracts §3.4 r6: no external id means no sidecar entry and nothing to establish
+            // here either -- the item is addressable only by its `tessera_id`. `None` must never
+            // collide with `None`, so this simply skips the insert rather than inserting under a
+            // shared "empty" key.
+            if let Some(external_id) = &row.external_id {
+                established.insert(external_id.clone(), row.entity_id);
+                established_inverse.insert(row.entity_id, external_id.clone());
+            }
             buffer.insert_row_with_terms(row, row_terms.clone());
         }
         drop(established);
@@ -626,13 +669,14 @@ impl Engine {
         };
         self.generation.store(Arc::new(next));
 
+        let entity_ids: Vec<EntityId> = rows.iter().map(|row| row.entity_id).collect();
         self.accepted_batches
             .lock()
             .unwrap()
-            .insert(batch_id, body_hash);
+            .insert(batch_id, (body_hash, entity_ids.clone()));
 
         drop(wal);
-        Ok(())
+        Ok(entity_ids)
     }
 
     /// Accept one `/control/changes` disposition change atomically: WAL append -> fsync -> apply

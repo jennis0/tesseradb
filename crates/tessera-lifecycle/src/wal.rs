@@ -72,9 +72,15 @@ pub enum WalScalar {
 /// ordinals fixed by the bundle's (immutable) dictionary extents, so a term coined between
 /// builds has no durable ID yet. Descriptors resolve through the bundle dictionary plus a
 /// deterministic in-memory extension interned in replay order at load time.
+///
+/// `external_id` is **optional** (contracts §3.4 r6): a caller may ingest an item with no
+/// external id at all, in which case it gets no sidecar entry and is addressable only by its
+/// `tessera_id` — a pure function of `(key, shard_id, entity_id)`, so nothing needs to be stored
+/// to make that identity durable. `None` here must never collide with `None` elsewhere, and must
+/// never be treated as "an external id happens to be empty".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalRow {
-    pub external_id: Vec<u8>,
+    pub external_id: Option<Vec<u8>>,
     pub entity_id: EntityId,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f32,

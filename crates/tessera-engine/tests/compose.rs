@@ -440,7 +440,7 @@ fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
     use tessera_lifecycle::WalRow;
 
     let row = WalRow {
-        external_id: entity.to_le_bytes().to_vec(),
+        external_id: Some(entity.to_le_bytes().to_vec()),
         entity_id: e(entity),
         descriptors: Vec::new(),
         x: 0.0,
@@ -477,7 +477,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
             body_hash: [0u8; 32],
             rows: vec![
                 WalRow {
-                    external_id: ext_x.clone(),
+                    external_id: Some(ext_x.clone()),
                     entity_id: e(ENTITY_X),
                     descriptors: vec![b"term-x".to_vec()],
                     x: 0.0,
@@ -485,7 +485,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
                     scalars: Vec::new(),
                 },
                 WalRow {
-                    external_id: ext_y.clone(),
+                    external_id: Some(ext_y.clone()),
                     entity_id: e(ENTITY_Y),
                     descriptors: vec![b"term-y".to_vec()],
                     x: 0.0,

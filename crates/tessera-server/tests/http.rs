@@ -343,6 +343,39 @@ fn build_ingest_batch_raw(rows: &[(&[u8], f32, f32, &str)]) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
+/// Like [`build_ingest_batch_raw`], but `external_id` is `Option<&[u8]>` per row — contracts §3.4
+/// r6: an ingested item may carry no external id at all, in which case it is addressable only by
+/// the `tessera_id` `/control/ingest`'s response returns for it. The column is declared nullable
+/// here (unlike the other two builders, which happen to always supply a value): this is the
+/// null-within-the-column shape the server must accept.
+fn build_ingest_batch_optional(rows: &[(Option<&[u8]>, f32, f32, &str)]) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("access", DataType::Utf8, false),
+    ]));
+    let ext_array = BinaryArray::from_iter(rows.iter().map(|(id, _, _, _)| *id));
+    let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
+    let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
+    let access_array = StringArray::from_iter_values(rows.iter().map(|(_, _, _, a)| *a));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ext_array),
+            Arc::new(x_array),
+            Arc::new(y_array),
+            Arc::new(access_array),
+        ],
+    )
+    .unwrap();
+
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
 #[tokio::test]
 async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
     let tmp = TempDir::new().unwrap();
@@ -1389,7 +1422,7 @@ fn concurrent_ingest_and_change_both_survive() {
     let ingest_thread = std::thread::spawn(move || {
         let new_external_id = external_id_of(N_ITEMS + 100);
         let row = tessera_lifecycle::WalRow {
-            external_id: new_external_id.clone(),
+            external_id: Some(new_external_id.clone()),
             entity_id: tessera_types::EntityId::new(N_ITEMS + 100),
             descriptors: vec![b"0".to_vec()],
             x: 5.0,
@@ -1447,5 +1480,177 @@ fn concurrent_ingest_and_change_both_survive() {
         Some(tessera_types::EntityId::new(N_ITEMS + 100)),
         "the concurrent ingest must have survived — a lost update would drop it from the live \
          buffer/established state"
+    );
+}
+
+/// Contracts §3.4 (r6): an item ingested with no external id at all is still accepted, and the
+/// `tessera_id` the 200 response returns for it is a genuine, correctly-shard-scoped identity for
+/// the entity that was actually allocated — the only way the item is addressable at all, since it
+/// has no external id.
+///
+/// This does not assert a `200` from `/v1/items`: Phase 1 has no flush yet, so *any* freshly
+/// ingested item — with or without an external id — has no row geometry until the next
+/// `tessera build`, and `Engine::item`'s own doc records that a visible-but-geometryless entity
+/// is a `404`, identical to an unknown one. That is a pre-existing Phase 1 limitation, orthogonal
+/// to this feature. What this test checks instead is the thing this feature actually promises:
+/// inverting the returned `tessera_id` with the deployment's own identity key yields the right
+/// shard and a freshly-allocated entity id (at or past the bundle's `N_ITEMS` high-water mark),
+/// so the caller genuinely learned a working identity for its item, not a decoy.
+#[tokio::test]
+async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_id() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let body = build_ingest_batch_optional(&[(None, 20.0, 20.0, "0")]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "null-ext-batch")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["accepted"], 1);
+    let tessera_ids = json["tessera_ids"].as_array().unwrap();
+    assert_eq!(tessera_ids.len(), 1);
+    let tessera_id = tessera_ids[0].as_u64().unwrap();
+
+    // The fixture's own identity key (matches `TEST_KEY_HEX`, shard 0) — inverting independently
+    // of the server proves the response carries a real, working identity, not an opaque number.
+    let (shard, entity) = test_key().invert(tessera_types::TesseraId::new(tessera_id));
+    assert_eq!(shard, 0, "the fixture bundle is shard 0");
+    assert!(
+        entity.raw() >= N_ITEMS,
+        "a freshly-ingested item must get an entity id past the bundle's own N_ITEMS range, not \
+         collide with a built-in item"
+    );
+
+    // Phase 1's documented limitation, not a defect this feature introduces: no flush yet means
+    // no row geometry for any freshly-ingested item, so `/v1/items` 404s identically to an
+    // unknown id (`Engine::item`'s doc).
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let resp = post_item(&server, token, tessera_id).await;
+    assert_eq!(
+        resp.status(),
+        404,
+        "a buffered (unflushed) item 404s on /v1/items regardless of external id, per Phase 1's \
+         documented row-geometry limitation"
+    );
+}
+
+/// Contracts §3.4 (r6): a batch mixing items with and without an external id is accepted whole,
+/// and duplicate detection considers only the supplied ones — the null-external-id rows have
+/// nothing to collide on and must not be rejected or interfere with the others' dedup check.
+#[tokio::test]
+async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let body = build_ingest_batch_optional(&[
+        (Some(b"mixed-a".as_slice()), 1.0, 1.0, "0"),
+        (None, 2.0, 2.0, "0"),
+        (None, 3.0, 3.0, "0"),
+        (Some(b"mixed-b".as_slice()), 4.0, 4.0, "0"),
+    ]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "mixed-batch")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "two null external ids in one batch must not be treated as duplicates of each other"
+    );
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["accepted"], 4);
+    let tessera_ids = json["tessera_ids"].as_array().unwrap();
+    assert_eq!(tessera_ids.len(), 4);
+
+    // A follow-up batch re-using one of the *supplied* external ids must still be caught.
+    let dup_body = build_ingest_batch_optional(&[(Some(b"mixed-a".as_slice()), 9.0, 9.0, "0")]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "mixed-batch-dup")
+        .header("content-type", "application/octet-stream")
+        .body(dup_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+}
+
+/// Contracts §3.4 (r6): two items with no external id in the *same* batch must not collide with
+/// each other — `null` is not a key that can be duplicated.
+#[tokio::test]
+async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let body = build_ingest_batch_optional(&[(None, 1.0, 1.0, "0"), (None, 2.0, 2.0, "0")]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "two-nulls-batch")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["accepted"], 2);
+    let tessera_ids = json["tessera_ids"].as_array().unwrap();
+    assert_eq!(tessera_ids.len(), 2);
+    assert_ne!(
+        tessera_ids[0].as_u64().unwrap(),
+        tessera_ids[1].as_u64().unwrap(),
+        "two null-external-id items must still get distinct entities/tessera_ids"
     );
 }

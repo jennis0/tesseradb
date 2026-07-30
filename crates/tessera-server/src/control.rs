@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use arrow::array::Array;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -55,7 +56,10 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 const EXTERNAL_ID_MAX_LEN: usize = 64;
 
 struct RawIngestItem {
-    external_id: Vec<u8>,
+    /// Optional (contracts §3.4 r6): `None` when the caller supplied no external id. Such an item
+    /// gets no sidecar entry and is addressable only by its `tessera_id` (returned per row in
+    /// [`IngestResp`]).
+    external_id: Option<Vec<u8>>,
     x: f32,
     y: f32,
     access: Vec<u8>,
@@ -79,7 +83,7 @@ fn parse_ingest_batch(body: &[u8]) -> Result<Vec<RawIngestItem>, ApiError> {
             .map_err(|e| ApiError::Contract(format!("ingest body: arrow decode error: {e}")))?;
         let schema = batch.schema();
 
-        let ext = binary_col(&batch, "external_id")?;
+        let ext = optional_binary_col(&batch, "external_id")?;
         let x = f32_col(&batch, "x")?;
         let y = f32_col(&batch, "y")?;
         let access = utf8_col(&batch, "access")?;
@@ -103,18 +107,26 @@ fn parse_ingest_batch(body: &[u8]) -> Result<Vec<RawIngestItem>, ApiError> {
                     scalars.push(WalScalar::Utf8(arr.value(i).to_string()));
                 }
             }
-            let external_id = ext.value(i).to_vec();
+            // Contracts §3.4 (r6): `external_id` is optional. Neither a missing column nor a null
+            // within the column is an error -- both simply mean this item has no caller-supplied
+            // external id and is addressable only by its `tessera_id`.
+            let external_id = match &ext {
+                Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
+                _ => None,
+            };
             // Contracts §1 (r6): a typed error, never a truncation -- see `EXTERNAL_ID_MAX_LEN`'s
             // doc. Checked here, inside the whole-batch parse, so an over-length id anywhere in
             // the batch fails the parse before anything downstream (replay check, dedup,
             // allocation, WAL append) ever runs: the batch has no effect, exactly as a duplicate
             // 409 must.
-            if external_id.len() > EXTERNAL_ID_MAX_LEN {
-                return Err(ApiError::Contract(format!(
-                    "external id is {} bytes, exceeding the {EXTERNAL_ID_MAX_LEN}-byte cap \
-                     (contracts §1); refused rather than truncated",
-                    external_id.len()
-                )));
+            if let Some(external_id) = &external_id {
+                if external_id.len() > EXTERNAL_ID_MAX_LEN {
+                    return Err(ApiError::Contract(format!(
+                        "external id is {} bytes, exceeding the {EXTERNAL_ID_MAX_LEN}-byte cap \
+                         (contracts §1); refused rather than truncated",
+                        external_id.len()
+                    )));
+                }
             }
             items.push(RawIngestItem {
                 external_id,
@@ -128,18 +140,25 @@ fn parse_ingest_batch(body: &[u8]) -> Result<Vec<RawIngestItem>, ApiError> {
     Ok(items)
 }
 
-fn binary_col<'a>(
+/// A binary column that may be null-within (any row) or absent entirely (contracts §3.4 r6:
+/// `external_id` is optional). A present-but-wrong-typed column is still a typed error — only
+/// "missing" and "null at this row" mean "no external id", never "this batch is malformed".
+fn optional_binary_col<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
-) -> Result<&'a arrow::array::BinaryArray, ApiError> {
-    batch
-        .column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<arrow::array::BinaryArray>())
-        .ok_or_else(|| {
-            ApiError::Contract(format!(
-                "ingest body: column '{name}' missing or not binary"
-            ))
-        })
+) -> Result<Option<&'a arrow::array::BinaryArray>, ApiError> {
+    match batch.column_by_name(name) {
+        None => Ok(None),
+        Some(col) => col
+            .as_any()
+            .downcast_ref::<arrow::array::BinaryArray>()
+            .map(Some)
+            .ok_or_else(|| {
+                ApiError::Contract(format!(
+                    "ingest body: column '{name}' present but not binary"
+                ))
+            }),
+    }
 }
 
 fn f32_col<'a>(
@@ -173,6 +192,11 @@ struct IngestResp {
     accepted: u64,
     over_bound: u64,
     over_bound_ids: Vec<String>,
+    /// Contracts §3.4 (r6): `external_id` is optional, so an accepted item may be addressable
+    /// only by its `tessera_id` -- returned here per accepted row, in the same order as the
+    /// request batch, so a caller can correlate. Present for every accepted row, whether or not
+    /// that row carried an external id.
+    tessera_ids: Vec<u64>,
 }
 
 async fn ingest(
@@ -210,21 +234,30 @@ async fn ingest(
         let terms = state.engine.resolve_terms(&descriptors);
         if terms.len() as u32 > bounds.max_terms_per_item {
             over_bound += 1;
+            // A null external id has nothing to name it by in this list; it is still counted in
+            // `over_bound` above (bounds warn, never exclude -- §6.2 r16), just not listed here.
             if over_bound_ids.len() < 100 {
-                over_bound_ids.push(String::from_utf8_lossy(&item.external_id).to_string());
+                if let Some(external_id) = &item.external_id {
+                    over_bound_ids.push(String::from_utf8_lossy(external_id).to_string());
+                }
             }
         }
         descriptor_lists.push(descriptors);
         terms_per_item.push(terms);
     }
 
-    if let Some(prev_hash) = state.engine.accepted_batch(&batch_id) {
+    if let Some((prev_hash, prev_entity_ids)) = state.engine.accepted_batch(&batch_id) {
         if prev_hash == body_hash {
-            // Idempotent replay of an already-acked batch: 200, no effect (R5).
+            // Idempotent replay of an already-acked batch: 200, no effect (R5) -- same
+            // `tessera_id`s as the original acceptance, recovered from the recorded entity ids
+            // rather than re-derived from `external_id` (a null-external-id row has none to
+            // re-derive from).
+            let tessera_ids = tessera_ids_of(&state, &prev_entity_ids)?;
             return Ok(Json(IngestResp {
                 accepted: items.len() as u64,
                 over_bound,
                 over_bound_ids,
+                tessera_ids,
             }));
         }
         return Err(ApiError::Conflict(format!(
@@ -236,6 +269,10 @@ async fn ingest(
     // the batch has NO effect -- so this runs entirely before `allocate_sorted`/WAL append below,
     // and after the batch-id replay check above, which stays first (an idempotent replay of an
     // already-acked batch must still be a 200 no-op, not get caught here as "already known").
+    // Contracts §3.4 r6: duplicate detection applies only *where an external id is supplied* --
+    // a batch of items with no external id at all has no duplicates to find, and two null ids
+    // must never be treated as colliding with each other. So every step below is scoped to
+    // `Some(external_id)` items only.
     // Two checks, cheaper first:
     //   1. duplicates within this batch itself, by a hash set over the supplied bytes;
     //   2. collisions against existing state, in one call to `Engine::resolve_external_ids`,
@@ -247,8 +284,11 @@ async fn ingest(
     let mut seen_in_batch: FxHashSet<&[u8]> = FxHashSet::default();
     let mut dup_ids: Vec<String> = Vec::new();
     for item in &items {
-        if !seen_in_batch.insert(item.external_id.as_slice()) {
-            dup_ids.push(base64::engine::general_purpose::STANDARD.encode(&item.external_id));
+        let Some(external_id) = &item.external_id else {
+            continue;
+        };
+        if !seen_in_batch.insert(external_id.as_slice()) {
+            dup_ids.push(base64::engine::general_purpose::STANDARD.encode(external_id));
         }
     }
     if !dup_ids.is_empty() {
@@ -260,17 +300,24 @@ async fn ingest(
         )));
     }
 
-    let batch_external_ids: Vec<Vec<u8>> =
-        items.iter().map(|item| item.external_id.clone()).collect();
+    // Only the supplied external ids are worth asking the engine about -- a null id has no
+    // sidecar/live-map entry to collide with, so it is filtered out here rather than passed
+    // through as some sentinel value.
+    let supplied: Vec<(usize, Vec<u8>)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| item.external_id.clone().map(|id| (i, id)))
+        .collect();
+    let supplied_ids: Vec<Vec<u8>> = supplied.iter().map(|(_, id)| id.clone()).collect();
     let resolved = state
         .engine
-        .resolve_external_ids(&batch_external_ids)
+        .resolve_external_ids(&supplied_ids)
         .map_err(map_store_error)?;
     let existing_ids: Vec<String> = resolved
         .iter()
-        .zip(&items)
+        .zip(&supplied)
         .filter(|(entity, _)| entity.is_some())
-        .map(|(_, item)| base64::engine::general_purpose::STANDARD.encode(&item.external_id))
+        .map(|(_, (_, id))| base64::engine::general_purpose::STANDARD.encode(id))
         .collect();
     if !existing_ids.is_empty() {
         return Err(ApiError::Conflict(format!(
@@ -317,7 +364,7 @@ async fn ingest(
     // fix), so this can never race a concurrent `/control/changes` acceptance into a lost-update
     // generation swap.
     let accepted = rows.len() as u64;
-    state
+    let entity_ids = state
         .engine
         .accept_ingest(rows, terms_per_item, batch_id, body_hash)
         .map_err(|e| {
@@ -325,11 +372,34 @@ async fn ingest(
             ApiError::FailClosed(format!("wal append/fsync failed: {e}"))
         })?;
 
+    // Contracts §3.4 (r6): the 200 response returns each accepted row's `tessera_id`, in batch
+    // order, so a caller who supplied no external id for an item still learns the identity it
+    // was given -- otherwise that item would be unreachable by anyone.
+    let tessera_ids = tessera_ids_of(&state, &entity_ids)?;
+
     Ok(Json(IngestResp {
         accepted,
         over_bound,
         over_bound_ids,
+        tessera_ids,
     }))
+}
+
+/// `EntityId` -> `tessera_id`, per row, in the caller's given order. `Engine::tessera_id_of` is
+/// fallible only for an entity id the I9 allocator's ceiling makes unreachable in practice
+/// (Important I-1) — still propagated as a typed 500 here, never `.unwrap()`-ed away, since an
+/// internal invariant violation must fail closed.
+fn tessera_ids_of(state: &AppState, entity_ids: &[EntityId]) -> Result<Vec<u64>, ApiError> {
+    entity_ids
+        .iter()
+        .map(|&entity| {
+            state
+                .engine
+                .tessera_id_of(entity)
+                .map(|id| id.raw())
+                .map_err(|e| ApiError::FailClosed(e.to_string()))
+        })
+        .collect()
 }
 
 /// `external_id` is base64 (external ids are arbitrary bytes — contracts §2.1's `binary` type —
