@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tessera_spatial::{tiles_for_bbox, Extent};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
-use tessera_store::tile_ranges;
+use tessera_store::tile_ranges_all;
 use tessera_store::StoreError;
 use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 
@@ -321,13 +321,28 @@ impl Engine {
         let mut tile_counts = Vec::new();
         let mut points = Vec::new();
 
-        // A slice with zero segments (an empty build) has nothing visible in any tile; the loop
-        // below simply never finds a non-empty range in that case.
-        for tile in tiles {
+        // Resolve every tile's row range in ONE monotone sweep rather than two full-column binary
+        // searches per tile. A few hundred independent `log2(rows)` searches is where a sparse
+        // request's time actually goes — measured at 26-64% of one
+        // (`docs/design-memos/2026-07-30-f1-selection-overdraw.md`), and flat in density, because
+        // the cost is the searching rather than the rows found.
+        //
+        // `tile_ranges_all` returns ranges positionally aligned with `tiles`, so the zip below
+        // walks `tiles_for_bbox`'s raster order unchanged. That order is load-bearing (it is the
+        // response's tile order, and the wire payload's points are a flat concatenation in it) —
+        // the sweep's own Morton order stays inside `tile_ranges_all` and never reaches here.
+        //
+        // A slice with zero segments (an empty build) has nothing visible in any tile: `ranges` is
+        // empty, the zip yields nothing, and the response is empty — as before.
+        let ranges: Vec<Range<u32>> = match segment {
+            Some(segment) => tile_ranges_all(segment, &tiles),
+            None => Vec::new(),
+        };
+        probe.lap(|t| &mut t.tile_ranges_ns);
+
+        for (tile, range) in tiles.iter().zip(ranges) {
             let Some(segment) = segment else { continue };
 
-            let range = tile_ranges(segment, &tile);
-            probe.lap(|t| &mut t.tile_ranges_ns);
             probe.count(|t| &mut t.rows_in_ranges, range.len() as u64);
 
             let visible = mask.count_range(range.clone());

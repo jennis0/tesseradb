@@ -12,7 +12,7 @@ use croaring::Bitmap;
 use sha2::{Digest, Sha256};
 
 use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_spatial::{Extent, Tile};
+use tessera_spatial::{tiles_for_bbox, Extent, Tile};
 use tessera_store::manifest::{
     CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
     SegmentDescriptor, SegmentsManifest, SliceDescriptor,
@@ -468,4 +468,128 @@ fn open_bundle_rejects_a_path_traversing_segment_id() {
         }
         other => panic!("expected UnsafePath, got: {other}"),
     }
+}
+
+// -------------------------------------------------------------------------------------------
+// `tile_ranges_all` equivalence.
+//
+// `tile_ranges_all` replaces N per-tile full-column binary searches with one monotone galloping
+// sweep in Morton order. Its entire safety argument is that it computes the *same answer* as
+// `tile_ranges` at every index — so nothing below re-derives an expected range from a model of
+// the sweep. Everything compares against `tile_ranges` itself, which is untouched and remains
+// the definition. (The gallop primitive underneath has its own unit test against
+// `partition_point`, in `tessera_store::read`.)
+//
+// Two things a plausible-looking sweep gets wrong, both tested for here:
+//
+//   1. Returning results in Morton order. `tiles_for_bbox` enumerates in `(ty outer, tx inner)`
+//      raster order, which is NOT Morton order — and the response's tile order is load-bearing
+//      (see `tile_ranges_all`'s doc). Every assertion below is positional.
+//   2. Assuming the tile set is shaped the way `tiles_for_bbox` happens to shape it: one depth,
+//      unique, disjoint, ascending. The function is public, so the arbitrary-tile-set test
+//      feeds it mixed depths, duplicates and shuffled orders.
+// -------------------------------------------------------------------------------------------
+
+/// `out[i] == tile_ranges(seg, &tiles[i])` for every `i`, or a failure naming the index.
+fn assert_matches_per_tile_search(seg: &tessera_store::SegmentData, tiles: &[Tile], what: &str) {
+    let swept = tessera_store::tile_ranges_all(seg, tiles);
+    assert_eq!(swept.len(), tiles.len(), "{what}: one range per tile");
+    for (i, tile) in tiles.iter().enumerate() {
+        assert_eq!(
+            swept[i],
+            tile_ranges(seg, tile),
+            "{what}: tile {i} ({tile:?}) — the sweep must agree with the full-column search \
+             AT ITS OWN INDEX"
+        );
+    }
+}
+
+/// A random depth and an in-range prefix for it.
+fn random_tile(rng: &mut impl rand::Rng) -> Tile {
+    let depth: u8 = rng.gen_range(0..=16);
+    let prefix = if depth == 0 {
+        0
+    } else {
+        rng.gen::<u64>() & ((1u64 << (2 * depth as u32)) - 1)
+    };
+    Tile { prefix, depth }
+}
+
+#[test]
+fn tile_ranges_all_agrees_with_the_full_column_search_over_depths_bboxes_and_orders() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // 5,000 items over `build_bundle`'s 100x100 position grid, so every Morton code is repeated
+    // ~50 times — which is exactly where a sweep that floors the next search at the previous
+    // tile's *end* rather than its *start* begins to lie.
+    let (_items, _codes) = build_bundle(dir.path(), 5_000);
+    let bundle = open_bundle(dir.path()).expect("open_bundle");
+    let seg = &bundle.partitions["default"].slices["main"].segments[0];
+    let extent = unit_extent();
+
+    // Every bbox shape a viewport request can produce a tile set from, including the ones a
+    // hand-written sweep tends to skip: corners given in reverse, a degenerate single-point box,
+    // the full extent, and boxes that clamp at an edge.
+    let bboxes: [(&str, [f64; 4]); 7] = [
+        ("interior", [0.10, 0.20, 0.40, 0.55]),
+        ("reversed corners", [0.40, 0.55, 0.10, 0.20]),
+        ("degenerate point", [0.33, 0.33, 0.33, 0.33]),
+        ("full extent", [0.0, 0.0, 1.0, 1.0]),
+        ("clamped below", [-5.0, -5.0, 0.05, 0.05]),
+        ("clamped above", [0.95, 0.95, 5.0, 5.0]),
+        ("straddling the quadrant split", [0.45, 0.45, 0.55, 0.55]),
+    ];
+
+    for (label, bbox) in bboxes {
+        // Depth is capped at 6 because the full-extent bbox enumerates the *whole* grid at that
+        // depth (4^6 = 4,096 tiles, x3 orderings, x7 bboxes); the property under test is
+        // depth-independent, and `tile_ranges_all_agrees_..._for_arbitrary_tile_sets` below
+        // reaches depth 16 directly.
+        for depth in 0u8..=6 {
+            let tiles = tiles_for_bbox(bbox, depth, &extent);
+            assert_matches_per_tile_search(seg, &tiles, &format!("{label} d{depth} as-enumerated"));
+
+            // Reversed: an implementation that leaked its own sweep order into the result can
+            // still coincide with raster order on some inputs, but not on this one.
+            let mut reversed = tiles.clone();
+            reversed.reverse();
+            assert_matches_per_tile_search(seg, &reversed, &format!("{label} d{depth} reversed"));
+
+            // Every tile twice, adjacent: a repeated code range must resolve identically both
+            // times.
+            let doubled: Vec<Tile> = tiles.iter().flat_map(|t| [*t, *t]).collect();
+            assert_matches_per_tile_search(seg, &doubled, &format!("{label} d{depth} doubled"));
+        }
+    }
+}
+
+#[test]
+fn tile_ranges_all_agrees_with_the_full_column_search_for_arbitrary_tile_sets() {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_items, _codes) = build_bundle(dir.path(), 5_000);
+    let bundle = open_bundle(dir.path()).expect("open_bundle");
+    let seg = &bundle.partitions["default"].slices["main"].segments[0];
+
+    // Randomised rather than `proptest`-generated so the bundle fixture (tempdir, Arrow write,
+    // real SHA-256 digests) is built once instead of once per generated case. The seed is fixed,
+    // so any failure reproduces by running this test again.
+    let mut rng = StdRng::seed_from_u64(0x7E55E4A);
+    for case in 0..2_000u32 {
+        let n = rng.gen_range(0..24usize);
+        // Mixed depths in one set — the case where ordering the sweep by `prefix` instead of by
+        // the code-range low bound gives a wrong visit order and a truncated range.
+        let tiles: Vec<Tile> = (0..n).map(|_| random_tile(&mut rng)).collect();
+        assert_matches_per_tile_search(seg, &tiles, &format!("random case {case}"));
+    }
+}
+
+#[test]
+fn tile_ranges_all_over_an_empty_tile_set_is_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 64);
+    let bundle = open_bundle(dir.path()).expect("open_bundle");
+    let seg = &bundle.partitions["default"].slices["main"].segments[0];
+    assert!(tessera_store::tile_ranges_all(seg, &[]).is_empty());
 }
