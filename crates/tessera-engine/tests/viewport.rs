@@ -49,6 +49,14 @@ const SUBSET_TERM: u64 = 1;
 /// still wants the small, fast fixture.
 const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
 
+/// Fix round 1: the runtime `rows_in_ranges >= SERIAL_FALLBACK_MAX_ROWS` assertions in the two
+/// headline tests below only run under `--features bench-timing` (`StageTimings` is all-zero
+/// without it). This makes the SAME guarantee a compile-time fact instead, so a plain `cargo test`
+/// (no `bench-timing`) still catches `PARALLEL_HEADLINE_ITEMS` being dropped below the threshold
+/// by some future edit, rather than silently degrading to serial-vs-serial with no build ever
+/// catching it.
+const _: () = assert!(PARALLEL_HEADLINE_ITEMS >= SERIAL_FALLBACK_MAX_ROWS);
+
 /// A fixed, non-degenerate test key — the same canonical vector used across the identity
 /// construction's own tests (`tessera_types::identity`'s `CANONICAL_KEY`) and
 /// `tessera-build`'s fixture tests, so a mismatch between crates would show up as a vector

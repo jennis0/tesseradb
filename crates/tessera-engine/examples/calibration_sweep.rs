@@ -83,9 +83,33 @@ fn all_descriptors(bundle_root: &Path) -> Vec<String> {
     out
 }
 
+/// Fix round 1: the sweep's ORIGINAL grant. Deterministic even-spacing across the dictionary, NOT
+/// representative of the validation workload's actual grant construction — review caught that
+/// this produced a mask ~20x sparser than `bench_concurrency.py`'s own w=10 random-term grant
+/// (`sigma_visible=21` at the exact validation bbox vs the real run's ~433 points/request on the
+/// same shape), and that mask density is a cost driver the predictor (deliberately pre-mask) does
+/// not model. Kept for comparison against [`random_grant`]'s dense-mask re-run — see the module
+/// doc and the calibration report's fix-round-1 section for both tables side by side.
 fn spread_descriptors(all: &[String], w: usize) -> Vec<String> {
     let step = (all.len() / w).max(1);
-    (0..w).map(|i| all[(i * step) % all.len()].clone()).collect()
+    (0..w)
+        .map(|i| all[(i * step) % all.len()].clone())
+        .collect()
+}
+
+/// The bench's OWN grant construction (`tessera_bench::corpus::build_grant`'s
+/// `GrantShape::Random` arm, duplicated rather than imported — `tessera-engine` cannot depend on
+/// `tessera-bench`, same layering reason [`viewports`] duplicates `gen_viewports`): shuffle every
+/// term with `StdRng::seed_from_u64(seed)`, truncate to `w`. This is the dense-mask grant fix
+/// round 1 asked for — a uniform random sample of the vocabulary rather than deterministic even
+/// spacing, which is what actually produces a mask density comparable to the real validation runs.
+fn random_grant(all: &[String], w: usize, seed: u64) -> Vec<String> {
+    use rand::seq::SliceRandom;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let mut idx: Vec<usize> = (0..all.len()).collect();
+    idx.shuffle(&mut rng);
+    idx.truncate(w.min(all.len()));
+    idx.into_iter().map(|i| all[i].clone()).collect()
 }
 
 /// One sweep shape: a (zoom, bbox) pair with a label describing how it was constructed.
@@ -133,15 +157,33 @@ fn main() {
         return;
     }
 
+    // Fix round 1: `--dense` selects the bench's own `GrantShape::Random` grant construction
+    // (matching the real validation workload's mask density) instead of this tool's original
+    // deterministic even-spacing, which review found produced an unrepresentatively sparse mask.
+    // Both are kept — see `spread_descriptors`/`random_grant`'s docs.
+    let dense = std::env::args().any(|a| a == "--dense");
     let bundle_root = ensure_bundle();
     let all = all_descriptors(&bundle_root);
-    let terms = spread_descriptors(&all, 10);
+    let terms = if dense {
+        random_grant(&all, 10, 0)
+    } else {
+        spread_descriptors(&all, 10)
+    };
     let terms_json = terms
         .iter()
         .map(|t| format!("{t:?}"))
         .collect::<Vec<_>>()
         .join(",");
     let auth = format!(r#"{{"terms": [{terms_json}]}}"#);
+    println!(
+        "grant mode: {} (w={})\n",
+        if dense {
+            "random (--dense, bench GrantShape::Random)"
+        } else {
+            "spread (deterministic)"
+        },
+        terms.len()
+    );
 
     let cfg = |compute_threads: usize| EngineConfig {
         token_max_lifetime_secs: 3600,
@@ -179,10 +221,16 @@ fn main() {
 
     // Warm-up: pays the row-projection cache fill once per engine, excluded from every figure.
     let _ = engine_serial
-        .viewport(&session1, ViewportRequest::new("s0", 8, [0.0, 0.0, 4096.0, 4096.0], 30))
+        .viewport(
+            &session1,
+            ViewportRequest::new("s0", 8, [0.0, 0.0, 4096.0, 4096.0], 30),
+        )
         .expect("warm-up");
     let _ = engine_par
-        .viewport(&session2, ViewportRequest::new("s0", 8, [0.0, 0.0, 4096.0, 4096.0], 30))
+        .viewport(
+            &session2,
+            ViewportRequest::new("s0", 8, [0.0, 0.0, 4096.0, 4096.0], 30),
+        )
         .expect("warm-up");
 
     println!(
@@ -199,7 +247,10 @@ fn main() {
 
         for _ in 0..REPS {
             let out = engine_serial
-                .viewport(&session1, ViewportRequest::new("s0", shape.zoom, shape.bbox, 30))
+                .viewport(
+                    &session1,
+                    ViewportRequest::new("s0", shape.zoom, shape.bbox, 30),
+                )
                 .expect("viewport (serial)");
             serial_ns.push(out.timings.total_ns);
             tiles_resolved = out.timings.tiles_resolved;
@@ -207,7 +258,10 @@ fn main() {
         }
         for _ in 0..REPS {
             let out = engine_par
-                .viewport(&session2, ViewportRequest::new("s0", shape.zoom, shape.bbox, 30))
+                .viewport(
+                    &session2,
+                    ViewportRequest::new("s0", shape.zoom, shape.bbox, 30),
+                )
                 .expect("viewport (parallel)");
             par_ns.push(out.timings.total_ns);
         }
@@ -220,7 +274,14 @@ fn main() {
 
         println!(
             "{:>22} {:>6} {:>10} {:>12} {:>12} {:>12} {:>9.2} {:>7}",
-            shape.label, shape.zoom, tiles_resolved, rows_in_ranges, serial_med, par_med, ratio, winner
+            shape.label,
+            shape.zoom,
+            tiles_resolved,
+            rows_in_ranges,
+            serial_med,
+            par_med,
+            ratio,
+            winner
         );
     }
 }

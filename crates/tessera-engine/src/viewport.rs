@@ -553,6 +553,14 @@ impl Engine {
         // §3.3 underlay bounds, all three checked up front and all three *rejecting* rather than
         // clamping (see `EngineError::UnderlayRefused`). The cell budget is checked before any
         // counting work because the underlay multiplies the (already-bounded) tile set by 4^offset.
+        //
+        // Fix round 1: `underlay_cells_demanded` (0 when no underlay was requested) is captured
+        // here, outside the match, so the serial-fallback predictor below can see it — review
+        // caught that the predictor was blind to underlay cost entirely (`total_rows_in_ranges`
+        // alone), which is a real gap since a saturated underlay (`max_underlay_cells`, default
+        // 8192) is comparable work to thousands of spanned rows and was previously invisible to
+        // the serial/parallel decision no matter how large it was.
+        let mut underlay_cells_demanded: u64 = 0;
         let underlay_offset = match underlay_offset {
             None | Some(0) => None,
             Some(offset) => {
@@ -579,6 +587,7 @@ impl Engine {
                         self.config.max_underlay_cells
                     )));
                 }
+                underlay_cells_demanded = demanded as u64;
                 Some(offset)
             }
         };
@@ -634,7 +643,17 @@ impl Engine {
         // the `tile_ranges_all` sweep above, costs one pass over `ranges` to sum, and needs no
         // work from either candidate path to compute. See [`SERIAL_FALLBACK_MAX_ROWS`]'s doc for
         // why this predictor (and not tile count) is the one the sweep data supports.
-        let total_rows_in_ranges: u64 = ranges.iter().map(|r| r.len() as u64).sum();
+        //
+        // Fix round 1: `underlay_cells_demanded` is added in, not left out. The underlay's own
+        // per-cell cost is "one small binary search plus one bitmap range-count" (the underlay
+        // block's own comment, below) — the same shape of operation `count_range` performs per
+        // row-range, so summing the two into one row-equivalent total before comparing against
+        // the threshold is the natural extension of the same predictor, not a second one bolted
+        // on. Before this fix a saturated underlay (`max_underlay_cells`, default 8192) was
+        // invisible to this decision entirely, regardless of how large the resulting per-tile
+        // sub-cell fan-out actually was.
+        let total_rows_in_ranges: u64 =
+            ranges.iter().map(|r| r.len() as u64).sum::<u64>() + underlay_cells_demanded;
 
         // D-D/D-F, calibrated: below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_result` in place —
         // same function, same input order, no `pool.install` — since below that line the fan-out's
@@ -664,46 +683,45 @@ impl Engine {
         // checkpoint keeps running to completion; every tile whose worker had not yet reached it
         // observes the flip there instead and returns immediately. The serial path's bound is
         // therefore strictly tighter, not merely no-worse.
-        let tile_outcomes: Vec<Result<Option<TileResult>>> = if should_fold_serially(total_rows_in_ranges) {
-            tiles
-                .iter()
-                .zip(ranges)
-                .map(|(tile, range)| {
-                    tile_result(
-                        tile,
-                        range,
-                        &mask,
-                        segment,
-                        declared_scalars,
-                        &params,
-                        zoom,
-                        underlay_offset,
-                        &cancel,
-                    )
-                })
-                .collect::<Vec<Result<Option<TileResult>>>>()
-        } else {
-            self.pool.install(|| {
-                tiles
-                    .par_iter()
-                    .zip(ranges.into_par_iter())
-                    .with_min_len(TILE_PAR_MIN_LEN)
-                    .map(|(tile, range)| {
-                        tile_result(
-                            tile,
-                            range,
-                            &mask,
-                            segment,
-                            declared_scalars,
-                            &params,
-                            zoom,
-                            underlay_offset,
-                            &cancel,
-                        )
-                    })
-                    .collect::<Vec<Result<Option<TileResult>>>>()
-            })
+        // Fix round 1: one closure, not two independently-maintained copies of the same 9-argument
+        // call — the duplication was a divergence risk (a future change to `tile_result`'s
+        // argument list would need to be made twice, silently, with no compiler help if one copy
+        // were missed). `run` captures only shared references and `Copy` values (`&mask`,
+        // `segment`, `declared_scalars`, `&params`, `zoom`, `underlay_offset`, `&cancel`), so it is
+        // `Sync` for free and usable from both the serial `Iterator::map` below and rayon's
+        // parallel `map` inside `pool.install` — no new bound this file did not already require of
+        // these captures for the parallel branch to compile before this change.
+        let run = |tile: &Tile, range: Range<u32>| {
+            tile_result(
+                tile,
+                range,
+                &mask,
+                segment,
+                declared_scalars,
+                &params,
+                zoom,
+                underlay_offset,
+                &cancel,
+            )
         };
+
+        let tile_outcomes: Vec<Result<Option<TileResult>>> =
+            if should_fold_serially(total_rows_in_ranges) {
+                tiles
+                    .iter()
+                    .zip(ranges)
+                    .map(|(tile, range)| run(tile, range))
+                    .collect::<Vec<Result<Option<TileResult>>>>()
+            } else {
+                self.pool.install(|| {
+                    tiles
+                        .par_iter()
+                        .zip(ranges.into_par_iter())
+                        .with_min_len(TILE_PAR_MIN_LEN)
+                        .map(|(tile, range)| run(tile, range))
+                        .collect::<Vec<Result<Option<TileResult>>>>()
+                })
+            };
         // D-E: neither branch's own wall time is a named stage — it is already fully accounted
         // for, per tile, inside each `TileResult::stats` (folded below) — so this resets the clock
         // without charging the stretch to whatever lap runs next, rather than leaving it to be
@@ -743,41 +761,62 @@ impl Engine {
 }
 
 /// Calibration task threshold: below this many total rows spanned by a request's resolved tiles
-/// (`Σ range.len()`, pre-mask — see the call site's `total_rows_in_ranges`), `Engine::viewport`
-/// folds `tile_result` serially instead of calling `self.pool.install`.
+/// PLUS its §3.3 underlay cell demand if any (`Σ range.len() + underlay_cells_demanded`, pre-mask
+/// — see the call site's `total_rows_in_ranges`), `Engine::viewport` folds `tile_result` serially
+/// instead of calling `self.pool.install`.
 ///
 /// `pub` (unlike [`TILE_PAR_MIN_LEN`]) so the byte-equality tests in `tests/viewport.rs` can
 /// assert a fixture genuinely cleared it, rather than duplicating the number and risking drift.
 ///
 /// **Why this predictor and not tile count.** Both were measured (2.42M `categories-subclass`
-/// fixture, w=10 spread grant, 2026-07-31, 12-core WSL2 box — sweep table and method in
+/// fixture, w=10 grant, 2026-07-31, 12-core WSL2 box — sweep table and method in
 /// `.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/calibration-report.md`). Tile count does NOT
 /// discriminate: the "natural" viewport family (a fixed-size client window at increasing zoom)
 /// resolves a near-constant ~289 tiles at every zoom from 6 to 14 regardless of density, yet the
-/// measured serial/parallel verdict at that SAME tile count ranged from "serial wins 18x"
-/// (near-empty tiles) to "parallel wins 1.8x" (dense tiles) purely as a function of how many rows
-/// those tiles actually spanned. Conversely, a request touching as few as 4 tiles but spanning the
-/// WHOLE 2.42M-row corpus (a maximally zoomed-out view) still measured parallel breaking even or
+/// measured serial/parallel verdict at that SAME tile count varies with how many rows those tiles
+/// actually spanned. Conversely, a request touching as few as 4 tiles but spanning the WHOLE
+/// 2.42M-row corpus (a maximally zoomed-out view) still measured parallel breaking even or
 /// winning, despite the low tile count — there being few units to schedule did not make the
-/// spanned work small. `rows_in_ranges` tracks the real driver directly and is consistent with the
+/// spanned work small. `rows_in_ranges` tracks that driver directly and is consistent with the
 /// measured cost model this codebase designs against (module doc, and CLAUDE.md: "bitmap
 /// operations cost O(containers touched)", which scales with the range read, not the tile count).
 ///
-/// **Why 200,000 and not the exact crossover.** The sweep found a clean split below ~165,000 rows
-/// (serial wins or ties in every sample) and above ~316,000 rows (parallel wins in every sample),
-/// with a noisy, inconsistently-ordered band between them (a `Σ range.len()` figure is a proxy for
-/// containers touched, not identical to it, so it does not order perfectly against measured cost
-/// in that band). 200,000 sits inside the gap, close to its lower edge. The two misclassification
-/// costs are asymmetric — wrongly choosing the parallel path on genuinely small work measured
-/// 6-20x slower than serial in this sweep, while wrongly choosing serial on work that would have
-/// benefited measured at most ~1.3x slower than parallel — so the threshold is placed to bias
-/// toward serial in the ambiguous band rather than centred on it.
+/// **What this predictor does NOT model, stated plainly rather than glossed over (fix round 1).**
+/// `rows_in_ranges` is deliberately PRE-mask — it counts rows a tile's range spans, not how many
+/// of them pass the viewer's mask. Mask density (how much of a spanned range is actually visible)
+/// is therefore a real, independent cost driver this predictor cannot see: two requests with
+/// identical `Σ range.len()` can differ in true `count`/`select`/`gather` cost if one principal's
+/// grant is far narrower than the other's. This was checked, not assumed: fix round 1 re-ran the
+/// calibration sweep with the validation workload's own dense, uniform-random w=10 grant
+/// (`tessera_bench::corpus::build_grant`'s `GrantShape::Random`, duplicated in
+/// `examples/calibration_sweep.rs --dense`) against the original sweep's much sparser deterministic
+/// grant, on the same shapes, back to back on the same box. The crossover band did not move
+/// materially between the two (both runs' clearly-large-row shapes stayed clearly parallel-
+/// favouring, both runs' near-zero-row shapes stayed near parity or serial-favouring) — see the
+/// calibration report's fix-round-1 section for both tables side by side. This is one box, one
+/// corpus, one grant width; it is evidence the crossover is not obviously grant-width-sensitive
+/// at THIS scale, not a proof that mask density can never matter.
 ///
-/// No corpus- or deployment-dependent knob is exposed for this: the sweep did not show the
-/// crossover moving with anything this engine's callers control (grant width and viewport size
-/// both feed into `rows_in_ranges` directly, which is exactly the point of using it as the
-/// predictor), so a fixed constant is what the data supports — see the calibration report's
-/// concerns section if a future corpus at a very different scale calls this back into question.
+/// **Why 200,000 and not the exact crossover.** The sweep found a clean split below ~165,000 rows
+/// (serial wins or ties in nearly every sample) and above ~316,000 rows (parallel wins in every
+/// sample), with a noisy, inconsistently-ordered band between them (a `Σ range.len()` figure is a
+/// proxy for containers touched, not identical to it, so it does not order perfectly against
+/// measured cost in that band, and mask density is part of why not — see above). 200,000 sits
+/// inside the gap, close to its lower edge. The two misclassification costs are asymmetric:
+/// wrongly choosing the parallel path on genuinely small work measured 6-20x slower than serial in
+/// this sweep is the expensive mistake; wrongly choosing serial in the ambiguous band cost at most
+/// ~1.3x measured here (these are ~1 ms-scale requests either way, so the absolute cost of that
+/// mistake is small) — so the threshold is placed to bias toward serial in the ambiguous band
+/// rather than centred on it. A mis-prediction driven by the mask-density gap above is expected to
+/// fall in roughly this same ≤~1.5-2x band on a ~1 ms request, not a qualitatively different one,
+/// since it is the same "ambiguous middle" the row-count proxy already measures imperfectly.
+///
+/// No corpus- or deployment-dependent knob is exposed for this: viewport size feeds into
+/// `rows_in_ranges` directly (by construction — it is what the predictor sums), and the fix-round-1
+/// re-run found no clear evidence grant width moves the crossover enough at this scale to justify
+/// one either. A fixed constant is what the data supports — see the calibration report's concerns
+/// section if a future corpus at a very different scale, or a workload with much more extreme
+/// grant-width variance than this task exercised, calls this back into question.
 pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 200_000;
 
 /// The predictor, pulled out as its own pure function so it is unit-testable without an `Engine`

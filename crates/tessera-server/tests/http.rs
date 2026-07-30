@@ -19,7 +19,7 @@ use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
 use tessera_build::{build, BuildArgs};
-use tessera_engine::viewport::ViewportRequest;
+use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
 use tessera_server::state::{AppState, ComputeGate, SessionRegistry};
@@ -37,6 +37,14 @@ const SESSION_CREDENTIAL: &str = "session-secret";
 /// reasoning are duplicated rather than shared, matching this file's own existing "same fixture
 /// pattern" duplication of `tests/viewport.rs`'s fixture builder (this file's module doc).
 const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
+
+/// Fix round 1: compile-time twin of `tests/viewport.rs`'s identically-named assertion. Unlike
+/// the item count above (duplicated because a test *binary* cannot be imported across crates),
+/// `SERIAL_FALLBACK_MAX_ROWS` is a `pub` constant on the production `tessera_engine::viewport`
+/// module this crate already depends on, so it is imported and compared directly rather than
+/// duplicated as a bare number that could drift out of sync.
+const _: () = assert!(PARALLEL_HEADLINE_ITEMS >= SERIAL_FALLBACK_MAX_ROWS);
+
 const OPERATOR_CREDENTIAL: &str = "operator-secret";
 /// Fixed test key, matching `tessera-build`'s own test fixtures — not sensitive, this repository
 /// contains no real deployment key.

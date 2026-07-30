@@ -107,7 +107,9 @@ fn all_descriptors(bundle_root: &Path) -> Vec<String> {
 /// dictionary's term order is not known to be frequency-independent.
 fn spread_descriptors(all: &[String], w: usize) -> Vec<String> {
     let step = (all.len() / w).max(1);
-    (0..w).map(|i| all[(i * step) % all.len()].clone()).collect()
+    (0..w)
+        .map(|i| all[(i * step) % all.len()].clone())
+        .collect()
 }
 
 /// Copy of `tessera-bench::corpus::gen_viewports`'s algorithm (identical RNG, identical formula),
@@ -171,8 +173,10 @@ fn main() {
         terms.len()
     );
 
-    for (label, compute_threads) in [("threads=1", 1), ("threads=default", tessera_engine::default_compute_threads())]
-    {
+    for (label, compute_threads) in [
+        ("threads=1", 1),
+        ("threads=default", tessera_engine::default_compute_threads()),
+    ] {
         let tmp = tempfile::tempdir().unwrap();
         let engine = Engine::open(
             &bundle_root,
@@ -251,13 +255,28 @@ fn main() {
         println!("== {label} (compute_threads = {compute_threads}) ==");
         println!("  total_ns            avg={avg_total:>8}  p50={p50:>8}  p99={p99:>8}");
         println!("  serial prefix sum   avg={serial_prefix:>8}");
-        println!("    generation_resolve_ns  {:>8}", avg(sums.generation_resolve_ns));
+        println!(
+            "    generation_resolve_ns  {:>8}",
+            avg(sums.generation_resolve_ns)
+        );
         println!("    pin_resolve_ns         {:>8}", avg(sums.pin_resolve_ns));
-        println!("    slice_lookup_ns        {:>8}", avg(sums.slice_lookup_ns));
-        println!("    row_projection_ns      {:>8}", avg(sums.row_projection_ns));
+        println!(
+            "    slice_lookup_ns        {:>8}",
+            avg(sums.slice_lookup_ns)
+        );
+        println!(
+            "    row_projection_ns      {:>8}",
+            avg(sums.row_projection_ns)
+        );
         println!("    compose_ns             {:>8}", avg(sums.compose_ns));
-        println!("    theta_anchor_ns        {:>8}", avg(sums.theta_anchor_ns));
-        println!("    tiles_for_bbox_ns      {:>8}", avg(sums.tiles_for_bbox_ns));
+        println!(
+            "    theta_anchor_ns        {:>8}",
+            avg(sums.theta_anchor_ns)
+        );
+        println!(
+            "    tiles_for_bbox_ns      {:>8}",
+            avg(sums.tiles_for_bbox_ns)
+        );
         println!("    tile_ranges_ns         {:>8}", avg(sums.tile_ranges_ns));
         println!(
             "  parallel section (pool.install + fold), = total - serial prefix   avg={parallel_section:>8}"

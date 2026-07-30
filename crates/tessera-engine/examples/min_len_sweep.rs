@@ -32,7 +32,12 @@ fn extent() -> Extent {
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 fn ensure_bundle() -> PathBuf {
@@ -72,14 +77,20 @@ fn all_descriptors(bundle_root: &std::path::Path) -> Vec<String> {
 
 fn spread_descriptors(all: &[String], w: usize) -> Vec<String> {
     let step = (all.len() / w).max(1);
-    (0..w).map(|i| all[(i * step) % all.len()].clone()).collect()
+    (0..w)
+        .map(|i| all[(i * step) % all.len()].clone())
+        .collect()
 }
 
 fn main() {
     let bundle_root = ensure_bundle();
     let all = all_descriptors(&bundle_root);
     let terms = spread_descriptors(&all, 10);
-    let terms_json = terms.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join(",");
+    let terms_json = terms
+        .iter()
+        .map(|t| format!("{t:?}"))
+        .collect::<Vec<_>>()
+        .join(",");
     let auth = format!(r#"{{"terms": [{terms_json}]}}"#);
 
     let tmp = tempfile::tempdir().unwrap();
@@ -116,16 +127,24 @@ fn main() {
     ];
 
     let _ = engine
-        .viewport(&session, ViewportRequest::new("s0", 8, [0.0, 0.0, 4096.0, 4096.0], 30))
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 8, [0.0, 0.0, 4096.0, 4096.0], 30),
+        )
         .expect("warm-up");
 
-    println!("{:>16} {:>6} {:>10} {:>12} {:>12} {:>12}", "shape", "zoom", "tiles", "rows_in_rng", "p50_ns", "p99_ns");
+    println!(
+        "{:>16} {:>6} {:>10} {:>12} {:>12} {:>12}",
+        "shape", "zoom", "tiles", "rows_in_rng", "p50_ns", "p99_ns"
+    );
     for (label, zoom, bbox) in shapes {
         let mut ns: Vec<u64> = Vec::with_capacity(REPS);
         let mut tiles = 0u64;
         let mut rows = 0u64;
         for _ in 0..REPS {
-            let out = engine.viewport(&session, ViewportRequest::new("s0", zoom, bbox, 30)).expect("viewport");
+            let out = engine
+                .viewport(&session, ViewportRequest::new("s0", zoom, bbox, 30))
+                .expect("viewport");
             ns.push(out.timings.total_ns);
             tiles = out.timings.tiles_resolved;
             rows = out.timings.rows_in_ranges;
