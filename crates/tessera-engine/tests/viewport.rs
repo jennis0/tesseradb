@@ -1945,8 +1945,13 @@ fn distinct_key_first_viewports_overlap_instead_of_serialising() {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    if cores < 2 {
-        eprintln!("skipping distinct_key_first_viewports_overlap_instead_of_serialising: single-core machine, nothing can overlap");
+    // N=4 concurrent builds need at least N cores to genuinely overlap; on a 2- or 3-core
+    // runner the 70%-of-serial assertion below has too little headroom (some builds queue for a
+    // core regardless of the lock-free design) and flakes for reasons unrelated to F4. Skip
+    // rather than loosen the ratio, so a real regression on well-provisioned runners still fails
+    // loudly.
+    if cores < 4 {
+        eprintln!("skipping distinct_key_first_viewports_overlap_instead_of_serialising: only {cores} cores available, need >= 4 for headroom");
         return;
     }
 
@@ -2436,5 +2441,80 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
         out_1, out_8,
         "ViewportOut must be byte-for-byte identical (PartialEq ignores only `timings`) \
          regardless of compute_threads"
+    );
+}
+
+/// A sparse/skewed-bbox variant of the headline test above (fix-wave minor: the headline fixture's
+/// zoom = 3 request is "most non-empty over this fixture's scatter", so `tile_result`'s
+/// `visible == 0 -> Ok(None)` empty-tile skip path — a real branch inside the parallel sweep, since
+/// an empty tile contributes nothing to `tile_counts`/`points`/`sub_cells` in the serial fold — was
+/// never exercised by a byte-equality assertion).
+///
+/// **Why zoom = 8 over the same fixture, no new fixture data.** The fixture's scatter
+/// (`x = (e*37) % 1000, y = (e*53) % 1000`) is a bijection of `e % 1000` onto the 1000×1000 residue
+/// lattice, repeated every 1,000-item cycle of `N_ITEMS` — so `N_ITEMS = 10_000` items occupy only
+/// 1,000 distinct locations (each hit 10 times), not 10,000. At `zoom = 3` (64 candidate tiles) that
+/// is dense enough to leave almost every tile non-empty; at `zoom = 8` (up to 65,536 candidate tiles
+/// over the full extent) it is over 65 empty candidate cells per occupied one on average, so most
+/// tiles are genuinely empty while a real minority are not — the mix this test needs, produced by
+/// changing only the requested zoom, not by hand-building a new sparse corpus.
+#[test]
+fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let dir_1 = tmp.path().join("a");
+    let dir_8 = tmp.path().join("b");
+    std::fs::create_dir_all(&dir_1).unwrap();
+    std::fs::create_dir_all(&dir_8).unwrap();
+    let engine_1 = open_engine_with(
+        &bundle_root,
+        &dir_1,
+        EngineConfig {
+            compute_threads: 1,
+            ..config()
+        },
+    );
+    let engine_8 = open_engine_with(
+        &bundle_root,
+        &dir_8,
+        EngineConfig {
+            compute_threads: 8,
+            ..config()
+        },
+    );
+
+    let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
+    let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
+
+    let bbox = [0.0, 0.0, 1000.0, 1000.0];
+    let zoom = 8;
+    let request = || ViewportRequest::new("s0", zoom, bbox, 50);
+    let candidate_tiles = tiles_for_bbox(bbox, zoom, &extent()).len();
+
+    let out_1 = engine_1.viewport(&session_1, request()).unwrap();
+    let out_8 = engine_8.viewport(&session_8, request()).unwrap();
+
+    assert!(
+        !out_1.tiles.is_empty(),
+        "need at least one non-empty tile for this to be a real mixed case, got none"
+    );
+    assert!(
+        out_1.tiles.len() < candidate_tiles,
+        "need at least one genuinely empty (Ok(None)-skipped) tile among the {candidate_tiles} \
+         candidates to exercise the skip path this test is for -- got {} non-empty tiles, meaning \
+         none were skipped",
+        out_1.tiles.len()
+    );
+
+    assert_eq!(
+        out_1, out_8,
+        "ViewportOut must be byte-for-byte identical (PartialEq ignores only `timings`) \
+         regardless of compute_threads, including on the mostly-empty-tile Ok(None) skip path"
     );
 }

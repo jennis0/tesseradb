@@ -293,7 +293,6 @@ pub struct Engine {
     /// build is in flight does not wait for it; it gets [`EngineError::ProjectionBuilding`] and
     /// retries. Unbounded growth (eviction) is out of scope here — a memory concern, not the
     /// concurrency one this cache exists to fix.
-    #[allow(clippy::type_complexity)]
     pub(crate) row_projection_cache:
         SingleFlightCache<(u64, String, u64), crate::compose::RowProjection>,
     /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
@@ -1068,6 +1067,23 @@ mod tests {
     /// would let a test-only branch diverge from the code every real request runs. This is rayon's
     /// own propagation guarantee, pinned against the identical construction `Engine::open` uses,
     /// which is what `self.pool.install(...)` in `Engine::viewport` actually relies on.
+    ///
+    /// **Why this builds its own pool rather than a real `Engine`'s.** `Engine::pool` is
+    /// `pub(crate)`, so an integration test in `tests/viewport.rs` cannot reach it at all — this
+    /// is precisely the case the fix-wave brief's fallback names ("if pub(crate) visibility
+    /// genuinely blocks an integration test, an engine-internal `#[cfg(test)]` test module is
+    /// acceptable"), which is why this test lives here rather than there. Going one step further
+    /// — opening a real `Engine` from *inside* this module instead of building a look-alike pool
+    /// — was considered and rejected as disproportionate for this one assertion: it would mean
+    /// duplicating `tests/viewport.rs`'s ~100-line bundle-fixture harness (`tessera_build::build`
+    /// plus Arrow-writing the points/pairs extents) into `src/session.rs`, or an invasive refactor
+    /// to share that harness across a `tests/` integration binary and an internal `src/` module
+    /// (different compilation units), for a test whose only load-bearing claim is "rayon
+    /// propagates a worker panic through `install()`" — a property of rayon's own pool, not of
+    /// anything `Engine::open` does when building one. The construction below is checked against
+    /// `Engine::open`'s by inspection (both are a bare
+    /// `rayon::ThreadPoolBuilder::new().num_threads(n).build()`, no further configuration either
+    /// side) rather than by sharing code, which is what "identical construction" above means.
     #[test]
     fn a_panic_inside_the_shared_pool_propagates_to_the_caller() {
         let pool = rayon::ThreadPoolBuilder::new()

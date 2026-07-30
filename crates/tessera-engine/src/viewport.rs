@@ -629,6 +629,17 @@ impl Engine {
         // `Vec<Result<Option<TileResult>>>` (this crate's `Result<T>` alias for
         // `std::result::Result<T, EngineError>`) rather than `Result<Vec<TileResult>>` is
         // load-bearing for the byte-equality claim below — see this module's doc.
+        //
+        // D-C cancellation bound at this sweep: the parallel section itself does not
+        // short-circuit on a flip (see the serial fold's own comment below) — every tile that has
+        // already passed `tile_result`'s checkpoint keeps running to completion regardless. What
+        // bounds the wasted work is the pool, not the fold: at most `compute_threads` tiles can be
+        // past that checkpoint and still in flight at any instant (one per worker), so a
+        // cancellation observed mid-sweep wastes at most `compute_threads` tiles' worth of
+        // count/select/gather/underlay work — every tile whose worker had not yet reached the
+        // checkpoint observes the flip there instead and returns immediately. The fold below then
+        // discards every result after the first `Cancelled` it walks, so none of that (bounded)
+        // extra work reaches the response either way.
         let tile_outcomes: Vec<Result<Option<TileResult>>> = self.pool.install(|| {
             tiles
                 .par_iter()

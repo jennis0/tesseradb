@@ -23,7 +23,6 @@
 //! timing-dependent) reproductions of single-flight, non-blocking-waiter and panic-safety
 //! behaviour.
 
-use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
@@ -71,6 +70,12 @@ impl<K: Eq + Hash + Clone, V> SingleFlightCache<K, V> {
     /// **Panic safety (I13).** If `build` unwinds, a drop guard removes the `Building` entry
     /// before the unwind propagates to this call's caller, so the key is left absent — not
     /// wedged — and the next arrival sees a plain miss and retries.
+    ///
+    /// **Invariant: `build` must be infallible.** `impl FnOnce() -> V` has no way to signal
+    /// failure, so a build that can fail (an `io::Result`-returning build, for instance) must not
+    /// be wrapped in a closure that panics or that stuffs an error into `V` — use
+    /// `tessera-authz`'s `SingleFlightCache::get_or_try_build` twin instead, which carries the
+    /// `Result` through the slot state machine properly (fail-closed, not a cached failure — I13).
     pub(crate) fn get_or_build(
         &self,
         key: K,
@@ -78,17 +83,15 @@ impl<K: Eq + Hash + Clone, V> SingleFlightCache<K, V> {
     ) -> Result<Arc<V>, Building> {
         {
             let mut slots = self.slots.lock().unwrap();
-            match slots.entry(key.clone()) {
-                Entry::Occupied(occupied) => {
-                    return match occupied.get() {
-                        Slot::Ready(v) => Ok(Arc::clone(v)),
-                        Slot::Building => Err(Building),
-                    };
-                }
-                Entry::Vacant(vacant) => {
-                    vacant.insert(Slot::Building);
-                }
+            // Look up by reference first so a warm hit — the common case — never pays for a
+            // clone of `key`; only a miss (which needs an owned key for the map entry) clones it.
+            if let Some(slot) = slots.get(&key) {
+                return match slot {
+                    Slot::Ready(v) => Ok(Arc::clone(v)),
+                    Slot::Building => Err(Building),
+                };
             }
+            slots.insert(key.clone(), Slot::Building);
         }
 
         // Armed for the whole build; disarmed only after `Ready` is published below. An
@@ -102,7 +105,16 @@ impl<K: Eq + Hash + Clone, V> SingleFlightCache<K, V> {
         impl<K: Eq + Hash, V> Drop for RemoveOnUnwind<'_, K, V> {
             fn drop(&mut self) {
                 if !self.disarmed {
-                    self.slots.lock().unwrap().remove(&self.key);
+                    // This guard's own `drop` can run while a panic is already unwinding through
+                    // it, so a poisoned mutex must not be treated as a second panic here — that
+                    // would abort the process instead of completing the unwind. The map's
+                    // invariants survive a poisoning (the writer that poisoned it panicked before
+                    // this `remove`, not mid-mutation of the map itself), so recovering the guard
+                    // and proceeding is sound.
+                    self.slots
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&self.key);
                 }
             }
         }
@@ -129,6 +141,13 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::thread;
+    use std::time::Duration;
+
+    /// A generous bound on the builder handshakes below: long enough that no legitimate run ever
+    /// approaches it, short enough that a regression that reintroduces blocking (the exact bug
+    /// this module's single-flight design exists to prevent) fails the test with a clear panic
+    /// message instead of hanging the test binary until a CI timeout kills it.
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// A hit must never call `build` — the closure panics if invoked, so any accidental rebuild
     /// on a warm key fails the test loudly rather than merely wasting work.
@@ -162,12 +181,16 @@ mod tests {
                 // runs, so by the time the main thread receives on `started_rx` the state this
                 // test wants to race against already exists.
                 started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
+                release_rx
+                    .recv_timeout(HANDSHAKE_TIMEOUT)
+                    .expect("builder never released — single-flight regression re-blocked it");
                 99
             })
         });
 
-        started_rx.recv().unwrap();
+        started_rx
+            .recv_timeout(HANDSHAKE_TIMEOUT)
+            .expect("builder never signalled start — single-flight regression re-blocked it");
 
         // Non-blocking: this call returns immediately (it does not wait on `release_tx`) with
         // `Building`, and its own closure must never run — there is already a builder for `1`.
@@ -200,12 +223,16 @@ mod tests {
         let slow = thread::spawn(move || {
             slow_cache.get_or_build(1, move || {
                 started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
+                release_rx
+                    .recv_timeout(HANDSHAKE_TIMEOUT)
+                    .expect("builder never released — single-flight regression re-blocked it");
                 1
             })
         });
 
-        started_rx.recv().unwrap();
+        started_rx
+            .recv_timeout(HANDSHAKE_TIMEOUT)
+            .expect("builder never signalled start — single-flight regression re-blocked it");
 
         // A distinct key's build must complete without waiting on key 1's release.
         let other = cache.get_or_build(2, || 2).unwrap();

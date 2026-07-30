@@ -112,7 +112,16 @@ impl<K: Eq + Hash + Clone, V> SingleFlightCache<K, V> {
         impl<K: Eq + Hash, V> Drop for RemoveUnlessReady<'_, K, V> {
             fn drop(&mut self) {
                 if !self.ready {
-                    self.slots.lock().unwrap().remove(&self.key);
+                    // This guard's own `drop` can run while a panic is already unwinding through
+                    // it, so a poisoned mutex must not be treated as a second panic here — that
+                    // would abort the process instead of completing the unwind. The map's
+                    // invariants survive a poisoning (the writer that poisoned it panicked before
+                    // this `remove`, not mid-mutation of the map itself), so recovering the guard
+                    // and proceeding is sound.
+                    self.slots
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&self.key);
                 }
             }
         }

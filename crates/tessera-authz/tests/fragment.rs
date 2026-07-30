@@ -333,7 +333,13 @@ fn concurrent_cold_builds_single_flight_to_one_real_build() {
                     );
                     match cache.get_or_build(&terms, auth_data_hash, &reader, 7) {
                         Ok(frozen) => return frozen,
-                        Err(FragmentCacheError::Building) => continue,
+                        Err(FragmentCacheError::Building) => {
+                            // Yield rather than busy-spin: a losing arrival retrying this tightly
+                            // would otherwise burn a full core against the one thread actually
+                            // doing the build, on every OS thread this test spawns.
+                            std::thread::yield_now();
+                            continue;
+                        }
                         Err(e) => panic!("unexpected error: {e}"),
                     }
                 }
