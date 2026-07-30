@@ -1,0 +1,838 @@
+<section class="part" id="part-5">
+
+  <p class="eyebrow">Part V — Time and change</p>
+
+  <h2>14. Ingest: entity space only grows</h2>
+
+  <p>A real corpus moves: documents arrive, documents are withdrawn, and the
+  clearance attached to a document changes without the document changing at all.
+  Each has to be reconciled with masks computed before it happened. What makes
+  that tractable is a deliberate restriction on what ingest may touch.</p>
+
+  <p>Entity space is append-only — invariant I9. Ingest appends entity IDs and
+  appends postings to the term index. It never reorders, never rewrites, and
+  never invalidates anything expressed in entity space: masks, node memberships
+  and generating sets all remain valid, merely incomplete. That distinction is
+  the whole of the design. An invalidated mask must be discarded and rebuilt; an
+  incomplete one has a boundary, and a boundary can be recorded and patched.
+  Target ingest visibility latency is seconds to minutes, and it is not coupled
+  to any credential cadence, because the model has none.</p>
+
+  <p>The churn lives in row space instead, where new items interleave
+  arbitrarily into the existing Morton ranking and a correct in-place insert
+  would renumber a large fraction of the slice. That is why the permutation
+  between entity IDs and row positions exists (invariant I4): row order may be
+  rewritten wholesale at a merge, because nothing durable depends on it.</p>
+
+  <p>Append-only does not mean order-free. Within a batch, entity IDs are
+  assigned sorted by term signature, so postings form long runs inside the
+  batch's ID range: created-order assignment yields run lengths of 1.00–1.26
+  against a 1.000 random baseline, which is to say nothing, while
+  signature-sorted assignment buys 8.9–36.7&times; on posting storage and up to
+  130&times; on union cost at equal coverage. Assigning IDs in Morton order
+  instead is prohibited: it would give permission-space IDs spatial meaning,
+  turning the ID gap between two visible points into an estimate of how much
+  unauthorised data lies between them. Signature ordering is safe only because
+  entity IDs never cross the trust boundary (I10) — and because I9 makes
+  assignment permanent, it ships in the first implementation of the allocator or
+  not at all.</p>
+
+  <h3>The log and the ack</h3>
+
+  <p>Each partition has one write-ahead log with a single appender, its
+  lifecycle thread; records are append-only, length-prefixed and individually
+  CRC'd. That thread owns every mutation decision but does only cheap work
+  itself — drain the command queue, append and fsync, swap pointers — while
+  everything else runs on a background pool. The queue has a priority lane for
+  deny-disposition changes, so a compaction publish or a stalled object-store
+  upload can never queue a suppression behind seconds of IO: deny visibility
+  latency is bounded by queue-front plus fsync, and nothing else.</p>
+
+  <p>The ack ordering is load-bearing: WAL fsync, then the overlay and
+  generation swap, then the 200. The swap takes nanoseconds and sits
+  <em>before</em> the ack, so a caller's own next request always observes its own
+  accepted change; the window it leaves — after fsync, before the swap —
+  recovers by replay and was never acked.</p>
+
+  <p>Recovery replays from the last flush marker, and a CRC failure is read by
+  position. In the unsynced tail it truncates the log — those records were never
+  acked. At or below the last fsync point the failure is corruption of acked
+  state, possibly including denies, and recovery fails closed until an operator
+  restores from the bundle and the object store; truncate-at-first-bad-CRC
+  applied mid-log would silently drop acked denies. Exhaustion follows the same
+  principle: the ingest 429 threshold sits strictly below the log's hard bound
+  so change records always have room to land, and if an append genuinely fails
+  the deny is applied to the in-memory overlay and swapped — visible immediately
+  — while the response is a 500 with an alarm. Never a 200 without fsync, never
+  a silent drop, never a refusal that leaves the item visible.</p>
+
+  <h3>Buffer, watermark, overlay</h3>
+
+  <p>Arrivals land in an in-memory buffer. A flush policy — size or age,
+  whichever trips first — turns that buffer into an immutable on-disk segment,
+  so segment count is governed by the flush interval rather than by the arrival
+  rate. Every mask fragment carries an entity high-water mark: a fragment built
+  at watermark W is authoritative below W, and entities at or above W are new
+  and not yet folded in. Flushing advances W by OR-ing in the flushed segment's
+  contribution for the token's already-known satisfied terms — a small, monotone
+  patch rather than a rebuild.</p>
+
+  <p>Changes to items already below W go to the overlay, which holds the items
+  in flux: those whose predicate changed, those deleted, and those
+  administratively suppressed. Each entry carries a disposition —
+  <em>evaluate</em>, meaning test its current term set against the token's, or
+  <em>deny</em>, meaning invisible regardless — and carries its term set inline.
+  The disposition is what lets one mechanism cover both a predicate change and
+  an administrative suppression. The live set is the overlay together with every
+  entity at or above W, and evaluating it needs no index at all: an item's term
+  set is a handful of IDs, so visibility is a set intersection against the
+  token's satisfied terms — microseconds for tens of thousands of items — and
+  the set stays bounded by the change rate times the interval before masks are
+  naturally rebuilt. A deletion is a tombstone in this frame: remove the entity
+  from the term index, add a deny entry, notify the caller of the labels
+  affected, and drop the row at the next compaction. The ID is never
+  recycled.</p>
+
+  <figure id="fig-f13" class="wide">
+    <div class="fig-controls" data-f13-controls>
+      <button type="button" data-act="play" aria-pressed="false">Play</button>
+      <button type="button" data-act="step">Step</button>
+      <button type="button" data-act="reset">Reset</button>
+      <span data-f13-readout aria-live="polite">Stage 1 of 8</span>
+    </div>
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" data-f13-canvas></div>
+    </div>
+    <ol class="p5-stages" data-f13-list></ol>
+    <figcaption><span class="fig-num">Figure 13.</span> The write path. A
+    change or a batch of rows is appended to the write-ahead log and fsynced;
+    only then is the generation pointer swapped and the request acked, so no
+    caller is ever told a change is durable before it is. Rows sit in an
+    in-memory buffer until a flush turns them into an immutable segment and
+    advances the mask watermark W; the overlay covers items in flux below W;
+    merges and compaction fold the accumulated deltas back into the base. The
+    dashed line marks the durability boundary — nothing to its left has been
+    acked.</figcaption>
+  </figure>
+
+  <h3>Segments, merges, compaction</h3>
+
+  <p>A tile resolves to one contiguous range per live segment, so query cost is
+  linear in segment count and segment count must be bounded. Merge policy is
+  structured on established lines rather than run as a scheduled job: a floor
+  size, so a tail of tiny segments cannot dominate decisions; a maximum
+  merged-segment size, so no merge becomes an unbounded rewrite; and a
+  separation of the reasons to merge — natural tiering, forced compaction, and
+  tombstone reclamation on a deletes-percentage trigger. Re-ranking is a
+  decorator on that policy rather than a phase of its own — reorder only merges
+  above a minimum document count, always reorder on forced merges — so the
+  Morton re-rank becomes a continuous property of large merges rather than a
+  scheduled cliff. The reference points
+  taken from a widely-deployed policy are ten segments per tier, a 5&nbsp;GB
+  maximum merged segment, a 2&nbsp;MB floor, a 20% deletes threshold, and
+  reordering above 2<sup>18</sup> documents.</p>
+
+  <p>Compaction snapshots a generation, folds the snapshot-covered posting
+  deltas, tombstones and evaluate entries into the base postings, rewrites the
+  permutation, tile table, candidate lists and columns, publishes under a new
+  segment-set version, and lets in-flight requests drain. What it must
+  <em>not</em> fold is specified as carefully as what it folds: segments and
+  deltas flushed after the snapshot, tombstones accepted after the snapshot, the
+  active suppression set, and all unfolded overlay entries are carried forward
+  verbatim. That tombstone clause is a correction — an earlier rule covered only
+  segments and deltas, and folding away a post-snapshot tombstone while the
+  entity survives in the folded base is fail-open.</p>
+
+  <h2>15. Denial: generations, pins, and three retirement rules</h2>
+
+  <p>All of a partition's serving state hangs off a single atomically
+  swappable pointer to an immutable generation: the segments and their version
+  number, the postings view, the watermark W, and the overlay with its own
+  version number. The two version numbers move for different reasons. The
+  segment-set version moves on flush and compaction — row-space and postings
+  shape. The overlay version moves on every accepted change batch — security
+  state. Every mutation builds a new generation sharing its unchanged parts by
+  reference count; a change-only generation is two small allocations, which is
+  what makes a suppression cheap enough to apply synchronously.</p>
+
+  <p>One ordering rule governs how a request reads that state, and it is tested
+  rather than assumed: a request thread loads the generation pointer exactly
+  once, at request start, before acquiring any fragment or cache entry — overlay
+  resolution happens-before fragment acquisition. That is what makes fragment
+  eviction safe while a request still holds a fragment: the request's own
+  overlay still carries any deny the ledger has since retired. An implementation
+  that refreshes a fragment mid-request leaks in the window between eviction and
+  retirement.</p>
+
+  <h3>Pins</h3>
+
+  <p>A pin is a counted reference to a generation; superseded generations sit on
+  a drain list until the last holder lets go. The reclaim ordering is
+  deliberate — remove the entry from the drain list, then verify the strong
+  count is one, then reclaim — because verify-then-remove is a use-after-free
+  that review caught. A racing pin resolution that misses the removed entry gets
+  a 410 pin-expired, which is the correct answer.</p>
+
+  <p>What a pin does <em>not</em> do is the point:</p>
+
+  <blockquote>Pins fix geometry, never authorisation. A pinned request uses the
+  pinned <code>segments_version</code> for tiles, columns and permutation, but
+  composes <code>M_auth</code> against the current overlay — deny entries apply
+  the moment they are accepted, pinned or not.</blockquote>
+
+  <p>The consequence is visible to users and is not a bug: &ldquo;a pinned
+  drill-down can return fewer items than the viewport before it — is correct
+  behaviour.&rdquo; The composition stays coherent under mixed versions because
+  <code>M_auth</code> is computed entirely in entity space, with the fragment's
+  own watermark defining the live set; projection through the pinned permutation
+  then drops row-absent entities via the sentinel, so there is no gap and no
+  double count. For the same reason, fragments are built on a cache miss from
+  the <em>current</em> generation's postings view and never from a pinned one: a
+  fragment is authorisation state.</p>
+
+  <h3>The three retirement rules</h3>
+
+  <p>A deny entry cannot stay in the overlay forever; the overlay would grow
+  without bound. So each entry needs a condition under which it may be dropped —
+  a retirement rule. The design's recorded decision reads:</p>
+
+  <blockquote>Three retirement rules, not one (amended r2): deletion denies by
+  the epoch ledger with an insertion floor; suppressions only by unsuppress;
+  evaluate entries at their compaction fold. r1's single rule was fail-open for
+  two of the three.</blockquote>
+
+  <p><strong>Deletion denies retire by the epoch ledger.</strong> A deletion
+  stamps its deny entry with a tombstone epoch <em>d</em> and applies a
+  delta-tier tombstone at <em>d</em> immediately. The entry may leave the
+  overlay only when no servable fragment epoch predates <em>d</em>. The fragment
+  cache maintains a count of live fragments per postings epoch, whose lowest key
+  is the minimum live epoch, and the lifecycle thread retires the retirable
+  prefix below it after evictions and periodically. The cache additionally
+  tracks a retirement floor — the highest epoch of any retired overlay entry,
+  whether a deletion's <em>d</em> or an evaluate entry's fold epoch <em>f</em> —
+  and refuses to insert any fragment whose epoch is below that floor. Without
+  the floor, a pinned or slow request could rebuild an old-epoch fragment after
+  the entries predating it were retired, and resurrect a deleted item or a
+  revoked term. Refusal is cheap: the builder retries against current postings.
+  The ledger is per worker and in memory, and losing it on restart is safe by
+  construction, because the cache restarts cold.</p>
+
+  <p><strong>Suppressions retire only on unsuppress, and never touch
+  postings.</strong> The rule leaves no room for interpretation: a suppression is
+  &ldquo;never — suppression does not touch postings&rdquo; retired by any
+  epoch, and leaves &ldquo;only by unsuppress. Non-retirable while active, by
+  construction: no fragment rebuild ever excludes a suppressed entity, so its
+  invisibility rests on the overlay entry for as long as the suppression
+  stands.&rdquo; Unsuppress removes the entry and publishes a side-manifest
+  immediately, as all deny-state changes do. The obvious objection — that the
+  active-suppression set then grows monotonically — is answered by treating its
+  size as a metric: a growing suppression set is a policy signal, not a
+  leak.</p>
+
+  <p><strong>Predicate-change entries retire at their compaction fold.</strong>
+  An evaluate entry carries the entity's current term set inline, and retires
+  &ldquo;not until compaction folds it — deltas cover newly flushed entities
+  only, so a change to an existing entity's terms is invisible to postings in
+  both directions.&rdquo; Compaction rewrites the affected entities' postings
+  from the term sets carried in their evaluate entries; after the fold the entry
+  carries its fold epoch <em>f</em> and retires under the ledger rule above,
+  with <em>f</em> participating in the retirement floor exactly as a deletion's
+  <em>d</em> does. That symmetry is required, not decorative: a fragment
+  predating the fold misreads the entity in both directions — a revoked term
+  still present is fail-open, a granted term absent is merely wrong counts — so
+  a floor raised only on deletion retirements &ldquo;passes the deletion test
+  and still fails open through a pre-fold fragment.&rdquo; Before any fold,
+  evaluate entries are immortal, which is why overlay growth under predicate
+  churn schedules a compaction rather than just a fragment refresh.</p>
+
+  <p>An earlier revision had a single rule, and it was a rule about denies:
+  every deny was assigned a retirement epoch. Evaluate entries are not denies,
+  and the rule that governs them arrived only with the amendment quoted above —
+  which is why the recorded verdict is that the single rule was fail-open for
+  two of the three. For deletions it is right, because a deletion leaves a
+  tombstone in the postings, so once every servable fragment postdates it the
+  postings themselves carry the denial and the overlay entry is redundant. For
+  suppressions it is fail-open. A suppression carries no postings-side signal at
+  all — no tombstone, no fold — from which its invisibility can be re-derived,
+  so an epoch-based timer expiring the entry resurrects the suppressed item with
+  no unsuppress having occurred: any epoch eventually retires the entry and
+  re-exposes the item. The third failure is the one the amendment had to
+  generalise for: raising the floor only on deletion retirements leaves
+  a pre-fold fragment insertable after an evaluate entry logically retires.
+  Splitting the rules by disposition is the fix. Stated generally, the row that
+  must never exist is &ldquo;any path that loses or re-exposes an acked
+  deny&rdquo;; the ack ordering, the suppression rule, the insertion floor and
+  the post-snapshot tombstone carry-forward each close one such path found in
+  review, and all four carry conformance tests.</p>
+
+  <figure id="fig-f14" class="wide">
+    <div class="fig-controls" data-f14-controls>
+      <button type="button" data-act="prev">&larr; Prev</button>
+      <button type="button" data-act="next">Next &rarr;</button>
+      <label>Step
+        <input type="range" min="0" max="8" value="0" step="1" data-f14-slider
+               aria-label="Interleaving step, 0 to 8">
+      </label>
+      <button type="button" data-act="conflate" aria-pressed="false">Conflate the rules</button>
+    </div>
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" data-f14-canvas></div>
+    </div>
+    <div class="p5-panel" data-f14-panel aria-live="polite"></div>
+    <table class="p5-rules">
+      <caption class="p5-vh">Retirement rule summary</caption>
+      <thead>
+        <tr><th>Disposition</th><th>Starts on</th><th>Retires on</th></tr>
+      </thead>
+      <tbody>
+        <tr><th>deny / deletion</th>
+            <td>deletion accepted; deny entry stamped with tombstone epoch <em>d</em>, delta-tier tombstone applied at <em>d</em></td>
+            <td>no servable fragment epoch predates <em>d</em>; the retirement floor then refuses any fragment below <em>d</em></td></tr>
+        <tr><th>deny / suppression</th>
+            <td>administrative suppress; deny entry added, postings untouched</td>
+            <td>unsuppress only — no epoch, no cache condition, no compaction event retires it</td></tr>
+        <tr><th>evaluate / predicate change</th>
+            <td>predicate change; entry carries the current term set inline, immortal until folded</td>
+            <td>the entity's next compaction fold, which stamps fold epoch <em>f</em>; <em>f</em> then joins the same floor as <em>d</em></td></tr>
+      </tbody>
+    </table>
+    <figcaption><span class="fig-num">Figure 14.</span> One scripted
+    interleaving, three retirement rules. Each lane starts and retires by its
+    own mechanism: the deletion deny by the epoch ledger, the evaluate entry at
+    its compaction fold, and the suppression only when an operator unsuppresses.
+    Pressing <em>Conflate the rules</em> puts the earlier revision's single
+    epoch-based rule back across both deny dispositions and leaves the
+    retirement floor ungeneralised. The suppression then retires at step 5
+    alongside the deletion; because a suppression is a deny disposition rather
+    than a term — the item is invisible to every viewer regardless of what they
+    satisfy — retiring it restores ordinary term-based visibility, so the item
+    reappears to every viewer whose grants already covered it, with no
+    unsuppress having occurred. The evaluate lane fails separately and for its
+    own reason, which is why it retires at its fold in both states: a floor
+    raised only on deletion retirements passes the deletion test and still fails
+    open through a pre-fold fragment.</figcaption>
+  </figure>
+
+</section>
+
+<style>
+/* Part V figure-local classes. Tokens only; no literal colours. */
+.wp .p5-stages {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--muted);
+  display: grid;
+  gap: 0.3rem;
+}
+.wp .p5-stages li {
+  margin: 0;
+  padding: 0.28rem 0.5rem;
+  border-left: 2px solid var(--rule);
+  border-radius: 2px;
+}
+.wp .p5-stages li[aria-current="step"] {
+  border-left-color: var(--accent);
+  background: var(--accent-weak);
+  color: var(--fg);
+}
+.wp .p5-stages b { color: var(--fg); font-weight: 620; }
+
+.wp .p5-panel {
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--muted);
+  display: grid;
+  gap: 0.5rem;
+}
+.wp .p5-panel .p5-step-text { color: var(--fg); }
+.wp .p5-panel .p5-step-text b { font-weight: 620; }
+.wp .p5-rows { display: grid; gap: 0.25rem; }
+.wp .p5-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.6rem;
+  align-items: baseline;
+  padding: 0.22rem 0.5rem;
+  border-radius: 2px;
+  background: var(--surface-2);
+}
+.wp .p5-row.is-bad { background: var(--accent-weak); }
+.wp .p5-row .p5-who { font-weight: 620; color: var(--fg); min-width: 12ch; }
+.wp .p5-badge {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: var(--hair) solid var(--rule);
+  border-radius: 2px;
+  padding: 0.02rem 0.34rem;
+  color: var(--muted);
+}
+.wp .p5-badge.is-bad {
+  color: var(--status-critical);
+  border-color: var(--status-critical);
+}
+.wp .p5-alarm {
+  border-left: 3px solid var(--status-critical);
+  padding: 0.45rem 0 0.45rem 0.7rem;
+  color: var(--fg);
+}
+.wp .p5-alarm strong { color: var(--status-critical); }
+.wp .p5-rules { margin-top: 0.3rem; }
+.wp .p5-rules th { font-weight: 620; }
+.wp .p5-vh {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+</style>
+
+<script>
+/* ── Figure 13 — the write path ─────────────────────────────────────────── */
+(function () {
+  "use strict";
+  var root = document.getElementById("fig-f13");
+  if (!root || !window.TF) return;
+
+  var STAGES = [
+    { key: "write", name: "Write", sub: "queued",
+      text: "A batch of rows or a change record reaches the partition's lifecycle thread. Deny-disposition changes take the command queue's priority lane, so a suppression is never queued behind seconds of IO." },
+    { key: "wal", name: "WAL", sub: "fsync",
+      text: "The record is appended to the partition's single-appender write-ahead log — length-prefixed, one CRC per record — and fsynced. Nothing has been acked yet." },
+    { key: "ack", name: "Ack", sub: "swap → 200",
+      text: "The overlay and generation pointer are swapped, and only then is the 200 returned. The swap takes nanoseconds and sits before the ack, so a caller's own next request always observes its accepted change." },
+    { key: "buffer", name: "Buffer", sub: "in memory",
+      text: "Ingested rows sit in an in-memory buffer. Their entity IDs were allocated sorted by term signature, so postings form long runs inside the batch's ID range." },
+    { key: "watermark", name: "Watermark", sub: "W advances",
+      text: "A flush — on size or age, whichever trips first — turns the buffer into an immutable segment and advances the watermark W by OR-ing the flushed segment's contribution into existing fragments. A monotone patch, not a rebuild." },
+    { key: "overlay", name: "Overlay", sub: "items in flux",
+      text: "Items below W that are deleted, suppressed or whose predicate changed live in the overlay, each with an evaluate or deny disposition and its term set inline. The live set is the overlay plus everything at or above W." },
+    { key: "segment", name: "Segment", sub: "new version",
+      text: "The segment is on disk under a new segment-set version. Segment count is governed by the flush interval, not the arrival rate, because a tile costs one contiguous range per live segment." },
+    { key: "merge", name: "Merge", sub: "fold + re-rank",
+      text: "Tiered merges bound segment count and re-rank in Morton order above the size threshold; compaction folds deltas, tombstones and evaluate entries into the base postings and rewrites the permutation." }
+  ];
+
+  var N = STAGES.length;
+  var W = 730, H = 152, PAD = 16;
+  var NODE_W = 78, NODE_H = 44;
+  var span = W - 2 * PAD;
+  var step = span / N;
+  function cx(i) { return PAD + step * (i + 0.5); }
+
+  var canvas = root.querySelector("[data-f13-canvas]");
+  var list = root.querySelector("[data-f13-list]");
+  var readout = root.querySelector("[data-f13-readout]");
+  var btnPlay = root.querySelector('[data-act="play"]');
+  var btnStep = root.querySelector('[data-act="step"]');
+  var btnReset = root.querySelector('[data-act="reset"]');
+
+  var reduced = TF.reducedMotion();
+  var cur = reduced ? N - 1 : 0;
+  var playing = false;
+  var timer = null;
+
+  /* static scaffold */
+  var svg = TF.svg("svg", {
+    width: W, height: H, viewBox: "0 0 " + W + " " + H,
+    role: "img", "aria-label":
+      "Timeline of the write path: write, write-ahead log, ack, buffer, watermark, overlay, segment, merge."
+  });
+
+  svg.appendChild(TF.svg("line", {
+    x1: cx(0), y1: 34, x2: cx(N - 1), y2: 34,
+    stroke: "var(--axis)", "stroke-width": 1.5
+  }));
+
+  /* durability boundary sits between WAL (index 1) and Ack (index 2) */
+  var bx = (cx(1) + cx(2)) / 2;
+  svg.appendChild(TF.svg("line", {
+    x1: bx, y1: 12, x2: bx, y2: H - 26,
+    stroke: "var(--annotation)", "stroke-width": 1,
+    "stroke-dasharray": "4 4"
+  }));
+  svg.appendChild(TF.svg("text", {
+    x: bx + 6, y: H - 12, "font-size": 10, fill: "var(--muted)",
+    text: "durability boundary — nothing left of here has been acked"
+  }));
+
+  var marker = TF.svg("circle", {
+    cx: cx(0), cy: 34, r: 5.5,
+    fill: "var(--accent)", stroke: "var(--surface)", "stroke-width": 2
+  });
+  svg.appendChild(marker);
+
+  var nodes = [];
+  STAGES.forEach(function (s, i) {
+    var g = TF.svg("g", {});
+    var rect = TF.svg("rect", {
+      x: cx(i) - NODE_W / 2, y: 52, width: NODE_W, height: NODE_H,
+      rx: 4, fill: "var(--surface-2)", stroke: "var(--rule)", "stroke-width": 1.25
+    });
+    var label = TF.svg("text", {
+      x: cx(i), y: 79, "text-anchor": "middle", "font-size": 11.5,
+      "font-weight": 600, fill: "var(--muted)", text: s.name
+    });
+    var sub = TF.svg("text", {
+      x: cx(i), y: 112, "text-anchor": "middle", "font-size": 9.5,
+      fill: "var(--muted)", text: s.sub
+    });
+    var num = TF.svg("text", {
+      x: cx(i), y: 22, "text-anchor": "middle", "font-size": 10,
+      fill: "var(--muted)", text: String(i + 1)
+    });
+    g.appendChild(rect); g.appendChild(num); g.appendChild(label); g.appendChild(sub);
+    svg.appendChild(g);
+    nodes.push({ rect: rect, label: label });
+  });
+
+  canvas.appendChild(svg);
+
+  STAGES.forEach(function (s, i) {
+    var li = document.createElement("li");
+    var b = document.createElement("b");
+    b.textContent = (i + 1) + ". " + s.name + " — ";
+    li.appendChild(b);
+    li.appendChild(document.createTextNode(s.text));
+    list.appendChild(li);
+  });
+  var items = list.querySelectorAll("li");
+
+  function paint() {
+    for (var i = 0; i < N; i++) {
+      var done = i < cur, active = i === cur;
+      nodes[i].rect.setAttribute("fill",
+        active ? "var(--accent)" : (done ? "var(--accent-weak)" : "var(--surface-2)"));
+      nodes[i].rect.setAttribute("stroke",
+        active || done ? "var(--accent)" : "var(--rule)");
+      nodes[i].label.setAttribute("fill",
+        active ? "var(--bg)" : (done ? "var(--fg)" : "var(--muted)"));
+      if (reduced) items[i].removeAttribute("aria-current");
+      else if (active) items[i].setAttribute("aria-current", "step");
+      else items[i].removeAttribute("aria-current");
+    }
+    marker.setAttribute("cx", cx(cur));
+    marker.setAttribute("opacity", reduced ? 0 : 1);
+    readout.textContent = reduced
+      ? "All 8 stages shown"
+      : "Stage " + (cur + 1) + " of " + N + " — " + STAGES[cur].name;
+  }
+
+  function advance() {
+    cur = (cur + 1) % N;
+    paint();
+  }
+
+  function setPlaying(on) {
+    playing = on;
+    btnPlay.setAttribute("aria-pressed", on ? "true" : "false");
+    btnPlay.textContent = on ? "Pause" : "Play";
+    if (timer) { clearInterval(timer); timer = null; }
+    if (on) timer = setInterval(advance, 1400);
+  }
+
+  btnStep.addEventListener("click", function () { setPlaying(false); advance(); });
+  btnReset.addEventListener("click", function () {
+    setPlaying(false); cur = reduced ? N - 1 : 0; paint();
+  });
+  btnPlay.addEventListener("click", function () { setPlaying(!playing); });
+
+  if (reduced) {
+    /* Reduced motion: present the finished path with every stage label
+       visible and no timed transitions. Stepping stays available. */
+    btnPlay.hidden = true;
+    cur = N - 1;
+    paint();
+    for (var j = 0; j < N; j++) {
+      nodes[j].rect.setAttribute("fill", "var(--accent-weak)");
+      nodes[j].rect.setAttribute("stroke", "var(--accent)");
+      nodes[j].label.setAttribute("fill", "var(--fg)");
+    }
+    marker.setAttribute("opacity", 0);
+  } else {
+    paint();
+  }
+})();
+
+/* ── Figure 14 — three retirement rules ─────────────────────────────────── */
+(function () {
+  "use strict";
+  var root = document.getElementById("fig-f14");
+  if (!root || !window.TF) return;
+
+  var LANES = [
+    { id: "A", title: "deny / deletion", who: "E1 — deleted",
+      colour: "var(--cat-1)", start: 1, startLabel: "delete, d=7",
+      split: { retire: 5, label: "floor → 7" },
+      conflated: { retire: 5, label: "epoch expiry", bad: false } },
+    { id: "B", title: "deny / suppression", who: "E2 — suppressed",
+      colour: "var(--cat-2)", start: 2, startLabel: "suppress",
+      split: { retire: 8, label: "unsuppress" },
+      conflated: { retire: 5, label: "epoch expiry", bad: true, dash: "re-exposed" } },
+    { id: "C", title: "evaluate / predicate", who: "E3 — term revoked",
+      colour: "var(--cat-6)", start: 3, startLabel: "predicate Δ",
+      split: { retire: 7, label: "fold, f=9" },
+      conflated: { retire: 7, label: "fold; floor unraised", bad: true, dash: "pre-fold reads" } }
+  ];
+
+  var STEPS = [
+    { t: "Baseline. The overlay is empty. The fragment cache holds fragments built at postings epochs 5 and 6, so the minimum live epoch is 5 and the retirement floor is 0." },
+    { t: "E1 is deleted. A deny entry enters the overlay stamped with tombstone epoch d = 7, and a delta-tier tombstone is applied at 7. E1 is invisible from this instant, to pinned and unpinned requests alike." },
+    { t: "E2 is administratively suppressed. A deny entry enters the overlay and nothing in the postings changes: a suppression does not touch postings, so no fragment rebuild will ever exclude E2 on its own." },
+    { t: "E3's predicate changes and it loses a term. An evaluate entry enters the overlay carrying E3's current term set inline. The postings still carry the revoked term, because deltas cover newly flushed entities only." },
+    { t: "The epoch-5 and epoch-6 fragments are evicted; rebuilds come from current postings, so the minimum live epoch rises to 8. No servable fragment epoch now predates d = 7." },
+    { t: "The lifecycle thread retires the deletion deny. The retirement floor rises to 7 and the cache refuses to insert any fragment below epoch 7. E1 stays invisible — now because every servable fragment carries the tombstone." },
+    { t: "Compaction runs. It folds the snapshot-covered deltas, tombstones and evaluate entries into the base postings — E3's entry folds at f = 9 — and carries the post-snapshot tombstones and the active suppression set forward verbatim." },
+    { t: "E3's evaluate entry retires: after the fold it carries f = 9 and retires under the ledger rule, with f raising the retirement floor to 9 exactly as a deletion's d would. E2's suppression is untouched; no compaction event retires a suppression." },
+    { t: "An operator unsuppresses E2. Only now does the deny entry leave the overlay, and the removal publishes a side-manifest immediately, as all deny-state changes do. E2 is visible again because someone decided it should be." }
+  ];
+
+  var CONFLATED_NOTE = {
+    5: "Under one rule, every deny carries a retirement epoch — so the suppression retires here too, the moment the minimum live epoch passes it. A suppression touched no postings, so there is no tombstone and no fold from which to re-derive its invisibility. E2 becomes visible again with no unsuppress having occurred.",
+    6: "E2 is still wrongly visible. Compaction changes nothing: there was never a postings-side signal to fold.",
+    7: "E2 is still wrongly visible. A second failure surfaces here: with the floor raised only on deletion retirements, a fragment built before E3's fold can still be inserted, and a request served from it reads E3 as still carrying the revoked term.",
+    8: "The operator's unsuppress arrives, but E2 has already been exposed for three steps. The re-exposure was not an operator decision and nothing recorded it."
+  };
+
+  var NS = 9;
+  var W = 730, H = 250;
+  var LBL = 146, X0 = 170, COLW = 66;
+  function cx(i) { return X0 + i * COLW; }
+  var LANE_Y = [72, 138, 204];
+
+  var canvas = root.querySelector("[data-f14-canvas]");
+  var panel = root.querySelector("[data-f14-panel]");
+  var slider = root.querySelector("[data-f14-slider]");
+  var btnPrev = root.querySelector('[data-act="prev"]');
+  var btnNext = root.querySelector('[data-act="next"]');
+  var btnConf = root.querySelector('[data-act="conflate"]');
+
+  var cur = 0, conflated = false;
+
+  var svg = TF.svg("svg", {
+    width: W, height: H, viewBox: "0 0 " + W + " " + H,
+    role: "img", "aria-label":
+      "Three lanes — a deletion deny, a suppression and a predicate-change entry — across nine steps of one interleaving, each retiring by its own mechanism."
+  });
+  canvas.appendChild(svg);
+
+  var dyn = TF.svg("g", {});
+
+  /* step ruler */
+  var headers = [];
+  for (var i = 0; i < NS; i++) {
+    svg.appendChild(TF.svg("line", {
+      x1: cx(i), y1: 34, x2: cx(i), y2: H - 20,
+      stroke: "var(--grid)", "stroke-width": 1
+    }));
+    var h = TF.svg("text", {
+      x: cx(i), y: 24, "text-anchor": "middle", "font-size": 10,
+      fill: "var(--muted)", text: String(i)
+    });
+    svg.appendChild(h);
+    headers.push(h);
+  }
+  svg.appendChild(TF.svg("text", {
+    x: 8, y: 24, "font-size": 10, fill: "var(--muted)", text: "step"
+  }));
+
+  LANES.forEach(function (ln, k) {
+    var y = LANE_Y[k];
+    svg.appendChild(TF.svg("rect", {
+      x: 8, y: y - 13, width: 8, height: 26, rx: 2, fill: ln.colour
+    }));
+    svg.appendChild(TF.svg("text", {
+      x: 24, y: y - 2, "font-size": 12, "font-weight": 600,
+      fill: "var(--fg)", text: ln.title
+    }));
+    svg.appendChild(TF.svg("text", {
+      x: 24, y: y + 13, "font-size": 10.5, fill: "var(--muted)", text: ln.who
+    }));
+    svg.appendChild(TF.svg("line", {
+      x1: LBL, y1: y, x2: W - 12, y2: y,
+      stroke: "var(--axis)", "stroke-width": 1
+    }));
+  });
+
+  var cursor = TF.svg("line", {
+    x1: cx(0), y1: 30, x2: cx(0), y2: H - 20,
+    stroke: "var(--accent)", "stroke-width": 2
+  });
+  svg.appendChild(cursor);
+  svg.appendChild(dyn);
+
+  function laneState(ln) { return conflated ? ln.conflated : ln.split; }
+
+  function draw() {
+    while (dyn.firstChild) dyn.removeChild(dyn.firstChild);
+
+    LANES.forEach(function (ln, k) {
+      var y = LANE_Y[k];
+      var st = laneState(ln);
+      if (cur < ln.start) return;
+
+      var endStep = Math.min(cur, st.retire);
+      var x1 = cx(ln.start), x2 = cx(endStep);
+
+      dyn.appendChild(TF.svg("rect", {
+        x: x1, y: y - 8, width: Math.max(x2 - x1, 3), height: 16, rx: 3,
+        fill: ln.colour, opacity: 0.9
+      }));
+      if (x2 - x1 > 96) {
+        dyn.appendChild(TF.svg("text", {
+          x: (x1 + x2) / 2, y: y - 14, "text-anchor": "middle",
+          "font-size": 9.5, fill: "var(--muted)",
+          text: "overlay entry live"
+        }));
+      }
+      dyn.appendChild(TF.svg("circle", {
+        cx: x1, cy: y, r: 5, fill: ln.colour,
+        stroke: "var(--surface)", "stroke-width": 1.5
+      }));
+      dyn.appendChild(TF.svg("text", {
+        x: x1, y: y + 26, "text-anchor": "middle", "font-size": 9,
+        fill: "var(--muted)", text: ln.startLabel
+      }));
+
+      if (cur >= st.retire) {
+        var bad = !!st.bad;
+        var stroke = bad ? "var(--status-critical)" : ln.colour;
+        dyn.appendChild(TF.svg("rect", {
+          x: cx(st.retire) - 5, y: y - 5, width: 10, height: 10,
+          fill: "var(--surface)", stroke: stroke, "stroke-width": 2
+        }));
+        dyn.appendChild(TF.svg("text", {
+          x: cx(st.retire), y: y + 26, "text-anchor": "middle", "font-size": 9,
+          fill: bad ? "var(--status-critical)" : "var(--muted)",
+          "font-weight": bad ? 700 : 400,
+          text: st.label
+        }));
+        if (bad && cur > st.retire) {
+          dyn.appendChild(TF.svg("line", {
+            x1: cx(st.retire), y1: y, x2: cx(cur), y2: y,
+            stroke: "var(--status-critical)", "stroke-width": 3,
+            "stroke-dasharray": "5 4"
+          }));
+          dyn.appendChild(TF.svg("text", {
+            x: (cx(st.retire) + cx(cur)) / 2 + 4, y: y - 14,
+            "text-anchor": "middle", "font-size": 9.5, "font-weight": 700,
+            fill: "var(--status-critical)", text: st.dash || "re-exposed"
+          }));
+        }
+      }
+    });
+
+    cursor.setAttribute("x1", cx(cur));
+    cursor.setAttribute("x2", cx(cur));
+    for (var i = 0; i < NS; i++) {
+      headers[i].setAttribute("fill", i === cur ? "var(--accent)" : "var(--muted)");
+      headers[i].setAttribute("font-weight", i === cur ? 700 : 400);
+    }
+  }
+
+  /* Per-step viewer-visible status, derived from the same lane script. */
+  function statusFor(k) {
+    var ln = LANES[k], st = laneState(ln);
+    if (cur < ln.start) {
+      return { s: "visible", bad: false,
+        why: "no change has been accepted for it yet" };
+    }
+    if (cur < st.retire) {
+      return { s: "hidden", bad: false,
+        why: k === 2
+          ? "the overlay's evaluate entry is tested directly against the token's satisfied terms"
+          : "the overlay's deny entry applies, pinned or not" };
+    }
+    if (k === 0) {
+      return { s: "hidden", bad: false,
+        why: "the delta-tier tombstone at d = 7 is now in every servable fragment" };
+    }
+    if (k === 1) {
+      return conflated
+        ? { s: "visible", bad: true,
+            why: "the entry was retired by an epoch, and no postings-side signal keeps it hidden" }
+        : { s: "visible", bad: false,
+            why: "an operator unsuppressed it — the only event that retires a suppression" };
+    }
+    return conflated
+      ? { s: "hidden, unless a pre-fold fragment is served", bad: true,
+          why: "the floor was raised only on deletion retirements, so a fragment built before the fold is still insertable" }
+      : { s: "hidden", bad: false,
+          why: "the fold rewrote its postings from the entry's term set, and f = 9 raised the floor" };
+  }
+
+  function renderPanel() {
+    panel.textContent = "";
+
+    var p = document.createElement("p");
+    p.className = "p5-step-text";
+    var b = document.createElement("b");
+    b.textContent = "Step " + cur + ". ";
+    p.appendChild(b);
+    p.appendChild(document.createTextNode(STEPS[cur].t));
+    panel.appendChild(p);
+
+    if (conflated && CONFLATED_NOTE[cur]) {
+      var al = document.createElement("p");
+      al.className = "p5-alarm";
+      var s = document.createElement("strong");
+      s.textContent = "Fail-open. ";
+      al.appendChild(s);
+      al.appendChild(document.createTextNode(CONFLATED_NOTE[cur]));
+      panel.appendChild(al);
+    }
+
+    var rows = document.createElement("div");
+    rows.className = "p5-rows";
+    LANES.forEach(function (ln, k) {
+      var st = statusFor(k);
+      var row = document.createElement("div");
+      row.className = "p5-row" + (st.bad ? " is-bad" : "");
+      var who = document.createElement("span");
+      who.className = "p5-who";
+      who.textContent = ln.who.split(" — ")[0] + " (" + ln.title + ")";
+      var badge = document.createElement("span");
+      badge.className = "p5-badge" + (st.bad ? " is-bad" : "");
+      badge.textContent = st.bad ? "fail-open: " + st.s : st.s;
+      var why = document.createElement("span");
+      why.textContent = st.why;
+      row.appendChild(who); row.appendChild(badge); row.appendChild(why);
+      rows.appendChild(row);
+    });
+    panel.appendChild(rows);
+  }
+
+  function update() {
+    slider.value = String(cur);
+    btnPrev.disabled = cur === 0;
+    btnNext.disabled = cur === NS - 1;
+    draw();
+    renderPanel();
+  }
+
+  btnPrev.addEventListener("click", function () {
+    if (cur > 0) { cur--; update(); }
+  });
+  btnNext.addEventListener("click", function () {
+    if (cur < NS - 1) { cur++; update(); }
+  });
+  slider.addEventListener("input", function () {
+    cur = Math.max(0, Math.min(NS - 1, parseInt(slider.value, 10) || 0));
+    update();
+  });
+  btnConf.addEventListener("click", function () {
+    conflated = !conflated;
+    btnConf.setAttribute("aria-pressed", conflated ? "true" : "false");
+    update();
+  });
+
+  update();
+})();
+</script>

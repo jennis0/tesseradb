@@ -1,0 +1,1018 @@
+<!-- ===================================================================
+     Part III — Turning permission into arithmetic.
+     Chapters 7–9, figures F6 (interactive), F7 (static), F8 (interactive).
+     All colour comes from the tokens in 00-style.html; nothing here is
+     hardcoded, so both themes and the data-theme stamp are inherited.
+     =================================================================== -->
+
+<style>
+/* Figure-local structure for Part III. Additive only: layout and spacing for
+   markup this part introduces. Every colour is a token. */
+.wp .p3-stage {
+  border-left: 2px solid var(--rule);
+  padding: 0.35rem 0 0.35rem 0.75rem;
+  transition: border-color 160ms ease;
+}
+.wp .p3-stage.on { border-left-color: var(--accent); }
+.wp .p3-stage + .p3-stage { margin-top: 0.6rem; }
+.wp .p3-stage-name {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+.wp .p3-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.wp .p3-chip {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  border: var(--hair) solid var(--rule);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.wp .p3-chip.live {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-weak);
+}
+.wp .p3-readout {
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.wp .p3-readout b { font-weight: 650; }
+.wp .p3-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+}
+.wp .p3-past { opacity: 0.55; }
+/* The strip graphics keep their natural width and scroll inside .fig-scroll
+   rather than shrinking to illegibility; the prose beside them still wraps. */
+.wp #f6-body svg, .wp #f8-body svg { max-width: none; }
+.wp .p3-note {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+</style>
+
+<section class="part" id="part-3">
+
+  <p class="eyebrow">Part III</p>
+  <h2>Turning permission into arithmetic</h2>
+
+  <p class="standfirst">The previous part established the two coordinate
+  systems and the cost model. This is where a viewer's grants stop being policy
+  and become a bitmap — built once, cached, and thereafter intersected with
+  everything the map does.</p>
+
+  <h3>7. The plugin boundary</h3>
+
+  <p>The engine holds one idea about authorisation and nothing else. An item
+  carries a set of opaque term IDs; a token carries a set of satisfied term
+  IDs; the item is visible to the token if and only if those two sets
+  intersect. Everything about how those term sets are derived sits behind two
+  caller-supplied functions, and the authorisation schema is deliberately out
+  of scope for the service, which never receives policy semantics, only opaque
+  terms.</p>
+
+  <p>The two functions are asymmetric by design.
+  <code>terms_of_label(item_label)</code> runs once per item at ingest and must
+  be fast; <code>terms_of_auth(auth_data)</code> runs once per authorisation
+  and may be expensive. Both emit opaque byte strings, which the service interns
+  into IDs in a shared, append-only namespace, so agreement between the two
+  functions is nothing more than byte-equality of canonical descriptors. Beyond
+  the consistency requirement of invariant I5, the plugin author owes four
+  obligations: canonical descriptors, determinism, declared cardinality bounds,
+  and respect for that cost asymmetry.</p>
+
+  <p>Each half has a name in the literature worth keeping, because each brings
+  a body of work with it. The data function's normalisation of an item's
+  predicate into terms is <span class="term">boolean expression indexing</span>
+  — indexing a collection of boolean predicates so that, given one assignment,
+  every predicate it satisfies can be found. The auth function's job is
+  <span class="term">partial evaluation</span> producing a residual policy in
+  disjunctive normal form, which is why driving authorisation from a policy
+  engine later is a matter of writing one plugin rather than a redesign. And
+  where a deployment needs compartments — sets of items sharing a required term
+  set, gated by an intersection test — the established name is
+  <span class="term">compartmented / lattice-based mandatory access control;
+  dominance</span>.</p>
+
+  <p>The reference plugin makes the shape concrete. Item predicates are
+  written as access expressions in the <code>accumulo-access</code> grammar:
+  tokens combined with <code>&amp;</code> and <code>|</code>, parentheses for
+  grouping, and no negation — so the predicate is monotone, DNF normalisation
+  terminates and the term index is sound. Consistency then reduces to one rule:
+  an item is indexed under its DNF terms and nothing finer, so a conjunctive
+  disjunct is interned as a term in its own right and the item does not appear
+  in the postings of that disjunct's constituent parts.</p>
+
+  <p>The risk in that construction is known rather than hypothetical.
+  Fontoura et al., in the boolean expression indexing work published at SIGMOD
+  2010, measured DNF normalisation over Yahoo's ad-serving expressions and
+  found it infeasible beyond nesting depth 2. Treating that workload as
+  comparable to a corpus of access expressions is this design's judgement and
+  not a claim the paper makes; taken as a warning, the mitigation is
+  plugin-side minting of synthetic terms for deep subexpressions, which keeps
+  terms per item linear in expression size at any nesting depth. Expansion
+  itself was not measured in Phase 0, because here it cannot be — a
+  deployment's predicates are its own knob. Both ends of the conservation law
+  minting trades along were measured instead: satisfied terms per token to
+  10<sup>4</sup>, terms per item to 1,000.</p>
+
+  <p>Both functions ship as wasm32 modules with no WASI imports —
+  instantiation refuses any — so determinism is environmental rather than
+  promised: there is no clock and no ambient capability to reach for. A plugin
+  therefore cannot check expiry, and instead surfaces a credential's
+  <code>not_after</code> for the host to enforce; nor is there online
+  revocation, which is bounded by assertion lifetime instead. Shipping the two
+  functions as separate modules keeps their blast radii apart: rotating trust
+  anchors changes only the auth plugin's hash, which invalidates cached masks,
+  and never the data plugin's, which is a full-reindex event.</p>
+
+  <p>Failure is fail-closed in the <span class="term">Non-Truman model</span>
+  sense — refusing rather than silently filtering. A trap or structurally
+  malformed output fails the operation; an empty term list, by contrast, is
+  valid, and means default deny on the label side and a zero-visibility token
+  on the auth side. Declared cardinality bounds only warn: a predicate is a
+  monotone disjunction, so more terms means broader intended visibility, and
+  excluding on a bound would answer &ldquo;visible to many&rdquo; with
+  &ldquo;visible to none&rdquo;.</p>
+
+  <p>What the core does with the resulting term IDs is index them. The term
+  index maps each term to a Roaring bitmap of entity IDs, and Roaring's
+  per-block encoding makes the badly skewed size distribution harmless: head
+  terms become run containers, the long tail small sorted arrays. Mask
+  construction then happens once per distinct auth input, unioning the posting
+  lists of the satisfied terms — per partition the token can reach — into one
+  bitmap in entity space. That union, the term index, label containment, level
+  of detail, filters, partitioning and storage never learn where terms came
+  from; only the derivation did.</p>
+
+  <p>That the postings are pre-exploded into an <code>(entity_id, term_id)</code>
+  pair relation and joined as a semi-join is a requirement, not an
+  optimisation. The natural alternative — hold terms as a list column and test
+  containment against the presented set — is roughly three orders of magnitude
+  slower in every implementation measured, because containment operators
+  rebuild a probe structure per row. Even the semi-join is too slow for the
+  authorise path at scale and is reassigned away from it: 3.9–10.3&nbsp;s at a
+  tiled 249.5M corpus, against a postings union 4–540× faster at
+  36–530&nbsp;ms. At the full 10<sup>9</sup> corpus that union costs
+  230.6&nbsp;ms for a category-like head grant set (9 terms, mask cardinality
+  264.3M) and 588.0&nbsp;ms for 10,000 randomly drawn category-like grants
+  (41.6% coverage, mask cardinality 416.1M) — the realistic worst case, and
+  inside the 0.14–2&nbsp;s band projected from the 250M measurements. Every
+  timing in this paper was taken on WSL2 with 12 cores, 39&nbsp;GB and an RTX
+  3080; the ratios are the evidence, the absolutes a starting point.</p>
+
+  <p>This is the two-stage split the service's API is built around.
+  <em>Authorise</em> resolves the caller's authoritative auth data to satisfied
+  terms, builds the mask and returns an opaque token, once per distinct auth
+  input. <em>Retrieve</em> accepts that token plus a query and returns a
+  rendered payload in single-digit milliseconds, many times per second while a
+  user pans, because it works against a precomputed mask rather than
+  re-deriving authorisation. Masks — though not tokens — are content-addressed
+  on the satisfied term set, the auth plugin's version and the identity of the
+  postings they were built from, so nothing invalidates an entry: a changed
+  input is a different key. The auth data is kept alongside, so an evicted mask
+  is rebuilt rather than failing at an arbitrary moment.</p>
+
+  <p>Outward, the boundary is narrower still: entity IDs never cross it at all
+  (I10), and clients receive per-session opaque handles instead.</p>
+
+  <!-- ============================= F6 ============================= -->
+  <figure id="fig-f6" class="wide">
+    <div class="fig-controls" id="f6-controls" role="group" aria-label="Grants held by the viewer">
+      <span>Grants:</span>
+    </div>
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" id="f6-body"></div>
+    </div>
+    <div class="fig-legend">
+      <span><span class="swatch" style="background:var(--cat-1)"></span> in a posting list / in the mask</span>
+      <span><span class="swatch" style="background:var(--masked-out)"></span> not present</span>
+    </div>
+    <figcaption><span class="fig-num">Figure 6.</span> Grants become a bitmap.
+    Toggling a grant re-runs the whole path in sequence: the grant's residual
+    policy in disjunctive normal form, the terms those disjuncts intern to, the
+    posting list each term indexes, the union of those posting lists, and the
+    mask that union is. Grants share terms, so the term count tracks the union
+    of the grants' disjuncts rather than their product — the expansion is
+    bounded, which is what makes one union per session affordable. The entity
+    axis is 96 illustrative slots; the measured figures are in the prose.</figcaption>
+  </figure>
+
+  <h3>8. Signature-sorted entity IDs</h3>
+
+  <p>Union cost is not a function of how many entities a mask contains but of
+  how many Roaring containers the granted posting lists span — containers
+  touched, not cardinality. That single fact makes the ordering of entity IDs
+  an engineering decision rather than an implementation detail, because the
+  ordering determines whether a term's members fall into a few containers or
+  are smeared across all of them.</p>
+
+  <p>The measurement is stark. At equal coverage and equal mask cardinality, a
+  label shape whose terms span roughly 37 densely-filled containers beats one
+  whose terms span about 15,259 containers — all of them — at around 6.5
+  postings per container: 400× fewer container visits, and entity-space
+  contiguity worth up to about 130× on union cost as a result. Cost is close to
+  linear in containers spanned, the per-container constant drifting up only
+  about 2× across 400× of scale, from 54&nbsp;ns at 2.42M entities to
+  114&nbsp;ns at 10<sup>9</sup>.</p>
+
+  <p>Entity IDs are allocated in append-only batches, and the order
+  <em>within</em> a batch is a free choice the design spends deliberately:
+  assign IDs sorted by term signature — the set of terms the item carries — so
+  that each term's postings form long runs inside that batch's ID range and
+  head terms encode as run containers rather than scattered arrays. It costs
+  nothing, weakens no invariant, and is safe only because entity IDs never
+  leave the service.</p>
+
+  <p>Two results bound the payoff. Assignment in created order buys nothing at
+  all: run lengths of 1.00–1.26 against a 1.000 random baseline.
+  Signature-sorted assignment buys 8.9–36.7× on posting storage and up to 130×
+  on union cost at equal coverage — for category-like labels, total posting
+  storage from 7.7&nbsp;MB to 0.9&nbsp;MB; for a hash label shape with 100
+  terms, from 552.9&nbsp;MB to 15.1&nbsp;MB, with the cached 25%-coverage
+  session fragment falling from 303&nbsp;KB to 0.2&nbsp;KB. For a surname-like
+  shape it buys nothing measurable: like signature alignment and union speed
+  generally, the headline follows the shape of the labels rather than the size
+  of the corpus. These are floors rather than ceilings — at 2.4M items the mean
+  category group holds 44 entities, so its runs are short; at 10<sup>9</sup>
+  the groups are roughly 400× longer.</p>
+
+  <p>The gain is confined to entity space: the row-space mask — the same
+  visible set permuted into Morton order — stays scattered regardless of how
+  entity IDs were assigned. That is why the kernel carries two union
+  algorithms, a Roaring <em>n</em>-way union costing O(terms × containers
+  spanned) for the dense-bitmap regime and a concatenate-radix-sort-construct
+  path costing O(total postings) for the sparse-array regime.</p>
+
+  <p>What makes this more than a tuning parameter is invariant I9:</p>
+
+  <blockquote>I9 — Entity IDs are append-only and never reused. Masks and
+  generating sets are sets of entity IDs held in caches with non-zero lifetime;
+  reissuing a deleted item's ID grants the new item every access the old one
+  had.</blockquote>
+
+  <p>An ID, once assigned, is that item's ID for the lifetime of the corpus.
+  There is no later pass that renumbers entities for better compression,
+  because renumbering is reuse and reuse is a grant of someone else's access.
+  The compression comes entirely from the ordering, so it ships in the first
+  allocator or not at all: created-order IDs would lock in an uncompressed
+  index until a full re-allocation rebuild of the corpus.</p>
+
+  <p>One ordering is specifically forbidden. Assigning entity IDs in Morton
+  order is tempting, since it would make the entity-to-row permutation the
+  identity; it is rejected because it would give permission-space IDs spatial
+  meaning, turning the ID gap between two visible points into an estimate of
+  unauthorised data nearby. Why signature ordering is safe and Morton ordering
+  is not comes down to invariant I10:</p>
+
+  <blockquote>I10 — Entity IDs never cross the trust boundary. They are dense
+  and assigned in ingest order, so the gap between two visible IDs is a count
+  of unauthorised items ingested in the same window. Clients receive
+  per-session opaque handles instead.</blockquote>
+
+  <!-- ============================= F7 ============================= -->
+  <figure id="fig-f7" class="wide">
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" id="f7-body"></div>
+    </div>
+    <table>
+      <caption class="p3-note" style="text-align:left;padding-bottom:0.4rem">
+        Measured, simulated as a global re-permutation over the Phase 0 corpus.
+      </caption>
+      <thead>
+        <tr>
+          <th>Label shape</th>
+          <th class="num">Posting storage, created order</th>
+          <th class="num">Signature-sorted</th>
+          <th class="num">Session fragment, 25% coverage</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>categories-subclass</td><td class="num">7.7 MB</td><td class="num">0.9 MB (8.9×)</td><td class="num">303 → 47 KB (6×)</td></tr>
+        <tr><td>surnames</td><td class="num">44.8 MB</td><td class="num">45.5 MB (1.0×)</td><td class="num">303 → 303 KB (1×)</td></tr>
+        <tr><td>hash, t = 100</td><td class="num">552.9 MB</td><td class="num">15.1 MB (36.7×)</td><td class="num">303 → 0.2 KB (1,614×)</td></tr>
+      </tbody>
+    </table>
+    <figcaption><span class="fig-num">Figure 7.</span> Signature sorting,
+    before and after. The same logical visible set under two entity-ID
+    assignments: on the left, IDs in created order, so one term's postings are
+    smeared across every container as sparse arrays; on the right, IDs assigned
+    within each batch in term-signature order, so the same postings collapse
+    into a run container and the rest of the containers are never visited.
+    Cardinality is identical in both panels — only the container footprint
+    changes, and container footprint is what every bitmap operation costs.
+    Created-order assignment buys nothing (run lengths 1.00–1.26 against a
+    1.000 random baseline); the gain is entirely in the ordering, and it is
+    policy-dependent, as the surname row shows. <b>This cannot be changed
+    later.</b> Invariant I9 makes entity-ID assignment permanent — IDs are
+    append-only and never reused, because reissuing a deleted item's ID would
+    grant its successor every access the old item had — so a renumbering pass
+    is not available. Signature-sorted assignment ships in the first allocator
+    or the index stays uncompressed until a full re-allocation rebuild.</figcaption>
+  </figure>
+
+  <h3>9. One query, end to end</h3>
+
+  <p>With the mask built, a viewport request is arithmetic over two bitmaps
+  and a permutation. The specification's retrieve path runs to eleven steps;
+  five carry the load, and they are worth following in order.</p>
+
+  <p><strong>One.</strong> The viewport arrives: a rectangle at a zoom depth,
+  pinned once to a segment-set version that is then used for the tile table,
+  the columns, the permutation and the candidate lists alike, so that
+  everything in the request sees one consistent geometry. The mask fragment
+  carries its own watermark rather than sharing that pin, because a pin fixes
+  geometry and must never fix authorisation.</p>
+
+  <p><strong>Two.</strong> The rectangle is decomposed into a few hundred
+  quadtree tiles at the target depth. By the Morton prefix property each tile
+  is a contiguous half-open row range [lo,&nbsp;hi) — this is the whole reason
+  for storing geometry in Morton order, and it is what converts a spatial
+  question into an interval question.</p>
+
+  <p><strong>Three.</strong> The effective mask is composed in entity space and
+  projected into row space. Composition is
+  <code>M_auth = (M_token \ L) ∪ direct_eval(L)</code>, where <code>L</code> is
+  the overlay unioned with every entity at or above the watermark; the frozen
+  mask is read through a view over the memory-mapped file, with no
+  deserialisation and no allocation. Filters narrow it by intersection, never
+  touching authorisation. Projection then gathers
+  <code>entity_to_row[e]</code> into a flat buffer, radix sorts it and
+  bulk-constructs the row-space bitmap — the only point in the system at which
+  the two ID spaces meet, and cached per (token, slice, pin) because it is the
+  one expensive step.</p>
+
+  <p><strong>Four.</strong> Each tile's row range is intersected with that
+  row-space bitmap. <code>intersect_with_range</code> culls the empty tiles
+  outright. Cost here is in containers, not rows.</p>
+
+  <p><strong>Five.</strong> <code>range_cardinality</code> gives the exact
+  masked count per tile, with no data file touched at all. Only then does
+  selection happen, and that count is what decides how: at or below the
+  per-tile budget take everything, above it take the lowest-priority visible
+  items, evaluated directly from the mask where coverage is low or through a
+  precomputed candidate list where it is high. Priority is a hash-derived
+  per-point constant and is mask-independent, so the sample is a sample of the
+  visible set rather than the visible portion of a global sample.</p>
+
+  <p>What follows is mechanical. The selected row IDs collect into one sorted
+  <code>u32</code> array, so the gather over the memory-mapped Arrow columns is
+  forward-sequential-with-gaps; row IDs then translate to entity IDs and to
+  per-session opaque handles on the way out. Labels are served separately,
+  gated on <code>M_auth</code> and never on the filtered mask.</p>
+
+  <p>Three properties carry this design. Counting and post-mask sampling are
+  both bitmap arithmetic over contiguous ranges, so cost scales with screen
+  area rather than corpus size. Projection is the sole meeting point of the two
+  ID spaces, which makes their separation a type rule rather than a convention.
+  And nothing between mask composition and handle translation reads a column
+  except through a masked row-ID set — which is invariant I2, that every
+  derived quantity be a function of visible data only, in structural form
+  rather than as a discipline.</p>
+
+  <!-- ============================= F8 ============================= -->
+  <figure id="fig-f8" class="wide">
+    <div class="fig-controls" id="f8-controls">
+      <button type="button" id="f8-prev">← Back</button>
+      <button type="button" id="f8-next">Next →</button>
+      <span class="p3-rail" id="f8-rail"></span>
+    </div>
+    <div class="fig-frame fig-scroll">
+      <div class="fig-fixed" id="f8-body"></div>
+    </div>
+    <p class="p3-note" id="f8-live" aria-live="polite"></p>
+    <figcaption><span class="fig-num">Figure 8.</span> One query, five steps.
+    The stepper advances through a viewport request, and each stage keeps the
+    artefact the previous stage produced: the rectangle becomes a set of
+    contiguous Morton row ranges, the ranges meet the row-space image of
+    <code>M_auth</code>, the intersection is culled and counted. The exact
+    masked count comes out of range cardinality over containers, with no data
+    file read. The grid is 8 × 8 illustrative cells and the mask is a seeded
+    pattern; the point is the sequence of artefacts, not the numbers.
+    Forward and back controls, or the left and right arrow keys.</figcaption>
+  </figure>
+
+</section>
+
+<script>
+/* ---------------------------------------------------------------------
+   F6 — Grants become a bitmap.
+   Six grant chips; each grant's residual DNF interns to a small set of
+   terms, and grants share terms, so the term count is the size of a union
+   rather than a product. Posting lists are declared as runs over a 96-slot
+   entity axis so that signature locality is visible in the strips.
+   --------------------------------------------------------------------- */
+(function () {
+  "use strict";
+
+  var SLOTS = 96;
+
+  var TERMS = [
+    { id: "t0", runs: [[0, 12], [40, 46]] },
+    { id: "t1", runs: [[12, 20]] },
+    { id: "t2", runs: [[20, 28]] },
+    { id: "t3", runs: [[26, 34]] },
+    { id: "t4", runs: [[46, 52]] },
+    { id: "t5", runs: [[60, 72]] },
+    { id: "t6", runs: [[72, 80]] }
+  ];
+
+  var GRANTS = [
+    { id: "clearance:internal",  terms: ["t0"] },
+    { id: "project:atlas",       terms: ["t0", "t1"] },
+    { id: "dept:archive",        terms: ["t2", "t3"] },
+    { id: "region:eu",           terms: ["t1", "t4"] },
+    { id: "topic:astro-ph",      terms: ["t5"] },
+    { id: "partner:consortium",  terms: ["t3", "t6"] }
+  ];
+
+  var active = { "clearance:internal": true, "dept:archive": true };
+
+  var controls = document.getElementById("f6-controls");
+  var body = document.getElementById("f6-body");
+  if (!controls || !body) return;
+
+  var timers = [];
+  function clearTimers() {
+    for (var i = 0; i < timers.length; i++) clearTimeout(timers[i]);
+    timers = [];
+  }
+
+  function bitsOf(term) {
+    var b = new Uint8Array(SLOTS);
+    for (var i = 0; i < term.runs.length; i++) {
+      for (var j = term.runs[i][0]; j < term.runs[i][1]; j++) b[j] = 1;
+    }
+    return b;
+  }
+
+  var TERM_BITS = {};
+  var t;
+  for (t = 0; t < TERMS.length; t++) TERM_BITS[TERMS[t].id] = bitsOf(TERMS[t]);
+
+  /* --- controls ------------------------------------------------------- */
+  GRANTS.forEach(function (g) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = g.id;
+    b.setAttribute("aria-pressed", active[g.id] ? "true" : "false");
+    b.addEventListener("click", function () {
+      active[g.id] = !active[g.id];
+      b.setAttribute("aria-pressed", active[g.id] ? "true" : "false");
+      render();
+    });
+    controls.appendChild(b);
+  });
+
+  /* --- geometry ------------------------------------------------------- */
+  var W = 600, GUT = 150, CELL = (W - GUT - 8) / SLOTS, RH = 15;
+
+  function strip(bits, y, colour) {
+    var g = TF.svg("g", null);
+    g.appendChild(TF.svg("rect", {
+      x: GUT, y: y, width: CELL * SLOTS, height: RH - 4,
+      fill: "var(--masked-out)", rx: 1
+    }));
+    var i = 0;
+    while (i < SLOTS) {
+      if (bits[i]) {
+        var s = i;
+        while (i < SLOTS && bits[i]) i++;
+        g.appendChild(TF.svg("rect", {
+          x: GUT + s * CELL, y: y, width: (i - s) * CELL, height: RH - 4,
+          fill: colour, rx: 1
+        }));
+      } else i++;
+    }
+    return g;
+  }
+
+  function label(text, y, mono) {
+    return TF.svg("text", {
+      x: GUT - 10, y: y + RH - 8, "text-anchor": "end",
+      "font-size": "11", "font-family": mono ? "var(--font-mono)" : "var(--font-ui)",
+      text: text
+    });
+  }
+
+  function card(bits) {
+    var n = 0;
+    for (var i = 0; i < SLOTS; i++) n += bits[i];
+    return n;
+  }
+
+  /* --- render --------------------------------------------------------- */
+  function render() {
+    clearTimers();
+    body.textContent = "";
+
+    var grants = GRANTS.filter(function (g) { return active[g.id]; });
+
+    /* stage 1 + 2: grants -> DNF disjuncts -> interned terms */
+    var termIds = [];
+    grants.forEach(function (g) {
+      g.terms.forEach(function (id) {
+        if (termIds.indexOf(id) < 0) termIds.push(id);
+      });
+    });
+    termIds.sort();
+
+    var union = new Uint8Array(SLOTS);
+    var postings = 0;
+    termIds.forEach(function (id) {
+      var b = TERM_BITS[id];
+      postings += card(b);
+      for (var i = 0; i < SLOTS; i++) if (b[i]) union[i] = 1;
+    });
+
+    var stages = [];
+
+    function stage(name, node) {
+      var d = document.createElement("div");
+      d.className = "p3-stage";
+      var h = document.createElement("div");
+      h.className = "p3-stage-name";
+      h.textContent = name;
+      d.appendChild(h);
+      d.appendChild(node);
+      body.appendChild(d);
+      stages.push(d);
+      return d;
+    }
+
+    /* 1 — grants held */
+    var c1 = document.createElement("div");
+    c1.className = "p3-chips";
+    if (!grants.length) {
+      c1.appendChild(chip("(no grants — zero-visibility token)", false));
+    } else {
+      grants.forEach(function (g) { c1.appendChild(chip(g.id, true)); });
+    }
+    stage("1 · Grants presented to terms_of_auth", c1);
+
+    /* 2 — DNF terms */
+    var c2 = document.createElement("div");
+    c2.className = "p3-chips";
+    if (!termIds.length) {
+      c2.appendChild(chip("∅", false));
+    } else {
+      termIds.forEach(function (id) { c2.appendChild(chip(id, true)); });
+    }
+    var n2 = document.createElement("div");
+    n2.className = "p3-readout";
+    n2.style.marginTop = "0.3rem";
+    n2.innerHTML = "<b>" + grants.length + "</b> grants &rarr; <b>" +
+      termIds.length + "</b> distinct terms" +
+      (grants.length ? " (shared disjuncts collapse; the count is a union, not a product)" : "");
+    var w2 = document.createElement("div");
+    w2.appendChild(c2);
+    w2.appendChild(n2);
+    stage("2 · Residual policy in DNF, interned to term IDs", w2);
+
+    /* 3 — posting lists */
+    var h3 = Math.max(RH, termIds.length * RH) + 18;
+    var s3 = TF.svg("svg", {
+      width: W, height: h3, viewBox: "0 0 " + W + " " + h3,
+      role: "img", "aria-label": "One posting list per selected term over the entity-ID axis"
+    });
+    s3.appendChild(TF.svg("text", {
+      x: GUT, y: 10, "font-size": "10", text: "entity ID  0" }));
+    s3.appendChild(TF.svg("text", {
+      x: GUT + CELL * SLOTS, y: 10, "text-anchor": "end", "font-size": "10",
+      text: String(SLOTS) }));
+    termIds.forEach(function (id, i) {
+      var y = 18 + i * RH;
+      s3.appendChild(label(id + "  postings", y, true));
+      s3.appendChild(strip(TERM_BITS[id], y, "var(--cat-1)"));
+    });
+    stage("3 · Posting list per term, from the (entity_id, term_id) relation", s3);
+
+    /* 4 — union */
+    var s4 = TF.svg("svg", {
+      width: W, height: RH + 6, viewBox: "0 0 " + W + " " + (RH + 6),
+      role: "img", "aria-label": "The union of the selected posting lists"
+    });
+    s4.appendChild(label("union", 2, true));
+    s4.appendChild(strip(union, 2, "var(--cat-1)"));
+    stage("4 · n-way Roaring union, once per distinct auth input", s4);
+
+    /* 5 — mask */
+    var w5 = document.createElement("div");
+    var s5 = TF.svg("svg", {
+      width: W, height: RH + 6, viewBox: "0 0 " + W + " " + (RH + 6),
+      role: "img", "aria-label": "The resulting mask in entity space"
+    });
+    s5.appendChild(label("M_token", 2, true));
+    s5.appendChild(strip(union, 2, "var(--cat-1)"));
+    var n5 = document.createElement("div");
+    n5.className = "p3-readout";
+    n5.style.marginTop = "0.35rem";
+    n5.setAttribute("aria-live", "polite");
+    n5.innerHTML = "mask cardinality <b>" + TF.fmt(card(union)) + "</b> of " +
+      SLOTS + " entities · <b>" + TF.fmt(postings) +
+      "</b> postings read across <b>" + termIds.length +
+      "</b> posting lists · cached, then reused by every retrieval in the session";
+    w5.appendChild(s5);
+    w5.appendChild(n5);
+    stage("5 · Mask in entity space — built once, reused per viewport", w5);
+
+    /* visible sequencing: light each stage in turn */
+    if (TF.reducedMotion()) {
+      stages.forEach(function (d) { d.classList.add("on"); });
+    } else {
+      stages.forEach(function (d, i) {
+        timers.push(setTimeout(function () { d.classList.add("on"); }, i * 110));
+      });
+    }
+  }
+
+  function chip(text, live) {
+    var s = document.createElement("span");
+    s.className = "p3-chip" + (live ? " live" : "");
+    s.textContent = text;
+    return s;
+  }
+
+  render();
+})();
+
+/* ---------------------------------------------------------------------
+   F7 — Signature sorting, before and after. Static; two panels over the
+   same 96-slot entity axis divided into eight containers. Same
+   cardinality in both, different container footprint.
+   --------------------------------------------------------------------- */
+(function () {
+  "use strict";
+
+  var host = document.getElementById("f7-body");
+  if (!host) return;
+
+  var SLOTS = 96, NC = 8, PER = SLOTS / NC;
+  var W = 690, PW = 322, GAP = 46, CELL = PW / SLOTS, TOP = 30, RH = 22;
+
+  /* Twelve members of one term. Left: created order, one or two per
+     container. Right: the same twelve, contiguous. */
+  var arbitrary = [3, 9, 14, 21, 27, 35, 40, 51, 58, 66, 77, 88];
+  var sorted = [24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35];
+
+  var svg = TF.svg("svg", {
+    width: W, height: 150, viewBox: "0 0 " + W + " 150",
+    role: "img",
+    "aria-label": "Twelve postings under two entity-ID assignments: created order touches all eight containers, signature-sorted order touches one"
+  });
+
+  function panel(x0, title, members, footprint, kinds) {
+    var g = TF.svg("g", null);
+    g.appendChild(TF.svg("text", {
+      x: x0, y: 12, "font-size": "12", "font-weight": "650",
+      fill: "var(--fg)", text: title
+    }));
+    g.appendChild(TF.svg("text", {
+      x: x0, y: 26, "font-size": "11", text: footprint
+    }));
+
+    var set = {};
+    members.forEach(function (m) { set[m] = 1; });
+
+    for (var c = 0; c < NC; c++) {
+      var cx = x0 + c * PER * CELL;
+      var touched = false;
+      for (var i = c * PER; i < (c + 1) * PER; i++) if (set[i]) touched = true;
+
+      g.appendChild(TF.svg("rect", {
+        x: cx, y: TOP, width: PER * CELL - 2, height: RH,
+        fill: "var(--masked-out)",
+        stroke: touched ? "var(--cat-2)" : "var(--rule)",
+        "stroke-width": touched ? 1.5 : 1, rx: 2
+      }));
+      g.appendChild(TF.svg("text", {
+        x: cx + (PER * CELL - 2) / 2, y: TOP + RH + 12,
+        "text-anchor": "middle", "font-size": "9",
+        text: touched ? kinds : "—"
+      }));
+    }
+
+    members.forEach(function (m) {
+      g.appendChild(TF.svg("rect", {
+        x: x0 + m * CELL, y: TOP + 3, width: Math.max(CELL, 2.5), height: RH - 6,
+        fill: "var(--cat-1)", rx: 1
+      }));
+    });
+
+    g.appendChild(TF.svg("text", {
+      x: x0, y: TOP + RH + 30, "font-size": "11",
+      text: "cardinality 12"
+    }));
+    g.appendChild(TF.svg("text", {
+      x: x0 + PW - 2, y: TOP + RH + 30, "text-anchor": "end", "font-size": "11",
+      fill: "var(--fg)",
+      text: "containers touched: " + countTouched(set)
+    }));
+    return g;
+  }
+
+  function countTouched(set) {
+    var n = 0;
+    for (var c = 0; c < NC; c++) {
+      for (var i = c * PER; i < (c + 1) * PER; i++) {
+        if (set[i]) { n++; break; }
+      }
+    }
+    return n;
+  }
+
+  svg.appendChild(panel(0, "Created-order entity IDs",
+    arbitrary, "one term's postings, smeared", "array"));
+  svg.appendChild(panel(PW + GAP, "Signature-sorted entity IDs",
+    sorted, "the same postings, in one run", "run"));
+
+  svg.appendChild(TF.svg("line", {
+    x1: PW + GAP / 2, y1: 6, x2: PW + GAP / 2, y2: 144,
+    stroke: "var(--rule)", "stroke-width": 1
+  }));
+
+  svg.appendChild(TF.svg("text", {
+    x: 0, y: 144, "font-size": "10",
+    text: "each box is one Roaring container over the entity-ID axis; a container is only visited if the term has a member in it"
+  }));
+
+  host.appendChild(svg);
+})();
+
+/* ---------------------------------------------------------------------
+   F8 — One query, five steps. Vertical stack of stages; earlier stages
+   stay on screen carrying their artefact forward, later ones are hidden
+   until reached. Buttons plus arrow keys.
+   --------------------------------------------------------------------- */
+(function () {
+  "use strict";
+
+  var body = document.getElementById("f8-body");
+  var rail = document.getElementById("f8-rail");
+  var live = document.getElementById("f8-live");
+  var prev = document.getElementById("f8-prev");
+  var next = document.getElementById("f8-next");
+  if (!body || !rail || !live || !prev || !next) return;
+
+  var N = 8, ROWS = N * N;           /* 8 x 8 cells, 64 rows in Morton order */
+  var RECT = { x0: 2, y0: 1, x1: 6, y1: 5 };   /* half-open viewport */
+
+  function morton(x, y) {
+    var m = 0;
+    for (var b = 0; b < 3; b++) {
+      m |= ((x >> b) & 1) << (2 * b);
+      m |= ((y >> b) & 1) << (2 * b + 1);
+    }
+    return m;
+  }
+
+  /* ranges: Morton codes of the viewport cells, coalesced into runs */
+  var codes = [];
+  for (var y = RECT.y0; y < RECT.y1; y++) {
+    for (var x = RECT.x0; x < RECT.x1; x++) codes.push(morton(x, y));
+  }
+  codes.sort(function (a, b) { return a - b; });
+  var ranges = [];
+  (function () {
+    var s = codes[0], p = codes[0];
+    for (var i = 1; i < codes.length; i++) {
+      if (codes[i] === p + 1) { p = codes[i]; continue; }
+      ranges.push([s, p + 1]); s = codes[i]; p = codes[i];
+    }
+    ranges.push([s, p + 1]);
+  })();
+
+  /* M_auth projected into row space: a seeded, deterministic pattern */
+  var mask = new Uint8Array(ROWS);
+  (function () {
+    var seed = 20260728 >>> 0;
+    for (var i = 0; i < ROWS; i++) {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      mask[i] = (seed >>> 24) < 118 ? 1 : 0;
+    }
+  })();
+
+  var hits = [], total = 0;
+  ranges.forEach(function (r) {
+    var n = 0;
+    for (var i = r[0]; i < r[1]; i++) n += mask[i];
+    hits.push(n); total += n;
+  });
+
+  var cellSet = {};
+  codes.forEach(function (c) { cellSet[c] = 1; });
+
+  var STEPS = [
+    { name: "Viewport", note: "A rectangle at a zoom depth, pinned to one segment-set version." },
+    { name: "Morton ranges", note: "The rectangle decomposes into contiguous half-open row ranges." },
+    { name: "Row bitmap", note: "M_auth composed in entity space, projected into row space, cached per (token, slice, pin)." },
+    { name: "Intersect", note: "Each range meets the row bitmap; empty ranges are culled." },
+    { name: "Count", note: "Range cardinality gives the exact masked count. No data file is touched." }
+  ];
+
+  var step = 0;
+
+  /* --- drawing helpers ------------------------------------------------ */
+  var W = 600;
+
+  function gridSvg(showRect, showCurve, shade) {
+    var S = 26, pad = 2, h = N * S + 4;
+    var svg = TF.svg("svg", {
+      width: N * S + 4, height: h, viewBox: "0 0 " + (N * S + 4) + " " + h,
+      role: "img", "aria-label": "8 by 8 tile grid with the viewport rectangle"
+    });
+    for (var yy = 0; yy < N; yy++) {
+      for (var xx = 0; xx < N; xx++) {
+        var c = morton(xx, yy);
+        var inside = !!cellSet[c];
+        svg.appendChild(TF.svg("rect", {
+          x: pad + xx * S, y: pad + yy * S, width: S - 2, height: S - 2,
+          fill: inside && shade ? "var(--accent-weak)" : "var(--surface-2)",
+          stroke: "var(--grid)", rx: 2
+        }));
+        svg.appendChild(TF.svg("text", {
+          x: pad + xx * S + (S - 2) / 2, y: pad + yy * S + S / 2 + 3,
+          "text-anchor": "middle", "font-size": "9", text: String(c)
+        }));
+      }
+    }
+    if (showCurve) {
+      var pts = [];
+      for (var m = 0; m < ROWS; m++) {
+        var px = 0, py = 0;
+        for (var b = 0; b < 3; b++) {
+          px |= ((m >> (2 * b)) & 1) << b;
+          py |= ((m >> (2 * b + 1)) & 1) << b;
+        }
+        pts.push((pad + px * S + (S - 2) / 2) + "," + (pad + py * S + (S - 2) / 2));
+      }
+      svg.appendChild(TF.svg("polyline", {
+        points: pts.join(" "), fill: "none",
+        stroke: "var(--axis)", "stroke-width": 1
+      }));
+    }
+    if (showRect) {
+      svg.appendChild(TF.svg("rect", {
+        x: pad + RECT.x0 * S - 1, y: pad + RECT.y0 * S - 1,
+        width: (RECT.x1 - RECT.x0) * S, height: (RECT.y1 - RECT.y0) * S,
+        fill: "none", stroke: "var(--cat-2)", "stroke-width": 2, rx: 2
+      }));
+    }
+    return svg;
+  }
+
+  function rowStrip(opts) {
+    var CW = (W - 8) / ROWS, H = 20;
+    var svg = TF.svg("svg", {
+      width: W, height: H + 16, viewBox: "0 0 " + W + " " + (H + 16),
+      role: "img", "aria-label": opts.aria
+    });
+    for (var i = 0; i < ROWS; i++) {
+      var inRange = false;
+      for (var r = 0; r < ranges.length; r++) {
+        if (i >= ranges[r][0] && i < ranges[r][1]) { inRange = true; break; }
+      }
+      var fill = "var(--masked-out)";
+      if (opts.showMask && mask[i]) fill = "var(--cat-1)";
+      if (opts.showHit && inRange && mask[i]) fill = "var(--cat-6)";
+      if (opts.showHit && inRange && !mask[i]) fill = "var(--surface-2)";
+      svg.appendChild(TF.svg("rect", {
+        x: 2 + i * CW, y: 12, width: CW - 1, height: H, fill: fill, rx: 1
+      }));
+    }
+    if (opts.showRanges) {
+      ranges.forEach(function (r) {
+        svg.appendChild(TF.svg("rect", {
+          x: 2 + r[0] * CW - 1, y: 10, width: (r[1] - r[0]) * CW, height: H + 4,
+          fill: "none", stroke: "var(--cat-2)", "stroke-width": 1.5, rx: 2
+        }));
+      });
+    }
+    svg.appendChild(TF.svg("text", {
+      x: 2, y: 8, "font-size": "9", text: "row 0 (Morton order)"
+    }));
+    svg.appendChild(TF.svg("text", {
+      x: W - 2, y: 8, "text-anchor": "end", "font-size": "9", text: String(ROWS)
+    }));
+    return svg;
+  }
+
+  function rangeList() {
+    var d = document.createElement("div");
+    d.className = "p3-chips";
+    ranges.forEach(function (r) {
+      var s = document.createElement("span");
+      s.className = "p3-chip live";
+      s.textContent = "[" + r[0] + ", " + r[1] + ")";
+      d.appendChild(s);
+    });
+    return d;
+  }
+
+  function readout(html) {
+    var d = document.createElement("div");
+    d.className = "p3-readout";
+    d.style.marginTop = "0.3rem";
+    d.innerHTML = html;
+    return d;
+  }
+
+  function stageContent(i) {
+    var wrap = document.createElement("div");
+    if (i === 0) {
+      wrap.appendChild(gridSvg(true, false, false));
+      wrap.appendChild(readout("viewport covers <b>" + codes.length +
+        "</b> tiles at this depth"));
+    } else if (i === 1) {
+      wrap.appendChild(gridSvg(true, true, true));
+      wrap.appendChild(rangeList());
+      wrap.appendChild(readout("<b>" + ranges.length +
+        "</b> contiguous row ranges cover all <b>" + codes.length +
+        "</b> tiles — the Morton prefix property"));
+    } else if (i === 2) {
+      wrap.appendChild(rowStrip({ showMask: true, aria: "M_auth projected into row space" }));
+      var card = 0;
+      for (var k = 0; k < ROWS; k++) card += mask[k];
+      wrap.appendChild(readout("row-space image of <b>M_auth</b>: <b>" +
+        card + "</b> of " + ROWS + " rows visible — the only point at which the two ID spaces meet"));
+    } else if (i === 3) {
+      wrap.appendChild(rowStrip({ showMask: true, showRanges: true, showHit: true,
+        aria: "The row ranges intersected with the row-space mask" }));
+      var culled = hits.filter(function (h) { return h === 0; }).length;
+      wrap.appendChild(readout("intersect_with_range over <b>" + ranges.length +
+        "</b> ranges · <b>" + culled + "</b> culled empty · cost in containers, not rows"));
+    } else {
+      var tbl = document.createElement("table");
+      var head = "<thead><tr><th>Row range</th><th class=\"num\">Rows</th><th class=\"num\">Masked count</th></tr></thead><tbody>";
+      ranges.forEach(function (r, j) {
+        head += "<tr><td>[" + r[0] + ", " + r[1] + ")</td><td class=\"num\">" +
+          (r[1] - r[0]) + "</td><td class=\"num\">" + hits[j] + "</td></tr>";
+      });
+      head += "</tbody>";
+      tbl.innerHTML = head;
+      wrap.appendChild(tbl);
+      wrap.appendChild(readout("exact masked count for the viewport: <b>" +
+        total + "</b> — range_cardinality only, no column read"));
+    }
+    return wrap;
+  }
+
+  /* The rail is built once so that keyboard focus survives a re-render. */
+  var railButtons = STEPS.map(function (s, i) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = String(i + 1);
+    b.setAttribute("aria-label", "Step " + (i + 1) + ": " + s.name);
+    b.addEventListener("click", function () { step = i; render(); });
+    rail.appendChild(b);
+    return b;
+  });
+
+  function render() {
+    body.textContent = "";
+    for (var i = 0; i <= step; i++) {
+      var d = document.createElement("div");
+      d.className = "p3-stage" + (i === step ? " on" : " p3-past");
+      var h = document.createElement("div");
+      h.className = "p3-stage-name";
+      h.textContent = (i + 1) + " · " + STEPS[i].name;
+      d.appendChild(h);
+      d.appendChild(stageContent(i));
+      body.appendChild(d);
+    }
+    railButtons.forEach(function (b, i) {
+      b.setAttribute("aria-pressed", i === step ? "true" : "false");
+    });
+    prev.setAttribute("aria-disabled", step === 0 ? "true" : "false");
+    next.setAttribute("aria-disabled", step === STEPS.length - 1 ? "true" : "false");
+    live.textContent = "Step " + (step + 1) + " of " + STEPS.length + " — " +
+      STEPS[step].name + ". " + STEPS[step].note;
+  }
+
+  prev.addEventListener("click", function () {
+    if (step > 0) { step--; render(); }
+  });
+  next.addEventListener("click", function () {
+    if (step < STEPS.length - 1) { step++; render(); }
+  });
+  document.getElementById("f8-controls").addEventListener("keydown", function (e) {
+    if (e.key === "ArrowRight" && step < STEPS.length - 1) { step++; render(); e.preventDefault(); }
+    else if (e.key === "ArrowLeft" && step > 0) { step--; render(); e.preventDefault(); }
+  });
+
+  render();
+})();
+</script>
