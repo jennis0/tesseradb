@@ -43,7 +43,45 @@ pub struct EngineConfig {
     /// The hard cap on a viewport request's `k` (Reference Sheet R1: default 30, cap `max_k`
     /// 200). [`Engine::viewport`] clamps to this defensively even though Task 13's server is
     /// expected to enforce it at the HTTP boundary too.
+    ///
+    /// **This is the MACHINE ceiling** — GPU, transport, handle table — and it is the number the
+    /// drawn-mark budget spec's probes calibrate. It is deliberately *not* the same knob as
+    /// [`Self::k_max_marks`]: conflating them would mean that raising this on transport evidence
+    /// silently dissolved §7.2's cap clause and the per-tile work bound with it.
     pub max_k: usize,
+    /// §7.2's floor clause, `k_min`: the minimum marks a non-empty tile draws, whatever the
+    /// threshold says. **This is the I7 guarantee** — it is what stops the sparsest principals'
+    /// maps going blank — and it may not be removed as an optimisation. Provisional value 2 (density
+    /// memo §4), pending that memo's §0 visual experiments.
+    ///
+    /// **Must be at least 1.** At 0 the floor clause is switched off and a tile whose visible items
+    /// all sit above θ serves nothing — I7 gone, silently. `tessera-server`'s config loader refuses
+    /// to start on `k_min = 0` (`ConfigError::FloorClauseDisabled`) rather than clamping, so no
+    /// `tessera.toml` can reach that state; an embedder constructing this struct directly is on its
+    /// own honour, which is why the constraint is stated here rather than only in the loader.
+    pub k_min: usize,
+    /// §7.2's cap clause, `K_max`: the most marks any one tile draws.
+    ///
+    /// **This is the OVERPLOT ceiling**, not the machine ceiling — density memo §4 sizes it at 128
+    /// from ink coverage at ~80x80 px per tile, explicitly "overplot-bound, not machine-bound". A
+    /// client may request `k <= k_max_marks`; the effective cap is the smaller. Provisional,
+    /// pending the memo's §0 visual experiments.
+    pub k_max_marks: usize,
+    /// θ's anchor target: the number of marks the *mean occupied tile* should draw at any depth.
+    /// θ_0 is derived as `theta_target_marks * 2^64 / V_total` and progresses `x4` per depth, which
+    /// is what makes the per-tile expectation depth-stable. Provisional value 16 (density memo §4).
+    ///
+    /// Raising this above a session's total visible count saturates θ, which turns selection into
+    /// "serve every visible row up to the cap" — the configuration tests use when they mean to
+    /// assert masking rather than density.
+    pub theta_target_marks: u64,
+    /// The largest `underlay_offset` a request may ask for (§3.3 sub-cell counts). The sub-cell
+    /// depth is `zoom + offset`, clamped to 16.
+    pub max_underlay_offset: u8,
+    /// The hard ceiling on sub-cells in one response. `tiles_for_bbox` is itself uncapped, and the
+    /// underlay multiplies its output by `4^offset`, so without this a single request can ask for
+    /// ~77k `count_range` calls and blow the 10 ms p99 latency gate.
+    pub max_underlay_cells: usize,
 }
 
 /// One authorised viewer session: the credential's granted term set and the mask fragment it

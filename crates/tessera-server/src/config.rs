@@ -29,6 +29,18 @@ pub enum ConfigError {
     BadAddr(String),
     /// Phase 1 ships only `builtin:passthrough` (the wasmtime host is out of scope).
     UnsupportedPlugin(String),
+    /// `serve.k_min = 0`, which switches off §7.2's floor clause — the **I7 guarantee** that a
+    /// non-empty tile always draws at least one mark. With no floor, a tile whose visible items all
+    /// sit above θ serves nothing, and the sparsest principals' maps go blank exactly where I7
+    /// exists to keep them populated. Refused at startup rather than clamped, so a typo cannot
+    /// quietly disable an invariant.
+    FloorClauseDisabled,
+    /// `serve.k_min > serve.k_max_marks`. The floor would be clamped to the cap on every tile,
+    /// which is well-defined but means one of the two numbers is not doing what its author thought.
+    FloorAboveCap {
+        k_min: usize,
+        k_max_marks: usize,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -58,6 +70,19 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "unsupported plugin module '{module}' — Phase 1 ships only builtin:passthrough \
                  (the wasmtime host is out of scope)"
+            ),
+            ConfigError::FloorClauseDisabled => write!(
+                f,
+                "serve.k_min = 0 switches off design §7.2's floor clause, which is the I7 \
+                 guarantee that a non-empty tile always draws at least one mark; with no floor a \
+                 tile whose visible items all sit above the threshold serves nothing. Startup \
+                 refuses rather than clamping, so a typo cannot quietly disable an invariant"
+            ),
+            ConfigError::FloorAboveCap { k_min, k_max_marks } => write!(
+                f,
+                "serve.k_min ({k_min}) exceeds serve.k_max_marks ({k_max_marks}) — the floor \
+                 would be clamped to the cap on every tile, so one of the two is not doing what \
+                 its author intended"
             ),
         }
     }
@@ -108,6 +133,16 @@ struct RawServe {
     #[serde(default)]
     max_k: Option<usize>,
     #[serde(default)]
+    k_min: Option<usize>,
+    #[serde(default)]
+    k_max_marks: Option<usize>,
+    #[serde(default)]
+    theta_target_marks: Option<u64>,
+    #[serde(default)]
+    max_underlay_offset: Option<u8>,
+    #[serde(default)]
+    max_underlay_cells: Option<usize>,
+    #[serde(default)]
     session_credential_file: Option<PathBuf>,
     #[serde(default)]
     session_credential_env: Option<String>,
@@ -138,12 +173,42 @@ pub struct Config {
     pub session_addr: SocketAddr,
     pub control_listen: ControlListen,
     pub max_k: usize,
+    /// §7.2's floor clause. See `EngineConfig::k_min`.
+    pub k_min: usize,
+    /// §7.2's cap clause — the *overplot* ceiling, distinct from `max_k`'s machine ceiling. See
+    /// `EngineConfig::k_max_marks`.
+    pub k_max_marks: usize,
+    /// θ's anchor target. See `EngineConfig::theta_target_marks`.
+    pub theta_target_marks: u64,
+    pub max_underlay_offset: u8,
+    pub max_underlay_cells: usize,
     pub session_credential: String,
     pub operator_credential: String,
 }
 
-/// Reference Sheet R1: viewport `k`'s cap default.
+/// Reference Sheet R1: viewport `k`'s cap default. **The machine ceiling** — the drawn-mark budget
+/// spec's probes calibrate this number, and that calibration is blocked on the external-ID identity
+/// plan's rebuild, so this value must not be changed here.
 const DEFAULT_MAX_K: usize = 200;
+
+/// §7.2's floor clause: the fewest marks a non-empty tile draws. Provisional (density memo §4),
+/// pending that memo's §0 visual experiments.
+const DEFAULT_K_MIN: usize = 2;
+
+/// §7.2's cap clause: the most marks any one tile draws. **The overplot ceiling** — density memo §4
+/// sizes it from ink coverage at ~80x80 px per tile, not from machine limits. Provisional.
+const DEFAULT_K_MAX_MARKS: usize = 128;
+
+/// θ's anchor target: marks the mean occupied tile should draw at any depth. Provisional.
+const DEFAULT_THETA_TARGET_MARKS: u64 = 16;
+
+/// The largest `underlay_offset` a request may ask for (§3.3): sub-cell depth is `zoom + offset`.
+const DEFAULT_MAX_UNDERLAY_OFFSET: u8 = 4;
+
+/// The ceiling on sub-cells in one response. `tiles_for_bbox` is itself uncapped and the underlay
+/// multiplies its output by `4^offset`, so without this one request can demand ~77k
+/// `count_range` calls and blow the 10 ms p99 latency gate.
+const DEFAULT_MAX_UNDERLAY_CELLS: usize = 8192;
 
 pub fn load(path: &Path) -> Result<Config> {
     let text = fs::read_to_string(path)?;
@@ -197,6 +262,16 @@ fn parse(text: &str) -> Result<Config> {
         raw.serve.operator_credential_env.as_deref(),
     )?;
 
+    // §7.2's floor clause is the I7 guarantee; refuse to start without it rather than clamp.
+    let k_min = raw.serve.k_min.unwrap_or(DEFAULT_K_MIN);
+    let k_max_marks = raw.serve.k_max_marks.unwrap_or(DEFAULT_K_MAX_MARKS);
+    if k_min == 0 {
+        return Err(ConfigError::FloorClauseDisabled);
+    }
+    if k_min > k_max_marks {
+        return Err(ConfigError::FloorAboveCap { k_min, k_max_marks });
+    }
+
     Ok(Config {
         bundle_path: raw.bundle.path,
         cache_dir: raw.bundle.cache,
@@ -207,6 +282,20 @@ fn parse(text: &str) -> Result<Config> {
         session_addr,
         control_listen,
         max_k: raw.serve.max_k.unwrap_or(DEFAULT_MAX_K),
+        k_min,
+        k_max_marks,
+        theta_target_marks: raw
+            .serve
+            .theta_target_marks
+            .unwrap_or(DEFAULT_THETA_TARGET_MARKS),
+        max_underlay_offset: raw
+            .serve
+            .max_underlay_offset
+            .unwrap_or(DEFAULT_MAX_UNDERLAY_OFFSET),
+        max_underlay_cells: raw
+            .serve
+            .max_underlay_cells
+            .unwrap_or(DEFAULT_MAX_UNDERLAY_CELLS),
         session_credential,
         operator_credential,
     })
@@ -278,5 +367,74 @@ mod tests {
             err,
             ConfigError::MissingDisclosureKey("token_max_lifetime")
         ));
+    }
+
+    /// A complete, valid config, with `[serve]` extras interpolated — used by the selection-clause
+    /// tests below so each one differs from a working config in exactly one key.
+    fn valid_toml(serve_extra: &str) -> String {
+        format!(
+            r#"
+            [bundle]
+            path = "b"
+            cache = "c"
+            wal = "w"
+            [plugin]
+            module = "builtin:passthrough"
+            [disclosure]
+            min_visible_members = 10
+            token_max_lifetime = 3600
+            [serve]
+            viewer = "127.0.0.1:7407"
+            session = "127.0.0.1:7408"
+            control = "127.0.0.1:7409"
+            session_credential_env = "TESSERA_TEST_SESSION_CRED"
+            operator_credential_env = "TESSERA_TEST_OPERATOR_CRED"
+            {serve_extra}
+        "#
+        )
+    }
+
+    #[test]
+    fn the_selection_clauses_have_working_defaults() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("")).expect("defaults must load");
+        assert_eq!(config.k_min, DEFAULT_K_MIN);
+        assert_eq!(config.k_max_marks, DEFAULT_K_MAX_MARKS);
+        assert_eq!(config.theta_target_marks, DEFAULT_THETA_TARGET_MARKS);
+        assert_eq!(config.max_underlay_offset, DEFAULT_MAX_UNDERLAY_OFFSET);
+        assert_eq!(config.max_underlay_cells, DEFAULT_MAX_UNDERLAY_CELLS);
+        assert_eq!(
+            config.max_k, DEFAULT_MAX_K,
+            "max_k is the machine ceiling and is not this plan's to change"
+        );
+    }
+
+    /// `k_min = 0` disables §7.2's floor clause, which is the I7 guarantee. Startup must refuse
+    /// rather than clamp — a clamp would mean a typo silently changed the configuration, and a
+    /// pass-through would mean a typo silently disabled an invariant.
+    #[test]
+    fn a_zero_floor_refuses_to_start() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml("k_min = 0")).unwrap_err();
+        assert!(matches!(err, ConfigError::FloorClauseDisabled), "{err}");
+    }
+
+    #[test]
+    fn a_floor_above_the_cap_refuses_to_start() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml("k_min = 200\nk_max_marks = 128")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::FloorAboveCap {
+                    k_min: 200,
+                    k_max_marks: 128
+                }
+            ),
+            "{err}"
+        );
     }
 }

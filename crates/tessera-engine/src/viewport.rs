@@ -4,10 +4,14 @@
 //! (I11: geometry identity only, `(prefix, segments_version)` — never `overlay_version`, so an
 //! overlay swap never invalidates an outstanding pin), gets-or-builds the session's cached row
 //! projection, composes the effective mask (I1), and for every tile touching `bbox` counts and
-//! samples. The sampler is a **deliberate placeholder** (I7) — see [`sample_tile`]'s doc — not
-//! the real priority-sample definition.
+//! selects.
+//!
+//! Selection is §7.2's real definition — floor ∪ threshold ∪ cap over `tessera_id`, evaluated
+//! inside the mask (I7). It lives in [`crate::select`], which carries the definition, the nesting
+//! argument and the two evaluation routes. This module's job is only to resolve the per-request
+//! parameters (notably θ's anchor, which **must** be the composed visible cardinality — see
+//! [`crate::select::Threshold::anchor`] for the I2 argument) and to gather what selection returns.
 
-use std::ops::Range;
 use std::sync::Arc;
 
 use tessera_spatial::{tiles_for_bbox, Extent};
@@ -17,7 +21,8 @@ use tessera_store::tile_ranges;
 use tessera_store::StoreError;
 use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 
-use crate::compose::{compose, visible_to, EffectiveMask, RowProjection};
+use crate::compose::{compose, visible_to, RowProjection};
+use crate::select::{SelectParams, Selection, Threshold};
 use crate::session::{Engine, EngineError, Result, Session};
 use crate::Generation;
 
@@ -38,6 +43,23 @@ pub struct TileCount {
     pub tile: u64,
     pub visible: u64,
     pub matched: u64,
+    /// How many of this tile's points are in [`ViewportOut::points`] — §7.2's `m(T)`.
+    ///
+    /// **Why it is here.** `points` is a flat concatenation in tile order, and every reader used to
+    /// recover the per-tile grouping arithmetically as `min(k, visible)`. Under the density rule the
+    /// per-tile count is `min(min(cap, max(k_min, C_θ)), visible)`, which that arithmetic cannot
+    /// reproduce — so the differential oracle could not split the points batch, and a client could
+    /// not truncate per tile to its own budget, which is what the nesting argument's
+    /// client-truncation clause requires.
+    ///
+    /// **It is a convenience, not a new capability, and the distinction matters.** The grouping was
+    /// always recoverable without it: every point carries `x`/`y`, `GET /v1/meta` publishes the
+    /// quantisation extents, and `morton_of(x, y, extent) >> (32 − 2·zoom)` is the containing tile
+    /// (contracts §2.5) — the reference oracle already recomputes exactly that. So `served`
+    /// discloses nothing: it removes a recomputation from every client. Do not let this field be
+    /// cited later as precedent that some *other* quantity must go on the wire because it is
+    /// otherwise underivable.
+    pub served: u64,
 }
 
 /// One sampled point.
@@ -290,6 +312,25 @@ impl Engine {
         let tiles = tiles_for_bbox(bbox, zoom, &extent);
         let declared_scalars = &generation.bundle.manifest.declared_scalars;
 
+        // θ's anchor: the session's **composed** visible cardinality over this slice's whole row
+        // space. It must be the composed figure and not `base`'s — see `Threshold::anchor`'s doc
+        // for the I2 argument and the concrete channel the pre-overlay figure opens.
+        //
+        // This is viewport-*invariant*: it depends on the session's mask and the generation, never
+        // on `bbox` or `zoom`, so θ does not move when the viewer pans — which is the churn §7.2
+        // forbids. It does move on an overlay swap, which is accepted: swaps are rare against pans,
+        // and because the served set is a `tessera_id` prefix, a small θ move perturbs only the
+        // marks nearest the cut.
+        let v_total = mask.visible_total();
+        let params = SelectParams {
+            k_min: self.config.k_min,
+            // The client may ask for less than the overplot ceiling; it may not ask for more.
+            // Applying it here rather than truncating afterwards is free — the served set is a
+            // prefix, so the two agree — and it bounds the selection heap and the output gather.
+            cap: k.min(self.config.k_max_marks),
+            threshold: Threshold::anchor(v_total, self.config.theta_target_marks).at_depth(zoom),
+        };
+
         let mut tile_counts = Vec::new();
         let mut points = Vec::new();
 
@@ -301,18 +342,26 @@ impl Engine {
             let range = tile_ranges(segment, &tile);
             let visible = mask.count_range(range.clone());
             if visible == 0 {
-                // Skip empty: no count row, no sampling work for a tile with nothing visible.
+                // Skip empty: no count row, no selection work for a tile with nothing visible.
                 continue;
             }
+
+            let selected = Selection::of(&mask, segment, range, &params, visible);
 
             tile_counts.push(TileCount {
                 tile: tile.prefix,
                 visible,
                 // Phase 1 has no filters (Reference Sheet R5): matched == visible everywhere.
                 matched: visible,
+                served: selected.rows.len() as u64,
             });
 
-            sample_tile(&mask, segment, range, declared_scalars, k, &mut points);
+            points.extend(
+                selected
+                    .rows
+                    .into_iter()
+                    .map(|row| row_to_point(segment, row, declared_scalars)),
+            );
         }
 
         Ok(ViewportOut {
@@ -320,30 +369,6 @@ impl Engine {
             tiles: tile_counts,
             points,
         })
-    }
-}
-
-/// **Placeholder sampler (I7) — deliberately wrong.** Takes the first `k` visible row IDs in
-/// ascending row (Morton) order within `range`. This is *not* the priority-sample definition
-/// (Reference Sheet R3: `priority(e) = splitmix64(e) >> 48`); it exists only so the walking
-/// skeleton has an end-to-end query path to test against, and Phase 2's differential oracle is
-/// *expected* to disagree with it. Do not let this drift into being mistaken for the real
-/// sampling policy — replace it before Phase 2 ships.
-fn sample_tile(
-    mask: &EffectiveMask,
-    segment: &SegmentData,
-    range: Range<u32>,
-    declared_scalars: &[DeclaredScalar],
-    k: usize,
-    out: &mut Vec<PointOut>,
-) {
-    let mut remaining = k;
-    for row in mask.iter_range(range) {
-        if remaining == 0 {
-            break;
-        }
-        out.push(row_to_point(segment, row, declared_scalars));
-        remaining -= 1;
     }
 }
 

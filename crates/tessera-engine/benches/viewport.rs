@@ -152,9 +152,20 @@ fn bench_viewport(c: &mut Criterion) {
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
         Passthrough::new(),
+        // The production defaults, deliberately: this bench exists to measure what the server
+        // actually does, so θ is live here rather than saturated the way the correctness tests
+        // configure it. Note that recorded baselines from before §7.2's density rule landed are
+        // **not** comparable — the selection path now reads `tessera_id` per visible row where the
+        // placeholder read nothing, and the number of gathered points is θ-dependent rather than
+        // `min(k, visible)`.
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 200,
+            k_min: 2,
+            k_max_marks: 128,
+            theta_target_marks: 16,
+            max_underlay_offset: 4,
+            max_underlay_cells: 8192,
         },
     )
     .expect("engine should open the 2.4M bundle");

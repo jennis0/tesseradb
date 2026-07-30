@@ -8,6 +8,7 @@
 //! `tessera build` advances the bundle.
 
 pub mod compose;
+pub mod select;
 pub mod session;
 pub mod viewport;
 
@@ -19,6 +20,7 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
 pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
+pub use select::{route_for, served_count, Route, SelectParams, Selection, Threshold};
 pub use session::{Engine, EngineConfig, EngineError, Session};
 pub use viewport::{EngineMeta, ItemOut, PointOut, ScalarOut, TileCount, ViewportOut};
 

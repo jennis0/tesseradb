@@ -54,19 +54,35 @@ fn extent() -> Extent {
     }
 }
 
+/// The base config for these tests.
+///
+/// **`theta_target_marks` is raised above `N_ITEMS` on purpose.** These tests assert *masking* —
+/// which items a principal may see — not density. Leaving θ live would make every assertion about a
+/// point set depend on the density rule's threshold clause as well, so a masking bug and a θ
+/// arithmetic bug would be indistinguishable. Raising the target above the fixture's total visible
+/// count saturates θ at every depth, which reduces selection to "serve every visible row up to the
+/// cap" and isolates what these tests are for. Density itself is tested in `selection.rs`, against
+/// fixtures built for it.
 fn config() -> EngineConfig {
     EngineConfig {
         token_max_lifetime_secs: 3600,
         max_k: 200,
+        k_min: 2,
+        k_max_marks: 200,
+        theta_target_marks: N_ITEMS * 2,
+        max_underlay_offset: 4,
+        max_underlay_cells: 8192,
     }
 }
 
-/// A config whose `max_k` is large enough to never cap sampling — used by tests asserting
-/// membership (counts, exact point sets) rather than the `max_k` cap itself.
+/// A config whose caps are large enough to never truncate a sample — used by tests asserting
+/// membership (counts, exact point sets) rather than a cap itself. θ is saturated here too, for the
+/// reason given on [`config`].
 fn config_uncapped() -> EngineConfig {
     EngineConfig {
-        token_max_lifetime_secs: 3600,
         max_k: N_ITEMS as usize,
+        k_max_marks: N_ITEMS as usize,
+        ..config()
     }
 }
 
@@ -396,11 +412,19 @@ fn d_suppressing_an_item_drops_the_count_by_one() {
     assert_eq!(out_b.tiles[0].matched, out_b.tiles[0].visible);
 }
 
-/// (f) The placeholder sampler returns the **first** `k` visible row IDs in row (Morton) order —
-/// exact row ids asserted directly against the segment's own on-disk row order, proving this is
-/// the naive placeholder described in the module doc, not a priority sample.
+/// (f) Selection returns the *k* lowest `tessera_id`s in the mask — **not** the first *k* in row
+/// (Morton) order.
+///
+/// This test replaces one that asserted the opposite, and the replacement is the point: the
+/// placeholder took `mask.iter_range(..)` in row order, which within a leaf Morton cell *is*
+/// `tessera_id` order (storage sort is `(morton, tessera_id)`), so the two only diverge across
+/// cells. At zoom 0 the whole segment is one tile spanning every cell, so the divergence is maximal
+/// and the second assertion below — that the served set is *not* the first three rows — is what
+/// actually pins the fix. A sample ordered by row order is a sample ordered by **permission
+/// signature**, because entity IDs are signature-sorted permanently under I9; that is the defect
+/// `docs/design-memos/2026-07-30-priority-as-identity-prefix.md` exists to close.
 #[test]
-fn f_sampler_returns_first_k_in_row_order() {
+fn f_selection_returns_the_lowest_tessera_ids_not_the_first_rows() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -411,9 +435,20 @@ fn f_sampler_returns_first_k_in_row_order() {
 
     let bundle = open_bundle(&bundle_root).unwrap();
     let segment = &bundle.partitions["default"].slices["s0"].segments[0];
-    let expected_tessera_ids: Vec<u64> = segment.columns.tessera_id()[0..3].to_vec();
-    let expected_xs: Vec<f32> = segment.columns.x()[0..3].to_vec();
-    let expected_ys: Vec<f32> = segment.columns.y()[0..3].to_vec();
+    let ids = segment.columns.tessera_id();
+
+    // The definition's answer, computed independently of the engine: the three smallest identities
+    // in the segment, ascending.
+    let mut by_id: Vec<(u64, usize)> = ids.iter().copied().zip(0..).collect();
+    by_id.sort_unstable();
+    let expected: Vec<u64> = by_id[0..3].iter().map(|&(id, _)| id).collect();
+    let expected_xy: Vec<(f32, f32)> = by_id[0..3]
+        .iter()
+        .map(|&(_, row)| (segment.columns.x()[row], segment.columns.y()[row]))
+        .collect();
+
+    // What the retired placeholder would have returned.
+    let first_rows_in_row_order: Vec<u64> = ids[0..3].to_vec();
 
     let engine = open_engine(
         &bundle_root,
@@ -426,14 +461,155 @@ fn f_sampler_returns_first_k_in_row_order() {
         .unwrap();
 
     assert_eq!(out.points.len(), 3);
+    assert_eq!(
+        out.tiles[0].served, 3,
+        "the tile row must report what it served"
+    );
+
+    let got: Vec<u64> = out.points.iter().map(|p| p.tessera_id.raw()).collect();
+    assert_eq!(
+        got, expected,
+        "served set must be the three lowest identities"
+    );
     for (i, point) in out.points.iter().enumerate() {
+        assert_eq!((point.x, point.y), expected_xy[i], "point {i} geometry");
+    }
+
+    // The discriminating assertion. If the fixture ever changed such that these coincided, the
+    // test above would pass while proving nothing — so the divergence is asserted, not assumed.
+    assert_ne!(
+        expected, first_rows_in_row_order,
+        "fixture is degenerate: the lowest identities are also the first rows, so this test \
+         cannot distinguish the definition from the retired row-order placeholder"
+    );
+    assert_ne!(
+        got, first_rows_in_row_order,
+        "selection is still returning the first k rows in Morton order — the sample is ordered by \
+         permission signature (I9 signature-sorted entity IDs), which is the defect being fixed"
+    );
+}
+
+/// **θ must not move when the viewer pans.** A viewport-recomputed θ sheds marks on every pan,
+/// which is the churn the whole priority scheme exists to avoid — so θ is derived from the session's
+/// composed visible total and the request's depth, and from nothing about `bbox`.
+///
+/// This test pans across two overlapping bboxes at a fixed zoom and asserts that a tile appearing in
+/// both is served identically. It holds the generation fixed (one engine, no overlay writes) because
+/// θ is generation-*dependent* by design — an overlay swap may move it, a pan may not.
+#[test]
+fn theta_does_not_move_when_the_viewport_pans() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    // θ live, not saturated: this test is about θ's inputs, so it must actually be doing something.
+    let engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        EngineConfig {
+            token_max_lifetime_secs: 3600,
+            max_k: 200,
+            k_min: 2,
+            k_max_marks: 128,
+            theta_target_marks: 16,
+            max_underlay_offset: 4,
+            max_underlay_cells: 8192,
+        },
+    )
+    .unwrap();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    // Two overlapping viewports at zoom 3, chosen so their tile sets intersect.
+    let wide = engine
+        .viewport(&session, "s0", 3, [0.0, 0.0, 1000.0, 1000.0], 30, None)
+        .unwrap();
+    let narrow = engine
+        .viewport(&session, "s0", 3, [400.0, 400.0, 700.0, 700.0], 30, None)
+        .unwrap();
+
+    let shared: Vec<u64> = narrow
+        .tiles
+        .iter()
+        .map(|t| t.tile)
+        .filter(|p| wide.tiles.iter().any(|t| t.tile == *p))
+        .collect();
+    assert!(
+        !shared.is_empty(),
+        "the two viewports must share at least one tile for this test to mean anything"
+    );
+
+    for prefix in shared {
+        let a = wide.tiles.iter().find(|t| t.tile == prefix).unwrap();
+        let b = narrow.tiles.iter().find(|t| t.tile == prefix).unwrap();
         assert_eq!(
-            point.tessera_id.raw(),
-            expected_tessera_ids[i],
-            "point {i} is not the placeholder's expected first-k row"
+            a.visible, b.visible,
+            "tile {prefix}: visible moved on a pan"
         );
-        assert_eq!(point.x, expected_xs[i]);
-        assert_eq!(point.y, expected_ys[i]);
+        assert_eq!(
+            a.served, b.served,
+            "tile {prefix}: served moved on a pan — θ is being recomputed per viewport, which \
+             sheds marks on every pan"
+        );
+    }
+}
+
+/// A non-empty tile always draws at least one mark, at every depth, under the live-θ configuration.
+/// Owner decision 4 accepts that the density rule draws *fewer* marks than the retired flat `k`;
+/// it does not accept blank tiles.
+#[test]
+fn no_visible_tile_is_ever_served_empty() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        EngineConfig {
+            token_max_lifetime_secs: 3600,
+            max_k: 200,
+            k_min: 2,
+            k_max_marks: 128,
+            theta_target_marks: 16,
+            max_underlay_offset: 4,
+            max_underlay_cells: 8192,
+        },
+    )
+    .unwrap();
+    // The sparsest principal in this fixture — a third of the corpus.
+    let session = engine.authorise(&subset_credential()).unwrap();
+
+    for zoom in 0..8u8 {
+        let out = engine
+            .viewport(&session, "s0", zoom, [0.0, 0.0, 1000.0, 1000.0], 30, None)
+            .unwrap();
+        for tile in &out.tiles {
+            assert!(tile.visible > 0, "an empty tile should not be reported");
+            assert!(
+                tile.served >= 1,
+                "zoom {zoom}, tile {}: {} visible but nothing served — the floor clause is not \
+                 holding, which is an I7 regression",
+                tile.tile,
+                tile.visible
+            );
+        }
+        assert_eq!(
+            out.points.len(),
+            out.tiles.iter().map(|t| t.served as usize).sum::<usize>(),
+            "zoom {zoom}: the points batch length must equal the sum of served counts"
+        );
     }
 }
 
@@ -1003,6 +1179,11 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 200,
+            k_min: 2,
+            k_max_marks: 200,
+            theta_target_marks: u64::MAX,
+            max_underlay_offset: 4,
+            max_underlay_cells: 8192,
         },
     )
     .expect("engine should open the 2.4M bundle");

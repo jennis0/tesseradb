@@ -44,6 +44,11 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     let engine_config = EngineConfig {
         token_max_lifetime_secs: config.token_max_lifetime_secs,
         max_k: config.max_k,
+        k_min: config.k_min,
+        k_max_marks: config.k_max_marks,
+        theta_target_marks: config.theta_target_marks,
+        max_underlay_offset: config.max_underlay_offset,
+        max_underlay_cells: config.max_underlay_cells,
     };
     let engine = Engine::open(
         &config.bundle_path,

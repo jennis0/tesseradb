@@ -158,6 +158,13 @@ async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> 
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 200,
+            k_min: 2,
+            k_max_marks: 200,
+            // Saturate theta: these tests assert HTTP shape and masking, not density. See
+            // tessera-engine's tests/viewport.rs `config()` for the full reasoning.
+            theta_target_marks: u64::MAX,
+            max_underlay_offset: 4,
+            max_underlay_cells: 8192,
         },
     )
     .expect("engine should open against a freshly built bundle");
@@ -1522,6 +1529,11 @@ fn concurrent_ingest_and_change_both_survive() {
             EngineConfig {
                 token_max_lifetime_secs: 3600,
                 max_k: 200,
+                k_min: 2,
+                k_max_marks: 200,
+                theta_target_marks: u64::MAX,
+                max_underlay_offset: 4,
+                max_underlay_cells: 8192,
             },
         )
         .expect("engine should open"),

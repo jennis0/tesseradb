@@ -36,21 +36,33 @@ use tessera_types::{EntityId, TermId};
 /// / `contains`, both O(containers touched), never re-derives it from the fragment.
 pub struct RowProjection {
     rows: Bitmap,
+    /// `rows.cardinality()`, computed once at construction.
+    ///
+    /// Memoised because §7.2's θ anchor needs the projection's total cardinality on **every**
+    /// viewport (see [`EffectiveMask::visible_total`]), and `Bitmap::cardinality` is O(containers)
+    /// — roughly 15k containers for a 2.5x10⁸-row projection at 10⁹. Paying that per request would
+    /// make the anchor a per-viewport cost rather than the "almost nothing" it is advertised as.
+    /// The projection is immutable, so this can never go stale.
+    cardinality: u64,
 }
 
 impl RowProjection {
     /// Project `fragment`'s entity-space bitmap into this segment's row space via `perm`. Do not
     /// call this on the per-viewport path — see this struct's doc.
     pub fn new(fragment: &FrozenFragment, perm: &Permutation) -> Self {
-        RowProjection {
-            rows: perm.project(&fragment.view()),
-        }
+        Self::from_rows(perm.project(&fragment.view()))
     }
 
     /// Build directly from an already-projected row-space bitmap (e.g. in tests, or when a
     /// caller has its own reason to hold the projection independently of a `FrozenFragment`).
     pub fn from_rows(rows: Bitmap) -> Self {
-        RowProjection { rows }
+        let cardinality = rows.cardinality();
+        RowProjection { rows, cardinality }
+    }
+
+    /// The number of rows in this projection — O(1), memoised at construction.
+    pub fn cardinality(&self) -> u64 {
+        self.cardinality
     }
 
     pub fn bitmap(&self) -> &Bitmap {
@@ -84,6 +96,28 @@ impl EffectiveMask {
         let minus_count = self.minus.range_cardinality(r.clone());
         let plus_count = self.plus.range_cardinality(r);
         base_count - minus_count + plus_count
+    }
+
+    /// The total number of visible rows in this mask, over the whole row space — §7.2's `V_total`,
+    /// the quantity θ's anchor is derived from.
+    ///
+    /// **This is the composed figure, not the projection's.** I2 requires every aggregate be
+    /// computable from inside `M_auth` alone, and `base` is `M_auth` *before* the overlay diff:
+    /// after an accepted delete or suppression it strictly contains `M_auth`. Anchoring θ on
+    /// `base.cardinality()` alone would let a viewer aggregate mark counts across tiles, solve for
+    /// the anchor, difference it against its own summed per-tile `visible` (which §7.1 discloses
+    /// exactly), and recover a running estimate of how many of its own items have been denied —
+    /// a count of items *outside* `M_auth`. See [`crate::select::Threshold::anchor`].
+    ///
+    /// **Deliberately the same arithmetic as [`Self::count_range`]**, one term at a time, so the
+    /// anchor and the per-tile counts can never disagree about what composition means. Two
+    /// transcriptions of the composition rule is the same failure mode as two transcriptions of the
+    /// deny precedence — see [`verdict`]'s doc.
+    ///
+    /// O(containers in the diffs): `base`'s cardinality is memoised
+    /// ([`RowProjection::cardinality`]) and the diffs are tiny by construction.
+    pub fn visible_total(&self) -> u64 {
+        self.base.cardinality() - self.minus.cardinality() + self.plus.cardinality()
     }
 
     /// Merged, ascending iteration over the effective mask restricted to `r`: `(base ∩ r) ∖ minus

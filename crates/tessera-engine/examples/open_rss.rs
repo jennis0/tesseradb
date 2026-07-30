@@ -28,6 +28,11 @@ fn main() {
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 200,
+            k_min: 2,
+            k_max_marks: 200,
+            theta_target_marks: u64::MAX,
+            max_underlay_offset: 4,
+            max_underlay_cells: 8192,
         },
     )
     .expect("engine should open the 2.4M bundle");
