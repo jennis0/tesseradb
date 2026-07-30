@@ -470,6 +470,44 @@ impl Engine {
         self.external_index.resolve(external_id)
     }
 
+    /// Batch form of [`Self::resolve_external_id`] for `/control/ingest`'s duplicate check
+    /// (contracts §3.1 r6): live map first for the *whole* batch (Important I-8 — `established`
+    /// holds every id ingested since the build, which the sidecar cannot see at all, and is
+    /// exactly where a retried client batch's duplicate lives), then one batched, sorted sidecar
+    /// call for whatever residual keys the live map didn't resolve — each bundle extent is opened
+    /// at most once regardless of batch size, never once per row.
+    ///
+    /// Returns one `Option<EntityId>` per input, in the caller's given order.
+    pub fn resolve_external_ids(
+        &self,
+        external_ids: &[Vec<u8>],
+    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
+        let established = self.established.lock().unwrap();
+        let mut results: Vec<Option<EntityId>> = external_ids
+            .iter()
+            .map(|id| established.get(id.as_slice()).copied())
+            .collect();
+        drop(established);
+
+        let residual_positions: Vec<usize> = results
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| if r.is_none() { Some(i) } else { None })
+            .collect();
+        if residual_positions.is_empty() {
+            return Ok(results);
+        }
+        let residual_keys: Vec<Vec<u8>> = residual_positions
+            .iter()
+            .map(|&i| external_ids[i].clone())
+            .collect();
+        let residual_results = self.external_index.resolve_many(&residual_keys)?;
+        for (pos, resolved) in residual_positions.into_iter().zip(residual_results) {
+            results[pos] = resolved;
+        }
+        Ok(results)
+    }
+
     /// `entity -> external_id` for drill-down (`/v1/items`). Ordering mirrors
     /// `resolve_external_id`'s live-map-first rule, running the other way: post-build ingest has
     /// no locator slot and no extent entry, so the live map (`established_inverse`) is consulted
@@ -736,6 +774,16 @@ impl ExternalIdIndex {
     /// still fail-closed in effect, but no longer a panic in an async handler or at open.
     fn resolve(&self, external_id: &[u8]) -> std::result::Result<Option<EntityId>, StoreError> {
         self.0.resolve(external_id)
+    }
+
+    /// Batched form of [`Self::resolve`] — one sorted pass over `external_ids`, each extent
+    /// opened at most once, rather than one open per row (`/control/ingest`'s duplicate check,
+    /// contracts §3.1 r6).
+    fn resolve_many(
+        &self,
+        external_ids: &[Vec<u8>],
+    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
+        self.0.resolve_many(external_ids)
     }
 
     /// `entity -> external_id`, distinguishing "genuinely has none" from "an inconsistency" — see

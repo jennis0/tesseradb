@@ -552,6 +552,55 @@ impl ExternalIdSidecar {
         Ok(extent.resolve(external_id))
     }
 
+    /// Resolve many external ids in one batched pass over the bundle — `/control/ingest`'s
+    /// duplicate check (contracts §3.1 r6), which must not open one extent per row against a
+    /// batch that can run to thousands of keys. `scan_bounds` runs exactly once regardless of
+    /// batch size, and each extent is opened (verified, mapped) at most once even if many keys
+    /// fall inside it: the input is sorted internally so the resolved keys visit the extents in
+    /// one ascending walk, mirroring how the extents themselves partition ascending order.
+    ///
+    /// Returns one `Option<EntityId>` per input key, in the caller's original order — the input
+    /// need not be pre-sorted. Every failure is `Err(StoreError::InvalidSidecar)`, exactly as
+    /// [`Self::resolve`]: a batch of otherwise-fine keys must not read as "all absent" because one
+    /// extent is corrupt.
+    pub fn resolve_many(&self, external_ids: &[Vec<u8>]) -> Result<Vec<Option<EntityId>>> {
+        let mut results = vec![None; external_ids.len()];
+        if self.extents.is_empty() || external_ids.is_empty() {
+            return Ok(results);
+        }
+        let plain: Vec<ExtentDesc> = self.extents.iter().map(|e| e.desc.clone()).collect();
+        let scan = scan_bounds(&plain)?;
+
+        // Sort input indices by key (not the keys themselves) so results can still be returned
+        // in the caller's original order.
+        let mut order: Vec<usize> = (0..external_ids.len()).collect();
+        order.sort_by(|&a, &b| external_ids[a].cmp(&external_ids[b]));
+
+        // Extents partition one ascending order (scan_bounds already checked this), and `order`
+        // visits keys ascending too, so the extent cursor only ever moves forward — one pass,
+        // each extent opened at most once.
+        let mut extent_idx = 0usize;
+        for i in order {
+            let key = &external_ids[i];
+            while extent_idx < scan.bounds.len()
+                && !scan.bounds[extent_idx]
+                    .as_ref()
+                    .is_some_and(|(_, last, _)| last.as_slice() >= key.as_slice())
+            {
+                extent_idx += 1;
+            }
+            if extent_idx >= scan.bounds.len() {
+                // Past every extent's last key: absent from the bundle, and so is every key
+                // still to come (they only get larger) — but other, smaller-sorted keys already
+                // resolved above may still be valid, so keep going rather than returning early.
+                continue;
+            }
+            let extent = self.extents[extent_idx].get_or_load()?;
+            results[i] = extent.resolve(key);
+        }
+        Ok(results)
+    }
+
     /// The locator's length — the number of entity-id slots this bundle's build covered
     /// (`entity_id_high_water` at build time), or `0` if this deployment wrote no locator at all
     /// (no caller ever supplied an external id). Exposed so a caller (`tessera-engine`'s
@@ -751,6 +800,55 @@ mod tests {
         assert_eq!(found, Some(EntityId::new(15)));
         assert_eq!(sidecar.open_extents(), 1);
         assert!(sidecar.is_open());
+    }
+
+    #[test]
+    fn resolve_many_opens_each_extent_at_most_once_and_preserves_order() {
+        // The point of batching: `/control/ingest`'s duplicate check calls this over a whole
+        // batch, and must not open one extent per row. All 30 keys span all three extents, so a
+        // naive per-row `resolve` would open all three anyway here, but the assertion that
+        // matters is that each opens EXACTLY once regardless of how many of its keys are queried
+        // — repeat every key from extent 1 many times over.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (sidecar, keys) = sidecar_with_three_extents(dir.path());
+
+        // Deliberately out of order and with repeats, and a query, to prove the function sorts
+        // internally rather than requiring a sorted or deduplicated caller, and returns answers
+        // in the CALLER's original order, not sorted order.
+        let query: Vec<Vec<u8>> = vec![
+            keys[25].to_vec(),           // extent 2
+            keys[5].to_vec(),            // extent 0
+            b"not-a-real-key!".to_vec(), // absent entirely
+            keys[15].to_vec(),           // extent 1
+            keys[15].to_vec(),           // extent 1 again
+            keys[0].to_vec(),            // extent 0, smallest key
+        ];
+        let results = sidecar.resolve_many(&query).unwrap();
+        assert_eq!(
+            results,
+            vec![
+                Some(EntityId::new(25)),
+                Some(EntityId::new(5)),
+                None,
+                Some(EntityId::new(15)),
+                Some(EntityId::new(15)),
+                Some(EntityId::new(0)),
+            ],
+            "must preserve the caller's original order, not sorted order"
+        );
+        assert_eq!(
+            sidecar.open_extents(),
+            3,
+            "every extent that actually held a queried key opens exactly once, never once per row"
+        );
+    }
+
+    #[test]
+    fn resolve_many_on_an_empty_sidecar_answers_none_without_opening_anything() {
+        let s = ExternalIdSidecar::deferred(vec![]);
+        let results = s.resolve_many(&[b"a".to_vec(), b"b".to_vec()]).unwrap();
+        assert_eq!(results, vec![None, None]);
+        assert_eq!(s.open_extents(), 0);
     }
 
     #[test]

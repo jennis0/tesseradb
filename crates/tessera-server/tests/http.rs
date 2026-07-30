@@ -311,6 +311,38 @@ fn build_ingest_batch(rows: &[(u64, f32, f32, &str)]) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
+/// Like [`build_ingest_batch`], but takes the raw `external_id` bytes directly rather than
+/// deriving them from a source id — needed for Task 11's duplicate-detection and cap tests, which
+/// must construct exact byte strings (repeats across rows, or a specific length) that
+/// `external_id_of`'s 8-byte little-endian convention cannot express.
+fn build_ingest_batch_raw(rows: &[(&[u8], f32, f32, &str)]) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, false),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("access", DataType::Utf8, false),
+    ]));
+    let ext_array = BinaryArray::from_iter_values(rows.iter().map(|(id, _, _, _)| *id));
+    let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
+    let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
+    let access_array = StringArray::from_iter_values(rows.iter().map(|(_, _, _, a)| *a));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ext_array),
+            Arc::new(x_array),
+            Arc::new(y_array),
+            Arc::new(access_array),
+        ],
+    )
+    .unwrap();
+
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
 #[tokio::test]
 async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
     let tmp = TempDir::new().unwrap();
@@ -625,6 +657,21 @@ async fn e_suppress_via_changes_drops_the_count_without_reauthorising() {
     assert_eq!(tiles_after[0].1, tiles_before[0].1 - 1);
 }
 
+/// `GET /control/status`'s body, for asserting `entity_id_high_water` is unchanged across a
+/// rejected batch (contracts §3.1: a 409 batch has NO effect).
+async fn control_status(server: &TestServer) -> serde_json::Value {
+    server
+        .client
+        .get(server.control_url("/control/status"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn f_ingest_is_wal_before_ack_and_idempotent() {
     let tmp = TempDir::new().unwrap();
@@ -684,6 +731,304 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 409);
+}
+
+/// Contracts §3.1: duplicate external ids *within* one batch are `409 conflict`, and the batch
+/// has NO effect at all -- not even the non-duplicate rows are accepted.
+#[tokio::test]
+async fn ingest_rejects_duplicate_external_ids_within_one_batch() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
+
+    let body = build_ingest_batch_raw(&[
+        (b"a".as_slice(), 1.0, 1.0, "0"),
+        (b"b".as_slice(), 2.0, 2.0, "0"),
+        (b"a".as_slice(), 3.0, 3.0, "0"),
+    ]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "dup-batch")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "conflict");
+
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water_before,
+        "a 409 batch must have no effect at all -- not even the non-duplicate rows"
+    );
+}
+
+/// Important I-8: dedup must consult `Engine::established`, not only the bundle's external-id
+/// sidecar. The sidecar covers only the bundle built at open time; an id ingested five minutes
+/// ago in a *separate*, already-accepted batch lives only in the live map, and a dedup check
+/// that misses it would silently allocate a second entity and orphan the first
+/// (`session.rs`'s `Engine::accept_ingest` doc).
+#[tokio::test]
+async fn ingest_rejects_an_external_id_ingested_after_the_build() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let first_body = build_ingest_batch_raw(&[(b"z".as_slice(), 1.0, 1.0, "0")]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "z-batch-1")
+        .header("content-type", "application/octet-stream")
+        .body(first_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let high_water_after_first = control_status(&server).await["entity_id_high_water"].clone();
+
+    // A fresh batch id, re-ingesting the same external id: must be rejected, not silently
+    // allocate a second entity for "z".
+    let second_body = build_ingest_batch_raw(&[(b"z".as_slice(), 9.0, 9.0, "0")]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "z-batch-2")
+        .header("content-type", "application/octet-stream")
+        .body(second_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "conflict");
+
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water_after_first,
+        "the rejected re-ingest must not have allocated a second entity"
+    );
+}
+
+/// The bundle's own external-id sidecar half of duplicate detection: an id already present in
+/// the built bundle (not merely ingested live) must also be rejected.
+#[tokio::test]
+async fn ingest_rejects_an_external_id_already_in_the_bundle() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
+
+    // `external_id_of(0)` names a real item baked into the fixture at build time.
+    let body = build_ingest_batch(&[(0, 5.0, 5.0, "0")]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "bundle-dup-batch")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "conflict");
+
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water_before
+    );
+}
+
+/// Ordering matters and is not incidental: the batch-id replay check stays FIRST. An idempotent
+/// retry of an already-accepted batch id + body is a 200 no-op, even though the external id it
+/// carries is (correctly) "already known" by the time the duplicate check would run.
+#[tokio::test]
+async fn an_idempotent_retry_of_an_accepted_batch_is_a_200_not_a_409() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let body = build_ingest_batch_raw(&[(b"replay-me".as_slice(), 1.0, 1.0, "0")]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "replay-batch")
+        .header("content-type", "application/octet-stream")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "replay-batch")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "a byte-identical replay of an already-acked batch id must stay a 200, never be caught \
+         by the duplicate-external-id check"
+    );
+}
+
+/// Contracts §1 (r6): external ids are capped at ≤ 64 bytes. Off-by-one is the whole point: 64
+/// bytes exactly is accepted, 65 is a typed error, never a silent truncation.
+#[tokio::test]
+async fn ingest_external_id_cap_is_64_bytes_exactly() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let exactly_64 = vec![b'x'; 64];
+    let body = build_ingest_batch_raw(&[(exactly_64.as_slice(), 1.0, 1.0, "0")]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "cap-64")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "exactly 64 bytes must be accepted");
+
+    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
+
+    let sixty_five = vec![b'y'; 65];
+    let body = build_ingest_batch_raw(&[(sixty_five.as_slice(), 2.0, 2.0, "0")]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "cap-65")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        422,
+        "65 bytes must be a typed contract error, never truncated to 64"
+    );
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "contract");
+
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water_before,
+        "a rejected over-length batch must have no effect"
+    );
+}
+
+/// The point of batching resolution: a large batch must open each bundle extent at most once,
+/// not once per row. The fixture bundle has one external-id extent (built with `N_ITEMS` rows),
+/// so a batch of many distinct, never-before-seen external ids must resolve against it without
+/// the sidecar opening more than that one extent.
+#[tokio::test]
+async fn a_batch_resolution_opens_each_extent_at_most_once() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let rows: Vec<(u64, f32, f32, &str)> = (0..2_000)
+        .map(|i| (N_ITEMS + 10_000 + i, i as f32, i as f32, "0"))
+        .collect();
+    let body = build_ingest_batch(&rows);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "big-batch")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["accepted"], 2_000);
 }
 
 #[tokio::test]
