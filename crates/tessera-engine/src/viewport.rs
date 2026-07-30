@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
-use tessera_spatial::{tiles_for_bbox, Extent, Tile};
+use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Extent, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
-use tessera_store::tile_ranges;
 use tessera_store::StoreError;
+use tessera_store::{tile_ranges, tile_ranges_within};
 use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 
 use crate::compose::{compose, visible_to, RowProjection};
@@ -321,6 +321,21 @@ impl Engine {
 
         let k = k.min(self.config.max_k);
 
+        // Fail closed on a slice spanning partitions, for the same reason the segment guard below
+        // exists: this resolves to ONE partition, and theta's anchor and every rank are then taken
+        // over that partition alone — which §12.3 forbids (the anchor must be session-global, or
+        // "below the cut" means different things in different partitions). Phase 1 emits one
+        // partition, so this is unreachable; it is here so a §12 bundle cannot be served
+        // half-masked with no error, which is the failure the multi-segment guard already refuses.
+        let carriers = generation
+            .bundle
+            .partitions
+            .values()
+            .filter(|partition| partition.slices.contains_key(slice))
+            .count();
+        if carriers > 1 {
+            return Err(EngineError::MultiPartitionSlice(slice.to_string()));
+        }
         let slice_data = generation
             .bundle
             .partitions
@@ -380,14 +395,29 @@ impl Engine {
             y_max: q.y_max,
         };
 
+        // Refuse an over-large tile set **before allocating it**. `zoom` and `bbox` are both
+        // attacker-chosen, and the tile set is their product: at zoom 16 over the full extent that
+        // is 65536² = 4.29e9 tiles at 16 B each — ~69 GB in one `Vec`, i.e. an out-of-memory abort
+        // from a single authenticated request, reached before any masking work happens. Counting
+        // first (`tiles_for_bbox_count` allocates nothing) is what makes this a 422 instead.
+        //
+        // Both independent reviews of this file flagged that an earlier revision bounded only the
+        // *derived* underlay fan-out below while commenting that "`tiles_for_bbox` is itself
+        // uncapped" — guarding the second-order factor and leaving the first-order one open. This
+        // is the first-order bound; the underlay's is now genuinely second-order.
+        let tile_count = tiles_for_bbox_count(bbox, zoom, &extent);
+        if tile_count > self.config.max_tiles_per_request as u64 {
+            return Err(EngineError::TooManyTiles {
+                demanded: tile_count,
+                limit: self.config.max_tiles_per_request,
+            });
+        }
         let tiles = tiles_for_bbox(bbox, zoom, &extent);
         let declared_scalars = &generation.bundle.manifest.declared_scalars;
 
         // §3.3 underlay bounds, all three checked up front and all three *rejecting* rather than
-        // clamping (see `EngineError::UnderlayRefused`). Checking the cell budget before doing any
-        // work is the point of doing it here: `tiles_for_bbox` is itself uncapped, and the underlay
-        // multiplies its output by 4^offset, so a large offset over a wide bbox is an easy way to
-        // ask for tens of thousands of `count_range` calls and blow the latency budget.
+        // clamping (see `EngineError::UnderlayRefused`). The cell budget is checked before any
+        // counting work because the underlay multiplies the (already-bounded) tile set by 4^offset.
         let underlay_offset = match underlay_offset {
             None | Some(0) => None,
             Some(offset) => {
@@ -453,7 +483,7 @@ impl Engine {
                 continue;
             }
 
-            let selected = Selection::of(&mask, segment, range, &params, visible);
+            let selected = Selection::of(&mask, segment, range.clone(), &params, visible);
 
             tile_counts.push(TileCount {
                 tile: tile.prefix,
@@ -481,7 +511,11 @@ impl Engine {
                         prefix: cell,
                         depth: sub_depth,
                     };
-                    let count = mask.count_range(tile_ranges(segment, &sub_tile));
+                    // Search only the parent's range: sub-cells partition their parent, so this is
+                    // exactly `tile_ranges` would return, over tens of kilobytes already touched by
+                    // the parent's own `count_range` rather than ~30 levels of a 4 GB mmap.
+                    let count =
+                        mask.count_range(tile_ranges_within(segment, &sub_tile, range.clone()));
                     if count > 0 {
                         sub_cells.push(SubCellCount { cell, count });
                     }

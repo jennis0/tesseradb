@@ -73,6 +73,7 @@ fn config() -> EngineConfig {
         theta_target_marks: N_ITEMS * 2,
         max_underlay_offset: 4,
         max_underlay_cells: 8192,
+        max_tiles_per_request: 262_144,
     }
 }
 
@@ -532,6 +533,7 @@ fn theta_does_not_move_when_the_viewport_pans() {
             theta_target_marks: 16,
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
+            max_tiles_per_request: 262_144,
         },
     )
     .unwrap();
@@ -603,6 +605,7 @@ fn no_visible_tile_is_ever_served_empty() {
             theta_target_marks: 16,
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
+            max_tiles_per_request: 262_144,
         },
     )
     .unwrap();
@@ -1204,6 +1207,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             theta_target_marks: u64::MAX,
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
+            max_tiles_per_request: 262_144,
         },
     )
     .expect("engine should open the 2.4M bundle");
@@ -1262,6 +1266,7 @@ fn first_dictionary_descriptor(bundle_root: &Path) -> String {
 fn config_with_underlay(max_cells: usize) -> EngineConfig {
     EngineConfig {
         max_underlay_cells: max_cells,
+        max_tiles_per_request: 262_144,
         ..config()
     }
 }
@@ -1424,11 +1429,13 @@ fn every_underlay_bound_rejects_rather_than_clamping() {
         "offset above the configured maximum must be refused, got {err:?}"
     );
 
-    // (b) Beyond the depth-16 grid (§5.2 fixes the grid at 2^16 x 2^16).
+    // (b) Beyond the depth-16 grid (§5.2 fixes the grid at 2^16 x 2^16). The bbox is deliberately
+    // TINY: at zoom 14 a full-extent bbox spans 4^14 = 2.7e8 tiles and would be refused by the
+    // `max_tiles_per_request` bound first, which would make this test pass for the wrong reason.
     let err = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 14, [0.0, 0.0, 1000.0, 1000.0], 30).underlay_offset(Some(4)),
+            ViewportRequest::new("s0", 14, [0.0, 0.0, 0.05, 0.05], 30).underlay_offset(Some(4)),
         )
         .unwrap_err();
     assert!(
@@ -1460,4 +1467,231 @@ fn every_underlay_bound_rejects_rather_than_clamping() {
             ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], 30),
         )
         .expect("the viewport itself must still be served");
+}
+
+/// **The availability bound on the base path.** `zoom` and `bbox` are both caller-chosen and the
+/// tile set is their product, so an unbounded `tiles_for_bbox` lets one authenticated request
+/// allocate ~69 GB (zoom 16 over the full extent: 65536² tiles at 16 B). It must be counted and
+/// refused, never allocated and survived — and the refusal must not depend on the underlay, since an
+/// attacker has no reason to ask for one.
+#[test]
+fn an_over_large_tile_set_is_refused_before_it_is_allocated() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine_with(&bundle_root, tmp.path(), config());
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    // Zoom 16 over the whole extent: 4.29e9 tiles. No underlay requested.
+    let err = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 16, [0.0, 0.0, 1000.0, 1000.0], 30),
+        )
+        .unwrap_err();
+    match err {
+        EngineError::TooManyTiles { demanded, limit } => {
+            assert_eq!(demanded, 65536u64 * 65536, "the full grid at depth 16");
+            assert_eq!(limit, config().max_tiles_per_request);
+        }
+        other => panic!("expected TooManyTiles, got {other:?}"),
+    }
+
+    // A viewport of the size the system is actually designed for is unaffected: a few hundred tiles.
+    let out = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 4, [0.0, 0.0, 1000.0, 1000.0], 30),
+        )
+        .expect("a normal viewport must still be served");
+    assert!(!out.tiles.is_empty());
+}
+
+/// `tiles_for_bbox_count` must agree exactly with `tiles_for_bbox().len()` — otherwise the bound
+/// above either refuses requests it should serve or fails to refuse the one that matters.
+#[test]
+fn the_tile_count_estimate_is_exact() {
+    let e = extent();
+    for zoom in 0..=8u8 {
+        for bbox in [
+            [0.0, 0.0, 1000.0, 1000.0],
+            [0.0, 0.0, 0.05, 0.05],
+            [250.0, 300.0, 700.0, 800.0],
+            [999.9, 999.9, 1000.0, 1000.0],
+            // Reversed corners: `tiles_for_bbox` normalises them, so the count must too.
+            [700.0, 800.0, 250.0, 300.0],
+        ] {
+            assert_eq!(
+                tessera_spatial::tiles_for_bbox_count(bbox, zoom, &e),
+                tiles_for_bbox(bbox, zoom, &e).len() as u64,
+                "zoom {zoom}, bbox {bbox:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// θ's anchor: the composed total, and the equality the disclosure argument rests on
+// ---------------------------------------------------------------------------------------------
+
+/// **The I2 property θ's anchor turns on: it is the COMPOSED total, not the frozen projection's.**
+///
+/// `RowProjection` is `M_auth` *before* the overlay diff. If θ anchored there, mark counts would be
+/// scaled by a quantity strictly larger than the viewer's own visible set after a suppression — and
+/// a viewer aggregating marks across tiles could solve for it, difference it against its own summed
+/// `visible`, and recover **how many of its own items had been denied**. That is a count of items
+/// outside `M_auth`, which no Appendix C row admits.
+///
+/// Asserted here rather than argued, because nothing else in the tree pins it: a regression to
+/// `base.cardinality()` would leave every other test passing.
+#[test]
+fn the_theta_anchor_falls_when_an_item_is_suppressed() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let baseline = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache_a"),
+        &tmp.path().join("wal_a.log"),
+    );
+    let session_a = baseline.authorise(&full_coverage_credential()).unwrap();
+    let before = baseline
+        .viewport(
+            &session_a,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 1),
+        )
+        .unwrap();
+
+    const SUPPRESS_SOURCE_ID: u64 = 5;
+    let wal_path_b = tmp.path().join("wal_b.log");
+    {
+        let (mut wal, _initial) = Wal::open(&wal_path_b).unwrap();
+        wal.append(&WalRecord::Change {
+            external_id: SUPPRESS_SOURCE_ID.to_le_bytes().to_vec(),
+            op: ChangeOp::Suppress,
+            descriptors: None,
+        })
+        .unwrap();
+        wal.fsync().unwrap();
+    }
+    let suppressed = open_engine(&bundle_root, &tmp.path().join("cache_b"), &wal_path_b);
+    let session_b = suppressed.authorise(&full_coverage_credential()).unwrap();
+    let after = suppressed
+        .viewport(
+            &session_b,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 1),
+        )
+        .unwrap();
+
+    // The zoom-0 tile's `visible` IS the composed total (see the next test), so this is the anchor
+    // observed through the only surface that exposes it.
+    assert_eq!(
+        after.tiles[0].visible,
+        before.tiles[0].visible - 1,
+        "the composed total must fall by one when an item is suppressed — if it did not, theta is \
+         anchored on the pre-overlay projection and the I2 argument in select.rs is void"
+    );
+}
+
+/// **The equality `GET /v1/meta`'s disclosure argument rests on.**
+///
+/// Publishing `theta_target_marks` is defended on the grounds that solving through it yields only
+/// the viewer's own composed masked total — *precisely* what a `zoom = 0`, full-extent request
+/// already returns as `visible`, in one call. That is currently true by the coincidence of three
+/// separate properties in three crates (depth 0 returns one whole-grid tile whatever the bbox;
+/// `Tile::code_range` at depth 0 spans the segment; `count_range` and `visible_total` are the same
+/// three-term arithmetic), none of which was asserted anywhere. Pin it here, so the disclosure
+/// argument cannot be quietly falsified by a change to any one of them.
+#[test]
+fn the_zoom_zero_count_equals_the_anchor_a_client_could_solve_for() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let session = engine.authorise(&credential).unwrap();
+        let expected: u64 = engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 1),
+            )
+            .unwrap()
+            .tiles[0]
+            .visible;
+
+        // ...and a bbox that does NOT cover the whole extent must give the same answer, because at
+        // depth 0 there is only one tile and `bbox` cannot discriminate. If that ever stopped
+        // holding, a client could no longer obtain the anchor in one call and the argument would
+        // need restating rather than silently weakening.
+        let narrow = engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, [10.0, 10.0, 11.0, 11.0], 1),
+            )
+            .unwrap();
+        assert_eq!(
+            narrow.tiles[0].visible, expected,
+            "zoom 0 must report the whole slice's composed total regardless of bbox"
+        );
+    }
+}
+
+/// `tile_ranges_within` must agree with `tile_ranges` for every tile contained in the window — the
+/// property the underlay's restricted search rests on. If it ever diverged, sub-cell counts would
+/// silently under-report and the underlay would understate density rather than error.
+#[test]
+fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let bundle = open_bundle(&bundle_root).unwrap();
+    let segment = &bundle.partitions["default"].slices["s0"].segments[0];
+
+    for parent_depth in 0..5u8 {
+        for offset in 1..=3u8 {
+            let sub_depth = parent_depth + offset;
+            for parent_prefix in 0..(1u64 << (2 * parent_depth as u32)) {
+                let parent = tessera_spatial::Tile {
+                    prefix: parent_prefix,
+                    depth: parent_depth,
+                };
+                let parent_range = tessera_store::tile_ranges(segment, &parent);
+                let first = parent_prefix << (2 * offset as u32);
+                for i in 0..(1u64 << (2 * offset as u32)) {
+                    let sub = tessera_spatial::Tile {
+                        prefix: first + i,
+                        depth: sub_depth,
+                    };
+                    assert_eq!(
+                        tessera_store::tile_ranges_within(segment, &sub, parent_range.clone()),
+                        tessera_store::tile_ranges(segment, &sub),
+                        "parent {parent_prefix}@{parent_depth}, sub {}@{sub_depth}",
+                        first + i
+                    );
+                }
+            }
+        }
+    }
 }

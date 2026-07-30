@@ -166,6 +166,7 @@ async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> 
             theta_target_marks: u64::MAX,
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
+            max_tiles_per_request: 262_144,
         },
     )
     .expect("engine should open against a freshly built bundle");
@@ -174,10 +175,6 @@ async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> 
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         max_k: 200,
-        k_min: 2,
-        k_max_marks: 200,
-        theta_target_marks: u64::MAX,
-        max_underlay_offset: 4,
         min_visible_members: 10,
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
@@ -1539,6 +1536,7 @@ fn concurrent_ingest_and_change_both_survive() {
                 theta_target_marks: u64::MAX,
                 max_underlay_offset: 4,
                 max_underlay_cells: 8192,
+                max_tiles_per_request: 262_144,
             },
         )
         .expect("engine should open"),

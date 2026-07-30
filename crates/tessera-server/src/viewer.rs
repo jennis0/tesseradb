@@ -77,6 +77,7 @@ async fn meta(
     state.authenticated_session(token)?;
 
     let meta = state.engine.meta();
+    let selection = state.engine.config();
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
@@ -105,10 +106,10 @@ async fn meta(
         // full-bbox request already returns as `visible` in a single call (§7.1). Already
         // obtainable, exactly.
         "selection": {
-            "k_min": state.k_min,
-            "k_max_marks": state.k_max_marks,
-            "theta_target_marks": state.theta_target_marks,
-            "max_underlay_offset": state.max_underlay_offset,
+            "k_min": selection.k_min,
+            "k_max_marks": selection.k_max_marks,
+            "theta_target_marks": selection.theta_target_marks,
+            "max_underlay_offset": selection.max_underlay_offset,
         },
     })))
 }

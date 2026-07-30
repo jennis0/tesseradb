@@ -937,9 +937,35 @@ fn invalid_columns(path: &Path, detail: &str) -> StoreError {
 /// `1 << 32`, which does not fit in `u32`. Each stored code is widened for the comparison
 /// rather than the bounds being narrowed, which would overflow to an empty range there.
 pub fn tile_ranges(seg: &SegmentData, tile: &Tile) -> Range<u32> {
+    tile_ranges_within(seg, tile, 0..seg.morton.len() as u32)
+}
+
+/// [`tile_ranges`], but searching only `within` rather than the whole column.
+///
+/// For a tile **contained** in `within` this returns exactly what [`tile_ranges`] would, because the
+/// Morton column is sorted: every row of a contained tile lies inside its container's contiguous
+/// range, so restricting the search cannot exclude a matching row.
+///
+/// It exists for the §7.3 underlay, which resolves `4^offset` sub-cells per tile whose parent range
+/// is already in hand. Searching the whole column for each is not merely wasteful but wasteful at a
+/// bad ratio: at 10⁹ rows `morton.u32` is 4 GB, so each `partition_point` walks ~30 levels of a
+/// mostly-cold mmap, and the underlay's ceiling of 8,192 sub-cells makes that 16,384 such walks per
+/// request — a large fraction of a 10 ms budget spent re-deriving a bound the caller already knows.
+/// Restricted to the parent, the search is over a few tens of kilobytes that the parent's own
+/// `count_range` has already touched.
+///
+/// It is also the more honest construction: it *expresses* "sub-cells partition their parent"
+/// rather than searching the whole column again and relying on that being true.
+pub fn tile_ranges_within(seg: &SegmentData, tile: &Tile, within: Range<u32>) -> Range<u32> {
     let codes = seg.morton.u32();
+    let lo_idx = within.start as usize;
+    let hi_idx = (within.end as usize).min(codes.len());
+    if hi_idx <= lo_idx {
+        return within.start..within.start;
+    }
+    let window = &codes[lo_idx..hi_idx];
     let (lo, hi) = tile.code_range();
-    let start = codes.partition_point(|&c| (c as u64) < lo);
-    let end = codes.partition_point(|&c| (c as u64) < hi);
+    let start = lo_idx + window.partition_point(|&c| (c as u64) < lo);
+    let end = lo_idx + window.partition_point(|&c| (c as u64) < hi);
     start as u32..end as u32
 }

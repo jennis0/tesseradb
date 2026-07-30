@@ -59,13 +59,6 @@ pub struct AppState {
     pub engine: Engine,
     pub sessions: Mutex<SessionRegistry>,
     pub max_k: usize,
-    /// §7.2's selection constants, echoed by `GET /v1/meta` so a client can read mark count as
-    /// density (it must know where the floor and the cap sit) and so the reference oracle can
-    /// reproduce the definition. Deployment constants, identical for every principal.
-    pub k_min: usize,
-    pub k_max_marks: usize,
-    pub theta_target_marks: u64,
-    pub max_underlay_offset: u8,
     /// Parsed and stored (design §7.5/§2.3's startup rule); not consumed by any Phase 1 handler.
     #[allow(dead_code)]
     pub min_visible_members: u64,

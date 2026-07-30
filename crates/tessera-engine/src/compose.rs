@@ -120,17 +120,29 @@ impl EffectiveMask {
         self.base.cardinality() - self.minus.cardinality() + self.plus.cardinality()
     }
 
-    /// Merged, ascending iteration over the effective mask restricted to `r`: `(base ∩ r) ∖ minus
-    /// ∪ (plus ∩ r)`.
-    pub fn iter_range(&self, r: Range<u32>) -> impl Iterator<Item = u32> + '_ {
-        let range_mask = Bitmap::from_range(r.clone());
+    /// The effective mask restricted to `r`: `(base ∩ r) ∖ minus ∪ (plus ∩ r)`, as a bitmap.
+    ///
+    /// **Returns the set, not an iterator, and that is the point.** This replaced an `iter_range`
+    /// that ended in `result.to_vec().into_iter()` — an *eager* `Vec<u32>` of every visible row in
+    /// the range, materialised in full before the caller's first `next()`. At 10⁹ with a viewport
+    /// spanning ~2.5×10⁷ visible rows that is ~100 MB allocated and written per request, on a path
+    /// whose entire cost model (this module's doc, and CLAUDE.md) is "O(containers touched), not
+    /// O(cardinality)". The bitmap is O(containers) — roughly 3 MB for the same set — and callers
+    /// iterate it lazily with `.iter()`.
+    ///
+    /// The eagerness was easy to miss because the old placeholder sampler `break`ed after *k* rows:
+    /// the break saved the *gather*, never the materialisation, so the cost did not show up in the
+    /// shape of the code. Selection now consumes every visible row by design — `C_θ` is a count over
+    /// the whole tile — so the allocation was pure waste either way.
+    pub fn rows_in_range(&self, r: Range<u32>) -> Bitmap {
+        let range_mask = Bitmap::from_range(r);
         let mut result = self.base.bitmap().and(&range_mask);
         result.andnot_inplace(&self.minus);
         let plus_in_range = self.plus.and(&range_mask);
         // `or_inplace` on already-disjoint-from-`result` content (plus ∩ base = ∅ by
         // construction — see the structural invariant asserted in `compose`) — no double count.
         result.or_inplace(&plus_in_range);
-        result.to_vec().into_iter()
+        result
     }
 
     pub fn contains_row(&self, row: u32) -> bool {

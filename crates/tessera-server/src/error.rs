@@ -99,6 +99,9 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // contract error (422) rather than a fail-closed 500. Its `Display` names only the
         // offending numbers and the configured bounds — no path, no corpus fact.
         EngineError::UnderlayRefused(detail) => ApiError::Contract(detail),
+        // Also a request the caller can fix by asking for less, and its Display names only the
+        // caller's own numbers and the configured limit.
+        too_many @ EngineError::TooManyTiles { .. } => ApiError::Contract(too_many.to_string()),
         // `Store`/`Io` wrap a `StoreError`/`io::Error` whose `Display` names a filesystem path —
         // the same leak `map_store_error` closes, reached through the engine's error enum instead
         // of directly. One sanitiser for both doors.

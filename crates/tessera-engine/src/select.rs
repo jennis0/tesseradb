@@ -325,32 +325,47 @@ impl Selection {
 
         let rows = match route {
             Route::AllVisible => {
-                let mut rows: Vec<u32> = mask.iter_range(range).collect();
+                let mut rows: Vec<u32> = mask.rows_in_range(range).iter().collect();
                 rows.sort_unstable_by_key(|&row| ids[row as usize]);
                 rows
             }
             Route::Direct => {
-                // One pass, O(cap) memory. `m(T) <= cap` always, so the `cap` smallest ids in the
-                // tile contain the served set for *any* m the counting pass can produce — which is
-                // what makes a single pass sufficient. A two-pass form (count, then select) would
-                // need either a second `iter_range` or an O(V) buffer, and at V = 2.5e8 that is
-                // gigabytes.
+                // One pass. `m(T) <= cap` always, so the `cap` smallest ids in the tile contain the
+                // served set for *any* m the counting pass can produce — which is what makes a
+                // single pass sufficient.
                 //
-                // A `BinaryHeap` is a max-heap, which is what is wanted: push, then evict the
-                // largest once over capacity, and the `cap` smallest survive. A min-heap of
-                // `Reverse` would have to hold all V entries to find the smallest `cap`, which is
-                // precisely the O(V) memory being avoided.
+                // A `BinaryHeap` is a max-heap, which is what is wanted: the largest of the `cap`
+                // best-so-far sits at the root, so it is both the eviction candidate and the
+                // rejection threshold.
+                //
+                // **The peek-reject is not a micro-optimisation.** Without it, every visible row is
+                // pushed and sifted before being thrown away, which is O(V log cap) sift work
+                // against O(V) compares — measured at 19x the irreducible counting cost, ~36 ms for
+                // 300 tiles of 4,000 visible rows against a 10 ms p99 budget, and worsening with V
+                // because the reject rate rises. With it, a row past the current cut costs one
+                // compare. Output is identical either way: a row not smaller than the largest of
+                // the `cap` smallest cannot be among them.
+                //
+                // Memory: O(min(cap, V)) for the heap, plus `rows_in_range`'s bitmap, which is
+                // O(containers touched) rather than O(V) — see its doc for why that distinction
+                // used to be the other way round and what it cost.
                 let mut c_theta: u64 = 0;
-                let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(params.cap + 1);
-                for row in mask.iter_range(range) {
+                let heap_cap = params.cap.min(visible as usize).saturating_add(1);
+                let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(heap_cap);
+                let visible_rows = mask.rows_in_range(range);
+                for row in visible_rows.iter() {
                     let id = ids[row as usize];
                     if params.threshold.admits(id) {
                         c_theta += 1;
                     }
-                    heap.push((id, row));
-                    if heap.len() > params.cap {
+                    if heap.len() == params.cap {
+                        // Safe: len == cap >= 1 here, since cap == 0 returned early above.
+                        if id >= heap.peek().expect("non-empty at len == cap").0 {
+                            continue;
+                        }
                         heap.pop();
                     }
+                    heap.push((id, row));
                 }
 
                 let m = served_count(c_theta, params, visible);

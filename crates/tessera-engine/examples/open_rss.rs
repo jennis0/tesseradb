@@ -33,6 +33,7 @@ fn main() {
             theta_target_marks: u64::MAX,
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
+            max_tiles_per_request: 262_144,
         },
     )
     .expect("engine should open the 2.4M bundle");

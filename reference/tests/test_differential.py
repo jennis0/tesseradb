@@ -82,13 +82,37 @@ def test_morton_matches_byte_for_byte(oracle_bundle: Bundle):
 
 
 def test_grid_differential(server, oracle_bundle: Bundle):
-    """(b) and (c): the 20 grant sets x 10 viewports matrix."""
+    """(b) and (c) with theta SATURATED: masking and counts, isolated from the density rule."""
+    _grid_differential(server, oracle_bundle)
+
+
+def test_grid_differential_with_theta_live(density_server, oracle_bundle: Bundle):
+    """(b) and (c) with theta LIVE — the configuration §7.2's density rule actually ships in.
+
+    **This is the case that makes the point-set half of the differential mean anything.** Under
+    saturation both sides reduce to "serve everything visible", so the comparison cannot distinguish
+    this engine from one that anchors theta on the pre-overlay projection (the I2 breach), gets the
+    x4 depth progression wrong, or drops the threshold clause. Here the oracle computes a real cut
+    from a real anchor and the engine must agree tile by tile.
+
+    The assertion below (`saw_partial`) is what stops this test quietly reverting to the vacuous
+    case if the fixture size, the zoom range or `theta_target_marks` ever drift.
+    """
+    _grid_differential(density_server, oracle_bundle, require_partial=True)
+
+
+def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool = False):
+    """The 20 grant sets x 10 viewports matrix, against whichever server fixture is passed."""
     rng = random.Random(SEED)
     descriptors = oracle_bundle.dictionary
     grant_sets = _random_grant_sets(descriptors, rng)
 
     tiles_checked = 0
     points_checked = 0
+    # Tiles where the threshold clause actually bound — i.e. the engine served STRICTLY FEWER than
+    # were visible, and not because the cap truncated. Under saturated theta this stays 0, which is
+    # exactly the degeneracy `require_partial` exists to catch.
+    saw_partial = 0
 
     for grant in grant_sets:
         terms_str = [_descriptor_str(d) for d in grant]
@@ -163,10 +187,26 @@ def test_grid_differential(server, oracle_bundle: Bundle):
                     f"server={server_xy} oracle={oracle_xy}"
                 )
                 points_checked += len(tile_points)
+                if 0 < served_n < _visible_of(server_tiles, t):
+                    saw_partial += 1
             assert cursor == len(server_points), "points list must be exactly consumed by tiles"
 
     assert tiles_checked > 0
     assert points_checked > 0
+    if require_partial:
+        assert saw_partial > 0, (
+            "no tile served strictly fewer points than it had visible, so theta never bound and "
+            "this comparison degenerated to 'serve everything visible' — it can no longer "
+            "distinguish a correct density rule from a missing one. Check the fixture size, "
+            "ZOOM_RANGE, and the density_server fixture's theta_target_marks."
+        )
+
+
+def _visible_of(server_tiles, tile):
+    for t, v, _m, _s in server_tiles:
+        if t == tile:
+            return v
+    raise AssertionError(f"tile {tile} not in the tiles batch")
 
 
 def _oracle_visible_total(bundle, mask, slice_id):

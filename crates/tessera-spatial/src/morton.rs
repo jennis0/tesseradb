@@ -160,24 +160,15 @@ pub fn tiles_for_bbox(bbox: [f64; 4], depth: u8, e: &Extent) -> Vec<Tile> {
         e.validate().is_ok(),
         "tiles_for_bbox(): invalid extent {e:?}"
     );
-    let [x0, y0, x1, y1] = bbox;
     if depth == 0 {
         return vec![Tile {
             prefix: 0,
             depth: 0,
         }];
     }
-    let shift = 16 - depth as u32;
+    let (tx_lo, tx_hi, ty_lo, ty_hi) = tile_corners(bbox, depth, e);
 
-    let cx0 = cell(x0, e.x_min, e.x_max) >> shift;
-    let cx1 = cell(x1, e.x_min, e.x_max) >> shift;
-    let cy0 = cell(y0, e.y_min, e.y_max) >> shift;
-    let cy1 = cell(y1, e.y_min, e.y_max) >> shift;
-
-    let (tx_lo, tx_hi) = (cx0.min(cx1), cx0.max(cx1));
-    let (ty_lo, ty_hi) = (cy0.min(cy1), cy0.max(cy1));
-
-    let mut tiles = Vec::new();
+    let mut tiles = Vec::with_capacity(tiles_for_bbox_count(bbox, depth, e) as usize);
     for ty in ty_lo..=ty_hi {
         for tx in tx_lo..=tx_hi {
             let prefix = interleave_bits(tx as u32, ty as u32, depth);
@@ -185,6 +176,35 @@ pub fn tiles_for_bbox(bbox: [f64; 4], depth: u8, e: &Extent) -> Vec<Tile> {
         }
     }
     tiles
+}
+
+/// The inclusive tile-coordinate corners `bbox` spans at `depth`.
+fn tile_corners(bbox: [f64; 4], depth: u8, e: &Extent) -> (u16, u16, u16, u16) {
+    let [x0, y0, x1, y1] = bbox;
+    let shift = 16 - depth as u32;
+    let cx0 = cell(x0, e.x_min, e.x_max) >> shift;
+    let cx1 = cell(x1, e.x_min, e.x_max) >> shift;
+    let cy0 = cell(y0, e.y_min, e.y_max) >> shift;
+    let cy1 = cell(y1, e.y_min, e.y_max) >> shift;
+    (cx0.min(cx1), cx0.max(cx1), cy0.min(cy1), cy0.max(cy1))
+}
+
+/// How many tiles [`tiles_for_bbox`] *would* return, **without allocating any of them**.
+///
+/// Exists so a caller can refuse an over-large request before paying for it. The count is the
+/// product of two inclusive tile-coordinate spans, so at depth 16 over the full extent it is
+/// `65536² = 4.29×10⁹` — one 16-byte `Tile` each, ~69 GB, which is an out-of-memory abort rather
+/// than a slow request. Returning `u64` rather than `usize` is deliberate: the point is to compare
+/// against a budget, and a caller must be able to see the real magnitude rather than a value that
+/// has already been truncated or has already exhausted the allocator.
+pub fn tiles_for_bbox_count(bbox: [f64; 4], depth: u8, e: &Extent) -> u64 {
+    if depth == 0 {
+        return 1;
+    }
+    let (tx_lo, tx_hi, ty_lo, ty_hi) = tile_corners(bbox, depth, e);
+    let wide = (tx_hi - tx_lo) as u64 + 1;
+    let high = (ty_hi - ty_lo) as u64 + 1;
+    wide * high
 }
 
 #[cfg(test)]

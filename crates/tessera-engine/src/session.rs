@@ -78,9 +78,13 @@ pub struct EngineConfig {
     /// The largest `underlay_offset` a request may ask for (§3.3 sub-cell counts). The sub-cell
     /// depth is `zoom + offset`, clamped to 16.
     pub max_underlay_offset: u8,
-    /// The hard ceiling on sub-cells in one response. `tiles_for_bbox` is itself uncapped, and the
-    /// underlay multiplies its output by `4^offset`, so without this a single request can ask for
-    /// ~77k `count_range` calls and blow the 10 ms p99 latency gate.
+    /// The most tiles one `/v1/viewport` may span — an **availability** bound, see
+    /// [`EngineError::TooManyTiles`]. A viewport is expected to draw a few hundred tiles; the
+    /// default leaves generous headroom over that while keeping the worst case bounded.
+    pub max_tiles_per_request: usize,
+    /// The hard ceiling on sub-cells in one response. The underlay multiplies the (already-bounded,
+    /// see [`Self::max_tiles_per_request`]) tile set by `4^offset`, so without this a single request
+    /// can still ask for ~77k `count_range` calls and blow the 10 ms p99 latency gate.
     pub max_underlay_cells: usize,
 }
 
@@ -132,8 +136,28 @@ pub enum EngineError {
     /// yet, so this fails closed rather than produce a wrong (not even necessarily *obviously*
     /// wrong) answer.
     MultiSegmentSlice(String),
+    /// A slice carried by more than one partition.
+    ///
+    /// The symmetric case to [`Self::MultiSegmentSlice`], and it fails closed for the symmetric
+    /// reason: `Engine::viewport` resolves a slice by taking the first partition that carries the
+    /// id, and θ's anchor plus every rank is then computed over **that partition alone**. Design
+    /// §12.3 requires the anchor to be session-global across partitions — a per-partition anchor
+    /// makes "below the cut" mean different things in different partitions, so the coordinator's
+    /// union stops computing §7.2's definition. Phase 1's build emits exactly one partition, so this
+    /// is unreachable today; serving a §12 bundle half-masked with no error is what it prevents.
+    MultiPartitionSlice(String),
     /// A bundle-level file (`CURRENT`, a plugin hash) was not the shape this engine expects.
     Malformed(String),
+    /// A `/v1/viewport` request's `(zoom, bbox)` spans more tiles than this engine will serve.
+    ///
+    /// **This is an availability bound on the base path, not a tuning knob.** `zoom` and `bbox` are
+    /// both caller-chosen and the tile set is their product, so at zoom 16 over the full extent it
+    /// is 4.29e9 tiles — ~69 GB of `Vec` before any masking work. Counted and refused rather than
+    /// allocated and survived.
+    TooManyTiles {
+        demanded: u64,
+        limit: usize,
+    },
     /// A `/v1/viewport` request asked for a §3.3 underlay this engine will not serve.
     ///
     /// **Rejected, never clamped** — and that is one rule for all three bounds (config offset, the
@@ -158,7 +182,18 @@ impl std::fmt::Display for EngineError {
                 "slice '{slice}' has more than one segment, which this engine's row-space \
                  handling does not yet support (see EngineError::MultiSegmentSlice's doc)"
             ),
+            EngineError::MultiPartitionSlice(slice) => write!(
+                f,
+                "slice '{slice}' is carried by more than one partition, which this engine's \
+                 single-anchor selection does not yet support (see \
+                 EngineError::MultiPartitionSlice's doc)"
+            ),
             EngineError::Malformed(detail) => write!(f, "malformed: {detail}"),
+            EngineError::TooManyTiles { demanded, limit } => write!(
+                f,
+                "this (zoom, bbox) spans {demanded} tiles, above the configured limit of {limit}; \
+                 narrow the bbox or request a shallower zoom"
+            ),
             EngineError::UnderlayRefused(detail) => write!(f, "underlay refused: {detail}"),
         }
     }
@@ -228,6 +263,16 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// This engine's resolved configuration.
+    ///
+    /// Exposed so callers need not transcribe individual fields into their own state: `/v1/meta`
+    /// publishes §7.2's selection constants, and copying them into the server's `AppState` meant
+    /// four more definitions, four more assignments and four more fixture lines for values the
+    /// engine already holds.
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
     /// Open the bundle at `bundle_root`, replay the WAL at `wal_path`, seed the I9 allocator, and
     /// build the first [`Generation`]. `cache_dir` is the engine-local (never in-bundle) fragment
     /// cache directory (Reference Sheet R1).

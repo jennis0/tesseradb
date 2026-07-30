@@ -360,7 +360,7 @@ fn f3_cross_cause_suppress_delete_unsuppress_stays_excluded() {
 }
 
 #[test]
-fn g_count_range_matches_brute_force_iter_range() {
+fn g_count_range_matches_brute_force_rows_in_range() {
     let fx = build_fixture();
 
     // A composite scenario exercising every rule at once.
@@ -402,7 +402,7 @@ fn g_count_range_matches_brute_force_iter_range() {
         let b = rng.gen_range(0..BOUND as u32);
         let r = a.min(b)..a.max(b) + 1;
 
-        let expected = mask.iter_range(r.clone()).count() as u64;
+        let expected = mask.rows_in_range(r.clone()).iter().count() as u64;
         assert_eq!(mask.count_range(r.clone()), expected, "range {r:?}");
     }
 }

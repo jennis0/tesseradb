@@ -35,12 +35,24 @@ pub enum ConfigError {
     /// exists to keep them populated. Refused at startup rather than clamped, so a typo cannot
     /// quietly disable an invariant.
     FloorClauseDisabled,
-    /// `serve.k_min > serve.k_max_marks`. The floor would be clamped to the cap on every tile,
-    /// which is well-defined but means one of the two numbers is not doing what its author thought.
+    /// `serve.k_min` exceeds a cap that will clamp it — either `k_max_marks` (the overplot ceiling)
+    /// or `max_k` (the machine ceiling). Both clamp the floor, since the effective cap is
+    /// `min(k, max_k, k_max_marks)` and the floor is `min(k_min, cap)`. Well-defined either way, but
+    /// it means one of the two numbers is not doing what its author thought.
     FloorAboveCap {
         k_min: usize,
-        k_max_marks: usize,
+        cap_name: &'static str,
+        cap: usize,
     },
+    /// `serve.theta_target_marks = 0`, which anchors θ at `Cut(0)` — a threshold that admits
+    /// **nothing**, at every depth, because `0u64.leading_zeros() == 64` so the per-depth shift
+    /// always "fits". Every non-empty tile would then draw exactly `k_min` marks at every zoom
+    /// forever, with no error raised anywhere: design §7.2's density signal silently gone.
+    ///
+    /// This is the *same* silent failure mode `Threshold::at_depth`'s `leading_zeros` check exists to
+    /// prevent, reachable through config instead of through a shift bug — so it is refused in the
+    /// same spirit.
+    ThetaTargetZero,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -78,11 +90,22 @@ impl std::fmt::Display for ConfigError {
                  tile whose visible items all sit above the threshold serves nothing. Startup \
                  refuses rather than clamping, so a typo cannot quietly disable an invariant"
             ),
-            ConfigError::FloorAboveCap { k_min, k_max_marks } => write!(
+            ConfigError::FloorAboveCap {
+                k_min,
+                cap_name,
+                cap,
+            } => write!(
                 f,
-                "serve.k_min ({k_min}) exceeds serve.k_max_marks ({k_max_marks}) — the floor \
-                 would be clamped to the cap on every tile, so one of the two is not doing what \
-                 its author intended"
+                "serve.k_min ({k_min}) exceeds serve.{cap_name} ({cap}) — the floor would be \
+                 clamped to that cap on every tile, so one of the two is not doing what its author \
+                 intended"
+            ),
+            ConfigError::ThetaTargetZero => write!(
+                f,
+                "serve.theta_target_marks = 0 anchors design §7.2's threshold at a cut that admits \
+                 nothing, at every depth — so every non-empty tile would draw exactly k_min marks \
+                 at every zoom, with the density signal silently gone. Startup refuses rather than \
+                 serving a map that looks plausible and conveys nothing"
             ),
         }
     }
@@ -143,6 +166,8 @@ struct RawServe {
     #[serde(default)]
     max_underlay_cells: Option<usize>,
     #[serde(default)]
+    max_tiles_per_request: Option<usize>,
+    #[serde(default)]
     session_credential_file: Option<PathBuf>,
     #[serde(default)]
     session_credential_env: Option<String>,
@@ -182,6 +207,8 @@ pub struct Config {
     pub theta_target_marks: u64,
     pub max_underlay_offset: u8,
     pub max_underlay_cells: usize,
+    /// Availability bound on the base viewport path. See `EngineConfig::max_tiles_per_request`.
+    pub max_tiles_per_request: usize,
     pub session_credential: String,
     pub operator_credential: String,
 }
@@ -209,6 +236,19 @@ const DEFAULT_MAX_UNDERLAY_OFFSET: u8 = 4;
 /// multiplies its output by `4^offset`, so without this one request can demand ~77k
 /// `count_range` calls and blow the 10 ms p99 latency gate.
 const DEFAULT_MAX_UNDERLAY_CELLS: usize = 8192;
+
+/// The most tiles one viewport request may span.
+///
+/// **Sized against the threat, which is unbounded allocation — not against a latency SLO.** Without
+/// a bound, zoom 16 over the full extent is 65536² = 4.29e9 tiles at 16 B each, ~69 GB in one `Vec`:
+/// an out-of-memory abort from a single authenticated request. At this limit the tile vector is at
+/// most 4 MB and the per-tile range arithmetic is bounded with it.
+///
+/// It is deliberately *not* tightened to the few hundred tiles a real viewport draws. A wide bbox at
+/// a deep zoom is an unusual but legitimate query — the differential suite issues them — and its
+/// latency is the caller's own and now bounded. Refusing it would trade an availability fix for a
+/// functionality regression.
+const DEFAULT_MAX_TILES_PER_REQUEST: usize = 262_144;
 
 pub fn load(path: &Path) -> Result<Config> {
     let text = fs::read_to_string(path)?;
@@ -262,14 +302,36 @@ fn parse(text: &str) -> Result<Config> {
         raw.serve.operator_credential_env.as_deref(),
     )?;
 
-    // §7.2's floor clause is the I7 guarantee; refuse to start without it rather than clamp.
+    // §7.2's clause parameters. Every check here refuses rather than clamps: a typo must not
+    // silently disable an invariant (the floor) or silently blank the density signal (theta).
     let k_min = raw.serve.k_min.unwrap_or(DEFAULT_K_MIN);
     let k_max_marks = raw.serve.k_max_marks.unwrap_or(DEFAULT_K_MAX_MARKS);
+    let max_k = raw.serve.max_k.unwrap_or(DEFAULT_MAX_K);
+    let theta_target_marks = raw
+        .serve
+        .theta_target_marks
+        .unwrap_or(DEFAULT_THETA_TARGET_MARKS);
     if k_min == 0 {
         return Err(ConfigError::FloorClauseDisabled);
     }
+    // BOTH caps clamp the floor, because the effective cap is `min(k, max_k, k_max_marks)` and the
+    // floor is `min(k_min, cap)`. Checking only the overplot ceiling was a gap.
     if k_min > k_max_marks {
-        return Err(ConfigError::FloorAboveCap { k_min, k_max_marks });
+        return Err(ConfigError::FloorAboveCap {
+            k_min,
+            cap_name: "k_max_marks",
+            cap: k_max_marks,
+        });
+    }
+    if k_min > max_k {
+        return Err(ConfigError::FloorAboveCap {
+            k_min,
+            cap_name: "max_k",
+            cap: max_k,
+        });
+    }
+    if theta_target_marks == 0 {
+        return Err(ConfigError::ThetaTargetZero);
     }
 
     Ok(Config {
@@ -281,13 +343,10 @@ fn parse(text: &str) -> Result<Config> {
         viewer_addr,
         session_addr,
         control_listen,
-        max_k: raw.serve.max_k.unwrap_or(DEFAULT_MAX_K),
+        max_k,
         k_min,
         k_max_marks,
-        theta_target_marks: raw
-            .serve
-            .theta_target_marks
-            .unwrap_or(DEFAULT_THETA_TARGET_MARKS),
+        theta_target_marks,
         max_underlay_offset: raw
             .serve
             .max_underlay_offset
@@ -296,6 +355,10 @@ fn parse(text: &str) -> Result<Config> {
             .serve
             .max_underlay_cells
             .unwrap_or(DEFAULT_MAX_UNDERLAY_CELLS),
+        max_tiles_per_request: raw
+            .serve
+            .max_tiles_per_request
+            .unwrap_or(DEFAULT_MAX_TILES_PER_REQUEST),
         session_credential,
         operator_credential,
     })
@@ -422,19 +485,47 @@ mod tests {
     }
 
     #[test]
-    fn a_floor_above_the_cap_refuses_to_start() {
+    fn a_floor_above_either_cap_refuses_to_start() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+
+        // Above the overplot ceiling.
         let err = parse(&valid_toml("k_min = 200\nk_max_marks = 128")).unwrap_err();
         assert!(
             matches!(
                 err,
                 ConfigError::FloorAboveCap {
                     k_min: 200,
-                    k_max_marks: 128
+                    cap_name: "k_max_marks",
+                    cap: 128
                 }
             ),
             "{err}"
         );
+
+        // Above the MACHINE ceiling, which also clamps the floor — the gap the first check missed.
+        let err = parse(&valid_toml("max_k = 1\nk_min = 2")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::FloorAboveCap {
+                    k_min: 2,
+                    cap_name: "max_k",
+                    cap: 1
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    /// `theta_target_marks = 0` anchors θ at a cut admitting nothing, so every tile would draw
+    /// exactly `k_min` at every zoom with no error — the identical silent failure that
+    /// `Threshold::at_depth`'s `leading_zeros` guard prevents, reached through config instead.
+    #[test]
+    fn a_zero_theta_target_refuses_to_start() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml("theta_target_marks = 0")).unwrap_err();
+        assert!(matches!(err, ConfigError::ThetaTargetZero), "{err}");
     }
 }
