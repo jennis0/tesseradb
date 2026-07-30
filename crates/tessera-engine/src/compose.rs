@@ -128,7 +128,8 @@ impl EffectiveMask {
     /// spanning ~2.5×10⁷ visible rows that is ~100 MB allocated and written per request, on a path
     /// whose entire cost model (this module's doc, and CLAUDE.md) is "O(containers touched), not
     /// O(cardinality)". The bitmap is O(containers) — roughly 3 MB for the same set — and callers
-    /// iterate it lazily with `.iter()`.
+    /// iterate it lazily, per value with `.iter()` or per run via
+    /// [`Self::for_each_visible_run`]'s diffs-present fallback (selection's decode path).
     ///
     /// The eagerness was easy to miss because the old placeholder sampler `break`ed after *k* rows:
     /// the break saved the *gather*, never the materialisation, so the cost did not show up in the
@@ -160,10 +161,80 @@ impl EffectiveMask {
         self.base.bitmap().contains(row) || self.plus.contains(row)
     }
 
+    /// Are the overlay diffs empty — i.e. is the composed mask exactly `base`?
+    ///
+    /// This is [`Self::for_each_visible_run`]'s route predicate, public so tests can assert which
+    /// route a given mask exercises. The route choice is observable in timing (a diffs-empty mask
+    /// skips the per-tile materialisation) but never in output — the C19-adjacent note in memo
+    /// `2026-07-30-viewport-hot-path-and-bundle-size-review.md` §B9.
+    pub fn diffs_are_empty(&self) -> bool {
+        self.minus.is_empty() && self.plus.is_empty()
+    }
+
+    /// Visit the visible rows of `r` as ascending, non-overlapping, half-open runs — selection's
+    /// decode path, replacing per-value bitmap iteration with contiguous row ranges the caller can
+    /// scan as slices.
+    ///
+    /// Two sources of runs, one consumer. Steady state (diffs empty — the norm between change
+    /// events) walks `base` in place with a croaring cursor: no `from_range`, no AND, no
+    /// temporaries. Any non-empty diff takes the [`Self::rows_in_range`] fallback whole and yields
+    /// the temporary's runs the same way — necessarily, not merely simply: a cursor over `base`
+    /// can never see a `plus` row (`plus ∩ base = ∅` by construction), so there is no partial
+    /// fast route to salvage. The union of the yielded runs equals `rows_in_range(r)` exactly,
+    /// whichever source ran.
+    pub fn for_each_visible_run(&self, r: Range<u32>, mut f: impl FnMut(Range<u32>)) {
+        if self.diffs_are_empty() {
+            for_each_run_in(self.base.bitmap(), r, &mut f);
+        } else {
+            let composed = self.rows_in_range(r.clone());
+            for_each_run_in(&composed, r, &mut f);
+        }
+    }
+
     /// The two structural invariants (task-10 brief): `minus ⊆ base` and `plus ∩ base = ∅`.
     /// Exposed for tests; also asserted in debug builds at construction time in [`compose`].
     pub fn check_structural_invariants(&self) -> bool {
         self.minus.is_subset(self.base.bitmap()) && self.plus.and(self.base.bitmap()).is_empty()
+    }
+}
+
+/// How many runs one cursor read decodes: 64 × 8 B is a 512 B stack buffer, no heap allocation
+/// per call, and one FFI crossing per 64 runs.
+const RUN_BUF_LEN: usize = 64;
+
+/// Walk `bitmap ∩ r` as ascending, non-overlapping, half-open runs.
+///
+/// The delicate step is the closed→half-open conversion: croaring yields `{start, last}` with
+/// `last` *inclusive*, and `last + 1` at `last == u32::MAX` is a debug panic and a release wrap
+/// to 0 — so the end-clamp test runs first, and clamping to `r.end` covers the `u32::MAX` case
+/// for free (`r.end - 1 ≤ u32::MAX - 1 < last` whenever `last == u32::MAX`, since `r.end` is
+/// exclusive). The row `u32::MAX` itself is therefore never emitted — exactly as
+/// [`Bitmap::from_range`] excludes it, so the two decode routes agree at the top of the row
+/// space. No start-clamp exists on purpose: after `reset_at_or_after(r.start)` the first run
+/// already begins at the first set value ≥ `r.start`.
+fn for_each_run_in(bitmap: &Bitmap, r: Range<u32>, f: &mut impl FnMut(Range<u32>)) {
+    if r.start >= r.end {
+        return;
+    }
+    let mut cursor = bitmap.cursor();
+    cursor.reset_at_or_after(r.start);
+    let mut buf = [croaring::RangeInclusive::<u32> { start: 0, last: 0 }; RUN_BUF_LEN];
+    loop {
+        let n = cursor.read_many_ranges(&mut buf);
+        if n == 0 {
+            // Exhausted — `read_many_ranges` returning 0 is the termination signal.
+            return;
+        }
+        for run in &buf[..n] {
+            if run.start >= r.end {
+                return;
+            }
+            if run.last >= r.end - 1 {
+                f(run.start..r.end);
+                return;
+            }
+            f(run.start..run.last + 1);
+        }
     }
 }
 
@@ -326,4 +397,118 @@ pub fn visible_to(
 ) -> bool {
     verdict(overlay, buffer, satisfied, fragment.watermark, entity)
         .unwrap_or_else(|| fragment.view().contains(entity_as_u32(entity)))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for [`for_each_run_in`] — the closed→half-open conversion and its edges. Tested
+    //! here, at the helper, because the one genuinely dangerous input (a run ending at
+    //! `u32::MAX`) cannot be built through the integration fixtures without a 2³²-entry
+    //! permutation. Mask-level equivalence (both routes against `rows_in_range`) lives in
+    //! `tests/compose.rs` and `tests/selection.rs`.
+
+    use super::*;
+
+    fn runs_of(bitmap: &Bitmap, r: Range<u32>) -> Vec<Range<u32>> {
+        let mut out = Vec::new();
+        for_each_run_in(bitmap, r, &mut |run| out.push(run));
+        out
+    }
+
+    /// Every emitted run flattens back to exactly `bitmap ∩ r`, half-open — the property every
+    /// other test here is a named corner of.
+    fn assert_flattens_to_intersection(bitmap: &Bitmap, r: Range<u32>) {
+        let flat: Vec<u32> = runs_of(bitmap, r.clone()).into_iter().flatten().collect();
+        let expected: Vec<u32> = bitmap.and(&Bitmap::from_range(r.clone())).to_vec();
+        assert_eq!(flat, expected, "runs disagree with bitmap ∩ {r:?}");
+    }
+
+    #[test]
+    fn a_run_ending_at_u32_max_is_clamped_not_overflowed() {
+        // The R4 edge: `last + 1` at `last == u32::MAX` would panic in debug and wrap in release.
+        let mut b = Bitmap::new();
+        b.add_range(u32::MAX - 100..=u32::MAX);
+        let r = (u32::MAX - 50)..u32::MAX;
+        assert_eq!(runs_of(&b, r.clone()), vec![(u32::MAX - 50)..u32::MAX]);
+        // Parity with `Bitmap::from_range`, which also cannot express u32::MAX: neither route
+        // ever emits it.
+        assert_flattens_to_intersection(&b, r);
+    }
+
+    #[test]
+    fn a_run_spanning_the_container_boundary_comes_back_merged() {
+        // croaring merges runs across the 65535/65536 container boundary — one run, not two.
+        let mut b = Bitmap::new();
+        b.add_range(65_530..=65_540);
+        assert_eq!(runs_of(&b, 0..100_000), vec![65_530..65_541]);
+        assert_flattens_to_intersection(&b, 0..100_000);
+    }
+
+    #[test]
+    fn runs_touching_the_range_ends_are_clamped_to_it() {
+        let mut b = Bitmap::new();
+        b.add_range(0..=9);
+        b.add(15);
+        b.add_range(20..=29);
+        // The first run starts before r (the cursor seek supplies the start, no clamp code), the
+        // last extends past r.end (the end-clamp cuts it).
+        assert_eq!(runs_of(&b, 5..25), vec![5..10, 15..16, 20..25]);
+        assert_flattens_to_intersection(&b, 5..25);
+    }
+
+    #[test]
+    // The inverted range below is deliberate: it is the guard's own input, not an iteration.
+    #[allow(clippy::reversed_empty_ranges)]
+    fn empty_mask_empty_range_and_no_overlap_all_yield_nothing() {
+        let empty = Bitmap::new();
+        assert!(runs_of(&empty, 0..1000).is_empty());
+
+        let mut b = Bitmap::new();
+        b.add_range(100..=200);
+        assert!(runs_of(&b, 50..50).is_empty(), "empty range");
+        assert!(runs_of(&b, 60..40).is_empty(), "inverted range");
+        assert!(runs_of(&b, 0..100).is_empty(), "range wholly before the run");
+        assert!(runs_of(&b, 201..300).is_empty(), "range wholly after the run");
+    }
+
+    #[test]
+    fn more_runs_than_one_buffer_read_are_all_emitted() {
+        // 200 single-value runs forces multiple `read_many_ranges` refills (RUN_BUF_LEN = 64).
+        let mut b = Bitmap::new();
+        for i in 0..200u32 {
+            b.add(i * 3);
+        }
+        let runs = runs_of(&b, 0..600);
+        assert_eq!(runs.len(), 200);
+        assert_flattens_to_intersection(&b, 0..600);
+    }
+
+    #[test]
+    fn run_walk_agrees_with_the_bitmap_route_on_random_container_mixes() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(0xB9_0B9);
+        for _ in 0..50 {
+            let mut b = Bitmap::new();
+            // A mix that lands array, bitmap and run containers: sparse randoms, a dense random
+            // stretch, and a long literal run.
+            for _ in 0..rng.gen_range(0..200) {
+                b.add(rng.gen_range(0..300_000));
+            }
+            let dense_start = rng.gen_range(0..200_000);
+            for v in dense_start..dense_start + 40_000 {
+                if rng.gen_bool(0.5) {
+                    b.add(v);
+                }
+            }
+            let run_start = rng.gen_range(0..250_000);
+            b.add_range(run_start..=run_start + rng.gen_range(0..30_000));
+
+            for _ in 0..20 {
+                let a = rng.gen_range(0..320_000);
+                let z = rng.gen_range(0..320_000);
+                assert_flattens_to_intersection(&b, a.min(z)..a.max(z));
+            }
+        }
+    }
 }

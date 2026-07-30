@@ -20,7 +20,7 @@ use tempfile::TempDir;
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
 use tessera_engine::select::{SelectParams, Selection, Threshold};
-use tessera_lifecycle::{IngestBuffer, Overlay};
+use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_spatial::{morton_of, tiler::sort_batch, Extent, Tile, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::write::{write_permutation, write_segment};
@@ -89,6 +89,17 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
 ///
 /// Uses an identity permutation so entity ids and row indices coincide — see the module doc.
 fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
+    mask_over_with(visible_rows, row_count, &Overlay::default())
+}
+
+/// [`mask_over`], but composed against `overlay` — how the run-decode tests obtain masks with
+/// non-empty diffs (suppressions land in `minus`, predicate-widens onto rows outside
+/// `visible_rows` land in `plus`; entity id == row index, so the overlay names rows directly).
+fn mask_over_with(
+    visible_rows: &[u32],
+    row_count: u32,
+    overlay: &Overlay,
+) -> (TempDir, EffectiveMask) {
     let temp = TempDir::new().unwrap();
     let bound = row_count as u64;
 
@@ -111,7 +122,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
     let mask = compose(
         &fragment,
         &satisfied,
-        &Overlay::default(),
+        overlay,
         &IngestBuffer::default(),
         base,
         &perm,
@@ -668,6 +679,10 @@ fn a_zero_cap_serves_no_points() {
             got.rows.is_empty(),
             "cap 0 must serve nothing ({threshold:?})"
         );
+        assert_eq!(
+            got.rows_visited, 0,
+            "the cap-0 early return reads no rows, so it must report none read ({threshold:?})"
+        );
     }
 }
 
@@ -710,6 +725,213 @@ fn every_served_row_is_visible() {
                     "row {row} was served but is not visible (I7)"
                 );
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The run decode (B9): mechanism equivalence against the retired per-value path
+// ---------------------------------------------------------------------------------------------
+
+/// The pre-B9 `Selection::of`, transcribed: materialise `rows_in_range`, iterate it one value at
+/// a time, serve-all and counting/heap branches exactly as they stood. Kept as the oracle because
+/// the run decode claims to be a *mechanism* change only — so the reference is the retired
+/// mechanism itself, not the definition (the definition is already pinned by
+/// [`selection_matches_the_definition_over_both_internal_branches`]).
+///
+/// Returns `(rows, rows_visited)`: the counter is first-class output here, asserted un-gated —
+/// a clamp off-by-one in the run decode would corrupt the bench's C4 numerator without failing
+/// any served-set assertion.
+fn per_value_selection(
+    seg: &Segment,
+    mask: &EffectiveMask,
+    range: std::ops::Range<u32>,
+    p: &SelectParams,
+    visible: u64,
+) -> (Vec<u32>, u64) {
+    use std::collections::BinaryHeap;
+
+    if p.cap == 0 {
+        return (Vec::new(), 0);
+    }
+    let ids = seg.data.columns.tessera_id();
+    let visible_rows = mask.rows_in_range(range);
+    let floor = p.k_min.min(p.cap);
+    let serves_all =
+        visible <= floor as u64 || (p.threshold.is_saturated() && visible <= p.cap as u64);
+
+    let mut rows_visited: u64 = 0;
+    let rows: Vec<u32> = if serves_all {
+        let mut rows: Vec<u32> = Vec::new();
+        for row in visible_rows.iter() {
+            rows_visited += 1;
+            rows.push(row);
+        }
+        rows.sort_unstable_by_key(|&row| ids[row as usize]);
+        rows
+    } else {
+        let mut c_theta: u64 = 0;
+        let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::new();
+        for row in visible_rows.iter() {
+            rows_visited += 1;
+            let id = ids[row as usize];
+            if p.threshold.admits(id) {
+                c_theta += 1;
+            }
+            if heap.len() == p.cap {
+                if id >= heap.peek().expect("non-empty at len == cap").0 {
+                    continue;
+                }
+                heap.pop();
+            }
+            heap.push((id, row));
+        }
+        let m = p
+            .cap
+            .min(floor.max(usize::try_from(c_theta).unwrap_or(usize::MAX)))
+            .min(usize::try_from(visible).unwrap_or(usize::MAX));
+        let mut kept: Vec<(u64, u32)> = heap.into_vec();
+        kept.sort_unstable();
+        kept.truncate(m);
+        kept.into_iter().map(|(_, row)| row).collect()
+    };
+    (rows, rows_visited)
+}
+
+/// **The B9 equivalence property.** `Selection::of`'s run decode is bit-identical — same `rows`,
+/// same `rows_visited` — to the retired per-value path, over randomised masks, ranges and
+/// parameters, on **both** decode routes and **both** internal branches.
+///
+/// The diffs-empty arm is the one that exercises the new cursor route; a corpus that always has
+/// non-empty diffs tests only the fallback, which shares its bitmap with the oracle and proves
+/// nothing. The route predicate is `diffs_are_empty` (that is the branch `for_each_visible_run`
+/// takes), so asserting it per mask, plus the fired-counter floors below, pins that all four
+/// route × branch combinations were genuinely reached — mirroring the per-branch coverage
+/// asserts in [`selection_matches_the_definition_over_both_internal_branches`].
+#[test]
+fn run_decode_matches_the_per_value_path_on_both_routes_and_both_branches() {
+    use std::collections::HashSet;
+
+    let mut rng = StdRng::seed_from_u64(0xB9_0001);
+    let points: Vec<(f32, f32, u64)> = (0..3000)
+        .map(|_| {
+            (
+                rng.gen_range(0.0f32..1024.0),
+                rng.gen_range(0.0f32..1024.0),
+                rng.gen(),
+            )
+        })
+        .collect();
+    let seg = segment_of(&points);
+    let n = seg.row_count();
+
+    // Three visibility shapes: sparse scatter, dense scatter, contiguous blocks — the last is the
+    // long-run shape the run decode exists for.
+    let shapes: Vec<Vec<u32>> = vec![
+        (0..n).filter(|_| rng.gen_bool(0.07)).collect(),
+        (0..n).filter(|_| rng.gen_bool(0.7)).collect(),
+        (0..n).filter(|r| (r / 256) % 2 == 0).collect(),
+    ];
+
+    // fired[route][branch]: route 0 = diffs empty (cursor walk), 1 = diffs present (fallback);
+    // branch 0 = serve-all, 1 = counting/heap.
+    let mut fired = [[0usize; 2]; 2];
+
+    for visible_rows in &shapes {
+        for diffs_present in [false, true] {
+            let mut overlay = Overlay::new();
+            if diffs_present {
+                // `minus ⊆ base`: suppress a sample of visible rows. `plus ∩ base = ∅`: widen a
+                // sample of invisible rows via a predicate onto the granted term (entity id ==
+                // row index in this fixture).
+                for &row in visible_rows.iter().step_by(7) {
+                    overlay.apply(EntityId::new(row as u64), ChangeOp::Suppress, None);
+                }
+                let vis_set: HashSet<u32> = visible_rows.iter().copied().collect();
+                for row in (0..n).filter(|r| !vis_set.contains(r)).step_by(11) {
+                    overlay.apply(
+                        EntityId::new(row as u64),
+                        ChangeOp::Predicate,
+                        Some(vec![TermId::new(0)]),
+                    );
+                }
+            }
+            let (_t, mask) = mask_over_with(visible_rows, n, &overlay);
+            assert_eq!(
+                mask.diffs_are_empty(),
+                !diffs_present,
+                "route-coverage precondition: the fixture must actually put each mask on the \
+                 route this arm claims to test"
+            );
+
+            for threshold in [
+                Threshold::Saturated,
+                Threshold::Cut(1),
+                Threshold::Cut(1u64 << 62),
+                Threshold::Cut(u64::MAX),
+            ] {
+                for cap in [1usize, 4, 30, 4096] {
+                    for k_min in [1usize, 2] {
+                        let p = params(k_min, cap, threshold);
+                        for i in 0..10 {
+                            // Alternate wide and narrow ranges: wide ones exercise the
+                            // counting/heap branch and multi-run decodes, narrow ones give the
+                            // low visible counts the serve-all branch fires on.
+                            let range = if i % 2 == 0 {
+                                let a = rng.gen_range(0..n);
+                                let b = rng.gen_range(0..n);
+                                a.min(b)..a.max(b) + 1
+                            } else {
+                                let a = rng.gen_range(0..n);
+                                a..(a + rng.gen_range(1..64)).min(n)
+                            };
+                            let vis = mask.count_range(range.clone());
+                            if vis == 0 {
+                                continue;
+                            }
+                            let got = Selection::of(&mask, &seg.data, range.clone(), &p, vis);
+                            let (want_rows, want_visited) =
+                                per_value_selection(&seg, &mask, range.clone(), &p, vis);
+                            assert_eq!(
+                                got.rows, want_rows,
+                                "run decode diverged from the per-value path: diffs_present=\
+                                 {diffs_present} k_min={k_min} cap={cap} threshold={threshold:?} \
+                                 range={range:?} visible={vis}"
+                            );
+                            // R3: the counter, un-gated. Both sides count clamped rows actually
+                            // read, so both must equal the visible cardinality of the range.
+                            assert_eq!(
+                                got.rows_visited, want_visited,
+                                "rows_visited diverged at diffs_present={diffs_present} \
+                                 cap={cap} threshold={threshold:?} range={range:?}"
+                            );
+                            assert_eq!(
+                                want_visited, vis,
+                                "the per-value oracle itself must read exactly the visible \
+                                 cardinality — if this fails the fixture is broken, not the \
+                                 run decode"
+                            );
+
+                            // The exact internal branch predicate, transcribed.
+                            let floor = p.k_min.min(p.cap);
+                            let serves_all = vis <= floor as u64
+                                || (p.threshold.is_saturated() && vis <= p.cap as u64);
+                            fired[usize::from(diffs_present)][usize::from(!serves_all)] += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (route, route_name) in [(0, "diffs-empty cursor"), (1, "diffs-present fallback")] {
+        for (branch, branch_name) in [(0, "serve-all"), (1, "counting/heap")] {
+            assert!(
+                fired[route][branch] > 100,
+                "only {} comparisons hit the {route_name} route's {branch_name} branch — that \
+                 combination is barely covered and this test's silence proves nothing for it",
+                fired[route][branch]
+            );
         }
     }
 }

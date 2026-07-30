@@ -60,8 +60,10 @@ pub struct StageTimings {
     pub tile_ranges_ns: u64,
     /// `EffectiveMask::count_range`, summed over tiles. The count loop.
     pub count_ns: u64,
-    /// §7.2's selection, summed over tiles: `rows_in_range`'s bitmap work plus the threshold count
-    /// and the bounded selection over it.
+    /// §7.2's selection, summed over tiles: the run decode of the visible set
+    /// (`EffectiveMask::for_each_visible_run` — a cursor over `base` steady-state, the
+    /// `rows_in_range` bitmap fallback when overlay diffs exist) plus the threshold count and the
+    /// bounded selection over it.
     pub select_ns: u64,
     /// The per-row column gather (`row_to_point`), summed over tiles.
     pub gather_ns: u64,
@@ -94,8 +96,10 @@ pub struct StageTimings {
     /// Σ over tiles of the rows selection actually **read**, counted inside the loops that read
     /// them (`Selection::rows_visited`).
     ///
-    /// Renamed from `select_rows_materialised`: nothing is materialised any more — `rows_in_range`
-    /// returns a bitmap — so the old name described a `Vec` that no longer exists.
+    /// Renamed from `select_rows_materialised`: no row `Vec` is materialised any more — the
+    /// steady-state decode route walks `base` in place, and the diffs-present fallback's
+    /// `rows_in_range` temporary is a bitmap — so the old name described a `Vec` that no longer
+    /// exists.
     ///
     /// **It must be an observation of the selection path, never a restatement of another counter.**
     /// A version of this briefly took its value from the caller's `visible`, which made the natural

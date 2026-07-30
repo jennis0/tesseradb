@@ -239,8 +239,12 @@ impl Selection {
         }
 
         let ids = segment.columns.tessera_id();
-        let visible_rows = mask.rows_in_range(range);
 
+        // Both branches decode the visible set as contiguous runs (`for_each_visible_run`) rather
+        // than one value at a time — the measured per-row cost was dominated by decode machinery,
+        // not by the column loads (memo `2026-07-30-viewport-hot-path-and-bundle-size-review.md`
+        // §B9). Runs arrive ascending and non-overlapping, so the rows are read in exactly the
+        // order the per-value iteration read them and the output is bit-identical.
         let mut rows_visited: u64 = 0;
         let rows: Vec<u32> = if serves_all_visible(params, visible) {
             // Everything visible is served, so there is nothing to count and nothing to select —
@@ -256,20 +260,25 @@ impl Selection {
             // than the saved lookups — the ids being read are in cache for the sizes the serve-all
             // branch handles (V <= cap). Recorded because the reasoning for the other choice is
             // more persuasive than the measurement, and someone will make it again.
-            // A plain loop rather than `map`/`inspect`: the increment is the point, not a side
-            // effect smuggled through an iterator adaptor. Capacity is exact — this branch runs
-            // only when `visible <= cap`.
+            // The counter takes the clamped run length — the rows this call actually reads, which
+            // is the field's meaning. Capacity is exact — this branch runs only when
+            // `visible <= cap`.
             let mut rows: Vec<u32> = Vec::with_capacity(params.cap.min(visible as usize));
-            for row in visible_rows.iter() {
-                rows_visited += 1;
-                rows.push(row);
-            }
+            mask.for_each_visible_run(range, |run| {
+                rows_visited += u64::from(run.end - run.start);
+                rows.extend(run);
+            });
             rows.sort_unstable_by_key(|&row| ids[row as usize]);
             rows
         } else {
             // One pass. `m(T) <= cap` always, so the `cap` smallest ids in the tile contain the
             // served set for *any* m the counting pass can produce — which is what makes a single
             // pass sufficient.
+            //
+            // Per run, the threshold count goes first, over the contiguous id slice — a branchless
+            // filter-count the compiler vectorises — and the heap feed second. The original code
+            // interleaved them per row; the split changes nothing observable because `c_theta` and
+            // the heap never read each other.
             //
             // A `BinaryHeap` is a max-heap, which is what is wanted: the largest of the `cap`
             // best-so-far sits at the root, so it is both the eviction candidate and the rejection
@@ -282,26 +291,33 @@ impl Selection {
             // rate rises. Output is identical: a row not smaller than the largest of the `cap`
             // smallest cannot be among them.
             //
-            // Memory: O(min(cap, V)) for the heap, plus `rows_in_range`'s bitmap, which is
-            // O(containers touched) rather than O(V) — see its doc for what that used to cost.
+            // Memory: O(min(cap, V)) for the heap. The steady-state decode route (diffs empty)
+            // materialises nothing at all; with diffs present the fallback pays one temporary
+            // `rows_in_range` bitmap, O(containers touched) rather than O(V) — see its doc for
+            // what that used to cost.
             let mut c_theta: u64 = 0;
             let heap_cap = params.cap.min(visible as usize).saturating_add(1);
             let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(heap_cap);
-            for row in visible_rows.iter() {
-                rows_visited += 1;
-                let id = ids[row as usize];
-                if params.threshold.admits(id) {
-                    c_theta += 1;
-                }
-                if heap.len() == params.cap {
-                    // Safe: len == cap >= 1 here, since cap == 0 returned early above.
-                    if id >= heap.peek().expect("non-empty at len == cap").0 {
-                        continue;
+            mask.for_each_visible_run(range, |run| {
+                let slice = &ids[run.start as usize..run.end as usize];
+                rows_visited += slice.len() as u64;
+                match params.threshold {
+                    Threshold::Saturated => c_theta += slice.len() as u64,
+                    Threshold::Cut(cut) => {
+                        c_theta += slice.iter().filter(|&&id| id < cut).count() as u64;
                     }
-                    heap.pop();
                 }
-                heap.push((id, row));
-            }
+                for (i, &id) in slice.iter().enumerate() {
+                    if heap.len() == params.cap {
+                        // Safe: len == cap >= 1 here, since cap == 0 returned early above.
+                        if id >= heap.peek().expect("non-empty at len == cap").0 {
+                            continue;
+                        }
+                        heap.pop();
+                    }
+                    heap.push((id, run.start + i as u32));
+                }
+            });
 
             let m = served_count(c_theta, params, visible);
             let mut kept: Vec<(u64, u32)> = heap.into_vec();
