@@ -49,10 +49,13 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 echo "Building the 10^9 bundle at $OUT (no --limit)..."
+# --mint-external-ids keeps this bundle byte-comparable with the pre-flag 10^9 builds and the
+# bench fixtures (memo 2026-07-30 §3.2 D1 — the default build is spec-conformant and mints none).
 /usr/bin/time -v "$BIN" build \
   --points "$ROOT/data/scaled/geometry.parquet" \
   --pairs "$ROOT/data/scaled/pairs/categories-subclass.pairs.parquet" \
   --out "$OUT" \
   --extent 0,65536,0,65536 \
   --slice s0 \
+  --mint-external-ids \
   "${IDENTITY_ARGS[@]}"

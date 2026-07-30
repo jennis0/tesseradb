@@ -161,6 +161,8 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         identity_epoch: 1,
         shard_id: 0,
+        mint_external_ids: true,
+        emit_oracle_pairs: true,
     };
     build(&args).expect("fixture build should succeed");
 }
@@ -1277,6 +1279,8 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             identity_key_hex: TEST_KEY_HEX.to_string(),
             identity_epoch: 1,
             shard_id: 0,
+            mint_external_ids: true,
+            emit_oracle_pairs: true,
         };
         build(&args).expect("2.4M fixture build should succeed");
     }

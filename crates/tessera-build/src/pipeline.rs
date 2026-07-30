@@ -502,11 +502,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     // ---- 6. postings and pairs.parquet -----------------------------------------------
     let postings_path = terms_dir.join("postings.arrow");
-    let pairs_path = terms_dir.join("pairs.parquet");
+    let pairs_path = args
+        .emit_oracle_pairs
+        .then(|| terms_dir.join("pairs.parquet"));
     write_terms(
         args,
         &postings_path,
-        &pairs_path,
+        pairs_path.as_deref(),
         &source_ids,
         &entity_of_ordinal,
         &term_of_source,
@@ -519,24 +521,31 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     timer.end(BuildStage::PostingsWrite, pair_count);
 
-    // ---- 7. external ids -------------------------------------------------------------
-    // Sorted by the external id's *bytes* (R4); `ExternalIdRow` holds each id as the sort key
-    // that makes that a plain integer comparison, in twelve bytes rather than a padded sixteen.
-    let mut external: Vec<ExternalIdRow> = (0..n as usize)
-        .map(|ordinal| ExternalIdRow::new(source_ids[ordinal], entity_of_ordinal[ordinal]))
-        .collect();
-    // Keys are the byte-swapped source ids — dup-checked, hence unique: a total order, one
-    // output under the parallel unstable sort.
-    external.par_sort_unstable_by_key(ExternalIdRow::sort_key);
-    let external_ids_paths =
-        write_external_id_extents(&entities_dir, &external, EXTERNAL_ID_ROWS_PER_EXTENT)?;
-    // `external` is still in the concatenated extent order at this point (the extents partition
-    // it into consecutive ranges, in order) — its index *is* each row's ordinal, which is exactly
-    // what the locator addresses (contracts §2.4/§2.6 r6).
-    let ext_locator_path = write_ext_locator(&entities_dir, &external, n)?;
-    drop(external);
+    // ---- 7. external ids (only when minting — see `BuildArgs::mint_external_ids`) -----
+    let mut external_ids_paths: Vec<PathBuf> = Vec::new();
+    let mut ext_locator_path: Option<PathBuf> = None;
+    if args.mint_external_ids {
+        // Sorted by the external id's *bytes* (R4); `ExternalIdRow` holds each id as the sort
+        // key that makes that a plain integer comparison, in twelve bytes rather than a padded
+        // sixteen.
+        let mut external: Vec<ExternalIdRow> = (0..n as usize)
+            .map(|ordinal| ExternalIdRow::new(source_ids[ordinal], entity_of_ordinal[ordinal]))
+            .collect();
+        // Keys are the byte-swapped source ids — dup-checked, hence unique: a total order, one
+        // output under the parallel unstable sort.
+        external.par_sort_unstable_by_key(ExternalIdRow::sort_key);
+        external_ids_paths =
+            write_external_id_extents(&entities_dir, &external, EXTERNAL_ID_ROWS_PER_EXTENT)?;
+        // `external` is still in the concatenated extent order at this point (the extents
+        // partition it into consecutive ranges, in order) — its index *is* each row's ordinal,
+        // which is exactly what the locator addresses (contracts §2.4/§2.6 r6).
+        ext_locator_path = Some(write_ext_locator(&entities_dir, &external, n)?);
+    }
 
-    timer.end(BuildStage::ExternalIds, n);
+    timer.end(
+        BuildStage::ExternalIds,
+        if args.mint_external_ids { n } else { 0 },
+    );
 
     // ---- 8. geometry, in entity order ------------------------------------------------
     // Chunk-order insensitivity ([`join_chunk`]): source ids are duplicate-checked, so every
@@ -693,20 +702,16 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     timer.end(BuildStage::SegmentWrite, n);
 
     // ---- 11. manifests ---------------------------------------------------------------
+    let mut other_paths = vec![postings_path, permutation_path, columns_path, morton_path];
+    other_paths.extend(pairs_path);
+    other_paths.extend(ext_locator_path);
     let report = write_manifests(
         args,
         &BundleFiles {
             dict_paths,
             dict_records: term_count,
             external_ids_paths,
-            other_paths: vec![
-                postings_path,
-                pairs_path,
-                permutation_path,
-                columns_path,
-                morton_path,
-                ext_locator_path,
-            ],
+            other_paths,
         },
         &plugin,
         n,
@@ -1025,7 +1030,7 @@ fn refine_group(group: &mut [SortRec], packed: &[u64], long: &LongIndex, s: &mut
 fn write_terms(
     args: &BuildArgs,
     postings_path: &std::path::Path,
-    pairs_path: &std::path::Path,
+    pairs_path: Option<&std::path::Path>,
     source_ids: &[u64],
     entity_of_ordinal: &[u32],
     term_of_source: &FxHashMap<u64, u32>,
@@ -1125,13 +1130,15 @@ fn write_terms(
         .collect::<Result<_>>()?;
 
     let mut records: Vec<Vec<u8>> = Vec::with_capacity(row_counts.len());
-    let mut pairs_writer = PairsParquetWriter::create(pairs_path)?;
+    let mut pairs_writer = pairs_path.map(PairsParquetWriter::create).transpose()?;
     let mut written = 0u64;
     for (term, (end, record)) in encoded.into_iter().enumerate() {
         let bucket = &flat[offsets[term] as usize..offsets[term] as usize + end];
         written += end as u64;
         records.push(record);
-        pairs_writer.push_run(term as u32, bucket)?;
+        if let Some(writer) = pairs_writer.as_mut() {
+            writer.push_run(term as u32, bucket)?;
+        }
     }
     drop(flat);
     if written != pair_count {
@@ -1139,7 +1146,9 @@ fn write_terms(
             "postings hold {written} pairs but the relation has {pair_count}"
         )));
     }
-    pairs_writer.finish()?;
+    if let Some(writer) = pairs_writer {
+        writer.finish()?;
+    }
     write_posting_records(postings_path, &records).map_err(|e| BuildError::io(postings_path, e))?;
     Ok(())
 }
