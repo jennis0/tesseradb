@@ -54,8 +54,14 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--boot-deadline", type=float, default=1800.0)
     ap.add_argument("--max-k-config", type=int, default=6000)
+    ap.add_argument(
+        "--k",
+        default=",".join(str(k) for k in K_VALUES),
+        help="comma-separated k values to sweep (default: %(default)s)",
+    )
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
+    k_values = [int(k) for k in args.k.split(",") if k.strip()]
 
     bundle_root = Path(args.bundle)
     if not (bundle_root / "CURRENT").exists():
@@ -120,7 +126,7 @@ def main() -> int:
         results["fixed_viewport"] = {"zoom": zoom, "bbox": bbox}
         print(f"Fixed viewport: zoom={zoom} bbox={bbox}")
 
-        for k in K_VALUES:
+        for k in k_values:
             print(f"\n=== fixed viewport, k={k}, {args.n_repeats} repeats ===")
             server_us: list[float] = []
             e2e_us: list[float] = []
