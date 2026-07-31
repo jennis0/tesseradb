@@ -31,16 +31,10 @@ multiset, `Handle` values are per-session opaque and never compared — see I10'
 from __future__ import annotations
 
 from collections import Counter
-from pathlib import Path
 
 import pytest
 
-from oracle.canary_fixture import (
-    CANARY_TERM_ID,
-    N_BASE_ITEMS,
-    build_canary_pair,
-    verify_allocation_rules,
-)
+from oracle.canary_fixture import build_canary_pair, verify_allocation_rules
 from oracle.harness import spawn_server, stop_server
 from oracle.wire import decode_viewport
 

@@ -3,6 +3,53 @@ name = "tessera-reference-oracle"
 version = "0.1.0"
 description = "Independent Python differential oracle for Tessera (Task 14) — test-only, never a component."
 requires-python = ">=3.12"
+# The package imports all three at module scope. Declared because `reference/.venv` has to be
+# reproducible from a fresh clone for a track that stands across every stage — an undeclared
+# dependency is a suite that runs on the machine it was written on. `requests` arrived with the
+# HTTP harness and was the one that made the omission bite: a fresh venv built from this file
+# collected zero tests with an ImportError.
+#
+# Unpinned on purpose. This is a test-only consumer with no artifact and no request path (CLAUDE.md
+# — Python is never a component), and every use is of a long-stable API surface; a lockfile here
+# would be a maintenance obligation bought for nothing.
+dependencies = [
+  "pyarrow",
+  "numpy",
+  "requests",
+  # `bundle.py` reads `postings.arrow`'s Roaring bitmaps with it. Named here because the review
+  # that found the other three missed it, which is the argument for the list being derived from
+  # the imports rather than from memory: `test_oracle_layering.py` now checks it is complete.
+  "pyroaring",
+]
+
+[project.optional-dependencies]
+# `pytest` is what runs the suite; `ruff` is what makes the `# noqa` markers below mean something.
+dev = [
+  "pytest",
+  "ruff",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+# **The set that holds at zero findings today**, which is the only kind of lint configuration worth
+# committing: one that fails on arrival is one everybody learns to ignore. `E4` makes the `# noqa:
+# E402` markers in both conftests mean something — they suppress the deliberate `sys.path` insert
+# before `import oracle`, and until now nothing read them, so a suppression still needed and one
+# left over looked identical. `F` is the one that found real defects when this was first run: three
+# unused imports and two unused locals across the two suites, one of them a `constants` fetched
+# from `/v1/meta` in a test that never used it.
+#
+# Deliberately NOT selected, so the omissions are decisions rather than oversights. `I` (import
+# ordering) and `E501` (line length) would together rewrite the import block or wrap a line in
+# fifteen files — formatting churn across every file of a track that is mostly prose-heavy test
+# code, bought for nothing. `PLC0415` (function-local imports) would need ten more suppression
+# markers on the fixtures that import inside the function on purpose: a module-scope import there
+# builds a fixture bundle at collection time. Widening any of these is a separate piece of work
+# with its own diff, not a side effect of this one.
+select = ["E4", "E7", "E9", "F"]

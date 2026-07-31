@@ -39,6 +39,56 @@ DEFAULT_EXTENT = "0,65536,0,65536"
 DEFAULT_SLICE = "s0"
 
 
+# ---------------------------------------------------------------------------------------------
+# Fixture reuse: a stamped recipe, not a predicate over the artefact
+# ---------------------------------------------------------------------------------------------
+#
+# A fixture bundle is built once per machine at a fixed path and reused across sessions. Deciding
+# *whether* it may be reused by inspecting the bundle is the construction that failed twice in this
+# file's own history — once on the r6 `identity` object, once on `--mint-external-ids` — and each
+# time the fix was to extend the predicate by one more clause. That is an allowlist, and the input
+# that is not on it is precisely the one that goes wrong silently.
+#
+# The receipt inverts it: the builder writes down **the whole input set** it built from, and the
+# reuse test is equality against the input set the caller wants now. Adding a build input can then
+# only fail in the safe direction — an unrecorded input is a rebuild that was not needed, never a
+# reuse that should not have happened. It is also the answer to how the suite sat red for a month:
+# green was a function of `(checkout, /tmp state)` rather than of the checkout, because the state
+# in `/tmp` carried no record of what produced it.
+
+
+def recipe_path(bundle_root: Path) -> Path:
+    """The receipt's path — *beside* the bundle, not inside it.
+
+    Outside, because the bundle is a `tessera build` output and the byte-scanner and the shape
+    checks treat everything under it as the build's own; a fixture-management file living there
+    would be the suite planting something in the artefact it is supposed to be auditing.
+    """
+    return bundle_root.parent / f"{bundle_root.name}.FIXTURE.json"
+
+
+def read_recipe(bundle_root: Path) -> dict | None:
+    """The stamped recipe, or `None` if there isn't a readable one."""
+    try:
+        return json.loads(recipe_path(bundle_root).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def write_recipe(bundle_root: Path, wanted: dict | None) -> None:
+    """Stamp the recipe, or remove the stamp when `wanted` is `None`.
+
+    Removing first and stamping last is what makes the receipt mean "this bundle was built from
+    this, completely": a build that dies part way through leaves no receipt at all.
+    """
+    path = recipe_path(bundle_root)
+    if wanted is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(wanted, indent=2, sort_keys=True))
+
+
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -105,16 +155,39 @@ def ensure_fixture_bundle(
     the flip, and began failing when `/tmp` was wiped. Every test that addresses an item over
     `/control/changes` needs an external ID to address it *by*, so this fixture must carry them:
     opt-in in the product, mandatory here.
+
+    Both of those are the same defect twice, and it is the receipt above — not this docstring —
+    that closes the class: reuse is decided by comparing the full argument set against the stamp,
+    so the next flag added here cannot be forgotten by the reuse test.
     """
-    if (bundle_root / "CURRENT").exists():
-        if _bundle_is_current_shape(bundle_root):
-            return
+    args = _fixture_build_argv(
+        bundle_root, points=points, pairs=pairs, limit=limit, extent=extent, slice_id=slice_id
+    )
+    wanted = fixture_recipe(args)
+    if _fixture_bundle_is_usable(bundle_root, wanted):
+        return
+    if bundle_root.exists():
         print(
-            f"fixture at {bundle_root} is not the shape this harness builds (pre-r6 MANIFEST, or "
-            "no external-id sidecar) — rebuilding"
+            f"fixture at {bundle_root} was not built from this harness's current inputs "
+            f"(stamp={read_recipe(bundle_root)}, wanted={wanted}) — rebuilding"
         )
-        shutil.rmtree(bundle_root)
     ensure_cli_built()
+    write_recipe(bundle_root, None)
+    if bundle_root.exists():
+        shutil.rmtree(bundle_root)
+    subprocess.run(args, cwd=REPO_ROOT, check=True)
+    write_recipe(bundle_root, wanted)
+
+
+def _fixture_build_argv(
+    bundle_root: Path,
+    *,
+    points: str,
+    pairs: str,
+    limit: int | None,
+    extent: str,
+    slice_id: str,
+) -> list[str]:
     args = [
         str(CLI_BIN),
         "build",
@@ -132,35 +205,43 @@ def ensure_fixture_bundle(
     if limit is not None:
         args += ["--limit", str(limit)]
     args += ["--mint-id-key", "--mint-external-ids"]
-    subprocess.run(args, cwd=REPO_ROOT, check=True)
+    return args
 
 
-def _bundle_is_current_shape(bundle_root: Path) -> bool:
-    """True if `bundle_root` is the bundle *this function builds*: r6 `identity`, and an
-    external-ID sidecar.
+def fixture_recipe(argv: list[str]) -> dict:
+    """The stamped input set for [`ensure_fixture_bundle`]: the whole `tessera build` invocation.
 
-    Both halves are reuse tests, and both were learned the same way. `identity` is the r6 one — an
-    absent object is a typed reader error, not a default, so `tessera serve` refuses the bundle
-    and the failure surfaces as an opaque fixture-setup error rather than "your fixture is stale".
-    `external_id_extents` is the `--mint-external-ids` one: a bundle left behind by a run that
-    predates the flag opens fine and serves fine, and then every test that addresses an item over
-    `/control/changes` fails on a `KeyError` deep inside the oracle. A reuse test that does not
-    check for everything the builder now passes silently pins the suite to the older fixture.
+    Everything this fixture is a function of *is* an argument to that command — there is no
+    synthesised corpus here, unlike the mask catalogue's — so recording the argv records the
+    recipe. The binary's path and the `--out` path are dropped: neither is a property of the
+    fixture, and including them would force a rebuild per worktree.
 
-    Deliberately tolerant of an unreadable or malformed bundle: anything that cannot be confirmed
-    is treated as needing a rebuild. Being wrong in that direction costs a rebuild; being wrong in
-    the other hands every test a bundle that is not the one it asked for.
+    Note what the recipe cannot pin, and why that is correct: `--mint-id-key` mints a fresh
+    identity key per build, so two bundles from an identical recipe have different `tessera_id`s.
+    The recipe records the *lineage decision*, not the key. Nothing may persist a `tessera_id` from
+    this fixture across runs — the docstring above says so for the same reason.
     """
+    argv = argv[1:]
+    out = argv.index("--out")
+    argv = argv[:out] + argv[out + 2 :]
+    return {"recipe_version": 1, "build_argv": argv}
+
+
+def _fixture_bundle_is_usable(bundle_root: Path, wanted: dict) -> bool:
+    """The receipt matches, and there is a readable bundle under it.
+
+    The structural half is a second gate against damage *after* the receipt was written (a wiped
+    `/tmp`, a half-deleted tree) — something the receipt cannot see. Deliberately tolerant of an
+    unreadable or malformed bundle: anything that cannot be confirmed is treated as needing a
+    rebuild. Being wrong in that direction costs a rebuild; being wrong in the other hands every
+    test a bundle that is not the one it asked for.
+    """
+    if read_recipe(bundle_root) != wanted:
+        return False
     try:
         current = json.loads((bundle_root / "CURRENT").read_text())
         prefix_dir = bundle_root / current["prefix"]
-        manifest = json.loads((prefix_dir / "MANIFEST.json").read_text())
-        if "identity" not in manifest:
-            return False
-        segments = json.loads(
-            (prefix_dir / "partitions" / "default" / "SEGMENTS-0.json").read_text()
-        )
-        return bool(segments.get("external_id_extents"))
+        return json.loads((prefix_dir / "MANIFEST.json").read_text()) is not None
     except (OSError, KeyError, ValueError):
         return False
 

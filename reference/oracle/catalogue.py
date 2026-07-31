@@ -60,12 +60,31 @@ and `scalars: Vec::new()` onto every tiler item, so a *built* bundle carries no 
 column and the engine has none to serve. The column is planted in the points parquet here so the
 fixture is complete the moment the build gains support; `conformance/tests/test_mask_catalogue.py`
 carries a strict xfail that will fail the day it starts working, so the gap cannot be forgotten.
+
+## Reuse is decided by a stamped recipe, not by a predicate over the artefact
+
+The bundle is built once per machine at a fixed path and reused. **What may be reused is decided
+by comparing the full input set against a `FIXTURE.json` receipt written beside the bundle** — see
+[`recipe`] — and never by inspecting the bundle for properties a reader happens to think of. That
+distinction is the whole mechanism, and it is here because the predicate form failed twice: a
+hand-maintained "does it look right" test is an allowlist that has to be extended in step with
+every new build input, and the input that is *not* on it is exactly the one that goes silently
+wrong. The silent direction is the dangerous one — change `SEED` or `ONE_TILE_TX` and `verify()`
+still passes, because it re-derives geometry from the *bundle*, while every planted `fx_key` and
+every geometric claim in the test suite is computed from the *new* corpus. Bundle and corpus
+diverge with nothing failing.
+
+The receipt is therefore written **last**, after the build subprocess returns, and deleted before
+a rebuild starts: an interrupted or failed build leaves no receipt, so the next run rebuilds. And
+the corpus parquet is written only on the build path — writing it unconditionally is what let the
+two diverge in the first place.
 """
 
 from __future__ import annotations
 
 import json
 import random
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,11 +94,11 @@ import pyarrow.parquet as pq
 
 from . import morton
 from .bundle import Bundle
-from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built
+from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, read_recipe, write_recipe
 
 # Where the corpus and its bundle live between runs. A fixed path, like `/tmp/tessera-250k`, so
 # the build is paid once per machine rather than once per session — `build_catalogue_bundle`
-# reuses whatever is already there if it is the right shape.
+# reuses whatever is already there if it was built from this module's current inputs.
 DEFAULT_WORK_DIR = Path("/tmp/tessera-catalogue")
 
 EXTENT = (0.0, 65536.0, 0.0, 65536.0)
@@ -87,19 +106,24 @@ EXTENT_ARG = "0,65536,0,65536"
 SLICE_ID = "s0"
 SEED = 20260731
 
+POINTS_NAME = "catalogue-points.parquet"
+PAIRS_NAME = "catalogue-pairs.parquet"
+
+# The whole map, as `(x0, y0, x1, y1)` — the request's bbox order, which is **not** the order
+# `Bundle.extent` uses for the same four numbers (`(x_min, x_max, y_min, y_max)`). Writing the
+# extent's order into a request produces a degenerate bbox at `x = 0` that still enumerates one
+# tile column per depth, so the request succeeds, the counts agree with an oracle asking the same
+# wrong question, and the differential silently compares almost nothing. Defined once, here,
+# because it cost a debugging round and the failure is invisible — two copies means one copy
+# without this comment.
+FULL_VIEWPORT = (0.0, 0.0, 65536.0, 65536.0)
+
 # One fixed identity key, never minted. A minted key is independent per build, and `tessera_id`
 # is both the storage sort key and §7.2's selection order — so two builds under two keys draw
 # different samples from the same corpus, which would make every point-set comparison across a
 # rebuild vacuous. (`canary_fixture.py` records the same reasoning at greater length; it is the
 # same trap.)
 CATALOGUE_ID_KEY_HEX = "0f0e0d0c0b0a09080706050403020100"
-
-# The corpus size. Two constraints fix it: it must exceed 2¹⁶ by enough that a block can straddle
-# 65,536 with real entities either side *and* a second container boundary (131,072) falls inside
-# the corpus; and the §7.2 oracle is a literal row-by-row definition, so every doubling doubles
-# the differential's run time. 150,000 satisfies both — three Roaring containers, and a full pass
-# costs tens of milliseconds.
-N_ITEMS = 150_000
 
 # The depth-6 tile the `one_tile` block is confined to. Depth 6 splits each axis into 64 columns
 # of 1,024 grid cells; column 17 is an arbitrary interior choice, away from both the origin and
@@ -136,7 +160,7 @@ class Block:
         return set(range(self.start, self.stop))
 
 
-# The layout. Sizes are chosen against N_ITEMS = 150,000 and are quoted as coverage below.
+# The layout. Sizes are quoted as coverage of the 150,000-item corpus the list sums to.
 #
 #   filler_head  65,500   43.67%   bulk, so `boundary` lands astride 65,536
 #   boundary        100    0.07%   65,500..65,600 — straddles the first container boundary
@@ -146,6 +170,16 @@ class Block:
 #   cross_hi     11,250    7.50%   cross_lo ∪ cross_hi = 10.00%, above it
 #   one_tile        250    0.17%   geometry confined to one depth-6 tile
 #   filler_tail  69,134   46.09%   spans the second container boundary, 131,072
+#
+# **APPEND-ONLY, and this is load-bearing rather than a style preference.** A block's position in
+# this list is two things at once: `_build_blocks` hands out term IDs by index, and it lays the
+# entity ranges out end to end in the same order. Inserting a block anywhere but the end therefore
+# renumbers every later block's *term* and moves every later block's *entity range* — which
+# silently re-points `boundary` away from 65,536, moves `filler_tail` off 131,072, and changes
+# every case's `tessera_id` ordering, i.e. §7.2's served set. `verify()` catches the term
+# renumbering loudly; it cannot catch "the case no longer straddles what it was designed to
+# straddle" beyond the two boundary claims it checks by name. Append, and resize `filler_tail` to
+# compensate.
 _LAYOUT: list[tuple[str, int]] = [
     ("filler_head", 65_500),
     ("boundary", 100),
@@ -158,13 +192,22 @@ _LAYOUT: list[tuple[str, int]] = [
 ]
 
 
+# The corpus size, **derived** rather than declared. Two constraints fix the number the layout is
+# built to: it must exceed 2¹⁶ by enough that a block can straddle 65,536 with real entities either
+# side *and* a second container boundary (131,072) falls inside the corpus; and the §7.2 oracle is
+# a literal row-by-row definition, so every doubling doubles the differential's run time. 150,000
+# satisfies both — three Roaring containers, and a full pass costs tens of milliseconds. Derived
+# because the two were separate constants that had to be edited in step, and a `_LAYOUT` that no
+# longer sums to `N_ITEMS` is a corpus with a gap in it.
+N_ITEMS = sum(size for _, size in _LAYOUT)
+
+
 def _build_blocks() -> dict[str, Block]:
     blocks: dict[str, Block] = {}
     cursor = 0
     for term_id, (name, size) in enumerate(_LAYOUT):
         blocks[name] = Block(name=name, start=cursor, stop=cursor + size, term_id=term_id)
         cursor += size
-    assert cursor == N_ITEMS, f"_LAYOUT sums to {cursor}, not N_ITEMS={N_ITEMS}"
     return blocks
 
 
@@ -216,6 +259,13 @@ def _case(name: str, attacks: str, block_names: list[str]) -> MaskCase:
 def catalogue() -> list[MaskCase]:
     """The catalogue, each member named for the property it attacks (brief item 1).
 
+    Adding a member costs three edits, and each is deliberate: append to `_LAYOUT` (append-only —
+    see the note there — resizing `filler_tail` to compensate), add a `_case(...)` here, and add
+    the name to `test_the_catalogue_covers_the_properties_the_design_names`. The third is not
+    duplication to be factored out: that test transcribes conformance design §2's list, and a
+    version that imported the names from here could not notice a case being deleted. Its docstring
+    argues the point at the site where somebody would be tempted.
+
     `overlay_heavy` is deliberately absent: it is not a *shape* of the build-time mask but a state
     of the overlay, so it is a base case plus a journal of acked control operations
     (`oracle.journal.AckedJournal`). `overlay_heavy_base()` names the case it is built on.
@@ -246,6 +296,14 @@ def catalogue() -> list[MaskCase]:
             "container in the corpus",
             [name for name, _ in _LAYOUT],
         ),
+        # **The crossover pair is prospective, and that is the right order to build it in.** §7.2
+        # puts the direct-evaluation/candidate-list boundary at roughly 5% coverage, but Phase 1
+        # has no candidate-list route at all — both cases go through direct evaluation today, so
+        # the pair currently proves only that the same route computes the same definition at two
+        # coverages. Building the fixture before the route is deliberate: the pair is what a
+        # candidate-list implementation would be measured against on the day it lands, and a
+        # catalogue that acquired its crossover cases *after* the route would be a catalogue
+        # designed around the implementation it is meant to test.
         _case(
             "crossover_below",
             "2.5% coverage, just below §7.2 r18's ~5% direct-evaluation boundary",
@@ -289,9 +347,26 @@ def overlay_heavy_base() -> MaskCase:
 # fx_key
 # ---------------------------------------------------------------------------------------------
 
-# The planted join scalars, `source_id -> fx_key`. Drawn from a seeded RNG and rejected on
-# collision; see the module doc for why it must NOT be a function of the entity ID.
-def _fx_keys(rng: random.Random) -> list[int]:
+# The RNG streams are **separate and independently seeded**, so the planted keys are a pure
+# function of `SEED` alone and not of how many draws the geometry happens to take. [`fx_keys`] can
+# then be recomputed by anything that needs the mapping — a test, a reuse path — without writing
+# the corpus, and without the recomputation having to mirror `write_corpus`'s draw order to stay
+# correct. A shared stream made "recompute the keys" and "rewrite the corpus" the same operation,
+# which is how the parquet came to be rewritten on the reuse path.
+_FX_SEED = SEED
+_GEOMETRY_SEED = SEED ^ 0x9E3779B9
+
+
+def fx_keys() -> list[int]:
+    """The planted join scalars, `source_id -> fx_key`, as a pure function of `SEED`.
+
+    Drawn from a seeded RNG and rejected on collision; see the module doc for why it must NOT be a
+    function of the entity ID. This is *the* definition — `write_corpus` plants exactly this list.
+    """
+    return _draw_fx_keys(random.Random(_FX_SEED))
+
+
+def _draw_fx_keys(rng: random.Random) -> list[int]:
     seen: set[int] = set()
     keys: list[int] = []
     for _ in range(N_ITEMS):
@@ -347,13 +422,18 @@ def _term_of(source_id: int) -> int:
 
 def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
     """Write `catalogue-points.parquet` and `catalogue-pairs.parquet`; return them and the planted
-    `fx_key`s indexed by source id."""
-    rng = random.Random(SEED)
-    fx = _fx_keys(rng)
-    geometry = _geometry(rng)
+    `fx_key`s indexed by source id.
 
-    points_path = work_dir / "catalogue-points.parquet"
-    pairs_path = work_dir / "catalogue-pairs.parquet"
+    **Called only on the build path.** It used to run unconditionally, including when the bundle
+    was about to be reused — so a changed `SEED` or `ONE_TILE_TX` rewrote the corpus under a bundle
+    that was never rebuilt from it. See the module doc.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    fx = fx_keys()
+    geometry = _geometry(random.Random(_GEOMETRY_SEED))
+
+    points_path = work_dir / POINTS_NAME
+    pairs_path = work_dir / PAIRS_NAME
 
     pq.write_table(
         pa.table(
@@ -380,12 +460,8 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
     return points_path, pairs_path, fx
 
 
-def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int]]:
-    """Synthesise the corpus and build it; return `(bundle_root, fx_keys)`.
-
-    Reused rather than rebuilt when a bundle is already present at the expected path — a
-    `CURRENT` plus a MANIFEST carrying `identity` is the same reuse test `ensure_fixture_bundle`
-    applies, and for the same reason (a pre-r6 bundle is one `tessera serve` refuses to open).
+def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
+    """The `tessera build` invocation, in one place so [`recipe`] records what is actually run.
 
     `--mint-external-ids` is passed because the overlay-heavy states address individual items over
     `/control/changes`, which takes an `external_id`. It is off by default in the product for a
@@ -393,39 +469,94 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
     and passing it here is a statement that *this fixture's* items do have caller-supplied ids —
     the source corpus is synthesised by this module, so they do.
     """
-    ensure_cli_built()
+    return [
+        str(CLI_BIN),
+        "build",
+        "--points",
+        str(work_dir / POINTS_NAME),
+        "--pairs",
+        str(work_dir / PAIRS_NAME),
+        "--extent",
+        EXTENT_ARG,
+        "--slice",
+        SLICE_ID,
+        "--out",
+        str(bundle_root),
+        "--mint-external-ids",
+        "--id-key",
+        CATALOGUE_ID_KEY_HEX,
+    ]
+
+
+def recipe(work_dir: Path, bundle_root: Path) -> dict:
+    """**Every input the built bundle is a function of.** Stamped beside the bundle; a mismatch is
+    a rebuild.
+
+    The list is the point, so it is written out rather than computed: the corpus is a function of
+    `_LAYOUT` (which fixes both the term IDs and the entity ranges), `SEED` (geometry and the
+    planted `fx_key`s), the `ONE_TILE_*` constants, and the CLI arguments — of which `--id-key` is
+    the one that decides `tessera_id`, and therefore §7.2's entire served order. Anything that
+    lands here later must be added; a recipe that omits an input is a reuse test that pins the
+    suite to the older fixture, which is the failure this replaced.
+
+    Absolute paths are reduced to their basenames so the stamp is comparable across checkouts and
+    worktrees — the path a fixture was built from is not a property of the fixture, and including
+    it would force a rebuild per worktree for no reason.
+    """
+    argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
+    return {
+        "recipe_version": 2,
+        "layout": [list(entry) for entry in _LAYOUT],
+        "n_items": N_ITEMS,
+        "seed": SEED,
+        "fx_seed": _FX_SEED,
+        "geometry_seed": _GEOMETRY_SEED,
+        "extent": EXTENT_ARG,
+        "slice": SLICE_ID,
+        "one_tile": [ONE_TILE_DEPTH, ONE_TILE_TX, ONE_TILE_TY],
+        "id_key": CATALOGUE_ID_KEY_HEX,
+        "build_argv": [Path(a).name if a.startswith("/") else a for a in argv],
+    }
+
+
+def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int]]:
+    """Synthesise the corpus and build it; return `(bundle_root, fx_keys)`.
+
+    Reused rather than rebuilt only when the receipt beside the bundle matches [`recipe`] exactly.
+    See the module doc for why the reuse test is a stamped recipe and not a predicate over the
+    artefact.
+    """
     work_dir = DEFAULT_WORK_DIR if work_dir is None else work_dir
     work_dir.mkdir(parents=True, exist_ok=True)
     bundle_root = work_dir / "bundle-catalogue"
-    _, _, fx = write_corpus(work_dir)
-    if _is_usable_bundle(bundle_root):
-        return bundle_root, fx
+    wanted = recipe(work_dir, bundle_root)
 
-    subprocess.run(
-        [
-            str(CLI_BIN),
-            "build",
-            "--points",
-            str(work_dir / "catalogue-points.parquet"),
-            "--pairs",
-            str(work_dir / "catalogue-pairs.parquet"),
-            "--extent",
-            EXTENT_ARG,
-            "--slice",
-            SLICE_ID,
-            "--out",
-            str(bundle_root),
-            "--mint-external-ids",
-            "--id-key",
-            CATALOGUE_ID_KEY_HEX,
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-    )
-    return bundle_root, fx
+    if _is_usable_bundle(bundle_root, wanted):
+        return bundle_root, fx_keys()
+
+    ensure_cli_built()
+    # The receipt goes first and the bundle second, so that a build interrupted anywhere in
+    # between leaves a state the next run rebuilds rather than reuses.
+    write_recipe(bundle_root, None)
+    if bundle_root.exists():
+        shutil.rmtree(bundle_root)
+    write_corpus(work_dir)
+    subprocess.run(_build_argv(work_dir, bundle_root), cwd=REPO_ROOT, check=True)
+    write_recipe(bundle_root, wanted)
+    return bundle_root, fx_keys()
 
 
-def _is_usable_bundle(bundle_root: Path) -> bool:
+def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
+    """The receipt matches, and there is a readable post-r6 bundle under it.
+
+    The receipt is the test; the structural check below is a cheap second gate against a bundle
+    that was damaged *after* its receipt was written (a truncated `/tmp`, a half-deleted tree) —
+    a case the receipt cannot see. Both are tolerant of anything unreadable: what cannot be
+    confirmed is rebuilt, because being wrong in that direction costs a build and being wrong in
+    the other hands every test a fixture nobody asked for.
+    """
+    if read_recipe(bundle_root) != wanted:
+        return False
     try:
         current = json.loads((bundle_root / "CURRENT").read_text())
         manifest = json.loads((bundle_root / current["prefix"] / "MANIFEST.json").read_text())
@@ -458,8 +589,9 @@ def verify(bundle: Bundle) -> VerificationReport:
     2. each block's descriptor interned to the term ID the module assumed;
     3. each block's postings are **exactly** its intended contiguous entity range — this is the
        whole `entity_id == source_id` argument, checked rather than trusted;
-    4. `container_boundary` really touches two containers with entities either side of 65,536;
-    5. `full_100pct` really touches three;
+    4. `container_boundary` really spans more than one Roaring container — entities either side of
+       a multiple of 65,536, which is the only reason the case exists;
+    5. `full_100pct` spans every container the corpus reaches;
     6. `all_in_one_tile`'s rows really share one depth-6 tile;
     7. the crossover cases really sit either side of 5%.
     """
@@ -490,22 +622,25 @@ def verify(bundle: Bundle) -> VerificationReport:
                 f"this corpus, so no catalogue member straddles what it claims to."
             )
 
+    # Both container claims are derived from `N_ITEMS` rather than written out, so that growing the
+    # corpus is one edit and not one edit plus two constants nobody remembers are here. The claims
+    # themselves are unchanged: `boundary` must span more than one container (any boundary, not
+    # container 0/1 in particular), and full coverage must span every container the corpus reaches.
     boundary = report.blocks.get("boundary", set())
-    if {e >> 16 for e in boundary} != {0, 1}:
+    boundary_containers = {e >> 16 for e in boundary}
+    if len(boundary_containers) < 2:
         report.failures.append(
-            f"container_boundary touches containers {{{sorted({e >> 16 for e in boundary})}}}, "
-            "not {0, 1} — the case exercises no container arithmetic"
+            f"container_boundary touches containers {sorted(boundary_containers)} — fewer than "
+            "two, so the case exercises no container arithmetic at all"
         )
-    if not (any(e < CONTAINER_SIZE for e in boundary) and any(e >= CONTAINER_SIZE for e in boundary)):
-        report.failures.append("container_boundary has no entities on both sides of 65,536")
-
     everything: set[int] = set()
     for postings in report.blocks.values():
         everything |= postings
-    if {e >> 16 for e in everything} != {0, 1, 2}:
+    expected_containers = set(range(((N_ITEMS - 1) >> 16) + 1)) if N_ITEMS else set()
+    if {e >> 16 for e in everything} != expected_containers:
         report.failures.append(
             f"full coverage touches containers {sorted({e >> 16 for e in everything})}, not "
-            "{0, 1, 2}"
+            f"{sorted(expected_containers)} — every container the corpus reaches"
         )
 
     one_tile = report.blocks.get("one_tile", set())

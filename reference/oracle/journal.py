@@ -36,6 +36,15 @@ visible, which is a differential failure against a correct engine.
 
 Flush and compaction are `202`-async in the same way, and take the same barrier.
 
+## Where its rules are pinned
+
+Every rule above is a decision this module makes, so each one is tested rather than asserted in
+prose. `reference/tests/test_journal.py` drives it against a **stub** control plane, because the
+states that matter are the ones a real deployment will not produce on demand: a 409 batch, a
+barrier that times out, a refused ingest. `conformance/tests/test_overlay_journal.py` drives the
+same code against a real server. Neither replaces the other — the stub proves the rule, the server
+proves the rule is about this system.
+
 ## What it does not model
 
 The three retirement rules (lifecycle §3) are the *engine's* obligation, not this journal's:

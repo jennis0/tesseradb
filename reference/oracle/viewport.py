@@ -1,5 +1,13 @@
 """Design §7.2, written as a **definition**.
 
+**Pinned to §7.2 as of design r24** (`188d961`; the anchor's row-space reading arrived in
+`a2db35d`, the floor and zero-case rules in `188d961`). A §7.2 revision is a **required edit
+here**, and that is a standing obligation rather than a courtesy: this module's whole value is
+being visibly the spec, so prose that has quietly fallen a revision behind is worse than no prose
+— a reader checks the module against the document precisely by reading this, and undetectable
+drift is the failure mode. Anything below tagged with a revision was checked against that
+revision's text.
+
 This module is the second implementation of record for one thing: what the service is *supposed*
 to serve. Its job is to be obviously the spec, so that when it disagrees with the engine a reader
 can tell which one is wrong by reading it. It is therefore written the slow, literal way on
@@ -15,8 +23,14 @@ m(T)      = min(cap, max(min(k_min, cap), C_θ(T)))
 served(T) = the min(m(T), |vis(T)|) smallest members of vis(T) by tessera_id
 ```
 
-with θ anchored on the viewer's own **composed** visible total over the slice: `P_0 = m_target ·
-2⁶⁴ / V_total`, `P_{d+1} = 4·P_d`, saturating.
+with θ anchored on the viewer's own **composed** visible total over the slice: `P_0 = ⌊m_target ·
+2⁶⁴ / V_total⌋`, `P_{d+1} = 4·P_d`, saturating — and `V_total` is `|M_auth ∩ rows(slice)|`,
+composed *and counted in row space* (r24). Both qualifiers are load-bearing: *composed* is the I2
+requirement below, and *row space* is §11.2's rule that an entity with no row contributes to no
+count whatever `L` says — which under group-commit allocation is the normal steady state of an
+ingesting deployment, not a transient, since a batch is acked and so in `M_auth` for a whole
+commit window before flush gives it rows. [`visible_total`] counts segment rows, which is that
+reading.
 
 ## What is literal here, and what is not — the line is drawn deliberately
 
@@ -37,8 +51,28 @@ preferred; per tile it is still O(rows in the segment).
 
 Two things follow from recomputing the tile from `(x, y)` rather than reading `morton.u32`. It is
 **stronger** — a build that wrote a wrong Morton column and then sorted and served consistently by
-its own wrong values fails this differential rather than passing it. And it is **independent** —
-oracle and engine now share no stored artefact anywhere on this path.
+its own wrong values fails this differential rather than passing it. And it removes the *tiling*
+side of the path from the set of artefacts the two implementations share.
+
+## The one artefact that IS shared, and what closes it
+
+`served_rows` sorts by `self.segment.tessera_id` — **the stored column**, which is also what the
+engine sorts and serves by. That is a shared artefact on the one §7.2 quantity this differential
+exists to referee, and it is stated here because an earlier draft of this doc claimed the opposite
+("oracle and engine share no stored artefact anywhere on this path"), which was false. A build
+writing a wrong-but-self-consistent `tessera_id` column — say one still correlated with signature
+order, the exact r21 disclosure the negative control's docstring invokes — would be agreed with,
+not caught.
+
+It is not re-derived here, for the reason the rest of this module is written the way it is: the
+re-derivation (`identity.forward` over `(shard_id, entity_id)`) is a keyed Feistel permutation,
+which is emphatically not a literal transcription of anything §7.2 says, and putting it in the
+selection path would trade an auditable definition for a cryptographic one. The check belongs
+where it can be made once and read: `Bundle.verify_identity_cross_check` proves the stored column
+*is* `forward(key, shard, entity_of_row)` for a sample of rows, `Bundle.derive_row_order` proves
+the rows are stored in the order that key implies, and the fixture — not the bundle — supplies the
+key. `conformance/tests/test_mask_catalogue.py` runs all three against the catalogue bundle, so by
+the time a `Selection` reads the column, nothing about it is being taken on trust.
 
 ## θ's anchor is computed here, never read back
 
@@ -58,25 +92,61 @@ from . import morton
 from .bundle import Bundle
 
 
+SATURATED = None
+"""θ_d ≥ 1: the threshold admits every identity. A distinct state, never a value.
+
+Not `2**64 - 1`, and not `2**64`: at θ ≥ 1 the threshold must admit *every* identity, and the
+comparison is strict (`tessera_id < P_d`), so any clamp to a representable cut wrongly excludes
+the single row whose `tessera_id` is `2**64 - 1`. Python's unbounded integers would let this
+module get away with `2**64` as a sentinel; it does not, because §7.2 has a saturated *state* and
+this file's job is to look like §7.2.
+"""
+
+
 def theta_cut(v_total: int, m_target: int, depth: int) -> int | None:
-    """`P_d` as a cut point over the identity space, or `None` for "saturated: admits everything".
+    """`P_d` as a cut point over the identity space, or [`SATURATED`].
 
-    `P_0 = m_target * 2**64 // v_total`, then `P_d = P_0 << 2d`, saturating at `2**64` — §7.2's
-    closed-form anchor. The ×4 per depth is what makes the per-tile expectation depth-stable, and
-    saturation is a distinct state rather than a clamp to `2**64 - 1`, because at θ ≥ 1 the
-    threshold must admit *every* identity including `2**64 - 1`.
+    §7.2 states θ as a **recurrence**, and this is written as one:
 
-    `v_total` is the viewer's **composed** visible total over the whole slice — the mask after the
-    overlay diff, not the raw fragment (I2; see the module doc).
+        P_0     = ⌊m_target · 2⁶⁴ / V_total⌋      (r24: floors; saturated when V_total = 0)
+        P_{d+1} = 4 · P_d                          saturating at 2⁶⁴
+
+    The engine (`crates/tessera-engine/src/select.rs`) evaluates the same thing in closed form, as
+    `P_0 << 2d` with a `leading_zeros` overflow test. **The two constructions differ on purpose**
+    (controller ruling, fix round 1): this module's premise is that "a differential between two
+    transcriptions of the same algorithm proves only that copy-paste works", and a transcribed
+    `p0 << (2 * depth)` was exactly that — the same expression, the same saturation test, on both
+    sides. Integer arithmetic makes the recurrence and the shift identical in *result* for every
+    input, so writing them differently costs no false failures and buys a genuinely independent
+    derivation of the one quantity a θ-live differential turns on.
+
+    **The rounding and the zero case are the spec's, not this module's** *(r24, `188d961`)*. Both
+    were unstated until that revision and both are observable — the differential demands exact
+    equality, so an implementation that rounded or took a ceiling would disagree on roughly half of
+    all anchors. §7.2 now settles them: `P_0` **floors** (a smaller `P_0` is a stricter threshold,
+    so rounding down errs toward fewer marks, never more, and the floor clause guarantees
+    non-emptiness regardless), and `P_0` is **saturated** when `V_total = 0`. `//` and the
+    `v_total <= 0` branch below are therefore transcriptions of a rule, not this file's choice —
+    which is what they were when the rule was unwritten, and what the fix-round-1 brief still
+    recorded them as. A negative `v_total` is impossible rather than specified; it is folded into
+    the zero branch because a count cannot be negative and this module refuses to invent a fourth
+    behaviour for a state that cannot arise.
+
+    `v_total` is the viewer's **composed** visible total over the slice, counted in **row space**
+    (r24) — the mask after the overlay diff, not the raw fragment (I2; see the module doc).
     """
     if v_total <= 0:
-        return None
-    p0 = (m_target << 64) // v_total
-    if p0 >= 1 << 64:
-        return None
-    p_d = p0 << (2 * depth)
+        return SATURATED
+    p_d = (m_target << 64) // v_total
     if p_d >= 1 << 64:
-        return None
+        return SATURATED
+    # `P_{d+1} = 4·P_d`, one depth at a time, testing saturation at each step — §7.2's own
+    # progression rather than its closed form. The test is before the multiply, so no value beyond
+    # the identity space is ever formed (Python would happily form one; the definition would not).
+    for _ in range(depth):
+        if p_d >= (1 << 64) // 4:
+            return SATURATED
+        p_d = 4 * p_d
     return p_d
 
 
@@ -170,17 +240,25 @@ class Selection:
         return rows[: min(m, len(rows))]
 
     def served_points(self, tile: int, **params) -> list[tuple[float, float]]:
-        """[`served_rows`] as `(x, y)` pairs, which is what the wire carries.
+        """[`served_rows`] as `(x, y)` pairs **in served order**, which is what the wire carries.
 
-        The differential compares point sets by coordinate rather than by identity deliberately:
-        agreement then never depends on either side *interpreting* an identifier, only on both
-        selecting the same items.
+        The differential compares by coordinate rather than by identity deliberately: agreement
+        then never depends on either side *interpreting* an identifier, only on both selecting the
+        same items. It compares the **list**, not a set or a multiset — both sides are in ascending
+        `tessera_id` order and contracts §2.6 makes that order part of the payload contract (see
+        [`served_rows`]), so list equality is strictly stronger for free.
         """
         seg = self.segment
         return [(float(seg.x[row]), float(seg.y[row])) for row in self.served_rows(tile, **params)]
 
     def served_identities(self, tile: int, **params) -> list[int]:
-        """[`served_rows`] as `tessera_id`s — the key §7.2's nesting property is stated over."""
+        """[`served_rows`] as `tessera_id`s — the key §7.2's nesting property is stated over.
+
+        Used where the question is *which items*, not *which coordinates*: the overlay differential
+        asks whether a denied item's identity appears in the payload, and two entities can share
+        rounded coordinates inside one tile, so a coordinate answer to that question would be
+        approximate where an exact one is available.
+        """
         return [int(self.segment.tessera_id[row]) for row in self.served_rows(tile, **params)]
 
     # -- the negative control ---------------------------------------------------------------------
@@ -242,27 +320,9 @@ def counts(
     return selection.counts_for(morton.tiles_for_bbox(bbox, zoom, bundle.extent))
 
 
-def served(
-    bundle: Bundle,
-    mask: set[int],
-    slice_id: str,
-    zoom: int,
-    tile: int,
-    *,
-    k_min: int,
-    cap: int,
-    v_total: int,
-    m_target: int,
-) -> list[tuple[float, float]]:
-    """§7.2's served set for one tile, as `(x, y)` pairs in served order.
-
-    One tile per call means one whole pass over the segment per call. A caller with several tiles
-    to ask about should build one [`Selection`] and ask it — same definition, one pass — rather
-    than reaching for something faster.
-    """
-    return Selection(bundle, mask, slice_id, zoom).served_points(
-        tile, k_min=k_min, cap=cap, v_total=v_total, m_target=m_target
-    )
+# (There is deliberately no single-tile `served()` here. It existed, had no call site, and was a
+# trap: one tile per call is one whole pass over the segment per call, and every caller has
+# several tiles. Build one `Selection` and ask it — same definition, one pass.)
 
 
 def params_from_meta(meta_selection: dict, *, k: int, v_total: int) -> dict:

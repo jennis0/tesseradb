@@ -82,6 +82,28 @@ def catalogue_server(tmp_path_factory, catalogue_bundle_root: Path):
 
 
 @pytest.fixture(scope="session")
+def catalogue_capped_server(tmp_path_factory, catalogue_bundle_root: Path):
+    """`k_max_marks = 128` — §7.2's *K*<sub>max</sub>, at the value the design actually names.
+
+    Every other server in this suite defaults it to 1,000,000 (`harness.write_config`), which is
+    deliberate for them — a suite asserting masking or wire shape should not have its point sets
+    truncated by a cap it did not choose — and leaves `cap = min(k, K_max)` reducing to `k` for
+    every request the suite makes. The cap clause is then dead in every conformance run: an engine
+    that ignored `k_max_marks` entirely, or read `max_k` as the cap, would pass. §7.2 warns about
+    precisely that conflation ("*K*<sub>max</sub> is an **overplot** ceiling and is deliberately
+    not the same knob as the machine ceiling"), so one server exists to make it live. `max_k` is
+    left at its default here on purpose: the two knobs must be *different* for the test to tell
+    which one an engine read.
+    """
+    from oracle.harness import spawn_server, stop_server  # noqa: PLC0415
+
+    tmp_dir = tmp_path_factory.mktemp("catalogue-serve-capped")
+    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir, k_max_marks=128)
+    yield srv
+    stop_server(proc)
+
+
+@pytest.fixture(scope="session")
 def catalogue_density_server(tmp_path_factory, catalogue_bundle_root: Path):
     """θ **live** — the configuration §7.2's density rule actually ships in.
 

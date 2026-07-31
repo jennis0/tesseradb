@@ -79,6 +79,23 @@ def decode_viewport(data: bytes):
     return tiles, points
 
 
+def decode_viewport_points(data: bytes):
+    """The points stream as a `pyarrow.Table` — **every** column, not the three [`decode_viewport`]
+    names.
+
+    [`decode_viewport`] projects `(tessera_id, x, y)` because that is all the differential compares.
+    A declared scalar (contracts §2.6 — the fixture's `fx_key`, the handle→item join) arrives as an
+    additional column, and a test that means to assert on it has to see the schema rather than a
+    fixed projection. Returning the table rather than widening the tuple keeps every existing
+    caller's arity.
+    """
+    import pyarrow as pa  # noqa: PLC0415 — only this function needs the table type
+
+    _tile_bytes, points_bytes = split_frames(data)
+    with ipc.open_stream(io.BytesIO(points_bytes)) as reader:
+        return pa.Table.from_batches(list(reader), reader.schema)
+
+
 def decode_viewport_with_subcells(data: bytes):
     """`(tiles, points, sub_cells)` — `sub_cells` is `[]` when the underlay was not requested.
 

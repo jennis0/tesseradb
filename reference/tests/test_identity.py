@@ -184,7 +184,6 @@ def test_rejected_keys(vectors):
 def test_rejected_key_reasons_are_distinct_all_zero_vs_k1_zero(vectors):
     """§1.3: the all-zero key and a merely-k1-zero key are both refused, and are named
     separately (the error should say which one an operator hit)."""
-    cases = {c["key"]: c["reason"] for c in vectors["rejected_keys"]}
     all_zero = "00000000000000000000000000000000"[:32]
     assert all(ch == "0" for ch in all_zero)
     with pytest.raises(ident.IdentityError, match="all-zero"):

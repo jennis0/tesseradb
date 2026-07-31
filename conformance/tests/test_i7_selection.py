@@ -6,12 +6,14 @@ authorised portion of a global sample. §7.2 gives the definition — floor ∪ 
 definition written out literally. This module puts the two side by side across the catalogue ×
 depths × `k`.
 
-Three tests, and the third is the one that makes the first two mean anything:
+Four tests, and the last is the one that makes the others mean anything:
 
 1. **the differential**, over the catalogue × depths × `k`, against θ saturated and θ live;
 2. **cross-zoom nesting** — an item drawn in a parent tile is still drawn in whichever child
    contains it (§7.2's nesting argument, which is what makes a zoom not flicker);
-3. **the negative control** — a first-`k` stub that ignores `tessera_id` ordering, and proof that
+3. **the cap**, against a server whose `K_max` is small enough to bind — every other run in this
+   suite leaves `cap = min(k, K_max)` reducing to `k`, so the clause is otherwise dead;
+4. **the negative control** — a first-`k` stub that ignores `tessera_id` ordering, and proof that
    the differential *disagrees* with it. A differential that passes against a deliberately wrong
    implementation is not testing anything, and this is the cheapest possible check that it is live.
 
@@ -26,10 +28,15 @@ attacks and a failure names it too.
 
 ## What "disagree" is allowed to mean
 
-Exact equality. There is no floating point in the counting path, and the point sets are compared as
-**multisets of coordinates**, not sets: two distinct entities can share rounded coordinates inside
-one tile, and a set comparison would silently absorb an engine bug that dropped one of them while
-duplicating another.
+Exact equality, and **as ordered lists** rather than sets or multisets. A set comparison would
+absorb an engine bug that dropped one of two entities sharing rounded coordinates in a tile while
+duplicating the other; a multiset comparison catches that but still discards the order — and the
+order is contract, not presentation. Contracts §2.6 makes the points batch ascending by
+`tessera_id` within each tile, and §7.2's nesting argument depends on the served set being a
+*prefix*, so a client that truncates to its own budget forfeits nesting the moment the payload
+arrives unsorted. Both sides are already in ascending order, so list equality is strictly stronger
+at no cost — an engine draining a bounded heap without a final sort passes a multiset comparison
+and fails this one.
 """
 
 from __future__ import annotations
@@ -46,13 +53,11 @@ from oracle.wire import decode_viewport
 
 SLICE = cat.SLICE_ID
 
-# The whole map, as `(x0, y0, x1, y1)` — the request's bbox order, which is **not** the order
-# `Bundle.extent` uses for the same four numbers (`(x_min, x_max, y_min, y_max)`). Writing the
-# extent's order here produces a degenerate bbox at `x = 0` that still enumerates one tile column
-# per depth, so the request succeeds, the counts agree with the oracle asking the same wrong
-# question, and the differential silently compares almost nothing. Named and commented because it
-# cost a debugging round and the failure is invisible.
-FULL_VIEWPORT = (0.0, 0.0, 65536.0, 65536.0)
+# `(x0, y0, x1, y1)`, the request's bbox order — NOT `Bundle.extent`'s order for the same four
+# numbers. Defined in `oracle/catalogue.py` beside the extent it is derived from; imported rather
+# than restated, because it existed here and in `test_overlay_journal.py` with the explanation
+# attached to only one of them.
+FULL_VIEWPORT = cat.FULL_VIEWPORT
 
 # Depth 0 is one tile over the whole map, where the cap clause binds for every case with more
 # visible items than `k`; depth 6 is 4,096 tiles, where the floor clause binds for the sparse
@@ -85,6 +90,12 @@ def _server_view(server, token: str, depth: int, k: int):
     by `min(k, visible)`: under §7.2's density rule the per-tile count is `min(cap, max(k_min,
     C_θ))` clamped to visible, which cannot be recomputed from `k` and `visible` alone. That is the
     whole reason `served` is on the wire.
+
+    Per-tile points keep the order they arrived in **and their exact coordinates**. The order is
+    part of what is under test (see the module doc), so this must not sort, canonicalise or
+    deduplicate anything; the coordinates are left unrounded because the nesting test recomputes a
+    point's containing tile from them, and a rounded coordinate can — rarely, but not never — fall
+    the other side of a tile edge.
     """
     raw = server.viewport(token, SLICE, depth, FULL_VIEWPORT, k=k)
     tiles, points = decode_viewport(raw)
@@ -101,8 +112,16 @@ def _server_view(server, token: str, depth: int, k: int):
     return counts, per_tile
 
 
+def _ordered(points) -> list[tuple[float, float]]:
+    """Coordinates rounded for comparison, **order preserved** — the served sequence itself."""
+    return [(round(x, 4), round(y, 4)) for x, y in points]
+
+
 def _multiset(points) -> Counter:
-    return Counter((round(x, 4), round(y, 4)) for x, y in points)
+    """Order discarded. Used only where the question is genuinely about *membership* — the
+    negative control, which asks whether the engine drew the same items as a wrong-order stub, and
+    the nesting test, where the child's own order is not what is being asserted."""
+    return Counter(_ordered(points))
 
 
 @pytest.mark.parametrize("theta", ["saturated", "live"])
@@ -151,11 +170,13 @@ def test_i7_selection_differential(
 
             params = vp.params_from_meta(constants, k=k, v_total=v_total)
             for tile, (visible, served_n) in counts.items():
-                expected = selection.served_points(tile, **params)
-                assert _multiset(per_tile[tile]) == _multiset(expected), (
+                expected = _ordered(selection.served_points(tile, **params))
+                assert _ordered(per_tile[tile]) == expected, (
                     f"{case.name} ({case.attacks}): served set disagrees for tile {tile} at "
                     f"depth {depth}, k={k}, θ {theta}. Engine served {served_n} of {visible} "
-                    f"visible; the definition serves {len(expected)}."
+                    f"visible; the definition serves {len(expected)}. Compared as ordered lists: "
+                    f"a disagreement here can be membership OR order, and contracts §2.6 makes "
+                    f"the order (ascending tessera_id within a tile) part of the payload."
                 )
                 assert served_n == len(expected), (
                     f"{case.name}: the tile batch's `served` column says {served_n} but the "
@@ -199,34 +220,110 @@ def test_i7_selection_nests_across_zoom(catalogue_bundle: Bundle, catalogue_dens
 
     Checked against the θ-live server deliberately: under saturation the threshold clause is inert
     and monotonicity in depth is trivially satisfied by a clause that does nothing.
+
+    **"Whichever child contains it" is computed, not searched for.** An earlier version flattened
+    every child tile and asserted the point was drawn *somewhere*, which a bug that drew the item
+    into the wrong child passes — and drawing into the wrong child is a tiling bug, exactly the
+    class `Bundle.row_morton_codes` recomputes geometry to catch. The containing child is a
+    function of `(x, y)`: quantise, take the Morton code, shift to the child depth. Two lines, and
+    the assertion becomes the property the docstring claims.
     """
     if not case.entities:
         pytest.skip("the empty case has nothing to nest")
 
     server = catalogue_density_server
     token = server.authorise(list(case.grants))["token"]
-    constants = server.meta(token)["selection"]
+    extent = catalogue_bundle.extent
     k = 30
 
     checked = 0
     for parent_depth in (2, 4):
         child_depth = parent_depth + 1
+        shift = 32 - 2 * child_depth
         parent_counts, parent_points = _server_view(server, token, parent_depth, k)
         _child_counts, child_points = _server_view(server, token, child_depth, k)
 
-        drawn_in_children = _multiset(
-            [p for points in child_points.values() for p in points]
-        )
         for tile in parent_counts:
-            for point in _multiset(parent_points[tile]):
-                assert drawn_in_children[point] >= 1, (
-                    f"{case.name}: a point drawn in depth-{parent_depth} tile {tile} is not drawn "
-                    f"in any depth-{child_depth} tile at the same k={k}. §7.2's nesting argument "
-                    f"is violated — the mark pops out on zoom-in."
-                )
-                checked += 1
+            # Group the parent's marks by the child that contains them, then require that child to
+            # carry at least as many copies of each. Points sharing a rounded coordinate share a
+            # child by construction — the child is a function of the coordinate — so counting per
+            # child is exact rather than approximate.
+            wanted: dict[int, Counter] = {}
+            for x, y in parent_points[tile]:
+                child = morton.morton_of(x, y, extent) >> shift
+                wanted.setdefault(child, Counter()).update(_ordered([(x, y)]))
+
+            for child, needed in wanted.items():
+                drawn = _multiset(child_points.get(child, []))
+                for point, count in needed.items():
+                    assert drawn[point] >= count, (
+                        f"{case.name}: a point drawn in depth-{parent_depth} tile {tile} is not "
+                        f"drawn in depth-{child_depth} tile {child}, the child that contains it, "
+                        f"at the same k={k}. §7.2's nesting argument is violated — the mark pops "
+                        f"out on zoom-in (or lands in the wrong child, which is a tiling bug and "
+                        f"would pass a test that only looked for it somewhere)."
+                    )
+                    checked += 1
 
     assert checked > 0, f"{case.name}: nesting was not exercised at all"
+
+
+K_MAX_UNDER_TEST = 128  # §7.2's own K_max; `catalogue_capped_server` is spawned with it
+
+
+def test_k_max_binds_and_is_not_the_max_k_knob(catalogue_bundle: Bundle, catalogue_capped_server):
+    """`cap = min(k, K_max)`, against a server where `K_max` is small enough to bind.
+
+    Every other run in this suite has `k_max_marks` defaulted to 1,000,000, so `cap` reduces to `k`
+    and the cap clause never does anything. Two engines pass that and fail this: one that ignores
+    `k_max_marks` at selection, and one that reads `max_k` as the cap — the conflation §7.2's
+    "deliberately not the same knob" paragraph exists to warn about, with `max_k` left at its
+    1,000,000 default here so the two are distinguishable.
+
+    `K_VALUES` straddles the cap deliberately: at `k = 2` and `k = 30` the *request* is the binding
+    term and an engine that capped at `K_max` unconditionally serves too many; at `k = 500` the
+    deployment's `K_max` binds and an engine that ignored it serves too many the other way.
+
+    The published constant is asserted before it is used, because the oracle takes `K_max` from
+    `/v1/meta` (it cannot know deployment config any other way) — so an engine that both ignored
+    the cap *and* misreported it would otherwise be agreed with.
+    """
+    server = catalogue_capped_server
+    case = next(c for c in cat.catalogue() if c.name == "full_100pct")
+    token = server.authorise(list(case.grants))["token"]
+    constants = server.meta(token)["selection"]
+
+    assert constants["k_max_marks"] == K_MAX_UNDER_TEST, (
+        "/v1/meta does not publish the k_max_marks this server was configured with, so the oracle "
+        "would compute `cap` from the engine's own claim and agree with it whatever it did"
+    )
+
+    depth = 4
+    mask, v_total, selection = _oracle_state(catalogue_bundle, case, depth)
+    capped_tiles = 0
+    for k in K_VALUES:
+        counts, per_tile = _server_view(server, token, depth, k)
+        params = vp.params_from_meta(constants, k=k, v_total=v_total)
+        assert params["cap"] == min(k, K_MAX_UNDER_TEST)
+
+        for tile, (visible, served_n) in counts.items():
+            expected = _ordered(selection.served_points(tile, **params))
+            assert _ordered(per_tile[tile]) == expected, (
+                f"served set disagrees for tile {tile} at k={k} against K_max="
+                f"{K_MAX_UNDER_TEST}: engine served {served_n} of {visible} visible, the "
+                f"definition serves {len(expected)} (cap={params['cap']})"
+            )
+            assert served_n <= min(k, K_MAX_UNDER_TEST), (
+                f"tile {tile} served {served_n} marks at k={k}, above cap = min(k, K_max) = "
+                f"{min(k, K_MAX_UNDER_TEST)}"
+            )
+            if served_n == K_MAX_UNDER_TEST and visible > K_MAX_UNDER_TEST:
+                capped_tiles += 1
+
+    assert capped_tiles > 0, (
+        f"no tile was truncated at K_max={K_MAX_UNDER_TEST} across k {K_VALUES}, so this run did "
+        "not exercise the cap clause it exists for — check the case's size against the depth"
+    )
 
 
 def test_the_differential_disagrees_with_a_first_k_stub(catalogue_bundle: Bundle, catalogue_server):
