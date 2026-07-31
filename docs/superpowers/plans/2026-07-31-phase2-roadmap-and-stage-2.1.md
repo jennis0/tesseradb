@@ -504,6 +504,13 @@ reference/.venv/bin/pytest conformance/ -v
 - One `scripts/bench_concurrency.py` arm — LRU-under-lock is precisely the contention class the branch's F4 measurement exists to police.
 - `cargo bench -p tessera-engine` against rebuilt fixtures (G4).
 
+**The criterion gate cannot police lock contention, and the Task 4 gate proved it** *(controller, 2026-07-31, on Track C's performance lens)*. The gated benches are **single-threaded, closed-loop, one session, and never present a pin**. An unconditional uncontended mutex added to `PinManager::resolve` would cost ~15–25 ns against a 2.3–4.0 ms request — ~0.001%, invisible under this box's documented ±1–3% criterion CIs. So the rule the gate exists to enforce (no drain lock on the common path) is enforced by criterion *not at all*; what actually caught it on Task 4 was the worker's own `drain_locks` counter test, whose coverage is exactly one lock type.
+
+Two consequences, binding from Task 5 onward:
+
+1. **Any task that adds or moves a lock on the request path must run a paired `scripts/bench_concurrency.py` arm at admission width, not criterion alone**, and report both. Task 5 is the immediate case: it puts LRU touch and eviction inside the single-flight lock, which is the same class one layer down, and its `drain_locks`-equivalent does not exist.
+2. **A counted choke point is worth more than a bench here.** Track C converted an unmeasurable contention property into a unit-testable one by routing every acquisition through one counted helper. Prefer that construction wherever a task claims a path is lock-free — it is the only form of the claim that survives a refactor, and CLAUDE.md's "structural, not disciplinary" test is exactly this distinction.
+
 End to end, against a built bundle:
 
 1. `tessera serve`; authorise; viewport — baseline.
