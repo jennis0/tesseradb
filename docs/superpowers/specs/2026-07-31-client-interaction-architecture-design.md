@@ -837,32 +837,39 @@ than "similar documents", with the Phase 4 vector operand remaining the answer f
 source-space similarity. Naming it honestly is what stops a viewer reading projection
 artefacts as semantic claims.
 
-**It is parameterised by scale, and that is what makes it usable zoomed out** *(owner,
-2026-08-01)*. The literal-nearest form has a failure mode at coarse zoom: inside a dense
-cluster the *N* nearest all fall within a pixel, so the answer is fifty points from one
-blob. Performing the read at the **depth matching the caller's zoom and taking the
-priority prefix** — §7.2's own selection, over the ring's cells — fixes that and buys two
-properties without new machinery.
+**Depth is a free parameter, independent of the view's zoom, and it defaults deep**
+*(owner, 2026-08-01)*. The point of this interaction is *"what is near this point that
+isn't yet rendered"* — so tying the read to the viewport's depth would return the marks
+already on screen and tell the user nothing. **This is drill-down in §7.4's sense**, the
+tile behind a mark generalised to the neighbourhood around a point, and its value lies
+exactly in what the sampler declined to draw.
 
-*The neighbours are marks the viewer can actually see.* At the same depth and cut as the
-viewport request, the result is a subset of what is drawn. Returning neighbours that are
-not on screen is incoherent to a user; this makes coherence the default rather than
-something the client must reconcile.
+Depth remains *available* as a parameter, because the shallow end is the right behaviour
+for a different interaction — hover highlight, live lasso feedback — where the answer
+should be marks the viewer can see. And because priority prefixes nest, the parameter
+**refines monotonically**: deeper adds neighbours and never removes them, so a client can
+expand progressively without anything popping out. That is §7.2's nesting property doing
+work in a second place.
 
-*And it refines monotonically.* Priority prefixes nest, so the coarse neighbour set is
-contained in the finer one — zooming in adds neighbours and never removes them. That is
-§7.2's nesting property doing work in a second place, and it is the same reason marks do
-not pop on descent.
+**The invariant argument is unchanged, and derivability is trivial.** A priority prefix
+over masked candidates is §7.2 verbatim, so I7 holds by the same reasoning. And a
+deep-depth neighbour query returns a **subset of what a zoomed-in viewport request over
+the same region already returns** — a client could zoom, fetch and sort by distance
+itself — so under P3 this is a convenience over the existing verbs rather than a new
+capability, admitted on that basis with no register entry.
 
-So depth is the parameter, continuous across the range: deep gives true nearest
-neighbours, shallow gives representative ones, one mechanism throughout. **The invariant
-argument is unchanged** — a priority prefix over masked candidates is §7.2 verbatim, so
-I7 holds by the same reasoning, and the underlying counts were already disclosed exactly
-by §7.1.
+**One consequence to design for rather than discover: undrawn results must not be drawn
+into the mark layer.** The client now holds identities that the sampler deliberately did
+not serve for the current view; painting them onto the map would locally corrupt
+mark-count-as-density, which is §7.3's entire premise — a neighbourhood the user has
+expanded would read as denser than its surroundings for a presentational reason. They
+belong in a panel, or in a visually distinct overlay a viewer reads as *expanded* rather
+than as data. And P2 applies as usual: report *N* shown against the masked total within
+the radius, never a bare *N*.
 
 Shape: a mode of the region verb parameterised by a query coordinate, *N*, and a depth,
 rather than a sixth verb — the adaptive expansion is server-side, and the result is the
-region machinery with a bounded, scale-aware ordering on top.
+region machinery with a bounded ordering on top.
 
 *Lasso, tag, iterate.* Interactive annotation is the loop those tools are built around,
 and it is a **write** path the viewer verbs deliberately do not carry. Name it as an
