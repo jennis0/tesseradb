@@ -8,6 +8,39 @@ before. Raw cells: `probes/2026-07-31-ingest-baseline/{ingest_batch,ingest_conti
 **Corpus:** 2,422,486 items, `categories-subclass`, 3 repeats per cell, release + `bench-timing`,
 12 cores / 47 GiB, bundle resident.
 
+---
+
+> ## ⚠ Do not compare post-Task-3a figures against this file *(added 2026-08-01)*
+>
+> **The warning three lines above was written, and then ignored — by the Task 3a worker, and by me.**
+> Both of us produced a post-change table against these numbers and read a batch-10,000 "regression"
+> out of it (+6.0% and +16.6% respectively). Track B's performance lens established that most of that
+> figure is a **moved timer boundary, not moved work**, and the record is corrected here so the next
+> reader inherits the correction rather than the table.
+>
+> **What moved.** At `df84423` the bench arm's `synth_rows` called `engine.allocate_sorted` and built
+> the `WalRow`s *before* `Instant::now()`, so the timed region was append → fsync → apply → swap
+> alone. At `c0bbd6b` `synth_rows` builds `UnallocatedRow`s and the timed region additionally covers
+> the duplicate scan, `to_pending`, `assign_sorted` (one sort-key `Vec<u32>` per item, then a sort of
+> all of them) and `into_wal_row` framing. **Per-row heap work across the system is unchanged** — the
+> lens counted the clones on both sides and they are equal, and `c0bbd6b` removed two the executor had
+> introduced.
+>
+> **The new arm is the more honest one.** Phase 1's handler always did the sort inside the request, so
+> the *old* arm under-measured the real ack path. This is a re-baseline in the direction of accuracy.
+>
+> **Corrections that follow.** Task 3a shows **no evidence of real ack-path regression above ~1%**; the
+> deltas in both post-change tables are timer boundary plus session noise (two runs of the same commit
+> disagree by 10–12%, in opposite directions, and this file's own 10k cell spans 7.762–12.135 ms at
+> n=3). And the Task 3a report's claim that the residual is "exactly what 7a amortises" is **false**:
+> a commit window amortises per-*submission* costs — the fsync, the buffer clone, the swap — while
+> `to_pending` and `assign_sorted` are per-*row* and a window contains the same rows. Whatever residual
+> is real is permanent, and 7a's gate must not expect the 10k cell to move.
+>
+> **The baseline for Task 7a is `/tmp/tessera-bench/runs/b-verify/`, not this file** — measured at
+> `c0bbd6b` on a quiet box under `scripts/bench-slot.sh`. This file remains valid for what it always
+> was: the fsync floor and the compose curve, both of which are boundary-independent.
+
 ## Results
 
 **1. Below ~1,000 items per batch, ingest cost is one fsync and nothing else.**
