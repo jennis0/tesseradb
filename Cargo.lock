@@ -2413,6 +2413,7 @@ dependencies = [
  "tempfile",
  "tessera-spatial",
  "tessera-types",
+ "tracing",
 ]
 
 [[package]]

@@ -27,6 +27,66 @@
 //!   The two orders are identical because `priority` is a prefix, so this costs no correctness —
 //!   only 8 B/row of scanned column where 2 B would do. Design Appendix A records that cost and
 //!   §7.2 the trigger for revisiting it.
+//!
+//! ## Why there is no candidate-list route
+//!
+//! **NO CANDIDATE-LIST ROUTE.** Everything below evaluates the definition *directly* from the
+//! mask, at every coverage. §7.2 specifies a second route — per-node precomputed lists of the
+//! top `c·k` items by `tessera_id`, unmasked, filtered at query time — and the owner has
+//! **declined** it (Phase 2 roadmap, ruling 1). This block records why, with the evidence,
+//! because a claim without its evidence gets re-litigated and the deletion of the direct path
+//! is the specific mistake that has been made before, by others, in production.
+//!
+//! `scripts/check-layers.sh` fails if the marker above disappears. A comment CI cannot notice
+//! being deleted is a comment that will be deleted.
+//!
+//! **1. The published analogue fails exactly here.** Tippecanoe's `--retain-points-multiplier`
+//! (2.41.0, in production at Felt) is the only shipped system that samples after filtering with
+//! cross-zoom stability. It over-retains N× per tile into *multiplier clusters* and serves the
+//! first surviving feature from each — a fixed-width structure with no route back once a cluster
+//! exhausts, so tiles go **empty** below a pass rate of roughly 1/N (prior-art synthesis §6,
+//! prior-art 2 §"Addendum"). Candidate lists have the identical shape: a list of width `c·k`
+//! yields about `c·k·coverage` survivors, so it produces `k` of them only above coverage `1/c`.
+//! At `c = 4` that is **25% coverage**, which — 10⁴ grants against 10⁵–10⁶ categories — describes
+//! almost no realistic principal (§7.2). Widening is linear in both help and cost: 1% needs
+//! `c = 100`, comparable in size to the hot columns.
+//!
+//! **2. Realistic masks live on the wrong side of the crossover, measured.** Phase 0 over the
+//! synthetic 10⁹ corpus (`probes/results.md` §5 — **re-read it rather than trusting these
+//! numbers second-hand**) puts the run ratio of surnames, the most realistic principal shape
+//! available, at **1.03–1.15** against a flat-hash control of exactly 1.00: masks are essentially
+//! scattered under Morton order, so there is no spatial clustering for a per-node list to exploit.
+//! The duty cycle follows (§7.2's r18 paragraph): at working coverages **12–99%** of occupied
+//! depth-6 tiles fall below the ~5% crossover, and for tail-only principals essentially all do —
+//! `probes/results.md` §5 measures 98.8% for a random `w=100` grant set at 0.13% coverage and
+//! 63.3% for surnames at 4.6%. **The honest other end:** at surnames head-25% only 1.8% of tiles
+//! fall below the crossover. That is the regime candidate lists would serve, and it is the dense
+//! core of a head principal — which is precisely the scope §7.2 assigns them ("an optimisation
+//! for high-coverage principals, not the general path") and precisely what a route built for the
+//! *general* case cannot be sized from.
+//!
+//! **3. Below the crossover the direct route is also the faster one.** Descent multiplies work
+//! rather than dividing it — merging four children's lists yields four times the candidates, so
+//! reaching `k` survivors from `d` levels down visits the geometric sum of `4^d` nodes, work
+//! proportional to **1/coverage, not log(1/coverage)** (a conflation corrected in prior-art 2 on
+//! 2026-07-27, having first been published the wrong way round). At `c = 4`, `k = 30`, 10⁴-row
+//! tiles: ~21 nodes at 5% coverage against ~10 pages for direct evaluation, 85 nodes at 1%, and
+//! **5,461 nodes at 0.01% against a single page**. Direct evaluation is bounded by the tile's
+//! row range in the scanned identity column and gets *cheaper* as coverage falls, because there
+//! are fewer visible items to consider. So it is the **main route by measurement, not a
+//! fallback** — the framing I7 and §7.2 r18 both insist on, and the one this module implements.
+//!
+//! **4. Deleting the direct path to "simplify" is the failure mode, not a tidy-up.** It would
+//! reintroduce tippecanoe's empty-tile cliff silently — no error, no metric, just blank map
+//! regions — and it would do so for the **sparsest** principals: the users with the least
+//! coverage, the least context to recognise a wrong map, and the least standing to report one.
+//! That is the I7 guarantee inverted. The floor clause (`k_min`) is what keeps their maps from
+//! going blank and may not be removed as an optimisation either (§7.2).
+//!
+//! *Not foreclosed:* the **single-cell-tile fast path** (hot-path memo §6, B1's surviving
+//! residual) is a fourth decode tier over this same direct route, not a candidate list — it
+//! computes the identical served set from the identical mask. It sits on the perf ledger and is
+//! deliberately outside the stage-2.1 plan.
 
 use std::collections::BinaryHeap;
 use std::ops::Range;

@@ -33,3 +33,7 @@ postcard = { version = "1", features = ["use-std"] }
 crc32fast = "1"
 arc-swap = "1"
 parking_lot = "0.12"
+# Facade only, no subscriber: a no-op wherever nothing attaches one. Promoted here on its
+# second consumer (tessera-store's step-down warn, tessera-server's request logging) per the
+# workspace convention that a dependency taken by two crates is versioned in one place.
+tracing = "0.1"
