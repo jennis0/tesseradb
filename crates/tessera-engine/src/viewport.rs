@@ -428,11 +428,29 @@ impl Engine {
         let generation = self.generation.load_full();
         probe.lap(|t| &mut t.generation_resolve_ns);
 
-        // Task 0a: the I11 check itself moved verbatim into `PinManager::resolve`; what it hands
-        // back is `PinnedGeometry` — geometry ONLY. Overlay, buffer and `overlay_version` are
-        // deliberately not on that type and are read from the LIVE generation below, exactly as
-        // this loop always has: a pin fixes row-space geometry and never authorisation state
-        // (lifecycle §2.3), so a suppression accepted mid-request applies to a pinned request too.
+        // The I11 check lives in `PinManager::resolve`; what it hands back is `PinnedGeometry` —
+        // geometry ONLY. Overlay, buffer and `overlay_version` are deliberately not on that type
+        // and are read from the LIVE `generation` below, exactly as this loop always has: a pin
+        // fixes row-space geometry and never authorisation state (lifecycle §2.3), so a
+        // suppression accepted mid-request applies to a pinned request too. Task 4 made the
+        // opposite implementation *available* — `resolve` can now return a superseded
+        // generation's geometry — and it is `PinnedGeometry`'s absent fields that keep it from
+        // compiling here.
+        //
+        // **This call takes no lock unless `pin` names a superseded generation** (`PinManager`'s
+        // module doc, property 1). It is on the path of every admitted request at 48-way
+        // concurrency; if a change here starts locking unconditionally, that is a process-wide
+        // serialisation point on the viewport path, not a detail.
+        //
+        // **A `410` from here after a restart is correct and must stay correct.** A restarted
+        // worker's drain list is empty, so every pre-restart pin fails. The two tempting repairs
+        // are both forbidden (lifecycle §2.2): reconstructing `(n_old, W)` from an old
+        // side-manifest mixes old rows with a fresh fragment cache and a replayed overlay, and
+        // reinterpreting the pin against *current* geometry is I11's named failure verbatim — "a
+        // row-space mask applied across a compaction boundary selects arbitrary rows, not
+        // stale-restrictive but simply wrong". The second would return a `200` full of unrelated
+        // items. See `PinManager::resolve_drained`, where both are restated at the site that
+        // would implement them.
         let geometry = self.pins.resolve(pin, session.token_id, &generation)?;
         let effective_pin = geometry.pin_id();
 
