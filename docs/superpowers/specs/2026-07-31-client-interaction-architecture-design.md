@@ -169,6 +169,39 @@ respect: a client that answers pans entirely from held tiles makes an accepted c
 invisible indefinitely, because there is no next request. *Don't re-download* is free;
 *don't re-request* needs an explicit staleness bound, and the bound is the epoch.
 
+**The budget is minutes, in both directions** *(owner ruling, 2026-08-01)*: *"minutes of
+latency on new items appearing, and minutes of latency on items disappearing, so long as
+there's a way to refresh. Staleness is something to be managed, not prevented."* Two
+things follow, and the second is a requirement rather than a permission. The client-side
+budget is **generous and symmetric** — appearance and disappearance are governed alike,
+so §6.1 needs one flip policy rather than a security-bounded one for denies and a relaxed
+one for ingest. And **a refresh path must exist and be reachable**, because the whole
+ruling rests on it; a client with no way to refresh has converted an accepted staleness
+budget into an unbounded one. The affordance is therefore mandatory in the conformance
+sense, not a product nicety.
+
+**And client-side disappearance latency is not a security control** *(owner, 2026-08-01:
+"we can never take back a served item — so anything on top of that is merely window
+dressing… if access changes after something has been read in the past, that's just tough
+luck")*. This is the more honest framing and it should govern the whole document. A
+served item is served: the disclosure completed at serve time and no client behaviour
+retracts it. Redrawing it from cache to the same principal discloses nothing that has not
+already been disclosed.
+
+So exactly **two** mechanisms carry the security here, and neither is a timer:
+
+1. **The server never serves it again** once the change is accepted (lifecycle §2.3).
+   That is the whole of the authorisation boundary, and it is the server's behaviour.
+2. **The cache dies with the principal** — the session owns cache lifetime and drops it
+   on token change (§10), which closes cross-principal persistence, the one client-side
+   leak the secrecy/truthfulness division leaves standing.
+
+Everything else — flip deadlines, cache TTLs, refresh cadence — is **coherence and
+hygiene**. Worth doing so the map does not quietly misrepresent its own currency, not
+worth defending as a control, and specifically not worth building machinery for. A
+document that presents them as controls invites a reviewer to lean on them, which is how
+window dressing becomes load-bearing.
+
 ## 5. Reconciliation: what the client already holds
 
 Owner motive (2026-07-31): *"points are stable at a given pan/zoom by construction — so
@@ -257,6 +290,13 @@ fog-of-war computed server-side *because clients cheat*. It is the one field who
 security posture matches this one, with two decades of scale evidence behind it, and
 Appendix D's survey covers databases and authorisation services only.
 
+*What the cursor is for, corrected* **(owner, 2026-08-01)**. The case above is argued
+from denies. That is the *weakest* case — denies are rare and their delta is O(1). The
+common case is **ingest**, whose delta is proportional to the flush's share of the
+corpus (§6.2), and which is therefore both more frequent and larger. The cursor's value
+should be argued from ingest; it survives comfortably even at a 10% flush, where naming
+the delta still beats refetching the viewport by an order of magnitude.
+
 *And a caution against overreach from the same review.* Full per-session incremental
 view maintenance — the Materialize or Zero posture — is **wrong-sized** here, because
 re-answering a tile from the Roaring mask is already O(containers touched), so a refetch
@@ -326,15 +366,73 @@ strictly smaller channel than the broadcast design.
    display and flip atomically when the visible tiles and their counts are complete —
    double buffering, standard in every tile map, and the operational form of §2's
    snapshot isolation.
-2. *The flip has a deadline.* The old epoch may remain on screen at most the
-   deny-visibility budget after the signal; then force-flip even if incomplete, showing
-   loading states. **"Still fetching" must not extend a suppression's visibility
-   indefinitely** — this is where §4's staleness ruling acquires its upper bound.
+2. *There is no forced flip, and an earlier draft's deadline was window dressing*
+   **(owner, 2026-08-01)**. A deadline that force-flips mid-read buys nothing — the
+   served item was already disclosed (§4) — and costs the user their place. What replaces
+   it is cheaper and honest: **mark the staleness accurately and keep refresh reachable.**
+   The map says what it is as of, the user refreshes when they choose, and the flip
+   happens on the next pan anyway, when the layout is already changing and §6.2's churn
+   is masked. **Auto-flipping is the wrong default** for the same reason: a large flush
+   can displace on the order of a tenth of the served marks, and churning that under
+   someone who is reading is worse than telling them. Prefer "N new items — refresh".
 3. *Cache validity binds to the epoch integer.* A tile older than the last signalled
    epoch is renderable but **stale-marked**, and no number-channel value may be
    displayed against it. One integer comparison, and it is what closes §4's
    "pan answered entirely from held tiles" corollary with a mechanism rather than a
    remark.
+
+### 6.2 What the epoch is made of, and what each part invalidates
+
+Treating the epoch as one monolithic key is over-coarse, and an earlier draft did
+*(owner, 2026-08-01)*. Its components invalidate genuinely different things, and folding
+them together forces a full re-render for a change whose delta is tiny.
+
+| Tier | Advances on | What it voids for a client |
+|---|---|---|
+| **Identity generation** | key rotation, identity-epoch advance | **everything** — every held `tessera_id` becomes meaningless and row order changes with it |
+| **Content version** | flush; accepted deny | what is visible — a small delta (below) |
+| **Pin / segment-set version** | compaction | **nothing** |
+
+**The pin is invisible to a client, and the draft was wrong to fold it in.** A client
+holds identities, coordinates and scalars; it never sees a row ID. Compaction rewrites
+row IDs and nothing else, so nothing the client holds goes stale. A drained pin still
+returns `410` on an in-flight *pinned* request — but that is request continuity, not
+cache validity, and I10 and I11 are what make the distinction real rather than
+convenient.
+
+**Content version is the tier that matters, and ingest dominates it, not denial**
+*(owner, 2026-08-01: continuous streams of 10²–10⁶ items/hour, or batches of 10²–10⁷ a
+few times a day; denies are rare)*. Two quantities follow, and they differ by orders of
+magnitude:
+
+*A deny* moves θ by a relative 1/`V_total` — at 10⁶ visible, on the order of two marks
+displaced across an entire viewport — plus the denied entity itself. Genuinely O(1).
+
+*A flush* is the common case and the larger one. Because `served(T)` is a
+`tessera_id`-order prefix and new arrivals carry uniformly distributed identities, a
+flush adding fraction *f* of the corpus displaces roughly fraction *f* of each tile's
+served set. At *f* = 0.1% (a 10⁶/hour stream against 10⁹) that is nothing; at *f* = 10%
+(a 10⁷ batch against 10⁸) it is a tenth of the map. **Crucially, the cadence is the
+flush, not the arrival**: design §7.2 r24's rule that an entity with no row contributes
+to no count means arrivals are invisible until flush, so a 280/s stream advances the
+content version once per flush rather than 280 times a second. The batching this
+document's §6.1 wanted is already in the ingest architecture; only denies publish
+immediately, and that is a security requirement.
+
+The design-level consequence of the *f* = 10% row — that §7.2's acceptance of θ movement
+was priced against rare overlay swaps rather than the dominant case — is raised as an
+annotation at design §7.2 rather than settled here. It is a question of parameters and
+flush cadence, not of correctness: nesting across *zoom* is untouched, and what moves is
+stability across *time*, which §7.2 never claimed.
+
+**And this is what §5.1's cursor is actually for.** The draft motivated it on denies,
+which are rare and O(1) — the weakest possible case. Ingest is the common case and the
+larger delta, and even at *f* = 10% naming the delta beats refetching the viewport
+tenfold. The cheap correct move on a content bump is to **refresh the number channel and
+keep the mark channel stale-marked**: counts are `range_cardinality` over the mask with
+no data file touched (§2.6 step 6), while the gather is the expensive half — so
+refreshing numbers eagerly and marks lazily is the honest ordering, not a shortcut. Full
+re-render belongs to identity-generation bumps alone.
 
 ## 7. Deployment topologies, and the two anti-patterns
 
