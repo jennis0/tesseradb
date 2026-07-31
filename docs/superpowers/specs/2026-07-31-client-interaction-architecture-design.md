@@ -795,13 +795,74 @@ should answer rather than let users discover** *(survey, 2026-08-01)*. TensorBoa
 Projector, WizMap and Latent Scope taught this audience what a data map does, and two of
 their signature interactions are currently unaddressed.
 
-*Click a point, see its nearest neighbours.* Excluded by the owner's 2026-07-31 ruling
-that scoped "close points" to drill-down. The honest position is **deferred, not
-refused**: it arrives through the Phase 4 vector operand as a threshold filter with
-candidate push-down (§8.2, §8.3, C10), needing no sixth verb and no new disclosure class.
-Say so explicitly, because a data map with no similarity affordance at all will read as
-broken to precisely the audience most likely to adopt this, and "we refuse it" and "it is
-Phase 4" are very different messages.
+*Click a point, see its nearest neighbours.* **Available now, in the plane, without the
+vector store** *(owner, 2026-08-01, revising the 2026-07-31 scoping which had excluded
+the plane option; the earlier ruling stands for what drill-down means, but no longer
+excludes this)*.
+
+Nearest neighbours in projected space is a **bounded read over nearby Morton cells**,
+because a point's spatial neighbours are confined to a small number of cells: expand a
+ring around the query coordinate, intersect with the mask, gather the survivors, sort by
+true Euclidean distance, take *N*.
+
+Three properties make it cheap and clean rather than a special case.
+
+It is **§8.2-compliant by construction**, not by argument. That section requires ranked
+filters to be expressed as thresholds with top-*k* applied *after* intersection, and C10
+records "candidate push-down" as the mitigation that closes it. Here the Morton ring
+**is** the candidate push-down, the mask intersects before any ranking, and the ordering
+runs last over survivors — so the principal receives the nearest among items they may
+see, which is the correct semantics, and no post-filtering step exists to leak through.
+
+**Sizing costs nothing before the gather.** `range_cardinality` returns exact masked
+counts over a contiguous range with no data file touched (§2.6 step 6), so the server
+walks up depths until the containing cell holds at least *N* visible entirely in bitmap
+arithmetic, then performs one bounded gather over at most nine contiguous ranges. The
+standard grid termination condition applies — expand until the *N*-th distance found is
+no greater than the distance to the search-region boundary — or a point just outside the
+block can beat one in a far corner.
+
+**It adds no channel.** The radius needed to find *N* visible neighbours is a function of
+local masked density, and §7.1 already returns that exactly for any tile at any zoom. The
+quantity is derivable from what the principal can already request, which is C18's
+argument unchanged.
+
+Two distinctions to keep sharp. **This is not the deferred sort demand of §15**, despite
+involving an ordering: that one is an O(visible) gather-and-sort over `M_sel`, this is a
+bounded top-*N* over a candidate set small by construction — different cost class,
+different verdict. And **this is not semantic similarity**: §8.3's trap applies at full
+strength — *"the 2D coordinates are a projection; similarity in the source space is not
+similarity in the plane"* — so the affordance must be named **nearby on the map** rather
+than "similar documents", with the Phase 4 vector operand remaining the answer for
+source-space similarity. Naming it honestly is what stops a viewer reading projection
+artefacts as semantic claims.
+
+**It is parameterised by scale, and that is what makes it usable zoomed out** *(owner,
+2026-08-01)*. The literal-nearest form has a failure mode at coarse zoom: inside a dense
+cluster the *N* nearest all fall within a pixel, so the answer is fifty points from one
+blob. Performing the read at the **depth matching the caller's zoom and taking the
+priority prefix** — §7.2's own selection, over the ring's cells — fixes that and buys two
+properties without new machinery.
+
+*The neighbours are marks the viewer can actually see.* At the same depth and cut as the
+viewport request, the result is a subset of what is drawn. Returning neighbours that are
+not on screen is incoherent to a user; this makes coherence the default rather than
+something the client must reconcile.
+
+*And it refines monotonically.* Priority prefixes nest, so the coarse neighbour set is
+contained in the finer one — zooming in adds neighbours and never removes them. That is
+§7.2's nesting property doing work in a second place, and it is the same reason marks do
+not pop on descent.
+
+So depth is the parameter, continuous across the range: deep gives true nearest
+neighbours, shallow gives representative ones, one mechanism throughout. **The invariant
+argument is unchanged** — a priority prefix over masked candidates is §7.2 verbatim, so
+I7 holds by the same reasoning, and the underlying counts were already disclosed exactly
+by §7.1.
+
+Shape: a mode of the region verb parameterised by a query coordinate, *N*, and a depth,
+rather than a sixth verb — the adaptive expansion is server-side, and the result is the
+region machinery with a bounded, scale-aware ordering on top.
 
 *Lasso, tag, iterate.* Interactive annotation is the loop those tools are built around,
 and it is a **write** path the viewer verbs deliberately do not carry. Name it as an
