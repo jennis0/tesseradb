@@ -123,7 +123,11 @@ run_audit() {
   echo "  shared:  $(patterns_for shared | wc -l) pattern(s)"
 
   echo
-  echo "== overlaps (a pattern claimed by more than one track — should be [shared] instead) =="
+  # Not automatically a defect: the plan arranges exactly one deliberate overlap
+  # (`scripts/check-layers.sh` — "touched by A and B, split by rule, each track appending its own,
+  # reviewed together at integration"). Anything else here is two tracks claiming one file, which
+  # is what `[shared]` is for.
+  echo "== overlaps (claimed by more than one track — expected: scripts/check-layers.sh only) =="
   local overlaps
   overlaps="$(for track in "${tracks[@]}"; do patterns_for "track.$track"; done | sort | uniq -d)"
   if [ -n "$overlaps" ]; then
@@ -133,7 +137,9 @@ run_audit() {
   fi
 
   echo
-  echo "== dead patterns (match no tracked file — a typo, or a path that moved) =="
+  # A pattern naming a file a task is supposed to CREATE is legitimately dead until it does
+  # (`engine/tests/cache.rs` is Task 5's). The ones worth acting on are typos and paths that moved.
+  echo "== dead patterns (match no tracked file — a typo, a moved path, or a file not yet created) =="
   local -a all_files
   mapfile -t all_files < <(git -C "$repo_root" ls-files)
   local dead=0

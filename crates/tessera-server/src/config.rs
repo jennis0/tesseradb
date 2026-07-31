@@ -243,7 +243,21 @@ impl From<toml::de::Error> for ConfigError {
 
 pub type Result<T> = std::result::Result<T, ConfigError>;
 
+/// **`deny_unknown_fields` on every raw section** *(Task 0 gate, F13)*. Serde's default is to
+/// ignore what it does not recognise, which for this file means a typo'd section header
+/// (`[ingestion]`) or key (`wal_hard_limit`) parses clean and silently defaults — against this
+/// module's own stated discipline that every check here refuses rather than clamps, so a typo
+/// cannot silently disable an invariant. Fourteen keys landed at once precisely so operators would
+/// set them, and an operator who sets one and gets the default has no signal at all that they did.
+///
+/// The cost is that a `tessera.toml` carrying a key from a *newer* build is refused rather than
+/// ignored. That is the right direction for a fail-closed config: a downgrade that silently drops
+/// half an operator's tuning is the worse outcome.
+///
+/// `[disclosure]` is exempt in practice — it is parsed as a `toml::Value` and validated by hand
+/// below, since its rule is "present, with both keys" rather than a shape.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     bundle: RawBundle,
     plugin: RawPlugin,
@@ -259,6 +273,7 @@ struct RawConfig {
 /// SA §7's `[ingest]` section (Task 0b). Every field is `Option` and the struct is `Default`, so
 /// a `tessera.toml` with no `[ingest]` section at all parses to "every key defaulted".
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawIngest {
     #[serde(default)]
     commit_window_max_items: Option<usize>,
@@ -281,6 +296,7 @@ struct RawIngest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawBundle {
     path: PathBuf,
     cache: PathBuf,
@@ -288,11 +304,13 @@ struct RawBundle {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawPlugin {
     module: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawServe {
     viewer: String,
     session: String,
@@ -421,8 +439,11 @@ pub struct Config {
     /// operand of the headroom assertion (see [`DEFAULT_WAL_HARD_LIMIT_BYTES`]), because a queue
     /// bounded in *entries* bounds nothing without it. See [`DEFAULT_INGEST_MAX_BATCH_BYTES`].
     pub ingest_max_batch_bytes: usize,
-    /// **Task 6** — the WAL's byte ceiling, and the right-hand side of the startup headroom
-    /// assertion. See [`DEFAULT_WAL_HARD_LIMIT_BYTES`]. No WAL bound existed before this key.
+    /// **Task 6** — the WAL's byte ceiling *as a startup relation between config values*, and the
+    /// right-hand side of the headroom assertion. **Not a runtime ceiling: appends do not stop
+    /// here** (Task 0 gate, F10) — `Wal` has no length accessor, so nothing compares the live log
+    /// against this number. See [`DEFAULT_WAL_HARD_LIMIT_BYTES`] for what would be needed to make
+    /// the name true.
     pub wal_hard_limit_bytes: u64,
     /// **Task 6** — overlay depth at which an alarm is raised. See
     /// [`DEFAULT_OVERLAY_SOFT_LIMIT`]. **Alarms only**: there is no fold until stage 2.3, so
@@ -647,6 +668,15 @@ const DEFAULT_INGEST_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 /// refused for load and therefore have no admission control of their own to fall back on — have
 /// somewhere to go even with the ingest queue completely full. It is also small enough to fit the
 /// NVMe cache directory SA §7 describes without an operator thinking about it.
+///
+/// **It bounds a startup relation; it does not stop appends** *(Task 0 gate, F10, in the spirit of
+/// [`DEFAULT_OVERLAY_SOFT_LIMIT`]'s "it alarms; it does not act")*. The name reads as a runtime
+/// ceiling and is not one: `Wal` exposes no length accessor, so nothing can compare the live WAL
+/// against this number. Task 6 consumes it in exactly one place — the startup assertion that the
+/// queue's worst case plus reserved deny headroom sits strictly below it — and past that point the
+/// WAL grows until the filesystem refuses, at which point `WalError::Poisoned` makes the handle
+/// dead. Runtime enforcement needs a `Wal::len()` and a ruling on what "at the limit" should do
+/// (refusing ingest is straightforward; refusing a *deny* is fail-open), and neither is scheduled.
 const DEFAULT_WAL_HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Task 6: overlay depth at which an alarm is raised. **SA §7's own default**, carried across
@@ -685,10 +715,22 @@ const DEFAULT_FLUSH_MAX_AGE_SECS: u64 = 60;
 /// same 125 MB unsharded figure). Exposed rather than private because it is the operand of Task
 /// 5's startup validation, not a documentation flourish.
 ///
-/// Two caveats that belong wherever this number is used: it is the *serialised* size, and
-/// `get_serialized_size_in_bytes` underestimates the in-memory footprint of array containers
-/// with capacity slack by up to ~2×; and it is the 10⁹ figure, so a smaller corpus leaves the
-/// bounds below over-provisioned rather than wrong.
+/// Three caveats belong wherever this number is used.
+///
+/// 1. It is the *serialised* size. `get_serialized_size_in_bytes` can underestimate the in-memory
+///    footprint — but **not at this operating point**, and the previous phrasing of this caveat
+///    was wrong about why *(Task 0 gate, F12)*. The ~2× gap is an **array-container** property:
+///    a `Vec<u16>` of values carries capacity slack that the serialised form does not. A mask that
+///    serialises to the 125.12 MB dense bound is by construction dominated by **bitmap**
+///    containers, whose in-memory size *is* their serialised size (8 KB, a fixed 2¹⁶-bit block) —
+///    ratio ≈ 1.0. So at the figure this constant describes, the factor does not apply; it applies
+///    to sparse, array-container-dominated masks, which are small in absolute terms anyway.
+/// 2. It is the 10⁹ figure, so a smaller corpus leaves the bounds below over-provisioned rather
+///    than wrong.
+/// 3. It is **per (session, slice, segments_version) entry**, not per session — the cache key's
+///    three components (see `tessera_engine`'s `RowProjectionKey`). "Eight sessions, eight
+///    entries" holds only while one partition emits one slice, which is true today and silently
+///    false the moment a build emits two: the same eight sessions then occupy sixteen entries.
 pub const MEASURED_PROJECTION_BYTES_AT_1E9: u64 = 125_120_000;
 
 /// Task 5: byte bound on the row-projection cache.
@@ -701,9 +743,19 @@ pub const MEASURED_PROJECTION_BYTES_AT_1E9: u64 = 125_120_000;
 /// 429 storm with a core set pegged on rebuilds, not as a gently lower hit rate.
 ///
 /// 2 GiB is `2 ×` [`DEFAULT_EXPECTED_CONCURRENT_SESSIONS`] × [`MEASURED_PROJECTION_BYTES_AT_1E9`]
-/// (8 × 125 MB ≈ 1 GiB working set). The factor of two is not slack for its own sake: it is
-/// exactly the ~2× underestimate the serialised-size accounting carries for array containers
-/// with capacity slack.
+/// (8 × 125 MB ≈ 1 GiB working set).
+///
+/// **The factor of two is headroom, and the reason previously given for it was wrong** *(Task 0
+/// gate, F12; the number is unchanged, only its justification)*. It was described as the
+/// serialised-size accounting's ~2× underestimate — but that underestimate is an array-container
+/// property and does not apply at the dense bound this cache is sized against, where the mask is
+/// bitmap-container dominated and in-memory size equals serialised size. What the margin actually
+/// buys is the two ways the entry count exceeds the session count: **more than one slice per
+/// session** (the key is `(token_id, slice, segments_version)`, so a two-slice bundle doubles the
+/// entries at unchanged concurrency), and **a generation swap**, during which a pinned request's
+/// old-`segments_version` entry coexists with the new one until Task 5's `prune_generation` runs
+/// at drain-list reclaim. Both are entry-count effects, and at this bound either one alone still
+/// fits.
 const DEFAULT_ROW_PROJECTION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Task 5: byte bound on the **in-memory** fragment tier. The digest-verified `.frag` sidecar
@@ -714,6 +766,19 @@ const DEFAULT_ROW_PROJECTION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// a projection miss costs a rebuild measured in seconds. Fragments are also keyed by canonical
 /// grant set rather than by session, so principals with equal grants share one entry and the
 /// working set grows with *policy* cardinality, not with concurrency.
+///
+/// **The margin its sibling carries is dropped here deliberately** *(Task 0 gate, F11)*. Both
+/// bounds hold the same-shaped Roaring object at the same measured per-entry size, so `1 ×` here
+/// against `2 ×` there is a real difference and needs its reason stated rather than inferred: this
+/// cache's entry count is bounded by **distinct grant sets in flight**, not by sessions, so the
+/// row-projection margin's two justifications (a slice multiplier per session, and a generation
+/// swap's transient duplicate) do not apply — a slice does not appear in this key at all, and a
+/// fragment outlives a bundle swap. Eight *entries* here is therefore eight distinct policies,
+/// which is a deployment with more compartmentation than Phase 1 can express.
+///
+/// A deployment whose principals genuinely span more than eight distinct grant sets should raise
+/// this, and Task 5's startup validation covers this cache with the same relation it applies to
+/// the projection cache, so the failure is a refusal to start rather than a thrash.
 const DEFAULT_FRAGMENT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Task 5: the session concurrency the projection cache must not collapse at — the startup
@@ -1487,11 +1552,44 @@ mod tests {
         }
     }
 
+    /// A misspelt key or section is **refused**, not defaulted *(Task 0 gate, F13)*.
+    ///
+    /// The three cases are the three an operator actually hits: a key typo'd inside a real section
+    /// (`wal_hard_limit` for `wal_hard_limit_bytes`), a key put in the *wrong* section (a `serve`
+    /// key under `[ingest]` — the two-section split makes this the easy mistake), and a typo'd
+    /// section header (`[ingestion]`). Before `deny_unknown_fields` all three parsed clean and
+    /// silently defaulted, so an operator tuning the write path got the shipped behaviour and no
+    /// signal at all.
+    #[test]
+    fn a_misspelt_key_or_section_refuses_to_start() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+
+        for toml in [
+            valid_toml_with("", "wal_hard_limit = 999000000"),
+            valid_toml_with("", "pin_ttl_secs = 42"),
+            valid_toml("commit_window_max_items = 7"),
+            valid_toml("").replace("[serve]", "[serv]\n[serve]"),
+        ] {
+            let err = parse(&toml).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Toml(_)),
+                "an unrecognised key or section must be refused, got {err}"
+            );
+        }
+    }
+
     /// **The inertness assertion.** `flush_max_items` and `flush_max_age_secs` are parsed,
     /// validated and stored, and *nothing reads them* — their consumer is flush, which does not
     /// exist until stage 2.2. An operator must not be able to set one and believe it works, so
     /// the claim is checked mechanically rather than promised in a doc comment: no `.rs` file in
-    /// the workspace outside this module may name either key.
+    /// the workspace outside this module may **use** either key.
+    ///
+    /// **Comments are stripped before the scan** *(Task 0 gate, F9)*. As written it matched any
+    /// mention, including prose, and had already forced `tessera-bench/src/arms/ingest.rs` to
+    /// carry a caveat about two config keys that was forbidden from naming them — a test making
+    /// documentation worse to keep itself green. A mention is not a consumer; only a *use* is, and
+    /// after comment-stripping any surviving occurrence is one.
     ///
     /// When stage 2.2 wires flush, this test fails. That is the intended design: the failure is
     /// the prompt to delete the INERT paragraphs from both `DEFAULT_FLUSH_*` constants and both
@@ -1527,7 +1625,8 @@ mod tests {
                     stack.push(path);
                 } else if path.extension().is_some_and(|e| e == "rs") && path != this_file {
                     let text = fs::read_to_string(&path).expect("readable source file");
-                    if text.contains("flush_max_items") || text.contains("flush_max_age_secs") {
+                    let code = strip_comments(&text);
+                    if code.contains("flush_max_items") || code.contains("flush_max_age_secs") {
                         offenders.push(path.display().to_string());
                     }
                 }
@@ -1536,11 +1635,60 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "flush_max_items / flush_max_age_secs are documented as INERT until stage 2.2, but \
-             are named in: {offenders:?}. If flush now consumes them, delete this test AND the \
+             are USED (outside a comment) in: {offenders:?}. Naming either key in prose — a doc \
+             comment, a caveat, a TODO — is fine and always was intended to be; comments are \
+             stripped before this scan. If flush now consumes them, delete this test AND the \
              INERT paragraphs on DEFAULT_FLUSH_MAX_ITEMS, DEFAULT_FLUSH_MAX_AGE_SECS and both \
              Config fields — an operator reading a stale 'INERT' note is exactly what this test \
              prevents"
         );
+    }
+
+    /// Line and block comments removed; string literals are left alone.
+    ///
+    /// Deliberately crude — it is scanning for one of two identifiers, not parsing Rust. The one
+    /// way it can be wrong is a `//` inside a string literal on a line that also *uses* one of the
+    /// keys, which would hide a real consumer; there is no such line, and the failure direction
+    /// would be a missed offender in a test whose job is to notice a whole new consumer appearing.
+    fn strip_comments(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut in_block = false;
+        for line in text.lines() {
+            let mut rest = line;
+            loop {
+                if in_block {
+                    match rest.find("*/") {
+                        Some(end) => {
+                            in_block = false;
+                            rest = &rest[end + 2..];
+                        }
+                        None => {
+                            rest = "";
+                            break;
+                        }
+                    }
+                } else {
+                    let line_at = rest.find("//");
+                    let block_at = rest.find("/*");
+                    match (line_at, block_at) {
+                        (Some(l), b) if b.is_none_or(|b| l < b) => {
+                            out.push_str(&rest[..l]);
+                            rest = "";
+                            break;
+                        }
+                        (_, Some(b)) => {
+                            out.push_str(&rest[..b]);
+                            in_block = true;
+                            rest = &rest[b + 2..];
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            out.push_str(rest);
+            out.push('\n');
+        }
+        out
     }
 
     /// The defaults are a *consistent set*, not fourteen independent numbers. Task 6 asserts at
@@ -1569,10 +1717,12 @@ mod tests {
         );
     }
 
-    /// The other cross-knob relation, for the same reason. Task 5 refuses to start unless
-    /// `row_projection_cache_bytes` admits at least `expected_concurrent_sessions` entries at the
-    /// measured per-entry size — so the defaults must admit that many, with the ~2× margin the
-    /// serialised-size accounting's own underestimate calls for.
+    /// The other cross-knob relation, for the same reason. Task 5 refuses to start unless each
+    /// cache bound admits at least `expected_concurrent_sessions` entries at the measured
+    /// per-entry size — so the defaults must admit that many. **Both** caches, not just the
+    /// projection one (Task 0 gate, F11): they hold the same-shaped Roaring object at the same
+    /// measured size, and a validation that covered one of them would leave the other free to be
+    /// set to a value that collapses.
     #[test]
     fn defaults_satisfy_task_5s_cache_relation() {
         let working_set =
@@ -1584,9 +1734,22 @@ mod tests {
              {MEASURED_PROJECTION_BYTES_AT_1E9} B"
         );
         assert!(
+            DEFAULT_FRAGMENT_CACHE_BYTES >= working_set,
+            "{DEFAULT_FRAGMENT_CACHE_BYTES} B admits fewer than \
+             {DEFAULT_EXPECTED_CONCURRENT_SESSIONS} fragments of \
+             {MEASURED_PROJECTION_BYTES_AT_1E9} B — this cache is keyed by grant set rather than \
+             by session, so eight entries is eight distinct policies, but the per-entry size and \
+             the collapse mode are the projection cache's"
+        );
+        // The projection cache carries a further 2× (the fragment cache deliberately does not —
+        // see both constants). It is entry-count headroom, NOT a correction for a serialised-size
+        // underestimate: that underestimate is an array-container property and does not apply at
+        // the bitmap-dominated dense bound this figure describes (Task 0 gate, F12).
+        assert!(
             DEFAULT_ROW_PROJECTION_CACHE_BYTES >= 2 * working_set,
-            "the bound must carry the ~2× margin for the in-memory footprint that \
-             get_serialized_size_in_bytes underestimates"
+            "the projection bound must carry its 2× entry-count headroom: the key is \
+             (token_id, slice, segments_version), so a second slice or a generation swap doubles \
+             the entries at unchanged session concurrency"
         );
     }
 }

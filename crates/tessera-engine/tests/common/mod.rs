@@ -73,6 +73,12 @@ pub fn config() -> EngineConfig {
         max_underlay_cells: 8192,
         max_tiles_per_request: 262_144,
         compute_threads: default_compute_threads(),
+        // The server's own defaults for lifecycle §2.2's two pin bounds. Nothing reads either
+        // until Task 4 builds the drain list they bound (Task 0 gate, F3), so the values are the
+        // shipped ones rather than test-specific: a test that means to exercise the cap will set
+        // its own, and until then these must not be the reason a test passes.
+        pin_ttl_secs: 300,
+        pins_per_session_max: 4,
     }
 }
 

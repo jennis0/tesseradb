@@ -200,6 +200,8 @@ fn main() {
         max_underlay_cells: 8192,
         max_tiles_per_request: 262_144,
         compute_threads,
+        pin_ttl_secs: 300,
+        pins_per_session_max: 4,
     };
 
     let tmp1 = tempfile::tempdir().unwrap();

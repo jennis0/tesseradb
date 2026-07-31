@@ -145,6 +145,14 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // Also a request the caller can fix by asking for less, and its Display names only the
         // caller's own numbers and the configured limit.
         too_many @ EngineError::TooManyTiles { .. } => ApiError::Contract(too_many.to_string()),
+        // Lifecycle §2.2's per-session pin cap, the third member of the same family: contracts
+        // §3.1's 422 row is "malformed request, bounds exceeded, unknown filter operand", and this
+        // is a bound exceeded. Deliberately NOT 429 — the cap clears when a pin expires, on the
+        // TTL's timescale, so `Retry-After: 1` would be a lie. Landed by the seam commit with the
+        // variant itself (Task 0 gate, C2) so Track C's Task 4, which owns `pins.rs` but not this
+        // file, does not have to choose between editing Track B's file and letting a caller-fixable
+        // bound fall through the catch-all below as a fail-closed 500.
+        cap @ EngineError::PinCapExceeded { .. } => ApiError::Contract(cap.to_string()),
         // `Store`/`Io` wrap a `StoreError`/`io::Error` whose `Display` names a filesystem path —
         // the same leak `map_store_error` closes, reached through the engine's error enum instead
         // of directly. One sanitiser for both doors.
@@ -342,6 +350,23 @@ mod tests {
         let (status, code, _) = map_engine_error(EngineError::FragmentBuilding).parts();
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(code, "backpressure");
+    }
+
+    /// Task 0 gate (C2): the per-session pin cap is a **bound exceeded**, so contracts §3.1 puts
+    /// it on the 422 `contract` row beside `TooManyTiles`, not on 429 — and it is named in
+    /// `map_engine_error`'s match rather than left to the catch-all, which would have made a
+    /// caller-fixable refusal a fail-closed 500. Constructed by nobody until Task 4; this test is
+    /// what stops the mapping rotting in the meantime.
+    #[test]
+    fn map_engine_error_takes_a_pin_cap_refusal_to_422_contract() {
+        let (status, code, detail) =
+            map_engine_error(EngineError::PinCapExceeded { held: 4, limit: 4 }).parts();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(code, "contract");
+        assert!(
+            detail.contains('4') && !detail.contains('/'),
+            "the body must name the caller's own numbers and no server path, got: {detail}"
+        );
     }
 
     /// Fix wave, Task 2: `StaleIdentityEpoch` (now raised by `Engine::item` itself, against the

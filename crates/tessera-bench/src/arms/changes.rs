@@ -212,6 +212,8 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                     max_underlay_cells: 8192,
                     max_tiles_per_request: 262_144,
                     compute_threads: tessera_engine::default_compute_threads(),
+                    pin_ttl_secs: 300,
+                    pins_per_session_max: 4,
                 },
             )?;
             let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;

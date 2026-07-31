@@ -184,6 +184,10 @@ pub fn default_engine_config() -> EngineConfig {
         max_underlay_cells: 8192,
         max_tiles_per_request: 262_144,
         compute_threads: tessera_engine::default_compute_threads(),
+        // The shipped defaults for lifecycle §2.2's two pin bounds — see the same two lines in
+        // tessera-engine's `tests/common/mod.rs`. Inert until Task 4 (Task 0 gate, F3).
+        pin_ttl_secs: 300,
+        pins_per_session_max: 4,
     }
 }
 

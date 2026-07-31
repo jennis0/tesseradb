@@ -1,6 +1,7 @@
 //! The write path: the WAL handle, the I9 allocator, the live external-id maps, the descriptor
 //! resolver's extension state and the `/control/ingest` idempotency index — everything the
-//! acceptance paths mutate, behind one seam.
+//! acceptance paths mutate, behind one seam. Plus, at the bottom of the file, the **delivery
+//! half** of the write-executor vocabulary: [`LifecycleHandle`], [`Job`] and [`Responder`].
 //!
 //! Carved out of `session.rs` (Phase 2 stage 2.1, Task 0a) so the write-path work and the
 //! read-path work can proceed in separate files. The carve is deliberately **not** a wholesale
@@ -14,19 +15,49 @@
 //! `generation` and `dict` are **shared** with the `Engine`, not owned by this type: the WAL
 //! critical section below swaps the generation pointer, and `resolve_terms` resolves against the
 //! same bundle dictionary `Engine::authorise` looks descriptors up in.
+//!
+//! ## Where the vocabulary is, and why it is split across two crates
+//!
+//! The *data* half — `Command`, `UnallocatedRow`, `Receipt`, `Ack`, `SubmitError`, `ExecError` —
+//! lives in [`tessera_lifecycle::command`], and **that module's doc is the one to read first**: it
+//! argues the `Command` shape, the unallocated-row decision and the never-shed lane. This file
+//! carries only the half that cannot live there. The split is a crate-graph fact, not a taste:
+//! `tessera-engine` depends on `tessera-lifecycle`, the executor's loop must `apply → swap` a
+//! `Generation` (which holds a `tessera_store::Bundle`, a crate lifecycle deliberately does not
+//! depend on), and a thread in lifecycle importing `Generation` is a cycle cargo refuses. So the
+//! executor lives here (plan Decision 1) — and the queues and the handle live with the executor
+//! that owns their far end, which keeps `tessera-lifecycle` free of any channel or async
+//! dependency and leaves `check-layers.sh` unchanged *(Task 0 gate, F6: the omission of the
+//! handle hid exactly this decision, and a Track B worker opening this file first found no thread
+//! back to the vocabulary at all — hence the back-reference above)*.
+//!
+//! ## A name that is about to stop fitting
+//!
+//! [`WritePath`] is the right name today and will be wrong after Task 3a. Once the executor thread
+//! owns the `Wal` **by value** and the acceptance methods below become its loop body, *the executor
+//! is the write path*, and what is left here is handler-side live state — the maps and indices a
+//! handler consults before submitting (`established`, `accepted_batches`, the resolver's extension
+//! state). The type will want splitting along that line then; it is not split now because doing it
+//! before the executor exists would be guessing at the seam.
 
+use std::path::Path;
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::FxHashMap;
 
 use tessera_authz::Dict;
-use tessera_lifecycle::alloc::{Allocator, PendingItem};
+use tessera_lifecycle::alloc::{high_water_from, Allocator, PendingItem};
 use tessera_lifecycle::buffer::DescriptorResolver;
+use tessera_lifecycle::command::{Command, Receipt, SubmitError};
+use tessera_lifecycle::overlay::replay;
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalError, WalRecord, WalRow};
-use tessera_lifecycle::{assign_sorted, Overlay};
+use tessera_lifecycle::{assign_sorted, IngestBuffer, Overlay};
 use tessera_plugin::Descriptor;
+use tessera_store::StoreError;
 use tessera_types::{EntityId, TermId};
 
+use crate::session::EngineError;
 use crate::{Generation, GenerationHandle};
 
 /// The mutable write-side state of a running engine. See this module's doc for why the split
@@ -67,31 +98,132 @@ pub(crate) struct WritePath {
     dict: Arc<Dict>,
 }
 
+/// Everything [`WritePath::reconstruct`] rebuilds from durable state, minus the two pieces that
+/// belong to the first [`Generation`] rather than to the write path.
+///
+/// Opaque on purpose: `session.rs` never names a field of it, it only carries the value from
+/// [`WritePath::reconstruct`] to [`WritePath::new`]. That is what keeps `Engine::open`'s share of
+/// the reconstruction to two lines (Task 0 gate, F7).
+pub(crate) struct WritePathState {
+    wal: Wal,
+    allocator: Allocator,
+    established: FxHashMap<Vec<u8>, EntityId>,
+    established_inverse: FxHashMap<EntityId, Vec<u8>>,
+    resolver_state: (FxHashMap<Vec<u8>, TermId>, u32),
+    accepted_batches: FxHashMap<String, ([u8; 32], Vec<EntityId>)>,
+}
+
 impl WritePath {
-    /// Assemble the write path from the state `Engine::open` reconstructed at open: the WAL
-    /// handle, the seeded allocator, WAL replay's `established` map and its inverse, the detached
-    /// resolver extension state, and the idempotency index rebuilt from the replayed records.
+    /// Rebuild every piece of write-side state that comes from durable storage: open and replay
+    /// the WAL, seed the I9 allocator at `max(manifest high-water, WAL high-water)`, build the
+    /// live external-id map and its inverse, detach the descriptor resolver's extension state, and
+    /// rebuild the `/control/ingest` idempotency index from the replayed `IngestBatch` records.
+    ///
+    /// Returns the first generation's `(overlay, buffer)` alongside the write-path state, because
+    /// replay produces all four in one pass and the caller needs the first two to build the
+    /// `Generation` this type will then publish through.
+    ///
+    /// **Why it is a method here and not sixty lines of `Engine::open`** *(Task 0 gate, F7)*:
+    /// [`WritePath::new`]'s doc argues for a one-line construction site because two tracks both
+    /// edit `Engine::open` — and the *reconstruction* of the same state is the other half of that
+    /// argument. Track B's Tasks 3a and 8 both rewrite this block (the executor takes the `Wal` by
+    /// value; the batch-state machine changes what the index holds), in a file Track C also edits.
+    /// Behaviour is unchanged, line for line, including the two error messages.
+    pub(crate) fn reconstruct(
+        wal_path: &Path,
+        manifest_high_water: u64,
+        dict: &Dict,
+        resolve_from_bundle: impl Fn(&[u8]) -> std::result::Result<Option<EntityId>, StoreError>,
+    ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
+        let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
+
+        let high_water = manifest_high_water.max(high_water_from(&records));
+        // `try_new`, not `new`: the seed comes from durable state this process did not write in
+        // this run (MANIFEST's `entity_id_high_water`, or a replayed WAL row/lease), so a
+        // corrupt or hand-edited value at or above `u32::MAX` must be refused **here**, before
+        // any ingest, rather than surfacing later as an opaque exhaustion error on whichever
+        // request happened to allocate first. This is the check `Allocator::try_new`'s own doc
+        // says "belongs at open" — open is `Engine::open`, which is this call's only caller.
+        let allocator = Allocator::try_new(high_water).map_err(|e| {
+            EngineError::Malformed(format!(
+                "entity-ID allocator seed from durable state (MANIFEST high-water {}, WAL \
+                 high-water {}): {e}",
+                manifest_high_water,
+                high_water_from(&records),
+            ))
+        })?;
+
+        // **C3 closed (review round 4, Critical)**: `resolve_from_bundle` propagates a real
+        // sidecar failure through `replay` as `Err`, rather than the closure panicking on it —
+        // `ExternalIdIndex::resolve` is fallible end to end.
+        let (overlay, buffer, established, resolver) = replay(&records, dict, resolve_from_bundle)
+            .map_err(EngineError::Overlay)?;
+
+        // `established_inverse` — the drill-down direction (Important I-9) — is the exact
+        // inverse of `established`, built once here from the same replay pass; the two are kept
+        // in sync from this point on by `WritePath::accept_ingest`'s single critical section.
+        let established_inverse: FxHashMap<EntityId, Vec<u8>> = established
+            .iter()
+            .map(|(ext, ent)| (*ent, ext.clone()))
+            .collect();
+        // Detach the resolver's extension state from `dict`'s borrow immediately (Task 13): the
+        // live serving path resumes exactly this state on every future descriptor resolution, so
+        // novel-descriptor extension ids keep counting down from wherever replay left off, rather
+        // than restarting and colliding with ids already handed out earlier in this process's
+        // lifetime (see `DescriptorResolver::resume`'s doc).
+        let resolver_state = resolver.into_state();
+
+        // The idempotency index for `/control/ingest` (Task 13): every previously-accepted batch
+        // id, mapped to the body hash it was accepted with plus the entity ids that batch's rows
+        // were assigned, so a retried request with the same id and body is recognised as a no-op
+        // 200 rather than re-applied, and can still answer with the same `tessera_id`s (contracts
+        // §3.4 r6) even for a row that carried no external id to re-resolve from.
+        let mut accepted_batches: FxHashMap<String, ([u8; 32], Vec<EntityId>)> =
+            FxHashMap::default();
+        for record in &records {
+            if let WalRecord::IngestBatch {
+                batch_id,
+                body_hash,
+                rows,
+            } = record
+            {
+                let entity_ids = rows.iter().map(|row| row.entity_id).collect();
+                accepted_batches.insert(batch_id.clone(), (*body_hash, entity_ids));
+            }
+        }
+
+        Ok((
+            overlay,
+            buffer,
+            WritePathState {
+                wal,
+                allocator,
+                established,
+                established_inverse,
+                resolver_state,
+                accepted_batches,
+            },
+        ))
+    }
+
+    /// Assemble the write path from [`WritePath::reconstruct`]'s output plus the two pointers it
+    /// shares with the `Engine`: the generation handle every acceptance publishes through, and the
+    /// bundle dictionary `resolve_terms` resolves against.
     ///
     /// **One call, and deliberately so.** Two later tracks both edit `Engine::open`; a one-line
     /// construction site conflicts trivially where a twenty-line one does not.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub(crate) fn new(
-        wal: Wal,
-        allocator: Allocator,
-        established: FxHashMap<Vec<u8>, EntityId>,
-        established_inverse: FxHashMap<EntityId, Vec<u8>>,
-        resolver_state: (FxHashMap<Vec<u8>, TermId>, u32),
-        accepted_batches: FxHashMap<String, ([u8; 32], Vec<EntityId>)>,
+        state: WritePathState,
         generation: Arc<GenerationHandle>,
         dict: Arc<Dict>,
     ) -> Self {
         WritePath {
-            wal: Mutex::new(wal),
-            allocator: Mutex::new(allocator),
-            established: Mutex::new(established),
-            established_inverse: Mutex::new(established_inverse),
-            resolver_state: Mutex::new(resolver_state),
-            accepted_batches: Mutex::new(accepted_batches),
+            wal: Mutex::new(state.wal),
+            allocator: Mutex::new(state.allocator),
+            established: Mutex::new(state.established),
+            established_inverse: Mutex::new(state.established_inverse),
+            resolver_state: Mutex::new(state.resolver_state),
+            accepted_batches: Mutex::new(state.accepted_batches),
             generation,
             dict,
         }
@@ -144,9 +276,9 @@ impl WritePath {
     /// `DescriptorResolver::resume`'s doc for why restarting that sequence per call would be
     /// fail-open.
     ///
-    /// **Durability-ordering exemption (review finding, Important 3):** ideally every call to
-    /// this method happens only after the record that will carry its descriptors is durably WAL
-    ///-appended and fsynced — otherwise an extension id can be minted in-process for a batch
+    /// **Durability-ordering exemption (review finding, Important 3):** ideally every call to this
+    /// method happens only after the record that will carry its descriptors is durably
+    /// WAL-appended and fsynced — otherwise an extension id can be minted in-process for a batch
     /// whose append then fails, leaving the live resolver's state one step ahead of what a
     /// restart-replay would ever reconstruct from the WAL alone. `WritePath::accept_change` honours
     /// that ordering (it resolves only after its `Change` record's append/fsync succeeds).
@@ -371,4 +503,90 @@ impl WritePath {
         };
         self.generation.store(Arc::new(next));
     }
+}
+
+/// Where one submitted [`Command`]'s [`Receipt`] is delivered.
+///
+/// A **synchronous** channel sender, and that is forced rather than chosen: `tessera-engine` has
+/// no `tokio` dependency and must not acquire one — lifecycle §7's sync-engine rule, policed by
+/// `scripts/check-layers.sh`'s `deny tessera-engine tokio`. So the plan's two options for "receipt
+/// awaiting must not block the reactor" collapse to one: the handler wraps its submit in
+/// `spawn_blocking`, and this type stays a plain `std::sync::mpsc` sender. `sync_channel(1)`, not
+/// `channel()`, so the executor's send never outlives the receipt it is delivering.
+///
+/// A dropped `Responder` is not an error the executor should treat as one: it means the caller's
+/// connection went away, and the command's effect is already in force by then (the ack step runs
+/// strictly after the swap).
+pub type Responder = SyncSender<Receipt>;
+
+/// One queued unit of work: what to do, and where to say it was done.
+///
+/// The responder travels **with** the command rather than being looked up afterwards, because
+/// Task 8's join case needs several of them against one entry — a retry of a held `batch_id` with
+/// identical bytes appends its responder to the existing window entry's `waiters` and both callers
+/// receive the same ids off one allocation.
+pub struct Job {
+    pub command: Command,
+    pub respond: Responder,
+}
+
+/// The handler-side end of the write executor: two queues, and the asymmetry between them.
+///
+/// **The asymmetry is the design** (lifecycle §1.3, contracts §3.1's 429 row). `work` is bounded
+/// by `ingest_queue_bound` and a full queue is a `429`; `deny` is unbounded and can never refuse
+/// for load, because refusing a security operation for load is fail-open. The executor drains
+/// `deny` to empty before it touches `work`, so a deny's wait is bounded by the work item
+/// currently executing rather than by queue depth. Two consequences to choose rather than
+/// discover: a sustained deny flood starves ingest completely, and the deny queue is unbounded in
+/// memory.
+///
+/// **Both submit methods return a `Result`.** A handle that swallows a dead executor while still
+/// answering 202 is the worst available outcome — the caller believes its suppression is in
+/// flight and it is not (plan Task 3a, review I-5).
+///
+/// *Landed by the seam commit with no constructor* **(Task 0 gate, F6)**: Task 3a spawns the
+/// executor thread and is what returns one of these, so no instance can exist before then and the
+/// method bodies below are unreachable. The signatures are here now because plan rule 4 freezes
+/// them at Task 0 review — Track B implements against a shape agreed with the reviewers, not one
+/// invented mid-stream — and because their absence hid the crate-graph decision this module's doc
+/// now records.
+// Unread until Task 3a writes the two method bodies below — which is also when this type acquires
+// a constructor. Kept as fields rather than deferred to Task 3a because the *pair*, with these two
+// channel types, is the frozen decision: `SyncSender` for work (bounded, sheddable) and `Sender`
+// for deny (unbounded, never shed) is the never-shed lane expressed in the type system rather than
+// in a comment.
+#[allow(dead_code)]
+pub struct LifecycleHandle {
+    /// Bounded by `ingest_queue_bound`; full → [`SubmitError::QueueFull`].
+    work: SyncSender<Job>,
+    /// Unbounded: a deny is never refused for load.
+    deny: Sender<Job>,
+}
+
+impl LifecycleHandle {
+    /// Submit an ingest command and wait for its receipt. **May 429** (queue full).
+    ///
+    /// Blocking by construction — see [`Responder`] — so a tokio handler must call this inside
+    /// `spawn_blocking`.
+    pub fn submit(&self, _command: Command) -> std::result::Result<Receipt, SubmitError> {
+        unimplemented!("Task 3a: the executor thread, and with it the only constructor for this type")
+    }
+
+    /// Submit a `/control/changes` command and wait for its receipt. **Never 429**, but it can
+    /// still report [`SubmitError::ExecutorDead`]: a deny is never refused for *load*, which is
+    /// not the same as never refused. There is no honest 200 to give when there is nothing left
+    /// to apply it.
+    pub fn submit_deny(&self, _command: Command) -> std::result::Result<Receipt, SubmitError> {
+        unimplemented!("Task 3a: the executor thread, and with it the only constructor for this type")
+    }
+}
+
+/// The executor's end of the two queues, held by the thread Task 3a spawns.
+///
+/// Named here so the pairing is visible from the handle: `deny` is drained to empty before `work`
+/// is touched, which is what makes the starvation bound "the work item currently executing" rather
+/// than "the work queue's depth".
+pub struct LifecycleQueues {
+    pub work: Receiver<Job>,
+    pub deny: Receiver<Job>,
 }

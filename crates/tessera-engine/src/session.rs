@@ -16,14 +16,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwap;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
 use tessera_authz::{Dict, FragmentCache, FragmentCacheError, FrozenFragment, PostingsReader};
-use tessera_lifecycle::alloc::{high_water_from, Allocator};
-use tessera_lifecycle::overlay::replay;
-use tessera_lifecycle::wal::{ChangeOp, Wal, WalError, WalRecord, WalRow};
+use tessera_lifecycle::wal::{ChangeOp, WalError, WalRow};
 use tessera_lifecycle::{alloc::PendingItem, OverlayError};
 use tessera_plugin::{Descriptor, Plugin, PluginError};
 use tessera_store::manifest::CurrentPointer;
@@ -101,6 +98,16 @@ pub struct EngineConfig {
     /// rayon's own default (`RAYON_NUM_THREADS` or the logical core count), so a `0` here is
     /// harmless rather than a zero-width pool that can run nothing.
     pub compute_threads: usize,
+    /// Lifecycle §2.2's pin TTL, in seconds — how long a pin stays resolvable once the generation
+    /// it names has been superseded. Handed to [`crate::pins::PinManager`] at open; **nothing
+    /// reads it until Task 4** builds the drain list it bounds. Mirrors `tessera-server::config`'s
+    /// `serve.pin_ttl_secs`, whose doc carries the page-cache argument that sizes it.
+    pub pin_ttl_secs: u64,
+    /// Lifecycle §2.2's per-session pin cap. Same wiring and the same "not read until Task 4"
+    /// status as [`Self::pin_ttl_secs`]; a mint above it becomes
+    /// [`EngineError::PinCapExceeded`]. Mirrors `tessera-server::config`'s
+    /// `serve.pins_per_session_max`.
+    pub pins_per_session_max: usize,
 }
 
 /// D-D's default: fill the machine. Identical reasoning and identical fallback (`1`, never
@@ -149,6 +156,25 @@ pub enum EngineError {
     /// A presented pin's `(prefix, segments_version)` does not match the live generation (I11) —
     /// maps to HTTP 410 at the server boundary.
     PinExpired,
+    /// This session already holds `pins_per_session_max` pins and asked for another (lifecycle
+    /// §2.2's per-session cap). Maps to **422 `contract`** — contracts §3.1's 422 row is
+    /// "malformed request, **bounds exceeded**, unknown filter operand", the same row
+    /// [`Self::TooManyTiles`] and [`Self::UnderlayRefused`] take. Not a 429: a cap that clears
+    /// only when a pin TTLs out is not backpressure, and `Retry-After: 1` would be a lie at a
+    /// five-minute TTL.
+    ///
+    /// **Landed by the seam commit, constructed by nobody yet** *(Task 0 gate, C2)*. Task 4 is
+    /// where a session can first hold more than one pin, and its
+    /// `a_session_cannot_exceed_its_pin_cap` is where this variant acquires a caller. It is here
+    /// now because the alternative was worse: `tessera-server/src/error.rs` belongs to Track B, so
+    /// Track C adding the variant later would either have to edit another track's file or let the
+    /// refusal fall through `map_engine_error`'s catch-all into a fail-closed 500 — a
+    /// caller-fixable bound reported as a server fault. Both counts are the caller's own and the
+    /// configured limit; no corpus fact rides on this error.
+    PinCapExceeded {
+        held: usize,
+        limit: usize,
+    },
     /// A viewport request named a slice this bundle doesn't have.
     UnknownSlice(String),
     /// A slice with more than one segment. `tile_ranges` returns **segment-local** row indices
@@ -246,6 +272,11 @@ impl std::fmt::Display for EngineError {
             EngineError::Plugin(e) => write!(f, "plugin error: {e}"),
             EngineError::Io(e) => write!(f, "io error: {e}"),
             EngineError::PinExpired => write!(f, "pin expired"),
+            EngineError::PinCapExceeded { held, limit } => write!(
+                f,
+                "this session already holds {held} pins, at its configured maximum of {limit}; \
+                 reuse a pin it holds, or let one expire"
+            ),
             EngineError::UnknownSlice(slice) => write!(f, "unknown slice '{slice}'"),
             EngineError::MultiSegmentSlice(slice) => write!(
                 f,
@@ -416,67 +447,17 @@ impl Engine {
         let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
             .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
 
-        let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
-
-        let high_water = bundle
-            .manifest
-            .entity_id_high_water
-            .max(high_water_from(&records));
-        // `try_new`, not `new`: the seed comes from durable state this process did not write in
-        // this run (MANIFEST's `entity_id_high_water`, or a replayed WAL row/lease), so a
-        // corrupt or hand-edited value at or above `u32::MAX` must be refused **here**, before
-        // any ingest, rather than surfacing later as an opaque exhaustion error on whichever
-        // request happened to allocate first. This is the check `Allocator::try_new`'s own doc
-        // says "belongs at open" — open is this function.
-        let allocator = Allocator::try_new(high_water).map_err(|e| {
-            EngineError::Malformed(format!(
-                "entity-ID allocator seed from durable state (MANIFEST high-water {}, WAL \
-                 high-water {}): {e}",
-                bundle.manifest.entity_id_high_water,
-                high_water_from(&records),
-            ))
-        })?;
-
-        // **C3 closed (review round 4, Critical)**: `resolve_from_bundle` propagates a real
-        // sidecar failure through `replay` as `Err`, rather than the closure panicking on it —
-        // `ExternalIdIndex::resolve` below is fallible end to end.
-        let (overlay, buffer, established, resolver) = replay(&records, &dict, |external_id| {
-            external_index.resolve(external_id)
-        })
-        .map_err(EngineError::Overlay)?;
-
-        // `established_inverse` — the drill-down direction (Important I-9) — is the exact
-        // inverse of `established`, built once here from the same replay pass; the two are kept
-        // in sync from this point on by `Engine::accept_ingest`'s single critical section.
-        let established_inverse: FxHashMap<EntityId, Vec<u8>> = established
-            .iter()
-            .map(|(ext, ent)| (*ent, ext.clone()))
-            .collect();
-        // Detach the resolver's extension state from `dict`'s borrow immediately (Task 13): the
-        // live serving path resumes exactly this state on every future descriptor resolution, so
-        // novel-descriptor extension ids keep counting down from wherever replay left off, rather
-        // than restarting and colliding with ids already handed out earlier in this process's
-        // lifetime (see `DescriptorResolver::resume`'s doc).
-        let resolver_state = resolver.into_state();
-
-        // The idempotency index for `/control/ingest` (Task 13): every previously-accepted batch
-        // id, mapped to the body hash it was accepted with plus the entity ids that batch's rows
-        // were assigned, so a retried request with the same id and body is recognised as a no-op
-        // 200 rather than re-applied, and can still answer with the same `tessera_id`s (contracts
-        // §3.4 r6) even for a row that carried no external id to re-resolve from.
-        let mut accepted_batches: FxHashMap<String, ([u8; 32], Vec<EntityId>)> =
-            FxHashMap::default();
-        for record in &records {
-            if let WalRecord::IngestBatch {
-                batch_id,
-                body_hash,
-                rows,
-            } = record
-            {
-                let entity_ids = rows.iter().map(|row| row.entity_id).collect();
-                accepted_batches.insert(batch_id.clone(), (*body_hash, entity_ids));
-            }
-        }
+        // Every piece of state that comes from durable storage — the WAL handle, the seeded I9
+        // allocator, replay's overlay/buffer/`established` maps, the detached resolver state and
+        // the idempotency index — is rebuilt behind one call (Task 0 gate, F7). It lives with the
+        // type that owns it: Track B's Tasks 3a and 8 both rewrite that block, and this function
+        // is edited by Track C too.
+        let (overlay, buffer, write_state) = WritePath::reconstruct(
+            wal_path,
+            bundle.manifest.entity_id_high_water,
+            &dict,
+            |external_id| external_index.resolve(external_id),
+        )?;
 
         let plugin: Arc<dyn Plugin> = Arc::new(plugin);
         let auth_plugin_hash = hex_decode_32(&plugin.auth_plugin_hash()).ok_or_else(|| {
@@ -520,17 +501,8 @@ impl Engine {
             pool,
             config,
             next_token_id: AtomicU64::new(0),
-            pins: PinManager::new(),
-            write: WritePath::new(
-                wal,
-                allocator,
-                established,
-                established_inverse,
-                resolver_state,
-                accepted_batches,
-                generation,
-                dict,
-            ),
+            pins: PinManager::new(config.pin_ttl_secs, config.pins_per_session_max),
+            write: WritePath::new(write_state, generation, dict),
             external_index,
             identity_key,
         })
@@ -633,9 +605,21 @@ impl Engine {
         self.plugin.declared_bounds()
     }
 
-    /// Delegates to `WritePath::resolve_terms` (Task 0a moved the resolver's extension state
-    /// behind the write-path seam); see that method's doc, which carries the durability-ordering
-    /// exemption this method's callers rely on.
+    /// Resolve raw term descriptors to `TermId`s (dictionary hit → durable bundle-relative id;
+    /// miss → an id interned in this process's extension state, resumed across calls).
+    ///
+    /// **Caller obligation — the durability-ordering exemption.** Every other resolution site
+    /// resolves *after* the record carrying the descriptors is durably appended and fsynced, so a
+    /// batch whose append fails cannot leave the live resolver a step ahead of what a replay would
+    /// reconstruct. `/control/ingest` is the one structural exception: signature-sorted assignment
+    /// (I9/§11.1) needs each item's terms to compute its sort key before its `WalRow` can be
+    /// framed at all. Judged safe because an extension id is by construction unsatisfiable by any
+    /// session, so a live/replay mismatch renumbers bookkeeping and never a visibility outcome —
+    /// the full argument, and why it is not merely convenient, is at `WritePath::resolve_terms`.
+    ///
+    /// *(Restated here at the Task 0 gate, F5: `WritePath` is `pub(crate)`, so rustdoc renders
+    /// none of its docs for a reader of this public API — a bare pointer to an invisible page is
+    /// not an obligation a caller can honour.)*
     pub fn resolve_terms(&self, descriptors: &[Descriptor]) -> Vec<TermId> {
         self.write.resolve_terms(descriptors)
     }
@@ -712,8 +696,17 @@ impl Engine {
             .external_id_of_checked(entity, self.allocator_high_water())
     }
 
-    /// Delegates to `WritePath::allocate_sorted` (Task 0a moved the allocator behind the
-    /// write-path seam); see that method's doc.
+    /// Allocate entity ids for a freshly-parsed ingest batch, in signature-sorted order (I9/§11.1).
+    ///
+    /// **Caller obligation, in one sentence:** call this *after* every item's `terms` are
+    /// populated (via [`Self::resolve_terms`]) and *before* the batch's `WalRow`s are framed for
+    /// append — the sort key is the term set, and the id it yields is a field of the row the WAL
+    /// will carry. Propagates `AllocError` rather than discarding it: I9's `u32` ceiling is
+    /// reachable, and a partially-assigned batch would frame rows the WAL must never see. See
+    /// `WritePath::allocate_sorted` for the argument.
+    ///
+    /// *(Restated at the Task 0 gate, F5 — the delegator did not previously name the obligation
+    /// at all, and the method it pointed at is `pub(crate)` and so unrendered.)*
     pub fn allocate_sorted(
         &self,
         items: &mut [PendingItem],
@@ -727,9 +720,17 @@ impl Engine {
         self.write.accepted_batch(batch_id)
     }
 
-    /// Delegates to `WritePath::record_accepted_batch` (Task 0a moved the idempotency index
-    /// behind the write-path seam); see that method's doc, which carries the ack-contract
-    /// obligation this method's callers must honour.
+    /// Record a batch id as accepted, with the body hash and per-row entity ids it was accepted
+    /// with (the `/control/ingest` idempotency index).
+    ///
+    /// **Caller obligation, in one sentence:** call this only *after* the batch's `IngestBatch`
+    /// record has been WAL-appended and fsynced — the ack contract. This index is an in-memory
+    /// accelerant for the replay check, never itself a durability boundary, so a batch recorded
+    /// ahead of its fsync would answer a retry `200, same ids` for bytes that a crash then loses.
+    /// See `WritePath::record_accepted_batch`.
+    ///
+    /// *(Restated at the Task 0 gate, F5: the delegator named "an ack-contract obligation" without
+    /// stating it, and pointed at a `pub(crate)` method rustdoc does not render.)*
     pub fn record_accepted_batch(
         &self,
         batch_id: String,

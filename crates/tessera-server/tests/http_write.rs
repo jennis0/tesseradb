@@ -290,7 +290,8 @@ async fn ingest_rejects_duplicate_external_ids_within_one_batch() {
 /// sidecar. The sidecar covers only the bundle built at open time; an id ingested five minutes
 /// ago in a *separate*, already-accepted batch lives only in the live map, and a dedup check
 /// that misses it would silently allocate a second entity and orphan the first
-/// (`session.rs`'s `Engine::accept_ingest` doc).
+/// (`write.rs`'s `WritePath::accept_ingest` doc — the acceptance path moved out of `session.rs`
+/// behind the Task 0a seam).
 #[tokio::test]
 async fn ingest_rejects_an_external_id_ingested_after_the_build() {
     let tmp = TempDir::new().unwrap();
@@ -686,6 +687,8 @@ fn concurrent_ingest_and_change_both_survive() {
                 max_underlay_cells: 8192,
                 max_tiles_per_request: 262_144,
                 compute_threads: tessera_engine::default_compute_threads(),
+                pin_ttl_secs: 300,
+                pins_per_session_max: 4,
             },
         )
         .expect("engine should open"),

@@ -29,6 +29,10 @@ pub use cancel::CancelToken;
 pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
 pub use session::{default_compute_threads, Engine, EngineConfig, EngineError, Session};
 pub use timing::{Probe, StageTimings};
+// The write executor's delivery half (Task 0b landed the data half in `tessera_lifecycle::command`).
+// Re-exported because `tessera-server`'s handlers hold the handle and submit through it (Task 3b),
+// while `write.rs` itself stays private — `WritePath` is engine-internal.
+pub use write::{Job, LifecycleHandle, LifecycleQueues, Responder};
 pub use viewport::{
     EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,
 };

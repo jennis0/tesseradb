@@ -19,7 +19,29 @@ use crate::single_flight::SingleFlightCache;
 /// `(token_id, slice, segments_version)` — the row-projection cache's key (shared-context
 /// constraint 8). `token_id` rather than the token string so the cache never has to hash or
 /// compare a full bearer token.
-pub(crate) type RowProjectionKey = (u64, String, u64);
+///
+/// **Named fields, not a tuple, and the reason is a disclosure** *(Task 0 gate, F4)*. Two of the
+/// three components are `u64`, so as `(u64, String, u64)` a transposition at the construction site
+/// compiles, runs, and keys every session's projection on `(segments_version, slice, token_id)` —
+/// at which point any two sessions whose `token_id` collides with the live `segments_version`
+/// share a row projection. That is cross-principal mask reuse: one viewer composing against
+/// another's `M_auth` (I2/I3), presenting as a cache-hit-rate improvement. Task 5 adds
+/// `prune_token(token_id)` and `prune_generation(segments_version)`, two functions that must each
+/// pick the right `u64` out of this key, so the shape is fixed now, while there is exactly one
+/// construction site to change.
+///
+/// Open question O3 widens this with `seg_id` at stage 2.2 (N segments means N row spaces and
+/// therefore N projections); a named struct makes that additive.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RowProjectionKey {
+    /// The session's process-local identity (`Session::token_id`), never the bearer token itself.
+    pub token_id: u64,
+    /// The slice this projection addresses — its `Permutation` is what defines the row space.
+    pub slice: String,
+    /// The geometry generation the row space belongs to. A bundle swap changes it, and the old
+    /// entries become Task 5's `prune_generation` work; an *overlay* swap must not (I11).
+    pub segments_version: u64,
+}
 
 /// A losing arrival's outcome: another caller is already building this key, and this call did not
 /// wait for it (D-G). Carries nothing — the caller only needs to know to retry.

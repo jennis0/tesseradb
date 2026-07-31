@@ -35,11 +35,10 @@
 //! * SA §7's overlay/flush bounds were **design-document values, not implemented** when this was
 //!   measured, and the extrapolation therefore had no ceiling rather than a 500,000 one. Phase 2
 //!   stage 2.1 Task 0b landed them as parsed, validated config keys, which does **not** change
-//!   the caveat: the overlay bound alarms and does not fold (there is no fold until stage 2.3),
-//!   and the flush bounds are inert until stage 2.2 gives them a consumer. The buffer still grows
-//!   without bound in code, so this extrapolation stands as written. (The keys are deliberately
-//!   not named here: `tessera-server`'s config module asserts mechanically that nothing outside
-//!   it names the flush ones while they are inert.)
+//!   the caveat: `overlay_soft_limit` alarms and does not fold (there is no fold until stage
+//!   2.3), and `flush_max_items`/`flush_max_age_secs` are inert until stage 2.2 gives them a
+//!   consumer. The buffer still grows without bound in code, so this extrapolation stands as
+//!   written.
 //! * The measured ~10 ns/item is a **lower bound**. None of the buffered rows are visible (see
 //!   below), so `compose` iterates the buffer and *rejects* every entry at `perm.row_of`. Rows
 //!   that resolved would additionally push into `pass_rows`/`fail_rows` and build the diff
@@ -400,6 +399,8 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     max_underlay_cells: 8192,
                     max_tiles_per_request: 262_144,
                     compute_threads: tessera_engine::default_compute_threads(),
+                    pin_ttl_secs: 300,
+                    pins_per_session_max: 4,
                 },
             )?;
 
@@ -506,6 +507,8 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 max_underlay_cells: 8192,
                 max_tiles_per_request: 262_144,
                 compute_threads: tessera_engine::default_compute_threads(),
+                pin_ttl_secs: 300,
+                pins_per_session_max: 4,
             },
         )?;
         let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;

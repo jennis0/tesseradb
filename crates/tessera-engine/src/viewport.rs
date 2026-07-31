@@ -48,6 +48,7 @@ use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::{tile_ranges_all, tile_ranges_within};
 use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 
+use crate::cache::RowProjectionKey;
 use crate::cancel::CancelToken;
 use crate::compose::{compose, visible_to, EffectiveMask, RowProjection};
 use crate::select::{SelectParams, Selection, Threshold};
@@ -431,11 +432,8 @@ impl Engine {
         // deliberately not on that type and are read from the LIVE generation below, exactly as
         // this loop always has: a pin fixes row-space geometry and never authorisation state
         // (lifecycle §2.3), so a suppression accepted mid-request applies to a pinned request too.
-        let geometry = self.pins.resolve(pin, &generation)?;
-        let effective_pin = PinId {
-            prefix: geometry.prefix.clone(),
-            segments_version: geometry.segments_version,
-        };
+        let geometry = self.pins.resolve(pin, session.token_id, &generation)?;
+        let effective_pin = geometry.pin_id();
 
         probe.lap(|t| &mut t.pin_resolve_ns);
 
@@ -475,11 +473,11 @@ impl Engine {
         let segment = slice_data.segments.first();
         probe.lap(|t| &mut t.slice_lookup_ns);
 
-        let cache_key = (
-            session.token_id,
-            slice.to_string(),
-            geometry.segments_version,
-        );
+        let cache_key = RowProjectionKey {
+            token_id: session.token_id,
+            slice: slice.to_string(),
+            segments_version: geometry.segments_version,
+        };
         // D-G slot-state single-flight (F4, `tessera-bench/src/arms/load.rs:34-76`): the map
         // lock (`SingleFlightCache`) is held only for the O(1) `Building`/`Ready` transition —
         // never across the build below — so distinct sessions' first viewports no longer

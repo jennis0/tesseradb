@@ -62,6 +62,14 @@
 //! hourly meets it on every rotation. Building the projection outside the lock (or keying an
 //! in-progress marker so concurrent builders wait per-key rather than globally) would fix it.
 //!
+//! *(**That mutex no longer exists.** The paragraph above is the 2026-07-29 measurement as taken,
+//! kept because the Task 9 re-measurement below is only meaningful against it — but the code it
+//! describes is gone: D-G replaced the global lock with the per-key slot-state single flight in
+//! `tessera-engine/src/single_flight.rs`, wrapped since the stage-2.1 seam as `RowProjectionCache`
+//! in `cache.rs`, whose map lock is held only for the O(1) `Building`/`Ready` transition and never
+//! across `RowProjection::new`. Read `viewport.rs`'s cache-lookup comment for the guardrail that
+//! keeps it that way.)*
+//!
 //! **Memory: ~248 KiB per distinct session** at this scale (243 MiB of RSS delta over 1000
 //! sessions; the smaller-N rows are noise at 1–4 MiB). That is the fragment plus its row
 //! projection. The mask scales with the corpus, so the slope extrapolates to ~2.5 MB/session at
