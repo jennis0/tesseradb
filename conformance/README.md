@@ -15,16 +15,57 @@ reference/.venv/bin/pytest conformance/tests -v
 touched `reference/tests/conftest.py` and `reference/tests/wire.py`, both now thin wrappers over
 shared `oracle` modules, but their fixtures/behaviour are unchanged.)
 
+Lint, if you have `ruff`, from the repository root — the configuration lives with the package it
+governs and covers both suites:
+
+```
+uvx ruff check --config reference/pyproject.toml reference conformance
+```
+
+The selected rule set is small and passes at zero; `reference/pyproject.toml` says which rules are
+deliberately *not* selected and why.
+
 ## What's here
 
 | File | Invariant | What it proves |
 |---|---|---|
 | `tests/test_byte_scan.py` | I10 | No 8-byte LE entity-id encoding appears in any viewport response's points batch, or in the server's `RUST_LOG=info` log, across a zoom range — for both the mask's admitted entities and its denied ones. See the file's module doc for why the scan is restricted to a "safe" high entity-id range (the fixture's dense, small entity-id space is otherwise structurally indistinguishable, by raw integer value, from `tessera-wire`'s deliberately sequential per-session handles and the tile stream's I2-legitimate aggregate counts — scanning the full universe would produce constant, meaningless matches, not real ones). |
 | `tests/test_restart_replay.py` | WAL/deny-survival (plan §10.3) | An ingest, two suppressions and a delete all survive a `SIGKILL` (not a graceful stop) and a restart on the *same* WAL/cache/bundle with nothing re-submitted: the denies stay applied, the entity-id allocator's high-water mark is unchanged (evidence the ingested batch replayed with its original allocated ids, not fresh ones — see the file's doc on why this stands in for the brief's "status shows buffered rows", which Phase 1's actual `/control/status` shape doesn't expose directly), and replaying the *same* ingest batch id/body again is still idempotent. |
-| `tests/test_canary.py` | I2 (scaffold) | A synthetic bundle pair (`reference/oracle/canary_fixture.py`) — identical except one extra item, at an extreme corner of the extent, carrying a term no tested grant set holds — produces byte-for-byte-equivalent *decoded* responses (tile counts, tile list, point multisets) between the two bundles, across zooms and grant sets, and the canary's own tile never appears in either. This is the scaffold Phase 2 extends to centroids/hulls; Phase 1 has no other derived aggregate to check. |
+| `tests/test_canary.py` | I2 (scaffold) | A synthetic bundle pair (`reference/oracle/canary_fixture.py`) — identical except one extra item, at an extreme corner of the extent, carrying a term no tested grant set holds — produces byte-for-byte-equivalent *decoded* responses (tile counts, tile list, point multisets) between the two bundles, across zooms and grant sets, and the canary's own tile never appears in either. Also checks the **five canary allocation rules** as one property: the canary bundle's stored rows are the canary-free bundle's rows plus exactly one at the end. This is the scaffold Phase 2 extends to centroids/hulls; Phase 1 has no other derived aggregate to check. |
+| `tests/test_mask_catalogue.py` | fixture integrity | The adversarial mask catalogue (`reference/oracle/catalogue.py`) is the shape it claims: eight cases, each named for the property it attacks, each reaching exactly its declared entity set by two independent routes (postings union, pairs semi-join). Includes the container-boundary and ~5%-crossover claims, which are the two that stop being true silently. Carries a **strict xfail** for `fx_key` in the points batch — see "Known limitations". |
+| `tests/test_i7_selection.py` | I7 | §7.2's served set, engine against the literal definition in `reference/oracle/viewport.py`, over the catalogue × depths `{0,2,4,6}` × `k` `{2,30,500}`, against both a θ-saturated and a θ-live server, compared as **ordered lists** (contracts §2.6 makes the order contract). Plus cross-zoom nesting into *the child that contains the point*; the **cap**, against a server with `k_max_marks = 128` so `cap = min(k, K_max)` actually binds; and **the negative control**: a first-`k` stub that serves §7.2's count in storage order instead of `tessera_id` order, with the assertion that the differential disagrees with it on most tiles. A differential that passes against a deliberately wrong implementation is testing nothing. |
+| `tests/test_overlay_journal.py` | I1, I7, I2 | The overlay-heavy catalogue state: acked control operations (deletes, suppressions, predicate-narrows, and predicate-widens onto entities *outside* the token's mask) composed in entity space by `oracle.journal.AckedJournal` and in row space by the engine. Counts **and served points**, the latter against a **θ-live** server — the combination that catches an engine sampling from the pre-overlay mask (which serves denied items as marks while every count stays right) and one anchoring θ on the pre-overlay projection (§7.2's own I2 leak). Its negative control builds both of those engines out of the oracle and shows the comparison rejects them. Plus the journal's rules: a refused operation enters no composition and moves nothing, and an acked ingest is not an applied one. |
+
+## Fixtures
+
+Two corpora, both cached at a fixed `/tmp` path and rebuilt whenever the **stamped recipe** beside
+the bundle is not the input set the builder wants now (`<bundle>.FIXTURE.json`; see
+`oracle/harness.py`'s "Fixture reuse" section). Reuse used to be decided by a predicate over the
+bundle — an allowlist that had to be extended in step with every new build input, and twice was
+not, which is how the suite came to be green as a function of `(checkout, /tmp state)` rather than
+of the checkout. Delete the stamp to force a rebuild; no manual cache wipe is needed for a changed
+seed, layout, extent or identity key.
+
+| Fixture | Path | What it is for |
+|---|---|---|
+| `bundle_root` | `/tmp/tessera-250k` | A 250k prefix of the Phase 0 corpus, built by `oracle.harness.ensure_fixture_bundle`. Realistic term distribution; random grant sets. |
+| `catalogue_bundle_root` | `/tmp/tessera-catalogue` | 150,000 synthetic items designed **backwards from the adversarial mask catalogue** (`oracle.catalogue`), so each mask shape is reachable as a grant set. Three Roaring containers, a block placed astride 65,536, a pair straddling §7.2's ~5% crossover, and a block confined to one depth-6 tile. |
 
 ## Known limitations / explicitly out of scope
 
+- **`fx_key` is planted but cannot be served** — conformance design §2/decision 4 makes a per-item
+  declared scalar the handle→item join, and `tessera-build` writes `declared_scalars: Vec::new()`
+  into MANIFEST and `scalars: Vec::new()` onto every tiler item, so no built bundle can carry one.
+  Every other layer already supports it (`tessera-store::write_segment` takes a scalar schema,
+  `tessera-wire::viewport_ipc` emits scalar columns, `/control/ingest` parses them); only the build
+  does not connect them. Pinned by a **strict** xfail in `tests/test_mask_catalogue.py`, so the day
+  the build gains support the test fails and someone reads this paragraph. That test's body
+  requests a viewport and checks the served column against the planted keys — not just MANIFEST —
+  so when it flips it exercises the wire path rather than reading green on a declaration. Until
+  then the differentials join by the ordered `(x, y)` list, which is weaker: two entities sharing
+  rounded coordinates in one tile are indistinguishable to it. Where an exact answer is needed
+  (which items did a defective engine serve?) the tests use `tessera_id` and the fixture's own
+  key instead.
 - **I10 byte-scan is necessary, not sufficient** (documented in the test file itself): absence of
   a matching byte pattern cannot prove no code path could ever leak an entity id under a different
   encoding. The complementary, structural half of I10's assurance is a code review of

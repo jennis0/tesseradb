@@ -1,9 +1,53 @@
-"""Synthesise a tiny points+pairs parquet pair for `test_canary.py`'s I2 scaffold, and build the
-canary / canary-free bundle pair from them via the CLI (Task 15, brief step 3).
+"""The I2 canary fixture: two bundles differing only in one item nobody can see.
 
-Deliberately independent of the 250k Phase 0 corpus: a small, from-scratch synthetic dataset is
-easier to reason a canary term is genuinely held by *no* tested principal, and keeps the two
-builds (canary, canary-free) fast enough to run twice in one test.
+Synthesises a tiny points+pairs parquet pair for `test_canary.py`, and builds the canary /
+canary-free pair from them via the CLI. Deliberately independent of the 250k Phase 0 corpus: a
+small, from-scratch synthetic dataset makes it easy to reason that the canary's term is genuinely
+held by *no* tested principal, and keeps both builds fast enough to run twice in one test.
+
+# The canary allocation rules — there are FIVE
+
+The canary test compares two fixture states and asserts that **no aggregate moves by any amount**.
+That assertion is only about disclosure if the canary's presence has zero *legitimate* influence on
+anything else. Otherwise the comparator flags fixture perturbation and calls it a leak. Conformance
+design §2 states four rules; the stage-2.1 plan review added a fifth.
+
+1. **Canary entity IDs are allocated after all real IDs.** Entity IDs are assigned in
+   term-signature order and are permanent (I9); an ID inserted in the middle shifts every later
+   item's ID, and `tessera_id` is a keyed permutation of `(shard_id, entity_id)`, so every shifted
+   item gets a new identity — and §7.2 selects the lowest identities in a tile. A displaced ID
+   therefore changes the *sample*, everywhere, legitimately.
+2. **Coordinates at the Morton-maximal corner.** Rows are stored in `(morton, tessera_id)` order,
+   so an item anywhere else shifts the row IDs of everything after it. `(65535.9, 65535.9)`
+   quantises to cell 65535 on both axes (contracts §2.5: `v == max` lands in the top cell), which
+   is the maximum representable code, so the canary sorts last and shifts nothing.
+3. **Canary terms are interned last.** Term IDs are assigned in first-appearance order over the
+   source-ID-sorted points, and the *signature* that orders entity-ID assignment is a sorted list
+   of term IDs — so a canary term interned early would renumber other terms and reorder the
+   assignment, which is rule 1 again by another route.
+4. **Canaries belong to no cluster node and no generating set.** A canary inside a generating set
+   makes a label *legitimately* withheld in the canary state (containment fails), and one inside a
+   node perturbs build-time geometry. Either would make the comparator flag fixture perturbation
+   as disclosure. **Vacuous in Phase 1 and stated rather than skipped:** the build emits no cluster
+   membership bitmaps and no generating sets, so there is nothing for the canary to be in. It
+   becomes load-bearing the moment §7.5/§7.6 land, which is why it is written down now.
+5. **Canaries are allocated in their own commit window.** *(Added at the stage-2.1 plan review.)*
+   Rules 1 and 3 are stated as global properties — "after all real IDs" — but stage 2.1's Task 7a
+   makes signature-sorted assignment **window-scoped** (§11.1 r23: "within each batch and only
+   within one"). Inside a shared window the canary is sorted by its signature against its
+   window-mates, not against the corpus, so "after all real IDs" silently becomes "somewhere in the
+   middle of this window" and rule 1 is lost without anything failing. Giving the canary its own
+   window restores the global property, because windows are assigned in order.
+
+   Implemented here rather than described: both builds pass `--batch-items N_BASE_ITEMS`, which is
+   the build-side name for the same mechanism. The canary-free corpus is exactly one window; the
+   canary corpus is that same window plus a second window holding the canary alone. The base
+   items' assignment is therefore bit-identical between the two builds *by construction*, not by
+   luck. **This rule must exist before Task 7a merges.**
+
+`verify_allocation_rules` checks 1–3 and 5 as a single, stronger property: the canary bundle's
+stored rows are the canary-free bundle's rows, unchanged, plus one row at the end. Nothing else can
+be true if any of the four were violated.
 """
 
 from __future__ import annotations
@@ -132,9 +176,86 @@ def build_canary_pair(work_dir: Path) -> tuple[Path, Path]:
                 # of one extra item carrying an ungranted term.
                 "--id-key",
                 CANARY_ID_KEY_HEX,
+                # Allocation rule 5 (see the module doc): the canary gets its own commit window.
+                # `--batch-items` is the build-side name for the window §11.1 r23 scopes
+                # signature-sorted assignment to. At `N_BASE_ITEMS` the canary-free corpus is
+                # exactly one window and the canary corpus is that window plus a second holding
+                # the canary alone — so the base items' entity IDs, and therefore their
+                # `tessera_id`s and their row order, are identical between the two builds by
+                # construction. Both builds pass it because the value is identity-bearing: two
+                # bundles built with different batch sizes are two different permanent
+                # assignments of the same corpus.
+                "--batch-items",
+                str(N_BASE_ITEMS),
             ],
             cwd=REPO_ROOT,
             check=True,
         )
 
     return free_bundle, canary_bundle
+
+
+def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]:
+    """Check allocation rules 1, 2, 3 and 5 as one property; return the failures.
+
+    **The property:** the canary bundle's segment is the canary-free bundle's segment, row for row,
+    plus exactly one row at the end, and that row is the canary at the Morton-maximal corner.
+
+    This is stronger than checking the four rules separately and it is not a coincidence that one
+    assertion covers them all. Every rule is a way of saying "the canary displaces nothing", and
+    displacement is observable in exactly one place: the stored rows. A canary allocated in the
+    middle of entity space (rule 1 or 5 broken) changes every later item's `tessera_id`, which is a
+    sort key, so rows move. A canary term interned early (rule 3) renumbers signatures and does the
+    same by another route. A canary anywhere but the maximal corner (rule 2) inserts a row in the
+    middle. Each is caught here as a row-level difference, with no need to guess which rule failed
+    — the diff says where.
+
+    Rule 4 is not checked because in Phase 1 there is nothing to check: no cluster memberships and
+    no generating sets are built. See the module doc.
+    """
+    from .bundle import Bundle  # local: this module is imported by fixture builders that must not
+    # pay for a bundle read they are not doing.
+
+    failures: list[str] = []
+    free = Bundle(free_bundle).segment(SLICE_ID)
+    canary = Bundle(canary_bundle).segment(SLICE_ID)
+    if free.tessera_id is None or canary.tessera_id is None:
+        return ["a canary bundle has no stored tessera_id column (pre-r6 build)"]
+
+    if canary.row_count != free.row_count + 1:
+        failures.append(
+            f"the canary bundle has {canary.row_count} rows against the canary-free bundle's "
+            f"{free.row_count}; expected exactly one more"
+        )
+        return failures
+
+    for row in range(free.row_count):
+        if (
+            float(free.x[row]) != float(canary.x[row])
+            or float(free.y[row]) != float(canary.y[row])
+            or int(free.morton[row]) != int(canary.morton[row])
+            or int(free.tessera_id[row]) != int(canary.tessera_id[row])
+        ):
+            failures.append(
+                f"row {row} differs between the two bundles: the canary displaced a real item, so "
+                f"one of allocation rules 1, 2, 3 or 5 is broken and the canary comparison would "
+                f"be measuring fixture perturbation rather than disclosure. "
+                f"free=(x={float(free.x[row])}, y={float(free.y[row])}, "
+                f"morton={int(free.morton[row])}, tessera_id={int(free.tessera_id[row])}) "
+                f"canary=(x={float(canary.x[row])}, y={float(canary.y[row])}, "
+                f"morton={int(canary.morton[row])}, tessera_id={int(canary.tessera_id[row])})"
+            )
+            break
+
+    last = canary.row_count - 1
+    if int(canary.morton[last]) != 0xFFFF_FFFF:
+        failures.append(
+            f"the canary's row is not at the Morton-maximal corner (code "
+            f"{int(canary.morton[last])} != {0xFFFF_FFFF}) — allocation rule 2"
+        )
+    if int(canary.entity_id[last]) != N_BASE_ITEMS:
+        failures.append(
+            f"the canary's entity id is {int(canary.entity_id[last])}, not {N_BASE_ITEMS} — it "
+            "was not allocated after all real IDs (allocation rules 1 and 5)"
+        )
+    return failures

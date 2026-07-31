@@ -31,11 +31,10 @@ multiset, `Handle` values are per-session opaque and never compared — see I10'
 from __future__ import annotations
 
 from collections import Counter
-from pathlib import Path
 
 import pytest
 
-from oracle.canary_fixture import CANARY_TERM_ID, N_BASE_ITEMS, build_canary_pair
+from oracle.canary_fixture import build_canary_pair, verify_allocation_rules
 from oracle.harness import spawn_server, stop_server
 from oracle.wire import decode_viewport
 
@@ -100,6 +99,24 @@ def _decoded_viewport(server, token, zoom, bbox):
         )
     point_multiset = Counter((round(x, 4), round(y, 4)) for _h, x, y in points)
     return tile_map, point_multiset
+
+
+def test_the_canary_allocation_rules_hold(canary_bundles):
+    """The five allocation rules, checked before anything is read into the comparison below.
+
+    Order matters here: without these rules the canary test measures **fixture perturbation, not
+    disclosure** (conformance design §2), and it measures it while passing or failing for reasons
+    that have nothing to do with I2. A canary allocated in the middle of entity space changes every
+    later item's `tessera_id`, which is §7.2's selection key — so the two bundles would legitimately
+    draw different samples and the comparator would report a leak that is not there.
+
+    `verify_allocation_rules` checks rules 1, 2, 3 and 5 as one property (the canary bundle's rows
+    are the canary-free bundle's rows plus one at the end); rule 4 is vacuous in Phase 1. See
+    `oracle/canary_fixture.py`'s module doc for all five and why the fifth was added.
+    """
+    free_bundle, canary_bundle = canary_bundles
+    failures = verify_allocation_rules(free_bundle, canary_bundle)
+    assert not failures, "the canary allocation rules are broken:\n  " + "\n  ".join(failures)
 
 
 def test_ungranted_canary_term_never_changes_any_other_response(canary_bundles, canary_servers):

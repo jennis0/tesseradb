@@ -151,6 +151,11 @@ class Bundle:
         self._partition_dir = partition_dir
         self._segment_cache: dict[str, Segment] = {}
         self._permutation_cache: dict[str, Permutation] = {}
+        # Derived per-slice columns: pure functions of geometry and of the permutation, so they
+        # never vary with a mask and can safely be held for the bundle's lifetime. See
+        # `row_morton_codes` for why the Morton one is recomputed rather than read.
+        self._morton_cache: dict[str, list[int]] = {}
+        self._entity_list_cache: dict[str, list[int]] = {}
 
         # Dictionary: term_id (ordinal) -> descriptor bytes.
         self.dictionary: list[bytes] = []
@@ -192,6 +197,41 @@ class Bundle:
             perm_path = seg_dir.parent.parent / "permutation.bin"
             self._segment_cache[slice_id] = _read_segment(seg_dir, perm_path)
         return self._segment_cache[slice_id]
+
+    def row_morton_codes(self, slice_id: str) -> list[int]:
+        """Every row's Morton code, **recomputed from `(x, y)`** — never read from `morton.u32`.
+
+        The §7.2 oracle needs to know which tile a row is in. Reading the stored column would make
+        the oracle and the engine share a build artefact on the one path where they are supposed to
+        be independent: a build that emitted a wrong Morton column and then sorted and served
+        consistently by its own wrong values would agree with itself and pass. Recomputing means
+        that build fails the differential instead.
+
+        Computed once per slice and held, because it is a pure function of geometry and does not
+        vary with the mask — unlike anything in `viewport.Selection`, which is rebuilt per mask on
+        purpose.
+        """
+        if slice_id not in self._morton_cache:
+            seg = self.segment(slice_id)
+            self._morton_cache[slice_id] = [
+                morton_mod.morton_of(float(seg.x[i]), float(seg.y[i]), self.extent)
+                for i in range(seg.row_count)
+            ]
+        return self._morton_cache[slice_id]
+
+    def row_entity_ids(self, slice_id: str) -> list[int]:
+        """Every row's entity id as a plain Python list — the permutation-derived, key-independent
+        direction (I4: permissions live in entity space, geometry in row space, and the two are
+        related only by the explicit permutation).
+
+        A list rather than the `Segment`'s numpy array because every caller tests membership of a
+        Python `set` per row, and `int(numpy.uint64)` per test dominates the mask-composition pass
+        that is the oracle's only real cost.
+        """
+        if slice_id not in self._entity_list_cache:
+            seg = self.segment(slice_id)
+            self._entity_list_cache[slice_id] = [int(e) for e in seg.entity_id]
+        return self._entity_list_cache[slice_id]
 
     def verify_identity_cross_check(self, slice_id: str, sample: int = 200) -> None:
         """The only test that catches a key/column disagreement (Task 12 brief, Step 2): for
