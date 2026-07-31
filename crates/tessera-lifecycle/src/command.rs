@@ -226,6 +226,22 @@ pub enum ExecError {
     /// Evaluated on the executor rather than in the handler, which is why it is an [`ExecError`]
     /// and not something the handler decides before submitting.
     BatchConflict { batch_id: String },
+    /// `count` of this batch's rows name an external id the live map **already** holds → HTTP 409,
+    /// no effect (contracts §3.1's duplicate row).
+    ///
+    /// **A backstop, not the primary check.** `/control/ingest` already rejects duplicates in the
+    /// handler, with a detail naming them. But the live map is written at *apply* time, and Task 3a
+    /// moved apply behind a queue — so between a handler's check and the executor's insert there is
+    /// now a whole drain, and a client retry under a **fresh** `batch_id` can pass the handler check
+    /// twice. Without this the second insert silently overwrites the first, and the first item
+    /// stays visible, byte-identical to a suppressed one, and reachable by **no external id at
+    /// all** — so no deny can ever name it. Re-checked on the one thread that also performs the
+    /// insert, so check and apply cannot be separated (Task 3a security review, C1).
+    ///
+    /// Carries a **count, never the ids**: this reaches a response body, and an external id is
+    /// caller-supplied data `tessera-server`'s `error.rs` keeps out of one. The handler's own check
+    /// is the one that names them, to the caller who supplied them.
+    DuplicateExternalId { count: usize },
 }
 
 impl std::fmt::Display for ExecError {
@@ -236,6 +252,11 @@ impl std::fmt::Display for ExecError {
             ExecError::BatchConflict { batch_id } => write!(
                 f,
                 "batch id '{batch_id}' was already submitted with a different body"
+            ),
+            ExecError::DuplicateExternalId { count } => write!(
+                f,
+                "{count} row(s) name an external id this deployment already knows; the batch had \
+                 no effect"
             ),
         }
     }

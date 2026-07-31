@@ -3,6 +3,19 @@ name = "tessera-lifecycle"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# Deliberate WAL/executor fault injection — see `src/faults.rs`, which argues why the hooks land
+# with Task 3a rather than with stage 2.4's conformance pause points.
+#
+# Enabled ONLY through the self dev-dependency below, never as a normal dependency of anything.
+# `cargo build` does not build dev-dependencies, so nothing `cargo build` produces can carry this
+# code. Note honestly what that does NOT buy: `cargo test --workspace` still unifies the feature
+# across the workspace, exactly as `bench-timing` does — measured, not assumed. So the rule that
+# actually matters is the one `scripts/check-layers.sh` enforces: no NORMAL dependency may enable
+# it, and no shipped crate's behaviour may depend on it.
+fault-injection = []
+
 [dependencies]
 tessera-types = { path = "../tessera-types", features = ["serde"] }
 tessera-authz = { path = "../tessera-authz" }
@@ -12,5 +25,9 @@ serde = { workspace = true }
 rustc-hash = "1"
 
 [dev-dependencies]
+# Self dev-dependency: the only way this crate's own integration tests can turn on a feature of
+# the library they link. Not a cycle — cargo permits it for dev-dependencies precisely for this,
+# and `cargo tree -e normal` (what `scripts/check-layers.sh` reads) does not see the edge.
+tessera-lifecycle = { path = ".", features = ["fault-injection"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }

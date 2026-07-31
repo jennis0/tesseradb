@@ -280,3 +280,114 @@ fn bad_header_is_rejected() {
         Ok(_) => panic!("expected BadHeader, got Ok"),
     }
 }
+
+// --- Phase 2 stage 2.1, Task 3a: poisoning, for real and injected. ---
+//
+// `poisoned_error_is_distinct_and_reports_itself` above asserts a Display string and nothing else,
+// which is why the Phase 1 ledger carries "deny-op WAL-failure path inspection-only" as a
+// deferral. These two close it, and they exist as a **pair**: the first pins what a real I/O
+// failure does, the second pins that the injected fault does the same thing. Task 3a's
+// `deny_append_failure_still_applies` and `a_poisoned_wal_trips_the_not_ready_posture` both run on
+// injection, so if the two ever disagree those tests are measuring the harness rather than the
+// engine.
+
+/// A **genuine** I/O failure — not an injected one — poisons the handle, and the sequence is
+/// `Io` first, `Poisoned` after.
+///
+/// The failure is provoked by making the WAL's directory read-only. `Wal::fsync` calls
+/// `sync_data()` on an already-open fd (unaffected by the mode change) and then does the sidecar's
+/// write-tmp-then-rename, whose `open` needs write permission on the *directory* — so it fails
+/// with `EACCES` and lands in the arm that sets `poisoned`. That is the sidecar branch
+/// specifically, not the `sync_data` branch; the distinction is recorded because Task 8's crash
+/// test depends on which of the two a fault represents.
+///
+/// Skipped under uid 0: `chmod` does not bind root, so on a root CI runner this would silently
+/// assert nothing rather than fail.
+#[test]
+fn a_real_fsync_failure_poisons_the_handle() {
+    if unsafe { geteuid() } == 0 {
+        eprintln!("skipped: running as root, where a read-only directory is not read-only");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wal.log");
+    let (mut wal, _) = Wal::open(&path).unwrap();
+    wal.append(&sample_record(1)).unwrap();
+    wal.fsync().unwrap();
+    assert!(!wal.is_poisoned(), "a healthy handle is not poisoned");
+
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    wal.append(&sample_record(2)).unwrap();
+
+    let first = wal.fsync();
+    assert!(
+        matches!(first, Err(WalError::Io(_))),
+        "the FAILING call must report the I/O error itself, not Poisoned — it is the variant the \
+         500 mapping and the deny-op alarm both branch on; got {first:?}"
+    );
+    assert!(wal.is_poisoned(), "the failing call must poison the handle");
+
+    // The name claims the handle, so assert BOTH operations refuse, not just the one that failed.
+    assert!(matches!(wal.fsync(), Err(WalError::Poisoned)));
+    assert!(matches!(
+        wal.append(&sample_record(3)),
+        Err(WalError::Poisoned)
+    ));
+
+    // Restore before `TempDir` drops, or the directory leaks — this box runs near a full disk.
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The injected fault reproduces that sequence exactly: `Io` on the failing call, `Poisoned` on
+/// every call after, and `is_poisoned()` true throughout.
+///
+/// This is the assertion that lets Task 3a's WAL-failure tests mean anything. Without it, a
+/// switchboard that returned `Poisoned` on the *first* call would pass every one of them while
+/// describing a failure mode the real WAL never produces.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_injected_failure_is_indistinguishable_from_a_real_one() {
+    use std::sync::Arc;
+    use tessera_lifecycle::faults::{FaultSwitchboard, WalMeter};
+    use tessera_lifecycle::wal::ExecutorWal;
+
+    let dir = tempdir().unwrap();
+    let (wal, _) = Wal::open(dir.path().join("wal.log")).unwrap();
+    let faults = Arc::new(FaultSwitchboard::new());
+    let meter = Arc::new(WalMeter::new());
+    let mut wal = ExecutorWal::new(wal, Arc::clone(&meter)).with_faults(Arc::clone(&faults));
+
+    wal.append(&sample_record(1)).unwrap();
+    wal.fsync().unwrap();
+    assert_eq!((meter.appends(), meter.fsyncs()), (1, 1));
+
+    faults.fail_next_fsyncs(1);
+    wal.append(&sample_record(2)).unwrap();
+    let first = wal.fsync();
+    assert!(
+        matches!(first, Err(WalError::Io(_))),
+        "an injected failure must report Io on the failing call, exactly as a real one does; \
+         got {first:?}"
+    );
+    assert!(wal.is_poisoned());
+    assert!(matches!(wal.fsync(), Err(WalError::Poisoned)));
+    assert!(matches!(
+        wal.append(&sample_record(3)),
+        Err(WalError::Poisoned)
+    ));
+
+    // A failed operation is not counted: the meter measures durability actually achieved, which is
+    // what Task 7a's `one_fsync_per_window` is an assertion about.
+    assert_eq!(
+        (meter.appends(), meter.fsyncs()),
+        (2, 1),
+        "the failed fsync must not be counted"
+    );
+}
+
+extern "C" {
+    #[link_name = "geteuid"]
+    fn geteuid() -> u32;
+}
