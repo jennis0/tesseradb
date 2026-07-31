@@ -1,6 +1,6 @@
 # Tessera — Visualisation and Client Architecture
 
-**Companion to** `tessera-architecture-design.md` (r14) and `tessera-implementation-plan.md`.
+**Companion to** `tessera-architecture-design.md` (r23) and `tessera-implementation-plan.md`.
 **Supersedes** an earlier standalone thin-client profile, absorbed here as Profile B.
 
 Two deployment profiles — GPU-capable and thin-client — over one service, one data contract and one interaction model. The document is organised around reuse: for each layer it states what exists, what its licence is, and what remains to be written.

@@ -1,0 +1,268 @@
+{
+  "bundle": "/tmp/tessera-1e9",
+  "global": {
+    "distinct_codes": 647216785,
+    "histogram": [
+      {
+        "bucket": "1",
+        "cells": 493352444,
+        "rows": 493352444,
+        "rows_fraction": 0.493352444
+      },
+      {
+        "bucket": "2",
+        "cells": 98465054,
+        "rows": 196930108,
+        "rows_fraction": 0.196930108
+      },
+      {
+        "bucket": "3-4",
+        "cells": 41663139,
+        "rows": 136984542,
+        "rows_fraction": 0.136984542
+      },
+      {
+        "bucket": "5-8",
+        "cells": 11865944,
+        "rows": 69276328,
+        "rows_fraction": 0.069276328
+      },
+      {
+        "bucket": "9-16",
+        "cells": 1579275,
+        "rows": 16497684,
+        "rows_fraction": 0.016497684
+      },
+      {
+        "bucket": "17-32",
+        "cells": 78481,
+        "rows": 1658238,
+        "rows_fraction": 0.001658238
+      },
+      {
+        "bucket": "33-64",
+        "cells": 45924,
+        "rows": 2179916,
+        "rows_fraction": 0.002179916
+      },
+      {
+        "bucket": "65-128",
+        "cells": 64381,
+        "rows": 5974932,
+        "rows_fraction": 0.005974932
+      },
+      {
+        "bucket": "129-256",
+        "cells": 52129,
+        "rows": 9016465,
+        "rows_fraction": 0.009016465
+      },
+      {
+        "bucket": "257-512",
+        "cells": 21219,
+        "rows": 7757320,
+        "rows_fraction": 0.00775732
+      },
+      {
+        "bucket": "513-1024",
+        "cells": 8292,
+        "rows": 6310717,
+        "rows_fraction": 0.006310717
+      },
+      {
+        "bucket": "1025-2048",
+        "cells": 10287,
+        "rows": 15727768,
+        "rows_fraction": 0.015727768
+      },
+      {
+        "bucket": "2049-4096",
+        "cells": 8923,
+        "rows": 23982568,
+        "rows_fraction": 0.023982568
+      },
+      {
+        "bucket": "4097-8192",
+        "cells": 1180,
+        "rows": 5677373,
+        "rows_fraction": 0.005677373
+      },
+      {
+        "bucket": "8193-16384",
+        "cells": 49,
+        "rows": 617097,
+        "rows_fraction": 0.000617097
+      },
+      {
+        "bucket": "16385-32768",
+        "cells": 53,
+        "rows": 1280562,
+        "rows_fraction": 0.001280562
+      },
+      {
+        "bucket": "32769-65536",
+        "cells": 9,
+        "rows": 341943,
+        "rows_fraction": 0.000341943
+      },
+      {
+        "bucket": ">65536",
+        "cells": 2,
+        "rows": 6433995,
+        "rows_fraction": 0.006433995
+      }
+    ],
+    "max_cell_size": 3877273,
+    "mean_rows_per_cell": 1.5450773576584544,
+    "median_rows_per_cell": 1,
+    "rows": 1000000000,
+    "rows_fraction_in_cells_ge": {
+      "1024": 0.054073594,
+      "128": 0.077230544,
+      "32": 0.085357008,
+      "8": 0.111928858
+    },
+    "rows_weighted_median_cell_size": 2
+  },
+  "partition": "default",
+  "region": {
+    "bbox": [
+      27977.508855261374,
+      39432.932286538555,
+      44361.508855261374,
+      55816.932286538555
+    ],
+    "mean_occupied_cells_per_tile": 217493.25951557094,
+    "mean_rows_per_occupied_cell_per_tile": 1.226266040220891,
+    "occupancy": {
+      "distinct_codes": 62855552,
+      "histogram": [
+        {
+          "bucket": "1",
+          "cells": 48439286,
+          "rows": 48439286,
+          "rows_fraction": 0.5509629470591646
+        },
+        {
+          "bucket": "2",
+          "cells": 9531248,
+          "rows": 19062496,
+          "rows_fraction": 0.21682253892973438
+        },
+        {
+          "bucket": "3-4",
+          "cells": 3573881,
+          "rows": 11723254,
+          "rows_fraction": 0.13334380223860318
+        },
+        {
+          "bucket": "5-8",
+          "cells": 1138444,
+          "rows": 6744642,
+          "rows_fraction": 0.07671557820193754
+        },
+        {
+          "bucket": "9-16",
+          "cells": 165992,
+          "rows": 1688220,
+          "rows_fraction": 0.019202319920327126
+        },
+        {
+          "bucket": "17-32",
+          "cells": 3429,
+          "rows": 79222,
+          "rows_fraction": 0.000901094755854187
+        },
+        {
+          "bucket": "33-64",
+          "cells": 2455,
+          "rows": 112417,
+          "rows_fraction": 0.001278664628119211
+        },
+        {
+          "bucket": "65-128",
+          "cells": 793,
+          "rows": 64380,
+          "rows_fraction": 0.0007322774025130969
+        },
+        {
+          "bucket": "129-256",
+          "cells": 24,
+          "rows": 3585,
+          "rows_fraction": 0.000040776863746651945
+        },
+        {
+          "bucket": "257-512",
+          "cells": 0,
+          "rows": 0,
+          "rows_fraction": 0.0
+        },
+        {
+          "bucket": "513-1024",
+          "cells": 0,
+          "rows": 0,
+          "rows_fraction": 0.0
+        },
+        {
+          "bucket": "1025-2048",
+          "cells": 0,
+          "rows": 0,
+          "rows_fraction": 0.0
+        },
+        {
+          "bucket": "2049-4096",
+          "cells": 0,
+          "rows": 0,
+          "rows_fraction": 0.0
+        },
+        {
+          "bucket": "4097-8192",
+          "cells": 0,
+          "rows": 0,
+          "rows_fraction": 0.0
+        },
+        {
+          "bucket": "8193-16384",
+          "cells": 0,
+          "rows": 0,
+          "rows_fraction": 0.0
+        },
+        {
+          "bucket": "16385-32768",
+          "cells": 0,
+          "rows": 0,
+          "rows_fraction": 0.0
+        },
+        {
+          "bucket": "32769-65536",
+          "cells": 0,
+          "rows": 0,
+          "rows_fraction": 0.0
+        },
+        {
+          "bucket": ">65536",
+          "cells": 0,
+          "rows": 0,
+          "rows_fraction": 0.0
+        }
+      ],
+      "max_cell_size": 186,
+      "mean_rows_per_cell": 1.3987229322240302,
+      "median_rows_per_cell": 1,
+      "rows": 87917502,
+      "rows_fraction_in_cells_ge": {
+        "1024": 0.0,
+        "128": 0.00004223277408404984,
+        "32": 0.0021037676889409346,
+        "8": 0.03304743576540653
+      },
+      "rows_weighted_median_cell_size": 1
+    },
+    "tiles": 289,
+    "tiles_occupied": 289,
+    "zoom": 6
+  },
+  "rows": 1000000000,
+  "segment": "seg-0",
+  "slice": "s0"
+}
