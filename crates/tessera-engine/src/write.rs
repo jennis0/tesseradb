@@ -953,14 +953,18 @@ impl Executor {
             return self.ack_failed(respond, ExecError::Alloc(e));
         }
 
-        let terms: Vec<Vec<TermId>> = rows.iter().map(|r| r.terms.clone()).collect();
-        let wal_rows: Vec<WalRow> = rows
-            .into_iter()
-            .zip(&pending)
-            .map(|(row, p)| {
-                row.into_wal_row(p.entity_id.expect("assign_sorted assigns every item"))
-            })
-            .collect();
+        // `terms` is **moved** out of each row, not cloned. `WalRow` has no `terms` field — the WAL
+        // stores raw descriptors — so the resolved set has to be carried separately to the buffer
+        // apply, and the obvious `rows.iter().map(|r| r.terms.clone())` costs one heap allocation
+        // per row. That showed up as +14% on the 10,000-row bench arm, the only batch size at which
+        // real work overtakes the fsync floor at all, and it was a regression this change
+        // introduced rather than a cost the previous shape paid.
+        let mut terms: Vec<Vec<TermId>> = Vec::with_capacity(rows.len());
+        let mut wal_rows: Vec<WalRow> = Vec::with_capacity(rows.len());
+        for (mut row, p) in rows.into_iter().zip(&pending) {
+            terms.push(std::mem::take(&mut row.terms));
+            wal_rows.push(row.into_wal_row(p.entity_id.expect("assign_sorted assigns every item")));
+        }
         let entity_ids: Vec<EntityId> = wal_rows.iter().map(|r| r.entity_id).collect();
 
         // **A failed batch burns entity ids.** Assignment happens before the append, so ids given
@@ -1048,14 +1052,17 @@ impl Executor {
         // Updated together in one critical section, so a `/control/changes` lookup and a
         // `/v1/items` drill-down can never disagree about the same item.
         let mut established_inverse = lock_recover(&self.live.established_inverse);
-        for (row, row_terms) in rows.iter().zip(&terms) {
+        // `terms` is consumed, not borrowed: each row's resolved set is *moved* into the buffer.
+        // Borrowing would force `row_terms.clone()` here, one heap allocation per row on the one
+        // thread every write is serialised through.
+        for (row, row_terms) in rows.iter().zip(terms) {
             // Contracts §3.4: no external id means nothing to establish. `None` must never collide
             // with `None`, so this skips rather than inserting under a shared empty key.
             if let Some(external_id) = &row.external_id {
                 established.insert(external_id.clone(), row.entity_id);
                 established_inverse.insert(row.entity_id, external_id.clone());
             }
-            buffer.insert_row_with_terms(row, row_terms.clone());
+            buffer.insert_row_with_terms(row, row_terms);
         }
         drop(established);
         drop(established_inverse);
