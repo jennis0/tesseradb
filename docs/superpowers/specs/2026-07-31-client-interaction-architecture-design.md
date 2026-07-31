@@ -30,6 +30,12 @@ take."*
 **Timing:** design now, build later (owner, 2026-07-31). Nothing here schedules work
 except §13.
 
+**This document is deliberately an umbrella and does not decompose into one
+implementation plan.** It fixes boundaries and vocabulary across a span — the finished
+verb surface, the client stack, the integration tier, the customisable UI, the data-shape
+stretches — each of which wants its own spec and plan against §13's gradient. Read its
+size as the span it covers rather than as the size of any piece of work in it.
+
 ## 2. The anatomy: two channels
 
 Four integration seams were worked end to end (§8). All four are **count-blind** —
@@ -52,13 +58,24 @@ the verbs.* An integration that uses only the mark channel produces a picture wi
 trustworthy quantities in it — which is a legitimate product (a viewer) but must be
 named as one.
 
-**The obligation this exposes is cross-channel epoch consistency**, and it is the
-single most load-bearing thing a client does. Nothing in any renderer prevents drawing
-marks from one epoch beside numbers from another — a cached tile under a fresh count,
-or a stale count beneath fresh marks. A mixed-epoch display is exactly the
-confidently-wrong failure this side of the system exists to prevent, and **only a
-client can enforce it**: the service answers one request at a time and cannot see the
-screen. It is invisible to a naive integrator until it bites.
+**The obligation this exposes is cross-channel epoch consistency** — but it is smaller
+and more mechanical than the split makes it look, and an earlier draft over-dramatised
+it *(third review, 2026-08-01)*. Within one response the channels are atomically
+consistent **by construction**: the viewport verb delivers tile counts and points in a
+single body (contracts §5). The risk is purely *temporal* — composing responses fetched
+at different times, so that a cached tile sits beneath a fresh count or the reverse.
+
+So the obligation reduces to **render only responses sharing one epoch**, which is
+snapshot isolation, and it is therefore a **data-structure property of the replica
+store** rather than a discipline every integrator must hold: all state keyed by epoch,
+the renderer reading exactly one epoch's keyspace, flips atomic. That reduction is what
+makes it testable — the conformance assertion is one predicate, *no frame mixed
+epochs*, rather than a review of everything a client draws. Only a client can enforce
+it: the service answers one request at a time and cannot see the screen.
+
+The two-channel split remains the document's anatomy. It is *not* the source of the
+consistency problem, and reading it as such invites a heavier mechanism than the
+problem needs.
 
 ## 3. The lifecycle: a client is a versioned partial replica
 
@@ -124,8 +141,13 @@ correct behaviour, only slower. Nothing a client *must* do to be correct may be
 complex. *Prevents:* a REST surface whose reference implementation is a disguised
 requirement. *Has teeth:* §7.2's *k*-non-decreasing rule is a correctness-affecting
 obligation the server cannot enforce and a naive client will get wrong — under P6 that
-is a defect to design out, most cheaply by having the client library own *k* and never
-expose it, not an obligation to document.
+is a defect to design out, not an obligation to document. Two mechanisms, because the
+replica store is not the only layer: the store owns *k* and never exposes it; and for
+the bare session client of §10, which by construction exposes the verbs as they are, the
+design-out is already in the contract — §3.2 defaults *k* to the deployment's own
+ceiling, so a caller who never mentions *k* can never decrease it. **The obligation
+survives only for a caller who both sets *k* explicitly and varies it**, which is a
+narrow and self-selected population rather than the default path.
 
 **And the division that governs what conformance is for.** Secrecy is **structural**:
 every byte a client holds is inside `M_auth` by server construction (I2, §10.4), so a
@@ -203,6 +225,46 @@ trades away the fail-closed-by-naming property that makes §5 reviewable, which 
 precisely the class of thing the three retirement rules warn gets conflated. Adopt only
 with the argument written first, and only if P2's numbers demand it.
 
+### 5.1 Where the replica state lives — the axis this document initially fixed
+
+Everything above treats *who holds the replica record* as settled (the client) and only
+*how much we trust it* as variable. **Flipping that axis is the most promising open
+direction in this document** *(third review, 2026-08-01)*.
+
+The server already holds per-session state: masks per token, θ per session, the
+drawn-mark spec's handle tables. A **per-session cursor** — at minimum the last epoch
+answered, at most the tile→cut record mirroring what it named — is a small addition to
+state that exists anyway, and it changes the safety calculus above. The fail-open risk
+in delta naming is trusting a *client's claim* about what it holds; if the server
+computes "changes since epoch E" from its **own** record — the deny set since E, which
+contracts §2.3's side-manifest rule already publishes immediately, plus what became
+visible since E — then no client claim is load-bearing and the completeness guarantee
+becomes checkable in one place.
+
+Tessera's version of this record is far cheaper than the field's, and for a reason
+specific to this design: because `served` is a `tessera_id`-order prefix, `(tile, epoch,
+cut)` is a *complete* description of client state — three integers, where the sync
+engines need a key-to-version map. **The mechanism this document already has is the
+compression; §5 merely gives the record to the other party.**
+
+*Prior art, including one nobody has brought.* Replicache's server-held Client View
+Record diffs a recomputed authoritative view against what a client was last sent, so
+revocation propagates as deletions for free; PowerSync's protocol distinguishes REMOVE
+(left your visible set) from DELETE, which is the wire-level echo of the three
+retirement rules. **The unclaimed body of evidence is game-server interest
+management** — server-authoritative per-client visibility with delta replication,
+fog-of-war computed server-side *because clients cheat*. It is the one field whose
+security posture matches this one, with two decades of scale evidence behind it, and
+Appendix D's survey covers databases and authorisation services only.
+
+*And a caution against overreach from the same review.* Full per-session incremental
+view maintenance — the Materialize or Zero posture — is **wrong-sized** here, because
+re-answering a tile from the Roaring mask is already O(containers touched), so a refetch
+costs nearly what computing the delta would, while the machinery costs real review
+surface. Figma's LiveGraph reached this verdict at scale: invalidate-and-refetch beat
+incremental maintenance because invalidations on active views are sparse. Take the
+session cursor for delta economics at the 10⁷ budget; do not take the layer above it.
+
 ## 6. The epoch, and the change signal
 
 All four seams independently demand a client-visible unit of cache validity: MVT needs
@@ -233,6 +295,47 @@ constants, node handles}. Writing it out is a task for the phase that implements
 signal; naming it here is what stops five invalidation paths being discovered one at a
 time.
 
+### 6.1 Live data, and what the client does when the signal fires
+
+An earlier draft designed the signal's leak posture carefully and its *behaviour* not at
+all *(third review, 2026-08-01)*.
+
+**The cadence is already decided, elsewhere, and it decides the transport.** Design §3
+puts the whole write path — denies included — at seconds to minutes, because it is
+human-reaction-dominated. So the change signal never needs sub-second delivery: it may
+tick on a configured cadence of order seconds, batching epoch advances. That kills by
+construction the failure this section should fear — epoch churn under continuous ingest
+driving constant refetch — and it means SSE, long-poll and plain polling are all
+adequate. SSE is the mild favourite because `Last-Event-ID` gives epoch-resume for free
+and it is proxy-friendly; nothing here needs bidirectional push. The field agrees: live
+layers over tiled maps are universally poll-or-invalidate, never per-tile push.
+
+**Scope the signal per session, which makes the register entry smaller rather than
+larger.** A broadcast "the corpus changed" is C15's shape. But the server can intersect
+an accepted change's entities against each live session's mask — one `and_cardinality`,
+machinery that exists — and signal only sessions whose **own view** moved. The signal
+then carries information that session's next §7.1 counts would disclose exactly anyway,
+which is C18's accepted argument, and the entry narrows from *corpus activity rate* to
+*your-view activity rate*. A residual remains — the timing of *not* being signalled
+correlates weakly with others' activity — and still needs the entry, but it is a
+strictly smaller channel than the broadcast design.
+
+**Three client rules, which are the reconcile table's behavioural half.**
+
+1. *Refresh is a new epoch snapshot, not an in-place update.* Fetch behind the current
+   display and flip atomically when the visible tiles and their counts are complete —
+   double buffering, standard in every tile map, and the operational form of §2's
+   snapshot isolation.
+2. *The flip has a deadline.* The old epoch may remain on screen at most the
+   deny-visibility budget after the signal; then force-flip even if incomplete, showing
+   loading states. **"Still fetching" must not extend a suppression's visibility
+   indefinitely** — this is where §4's staleness ruling acquires its upper bound.
+3. *Cache validity binds to the epoch integer.* A tile older than the last signalled
+   epoch is renderable but **stale-marked**, and no number-channel value may be
+   displayed against it. One integer comparison, and it is what closes §4's
+   "pan answered entirely from held tiles" corollary with a mechanism rather than a
+   remark.
+
 ## 7. Deployment topologies, and the two anti-patterns
 
 Organised on P4's two axes.
@@ -248,6 +351,37 @@ Organised on P4's two axes.
 construction belongs at the integrator's app server because that is where the authority
 is; verified assertions (JWS/SAML, trust anchors in the auth plugin, host-enforced
 `not_after`) mean their backend may *submit* authority but cannot *mint* it.
+
+**T2(c) — attenuated capability, for multi-tenant integrations** *(third review,
+2026-08-01)*. Attenuable capability tokens do not remove minting: the root keyholder can
+still mint anything, which is the position the identity provider already occupies. What
+they remove is precisely the **middle** component that can fabricate. An integrator
+holds a token whose authority is already scoped to its tenant, and may append blocks
+that only *narrow* — per user, per session, per expiry — because each block is signed by
+a key chained from the previous one while the verifier holds only the root public key. A
+compromised integrator backend then fabricates at most **its own tenant's** `M_auth`.
+That converts §7's global fail-open into a per-tenant one, which is a quantified
+blast-radius reduction verified assertions alone cannot give — under JWS the integrator
+either forwards per-user assertions faithfully or terminates the flow itself and becomes
+the minting proxy anyway.
+
+It composes as **one more `auth_data` type, not an architecture change**: §6.1 already
+declines to require bare claims and anchors trust inside the plugin; verification is
+pure computation, so the determinism obligation holds; expiry surfaces as `not_after`
+for host enforcement exactly as today; and the effective term set is the intersection
+across blocks, which feeds §2.3's content-addressed mask key unchanged — two different
+attenuations of one authority resolving to the same terms share one mask, which that key
+already handles.
+
+**Biscuit** is the mechanism to evaluate (Eclipse-incubating, `biscuit-auth` 6.0.0,
+production use at Clever Cloud and Outscale; its Datalog has set `contains`/`intersection`
+and block-origin rules that prevent escalation). **Macaroons are the cautionary tale
+rather than the candidate**: HMAC chaining means every verifier holds the minting
+secret, which is why the one large modern deployment ended up building a centralised
+verification service. The costs are honest and mostly organisational — root-issuance
+discipline, since handing an integrator a broad root rebuilds the proxy with extra
+steps; a revocation denylist, which is the same class of machinery as the epoch ledger;
+and Datalog debugging opacity.
 
 **Two anti-patterns, named as loudly as the three retirement rules.**
 
@@ -292,10 +426,19 @@ over `M_auth`. They are notebook-scale by construction.
 and scale to any corpus and any principal.
 
 The design's central cost claim, *cost scales with screen area rather than corpus
-size*, **holds only for the second class.** An integrator can self-select in one
-sentence, and the export threshold (§8.4) is not an arbitrary limit but the boundary
-between the classes: above it the honest answer is "use a streaming integration", never
-a truncated table.
+size*, **holds only for the second class.** The export threshold (§8.4) is not an
+arbitrary limit but the boundary between the classes: above it the honest answer is
+"use a streaming integration", never a truncated table.
+
+**The partition is per-principal, not per-app, and that is a support surprise unless
+stated** *(third review, 2026-08-01)*. The visible-set size that selects the class is a
+runtime property of each *principal*, so an application built resident works for every
+analyst and then meets the export refusal the day a broad-clearance principal signs in.
+A resident-class application must therefore either branch on the visible count — cheap
+to obtain, one `zoom = 0` full-extent call, at the cost of a dual implementation — or
+declare a supported-clearance ceiling. The export refusal should carry the visible count
+and the pointer to the streaming class in its detail, so the failure teaches the fix
+rather than reading as a limit.
 
 ### 8.2 deck.gl — the control case *(verdict: achievable now)*
 
@@ -312,7 +455,12 @@ Atlas decision — to "does the arithmetic line up": y-axis orientation, the zoo
 mapping, and refinement under real sublayers. **The smallest discharging spike contains
 no Tessera at all**: ~50 lines of orthographic view plus tile layer with a synthetic
 `getTileData` drawing each tile's index and bbox, asserting index arithmetic at z 0–16,
-y direction, abort-on-fast-pan, and cache behaviour. Half a day.
+y direction, abort-on-fast-pan, and cache behaviour. Half a day. **Add one item**
+*(third review, 2026-08-01)*: **non-square extents.** §2.5 quantises each axis
+independently onto 2¹⁶, so a tile is square in cell space and rectangular in data space,
+while `TileLayer` takes a scalar `tileSize`. If it cannot express anisotropic tiles the
+fix — pre-scaling y into an aspect-corrected world space — is easy, and it belongs in
+the spike rather than in production debugging.
 
 *Our sampler is what makes deck.gl's default refinement look right.* The default
 `refinementStrategy: 'best-available'` shows a parent while children load; because
@@ -520,6 +668,16 @@ versus unknown, and collapsing them converts fail-closed into fail-misleading. T
 a conformance item, and it is why developer experience and observability earn
 architectural status here rather than being tooling concerns.
 
+**There is a fourth state, created by §4's own staleness ruling and previously unnamed**
+*(third review, 2026-08-01)*: **shown-but-stale** — drawn from epoch *E* while the change
+signal reports *E′ > E*. The ruling makes this legitimate; nothing currently makes it
+*visible*, and an unmarked stale display is the truthfulness failure the staleness
+concession quietly buys. The fields that handle this honestly are the regulated ones —
+delayed market data must carry a delay badge — and the general pattern is an "as of"
+affordance owned by the core and surfaced by default rather than opted into. It belongs
+beside the trichotomy as a conformance item, and it is the display half of §6.1's rule
+3.
+
 ## 10. The client stack
 
 **One headless core, in TypeScript**, owning everything invariant-bearing: session and
@@ -558,9 +716,20 @@ context, not reimplemented in Python.
 core: the **client obligations list** (every rule the server cannot enforce) and the
 **conformance kit**. The kit's subject is truthfulness, not secrecy (§4) — displayed
 counts sourced from the number channel, both numbers on every selection, *k*
-non-decreasing, the three-state trichotomy, cross-channel epoch consistency. It is what
-binds mode-3 clients we cannot inspect, and §11's determinism is what makes it
-shippable.
+non-decreasing, the four display states, and §2's one-predicate epoch assertion. §11's
+determinism is what makes it shippable.
+
+**But the kit cannot *bind* a client we cannot inspect, and an earlier draft claimed it
+could** *(third review, 2026-08-01)*. A stranger's frontend consuming the REST surface
+exposes no displayed state to assert against; the kit binds our core, and any client
+whose display layer a harness can drive. Every field that solved this solved it
+**socially**: the Certified Kubernetes model binds through a trademarked mark plus a
+self-run suite whose results gate the mark — the suite is the *evidence*, the brand is
+the *enforcement*. The correction changes what gets built rather than what gets written:
+the kit needs a **driver harness** capable of running against an integrator's own
+application through a headless browser with DOM-level assertions, not merely a set of
+canned transcripts, and it wants a certification-mark policy beside it — a
+"Tessera-conformant" claim that is licensed rather than assumed.
 
 **Mode 1 needs a first-party local mode** — `tessera.open(path)` to a map in a few
 lines, with a loudly-marked allow-all plugin and a localhost self-token for the
@@ -626,8 +795,9 @@ The minimum primitive sets differ by mode in a way that *is* the roadmap.
 
 **Mode 3** (stranger's frontend) needs **zero new primitives**. What it needs is an
 OpenAPI 3.1 description of the finished surface, the obligations list, and the
-conformance kit. Its unit of adoption is a documented stable verb, not a feature — so
-the cheapest adoption wins are documentation, not engineering.
+conformance kit — the last of which, per §10, is a driver harness plus a certification
+mark rather than a transcript set. Its unit of adoption is a documented stable verb, not
+a feature, so the cheapest adoption wins here are documentation, not engineering.
 
 **Mode 1** (notebook) needs mode 3's set plus the local mode, Arrow exports carrying
 `{shown, total}`, the acked-is-not-visible affordance, the bulk-export verb with its
@@ -697,20 +867,61 @@ archive is forbidden.*
 - **Notebook token custody**: the widget must never serialise a token into saved output.
 - **Whether the `fixed_size_list<f32,2>` position column is worth an additive wire
   change** — decided on P2's numbers, not now.
-- **Whether position storage should be Morton-residual rather than `x`/`y`** *(owner,
-  2026-07-31)*. §2.6 stores `x`, `y` as `float32` "as supplied (quantisation is for
-  codes, not storage)", so `morton.u32` duplicates their high bits: what Morton cannot
-  recover is only the residual *within* a cell. Storing `morton.u32` plus an interleaved
-  32-bit residual is 8 B/row against 12 B — **4 GB at 10⁹**, the same magnitude and the
-  same argument as r5's narrowing. Three caveats: the per-viewport **gather is roughly
-  neutral** (8 B either way, since Morton is not currently read per served row), so the
-  win is residency rather than hot-path page traffic; a 16-bit residual gives only 256
-  sub-positions per cell, which bands visibly at depth 16 where a tile *is* one cell, so
-  32 bits is the safe width; and it requires ruling that positions are stored
-  fixed-point rather than as supplied, which is a contract change the oracle inherits.
-  The wire need not change — the server dequantises during the gather, and that pass can
-  absorb the interleave the item above wants. **Belongs to the drawn-mark-budget spec and
-  P2**, not to this document; recorded here because it was raised during this design.
+- **Whether position storage should be Morton-derived rather than `x`/`y`** *(owner,
+  2026-07-31; three variants after the third review, 2026-08-01)*. §2.6 stores `x`, `y`
+  as `float32` "as supplied (quantisation is for codes, not storage)", so `morton.u32`
+  duplicates their quantised high bits; what Morton cannot recover is only the residual
+  *within* a cell. Every variant below is **8 B/row against 12 B — 4 GB at 10⁹**, the
+  same magnitude and the same argument as r5's narrowing, and none is dominant:
+
+  | Variant | Search column | Random touches per served point |
+  |---|---|---|
+  | today | `morton.u32`, contiguous | 2 (`x`, `y` are separate buffers) |
+  | **A — split** (owner) | `morton.u32`, contiguous | 2 (`morton`, `residual`) |
+  | **B — fused** `u64` | high half at stride 8 | **1** |
+  | **C — fused + sparse index** | index of every *n*-th code | **1** |
+
+  The **gather is neutral between today and A** — Morton is not currently read per
+  served row, so A trades two touches for two — which is what makes B interesting: one
+  fused code halves the gather's random touches. B's cost is exactly the argument §2.6
+  makes for the `priority` column one level down — *"a cheap prefix must be physically
+  contiguous… reading the high 2 bytes of a `uint64` array at stride 8 touches every page
+  holding any value"* — so B doubles the search column's footprint and halves its
+  values per page. **Which cost dominates depends on *k***: at sparse *k* the scattered
+  gather dominates and B wins; in the 10⁷ scan regime the range is read whole and the
+  contiguity objection weakens. **C** is the shape that takes both — fuse, and restore
+  cheap search with a sparse index binary-searched to a page, then scanned within the
+  column the gather reads anyway.
+  Three further notes. B and C are §5.2's own stated future — past ~4×10⁹ the grid must
+  widen to 64-bit codes, so filling r5's deleted half with signal makes that widening a
+  no-op rather than a second format bump — and their compression structure is cleaner
+  than compressed floats, since the sorted high half delta-codes to nearly nothing while
+  the maximum-entropy low half stays fixed-width for mmap-and-slice. The low bits must
+  **not** join the sort key under any variant, or the wire ordering contract and the
+  served-prefix machinery are disturbed. And precision is a non-issue: 32-bit fixed point
+  over the extent is uniformly *more* faithful than `float32`; what is genuinely lost is
+  bit-exact round-trip of supplied floats and extent-independence of stored values, both
+  contract changes the oracle inherits. The wire need not change — the server dequantises
+  during the gather, and that pass **is** the interleave pass the item above wants.
+  **Belongs to the drawn-mark-budget spec as P4 arms**, not to this document; recorded
+  here because it was raised during this design.
+- **Whether a shared WASM kernel should own the invariant-bearing arithmetic** *(third
+  review, 2026-08-01; owner ruling: record as an open question, do not restructure §10)*.
+  §10's TypeScript core reimplements Morton and tile arithmetic that `tessera-spatial`
+  already owns, plus the nesting and *k* rules and epoch comparison — precisely the code
+  where an engine/client disagreement would be silent and conformance-relevant. A small
+  crate compiled to WASM would give one implementation. The boundary matters if it is
+  ever taken: **arithmetic only**, with the replica store staying TypeScript, because
+  chatty stateful APIs across the WASM boundary are where Rust-in-the-browser goes wrong.
+- **Is the epoch a readable coordinate, or only a cache-busting nonce?** *(third review,
+  2026-08-01)*. Every sync engine surveyed answers "readable, with a retention window".
+  It matters at §6.1's flip: a pan mid-flip may need one more *old*-epoch tile to keep the
+  outgoing snapshot complete. If the server will serve a still-retained epoch — the same
+  retention shape as pins and `410` — flips never tear; if not, the client force-flips
+  early or shows holes. Serving a stale epoch briefly keeps an accepted suppression
+  visible within that epoch's responses, but bounded by the same deny-visibility budget
+  as the flip deadline, so it spends §4's existing concession rather than a new one.
+  **The reconcile table cannot be written until this is chosen.**
 - **Licence review** for any Grafana or Metabase plugin work (both AGPLv3: a plugin is
   standard practice, embedding or forking the host is an AGPL event).
 - **Multi-slice comparison** has no client-architecture position yet.
@@ -719,13 +930,28 @@ archive is forbidden.*
 
 ## 16. Provenance
 
-Brainstormed with the owner 2026-07-31. Reviewed twice in draft by an independent agent
-with no stake in the plan being right, per CLAUDE.md's working method: a first pass
-against the design documents and invariants, which corrected the secrecy/truthfulness
-division, the claim-minting-proxy gap, and two bugs in §5; a landscape survey of
-consumers, alternatives and access-control prior art; a primitive inventory under the
-corrected test; and a four-seam integration study which produced §2's two-channel
-anatomy, §8.6's tile-addressed alias, and the Mosaic refusal.
+Brainstormed with the owner 2026-07-31. Reviewed by independent agents with no stake in
+the plan being right, per CLAUDE.md's working method.
+
+*Draft reviews (one agent, four passes).* A conformance pass against the design
+documents and invariants, which corrected the secrecy/truthfulness division, the
+claim-minting-proxy gap, and two bugs in §5; a landscape survey of consumers,
+alternatives and access-control prior art; a primitive inventory under the corrected
+test; and the four-seam integration study which produced §2's two-channel anatomy,
+§8.6's tile-addressed alias, and the Mosaic refusal.
+
+*Wide-net review (second agent, fresh eyes, 2026-08-01)*, commissioned deliberately from
+someone who had not produced the material — the owner's brief was to attack the frames
+and bring ideas rather than refine prose. Both organising frames survived. It added
+§5.1's server-held session cursor and its game-server prior art, §6.1's live-data
+behaviour, §7's T2(c), §15's fused-column variants, and the fourth display state; and it
+corrected two things this document had asserted — §2's consistency framing, which
+over-dramatised a problem that reduces to snapshot isolation, and §10's claim that the
+conformance kit binds clients we cannot inspect, which it cannot. It also proposed four
+scope cuts (deferring the elision mechanism and §12's extension API, dropping the
+deepscatter build, and promoting the WASM kernel); the owner ruled to **keep scope** on
+all four, since the document builds nothing and re-deriving a decision costs more than
+recording it, and to keep the WASM kernel as an open question only.
 
 Owner rulings recorded in place: staleness is acceptable and the boundary is the
 request, not the pixel (§4); encodings are configuration first (§9); drill-down is a
