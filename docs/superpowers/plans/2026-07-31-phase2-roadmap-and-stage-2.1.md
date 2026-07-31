@@ -502,7 +502,9 @@ reference/.venv/bin/pytest conformance/ -v
 
 - Fixed-viewport 1e9 A/B at the k=500 operating point against the 2026-07-31 campaign figures (123.3 ms p50 post-B9). **Gate: p50 within 5%.**
 - One `scripts/bench_concurrency.py` arm — LRU-under-lock is precisely the contention class the branch's F4 measurement exists to police.
-- `cargo bench -p tessera-engine` against rebuilt fixtures (G4).
+- `cargo bench -p tessera-engine` against rebuilt fixtures (G4), **through `scripts/bench-slot.sh`**.
+
+**Every benchmark runs under the slot** *(controller, 2026-07-31, on Track C's fix-round process finding)*. Parallel tracks in parallel worktrees mean a criterion run competes with other tracks' builds: Track C's first pairing measured `tile_sweep_k0` at 3.55 ms and `compose` at 99 ns — **+50% and +43%** — at load average 12.1 with three tracks compiling. It discarded that run, but only because it thought to look at the load; the instruction "benches must run alone" is not a mechanism, and the viewport-bench regression memo records how expensive a misattributed measurement is to unpick after the fact. `scripts/bench-slot.sh` takes an exclusive `flock` across every worktree and then waits for two consecutive quiet load readings, so the common failure — measuring through someone else's build — has to be worked around rather than merely not noticed. A run that gives up waiting says so on stderr and demands the fact be recorded with the numbers.
 
 **The criterion gate cannot police lock contention, and the Task 4 gate proved it** *(controller, 2026-07-31, on Track C's performance lens)*. The gated benches are **single-threaded, closed-loop, one session, and never present a pin**. An unconditional uncontended mutex added to `PinManager::resolve` would cost ~15–25 ns against a 2.3–4.0 ms request — ~0.001%, invisible under this box's documented ±1–3% criterion CIs. So the rule the gate exists to enforce (no drain lock on the common path) is enforced by criterion *not at all*; what actually caught it on Task 4 was the worker's own `drain_locks` counter test, whose coverage is exactly one lock type.
 
