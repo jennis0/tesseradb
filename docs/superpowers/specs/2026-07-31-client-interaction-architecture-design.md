@@ -239,6 +239,23 @@ and Mosaic wants snapshots. So **self-contained responses are the default and el
 is negotiated**, because the dominant tile consumers reassemble per tile and must not
 be made to hold reassembly logic. Our core opts in; a stranger never sees a delta.
 
+**Say this in OGC 3D Tiles' vocabulary rather than inventing our own** *(survey,
+2026-08-01)*: that standard already names per-tile refinement **`ADD`** (children add to
+the parent) versus **`REPLACE`** (children are self-contained). That is exactly this
+distinction, standardised, and anyone who has touched streaming geospatial reads it
+without explanation. **Tessera serves `REPLACE` by default; `ADD` is negotiated per
+session.**
+
+**And the shape is convergent, which is worth claiming precisely.** Three independent
+systems arrived at importance-ordered additive point tiling: Potree stores a subsample
+per octree node whose union along the root-to-leaf path is the full cloud; HiPS
+progressive catalogues (IVOA, astronomy) put the brightest sources at coarse orders and
+add fainter ones with depth, a decade ago; quadfeather assigns points to the shallowest
+tile with capacity. **The convergence is on the mechanism; what none of them has is a
+*defensible order*, because none of them needed one** — theirs are static, global and
+single-ordered. §7.2's keyed per-viewer priority prefix is the instance of a shape the
+field keeps rediscovering, which is a stronger and more checkable claim than novelty.
+
 **Declarations key on tile identity, not row ranges.** A row range dies at every
 compaction (I11); a Morton prefix is deliberately stable across pins.
 
@@ -512,6 +529,14 @@ Four seams worked end to end, chosen as one per integration currency. The exerci
 run *before* the architecture was written, on the owner's steer, and it produced two
 findings no top-down pass did (§8.5).
 
+**Owner decision, 2026-08-01: neither Mosaic nor deepscatter is built.** Both analyses
+are kept in full, because their value was never the adapter — the exercise is what
+produced the mark/number split, the tile-addressed alias, and the independent
+confirmation that a mature tile consumer demands the same elision §5 arrived at. What
+ships is **deck.gl (ours) and the MVT adapter (theirs)**; §8.4 and §8.5 are retained as
+*analysis*, and their verdicts below describe what would be involved were the decision
+revisited, not a plan.
+
 ### 8.1 The partition that comes first
 
 **Integrations divide by whether the consumer can hold the visible set.**
@@ -527,6 +552,25 @@ The design's central cost claim, *cost scales with screen area rather than corpu
 size*, **holds only for the second class.** The export threshold (§8.4) is not an
 arbitrary limit but the boundary between the classes: above it the honest answer is
 "use a streaming integration", never a truncated table.
+
+**A second axis: does the consumer aggregate internally?** *(survey, 2026-08-01)* A
+library survey covering grids, chart engines, scatter renderers and analytics viewers
+classified every entry against these two axes without strain, so they are worth stating
+as the classifier rather than re-deriving per tool.
+
+*Self-aggregating* consumers — Perspective, any data grid's client-side grouping, chart
+engines that bin — compute their own totals from whatever rows they are given. Fed the
+**mark channel**, which is a per-tile sample, they present sample aggregates as answers:
+the Embedding Atlas KDE failure in table form, and a P2 violation arriving through a
+component rather than through our code. Fed the **number channel** — the breakdown
+long-form `(value, count)` — they pivot and re-sum correctly, because sums of counts
+compose. Means need weighted columns.
+
+**So: a self-aggregating consumer takes the number channel or a full-visible extract,
+never the mark channel.** One rule, stated once, covering every such component we might
+embed. **Perspective** (FINOS, Apache-2.0; Arrow-native, incremental `table.update`, so
+epoch refresh maps directly onto it) is the strongest candidate for mode 2's table and
+panel half under exactly that rule, and is the natural counterpart to deck.gl's map half.
 
 **The partition is per-principal, not per-app, and that is a support surprise unless
 stated** *(third review, 2026-08-01)*. The visible-set size that selects the class is a
@@ -550,7 +594,12 @@ docs specify non-geospatial tiling: x and y increment from the world origin, eac
 tile's size matches `tileSize`, `bbox` arrives as `{left, top, right, bottom}`. The
 risk narrows from "does this exist" — which viz §9 said would reopen the Embedding
 Atlas decision — to "does the arithmetic line up": y-axis orientation, the zoom→z
-mapping, and refinement under real sublayers. **The smallest discharging spike contains
+mapping, and refinement under real sublayers. **Downgrade viz §9's framing further**
+*(survey, 2026-08-01)*: the single-cell imaging stack — Viv and Vitessce — runs deck.gl
+`OrthographicView` over multiscale tiled pyramids in production, daily, at gigapixel
+scale. Non-geographic tiled deck.gl is not exotic; a whole scientific field ships it. The
+spike survives because Viv uses its own multiscale layer rather than `TileLayer`, so what
+remains unverified is our arithmetic against *that* layer, not the composition itself. **The smallest discharging spike contains
 no Tessera at all**: ~50 lines of orthographic view plus tile layer with a synthetic
 `getTileData` drawing each tile's index and bbox, asserting index arithmetic at z 0–16,
 y direction, abort-on-fast-pan, and cache behaviour. Half a day. **Add one item**
@@ -689,7 +738,10 @@ mechanism (a fixed global order determines coarse-zoom membership) and has no
    costs nothing server-side. This is the clearest thing the integrations-first method
    surfaced.
 4. **Bulk export** as load-bearing architecture, not a gap-list item — the only route to
-   the resident class, and the SQL surface is not a substitute for it.
+   the resident class, and the SQL surface is not a substitute for it. **This survives
+   the 2026-08-01 decision to drop Mosaic**: export's day-one consumer is the notebook
+   itself — "give me this selection as a DataFrame" is mode 1's first request — and
+   Mosaic was only ever the most demanding thing reachable through it.
 5. **Count-blindness**, which is what §2 is built on.
 
 ## 9. The primitive inventory
@@ -738,6 +790,28 @@ about the first's visible distribution — C17's out-of-band family, created *ab
 Tessera. Closed by one rule in the toolkit: view-derived encodings are session-scoped
 artifacts; shared styles go through caller metadata.
 
+**Two expectations the embedding-viewer lineage has already set, which this document
+should answer rather than let users discover** *(survey, 2026-08-01)*. TensorBoard
+Projector, WizMap and Latent Scope taught this audience what a data map does, and two of
+their signature interactions are currently unaddressed.
+
+*Click a point, see its nearest neighbours.* Excluded by the owner's 2026-07-31 ruling
+that scoped "close points" to drill-down. The honest position is **deferred, not
+refused**: it arrives through the Phase 4 vector operand as a threshold filter with
+candidate push-down (§8.2, §8.3, C10), needing no sixth verb and no new disclosure class.
+Say so explicitly, because a data map with no similarity affordance at all will read as
+broken to precisely the audience most likely to adopt this, and "we refuse it" and "it is
+Phase 4" are very different messages.
+
+*Lasso, tag, iterate.* Interactive annotation is the loop those tools are built around,
+and it is a **write** path the viewer verbs deliberately do not carry. Name it as an
+app-layer pattern — annotations keyed by `external_id` and stored on the integrator's
+side, joined at display time — rather than leaving it to be discovered as a missing
+feature. It is the most common uncovered expectation in the survey.
+
+*(WizMap's overview — density contours plus labels — is the underlay plus gated labels
+we already serve. Confirmation, nothing to add.)*
+
 **The one primitive the design is materially short of** is label placement input. The
 maps-industry pattern — Google- and Apple-style pipelines precompute per-feature
 **anchor, importance rank and zoom range** server-side and let the client do collision;
@@ -781,7 +855,20 @@ beside the trichotomy as a conformance item, and it is the display half of §6.1
 **One headless core, in TypeScript**, owning everything invariant-bearing: session and
 token lifecycle, viewport-to-range arithmetic, tile scheduling and prefetch, Arrow
 decode, the replica state of §3 and §5, filter state, frontier and label selection,
-cross-channel epoch consistency (§2), and *k* (§4, P6). Viz architecture §1 already
+cross-channel epoch consistency (§2), and *k* (§4, P6).
+
+**Its scheduler has a gap the design does not cover, and the point-cloud field has
+solved it** *(survey, 2026-08-01)*. §7.2 bounds marks **per tile**; nothing bounds the
+total drawn across a viewport, and the drawn-mark budget workstream's 10⁷ ambition is a
+*global* number. Potree enforces exactly this — a global `pointBudget` spent across
+competing nodes by screen-space-error priority, with eviction — and CesiumJS's
+`maxScreenSpaceError` traversal is the principled form of "which tiles at which depth"
+that our scheduler would otherwise improvise. Both are deployed prior art for the part
+this design has not written: **how a client spends one budget across tiles that all want
+it.** Note the boundary carefully — this is a *client-side rendering* budget, and it must
+not become a second selection rule: the served set is the server's answer, and a client
+that drops marks to fit a budget is choosing what to draw, not what is visible. Which
+marks a client declines to *draw* is presentation; which marks it is *served* is I7. Viz architecture §1 already
 fixes this boundary; this document fills in its protocol half.
 
 **The core is a first-class distributable, not a reference implementation.** It is the
@@ -1023,6 +1110,27 @@ archive is forbidden.*
 - **Licence review** for any Grafana or Metabase plugin work (both AGPLv3: a plugin is
   standard practice, embedding or forking the host is an AGPL event).
 - **Multi-slice comparison** has no client-architecture position yet.
+- **Sort, for table-shaped consumers** *(survey, 2026-08-01; owner: record, do not decide)*.
+  Enterprise grids match the drill-down cursor almost exactly — AG Grid's server-side row
+  model, or TanStack Table's manual mode (MIT; AG Grid's server-side model is
+  Enterprise-paid), both wanting `{startRow, endRow, sortModel, filterModel} → {rows,
+  totalCount}` — but they expect **sort by any column**, and Tessera has one serving
+  order, `(morton, tessera_id)`. Sorting a region result by an arbitrary scalar over
+  `M_sel` is an O(visible) gather-and-sort, outside Appendix H's counting-engine boundary
+  and in the same class as masked means. Three positions, none taken: **refuse** (server
+  order, stated — honest, but integrators will then sort the *page* client-side, which
+  silently sorts a sample); **bounded top-N** by walking the build-time value-bin
+  bitmaps the histogram verb needs anyway, gathering only until N rows fill — stays near
+  the counting boundary and serves "top 50 by score", which is what panels actually want;
+  or **full sort behind an explicit cost gate**, most faithful to the grid contract and
+  the thing §8.2's "pipeline, not a planner" rule exists to keep off the request path.
+  Decide when a table consumer exists; the top-N option's dependency is itself only
+  planned.
+- **Verify Elasticsearch's `_mvt` under document-level security** before citing it.
+  If it holds, it is production evidence that per-viewer vector tiles are viable and are
+  served private rather than CDN-fronted — external validation for both §8.3's adapter
+  and its CDN posture — and it is the competitor's geo mode, filtering per query where we
+  materialise per viewer.
 - **Control-plane client story**: build-credential custody in a notebook, given that node
   iteration must never be reachable from a user token (§2.5).
 
