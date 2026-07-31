@@ -32,9 +32,12 @@ pub use timing::{Probe, StageTimings};
 // The write executor's delivery half (Task 0b landed the data half in `tessera_lifecycle::command`).
 // Re-exported because `tessera-server`'s handlers hold the handle and submit through it (Task 3b),
 // while `write.rs` itself stays private — `WritePath` is engine-internal.
-pub use write::{Job, LifecycleHandle, LifecycleQueues, Responder};
 pub use viewport::{
     EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,
+};
+pub use write::{
+    AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, Job,
+    LifecycleHandle, LifecycleQueues, Responder,
 };
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1, slimmed for

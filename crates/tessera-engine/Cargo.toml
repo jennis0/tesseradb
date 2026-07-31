@@ -10,6 +10,12 @@ default = []
 # release `tessera-cli` emits no `x-tessera-stage-ns`. Enabling it here does NOT enable it there —
 # but cargo's feature unification will, on a `--workspace` build, so both gates matter.
 bench-timing = []
+# Deliberate WAL/executor fault injection — see `tessera-lifecycle/src/faults.rs`. Enabled ONLY via
+# the self dev-dependency below, so nothing `cargo build` produces can carry it. It DOES still
+# unify across a `cargo test --workspace` build, exactly as `bench-timing` does — measured, not
+# assumed — so `scripts/check-layers.sh` asserts the property that actually matters: no normal
+# dependency enables it.
+fault-injection = ["tessera-lifecycle/fault-injection"]
 
 [dependencies]
 tessera-types = { path = "../tessera-types" }
@@ -31,6 +37,10 @@ sha2 = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
+# Self dev-dependency: the only way this crate's integration tests can enable a feature of the
+# library they link against. Not a cycle — cargo permits it for dev-dependencies, and
+# `cargo tree -e normal` (what `scripts/check-layers.sh` reads) does not see the edge.
+tessera-engine = { path = ".", features = ["fault-injection"] }
 tempfile = { workspace = true }
 tessera-build = { path = "../tessera-build" }
 parquet = { workspace = true }
