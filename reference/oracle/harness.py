@@ -95,11 +95,24 @@ def ensure_fixture_bundle(
     a genuinely new lineage each time it is built, so minting is the correct answer here — and
     stating it satisfies the rule rather than circumventing it. Note that this makes the fixture's
     `tessera_id`s differ between rebuilds, which is why nothing may persist them across runs.
+
+    `--mint-external-ids` is passed for the same class of reason and was **missing**, which broke
+    six tests on any checkout that had to build the fixture fresh (three in `reference/tests`,
+    three in `conformance/`, all of them a `KeyError` out of `Bundle.external_id_of`). The flag
+    became opt-in on 2026-07-30 (memo §3.2 D1: contracts §2.4 forbids manufacturing an external ID
+    for an item whose caller supplied none, and the Phase 0 corpus supplies none) and this builder
+    was not updated with it; the suite went on passing only against a `/tmp` fixture built before
+    the flip, and began failing when `/tmp` was wiped. Every test that addresses an item over
+    `/control/changes` needs an external ID to address it *by*, so this fixture must carry them:
+    opt-in in the product, mandatory here.
     """
     if (bundle_root / "CURRENT").exists():
-        if _bundle_has_identity(bundle_root):
+        if _bundle_is_current_shape(bundle_root):
             return
-        print(f"fixture at {bundle_root} predates contracts r6 (no MANIFEST identity) — rebuilding")
+        print(
+            f"fixture at {bundle_root} is not the shape this harness builds (pre-r6 MANIFEST, or "
+            "no external-id sidecar) — rebuilding"
+        )
         shutil.rmtree(bundle_root)
     ensure_cli_built()
     args = [
@@ -118,21 +131,36 @@ def ensure_fixture_bundle(
     ]
     if limit is not None:
         args += ["--limit", str(limit)]
-    args += ["--mint-id-key"]
+    args += ["--mint-id-key", "--mint-external-ids"]
     subprocess.run(args, cwd=REPO_ROOT, check=True)
 
 
-def _bundle_has_identity(bundle_root: Path) -> bool:
-    """True if `bundle_root`'s manifest carries the r6-required `identity` object.
+def _bundle_is_current_shape(bundle_root: Path) -> bool:
+    """True if `bundle_root` is the bundle *this function builds*: r6 `identity`, and an
+    external-ID sidecar.
 
-    Deliberately tolerant of an unreadable or malformed bundle: anything we cannot confirm as
-    r6-shaped is treated as needing a rebuild. Being wrong in that direction costs a rebuild;
-    being wrong in the other hands every test a bundle the server refuses to open.
+    Both halves are reuse tests, and both were learned the same way. `identity` is the r6 one — an
+    absent object is a typed reader error, not a default, so `tessera serve` refuses the bundle
+    and the failure surfaces as an opaque fixture-setup error rather than "your fixture is stale".
+    `external_id_extents` is the `--mint-external-ids` one: a bundle left behind by a run that
+    predates the flag opens fine and serves fine, and then every test that addresses an item over
+    `/control/changes` fails on a `KeyError` deep inside the oracle. A reuse test that does not
+    check for everything the builder now passes silently pins the suite to the older fixture.
+
+    Deliberately tolerant of an unreadable or malformed bundle: anything that cannot be confirmed
+    is treated as needing a rebuild. Being wrong in that direction costs a rebuild; being wrong in
+    the other hands every test a bundle that is not the one it asked for.
     """
     try:
         current = json.loads((bundle_root / "CURRENT").read_text())
-        manifest_path = bundle_root / current["prefix"] / "MANIFEST.json"
-        return "identity" in json.loads(manifest_path.read_text())
+        prefix_dir = bundle_root / current["prefix"]
+        manifest = json.loads((prefix_dir / "MANIFEST.json").read_text())
+        if "identity" not in manifest:
+            return False
+        segments = json.loads(
+            (prefix_dir / "partitions" / "default" / "SEGMENTS-0.json").read_text()
+        )
+        return bool(segments.get("external_id_extents"))
     except (OSError, KeyError, ValueError):
         return False
 
