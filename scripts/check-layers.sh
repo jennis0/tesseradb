@@ -80,4 +80,15 @@ if ! grep -q "stage_timing.unwrap_or(false)" crates/tessera-server/src/config.rs
   fail=1
 fi
 
+# ---------------------------------------------------------------------------------------------
+# Track A, Task 2. I7 / plan §6: "This warrants a comment in the source, not just a line in a
+# document." The candidate-list route is DECLINED (Phase 2 roadmap, owner ruling 1) and the
+# reasoning lives in `select.rs`'s module doc. A comment CI cannot notice being deleted is a
+# comment that will be deleted -- and the deletion this guards against ("simplify: drop the
+# direct path") reintroduces tippecanoe's empty-tile cliff silently, for the sparsest principals.
+if ! grep -q "NO CANDIDATE-LIST ROUTE" crates/tessera-engine/src/select.rs; then
+  echo "FAIL: select.rs has lost the 'NO CANDIDATE-LIST ROUTE' block (I7, plan §6)"
+  fail=1
+fi
+
 exit $fail

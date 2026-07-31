@@ -164,7 +164,11 @@ morton column is shared), so this verdict covers every label set. What survives:
 3.88M), and a tile whose whole range lies inside one such cell is fully id-sorted, so
 C_θ is one binary search and the served set a prefix; the gate is two loads
 (`morton[start] == morton[end−1]`). Candidate fourth tier for the B9 framework; costs
-nothing where it does not fire. The section below is retained as the design record.
+nothing where it does not fire. **Perf-ledger item, explicitly not in the stage-2.1 plan**
+(2026-07-31, Track A Task 2): it is a fourth decode tier over the direct route — the
+identical served set from the identical mask, not a candidate list — and it is unscheduled
+alongside B10 and B3/B4 rather than folded into a stage whose subject is the write path.
+The section below is retained as the design record.
 
 **Proposal.** Evaluate the threshold count `C_θ(T)` — "how many visible rows in tile T have
 `tessera_id` below the cut `P_d`" — without reading every visible row. Storage order is
