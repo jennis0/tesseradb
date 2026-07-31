@@ -575,7 +575,14 @@ impl Engine {
     /// makes — with no test able to reach it. This is the fix: a per-`Engine` override, set once
     /// after `Engine::open` and before issuing requests, that the byte-equality tests use to force
     /// the fan-out to engage on a small, fast fixture without changing production behaviour at
-    /// all (the field/method do not exist outside `bench-timing`).
+    /// all — **fix round 2 correction: only the SETTER below is `bench-timing`-gated; the
+    /// `serial_fallback_max_rows` field itself is present in every build and `Engine::viewport`
+    /// always pays one `Relaxed` load of it** (deliberately not `#[cfg]`-gated too — two code
+    /// paths in the hot path would cost auditability for the sake of one relaxed load of a value
+    /// production can never write, negligible against the thousands of other atomic operations a
+    /// request already does). A production build therefore always reads this field, but since
+    /// nothing outside `bench-timing` can ever write it, the load always yields
+    /// `SERIAL_FALLBACK_MAX_ROWS` — behaviourally identical to reading the constant directly.
     ///
     /// **Why per-`Engine`, not global or thread-local state.** `cargo test` runs tests in
     /// parallel by default, each typically constructing its own `Engine`; a process-global would

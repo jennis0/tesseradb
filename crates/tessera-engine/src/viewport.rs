@@ -730,11 +730,16 @@ impl Engine {
             )
         };
 
-        // §14 fix round 1: the threshold is read from `self`, not the constant directly, so
-        // `set_serial_fallback_max_rows_for_test` (session.rs, `bench-timing`-gated, test-only)
-        // can override it per-`Engine` — see that method's doc. In every build without that
-        // feature this is always `SERIAL_FALLBACK_MAX_ROWS` (nothing else ever writes the field),
-        // so production behaviour is unchanged; the extra atomic load is the entire cost.
+        // §14 fix round 1/2: the threshold is read from `self`, not the constant directly, so
+        // `set_serial_fallback_max_rows_for_test` (session.rs, test-only) can override it per-
+        // `Engine` — see that method's doc. **The `serial_fallback_max_rows` field and this load
+        // are unconditional — present and paid in EVERY build, not just `bench-timing` ones.**
+        // Only the setter method is `bench-timing`-gated; nothing outside it ever writes the
+        // field, so in a build without that feature (every shipped binary) this load always
+        // yields `SERIAL_FALLBACK_MAX_ROWS` — behaviourally identical to reading the constant
+        // directly, at the cost of one `Relaxed` atomic load, negligible against the request's
+        // own atomic operations elsewhere. Deliberately not `#[cfg]`-gated to a second code path
+        // here too: that would cost more to audit than the load itself costs to run.
         let serial_fallback_max_rows = self.serial_fallback_max_rows.load(Ordering::Relaxed);
         let tile_outcomes: Vec<Result<Option<TileResult>>> =
             if should_fold_serially(total_rows_in_ranges, serial_fallback_max_rows) {
