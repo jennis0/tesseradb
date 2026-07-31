@@ -2300,6 +2300,107 @@ fn f1_selection_visits_exactly_the_visible_set() {
     );
 }
 
+/// **§14.2 calibration report: `rows_in_ranges` must be mask-independent, and Task 6's tile-loop
+/// restructure silently broke that.**
+///
+/// `rows_in_ranges`'s own doc (`timing.rs`) says it is `Σ range.len()` over resolved tiles —
+/// spanned rows, authorised or not — and that C4's leak-register numerator
+/// (`rows_in_ranges - sigma_visible`, "rows scanned that this principal cannot see") depends on
+/// that being true regardless of the session's mask. But `tile_result` counted `range.len()` into
+/// its local `TileStats` before the `visible == 0` check, and returned `Ok(None)` on that branch —
+/// which `Engine::viewport`'s fold discards entirely (`let Some(tr) = outcome? else { continue };`
+/// never reaches `TileStats::fold_into`). So a grant that leaves a tile empty silently dropped that
+/// tile's rows from the total. A zero-coverage grant leaves EVERY touched tile empty, so under the
+/// bug `rows_in_ranges` collapsed to 0 for it while a full-coverage grant over the identical
+/// viewport reported the true row-span — measured at a 26x gap on a real corpus (calibration
+/// report §14.2: 303,173,705 vs 11,610,284 under two grants at the same shape, 1e9).
+///
+/// This test pins the fix at unit-test scale: same viewport, same `rows_in_ranges`, regardless of
+/// which tiles the grant leaves empty — and regardless of whether the request took the serial fold
+/// or the `pool.install` fan-out (`Engine::set_serial_fallback_max_rows_for_test` forces the
+/// latter on this otherwise-far-below-threshold fixture). `tiles_resolved` is checked alongside it
+/// per the same defect's "CHECK" brief — it turns out NOT to share the bug: it is counted once
+/// over `tiles_for_bbox`'s output, in the serial prefix, before any per-tile mask check, so it was
+/// already mask-independent by construction.
+#[cfg(feature = "bench-timing")]
+#[test]
+fn rows_in_ranges_is_mask_independent() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = open_engine_uncapped(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+
+    // Non-degenerate zoom/bbox (multiple candidate tiles) — same shape as
+    // `tile_counts_match_brute_force_at_a_non_degenerate_zoom_and_bbox_subset`.
+    const ZOOM: u8 = 4;
+    let bbox = [0.0, 0.0, 250.0, 250.0];
+    let request = || ViewportRequest::new("s0", ZOOM, bbox, N_ITEMS as usize);
+
+    let full_session = engine.authorise(&full_coverage_credential()).unwrap();
+    let zero_session = engine.authorise(&zero_credential()).unwrap();
+
+    // Serial fold: this fixture is far below `SERIAL_FALLBACK_MAX_ROWS`, so both requests take it
+    // by default.
+    let full_out = engine.viewport(&full_session, request()).unwrap();
+    let zero_out = engine.viewport(&zero_session, request()).unwrap();
+
+    assert!(
+        full_out.timings.enabled,
+        "built with bench-timing, so timings must be real"
+    );
+    assert!(
+        !full_out.tiles.is_empty(),
+        "the full-coverage grant must see at least one non-empty tile for this comparison to \
+         mean anything"
+    );
+    assert!(
+        zero_out.tiles.is_empty(),
+        "the zero-coverage grant must see nothing -- every touched tile empty is this test's \
+         whole point (the bug's early-return-discards-stats path)"
+    );
+    assert!(
+        full_out.timings.rows_in_ranges > 0,
+        "the full-coverage run must have spanned some rows for this to be a real comparison"
+    );
+    assert_eq!(
+        full_out.timings.rows_in_ranges, zero_out.timings.rows_in_ranges,
+        "rows_in_ranges is documented mask-independent (Sigma range.len() over resolved tiles) \
+         -- it must not depend on which tiles the grant leaves empty (serial fold): {} (full) vs \
+         {} (zero)",
+        full_out.timings.rows_in_ranges, zero_out.timings.rows_in_ranges
+    );
+    assert_eq!(
+        full_out.timings.tiles_resolved, zero_out.timings.tiles_resolved,
+        "tiles_resolved is also mask-independent -- counted once over tiles_for_bbox's output, \
+         before any per-tile mask check"
+    );
+
+    // Parallel fan-out: force both requests through `pool.install` via the test-only threshold
+    // override, and check the same equality holds there, and against the serial fold above.
+    engine.set_serial_fallback_max_rows_for_test(0);
+    let full_out_par = engine.viewport(&full_session, request()).unwrap();
+    let zero_out_par = engine.viewport(&zero_session, request()).unwrap();
+
+    assert_eq!(
+        full_out_par.timings.rows_in_ranges, zero_out_par.timings.rows_in_ranges,
+        "rows_in_ranges must stay mask-independent under the parallel fan-out too"
+    );
+    assert_eq!(
+        full_out_par.timings.rows_in_ranges, full_out.timings.rows_in_ranges,
+        "rows_in_ranges must agree between the serial fold and the parallel fan-out over the \
+         identical viewport"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Concurrency — D-C cooperative cancellation (the rapid-pan case)
 // ---------------------------------------------------------------------------------------------

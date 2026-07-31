@@ -677,8 +677,22 @@ impl Engine {
         // on. Before this fix a saturated underlay (`max_underlay_cells`, default 8192) was
         // invisible to this decision entirely, regardless of how large the resulting per-tile
         // sub-cell fan-out actually was.
-        let total_rows_in_ranges: u64 =
-            ranges.iter().map(|r| r.len() as u64).sum::<u64>() + underlay_cells_demanded;
+        //
+        // §14.2 fix: this is also `StageTimings::rows_in_ranges`'s whole value, computed here
+        // rather than accumulated per-tile inside `tile_result`. It used to be counted into each
+        // tile's `TileStats` before that tile's own `visible == 0` check, but a tile that fails
+        // that check returns `Ok(None)`, and `Engine::viewport`'s fold below discards `Ok(None)`
+        // entirely (`let Some(tr) = outcome? else { continue };`) — so a grant that left a tile
+        // empty silently dropped that tile's rows from the total, making a field documented as
+        // mask-independent (`rows_in_ranges - sigma_visible` is C4's leak-register numerator, and
+        // that subtraction is meaningless if the minuend already has the mask baked in) actually
+        // depend on the session's mask. `ranges` is already materialised here, before the tile
+        // sweep starts and before any mask is consulted, so summing it once is mask-free by
+        // construction and cannot regress the same way — see `TileStats`'s doc, which no longer
+        // carries this field at all, for the other half of this fix.
+        let rows_in_ranges: u64 = ranges.iter().map(|r| r.len() as u64).sum();
+        probe.count(|t| &mut t.rows_in_ranges, rows_in_ranges);
+        let total_rows_in_ranges: u64 = rows_in_ranges + underlay_cells_demanded;
 
         // D-D/D-F, calibrated: below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_result` in place —
         // same function, same input order, no `pool.install` — since below that line the fan-out's
@@ -968,8 +982,13 @@ fn tile_result(
         return Ok(None);
     };
 
+    // §14.2 fix: `rows_in_ranges` is no longer counted here. It is now summed once, mask-free,
+    // over `ranges` in `Engine::viewport`'s serial prefix — see that call site's comment. Counting
+    // it per-tile put it in `TileStats`, whose contribution this function's `Ok(None)` returns
+    // (this one included, three lines below) cause `Engine::viewport`'s fold to discard outright —
+    // silently making a documented-mask-independent field depend on which tiles a grant leaves
+    // empty.
     let mut stats = TileProbe::new();
-    stats.count(|t| &mut t.rows_in_ranges, range.len() as u64);
 
     let visible = mask.count_range(range.clone());
     stats.lap(|t| &mut t.count_ns);
