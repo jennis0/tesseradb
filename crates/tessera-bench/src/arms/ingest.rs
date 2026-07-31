@@ -32,10 +32,14 @@
 //!
 //! Two caveats on that extrapolation, both load-bearing:
 //!
-//! * `overlay_soft_limit`, `flush_max_items` and `flush_max_age` are **design-document values, not
-//!   implemented** — they appear nowhere in `tessera-server`'s config or in the engine. There is
-//!   no limit in code today, so the buffer grows without bound and the extrapolation has no
-//!   ceiling rather than a 500,000 one.
+//! * SA §7's overlay/flush bounds were **design-document values, not implemented** when this was
+//!   measured, and the extrapolation therefore had no ceiling rather than a 500,000 one. Phase 2
+//!   stage 2.1 Task 0b landed them as parsed, validated config keys, which does **not** change
+//!   the caveat: the overlay bound alarms and does not fold (there is no fold until stage 2.3),
+//!   and the flush bounds are inert until stage 2.2 gives them a consumer. The buffer still grows
+//!   without bound in code, so this extrapolation stands as written. (The keys are deliberately
+//!   not named here: `tessera-server`'s config module asserts mechanically that nothing outside
+//!   it names the flush ones while they are inert.)
 //! * The measured ~10 ns/item is a **lower bound**. None of the buffered rows are visible (see
 //!   below), so `compose` iterates the buffer and *rejects* every entry at `perm.row_of`. Rows
 //!   that resolved would additionally push into `pass_rows`/`fail_rows` and build the diff

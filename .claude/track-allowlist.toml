@@ -1,0 +1,89 @@
+# Stage 2.1 file ownership — the allowlist behind `scripts/check-track-allowlist.sh`.
+#
+# Transcribed from the stage-2.1 plan's "How the work parallelises" table
+# (docs/superpowers/plans/2026-07-31-phase2-roadmap-and-stage-2.1.md), including the two
+# corrections that revision makes to r1's map: `check_bearer` lives in `state.rs`, so its fix is
+# Track C's, and `error.rs`/`health.rs` are Track B's (Task 3b needs both).
+#
+# The rule this file gives teeth to is the plan's rule 3: "Ownership is an allowlist, not an
+# intention." A track that discovers it needs a file outside its list **stops and reports** — the
+# controller either reassigns the file or sequences the two tracks. Editing this file to make a
+# check pass is the failure mode it exists to prevent; it is a controller decision, recorded with
+# its reason, never a worker's convenience.
+#
+# Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/` — that is
+# why `crates/tessera-lifecycle/**` covers the whole subtree. Paths are repo-relative, exactly as
+# `git diff --name-only` prints them.
+#
+# Not listed, because git never sees them: `.superpowers/**` (the SDD ledgers and briefs) is
+# gitignored, so each track's `progress-<track>.md` can never show up in a diff.
+
+# Files more than one track legitimately touches. Every one of these is expected to conflict
+# textually at merge and is reviewed at integration — the plan's merge protocol already assumes
+# this ("C rebases onto B's merged head ... both moved code out of session.rs and their residual
+# edits to Engine::open will conflict textually even though they are semantically disjoint").
+# Nothing here is a licence to edit another track's *logic*; it is a licence to touch a
+# construction site.
+[shared]
+paths = [
+  # Engine::open constructs both B's WritePath and C's PinManager/RowProjectionCache. The plan's
+  # ownership table lists neither this file nor server/src/lib.rs — see the Task 0b report; the
+  # plan's own merge protocol proves this one is shared.
+  "crates/tessera-engine/src/session.rs",
+  # Declares the modules both tracks' files live in, and holds `Generation`.
+  "crates/tessera-engine/src/lib.rs",
+  # `prepare`/`run`: builds EngineConfig from Config and mounts all three routers. Task 3b's
+  # readiness wiring ("touches all three routers") and any Task 5 config-to-cache wiring both
+  # land here.
+  "crates/tessera-server/src/lib.rs",
+  # Manifests and the lockfile: a dependency change is regenerable and reviewed at integration,
+  # never a silent claim on another track's code.
+  "Cargo.lock",
+  "crates/*/Cargo.toml",
+]
+
+# Track A — store and reader. Tasks 1, 2.
+# `scripts/check-layers.sh` is shared with Track B by the plan's own arrangement: "touched by A
+# and B — split by rule, each track appending its own, reviewed together at integration".
+[track.a]
+paths = [
+  "crates/tessera-store/src/read.rs",
+  "crates/tessera-store/src/manifest.rs",
+  "crates/tessera-store/src/error.rs",
+  "crates/tessera-store/tests/bundle_read.rs",
+  "crates/tessera-engine/src/select.rs",
+  "scripts/check-layers.sh",
+]
+
+# Track B — the writer. Tasks 3a, 3b, 6, 7a, 7b, 8, 9, 10.
+[track.b]
+paths = [
+  "crates/tessera-lifecycle/**",
+  "crates/tessera-engine/src/write.rs",
+  "crates/tessera-server/src/control.rs",
+  "crates/tessera-server/src/error.rs",
+  "crates/tessera-server/src/health.rs",
+  "crates/tessera-server/tests/http_write.rs",
+  "scripts/check-layers.sh",
+]
+
+# Track C — engine state. Tasks 4, 5.
+[track.c]
+paths = [
+  "crates/tessera-engine/src/pins.rs",
+  "crates/tessera-engine/src/cache.rs",
+  "crates/tessera-authz/src/fragment.rs",
+  "crates/tessera-authz/src/single_flight.rs",
+  "crates/tessera-server/src/state.rs",
+  "crates/tessera-server/src/session.rs",
+  "crates/tessera-engine/tests/pins.rs",
+  "crates/tessera-engine/tests/cache.rs",
+]
+
+# Track T — the standing conformance track. Branches from 9f2424a and touches no crate the seam
+# moves, which is why it can start immediately.
+[track.t]
+paths = [
+  "reference/**",
+  "conformance/**",
+]
