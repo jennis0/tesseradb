@@ -89,8 +89,7 @@ use std::time::Duration;
 use tessera_build::{BuildArgs, BuildObserver, BuildStage};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::wal::WalRow;
-use tessera_lifecycle::PendingItem;
+use tessera_lifecycle::UnallocatedRow;
 use tessera_plugin::Passthrough;
 use tessera_spatial::Extent;
 use tessera_store::read::open_bundle;
@@ -299,47 +298,31 @@ pub fn run_build(
 // Modes: batch and continuous
 // ---------------------------------------------------------------------------------------------
 
-/// Synthetic rows to ingest, with entity IDs allocated the way the control plane allocates them.
+/// Synthetic rows to ingest, in the shape the control plane submits them.
 ///
 /// Terms are real dictionary terms so the buffered items are genuinely *visible* to the reading
 /// principal — ingesting items the reader cannot see would exercise none of the composition path
 /// and would make the F2 measurement meaningless.
 ///
-/// **Entity IDs come from `Engine::allocate_sorted`, not from a counter.** Assignment is
-/// signature-sorted and permanent under I9; `/control/ingest` goes through the allocator
-/// (`control.rs:329-354`) and so must this, or the buffered items would carry IDs inconsistent
-/// with the allocator's high-water mark and the measurement would describe a state the system
-/// cannot reach.
-fn synth_rows(
-    engine: &Engine,
-    count: usize,
-    start: u64,
-    terms: &[TermId],
-) -> Result<(Vec<WalRow>, Vec<Vec<TermId>>)> {
-    let mut pending: Vec<PendingItem> = (0..count)
-        .map(|i| PendingItem {
-            external_id: Some(format!("bench-{}", start + i as u64).into_bytes()),
-            terms: terms.to_vec(),
-            entity_id: None,
+/// **Entity IDs still come from the allocator, not from a counter** — they are simply assigned one
+/// layer further in. Phase 2 stage 2.1 (Task 3a) moved signature-sorted assignment off the handler
+/// and onto the write executor, so `/control/ingest` now submits `UnallocatedRow`s and the thread
+/// that owns the WAL assigns the ids (`control.rs`). This helper follows, so it keeps describing a
+/// state the system can actually reach — which was the whole point of the note this replaces.
+fn synth_rows(count: usize, start: u64, terms: &[TermId]) -> Vec<UnallocatedRow> {
+    (0..count)
+        .map(|i| {
+            let n = start + i as u64;
+            UnallocatedRow {
+                external_id: Some(format!("bench-{n}").into_bytes()),
+                descriptors: Vec::new(),
+                x: ((n * 37) % 65536) as f32,
+                y: ((n * 53) % 65536) as f32,
+                scalars: Vec::new(),
+                terms: terms.to_vec(),
+            }
         })
-        .collect();
-    engine.allocate_sorted(&mut pending)?;
-
-    let mut rows = Vec::with_capacity(count);
-    let mut row_terms = Vec::with_capacity(count);
-    for (i, item) in pending.into_iter().enumerate() {
-        let n = start + i as u64;
-        rows.push(WalRow {
-            external_id: item.external_id,
-            entity_id: item.entity_id.expect("allocate_sorted assigns every item"),
-            descriptors: Vec::new(),
-            x: ((n * 37) % 65536) as f32,
-            y: ((n * 53) % 65536) as f32,
-            scalars: Vec::new(),
-        });
-        row_terms.push(terms.to_vec());
-    }
-    Ok((rows, row_terms))
+        .collect()
 }
 
 /// Batch ingest: ack latency as a function of batch size.
@@ -381,7 +364,7 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
             ));
             let _ = std::fs::remove_dir_all(&tmp);
             std::fs::create_dir_all(&tmp)?;
-            let engine = Engine::open(
+            let mut engine = Engine::open(
                 &fixture.root,
                 &tmp.join("cache"),
                 &tmp.join("wal.log"),
@@ -403,15 +386,19 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     pins_per_session_max: 4,
                 },
             )?;
+            // Phase 2 stage 2.1 (Task 3a): the WAL now lives on a dedicated executor thread, so an
+            // engine that writes must start one. Bound is generous — this harness never means to
+            // measure queue-full backpressure, only ack latency.
+            engine.start_write_executor(1024)?;
 
             let mut next_id = 0u64;
             let mut samples = Vec::new();
             for rep in 0..ctx.repeat {
-                let (rows, terms) = synth_rows(&engine, batch, next_id, &grant.terms)?;
+                let rows = synth_rows(batch, next_id, &grant.terms);
                 next_id += batch as u64;
                 let batch_id = format!("bench-{batch}-{rep}");
                 let start = std::time::Instant::now();
-                engine.accept_ingest(rows, terms, batch_id, [rep as u8; 32])?;
+                engine.accept_ingest(rows, batch_id, [rep as u8; 32])?;
                 samples.push(start.elapsed().as_nanos() as u64);
             }
 
@@ -489,7 +476,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
         ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp)?;
-        let engine = Engine::open(
+        let mut engine = Engine::open(
             &fixture.root,
             &tmp.join("cache"),
             &tmp.join("wal.log"),
@@ -511,6 +498,10 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 pins_per_session_max: 4,
             },
         )?;
+        // Phase 2 stage 2.1 (Task 3a): the WAL now lives on a dedicated executor thread, so an
+        // engine that writes must start one. Bound is generous — this harness never means to
+        // measure queue-full backpressure, only ack latency.
+        engine.start_write_executor(1024)?;
         let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;
 
         // One fixed viewport for the whole run: the reader's geometry must not vary, or a change
@@ -533,10 +524,10 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
         let mut next_id = 0u64;
         for &checkpoint in checkpoints {
             while buffered < checkpoint {
-                let (rows, terms) = synth_rows(&engine, 1, next_id, &grant.terms)?;
+                let rows = synth_rows(1, next_id, &grant.terms);
                 next_id += 1;
                 let start = std::time::Instant::now();
-                engine.accept_ingest(rows, terms, format!("c-{next_id}"), [0u8; 32])?;
+                engine.accept_ingest(rows, format!("c-{next_id}"), [0u8; 32])?;
                 let ack_ns = start.elapsed().as_nanos() as u64;
                 buffered += 1;
                 std::hint::black_box(ack_ns);
@@ -564,11 +555,11 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
 
             // The ack cost right now, measured cleanly rather than sampled mid-stream.
             let ack_now = {
-                let (rows, terms) = synth_rows(&engine, 1, next_id, &grant.terms)?;
+                let rows = synth_rows(1, next_id, &grant.terms);
                 next_id += 1;
                 buffered += 1;
                 let start = std::time::Instant::now();
-                engine.accept_ingest(rows, terms, format!("c-probe-{next_id}"), [0u8; 32])?;
+                engine.accept_ingest(rows, format!("c-probe-{next_id}"), [0u8; 32])?;
                 start.elapsed().as_nanos() as u64
             };
 

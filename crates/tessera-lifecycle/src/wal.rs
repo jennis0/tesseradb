@@ -473,6 +473,20 @@ impl Wal {
         }
     }
 
+    /// Whether a previous write failed part-way through, leaving `self.len` unable to name a
+    /// record boundary. Every subsequent `append`/`fsync` on this handle refuses with
+    /// [`WalError::Poisoned`].
+    ///
+    /// **This is the source of truth for the executor's not-ready posture** (lifecycle §4, plan
+    /// Task 3a). The executor mirrors *this* rather than remembering that it once saw an `Err`,
+    /// because a posture derived from the executor's own bookkeeping is a posture that can drift
+    /// from the thing it claims to describe. Poisoning is set in exactly three places — `append`'s
+    /// error arm and `fsync`'s two — and this accessor is how anything outside this module learns
+    /// about it, since the field is private and must stay so.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
     /// Flushes buffered appends to durable storage and advances the sidecar's last-fsync offset
     /// to match. Returns the new durable offset. The ack contract must not return 200 until this
     /// has returned `Ok`.
@@ -514,5 +528,136 @@ impl Wal {
                 Err(WalError::Io(e))
             }
         }
+    }
+}
+
+/// The write executor's **sole** WAL handle: a [`Wal`] owned by value, plus the counters and — in
+/// test builds — the fault switches that make the ack contract observable (Phase 2 stage 2.1,
+/// Task 3a).
+///
+/// ## Why the executor holds this rather than a bare `Wal`
+///
+/// Two things need to hang off every append and fsync, and neither belongs inside [`Wal`]:
+///
+/// - **The counters** ([`WalMeter`]), which are production telemetry. Task 7a's group commit is
+///   *defined* by "one fsync per window" and is measured in exactly this number; the ingest
+///   baseline memo's ~3.2 ms floor is a cost per unit of it. `Wal` should stay a file format and a
+///   positional CRC rule, so the counting lives one layer out.
+/// - **The fault switches**, which must not exist in a shipped binary at all (see
+///   [`crate::faults`]). Putting a `#[cfg]` inside the durability primitive would mean the type
+///   the whole fail-closed story rests on compiles differently in test and in production. Wrapping
+///   it means `Wal` is byte-for-byte the same type either way.
+///
+/// ## Poisoning is mirrored, never remembered
+///
+/// [`Self::is_poisoned`] is `self.wal.is_poisoned() || self.injected_poison` — asked of the WAL on
+/// every call, never cached from the last error the executor happened to see. A posture derived
+/// from the executor's own bookkeeping can drift from the thing it claims to describe; one derived
+/// from the WAL cannot. This is the value stage 2.1's not-ready posture is built on (lifecycle §4).
+///
+/// An **injected** failure follows the real sequence exactly — `Io` on the failing call, `Poisoned`
+/// on every call after it — for the reason argued at length in [`crate::faults`]: the first call's
+/// variant is the one the 500 mapping, the operator alarm and the deny apply-anyway branch all
+/// switch on, so a harness that got it wrong would be testing itself.
+pub struct ExecutorWal {
+    wal: Wal,
+    meter: std::sync::Arc<crate::faults::WalMeter>,
+    /// Set by an injected failure, so injection poisons the *handle* exactly as a real I/O error
+    /// poisons the `Wal` — otherwise `a_poisoned_wal_trips_the_not_ready_posture` would be
+    /// asserting a property of the switchboard.
+    #[cfg(feature = "fault-injection")]
+    injected_poison: bool,
+    #[cfg(feature = "fault-injection")]
+    faults: Option<std::sync::Arc<crate::faults::FaultSwitchboard>>,
+}
+
+impl ExecutorWal {
+    /// Take ownership of `wal`. There is exactly one of these per partition and it lives on the
+    /// executor thread — that single ownership *is* the ordering guarantee stage 2.1 delivers, in
+    /// place of Phase 1's `Mutex<Wal>` plus a fourteen-line comment explaining that holding it
+    /// across append→fsync→apply→swap was load-bearing.
+    pub fn new(wal: Wal, meter: std::sync::Arc<crate::faults::WalMeter>) -> Self {
+        ExecutorWal {
+            wal,
+            meter,
+            #[cfg(feature = "fault-injection")]
+            injected_poison: false,
+            #[cfg(feature = "fault-injection")]
+            faults: None,
+        }
+    }
+
+    /// Arm this handle with a fault switchboard. Test builds only.
+    #[cfg(feature = "fault-injection")]
+    pub fn with_faults(mut self, faults: std::sync::Arc<crate::faults::FaultSwitchboard>) -> Self {
+        self.faults = Some(faults);
+        self
+    }
+
+    /// Whether this handle refuses every further operation — the WAL's own poison, or an injected
+    /// one. See the type doc: mirrored on every call, never cached.
+    pub fn is_poisoned(&self) -> bool {
+        #[cfg(feature = "fault-injection")]
+        {
+            self.injected_poison || self.wal.is_poisoned()
+        }
+        #[cfg(not(feature = "fault-injection"))]
+        {
+            self.wal.is_poisoned()
+        }
+    }
+
+    pub fn append(&mut self, rec: &WalRecord) -> Result<()> {
+        #[cfg(feature = "fault-injection")]
+        if let Some(injected) = self.injected_failure(|f| f.take_append_failure()) {
+            return Err(injected);
+        }
+        let out = self.wal.append(rec);
+        if out.is_ok() {
+            self.meter.record_append();
+            #[cfg(feature = "fault-injection")]
+            if let Some(faults) = &self.faults {
+                faults.record(crate::faults::Step::Append);
+            }
+        }
+        out
+    }
+
+    pub fn fsync(&mut self) -> Result<u64> {
+        #[cfg(feature = "fault-injection")]
+        if let Some(injected) = self.injected_failure(|f| f.take_fsync_failure()) {
+            return Err(injected);
+        }
+        let out = self.wal.fsync();
+        if out.is_ok() {
+            self.meter.record_fsync();
+            #[cfg(feature = "fault-injection")]
+            if let Some(faults) = &self.faults {
+                faults.record(crate::faults::Step::Fsync);
+            }
+        }
+        out
+    }
+
+    /// `Some(err)` when this call must fail: either the handle is already poisoned (real or
+    /// injected), or `take` armed a fresh failure. The two cases return **different** variants, and
+    /// that is the whole fidelity rule — see [`crate::faults`].
+    #[cfg(feature = "fault-injection")]
+    fn injected_failure(
+        &mut self,
+        take: impl Fn(&crate::faults::FaultSwitchboard) -> bool,
+    ) -> Option<WalError> {
+        if self.injected_poison {
+            return Some(WalError::Poisoned);
+        }
+        let faults = self.faults.as_ref()?;
+        if !take(faults) {
+            return None;
+        }
+        self.injected_poison = true;
+        Some(WalError::Io(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "injected disk-full (fault-injection build only)",
+        )))
     }
 }

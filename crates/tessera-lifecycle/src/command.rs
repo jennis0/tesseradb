@@ -142,6 +142,14 @@ impl Command {
     ///
     /// Two consequences to choose rather than discover (plan Task 3a): a sustained deny flood
     /// starves ingest completely, and this queue is unbounded in memory.
+    ///
+    /// **A NEW VARIANT DEFAULTS TO THE BOUNDED, SHEDDABLE LANE.** This is a `matches!` over one
+    /// variant, so stage 2.2's `Flush` and stage 2.3's `Compact` are sheddable the moment they are
+    /// added and nothing warns about it. That default is right for those two — a flush that cannot
+    /// be admitted is backpressure working — but it is the wrong default for anything a caller is
+    /// owed an unrefusable answer to, and adding a variant without visiting this line is how such a
+    /// thing ships. There is no `submit_deny` to reach for instead: the lane follows the command,
+    /// and this function is the whole of the rule.
     pub fn is_never_shed(&self) -> bool {
         matches!(self, Command::Change { .. })
     }
@@ -215,6 +223,15 @@ pub enum ExecError {
     /// to treat the WAL as the problem rather than to retry the suppression. For every other
     /// command nothing is applied. The op is the caller's own, so the caller can tell which case
     /// it is in.
+    ///
+    /// **At batch scope, one of these does not stop the batch.** A `/control/changes` request is a
+    /// list, and `tessera-server`'s `run_changes` submits **every** validated item even after one
+    /// of them fails this way, then reports the first failure. That matters because
+    /// [`crate::wal::WalError::Poisoned`] is a sustained posture, not a transient: a batch against
+    /// a poisoned node would otherwise apply exactly its first item on every retry until the WAL is
+    /// reopened, leaving the rest of the denies unapplied under a 500 that says durability is owed.
+    /// So the 500 means "at least one item is in force but not durable, and every deny in the
+    /// request was attempted", never "the batch was refused".
     Wal(WalError),
     /// Entity-ID assignment refused (I9's `u32` ceiling) → HTTP 500, fail closed. The batch has
     /// no effect: `Allocator::allocate` leaves the high-water mark unchanged on this path.
@@ -226,6 +243,22 @@ pub enum ExecError {
     /// Evaluated on the executor rather than in the handler, which is why it is an [`ExecError`]
     /// and not something the handler decides before submitting.
     BatchConflict { batch_id: String },
+    /// `count` of this batch's rows name an external id the live map **already** holds → HTTP 409,
+    /// no effect (contracts §3.1's duplicate row).
+    ///
+    /// **A backstop, not the primary check.** `/control/ingest` already rejects duplicates in the
+    /// handler, with a detail naming them. But the live map is written at *apply* time, and Task 3a
+    /// moved apply behind a queue — so between a handler's check and the executor's insert there is
+    /// now a whole drain, and a client retry under a **fresh** `batch_id` can pass the handler check
+    /// twice. Without this the second insert silently overwrites the first, and the first item
+    /// stays visible, byte-identical to a suppressed one, and reachable by **no external id at
+    /// all** — so no deny can ever name it. Re-checked on the one thread that also performs the
+    /// insert, so check and apply cannot be separated (Task 3a security review, C1).
+    ///
+    /// Carries a **count, never the ids**: this reaches a response body, and an external id is
+    /// caller-supplied data `tessera-server`'s `error.rs` keeps out of one. The handler's own check
+    /// is the one that names them, to the caller who supplied them.
+    DuplicateExternalId { count: usize },
 }
 
 impl std::fmt::Display for ExecError {
@@ -236,6 +269,11 @@ impl std::fmt::Display for ExecError {
             ExecError::BatchConflict { batch_id } => write!(
                 f,
                 "batch id '{batch_id}' was already submitted with a different body"
+            ),
+            ExecError::DuplicateExternalId { count } => write!(
+                f,
+                "{count} row(s) name an external id this deployment already knows; the batch had \
+                 no effect"
             ),
         }
     }

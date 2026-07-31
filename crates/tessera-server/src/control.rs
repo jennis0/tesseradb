@@ -21,10 +21,10 @@ use base64::Engine as _;
 use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
-use tessera_lifecycle::{ChangeOp, PendingItem, WalRow, WalScalar};
+use tessera_lifecycle::{ChangeOp, UnallocatedRow, WalScalar};
 use tessera_types::{EntityId, TermId};
 
-use crate::error::{map_join_error, map_store_error, map_wal_error, ApiError};
+use crate::error::{map_accept_error, map_join_error, map_store_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
@@ -321,54 +321,37 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
         )));
     }
 
-    let mut pending: Vec<PendingItem> = items
+    // The rows go to the executor **unallocated**: entity-id assignment moved off the handler at
+    // Task 3a and happens on the single writer thread, per command now and per commit window at
+    // Task 7a. That is what makes design §11.1's signature-sort scope the *server's* window rather
+    // than whatever chunk size a client happened to pick — and it is why this handler no longer
+    // calls `allocate_sorted` at all. Calling it here after this change would double-allocate.
+    let rows: Vec<UnallocatedRow> = items
         .iter()
         .zip(&terms_per_item)
-        .map(|(item, terms)| PendingItem {
-            external_id: item.external_id.clone(),
-            terms: terms.clone(),
-            entity_id: None,
-        })
-        .collect();
-    // I9/§11.1: signature-sorted assignment, from day one, permanent. The allocator refuses
-    // rather than issue an ID at or above the u32 ceiling (plan Important I-1) -- fail closed,
-    // never silently truncate or wrap.
-    state
-        .engine
-        .allocate_sorted(&mut pending)
-        .map_err(|e| ApiError::FailClosed(e.to_string()))?;
-
-    let rows: Vec<WalRow> = items
-        .iter()
-        .zip(pending.iter())
         .zip(descriptor_lists.iter())
-        .map(|((item, pending_item), descriptors)| WalRow {
+        .map(|((item, terms), descriptors)| UnallocatedRow {
             external_id: item.external_id.clone(),
-            entity_id: pending_item
-                .entity_id
-                .expect("allocate_sorted assigns every item"),
             descriptors: descriptors.clone(),
             x: item.x,
             y: item.y,
             scalars: item.scalars.clone(),
+            terms: terms.clone(),
         })
         .collect();
 
-    // The ack contract, atomically: WAL append -> fsync -> apply+swap -> 200. Never 200 without
-    // fsync. `Engine::accept_ingest` holds the WAL lock across the whole sequence (Critical 1
-    // fix), so this can never race a concurrent `/control/changes` acceptance into a lost-update
-    // generation swap.
+    // The ack contract, on the executor: allocate -> WAL append -> fsync -> apply+swap -> 200.
+    // Never 200 without fsync. Ordering is now a consequence of single ownership rather than of a
+    // mutex held across four steps (see `tessera_engine`'s `write` module).
     let accepted = rows.len() as u64;
     let entity_ids = state
         .engine
-        .accept_ingest(rows, terms_per_item, batch_id, body_hash)
+        .accept_ingest(rows, batch_id, body_hash)
         .map_err(|e| {
-            // Batch-level context, kept alongside `map_wal_error`'s own `error!` (which carries
-            // `e`'s Display — this crate rule closes error.rs:3-7's door, see that function's
-            // doc) rather than folded into one line, so an operator sees both without the body
-            // ever carrying either.
-            tracing::error!("wal append/fsync failed for an ingest batch");
-            map_wal_error(e)
+            // Batch-level context, kept alongside the mapper's own `error!` rather than folded into
+            // one line, so an operator sees both without the body ever carrying either.
+            tracing::error!("an ingest batch was refused by the write executor");
+            map_accept_error(e)
         })?;
 
     // Contracts §3.4 (r6): the 200 response returns each accepted row's `tessera_id`, in batch
@@ -461,7 +444,7 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     // the second, apply-only loop below is a different class of failure — an infrastructure
     // fault, not a client-correctable validation error — and is not, and cannot be, rolled back:
     // each item's `Engine::accept_change` call is its own complete ack-contract unit, exactly as
-    // `/control/ingest`'s batches are.)
+    // `/control/ingest`'s batches are. Nor does it abort the second loop; see the comment there.)
     let mut validated = Vec::with_capacity(items.len());
     for item in &items {
         let op = match item.op.as_str() {
@@ -506,40 +489,55 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
         });
     }
 
+    // **Every item is submitted, even after one fails.** The obvious `?` here aborts the batch at
+    // the first failure, and that is fail-open at batch scope now that Task 3a made a WAL failure a
+    // sustained *posture* rather than a one-off: `WalPoisoned` refuses every subsequent append, so
+    // an aborting loop applies exactly the first item of a multi-item change batch, on every retry,
+    // until the WAL is reopened — every other suppression in the request silently unapplied behind
+    // a 500 that reads as "retry for durability". Continuing is strictly more fail-closed and is
+    // this lane's whole ethos (lifecycle §4: never a refusal that leaves a deny unapplied): each
+    // remaining `Delete`/`Suppress` is applied to the live overlay by the executor even though its
+    // append fails, so the items are hidden and the caller still gets a 500.
+    //
+    // The **first** error is the one reported, so the status a caller sees does not depend on which
+    // item happened to fail last. Validation is already wholesale above, so nothing reached here
+    // can be a client-correctable fault: everything below is an infrastructure failure and every
+    // one of them is alarmed individually.
+    let mut first_error = None;
     for change in validated {
-        state
-            .engine
-            .accept_change(
-                change.external_id,
-                change.entity,
-                change.op,
-                change.raw_descriptors,
-            )
-            .map_err(|e| {
-                if matches!(change.op, ChangeOp::Delete | ChangeOp::Suppress) {
-                    // Deny-op append failure (lifecycle §4): `Engine::accept_change` already
-                    // applied the change to the live overlay before returning this error — never
-                    // a refusal that leaves a deny unapplied.
-                    tracing::error!(
-                        op = ?change.op,
-                        "ALARM: wal append/fsync failed for a deny-op change; applied to the \
-                         in-memory overlay anyway (item hidden immediately) and returning 500 — \
-                         durability is owed, caller must retry"
-                    );
-                } else {
-                    tracing::error!(
-                        "wal append/fsync failed for a non-deny change; refusing without applying"
-                    );
-                }
-                // Op-level context above, kept alongside `map_wal_error`'s own `error!` (which
-                // carries `e`'s Display — error.rs:3-7's rule; see that function's doc) rather
-                // than folded into one line, so an operator sees both without the body ever
-                // carrying either.
-                map_wal_error(e)
-            })?;
+        let op = change.op;
+        if let Err(e) = state.engine.accept_change(
+            change.external_id,
+            change.entity,
+            op,
+            change.raw_descriptors,
+        ) {
+            if matches!(op, ChangeOp::Delete | ChangeOp::Suppress) {
+                // Deny-op append failure (lifecycle §4): the executor already applied the
+                // change to the live overlay before returning this error — never a refusal
+                // that leaves a deny unapplied.
+                tracing::error!(
+                    op = ?op,
+                    "ALARM: wal append/fsync failed for a deny-op change; applied to the \
+                     in-memory overlay anyway (item hidden immediately) and returning 500 — \
+                     durability is owed, caller must retry"
+                );
+            } else {
+                tracing::error!(
+                    op = ?op,
+                    "wal append/fsync failed for a non-deny change; refusing without applying"
+                );
+            }
+            if first_error.is_none() {
+                first_error = Some(map_accept_error(e));
+            }
+        }
     }
 
-    Ok(())
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 async fn changes(

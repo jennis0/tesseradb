@@ -20,8 +20,9 @@ use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
 use tessera_authz::{Dict, FragmentCache, FragmentCacheError, FrozenFragment, PostingsReader};
-use tessera_lifecycle::wal::{ChangeOp, WalError, WalRow};
-use tessera_lifecycle::{alloc::PendingItem, OverlayError};
+use tessera_lifecycle::command::UnallocatedRow;
+use tessera_lifecycle::wal::{ChangeOp, WalError};
+use tessera_lifecycle::OverlayError;
 use tessera_plugin::{Descriptor, Plugin, PluginError};
 use tessera_store::manifest::CurrentPointer;
 use tessera_store::read::open_bundle;
@@ -510,7 +511,7 @@ impl Engine {
             config,
             next_token_id: AtomicU64::new(0),
             pins: PinManager::new(config.pin_ttl_secs, config.pins_per_session_max),
-            write: WritePath::new(write_state, generation, dict),
+            write: WritePath::new(write_state, dict),
             external_index,
             identity_key,
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
@@ -748,49 +749,15 @@ impl Engine {
             .external_id_of_checked(entity, self.allocator_high_water())
     }
 
-    /// Allocate entity ids for a freshly-parsed ingest batch, in signature-sorted order (I9/§11.1).
+    /// The body hash and per-row entity ids a batch id was previously accepted with, if any — the
+    /// idempotency check for `/control/ingest`'s replay rule: equal hash -> 200 no-op (returning
+    /// the same `tessera_id`s, via the entity ids here); different hash -> 409.
     ///
-    /// **Caller obligation, in one sentence:** call this *after* every item's `terms` are
-    /// populated (via [`Self::resolve_terms`]) and *before* the batch's `WalRow`s are framed for
-    /// append — the sort key is the term set, and the id it yields is a field of the row the WAL
-    /// will carry. Propagates `AllocError` rather than discarding it: I9's `u32` ceiling is
-    /// reachable, and a partially-assigned batch would frame rows the WAL must never see. See
-    /// `WritePath::allocate_sorted` for the argument.
-    ///
-    /// *(Restated at the Task 0 gate, F5 — the delegator did not previously name the obligation
-    /// at all, and the method it pointed at is `pub(crate)` and so unrendered.)*
-    pub fn allocate_sorted(
-        &self,
-        items: &mut [PendingItem],
-    ) -> std::result::Result<(), tessera_lifecycle::alloc::AllocError> {
-        self.write.allocate_sorted(items)
-    }
-
-    /// Delegates to `WritePath::accepted_batch` (Task 0a moved the idempotency index behind the
-    /// write-path seam); see that method's doc.
+    /// **An accelerant, never the authority.** The same check runs again on the executor, which is
+    /// the only place it can be race-free (see `WritePath`'s executor). A handler consulting this
+    /// is saving a queue round-trip on the common case, not deciding anything.
     pub fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
         self.write.accepted_batch(batch_id)
-    }
-
-    /// Record a batch id as accepted, with the body hash and per-row entity ids it was accepted
-    /// with (the `/control/ingest` idempotency index).
-    ///
-    /// **Caller obligation, in one sentence:** call this only *after* the batch's `IngestBatch`
-    /// record has been WAL-appended and fsynced — the ack contract. This index is an in-memory
-    /// accelerant for the replay check, never itself a durability boundary, so a batch recorded
-    /// ahead of its fsync would answer a retry `200, same ids` for bytes that a crash then loses.
-    /// See `WritePath::record_accepted_batch`.
-    ///
-    /// *(Restated at the Task 0 gate, F5: the delegator named "an ack-contract obligation" without
-    /// stating it, and pointed at a `pub(crate)` method rustdoc does not render.)*
-    pub fn record_accepted_batch(
-        &self,
-        batch_id: String,
-        body_hash: [u8; 32],
-        entity_ids: Vec<EntityId>,
-    ) {
-        self.write
-            .record_accepted_batch(batch_id, body_hash, entity_ids);
     }
 
     /// Compute the wire `tessera_id` for `entity` under this deployment's current shard id and
@@ -809,29 +776,89 @@ impl Engine {
             .forward(generation.bundle.manifest.identity.shard_id, entity)
     }
 
-    /// Delegates to `WritePath::accept_ingest` (Task 0a moved the WAL and the acceptance path
-    /// behind the write-path seam); see that method's doc, which carries the Critical-1
-    /// lost-update argument for holding the WAL lock across append -> fsync -> apply -> swap.
-    pub fn accept_ingest(
-        &self,
-        rows: Vec<WalRow>,
-        terms: Vec<Vec<TermId>>,
-        batch_id: String,
-        body_hash: [u8; 32],
-    ) -> std::result::Result<Vec<EntityId>, WalError> {
-        self.write.accept_ingest(rows, terms, batch_id, body_hash)
+    /// Start this engine's write executor: move the WAL onto a dedicated thread and open the two
+    /// queues every write is submitted through (Phase 2 stage 2.1, Task 3a). **Exactly once.**
+    ///
+    /// ## Why this is a separate call rather than a config field or an `open` parameter
+    ///
+    /// The natural shapes are both closed. `EngineConfig` is a `Copy` struct with no `Default` and
+    /// no `#[non_exhaustive]`, and three of its exhaustive literals live in
+    /// `crates/tessera-engine/tests/viewport.rs`, which stage 2.1 freezes for **every** track;
+    /// `Engine::open` is called with a full positional argument list inside the equally-frozen
+    /// `crates/tessera-server/tests/http.rs`. Either route is a stop-and-report, not an expense.
+    ///
+    /// It is also the better shape on its own merits, which is why it is not merely a workaround:
+    /// **an engine that never ingests starts no thread at all**. Every test, bench, example and
+    /// embedder that only reads gets exactly what it did before, and the one caller that writes
+    /// says so explicitly.
+    ///
+    /// `&mut self` is what makes the WAL's single ownership a borrow-checker fact rather than a
+    /// runtime `take` behind a lock: every caller holds the `Engine` by value before sharing it.
+    pub fn start_write_executor(
+        &mut self,
+        queue_bound: usize,
+    ) -> std::result::Result<(), crate::write::ExecutorStartError> {
+        let generation = Arc::clone(&self.generation);
+        self.write.start_executor(
+            generation,
+            queue_bound,
+            #[cfg(feature = "fault-injection")]
+            None,
+        )
     }
 
-    /// Delegates to `WritePath::accept_change` (Task 0a moved the WAL and the acceptance path
-    /// behind the write-path seam); see that method's doc, which carries the deny-op
-    /// append-failure rule (lifecycle §4) and the durability-ordering fix.
+    /// As [`Engine::start_write_executor`], with a fault switchboard armed. Test builds only.
+    #[cfg(feature = "fault-injection")]
+    pub fn start_write_executor_with_faults(
+        &mut self,
+        queue_bound: usize,
+        faults: Arc<tessera_lifecycle::faults::FaultSwitchboard>,
+    ) -> std::result::Result<(), crate::write::ExecutorStartError> {
+        let generation = Arc::clone(&self.generation);
+        self.write
+            .start_executor(generation, queue_bound, Some(faults))
+    }
+
+    /// The write executor's posture — **the liveness signal Task 3b's `readyz` reads**. Ready iff
+    /// [`crate::write::ExecutorPosture::Running`].
+    ///
+    /// Answerable without submitting anything, which is the point: readiness must be a question
+    /// about the node, not a side effect of trying to write to it.
+    pub fn write_executor_posture(&self) -> crate::write::ExecutorPosture {
+        self.write.health().posture()
+    }
+
+    /// The executor's counters, for `/control/status`. Operator plane only — bearer-gated, never
+    /// on `readyz`, which stays a boolean (SA §9: no internal write-path state on an
+    /// unauthenticated surface).
+    pub fn write_executor_stats(&self) -> crate::write::ExecutorStats {
+        self.write.health().stats()
+    }
+
+    /// Submit an ingest batch and wait for its receipt. Rows arrive **unallocated**: entity ids are
+    /// assigned on the executor (per command now, per window at Task 7a).
+    ///
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn accept_ingest(
+        &self,
+        rows: Vec<UnallocatedRow>,
+        batch_id: String,
+        body_hash: [u8; 32],
+    ) -> std::result::Result<Vec<EntityId>, crate::write::AcceptError> {
+        self.write.accept_ingest(rows, batch_id, body_hash)
+    }
+
+    /// Submit one `/control/changes` entry and wait for its receipt.
+    ///
+    /// **An `Err` does not mean nothing happened**: for `Delete`/`Suppress` a WAL failure still
+    /// applies the change before returning (lifecycle §4). See `ExecError::Wal`.
     pub fn accept_change(
         &self,
         external_id: Vec<u8>,
         entity: EntityId,
         op: ChangeOp,
         raw_descriptors: Option<Vec<Vec<u8>>>,
-    ) -> std::result::Result<(), WalError> {
+    ) -> std::result::Result<(), crate::write::AcceptError> {
         self.write
             .accept_change(external_id, entity, op, raw_descriptors)
     }

@@ -194,7 +194,7 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
             ));
             let _ = std::fs::remove_dir_all(&tmp);
             std::fs::create_dir_all(&tmp)?;
-            let engine = Engine::open(
+            let mut engine = Engine::open(
                 &fixture.root,
                 &tmp.join("cache"),
                 &tmp.join("wal.log"),
@@ -216,6 +216,10 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                     pins_per_session_max: 4,
                 },
             )?;
+            // Phase 2 stage 2.1 (Task 3a): the WAL now lives on a dedicated executor thread, so an
+            // engine that writes must start one. Bound is generous — this harness never means to
+            // measure queue-full backpressure, only ack latency.
+            engine.start_write_executor(1024)?;
             let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;
 
             // Zoom 0: one tile spanning every row, so `sigma_visible` is the mask cardinality and

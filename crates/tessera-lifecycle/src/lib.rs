@@ -15,11 +15,13 @@
 pub mod alloc;
 pub mod buffer;
 pub mod command;
+pub mod faults;
 pub mod overlay;
 pub mod wal;
 
 pub use alloc::{assign_sorted, high_water_from, Allocator, PendingItem};
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
 pub use command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
+pub use faults::WalMeter;
 pub use overlay::{replay, Overlay, OverlayEntry, OverlayError};
-pub use wal::{ChangeOp, Wal, WalError, WalRecord, WalRow, WalScalar};
+pub use wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord, WalRow, WalScalar};

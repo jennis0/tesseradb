@@ -67,13 +67,24 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         pin_ttl_secs: config.pin_ttl_secs,
         pins_per_session_max: config.pins_per_session_max,
     };
-    let engine = Engine::open(
+    let mut engine = Engine::open(
         &config.bundle_path,
         &config.cache_dir,
         &config.wal_path,
         Passthrough::new(),
         engine_config,
     )?;
+    // Phase 2 stage 2.1, Task 3a: move the WAL onto its own thread and open the two write queues.
+    // Started here rather than inside `Engine::open` so that an engine which never ingests — every
+    // read-only test, bench, example and embedder — starts no thread at all; see
+    // `Engine::start_write_executor` for why the config-field and open-parameter routes are closed
+    // by the stage's frozen files. `ingest_queue_bound` was landed by the seam (`config.rs`) and
+    // this is its only consumer; Task 6 adds the startup headroom assertion over it.
+    //
+    // Nothing is stored in `AppState`: the engine owns the handle, so `/control/*` reaches the
+    // executor through `state.engine` exactly as it reached the WAL before.
+    engine.start_write_executor(config.ingest_queue_bound)?;
+    let engine = engine;
 
     let state = Arc::new(AppState {
         engine,

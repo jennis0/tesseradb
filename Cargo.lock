@@ -2333,6 +2333,7 @@ dependencies = [
  "tempfile",
  "tessera-authz",
  "tessera-build",
+ "tessera-engine",
  "tessera-lifecycle",
  "tessera-plugin",
  "tessera-spatial",
@@ -2351,6 +2352,7 @@ dependencies = [
  "serde",
  "tempfile",
  "tessera-authz",
+ "tessera-lifecycle",
  "tessera-types",
 ]
 
