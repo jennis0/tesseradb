@@ -274,6 +274,14 @@ time against CPU time, which is a meaningful comparison for *cost*, but not for 
 `tessera_engine::timing`'s module doc for the full reasoning; nothing above this paragraph
 changed.
 
+**That cross-worker-sum behaviour only applies above the calibration serial fallback.** Below
+`SERIAL_FALLBACK_MAX_ROWS` (200,000 rows-in-ranges), `Engine::viewport` folds the tile sweep
+serially regardless of `compute_threads` — the `pool.install` fan-out never runs for those cells —
+so for a request below that line, the per-tile stage fields still partition the request's own
+wall clock exactly as before the intra-request rayon change, at ANY thread count. Read
+`env`/`work` in the record (or the request's own row-range total) to tell which regime a cell fell
+into before treating its per-tile fields as either a wall-clock partition or a CPU-time sum.
+
 ---
 
 ## 9. Things that will bite you

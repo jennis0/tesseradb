@@ -123,12 +123,21 @@ impl IntoResponse for ApiError {
 }
 
 /// Map an `EngineError` to the R5 code list. `MultiSegmentSlice`, `Store`/`Wal`/`Overlay`/
-/// `Plugin`/`Io`/`Malformed` are all fail-closed engine-internal failures (500); only
-/// `PinExpired` and `UnknownSlice` have a more specific code.
+/// `Plugin`/`Io`/`Malformed` are all fail-closed engine-internal failures (500); `PinExpired`,
+/// `UnknownSlice` and `StaleIdentityEpoch` have a more specific code.
 pub fn map_engine_error(e: EngineError) -> ApiError {
     match e {
         EngineError::PinExpired => ApiError::PinExpired,
         EngineError::UnknownSlice(slice) => ApiError::Unknown(format!("unknown slice '{slice}'")),
+        // Contracts §2.2/§3.2 r6: `POST /v1/items/{tessera_id}`'s caller-supplied `epoch` did not
+        // match the generation `Engine::item` validated it against (fix wave, Task 2 finding —
+        // this check used to run in the handler, against a separate `Engine::meta()` call, before
+        // moving inside `Engine::item` to close a second generation load). Fixed detail string,
+        // named explicitly rather than left to the catch-all, so a future catch-all change can
+        // never accidentally alter this one response's body.
+        EngineError::StaleIdentityEpoch => {
+            ApiError::Conflict("stale identity epoch; re-resolve by external_id".to_string())
+        }
         // A refused underlay is a request the caller can fix by asking for less, so it is a
         // contract error (422) rather than a fail-closed 500. Its `Display` names only the
         // offending numbers and the configured bounds — no path, no corpus fact.
@@ -197,6 +206,31 @@ pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
     )
 }
 
+/// Map a WAL append/fsync failure (`tessera_lifecycle::wal::WalError`, from
+/// `Engine::accept_ingest`/`Engine::accept_change`) to `500 fail-closed` — generic over the error
+/// type the same way [`map_store_error`] is, so this crate does not need to name
+/// `tessera_lifecycle`'s error type here just to sanitise it.
+///
+/// **The detail never crosses to the caller.** `WalError::Io` wraps a raw `std::io::Error`, whose
+/// `Display` can echo whatever the OS or a lower call site chose to say about the failure —
+/// exactly the class of detail (up to and including a filesystem path) this module's opening doc
+/// comment forbids in a body, the same door [`map_store_error`] already closes for a different
+/// lower layer. Before this fix, both `/control/ingest` and `/control/changes` built their `500`
+/// body with `format!("wal append/fsync failed: {e}")` directly — this closes it, one sanitiser
+/// for a third door.
+///
+/// Diagnosability moves to the log: the full `Display` is emitted at `error!` (this call site's
+/// own `tracing::error!`, immediately above where this is used, carries the batch/op context;
+/// this adds the error detail itself, which neither call site logged before this fix), and the
+/// body is a fixed, path-independent string.
+pub fn map_wal_error<E: std::fmt::Display>(e: E) -> ApiError {
+    tracing::error!(detail = %e, "wal append/fsync failed; answering fail-closed");
+    ApiError::FailClosed(
+        "a durability write failed; the request was refused rather than answered partially"
+            .to_string(),
+    )
+}
+
 /// Map a `spawn_blocking` `JoinError` (Task 3, D-A) to the fail-closed 500 arm. A `JoinError` here
 /// means the closure running the engine call panicked — I13: a panic is a failed request, never
 /// an empty one, so this is a typed 500, not a dropped connection or a silently empty body.
@@ -218,6 +252,24 @@ pub fn map_join_error(e: tokio::task::JoinError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fix wave, Task 3: `WalError`'s `Display` (a raw `std::io::Error`, potentially naming the
+    /// WAL's filesystem path) must never reach the caller either — `map_wal_error`'s twin of
+    /// `map_store_error_does_not_forward_the_detail_to_the_caller`, for the third door
+    /// (`/control/ingest` and `/control/changes`) that used to forward a lower layer's `Display`
+    /// straight into a `500` body via `format!("wal append/fsync failed: {e}")`.
+    #[test]
+    fn map_wal_error_does_not_forward_the_detail_to_the_caller() {
+        let leaky = "wal io error: No space left on device (os error 28) at \
+                     /srv/tessera/wal/v00000.log";
+        let (status, code, detail) = map_wal_error(leaky).parts();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(code, "fail-closed");
+        assert!(
+            !detail.contains('/'),
+            "the body must not carry a server path, got: {detail}"
+        );
+    }
 
     /// S7: a lower layer's `Display` must never reach the caller. The sidecar's inconsistency arms
     /// name its absolute path (and, before this fix, an entity id); both arms go live in Phase 2,
@@ -290,6 +342,18 @@ mod tests {
         let (status, code, _) = map_engine_error(EngineError::FragmentBuilding).parts();
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(code, "backpressure");
+    }
+
+    /// Fix wave, Task 2: `StaleIdentityEpoch` (now raised by `Engine::item` itself, against the
+    /// one generation it loads, rather than by a separate handler-side `Engine::meta()` check)
+    /// maps to the same 409 `conflict` body `POST /v1/items/{tessera_id}` has always returned for
+    /// a stale epoch.
+    #[test]
+    fn map_engine_error_takes_stale_identity_epoch_to_409_conflict() {
+        let (status, code, detail) = map_engine_error(EngineError::StaleIdentityEpoch).parts();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(code, "conflict");
+        assert_eq!(detail, "stale identity epoch; re-resolve by external_id");
     }
 
     /// D-C: `Cancelled` is explicitly named in `map_engine_error`'s match (not caught only by the

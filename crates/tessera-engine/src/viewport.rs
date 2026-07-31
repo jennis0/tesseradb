@@ -45,7 +45,6 @@ use rayon::prelude::*;
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Extent, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
-use tessera_store::StoreError;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
 use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 
@@ -295,17 +294,30 @@ impl Engine {
         )
     }
 
-    /// `POST /v1/items/{handle}` (R5): invert `id` to its entity, test visibility in entity
-    /// space, and only then locate a row and read its scalars/external id.
+    /// `POST /v1/items/{handle}` (R5): validate `epoch` if the caller sent one, invert `id` to
+    /// its entity, test visibility in entity space, and only then locate a row and read its
+    /// scalars/external id.
+    ///
+    /// **`epoch` is checked against the SAME generation this call loads for the lookup below —
+    /// never a separate `Engine::meta()` call.** Fix wave, Task 2 finding: the handler used to
+    /// call `Engine::meta()` (its own `generation.load_full()`, plus a clone of every declared
+    /// scalar and slice name, just to read one field) before calling this method, which loads
+    /// the generation again — two independent loads for one logical request, against lifecycle
+    /// §1.1's one-load-per-request invariant. Checking here, first, against the snapshot already
+    /// in hand removes the second load and closes the (correctness, not just cost) gap where a
+    /// generation swap landing between the two calls could validate the epoch against one
+    /// generation and serve the lookup from another.
     ///
     /// Returns `Ok(None)` both when `id` names nothing in this bundle and when it names an item
     /// the principal may not see — deliberately one outcome from one code path, so the server
     /// cannot differentiate what the engine does not tell it (owner ruling; contracts §3.2).
     ///
     /// **The timing channel is closed, not narrowed** (Critical C-5; design Appendix C, C4
-    /// annotation). Inversion is a pure function taking no I/O. The visibility test that follows
-    /// is an entity-space question — three constant-time probes — and is **the same three probes
-    /// for an identifier that names nothing and one that names an invisible item**. No
+    /// annotation). The epoch check is entity-independent — it runs identically for every `id`,
+    /// before inversion, and does not read `id` at all — so it opens no channel of its own.
+    /// Inversion is a pure function taking no I/O. The visibility test that follows is an
+    /// entity-space question — three constant-time probes — and is **the same three probes for
+    /// an identifier that names nothing and one that names an invisible item**. No
     /// `RowProjection` is constructed or read, so there is no per-ID cost for an attacker to
     /// correlate against, warm or cold. A row is located only after the answer is already
     /// "visible", and the sidecar is read only after that.
@@ -319,8 +331,18 @@ impl Engine {
         &self,
         session: &Session,
         id: TesseraId,
-    ) -> std::result::Result<Option<ItemOut>, StoreError> {
+        epoch: Option<u32>,
+    ) -> Result<Option<ItemOut>> {
         let generation = self.generation.load_full();
+
+        // Checked FIRST, against the generation this call already loaded above — see this
+        // method's doc for why that (not a separate `Engine::meta()` call) is load-bearing here.
+        if let Some(e) = epoch {
+            if e != generation.bundle.manifest.identity.epoch {
+                return Err(EngineError::StaleIdentityEpoch);
+            }
+        }
+
         let (shard, entity) = self.identity_key.invert(id);
         if shard != generation.bundle.manifest.identity.shard_id {
             return Ok(None);
@@ -349,7 +371,9 @@ impl Engine {
                 };
                 return Ok(Some(ItemOut {
                     scalars: row_to_point(segment, row.raw(), declared_scalars).scalars,
-                    external_id: self.external_id_of(entity)?, // N-3: propagate, never swallow
+                    // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
+                    // every other store-backed call in this crate uses (see `Engine::open`).
+                    external_id: self.external_id_of(entity).map_err(EngineError::Store)?,
                 }));
             }
         }

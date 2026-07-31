@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use tessera_lifecycle::{ChangeOp, PendingItem, WalRow, WalScalar};
 use tessera_types::{EntityId, TermId};
 
-use crate::error::{map_join_error, map_store_error, ApiError};
+use crate::error::{map_join_error, map_store_error, map_wal_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
@@ -363,8 +363,12 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
         .engine
         .accept_ingest(rows, terms_per_item, batch_id, body_hash)
         .map_err(|e| {
+            // Batch-level context, kept alongside `map_wal_error`'s own `error!` (which carries
+            // `e`'s Display — this crate rule closes error.rs:3-7's door, see that function's
+            // doc) rather than folded into one line, so an operator sees both without the body
+            // ever carrying either.
             tracing::error!("wal append/fsync failed for an ingest batch");
-            ApiError::FailClosed(format!("wal append/fsync failed: {e}"))
+            map_wal_error(e)
         })?;
 
     // Contracts §3.4 (r6): the 200 response returns each accepted row's `tessera_id`, in batch
@@ -527,7 +531,11 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
                         "wal append/fsync failed for a non-deny change; refusing without applying"
                     );
                 }
-                ApiError::FailClosed(format!("wal append/fsync failed: {e}"))
+                // Op-level context above, kept alongside `map_wal_error`'s own `error!` (which
+                // carries `e`'s Display — error.rs:3-7's rule; see that function's doc) rather
+                // than folded into one line, so an operator sees both without the body ever
+                // carrying either.
+                map_wal_error(e)
             })?;
     }
 

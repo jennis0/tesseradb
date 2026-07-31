@@ -18,7 +18,7 @@ use tessera_wire::{viewport_ipc, ScalarColumn, ViewportColumns};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::CancelToken;
 
-use crate::error::{map_engine_error, map_join_error, map_store_error, ApiError};
+use crate::error::{map_engine_error, map_join_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
@@ -415,6 +415,12 @@ async fn viewport(
 /// *ahead* of wall time under real parallelism, by roughly the achieved concurrency — that is
 /// correct, not a discrepancy to chase. `arrow_serialise_ns` itself is unaffected: response
 /// assembly (this handler) stays serial regardless of the engine's own `compute_threads`.
+///
+/// **That cross-worker-sum behaviour only holds above the calibration serial fallback.** Below
+/// `tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS`, the tile sweep folds serially at ANY
+/// `compute_threads` value — the `pool.install` fan-out this paragraph describes does not run at
+/// all for those requests — so below that line, these per-tile fields still partition the
+/// request's own wall clock, exactly as before D-D/D-F.
 #[cfg(feature = "bench-timing")]
 fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Option<String> {
     // **Append-only.** This is a positional CSV, so inserting a field anywhere but the end silently
@@ -553,6 +559,12 @@ struct ItemResp {
 ///
 /// **The epoch check runs before inversion and is entity-independent** — identical work and an
 /// identical `409` for every presented `tessera_id`, so it opens no channel (contracts §2.2, C4).
+/// Fix wave, Task 2 finding: the check itself now runs *inside* `Engine::item`, against the same
+/// generation snapshot that call already loads for the lookup that follows — not a separate
+/// `state.engine.meta()` call ahead of it, which cost this request a second, independent
+/// `generation.load_full()` (lifecycle §1.1). See [`tessera_engine::Engine::item`]'s doc for the
+/// full argument; the observable ordering (before inversion, entity-independent, same 409 body)
+/// is unchanged by moving where in the call stack it runs.
 ///
 /// **`404 unknown` is returned identically** for "no such id" and "exists but is not visible to
 /// this principal" (owner ruling; contracts §3.2): one `Ok(None)` arm, one `ApiError::Unknown`
@@ -560,14 +572,14 @@ struct ItemResp {
 /// construction site with a different detail string, or a `tracing`/metric call inside only one
 /// of the two `None`-shaped cases, would be exactly the oracle this rule exists to prevent.
 ///
-/// **The `Err` arm can never be reached by anything an attacker chooses.** `Engine::item` inverts
-/// `id` (a pure function, no I/O) and tests visibility in entity space — the *same* O(1) work for
-/// an id naming nothing and an id naming an invisible item (Critical C-5, closed not narrowed) —
-/// before it ever touches the external-ID sidecar. `StoreError` can therefore only be raised for
-/// an item already established visible, so a probing client can see a `500` only for an item it
-/// can already see; it can never use `500` vs `404` to learn whether an id exists. **A future
-/// edit that moves the sidecar read earlier than the visibility test would silently turn this
-/// status into a visibility oracle — don't.**
+/// **The store-backed `Err` arm can never be reached by anything an attacker chooses.**
+/// `Engine::item` inverts `id` (a pure function, no I/O) and tests visibility in entity space —
+/// the *same* O(1) work for an id naming nothing and an id naming an invisible item (Critical
+/// C-5, closed not narrowed) — before it ever touches the external-ID sidecar. A store/IO failure
+/// can therefore only be raised for an item already established visible, so a probing client can
+/// see a `500` only for an item it can already see; it can never use `500` vs `404` to learn
+/// whether an id exists. **A future edit that moves the sidecar read earlier than the visibility
+/// test would silently turn this status into a visibility oracle — don't.**
 /// `engine.item`'s sidecar read plus the scalar/external-id shaping that follows it (D-A scope
 /// for this handler) — run inside `spawn_blocking`. See [`item`]'s doc for why the ordering
 /// (visibility test before any sidecar touch) must not move.
@@ -575,13 +587,16 @@ fn run_item(
     state: &AppState,
     session: &tessera_engine::Session,
     raw: u64,
+    epoch: Option<u32>,
 ) -> Result<ItemResp, ApiError> {
-    let item = match state.engine.item(session, TesseraId::new(raw)) {
-        // A corrupt or unreadable sidecar is a SERVER fault, not "no such item". `.ok().flatten()`
-        // here would serve a 200 with `external_id: null` and call a digest mismatch a missing
-        // field -- fail-open, and precisely what Task 8's typed errors exist to prevent (Critical
-        // N-3). See this function's doc for why this arm is unreachable by identifier choice.
-        Err(e) => return Err(map_store_error(e)),
+    let item = match state.engine.item(session, TesseraId::new(raw), epoch) {
+        // `EngineError::StaleIdentityEpoch` -> 409, same fixed detail string as before this was
+        // moved inside `Engine::item`. A corrupt or unreadable sidecar (`Store`/`Io`) is a SERVER
+        // fault, not "no such item" -- `.ok().flatten()` here would serve a 200 with
+        // `external_id: null` and call a digest mismatch a missing field -- fail-open, and
+        // precisely what Task 8's typed errors exist to prevent (Critical N-3). See this
+        // function's doc for why the store-backed arm is unreachable by identifier choice.
+        Err(e) => return Err(map_engine_error(e)),
         // Owner ruling: identical 404 for "no such ID" and "exists but not visible". ONE arm, one
         // message, no branch above it -- a second construction site with a different detail
         // string would be the oracle this rule prevents.
@@ -618,29 +633,26 @@ async fn item(
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
     let entry = state.authenticated_session(token)?;
 
-    // Checked HERE -- before inversion, and identically for every identifier, so it opens no
-    // channel (contracts §2.2). Entity-independent: this branch does not depend on `raw` at all.
-    // Stays on the reactor: a pure in-memory comparison against `meta()`, no engine mask work.
-    if let Some(e) = req.epoch {
-        if e != state.engine.meta().identity_epoch {
-            return Err(ApiError::Conflict(
-                "stale identity epoch; re-resolve by external_id".to_string(),
-            ));
-        }
-    }
-
     // D-B: gated the same way as `/v1/viewport` (see its handler's comment) — `admit()` sheds
     // with 429 `backpressure` on either stage.
     let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
 
-    // D-A: `engine.item` inverts the id (pure, no IO) then reads the external-id sidecar for a
-    // visible item — file IO, moved off the reactor. Closure capture: `state` moved in directly
-    // (nothing after this `.await` needs the handler's own copy), `entry` moved (already an
-    // `Arc<SessionEntry>`), `raw` is `Copy`, `gate_permits` (D-B) moves in so both permits release
-    // only when this closure returns.
+    // D-A: `engine.item` checks `req.epoch` (if the caller sent one) against the ONE generation
+    // it loads, inverts the id (pure, no IO), then reads the external-id sidecar for a visible
+    // item — file IO, moved off the reactor. Fix wave, Task 2 finding: the epoch check used to
+    // run here, on the reactor, before `admit()`, against a SEPARATE `state.engine.meta()` call
+    // — a second, independent `generation.load_full()` ahead of `engine.item`'s own (lifecycle
+    // §1.1's one-load-per-request invariant, broken for a request that is nominally one lookup).
+    // Moving it inside `engine.item` costs this one check its previous free ride ahead of the
+    // compute-admission gate — a stale-epoch request now holds a gate permit for the length of
+    // the `spawn_blocking` call rather than being rejected before `admit()` runs — which is the
+    // trade lifecycle §1.1's invariant asks for; see `Engine::item`'s doc for the full argument.
+    // Closure capture: `state` moved in directly (nothing after this `.await` needs the handler's
+    // own copy), `entry` moved (already an `Arc<SessionEntry>`), `raw`/`req.epoch` are `Copy`,
+    // `gate_permits` (D-B) moves in so both permits release only when this closure returns.
     let resp = tokio::task::spawn_blocking(move || {
         let _gate_permits = gate_permits;
-        run_item(&state, &entry.session, raw)
+        run_item(&state, &entry.session, raw, req.epoch)
     })
     .await
     .map_err(map_join_error)??;
