@@ -10,16 +10,16 @@
 //! `tile_counts_match_brute_force_at_a_non_degenerate_zoom_and_bbox_subset` below queries at
 //! `zoom = 4` with a bbox covering a strict subset of tiles, cross-checked against an independent
 //! per-item Morton-prefix oracle.
+//!
+//! Task 0c (Phase 2 stage 2.1) moved the pin cases out of this file into `tests/pins.rs`, and the
+//! shared fixture block into [`common`], so stage 2.1's parallel tracks own disjoint files.
+
+mod common;
 
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, Float64Array, UInt32Array, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
 use tessera_build::{build, BuildArgs};
@@ -32,11 +32,9 @@ use tessera_plugin::Passthrough;
 use tessera_spatial::{morton_of, tiles_for_bbox, Extent};
 use tessera_store::read::open_bundle;
 use tessera_store::StoreError;
-use tessera_types::{EntityId, IdentityKey, PinId};
+use tessera_types::EntityId;
 
-const N_ITEMS: u64 = 10_000;
-const ALL_TERM: u64 = 0;
-const SUBSET_TERM: u64 = 1;
+use common::*;
 
 /// Calibration task: item count for the byte-equality tests that must exercise the GENUINE
 /// parallel fan-out (`Engine::viewport`'s `SERIAL_FALLBACK_MAX_ROWS`, currently 200,000). The
@@ -56,225 +54,6 @@ const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
 /// by some future edit, rather than silently degrading to serial-vs-serial with no build ever
 /// catching it.
 const _: () = assert!(PARALLEL_HEADLINE_ITEMS >= SERIAL_FALLBACK_MAX_ROWS);
-
-/// A fixed, non-degenerate test key — the same canonical vector used across the identity
-/// construction's own tests (`tessera_types::identity`'s `CANONICAL_KEY`) and
-/// `tessera-build`'s fixture tests, so a mismatch between crates would show up as a vector
-/// disagreement rather than an independently-chosen value.
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
-
-fn test_key() -> IdentityKey {
-    IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
-}
-
-fn extent() -> Extent {
-    Extent {
-        x_min: 0.0,
-        x_max: 1000.0,
-        y_min: 0.0,
-        y_max: 1000.0,
-    }
-}
-
-/// The base config for these tests.
-///
-/// **`theta_target_marks` is raised above `N_ITEMS` on purpose.** These tests assert *masking* —
-/// which items a principal may see — not density. Leaving θ live would make every assertion about a
-/// point set depend on the density rule's threshold clause as well, so a masking bug and a θ
-/// arithmetic bug would be indistinguishable. Raising the target above the fixture's total visible
-/// count saturates θ at every depth, which reduces selection to "serve every visible row up to the
-/// cap" and isolates what these tests are for. Density itself is tested in `selection.rs`, against
-/// fixtures built for it.
-fn config() -> EngineConfig {
-    EngineConfig {
-        token_max_lifetime_secs: 3600,
-        max_k: 200,
-        k_min: 2,
-        k_max_marks: 200,
-        theta_target_marks: N_ITEMS * 2,
-        max_underlay_offset: 4,
-        max_underlay_cells: 8192,
-        max_tiles_per_request: 262_144,
-        compute_threads: default_compute_threads(),
-    }
-}
-
-/// A config whose caps are large enough to never truncate a sample — used by tests asserting
-/// membership (counts, exact point sets) rather than a cap itself. θ is saturated here too, for the
-/// reason given on [`config`].
-fn config_uncapped() -> EngineConfig {
-    EngineConfig {
-        max_k: N_ITEMS as usize,
-        k_max_marks: N_ITEMS as usize,
-        ..config()
-    }
-}
-
-/// Every item carries `ALL_TERM`; every third carries `SUBSET_TERM` too.
-fn terms_of(source_id: u64) -> Vec<u64> {
-    if source_id.is_multiple_of(3) {
-        vec![ALL_TERM, SUBSET_TERM]
-    } else {
-        vec![ALL_TERM]
-    }
-}
-
-/// Parameterised over item count so the D-G concurrency tests near the end of this file (which
-/// need `RowProjection::new` to take long enough to give a race a real window) can ask for a
-/// larger synthetic corpus without duplicating the whole writer. [`build_fixture`] is the
-/// `N_ITEMS`-sized default every other test in this file uses.
-fn write_points_n(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-/// See [`write_points_n`]'s doc.
-fn write_pairs_n(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let mut entities = Vec::new();
-    let mut terms = Vec::new();
-    for e in 0..n {
-        for t in terms_of(e) {
-            entities.push(e);
-            terms.push(t as u32);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(entities)),
-            Arc::new(UInt32Array::from(terms)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-/// Build the fixture bundle at `out` (Task 8's library API — `tessera_build::build`), over an
-/// `n`-item synthetic corpus. See [`write_points_n`]'s doc for why this is parameterised.
-fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
-    write_points_n(points_path, n);
-    write_pairs_n(pairs_path, n);
-    let args = BuildArgs {
-        points: points_path.to_path_buf(),
-        pairs: pairs_path.to_path_buf(),
-        out: out.to_path_buf(),
-        extent: extent(),
-        slice_id: "s0".to_string(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        identity_epoch: 1,
-        shard_id: 0,
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-    };
-    build(&args).expect("fixture build should succeed");
-}
-
-/// Build the fixture bundle at `out` (Task 8's library API — `tessera_build::build`).
-fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
-    build_fixture_n(out, points_path, pairs_path, N_ITEMS)
-}
-
-/// Read the bundle's external-ids extent into a `source_id -> new entity_id` map — the same
-/// ground truth `tessera-build`'s own smoke test cross-checks against.
-fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64> {
-    let bundle = open_bundle(bundle_root).unwrap();
-    let part = &bundle.partitions["default"];
-    let ext_path = bundle_root
-        .join(prefix)
-        .join(&part.manifest.external_id_extents[0]);
-    let file = File::open(&ext_path).unwrap();
-    let reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
-    let mut map = BTreeMap::new();
-    for batch in reader {
-        let batch = batch.unwrap();
-        let ext = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
-        // Contracts r6: the external-id extent's entity column is `UInt32` (entities are capped
-        // at `u32::MAX` by the I9 allocator), not the pre-r6 `UInt64`.
-        let ent = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        for i in 0..batch.num_rows() {
-            let source = u64::from_le_bytes(ext.value(i).try_into().unwrap());
-            map.insert(source, ent.value(i) as u64);
-        }
-    }
-    map
-}
-
-/// The external id `tessera-build` writes for a source row: the source corpus id, 8 bytes
-/// little-endian (see `source_to_new_map`'s decode of the same convention).
-fn source_id_key(source_id: u64) -> Vec<u8> {
-    source_id.to_le_bytes().to_vec()
-}
-
-fn open_engine(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Engine {
-    Engine::open(
-        bundle_root,
-        cache_dir,
-        wal_path,
-        Passthrough::new(),
-        config(),
-    )
-    .expect("engine should open against a freshly built bundle")
-}
-
-fn open_engine_uncapped(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Engine {
-    Engine::open(
-        bundle_root,
-        cache_dir,
-        wal_path,
-        Passthrough::new(),
-        config_uncapped(),
-    )
-    .expect("engine should open against a freshly built bundle")
-}
-
-fn full_coverage_credential() -> Vec<u8> {
-    br#"{"terms": ["0"]}"#.to_vec()
-}
-
-fn subset_credential() -> Vec<u8> {
-    br#"{"terms": ["1"]}"#.to_vec()
-}
-
-fn zero_credential() -> Vec<u8> {
-    br#"{"terms": []}"#.to_vec()
-}
 
 /// (a) A full-coverage session sees every point of the bbox; a small `k` caps the sampled points
 /// but never the count. (e) `matched == visible` everywhere (Phase 1 has no filters).
@@ -847,58 +626,6 @@ fn response_tile_order_and_point_concatenation_follow_tiles_for_bbox_not_morton_
         got_points, expected_points,
         "points must be a flat concatenation in the reported tile order"
     );
-}
-
-/// A minted pin round-trips (re-presenting it succeeds and yields the same counts), and a pin
-/// naming the wrong `segments_version` is rejected as expired (I11) — never silently accepted or
-/// reinterpreted.
-#[test]
-fn pin_round_trips_and_rejects_a_mismatched_segments_version() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-
-    let first = engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
-        )
-        .unwrap();
-
-    let again = engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5)
-                .pin(Some(first.pin.clone())),
-        )
-        .unwrap();
-    assert_eq!(
-        again.tiles, first.tiles,
-        "a valid pin must round-trip identically"
-    );
-
-    let stale_pin = PinId {
-        prefix: first.pin.prefix.clone(),
-        segments_version: first.pin.segments_version + 1,
-    };
-    let err = engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5).pin(Some(stale_pin)),
-        )
-        .unwrap_err();
-    assert!(matches!(err, EngineError::PinExpired));
 }
 
 /// `Engine::open` seeds the I9 allocator at `max(manifest high-water, WAL high-water)` — here,

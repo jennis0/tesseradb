@@ -32,6 +32,10 @@ paths = [
   "crates/tessera-engine/src/session.rs",
   # Declares the modules both tracks' files live in, and holds `Generation`.
   "crates/tessera-engine/src/lib.rs",
+  # The engine's integration-test fixtures, factored out by Task 0c's split of `tests/viewport.rs`.
+  # Shared rather than Track C's, because `tests/viewport.rs` (which no track owns) compiles it
+  # too: a change here is a change to what both binaries build against, and is reviewed as one.
+  "crates/tessera-engine/tests/common/**",
   # `prepare`/`run`: builds EngineConfig from Config and mounts all three routers. Task 3b's
   # readiness wiring ("touches all three routers") and any Task 5 config-to-cache wiring both
   # land here.
@@ -64,6 +68,11 @@ paths = [
   "crates/tessera-server/src/error.rs",
   "crates/tessera-server/src/health.rs",
   "crates/tessera-server/tests/http_write.rs",
+  # The server's integration-test fixtures, factored out by Task 0c's split of `tests/http.rs`.
+  # Track B's rather than shared: B is the only track with a `tessera-server` test file, and the
+  # residual `tests/http.rs` belongs to no track, so a shared marking would name a co-owner that
+  # does not exist. A change here still affects `tests/http.rs`'s binary — B keeps it green.
+  "crates/tessera-server/tests/common/**",
   "scripts/check-layers.sh",
 ]
 
