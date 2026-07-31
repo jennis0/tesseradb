@@ -31,10 +31,10 @@
 ///
 /// **D-D/D-E: the per-tile fields stopped partitioning wall clock the moment the tile loop went
 /// parallel.** `count_ns`, `select_ns`, `gather_ns`, `underlay_ns` and every per-tile counter
-/// (`rows_in_ranges`, `tiles_nonempty`, `sigma_visible`, `select_rows_visited`,
-/// `points_gathered`, `underlay_cells_evaluated`) are now **cross-worker sums**: each tile's own
-/// contribution ([`crate::viewport::TileResult`]'s [`TileStats`]) is measured locally inside that
-/// tile's own `tile_result` call, on whatever rayon worker ran it, and summed into these fields by
+/// (`tiles_nonempty`, `sigma_visible`, `select_rows_visited`, `points_gathered`,
+/// `underlay_cells_evaluated`) are now **cross-worker sums**: each tile's own contribution
+/// ([`crate::viewport::TileResult`]'s [`TileStats`]) is measured locally inside that tile's own
+/// `tile_result` call, on whatever rayon worker ran it, and summed into these fields by
 /// [`TileStats::fold_into`] in `Engine::viewport`'s serial in-order fold. At `compute_threads = 1`
 /// this sum coincides with the old wall-clock partition (one worker, one tile at a time — nothing
 /// changes). At `compute_threads > 1` these fields report *aggregate CPU time spent*, not *wall
@@ -42,6 +42,18 @@
 /// concurrency showing up in the numbers honestly, not a bug. The serial-prefix fields
 /// (`generation_resolve_ns` through `tile_ranges_ns`, plus `theta_anchor_ns`) and `total_ns` keep
 /// their pre-parallelism meaning unchanged: nothing before the parallel sweep runs concurrently.
+///
+/// **`rows_in_ranges` and `tiles_resolved` are NOT per-tile counters, and must never become
+/// one again (§14.2).** Both are computed once in the serial prefix — `tiles_resolved` from
+/// `tiles_for_bbox`'s output length, `rows_in_ranges` from one `Σ range.len()` over `ranges` —
+/// before the parallel sweep starts and before any tile's mask is consulted, which is what makes
+/// them mask-independent by construction. `rows_in_ranges` briefly lived in [`TileStats`] instead
+/// (Task 6's tile-loop restructure): counted per-tile, before that tile's own `visible == 0`
+/// check, whose `Ok(None)` return `Engine::viewport`'s fold discards outright — silently making a
+/// field the C4 leak-register numerator depends on being mask-free (`rows_in_ranges -
+/// sigma_visible`, "rows scanned that this principal cannot see") instead track *which tiles the
+/// grant left empty*. Fixed by moving the count to the serial prefix and deleting the field from
+/// `TileStats` — see `Engine::viewport`'s call site for the argument in full.
 ///
 /// See [`Self::unattributed_ns`] for the direct consequence of this for that quantity, and
 /// `Probe::skip`'s call site in `Engine::viewport` for how the parallel section's own wall time
@@ -125,6 +137,12 @@ pub struct StageTimings {
     /// Σ`range.len()` over resolved tiles — total rows *spanned*, authorised or not.
     /// `rows_in_ranges - sigma_visible` is C4's numerator: rows scanned that this principal
     /// cannot see, which is the correlate the leak register says to quantify.
+    ///
+    /// **Mask-independent by construction, not by discipline (§14.2 fix).** Computed once in
+    /// `Engine::viewport`'s serial prefix, from `ranges` — before the parallel tile sweep starts
+    /// and before any tile's mask is even read — same serial-prefix treatment as `tiles_resolved`,
+    /// unlike every per-tile field below. See this struct's doc for why that distinction is now
+    /// load-bearing and the fold-discards-`Ok(None)` bug that motivated it.
     pub rows_in_ranges: u64,
     /// Σ over tiles of the rows selection actually **read**, counted inside the loops that read
     /// them (`Selection::rows_visited`).
@@ -317,13 +335,24 @@ impl Probe {
 /// [`StageTimings`] itself (this module's doc): every field stays at zero without `bench-timing`,
 /// via [`TileProbe`]'s internal `#[cfg]`, so a consumer can never mistake an uninstrumented
 /// build's zeros for a genuinely free tile.
+///
+/// **Deliberately does NOT carry `rows_in_ranges` (§14.2 fix).** It briefly did: counted here,
+/// per-tile, before that tile's own `visible == 0` check — and `tile_result` returns `Ok(None)`
+/// on that exact branch, which `Engine::viewport`'s fold discards without ever calling
+/// [`Self::fold_into`]. That silently made a field documented as mask-independent
+/// (`StageTimings::rows_in_ranges`'s doc) track which tiles a grant left empty instead. Fixed by
+/// computing it once, mask-free, over `ranges` in `Engine::viewport`'s serial prefix — before this
+/// struct is ever built — rather than by threading it through the `Ok(None)` case here as well;
+/// see that call site for the argument. If a field is ever added to this struct, ask first whether
+/// it is genuinely per-tile (depends on this tile's mask, segment or geometry) or, like
+/// `rows_in_ranges`, already available before the sweep — the latter belongs in the serial prefix,
+/// not here, precisely because `Ok(None)` makes this struct's contents conditional on visibility.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TileStats {
     pub count_ns: u64,
     pub select_ns: u64,
     pub gather_ns: u64,
     pub underlay_ns: u64,
-    pub rows_in_ranges: u64,
     pub tiles_nonempty: u64,
     pub sigma_visible: u64,
     pub select_rows_visited: u64,
@@ -342,7 +371,6 @@ impl TileStats {
         t.select_ns += self.select_ns;
         t.gather_ns += self.gather_ns;
         t.underlay_ns += self.underlay_ns;
-        t.rows_in_ranges += self.rows_in_ranges;
         t.tiles_nonempty += self.tiles_nonempty;
         t.sigma_visible += self.sigma_visible;
         t.select_rows_visited += self.select_rows_visited;

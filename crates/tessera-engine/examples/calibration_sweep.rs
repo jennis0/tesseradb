@@ -1,10 +1,24 @@
 //! Two-axis sweep for the calibration task: at what per-request work size does the tile-loop
 //! fan-out (`pool.install` + `with_min_len`) start winning over a serial fold, as a function of
-//! the predictors available BEFORE the fan-out — `tiles_resolved` (tile count) and
-//! `rows_in_ranges` (Σ`range.len()`, the total rows spanned pre-mask). Both are already
-//! materialised by `Engine::viewport`'s pre-fan-out `tile_ranges_all` sweep (Task 6's zip) and
-//! both are already surfaced on [`tessera_engine::StageTimings`], so this sweep reads them
-//! post-hoc from real responses rather than reimplementing the resolution logic.
+//! the predictor available BEFORE the fan-out — `rows_in_ranges` (Σ`range.len()`, the total rows
+//! spanned pre-mask, over EVERY resolved tile).
+//!
+//! **§14 bug found and fixed: `StageTimings.rows_in_ranges` is NOT that predictor and must not be
+//! read as a stand-in for it.** `tile_result` counts a tile's `range.len()` into its local
+//! `TileStats` before checking `visible == 0`, but on that empty-tile branch it returns `Ok(None)`
+//! and `Engine::viewport`'s fold loop discards the whole `TileStats` for a `None` result — so
+//! `StageTimings.rows_in_ranges` (what this sweep used to print and correlate against) silently
+//! excludes every tile the session's OWN MASK made empty. It is therefore mask-dependent, while
+//! the actual predictor the engine's serial/parallel branch reads (`total_rows_in_ranges` in
+//! `viewport.rs`) is computed directly from `ranges` BEFORE any masking and includes every
+//! resolved tile regardless of visibility. The gap between the two is small when few tiles are
+//! empty (most of §2's original 2.42M runs) and can be enormous when many are (§14's 1e9 runs:
+//! one grant's `StageTimings` figure came in 26x smaller than the other's for the geometrically
+//! IDENTICAL shape, which is the tell — a mask-independent quantity cannot legitimately move
+//! between two sessions over the same tiles). Fixed by computing the true, mask-independent
+//! `rows_in_ranges` directly here (`true_rows_in_ranges`, via `tessera_store::tile_ranges_all` on
+//! the bundle opened outright, no session involved) rather than trusting the engine's own
+//! post-request telemetry for a pre-request decision.
 //!
 //! **Why `compute_threads = 1` stands in for "serial".** The actual serial fallback this task
 //! adds bypasses `pool.install` entirely; `compute_threads = 1` still calls `pool.install` (on a
@@ -14,64 +28,71 @@
 //! size, the true zero-overhead serial fallback beats it by at least as much. The crossover this
 //! sweep finds is, if anything, biased toward UNDER-selecting the serial range, never over.
 //!
-//! Run: `cargo run --release --example calibration_sweep -p tessera-engine --features bench-timing`
+//! Run: `cargo run --release --example calibration_sweep -p tessera-engine --features
+//! bench-timing -- --bundle <path> [--dense]`
+//!
+//! **§14 re-calibration (post-B9, three scales).** Originally hard-coded to a single
+//! `ensure_bundle()`-built 2.4M fixture at a fixed `/tmp` path. B9's three-tier adaptive
+//! selection decode (`perf(engine): gate the run decode behind a measured three-tier adaptive
+//! choice`) changed the per-row cost this whole calibration was fitted against, and the
+//! bundle-build rewrite (`8c671f1`) made 1e8/1e9-scale fixtures cheap enough to build routinely
+//! — so a fixed single-scale bundle stopped being the right shape for this tool. `--bundle` now
+//! takes any already-built bundle root directly (no building here — durable fixtures live under
+//! `data/bench-fixtures/{2m4,1e8,1e9}/`, provisioned once outside this tool, matching how the
+//! 1e9 bench report's own bundle was produced) so the SAME sweep logic runs unchanged at every
+//! scale.
 
 use std::path::{Path, PathBuf};
 
 use rand::{Rng, SeedableRng};
-use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
-use tessera_spatial::Extent;
-use tessera_types::IdentityKey;
+use tessera_spatial::{tiles_for_bbox, Extent};
+use tessera_store::{open_bundle, tile_ranges_all, Bundle};
 
-const ITEM_LIMIT: u64 = 2_422_486;
-const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const REPS: usize = 40;
 
-fn extent() -> Extent {
-    Extent {
-        x_min: 0.0,
-        x_max: 65536.0,
-        y_min: 0.0,
-        y_max: 65536.0,
-    }
+/// The TRUE, mask-independent predictor value — see the module doc's §14 note for why
+/// `StageTimings.rows_in_ranges` cannot be used for this. Resolves tiles and their row ranges
+/// exactly as `Engine::viewport` does (`tiles_for_bbox` then `tile_ranges_all`), against the
+/// bundle opened directly, no session or mask involved at any point.
+fn true_rows_in_ranges(bundle: &Bundle, slice: &str, zoom: u8, bbox: [f64; 4]) -> (u64, u64) {
+    let q = bundle.manifest.quantisation;
+    let extent = Extent {
+        x_min: q.x_min,
+        x_max: q.x_max,
+        y_min: q.y_min,
+        y_max: q.y_max,
+    };
+    let tiles = tiles_for_bbox(bbox, zoom, &extent);
+    let slice_data = bundle
+        .partitions
+        .values()
+        .find_map(|p| p.slices.get(slice))
+        .expect("slice should exist");
+    let segment = slice_data.segments.first().expect("one segment (R4)");
+    let ranges = tile_ranges_all(segment, &tiles);
+    let rows: u64 = ranges.iter().map(|r| r.len() as u64).sum();
+    (tiles.len() as u64, rows)
 }
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
-
-fn ensure_bundle() -> PathBuf {
-    let bundle_root = PathBuf::from("/tmp/tessera-2m4");
-    if !bundle_root.join("CURRENT").exists() {
-        let root = workspace_root();
-        let args = BuildArgs {
-            points: root.join("data/scaled/geometry.parquet"),
-            pairs: root.join("data/scaled/pairs/categories-subclass.pairs.parquet"),
-            out: bundle_root.clone(),
-            extent: extent(),
-            slice_id: "s0".to_string(),
-            limit: Some(ITEM_LIMIT),
-            identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-            identity_key_hex: TEST_KEY_HEX.to_string(),
-            identity_epoch: 1,
-            shard_id: 0,
-            mint_external_ids: false,
-            batch_items: None,
-            memory_budget: None,
-            band_rows: None,
-            emit_oracle_pairs: false,
-        };
-        build(&args).expect("2.4M fixture build should succeed");
-    }
-    bundle_root
+/// `--bundle <path>` is required — this tool no longer builds a fixture itself (see the module
+/// doc). Panics with a usage message rather than silently falling back to a stale default, since
+/// a silent fallback is exactly how §2's original sweep ended up calibrated against the wrong
+/// scale's cost model for as long as it did.
+fn bundle_root_from_args() -> PathBuf {
+    let args: Vec<String> = std::env::args().collect();
+    let idx = args
+        .iter()
+        .position(|a| a == "--bundle")
+        .unwrap_or_else(|| {
+            panic!(
+                "usage: calibration_sweep --bundle <path> [--dense]\n  \
+                 (durable fixtures: data/bench-fixtures/{{2m4,1e8,1e9}}/)"
+            )
+        });
+    PathBuf::from(args.get(idx + 1).expect("--bundle needs a path argument"))
 }
 
 fn all_descriptors(bundle_root: &Path) -> Vec<String> {
@@ -166,8 +187,19 @@ fn main() {
     // (matching the real validation workload's mask density) instead of this tool's original
     // deterministic even-spacing, which review found produced an unrepresentatively sparse mask.
     // Both are kept — see `spread_descriptors`/`random_grant`'s docs.
-    let dense = std::env::args().any(|a| a == "--dense");
-    let bundle_root = ensure_bundle();
+    let args: Vec<String> = std::env::args().collect();
+    let dense = args.iter().any(|a| a == "--dense");
+    // §14: optional rep-count override — at 1e8/1e9 scale a per-request time large enough to make
+    // the default 40 reps slow is plausible and was not measured in advance, so this is here to
+    // adjust without a rebuild rather than assumed unnecessary.
+    let reps: usize = args
+        .iter()
+        .position(|a| a == "--reps")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(REPS);
+    let bundle_root = bundle_root_from_args();
+    println!("bundle: {}", bundle_root.display());
     let all = all_descriptors(&bundle_root);
     let terms = if dense {
         random_grant(&all, 10, 0)
@@ -189,6 +221,10 @@ fn main() {
         },
         terms.len()
     );
+
+    // §14: opened directly (no session) purely to compute the true, mask-independent predictor
+    // value per shape — see `true_rows_in_ranges`'s doc.
+    let bundle = open_bundle(&bundle_root).expect("bundle should open for row-range resolution");
 
     let cfg = |compute_threads: usize| EngineConfig {
         token_max_lifetime_secs: 3600,
@@ -245,12 +281,14 @@ fn main() {
     println!("{}", "-".repeat(100));
 
     for shape in shapes() {
-        let mut serial_ns = Vec::with_capacity(REPS);
-        let mut par_ns = Vec::with_capacity(REPS);
-        let mut tiles_resolved = 0u64;
-        let mut rows_in_ranges = 0u64;
+        let mut serial_ns = Vec::with_capacity(reps);
+        let mut par_ns = Vec::with_capacity(reps);
+        // §14: the TRUE predictor, mask-independent, computed once per shape directly from the
+        // bundle — NOT `out.timings.{tiles_resolved,rows_in_ranges}` (see module doc's bug note).
+        let (tiles_resolved, rows_in_ranges) =
+            true_rows_in_ranges(&bundle, "s0", shape.zoom, shape.bbox);
 
-        for _ in 0..REPS {
+        for _ in 0..reps {
             let out = engine_serial
                 .viewport(
                     &session1,
@@ -258,10 +296,8 @@ fn main() {
                 )
                 .expect("viewport (serial)");
             serial_ns.push(out.timings.total_ns);
-            tiles_resolved = out.timings.tiles_resolved;
-            rows_in_ranges = out.timings.rows_in_ranges;
         }
-        for _ in 0..REPS {
+        for _ in 0..reps {
             let out = engine_par
                 .viewport(
                     &session2,

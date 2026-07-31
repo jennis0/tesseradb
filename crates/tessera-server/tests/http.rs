@@ -29,21 +29,28 @@ use tessera_types::IdentityKey;
 const N_ITEMS: u64 = 1_000;
 const SESSION_CREDENTIAL: &str = "session-secret";
 
-/// Calibration task: item count for the two byte-equality tests below that must exercise the
-/// GENUINE parallel fan-out (`tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS`, currently
-/// 200,000) — see `tessera-engine/tests/viewport.rs`'s identically-named constant for the full
-/// argument (same fixed-extent scatter, so `Σ range.len() == n` exactly for a full-extent
-/// request). This crate does not depend on `tessera-engine`'s test binary, so the constant and its
-/// reasoning are duplicated rather than shared, matching this file's own existing "same fixture
-/// pattern" duplication of `tests/viewport.rs`'s fixture builder (this file's module doc).
+/// Item count for the two byte-equality tests below — see `tessera-engine/tests/viewport.rs`'s
+/// identically-named constant for the full argument (same fixed-extent scatter, so
+/// `Σ range.len() == n` exactly for a full-extent request). This crate does not depend on
+/// `tessera-engine`'s test binary, so the constant and its reasoning are duplicated rather than
+/// shared, matching this file's own existing "same fixture pattern" duplication of
+/// `tests/viewport.rs`'s fixture builder (this file's module doc).
+///
+/// **§14 note.** `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 post-B9 (three-scale
+/// re-calibration; see that constant's doc in `tessera-engine`) — comfortably above this fixture's
+/// item count, by design (see the assertion below), so item count alone no longer reaches the
+/// parallel branch. **§14 fix round 1**: the two tests below instead force it directly via
+/// `Engine::set_serial_fallback_max_rows_for_test` (`bench-timing`-gated, test-only) on each
+/// server's `Engine` before it starts serving — see either test's own doc. This constant still
+/// matters independent of that override: it is what gives the request a genuinely multi-tile,
+/// multi-thousand-row shape (cross-tile ordering, the underlay path) rather than a token one.
 const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
 
-/// Fix round 1: compile-time twin of `tests/viewport.rs`'s identically-named assertion. Unlike
-/// the item count above (duplicated because a test *binary* cannot be imported across crates),
-/// `SERIAL_FALLBACK_MAX_ROWS` is a `pub` constant on the production `tessera_engine::viewport`
-/// module this crate already depends on, so it is imported and compared directly rather than
-/// duplicated as a bare number that could drift out of sync.
-const _: () = assert!(PARALLEL_HEADLINE_ITEMS >= SERIAL_FALLBACK_MAX_ROWS);
+/// Sanity check that [`PARALLEL_HEADLINE_ITEMS`] stays deliberately unit-test-scale small relative
+/// to the production threshold — not load-bearing for the two tests' correctness any more (the
+/// `bench-timing` override makes them reach the parallel branch regardless of this relationship),
+/// but a true and worth-keeping fact about why this fixture is cheap to build.
+const _: () = assert!(PARALLEL_HEADLINE_ITEMS < SERIAL_FALLBACK_MAX_ROWS);
 
 const OPERATOR_CREDENTIAL: &str = "operator-secret";
 /// Fixed test key, matching `tessera-build`'s own test fixtures — not sensitive, this repository
@@ -76,8 +83,9 @@ fn terms_of(source_id: u64) -> Vec<u64> {
 }
 
 /// Parameterised over the item count — see [`build_fixture_n`]'s doc for why (calibration task:
-/// the byte-equality tests below need a regime that clears `SERIAL_FALLBACK_MAX_ROWS`, well above
-/// this file's default `N_ITEMS`).
+/// the byte-equality tests below need a genuinely multi-tile, multi-thousand-row regime, well
+/// above this file's default `N_ITEMS` — see [`PARALLEL_HEADLINE_ITEMS`]'s doc for how they reach
+/// the parallel branch specifically, which item count alone no longer does post-§14).
 fn write_points_n(path: &Path, n: u64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
@@ -244,7 +252,19 @@ async fn spawn_server_with_config_and_gate(
     let max_k = config.max_k;
     let engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
         .expect("engine should open against a freshly built bundle");
+    spawn_server_from_engine(engine, max_k, compute_gate).await
+}
 
+/// §14 fix round 1: the "wrap an already-constructed `Engine` into a running three-listener
+/// server" half of [`spawn_server_with_config_and_gate`], factored out so the byte-equality tests
+/// can construct their own `Engine` (to call `set_serial_fallback_max_rows_for_test` on it, which
+/// needs the owned `Engine` before it is moved into `AppState`) while still reusing the router/
+/// listener plumbing every other test in this file goes through.
+async fn spawn_server_from_engine(
+    engine: Engine,
+    max_k: usize,
+    compute_gate: ComputeGate,
+) -> TestServer {
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
@@ -2866,12 +2886,19 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
 /// of them are part of this byte-equality claim. `x-tessera-pin` IS compared -- it is derived from
 /// the bundle's own `(prefix, segments_version)`, not from timing, so it must agree too.
 ///
-/// **Calibration task fix-wave note.** Uses `PARALLEL_HEADLINE_ITEMS` (300,000), not this file's
-/// default `N_ITEMS` (1,000) — at 1,000 items this request's `Σ range.len()` cannot reach
-/// `tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS` (200,000), so both servers would silently
-/// take the same serial-fold branch regardless of `compute_threads` and this test would no longer
-/// exercise the fan-out its own doc claims to. See that constant's doc, and
-/// `tessera-engine/tests/viewport.rs`'s identically-named constant, for the fixture-size argument.
+/// **§14 fix round 1 note.** Uses `PARALLEL_HEADLINE_ITEMS` (300,000), not this file's default
+/// `N_ITEMS` (1,000), for a genuinely multi-tile, multi-thousand-row request. But item count alone
+/// no longer gets this test to the parallel branch at all: `SERIAL_FALLBACK_MAX_ROWS` rose to
+/// 500,000,000 in the post-B9 three-scale re-calibration, and a fixture that reaches it is
+/// impractical at unit-test scale. Review caught that this left `pool.install` untested end to
+/// end. Fixed the same way as the engine-level headline test
+/// (`tessera-engine/tests/viewport.rs`): each server's `Engine` has its threshold forced to 0 via
+/// `Engine::set_serial_fallback_max_rows_for_test` (`bench-timing`-gated, test-only) BEFORE it is
+/// handed to `spawn_server_from_engine`, so both servers genuinely take `pool.install`, differing
+/// only in worker count. Without `bench-timing` (the method does not exist there at all) this
+/// falls back to comparing the serial fold on both configs — still real byte-equality coverage,
+/// just not of the branch this test's name is about; every guard-rail invocation that matters for
+/// this specific claim builds with `bench-timing`.
 #[tokio::test]
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     let tmp = TempDir::new().unwrap();
@@ -2892,20 +2919,31 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
         ..default_engine_config()
     };
 
-    let server_1 = spawn_server_with_config(
+    let engine_1 = Engine::open(
         &bundle_root,
         &tmp.path().join("cache-1"),
         &tmp.path().join("wal-1.log"),
+        Passthrough::new(),
         config_1,
     )
-    .await;
-    let server_8 = spawn_server_with_config(
+    .expect("engine should open against a freshly built bundle");
+    let engine_8 = Engine::open(
         &bundle_root,
         &tmp.path().join("cache-8"),
         &tmp.path().join("wal-8.log"),
+        Passthrough::new(),
         config_8,
     )
-    .await;
+    .expect("engine should open against a freshly built bundle");
+    // §14 fix round 1: force the genuine parallel branch on both — see this test's doc.
+    #[cfg(feature = "bench-timing")]
+    {
+        engine_1.set_serial_fallback_max_rows_for_test(0);
+        engine_8.set_serial_fallback_max_rows_for_test(0);
+    }
+
+    let server_1 = spawn_server_from_engine(engine_1, config_1.max_k, generous_test_gate()).await;
+    let server_8 = spawn_server_from_engine(engine_8, config_8.max_k, generous_test_gate()).await;
 
     let auth_1 = authorise(&server_1, &["0"]).await;
     let token_1 = auth_1["token"].as_str().unwrap();
@@ -2989,11 +3027,11 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
 /// every tile non-empty, but at `zoom = 8` (up to 65,536 candidate tiles) sparse enough that most
 /// candidate tiles are genuinely empty while a real minority are not.
 ///
-/// **Calibration task fix-wave note.** Same reasoning as the headline test above:
-/// `PARALLEL_HEADLINE_ITEMS` replaces `N_ITEMS` so `Σ range.len()` clears
-/// `SERIAL_FALLBACK_MAX_ROWS` and the two servers are genuinely comparing serial against
-/// parallel. The occupied/empty tile mix (still 1,000 distinct locations, more items stacked on
-/// each) is unaffected — see the doc above.
+/// **§14 fix round 1 note.** Same fix as the headline test above: each server's `Engine` has its
+/// threshold forced to 0 (`Engine::set_serial_fallback_max_rows_for_test`, `bench-timing`-gated)
+/// before being handed to `spawn_server_from_engine`, so both genuinely take `pool.install`. The
+/// occupied/empty tile mix this test is actually for (still 1,000 distinct locations, more items
+/// stacked on each) is unaffected — see the doc above.
 #[tokio::test]
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles(
 ) {
@@ -3015,20 +3053,30 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
         ..default_engine_config()
     };
 
-    let server_1 = spawn_server_with_config(
+    let engine_1 = Engine::open(
         &bundle_root,
         &tmp.path().join("cache-1"),
         &tmp.path().join("wal-1.log"),
+        Passthrough::new(),
         config_1,
     )
-    .await;
-    let server_8 = spawn_server_with_config(
+    .expect("engine should open against a freshly built bundle");
+    let engine_8 = Engine::open(
         &bundle_root,
         &tmp.path().join("cache-8"),
         &tmp.path().join("wal-8.log"),
+        Passthrough::new(),
         config_8,
     )
-    .await;
+    .expect("engine should open against a freshly built bundle");
+    #[cfg(feature = "bench-timing")]
+    {
+        engine_1.set_serial_fallback_max_rows_for_test(0);
+        engine_8.set_serial_fallback_max_rows_for_test(0);
+    }
+
+    let server_1 = spawn_server_from_engine(engine_1, config_1.max_k, generous_test_gate()).await;
+    let server_8 = spawn_server_from_engine(engine_8, config_8.max_k, generous_test_gate()).await;
 
     let auth_1 = authorise(&server_1, &["0"]).await;
     let token_1 = auth_1["token"].as_str().unwrap();
