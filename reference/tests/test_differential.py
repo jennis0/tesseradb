@@ -30,6 +30,7 @@ import pytest
 
 from oracle import mask as mask_mod
 from oracle import morton
+from oracle import viewport as vp
 from oracle.bundle import Bundle
 
 from .wire import decode_viewport
@@ -134,7 +135,7 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
         # The deployment constants §7.2's definition needs. They are config, so the oracle cannot
         # know them; `GET /v1/meta` publishes them precisely so an independent implementation can
         # reproduce the served set. theta's anchor is computed independently below, not read back.
-        selection = server.meta(token)["selection"]
+        constants = server.meta(token)["selection"]
         v_total = _oracle_visible_total(oracle_bundle, base_mask, SLICE)
 
         for _ in range(N_VIEWPORTS_PER_GRANT):
@@ -145,7 +146,16 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
             raw = server.viewport(token, SLICE, zoom, bbox, k=k)
             server_tiles, server_points = decode_viewport(raw)
 
-            oracle_tile_counts = _oracle_counts(oracle_bundle, base_mask, SLICE, zoom, bbox)
+            # ONE `Selection` per request, asked about each of its tiles — see
+            # `oracle/viewport.py`'s doc. Both halves of this comparison, the counts and the point
+            # sets, then provably read the same `vis(T)`: §7.1 discloses that set's size and §7.2
+            # selects from it, so deriving them by two routes would let a disagreement between them
+            # hide in the oracle. It is also what keeps the literal definition affordable — the
+            # free `viewport.served()` makes a whole pass per tile.
+            oracle = vp.Selection(oracle_bundle, base_mask, SLICE, zoom)
+            oracle_tile_counts = oracle.counts_for(
+                morton.tiles_for_bbox(bbox, zoom, oracle_bundle.extent)
+            )
 
             server_tile_map = {t: v for t, v, m, _s in server_tiles}
             for t, v, m, _s in server_tiles:
@@ -170,15 +180,8 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
                 # while duplicating another (the brief calls for a multiset comparison here).
                 server_xy = Counter((round(x, 4), round(y, 4)) for _h, x, y in tile_points)
 
-                oracle_xy_list = _oracle_served(
-                    oracle_bundle,
-                    base_mask,
-                    SLICE,
-                    zoom,
-                    t,
-                    k=k,
-                    selection=selection,
-                    v_total=v_total,
+                oracle_xy_list = oracle.served_points(
+                    t, **vp.params_from_meta(constants, k=k, v_total=v_total)
                 )
                 oracle_xy = Counter((round(x, 4), round(y, 4)) for x, y in oracle_xy_list)
 
@@ -210,36 +213,11 @@ def _visible_of(server_tiles, tile):
 
 
 def _oracle_visible_total(bundle, mask, slice_id):
-    from oracle import viewport as vp
-
     return vp.visible_total(bundle, mask, slice_id)
 
 
 def _oracle_counts(bundle, base_mask, slice_id, zoom, bbox):
-    from oracle import viewport as vp
-
     return vp.counts(bundle, base_mask, slice_id, zoom, bbox)
-
-
-def _oracle_served(bundle, mask, slice_id, zoom, tile, *, k, selection, v_total):
-    """§7.2's served set, from the definition, with the deployment constants the server published.
-
-    The oracle cannot know `k_min`/`k_max_marks`/`theta_target_marks` — they are deployment config —
-    so it reads them from `GET /v1/meta`. `cap` is `min(k, k_max_marks)`, matching the engine.
-    """
-    from oracle import viewport as vp
-
-    return vp.served(
-        bundle,
-        mask,
-        slice_id,
-        zoom,
-        tile,
-        k_min=selection["k_min"],
-        cap=min(k, selection["k_max_marks"]),
-        v_total=v_total,
-        m_target=selection["theta_target_marks"],
-    )
 
 
 def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bundle):
