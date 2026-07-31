@@ -38,8 +38,61 @@ def bundle_root() -> Path:
     return BUNDLE_ROOT
 
 
-# NB: deliberately no shared session-scoped `server` fixture here (code review flagged the
-# previous one as dead weight — nothing in this suite used it). Every test module needs a server
-# spawned with non-default arguments (a file-backed log for the byte-scan, a private fixed
-# cache/WAL path for restart-replay, two independent bundles for the canary scaffold), so each
-# module defines its own `spawn_server(...)` fixture rather than sharing one generic instance.
+# NB: deliberately no shared session-scoped `server` fixture over `bundle_root` (code review
+# flagged the previous one as dead weight — nothing in this suite used it). Every test module
+# against that fixture needs a server spawned with non-default arguments (a file-backed log for
+# the byte-scan, a private fixed cache/WAL path for restart-replay, two independent bundles for
+# the canary scaffold), so each defines its own.
+#
+# The **catalogue** fixtures below are shared, and for the opposite reason: the adversarial mask
+# catalogue is one designed corpus with one designed entity-ID layout, and two modules asking for
+# two builds of it would be two different `tessera_id` orderings of the same items.
+
+
+@pytest.fixture(scope="session")
+def catalogue_bundle_root() -> Path:
+    """The adversarial mask catalogue's bundle, built once per machine at a fixed path."""
+    from oracle.catalogue import build_catalogue_bundle  # noqa: PLC0415
+
+    root, _fx = build_catalogue_bundle()
+    return root
+
+
+@pytest.fixture(scope="session")
+def catalogue_bundle(catalogue_bundle_root: Path):
+    from oracle.bundle import Bundle  # noqa: PLC0415
+
+    return Bundle(catalogue_bundle_root)
+
+
+@pytest.fixture(scope="session")
+def catalogue_server(tmp_path_factory, catalogue_bundle_root: Path):
+    """θ **saturated** — selection reduces to "serve every visible row up to the cap".
+
+    Right for the clauses that are not θ: the floor, the cap, and the ordering. With θ live every
+    point-set assertion also depends on the threshold clause, so a selection-ordering bug and a θ
+    arithmetic bug become indistinguishable. `catalogue_density_server` is the other half.
+    """
+    from oracle.harness import spawn_server, stop_server  # noqa: PLC0415
+
+    tmp_dir = tmp_path_factory.mktemp("catalogue-serve")
+    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir)
+    yield srv
+    stop_server(proc)
+
+
+@pytest.fixture(scope="session")
+def catalogue_density_server(tmp_path_factory, catalogue_bundle_root: Path):
+    """θ **live** — the configuration §7.2's density rule actually ships in.
+
+    `theta_target_marks = 16` against the 150,000-item catalogue puts `P_0` at 16/V_total for each
+    case's own V_total, which differs by four orders of magnitude across the catalogue — that
+    spread is the point, since θ's anchor is a per-viewer quantity and a catalogue that only ever
+    exercised one anchor would not test it.
+    """
+    from oracle.harness import spawn_server, stop_server  # noqa: PLC0415
+
+    tmp_dir = tmp_path_factory.mktemp("catalogue-serve-density")
+    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir, theta_target_marks=16)
+    yield srv
+    stop_server(proc)
