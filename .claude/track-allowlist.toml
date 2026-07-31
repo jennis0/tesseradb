@@ -83,6 +83,20 @@ paths = [
   # `docs/**` went unlisted. Documents are reviewed by reading them, so mechanical ownership buys
   # nothing here; a track rewriting another track's memo is a review matter, not a check failure.
   "docs/**",
+  # Build-fixup sites that belong to no track's subject but break when any track changes a shared
+  # type (controller ruling 2026-07-31, on the Task 3a report's F1/F2). `EngineConfig` is
+  # constructed by EXHAUSTIVE struct literal at fifteen sites across seven files — four in
+  # `tessera-bench`, four in `tessera-engine/examples`, one in `benches/viewport.rs`, the rest in
+  # owned or shared files — so adding one field breaks all fifteen, and most were reachable by no
+  # track. The same applies to any public engine signature a track changes.
+  #
+  # **Mechanical call-site updates only.** `tessera-bench` is the instrument the serving gates
+  # measure with, and `benches/viewport.rs` carries Track C's criterion gate: changing what an arm
+  # or a bench MEASURES is a controller decision, recorded with its reason, never a track's
+  # convenience. Reviewed at integration like every other `[shared]` path.
+  "crates/tessera-bench/**",
+  "crates/tessera-engine/examples/**",
+  "crates/tessera-engine/benches/viewport.rs",
 ]
 
 # Track A — store and reader. Tasks 1, 2.
@@ -107,6 +121,13 @@ paths = [
   "crates/tessera-server/src/error.rs",
   "crates/tessera-server/src/health.rs",
   "crates/tessera-server/tests/http_write.rs",
+  # Track B's engine-level test file (controller ruling 2026-07-31, on the Task 3a report's F1).
+  # Task 3a changes `accept_ingest`'s shape — entity IDs move from the caller to the executor —
+  # and its only engine-test call site was in `tests/viewport.rs`, frozen for every track. Without
+  # this file B could not migrate that case, and its four ordering tests would all have had to
+  # reach the executor through HTTP to observe a property that is not an HTTP one. Same remedy as
+  # Task 0c's `tests/pins.rs` and the gate's `http_engine_state.rs`.
+  "crates/tessera-engine/tests/write.rs",
   "scripts/check-layers.sh",
 ]
 

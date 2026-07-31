@@ -27,7 +27,7 @@ use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
 use tessera_engine::{
     default_compute_threads, CancelToken, Engine, EngineConfig, EngineError, Session,
 };
-use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord, WalRow};
+use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
 use tessera_plugin::Passthrough;
 use tessera_spatial::{morton_of, tiles_for_bbox, Extent};
 use tessera_store::read::open_bundle;
@@ -962,49 +962,10 @@ fn a_sidecar_error_on_drill_down_is_an_error_not_a_missing_external_id() {
     );
 }
 
-/// IMPORTANT I-9: an entity ingested after the build has no locator slot and no extent entry —
-/// the live map must answer first, or `external_id_of` would wrongly report "this item has no
-/// external id" for one that does.
-#[test]
-fn drill_down_resolves_an_external_id_for_a_post_build_entity() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-
-    let new_entity = EntityId::new(engine.allocator_high_water());
-    let row = WalRow {
-        external_id: Some(b"post-build-key".to_vec()),
-        entity_id: new_entity,
-        descriptors: Vec::new(),
-        x: 0.0,
-        y: 0.0,
-        scalars: Vec::new(),
-    };
-    engine
-        .accept_ingest(
-            vec![row],
-            vec![Vec::new()],
-            "batch-1".to_string(),
-            [0u8; 32],
-        )
-        .unwrap();
-
-    let resolved = engine.resolve_external_id(b"post-build-key").unwrap();
-    assert_eq!(resolved, Some(new_entity));
-
-    let external = engine.external_id_of(new_entity).unwrap();
-    assert_eq!(external.as_deref(), Some(&b"post-build-key"[..]));
-}
+// `drill_down_resolves_an_external_id_for_a_post_build_entity` moved to `tests/write.rs` — see
+// that file's module doc. It was this file's only `accept_ingest` call site, and Task 3a changes
+// that method's shape; leaving it here would have obliged Track B to edit a file frozen for every
+// track. The subject moved; the shared fixtures did not.
 
 /// S6: `Allocator::try_new`'s own doc calls it "the check that belongs at open", and `Engine::open`
 /// is open — it must refuse a seed at or above `u32::MAX` before any ingest, rather than let the
