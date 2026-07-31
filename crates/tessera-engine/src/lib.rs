@@ -27,12 +27,15 @@ use tessera_store::Bundle;
 
 pub use cancel::CancelToken;
 pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
-// The pin drain list's public surface (Task 4). `pins` itself stays private — `PinManager` and
+// The pin drain list's public surface. `pins` itself stays private — `PinManager` and
 // `PinnedGeometry` are engine-internal, and `PinnedGeometry` in particular exists to constrain
 // what `viewport.rs` can reach, which a public type would undo. What escapes is only what a
-// caller outside this crate genuinely needs: the reclaim record Task 5's cache pruner hooks, the
-// gauges `/control/status` will publish, and the depth the operator alarms above.
-pub use pins::{GeometryRefused, PinStats, Reclaimed, DRAIN_DEPTH_ALARM, DRAIN_DEPTH_MAX};
+// caller outside this crate genuinely needs: the reclaim record the cache pruner hooks, the
+// refusal a publisher must handle, the gauges `/control/status` publishes, and the two depths —
+// the one an operator alarms above and the one `tests/pins.rs` asserts the trim against.
+pub use pins::{
+    GeometryRefused, GeometryRefusedReason, PinStats, Reclaimed, DRAIN_DEPTH_ALARM, DRAIN_DEPTH_MAX,
+};
 pub use session::{default_compute_threads, Engine, EngineConfig, EngineError, Session};
 pub use timing::{Probe, StageTimings};
 pub use viewport::{

@@ -1,14 +1,16 @@
 //! Pin identity, the drain list, and lifecycle §2.2's two bounds — over the same synthetic bundle
 //! `tests/viewport.rs` uses.
 //!
-//! Split out of `tests/viewport.rs` by Task 0c (Phase 2 stage 2.1) so that stage 2.1's engine-state
-//! track owns the pin cases outright; Task 4 then added everything below
-//! `pin_round_trips_and_rejects_a_mismatched_segments_version`. Shared fixtures live in [`common`].
+//! Shared fixtures live in [`common`]. (History, as a pointer: these cases were split out of
+//! `tests/viewport.rs` so that the engine-state track owns them outright.)
 //!
-//! **Every test here needs a generation swap, and stage 2.1 has no production geometry publisher**
-//! — flush is 2.2, compaction is 2.3. `Engine::publish_geometry` is the seam both of those will
-//! publish through, and these tests are its first callers; see its doc for why it is a real API
-//! rather than a test hook, and for the obligation it puts on 2.2's flush.
+//! **Every case below a generation swap drives it through `Engine::publish_geometry`**, which is
+//! the one seam a geometry publication may go through — see its doc for why it is a real API
+//! rather than a test hook, and for the obligation it places on the writer.
+//!
+//! What is *not* reachable from here, and is unit-tested in `src/pins.rs` instead:
+//! `PinManager::retire`'s refusal to drain a geometry that is still live. It needs an interleaving
+//! inside `publish_geometry`'s own body, which no public API can schedule.
 
 mod common;
 
@@ -19,7 +21,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig, EngineError};
+use tessera_engine::{Engine, EngineConfig, EngineError, GeometryRefusedReason, DRAIN_DEPTH_MAX};
 use tessera_lifecycle::wal::WalRow;
 use tessera_lifecycle::ChangeOp;
 use tessera_store::read::open_bundle;
@@ -111,11 +113,11 @@ fn pin_round_trips_and_rejects_a_mismatched_segments_version() {
     assert!(matches!(err, EngineError::PinExpired));
 }
 
-/// The headline of Task 4: a pin taken before a geometry swap still resolves after it, and
-/// resolves to the **pinned** geometry rather than the live one.
+/// The headline property: a pin taken before a geometry swap still resolves after it, and resolves
+/// to the **pinned** geometry rather than the live one.
 ///
-/// *What each assertion catches.* The `unwrap` on the pinned request catches the pre-Task-4
-/// behaviour outright — an equality check against the live generation `410`s here. The
+/// *What each assertion catches.* The `unwrap` on the pinned request catches the absence of a drain
+/// list outright — a bare equality check against the live generation `410`s here. The
 /// `pinned.pin == before.pin` assertion catches the other plausible wrong answer, a `resolve` that
 /// quietly falls back to live geometry: that returns `200` with the *new* pin, which is I11's named
 /// failure ("not stale-restrictive but simply wrong"). The `live.tiles != before.tiles` assertion is
@@ -246,9 +248,13 @@ fn a_suppression_applies_to_a_pinned_request_immediately() {
     );
     // The request really took the DRAIN-LIST path, which is where the fail-open would live —
     // without this the test could pass against a live pin and assert nothing about drained ones.
-    assert_eq!(
-        engine.pin_stats().drain_locks,
-        locks_before + 1,
+    //
+    // `>=`, not `==`: the guarantee this case needs is "the drain lock was taken", and a future
+    // legitimate second acquisition anywhere on the pinned path would turn a test named for a
+    // *security* property red for a lock-accounting reason. Exact lock accounting is
+    // `resolve_takes_no_lock_when_no_pin_is_presented`'s subject, and it asserts equality there.
+    assert!(
+        engine.pin_stats().drain_locks > locks_before,
         "the pinned request must have resolved off the drain list"
     );
     assert_eq!(
@@ -291,8 +297,8 @@ fn a_suppression_applies_to_a_pinned_request_immediately() {
 ///
 /// Finally, note what this can and cannot catch. `compose` takes `&FrozenFragment` and no watermark
 /// argument at all (`compose.rs`), so the mistake it guards is a *future* edit that widens that
-/// signature or reads `PinnedGeometry::watermark` at the call site — not anything Task 4 does. That
-/// is what a negative control is for; it is not coverage of the drain list.
+/// signature or reads `PinnedGeometry::watermark` at the call site — not anything the drain list
+/// does. That is what a negative control is for; it is not coverage of the drain list.
 #[test]
 fn a_pinned_request_composes_with_the_fragment_watermark_not_the_pinned_one() {
     const LOW: u64 = 3_000;
@@ -600,6 +606,12 @@ fn a_pin_past_its_ttl_is_410() {
     );
 }
 
+/// `a_session_cannot_exceed_its_pin_cap` needs four geometries resolvable at once, so it is at the
+/// mercy of the depth ceiling. Checked at **compile** time rather than assumed: lowering
+/// `DRAIN_DEPTH_MAX` below 4 must fail here with a reason, not as a mysterious `PinExpired` in the
+/// middle of a cap assertion.
+const _: () = assert!(DRAIN_DEPTH_MAX >= 4);
+
 /// Lifecycle §2.2's per-session cap: the most **superseded** geometries one session may hold
 /// resolvable at once.
 ///
@@ -679,6 +691,210 @@ fn a_session_cannot_exceed_its_pin_cap() {
     engine
         .viewport(&other, whole_extent().pin(Some(pins[2].clone())))
         .expect("a second session has its own cap");
+}
+
+/// A publication that changes the **bundle** while leaving `(prefix, segments_version)` alone is
+/// refused, and so is a lower `segments_version`.
+///
+/// **This is I11's named failure reached through the API rather than through `resolve`.** A bundle
+/// swap under an unchanged pin identity retires nothing, so every outstanding pin naming that
+/// identity takes `resolve`'s live-equality fast path and is answered against the *new* geometry —
+/// "not stale-restrictive but simply wrong", a `200` over unrelated items. The second corpus is
+/// deliberately a different one (8 000 items against 10 000), so the assertion that the pin still
+/// answers `before.tiles` is a statement about which geometry answered rather than an identity.
+///
+/// The lower-version case is the mirror: a rollback by pointer flip (design §10.2) would put a
+/// *live* geometry's identity on the drain list, where a later `prune_generation` would evict the
+/// live generation's own projections.
+///
+/// Positive control at the end, so the test cannot pass by "publication always refuses".
+#[test]
+fn a_bundle_swap_under_an_unchanged_pin_identity_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let before = engine.viewport(&session, whole_extent()).unwrap();
+
+    let second_root = tmp.path().join("bundle2");
+    build_fixture_n(
+        &second_root,
+        &tmp.path().join("points2.parquet"),
+        &tmp.path().join("pairs2.parquet"),
+        8_000,
+    );
+
+    let refused = engine
+        .publish_geometry(
+            before.pin.prefix.clone(),
+            before.pin.segments_version,
+            watermark_of(&reopen(&second_root)),
+            reopen(&second_root),
+        )
+        .expect_err("a bundle swap under an unchanged pin identity must be refused");
+    assert_eq!(
+        refused.reason,
+        GeometryRefusedReason::SegmentsVersionNotIncreasing
+    );
+    assert_eq!(refused.live_segments_version, before.pin.segments_version);
+    assert_eq!(refused.offered_prefix, before.pin.prefix);
+
+    assert_eq!(
+        engine.pin_stats().drain_depth,
+        0,
+        "a refused publication retires nothing"
+    );
+    let after = engine.viewport(&session, whole_extent()).unwrap();
+    assert_eq!(
+        after.pin, before.pin,
+        "the live geometry must not have moved"
+    );
+    assert_eq!(
+        after.tiles, before.tiles,
+        "the refused bundle must not be answering requests — this is the count the accepted \
+         publication would have changed"
+    );
+    let pinned = engine
+        .viewport(&session, whole_extent().pin(Some(before.pin.clone())))
+        .unwrap();
+    assert_eq!(
+        pinned.tiles, before.tiles,
+        "the pin still names the geometry it was minted from"
+    );
+
+    // The mirror case. Raise the live version first, so offering the ORIGINAL version afterwards is
+    // a rollback rather than a repeat — and needs no underflow to express.
+    engine
+        .publish_geometry(
+            "v_next".to_string(),
+            before.pin.segments_version + 1,
+            watermark_of(&reopen(&bundle_root)),
+            reopen(&bundle_root),
+        )
+        .expect("a strictly increasing segments_version is publishable");
+    let rolled_back = engine
+        .publish_geometry(
+            "v_older".to_string(),
+            before.pin.segments_version,
+            watermark_of(&reopen(&bundle_root)),
+            reopen(&bundle_root),
+        )
+        .expect_err("republishing an older segments_version must be refused");
+    assert_eq!(
+        rolled_back.reason,
+        GeometryRefusedReason::SegmentsVersionNotIncreasing
+    );
+    assert_eq!(
+        engine.pin_stats().drain_depth,
+        1,
+        "only the accepted publication in between retired anything"
+    );
+
+    // Positive control.
+    engine
+        .publish_geometry(
+            "v_after".to_string(),
+            before.pin.segments_version + 2,
+            watermark_of(&reopen(&bundle_root)),
+            reopen(&bundle_root),
+        )
+        .expect("the refusals above are about the version, not about publication");
+}
+
+/// `DRAIN_DEPTH_MAX` is a **bound**, not a gauge: the list is trimmed to it, and the trimmed pins
+/// `410`.
+///
+/// The failure it catches is the depth trim being absent or a no-op, which is invisible in every
+/// other case here — without a ceiling, retention is publication rate × `pin_ttl_secs` and the list
+/// grows until the TTL happens to catch up. `pin_ttl_secs` is the shipped 300 s throughout, so
+/// nothing on this list can expire by elapsing and the removal must come from the trim.
+///
+/// The control that stops it passing for the wrong reason: the same pin is presented **before** the
+/// trimming publication and resolves. So the `410` afterwards is the trim, not "a drained pin never
+/// resolves".
+#[test]
+fn the_drain_list_is_trimmed_to_drain_depth_max() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let oldest = engine.viewport(&session, whole_extent()).unwrap().pin;
+
+    let publish = |step: usize| {
+        engine
+            .publish_geometry(
+                format!("v{step:05}"),
+                oldest.segments_version + step as u64,
+                watermark_of(&reopen(&bundle_root)),
+                reopen(&bundle_root),
+            )
+            .expect("each publication strictly increases segments_version")
+    };
+
+    // Fill the list exactly to the ceiling: after `DRAIN_DEPTH_MAX` publications the original
+    // geometry and the first `DRAIN_DEPTH_MAX - 1` replacements are all superseded.
+    for step in 1..=DRAIN_DEPTH_MAX {
+        assert!(
+            publish(step).is_empty(),
+            "nothing is reclaimed while the list is filling"
+        );
+    }
+    assert_eq!(engine.pin_stats().drain_depth, DRAIN_DEPTH_MAX);
+    // The control: at the ceiling, the oldest pin still resolves.
+    engine
+        .viewport(&session, whole_extent().pin(Some(oldest.clone())))
+        .expect("a pin at the ceiling, well inside its TTL, resolves");
+
+    let trimmed = publish(DRAIN_DEPTH_MAX + 1);
+    assert_eq!(
+        trimmed
+            .iter()
+            .map(|r| r.prefix.as_str())
+            .collect::<Vec<_>>(),
+        vec![oldest.prefix.as_str()],
+        "the trim drops the OLDEST entry, and reports it as reclaimed so the cache pruner sees it"
+    );
+    assert_eq!(
+        engine.pin_stats().drain_depth,
+        DRAIN_DEPTH_MAX,
+        "the list is capped, not merely alarmed on"
+    );
+
+    let err = engine
+        .viewport(&session, whole_extent().pin(Some(oldest.clone())))
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::PinExpired),
+        "a trimmed pin must be refused, never answered against current geometry; got {err:?}"
+    );
+    // …and the entry that took its place is resolvable, so the trim removed one end of the list.
+    engine
+        .viewport(
+            &session,
+            whole_extent().pin(Some(PinId {
+                prefix: format!("v{:05}", DRAIN_DEPTH_MAX),
+                segments_version: oldest.segments_version + DRAIN_DEPTH_MAX as u64,
+            })),
+        )
+        .expect("the newest superseded geometry is still on the list");
 }
 
 /// Rule 4: `PinManager::resolve` must not take the drain lock on the common path.

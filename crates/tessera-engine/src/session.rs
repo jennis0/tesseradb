@@ -30,7 +30,7 @@ use tessera_store::{Bundle, StoreError};
 use tessera_types::{EntityId, IdentityError, IdentityKey, TermId, TesseraId};
 
 use crate::cache::RowProjectionCache;
-use crate::pins::{GeometryRefused, PinManager, PinStats, Reclaimed};
+use crate::pins::{self, GeometryRefused, PinManager, PinStats, Reclaimed};
 use crate::write::WritePath;
 use crate::{Generation, GenerationHandle};
 
@@ -100,22 +100,24 @@ pub struct EngineConfig {
     /// harmless rather than a zero-width pool that can run nothing.
     pub compute_threads: usize,
     /// Lifecycle §2.2's pin TTL, in seconds — how long a pin stays resolvable once the generation
-    /// it names has been superseded. Handed to [`crate::pins::PinManager`] at open; **nothing
-    /// reads it until Task 4** builds the drain list it bounds. Mirrors `tessera-server::config`'s
-    /// `serve.pin_ttl_secs`, whose doc carries the page-cache argument that sizes it.
+    /// it names has been superseded. Handed to [`crate::pins::PinManager`] at open, where it bounds
+    /// the drain list: it is enforced at resolve as well as at reclaim, and it is (with
+    /// `crate::pins::DRAIN_DEPTH_MAX`, and with a reclaim pass actually running) what bounds
+    /// retention. Mirrors `tessera-server::config`'s `serve.pin_ttl_secs`, whose doc carries the
+    /// page-cache argument that sizes it.
     pub pin_ttl_secs: u64,
     /// Lifecycle §2.2's per-session pin cap: the most **superseded** geometries one session may
     /// hold resolvable at once. Presenting a further one is
     /// [`EngineError::PinCapExceeded`] (422). Mirrors `tessera-server::config`'s
     /// `serve.pins_per_session_max`.
     ///
-    /// *(Task 4 correction to the seam's own wording, which said "a **mint** above it becomes
-    /// `PinCapExceeded`". A mint always names the live generation, of which a session can hold
-    /// exactly one and which pins nothing that is not already live — so a mint consumes no
-    /// resource and there is nothing there to cap. Refusing at mint would also `422` an ordinary
-    /// unpinned viewport and would put the drain lock on the common request path. The cap is
-    /// counted and enforced at presentation of a **drained** pin; see
-    /// `crate::pins::PinManager::resolve_drained`.)*
+    /// **Counted at presentation of a drained pin, never at mint** — see
+    /// `crate::pins::PinManager::resolve_drained`. A mint always names the live generation, of
+    /// which a session can hold exactly one and which holds nothing alive that is not already live,
+    /// so a mint consumes no resource and there is nothing there to cap; refusing at mint would
+    /// `422` an ordinary unpinned viewport and would put the drain lock on the common request path.
+    /// This is **not** the page-cache defence — `crate::pins::PinManager::pins_per_session_max`
+    /// says what it does and does not bound.
     pub pins_per_session_max: usize,
 }
 
@@ -640,13 +642,12 @@ impl Engine {
 
     /// Publish a new row-space geometry, retiring the outgoing one onto the pin manager's drain
     /// list (I11, lifecycle §2.1–§2.3). Returns everything the depth trim and the reclaim pass
-    /// removed — **Task 5's cache-pruning hook**, see [`Reclaimed`].
+    /// removed — the cache pruner's hook, see [`Reclaimed`].
     ///
-    /// **The single seam a geometry swap may go through.** Stage 2.2's flush and 2.3's compaction
-    /// are its real callers; in stage 2.1 nothing in the serving process moves
-    /// `segments_version`, so the only callers are the tests that prove the drain list works. That
-    /// is not a placeholder: without a producer, Task 4's drain list is untestable, and the plan's
-    /// Global Constraint 3 is explicit that a named test with no hook to hang on is not a test.
+    /// **The single seam a geometry swap may go through**, and the only thing in this process that
+    /// moves `segments_version`. A flush and a compaction are its production callers; until one
+    /// exists, its callers are the tests that prove the drain list works — which is why it is a
+    /// real API and not a test hook, a drain list with no producer being untestable.
     ///
     /// **It structurally cannot regress authorisation state.** `overlay`, `buffer` and
     /// `overlay_version` are carried forward *unchanged* from whatever generation is live at the
@@ -667,19 +668,23 @@ impl Engine {
     /// stale fragment, so it goes unseen — but it is wrong, and 2.2 must widen this signature or
     /// swap those fields alongside.
     ///
-    /// **Obligation on stage 2.2** *(recorded here because it lands in a file this track does not
-    /// own)*: `WritePath::accept_ingest` and `WritePath::apply_change_locked`
-    /// (`crates/tessera-engine/src/write.rs`) still swap with `load_full` + `store` under the WAL
-    /// mutex, which is safe only while that mutex serialises **every** publisher. The
-    /// compare-and-swap below cannot lose a concurrent overlay swap, but those two `store`s can
-    /// lose a geometry published here. Flush must therefore run on the same writer thread (as
-    /// lifecycle §1.3 requires anyway), or those two swaps must move to a compare-and-swap too.
+    /// **Obligation on the writer, and it is load-bearing** *(recorded here because it lands in a
+    /// file this track does not own)*: `WritePath::accept_ingest` and
+    /// `WritePath::apply_change_locked` (`crates/tessera-engine/src/write.rs`) still swap with
+    /// `load_full` + `store` under the WAL mutex, which is safe only while that mutex serialises
+    /// **every** publisher. The compare-and-swap below cannot lose a concurrent overlay swap, but
+    /// those two `store`s can lose a geometry published here — after which the live generation is
+    /// one whose identity this method has already retired, and a later `prune_generation` evicts
+    /// the live generation's own projections. Either a geometry publisher runs on the same writer
+    /// thread (as lifecycle §1.3 requires anyway), or those two swaps move to a compare-and-swap
+    /// too. The identity check below narrows the window; **nothing in this file closes it**, and it
+    /// must not be read as a defence that makes the two `store`s safe.
     ///
     /// `prefix`, `segments_version` and `watermark` are the values from the new prefix's own
     /// SEGMENTS manifest; they are taken separately from `bundle` rather than read out of it
     /// because the caller — a flush or a compaction publication — is the thing that decides what
     /// `n` the new manifest carries. `segments_version` must strictly increase; see
-    /// [`GeometryRefused`] and `PinManager::check_publishable` for why that is a refusal and not a
+    /// [`GeometryRefused`] and `pins::check_publishable` for why that is a refusal and not a
     /// warning.
     pub fn publish_geometry(
         &self,
@@ -696,8 +701,7 @@ impl Engine {
         // duplicate — or entirely spurious — drain entries.
         let previous = loop {
             let live = self.generation.load_full();
-            self.pins
-                .check_publishable(&live, &prefix, segments_version)?;
+            pins::check_publishable(&live, &prefix, segments_version)?;
             let next = Arc::new(Generation {
                 prefix: prefix.clone(),
                 segments_version,
@@ -713,25 +717,41 @@ impl Engine {
             }
         };
 
-        // Retire only if `previous` is genuinely no longer live. It can still be live if a
-        // `WritePath` `store` landed on top of this swap (see the obligation above) — and retiring
-        // a *live* geometry would put its `segments_version` on the drain list, where Task 5's
-        // `prune_generation` would later evict the live generation's own projections. Cheap, one
-        // relaxed load, on the write path.
-        let mut reclaimed = if Arc::ptr_eq(&previous, &self.generation.load_full()) {
-            Vec::new()
-        } else {
-            self.pins.retire(&previous, &prefix, segments_version)
-        };
+        // Retire against the geometry identity that is live *now* — the observation
+        // `PinManager::retire` decides on, not the identity offered above. The compare-and-swap
+        // proves `previous` was superseded at the instant it ran; a `WritePath` `store` that began
+        // before it and lands after it makes `previous`'s geometry live again under a **fresh
+        // `Arc`** (`write.rs` copies `prefix` and `segments_version` forward), and draining a live
+        // identity is what `retire`'s guard refuses.
+        //
+        // Pointer identity cannot express that and an earlier revision's `Arc::ptr_eq` here was a
+        // no-op: nothing ever re-`store`s `previous`'s own pointer, so the comparison was false in
+        // both the case it was meant to catch and every other. The claim that it mitigated the
+        // clobber was wrong and is withdrawn.
+        //
+        // **This narrows the window; it does not close it.** A store landing after this load is
+        // unobserved. The obligation above is therefore load-bearing, not belt-and-braces.
+        let live_now = self.generation.load_full();
+        let mut reclaimed =
+            self.pins
+                .retire(&previous, &live_now.prefix, live_now.segments_version);
         // Reclaim *after* retiring, so the list is self-bounding for as long as geometry keeps
-        // moving and does not depend on a periodic pass existing before stage 2.2 writes one.
+        // moving. This is not a substitute for a periodic pass — see `reclaim_pins`.
         reclaimed.extend(self.pins.reclaim());
         Ok(reclaimed)
     }
 
-    /// One reclaim pass over the pin drain list — remove → verify → drop (lifecycle §2.1). The
-    /// lifecycle thread's periodic call; also Task 5's other cache-pruning hook, since
+    /// One reclaim pass over the pin drain list — remove → verify → drop (lifecycle §2.1).
+    ///
+    /// The lifecycle thread's periodic call, and the cache pruner's other hook, since
     /// [`Reclaimed::segments_version`] is exactly the row-projection cache key component to prune.
+    ///
+    /// **A periodic caller is required, not optional.** This is the only thing that releases a
+    /// superseded bundle's memory; the TTL bounds availability at resolve and frees nothing. Until
+    /// one exists, memory is released only by the next [`Self::publish_geometry`], so a process
+    /// that publishes once and goes quiescent holds a whole superseded bundle indefinitely — at
+    /// drain depth 1 — *at* `DRAIN_DEPTH_ALARM`, which alarms only above it. [`PinStats::oldest_retired_secs`]
+    /// is the gauge that makes that state visible.
     pub fn reclaim_pins(&self) -> Vec<Reclaimed> {
         self.pins.reclaim()
     }
