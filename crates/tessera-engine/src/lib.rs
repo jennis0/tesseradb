@@ -7,13 +7,16 @@
 //! `/control/changes` or `/control/ingest` acceptance advances the overlay/buffer, or a
 //! `tessera build` advances the bundle.
 
+mod cache;
 pub mod cancel;
 pub mod compose;
+mod pins;
 pub mod select;
 pub mod session;
 mod single_flight;
 pub mod timing;
 pub mod viewport;
+mod write;
 
 use std::sync::Arc;
 
