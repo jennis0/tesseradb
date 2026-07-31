@@ -436,6 +436,24 @@ fn detect_memory_budget() -> u64 {
         .unwrap_or(FALLBACK)
 }
 
+/// Free bytes on the filesystem holding `path`, or `None` where unknowable — the disk
+/// pre-flight then simply does not run, rather than refusing builds on a guess.
+#[cfg(unix)]
+fn available_disk(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stats) } != 0 {
+        return None;
+    }
+    Some(stats.f_bavail as u64 * stats.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+fn available_disk(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
 /// The auto-batching grid: derived batch sizes are multiples of 2^24 items, so small budget
 /// differences between machines derive the same size — an accidental identity fork needs a
 /// budget step of a whole grid cell, not a few megabytes.
@@ -559,6 +577,28 @@ fn plan_build(
         acc += rows;
     }
     band_bounds.push((lo, row_counts.len() as u32));
+
+    // Disk pre-flight (fail-closed): the build's transient spills and its outputs coexist in
+    // phases; refuse up front, with the arithmetic, rather than dying on ENOSPC hours in. The
+    // three phase peaks, all conservative: buckets full beside the first batch's bands;
+    // bands full beside the postings spool; the spool becoming postings.arrow beside the
+    // segment. (P here is pre-dedup pairs; band/spool bytes-per-pair are stated ceilings for
+    // the varint codec and Roaring postings, not measurements of this corpus.)
+    let p = pair_rows as u64;
+    let phase_spill = if bucket_in_ram { 0 } else { 8 * p } + (6 * p) / batches.max(1);
+    let phase_bands = 6 * p + 4 * p;
+    let phase_assemble = 4 * p + 26 * n;
+    let disk_need = phase_spill.max(phase_bands).max(phase_assemble);
+    if let Some(free) = available_disk(&args.out) {
+        if free < disk_need {
+            return Err(BuildError::Invalid(format!(
+                "insufficient disk for this build: ~{disk_need} bytes needed at peak \
+                 (spill phase {phase_spill}, band phase {phase_bands}, assembly phase \
+                 {phase_assemble}; n = {n}, pairs = {p}, batches = {batches}), {free} \
+                 available at the output path; free disk and retry"
+            )));
+        }
+    }
 
     Ok(BuildPlan {
         batch_items,

@@ -248,24 +248,26 @@ pub(crate) fn read_bucket(receipt: &SpillReceipt) -> Result<Vec<u64>> {
 /// Appends one band file: a `(term, entity)` pair stream for terms in `[term_lo, ...)`.
 ///
 /// **On disk:** a 4-byte little-endian `term_lo` header, then one record per pair —
-/// `varint(term - term_lo) ‖ varint(entity)`, both LEB128 (7 payload bits per byte,
-/// continuation in the high bit, at most 5 bytes for a `u32`). Integrity is external, via the
-/// [`SpillReceipt`]; the header is covered *indirectly* — the anchor mixes the resolved
-/// `(term, entity)` pairs, so a corrupted header shifts every decoded term and the anchor
-/// check fails.
+/// `varint(term - term_lo) ‖ varint(entity - last_entity)`, both LEB128 (7 payload bits per
+/// byte, continuation in the high bit, at most 5 bytes for a `u32`). Integrity is external,
+/// via the [`SpillReceipt`]; the header is covered *indirectly* — the anchor mixes the
+/// resolved `(term, entity)` pairs, so a corrupted header shifts every decoded term and the
+/// anchor check fails.
 ///
-/// **No entity delta, deliberately.** Entities for one term arrive strictly ascending across
-/// the writer's lifetime, but terms interleave arbitrarily (the emitter walks items, each
-/// carrying several terms), so per-term deltas would need last-entity state per term — a
-/// T-sized table in a module whose whole point is bounding memory. Absolute entities cost
-/// ~4.7–5.5 bytes/pair on the measured corpora (large entity values); acceptable, and the
-/// simplicity is worth more. Per-term ascent is enforced by the band's *consumer* (the
-/// pipeline's cursor-scatter feeding `encode_posting`'s sortedness check), not by
-/// [`BandReader`], which would otherwise need that same T-sized state.
+/// **The entity delta is per FILE, not per term.** The emitter walks items in assignment
+/// order — entity ids ascend across every push into a given file (equal for one item's
+/// several terms, strictly rising between items, and rising across batches because batch
+/// bases ascend) — so a single last-entity register per writer suffices, no T-sized state.
+/// The measured alternative (absolute entities, ~5 bytes each) put a 10⁹-item corpus's bands
+/// at ~39 GB and over the disk; deltas are overwhelmingly one byte. `push` refuses a
+/// regressing entity at the write site (an emitter-ordering bug), and per-term ascent is
+/// still enforced end-to-end by the band's *consumer* (the pipeline's cursor-scatter feeding
+/// `encode_posting`'s sortedness check).
 pub(crate) struct BandWriter {
     path: PathBuf,
     writer: BufWriter<File>,
     term_lo: u32,
+    last_entity: u32,
     count: u64,
     anchor: u64,
 }
@@ -281,6 +283,7 @@ impl BandWriter {
             path: path.to_path_buf(),
             writer,
             term_lo,
+            last_entity: 0,
             count: 0,
             anchor: 0,
         })
@@ -297,8 +300,18 @@ impl BandWriter {
                 self.term_lo
             ))
         })?;
+        // The per-file entity register: a regressing entity is an emitter-ordering bug and
+        // must fail here, at the write site, not decode into a wrong posting later.
+        let entity_delta = entity.checked_sub(self.last_entity).ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "band file {}: entity {entity} regresses below the file's last entity {}",
+                self.path.display(),
+                self.last_entity
+            ))
+        })?;
         write_varint(&mut self.writer, &self.path, delta)?;
-        write_varint(&mut self.writer, &self.path, entity)?;
+        write_varint(&mut self.writer, &self.path, entity_delta)?;
+        self.last_entity = entity;
         self.count += 1;
         self.anchor = self.anchor.wrapping_add(mix64(pack_pair(term, entity)));
         Ok(())
@@ -310,6 +323,7 @@ impl BandWriter {
             path,
             writer,
             term_lo: _,
+            last_entity: _,
             count,
             anchor,
         } = self;
@@ -355,6 +369,7 @@ pub(crate) struct BandReader {
     path: PathBuf,
     reader: BufReader<File>,
     term_lo: u32,
+    last_entity: u32,
     expect_count: u64,
     expect_anchor: u64,
     count: u64,
@@ -382,6 +397,7 @@ impl BandReader {
             path: receipt.path.clone(),
             reader,
             term_lo: u32::from_le_bytes(header),
+            last_entity: 0,
             expect_count: receipt.count,
             expect_anchor: receipt.anchor,
             count: 0,
@@ -408,7 +424,7 @@ impl BandReader {
             Some(byte) => byte,
         };
         let delta = self.decode_varint(first)?;
-        let entity = {
+        let entity_delta = {
             let byte = self.require_byte()?;
             self.decode_varint(byte)?
         };
@@ -418,6 +434,13 @@ impl BandReader {
                 self.term_lo
             ))
         })?;
+        let entity = self.last_entity.checked_add(entity_delta).ok_or_else(|| {
+            self.malformed(&format!(
+                "entity delta {entity_delta} overflows u32 above {}",
+                self.last_entity
+            ))
+        })?;
+        self.last_entity = entity;
         if self.count == self.expect_count {
             // One more decodable record than the receipt promised: trailing data. Caught here
             // rather than at EOF so the error names the actual malformation, not a bare count
@@ -653,11 +676,14 @@ mod tests {
             (0, vec![]),
             (0, vec![(0, 0)]),
             (7, vec![(7, 123)]),
-            // Terms interleave arbitrarily; entities per term ascend (the emitter's contract,
-            // not this codec's — the codec must simply preserve order).
-            (3, vec![(5, 1), (3, 1), (5, 2), (4, 7), (3, 9), (5, 900_000)]),
-            // Boundaries: maximal delta (5-byte varint), maximal entity, degenerate band.
-            (0, vec![(u32::MAX, u32::MAX), (0, 1)]),
+            // Terms interleave arbitrarily; entities are NON-DECREASING per file — the
+            // emitter's assignment-order contract, which the per-file delta encoding bakes
+            // into the format itself (equal entities for one item's several terms, rising
+            // between items).
+            (3, vec![(5, 1), (3, 1), (5, 1), (4, 7), (3, 9), (5, 900_000)]),
+            // Boundaries: maximal term delta (5-byte varint), maximal entity delta from 0,
+            // equal-entity runs at the ceiling.
+            (0, vec![(u32::MAX, 0), (0, u32::MAX)]),
             (u32::MAX, vec![(u32::MAX, 0), (u32::MAX, u32::MAX)]),
             (
                 100,
@@ -788,13 +814,23 @@ mod tests {
         /// `(term >= term_lo, entity)` pairs round-trips in order, through the real files.
         #[test]
         fn band_codec_round_trips(
-            (term_lo, pairs) in any::<u32>().prop_flat_map(|lo| {
+            (term_lo, raw) in any::<u32>().prop_flat_map(|lo| {
                 (
                     Just(lo),
-                    prop::collection::vec((lo..=u32::MAX, any::<u32>()), 0..64),
+                    prop::collection::vec((lo..=u32::MAX, 0u32..=1 << 20), 0..64),
                 )
             })
         ) {
+            // Entities must be non-decreasing per file (the format's contract): accumulate
+            // the generated values as deltas, saturating at the ceiling.
+            let mut entity = 0u32;
+            let pairs: Vec<(u32, u32)> = raw
+                .into_iter()
+                .map(|(term, step)| {
+                    entity = entity.saturating_add(step);
+                    (term, entity)
+                })
+                .collect();
             let temp = tempfile::TempDir::new().unwrap();
             let path = temp.path().join("band.bin");
             let receipt = write_band(&path, term_lo, &pairs);
@@ -804,6 +840,16 @@ mod tests {
     }
 
     // ---- TmpDir -----------------------------------------------------------------------
+
+    #[test]
+    fn band_writer_refuses_a_regressing_entity() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut writer = BandWriter::create(&temp.path().join("band.bin"), 0).unwrap();
+        writer.push(1, 10).unwrap();
+        writer.push(2, 10).unwrap(); // equal is fine (one item, several terms)
+        let err = writer.push(1, 9).unwrap_err().to_string();
+        assert!(err.contains("regresses"), "{err}");
+    }
 
     #[test]
     fn tmpdir_creates_and_close_removes() {
