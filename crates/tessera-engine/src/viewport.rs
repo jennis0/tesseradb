@@ -49,6 +49,7 @@ use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::{tile_ranges_all, tile_ranges_within};
 use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 
+use crate::cache::RowProjectionKey;
 use crate::cancel::CancelToken;
 use crate::compose::{compose, visible_to, EffectiveMask, RowProjection};
 use crate::select::{SelectParams, Selection, Threshold};
@@ -427,24 +428,13 @@ impl Engine {
         let generation = self.generation.load_full();
         probe.lap(|t| &mut t.generation_resolve_ns);
 
-        let effective_pin = match pin {
-            Some(presented) => {
-                // I11 / lifecycle §2.3: a pin is geometry identity only — `(prefix,
-                // segments_version)` — never `overlay_version`. An overlay swap (any accepted
-                // suppression/delete/predicate change) must not invalidate this pin; only a
-                // bundle swap (new `prefix`/`segments_version`) does.
-                if presented.prefix != generation.prefix
-                    || presented.segments_version != generation.segments_version
-                {
-                    return Err(EngineError::PinExpired);
-                }
-                presented
-            }
-            None => PinId {
-                prefix: generation.prefix.clone(),
-                segments_version: generation.segments_version,
-            },
-        };
+        // Task 0a: the I11 check itself moved verbatim into `PinManager::resolve`; what it hands
+        // back is `PinnedGeometry` — geometry ONLY. Overlay, buffer and `overlay_version` are
+        // deliberately not on that type and are read from the LIVE generation below, exactly as
+        // this loop always has: a pin fixes row-space geometry and never authorisation state
+        // (lifecycle §2.3), so a suppression accepted mid-request applies to a pinned request too.
+        let geometry = self.pins.resolve(pin, session.token_id, &generation)?;
+        let effective_pin = geometry.pin_id();
 
         probe.lap(|t| &mut t.pin_resolve_ns);
 
@@ -456,7 +446,7 @@ impl Engine {
         // "below the cut" means different things in different partitions). Phase 1 emits one
         // partition, so this is unreachable; it is here so a §12 bundle cannot be served
         // half-masked with no error, which is the failure the multi-segment guard already refuses.
-        let carriers = generation
+        let carriers = geometry
             .bundle
             .partitions
             .values()
@@ -465,7 +455,7 @@ impl Engine {
         if carriers > 1 {
             return Err(EngineError::MultiPartitionSlice(slice.to_string()));
         }
-        let slice_data = generation
+        let slice_data = geometry
             .bundle
             .partitions
             .values()
@@ -484,11 +474,11 @@ impl Engine {
         let segment = slice_data.segments.first();
         probe.lap(|t| &mut t.slice_lookup_ns);
 
-        let cache_key = (
-            session.token_id,
-            slice.to_string(),
-            generation.segments_version,
-        );
+        let cache_key = RowProjectionKey {
+            token_id: session.token_id,
+            slice: slice.to_string(),
+            segments_version: geometry.segments_version,
+        };
         // D-G slot-state single-flight (F4, `tessera-bench/src/arms/load.rs:34-76`): the map
         // lock (`SingleFlightCache`) is held only for the O(1) `Building`/`Ready` transition —
         // never across the build below — so distinct sessions' first viewports no longer
@@ -525,7 +515,7 @@ impl Engine {
                 self.pool
                     .install(|| RowProjection::new(&session.fragment, &slice_data.permutation))
             })
-            .map_err(|_building| EngineError::ProjectionBuilding)?;
+            .map_err(|_busy| EngineError::ProjectionBuilding)?;
         probe.lap(|t| &mut t.row_projection_ns);
 
         // D-C checkpoint: before compose, one of the two long serial-prefix stages this task
@@ -544,7 +534,7 @@ impl Engine {
         );
         probe.lap(|t| &mut t.compose_ns);
 
-        let q = &generation.bundle.manifest.quantisation;
+        let q = &geometry.bundle.manifest.quantisation;
         let extent = Extent {
             x_min: q.x_min,
             x_max: q.x_max,
@@ -573,7 +563,7 @@ impl Engine {
         probe.lap(|t| &mut t.tiles_for_bbox_ns);
         probe.count(|t| &mut t.tiles_resolved, tiles.len() as u64);
 
-        let declared_scalars = &generation.bundle.manifest.declared_scalars;
+        let declared_scalars = &geometry.bundle.manifest.declared_scalars;
 
         // §3.3 underlay bounds, all three checked up front and all three *rejecting* rather than
         // clamping (see `EngineError::UnderlayRefused`). The cell budget is checked before any

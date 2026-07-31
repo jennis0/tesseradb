@@ -1,0 +1,24 @@
+built data/bench-fixtures/1e9 (v00000): 1000000000 items, 47968 terms, 1718472823 pairs, 47017049354 bytes on disk
+	Command being timed: "target/release/tessera build --points data/scaled/geometry.parquet --pairs data/scaled/pairs/categories-subclass.pairs.parquet --out data/bench-fixtures/1e9 --extent 0,65536,0,65536 --slice s0 --limit 1000000000 --mint-external-ids --id-key 000102030405060708090a0b0c0d0e0f --epoch 1"
+	User time (seconds): 1214.71
+	System time (seconds): 246.81
+	Percent of CPU this job got: 233%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 10:25.00
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 27925084
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 2057811
+	Minor (reclaiming a frame) page faults: 44989394
+	Voluntary context switches: 2278847
+	Involuntary context switches: 408076
+	Swaps: 0
+	File system inputs: 140324352
+	File system outputs: 91830336
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

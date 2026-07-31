@@ -6,6 +6,10 @@ __pycache__/
 /bundles/
 .superpowers/
 .claude/worktrees/
+# Phase 2 stage 2.1: the per-worktree track marker `scripts/install-hooks.sh`'s pre-commit hook
+# reads. Per WORKTREE, never committed — hooks are shared across worktrees, so a tracked marker
+# would name one track for all of them.
+.claude/track
 .ignore/analysis-models/
 analysis-models/
 .vscode/

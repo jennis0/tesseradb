@@ -58,6 +58,14 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         // during their serialise phase, deliberately, because small requests are latency-bound on
         // scheduling rather than CPU.
         compute_threads: config.compute_threads,
+        // Lifecycle §2.2's two pin bounds, landed as config keys by the seam (Task 0b) and given
+        // their consumer's constructor by the Task 0 gate (F3): `Engine::open` hands both to
+        // `PinManager::new`, which holds them until Task 4 builds the drain list they bound.
+        // Wired now rather than at Task 4 because Track C owns `pins.rs` and this file is
+        // `[shared]` — a knob that reaches its consumer only via a later track's edit to a shared
+        // construction site is a knob that quietly does nothing in the meantime.
+        pin_ttl_secs: config.pin_ttl_secs,
+        pins_per_session_max: config.pins_per_session_max,
     };
     let engine = Engine::open(
         &config.bundle_path,

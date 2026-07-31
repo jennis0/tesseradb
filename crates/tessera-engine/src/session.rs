@@ -10,29 +10,27 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
 use tessera_authz::{Dict, FragmentCache, FragmentCacheError, FrozenFragment, PostingsReader};
-use tessera_lifecycle::alloc::{high_water_from, Allocator};
-use tessera_lifecycle::buffer::DescriptorResolver;
-use tessera_lifecycle::overlay::replay;
-use tessera_lifecycle::wal::{ChangeOp, Wal, WalError, WalRecord, WalRow};
-use tessera_lifecycle::{alloc::PendingItem, assign_sorted, Overlay, OverlayError};
+use tessera_lifecycle::wal::{ChangeOp, WalError, WalRow};
+use tessera_lifecycle::{alloc::PendingItem, OverlayError};
 use tessera_plugin::{Descriptor, Plugin, PluginError};
 use tessera_store::manifest::CurrentPointer;
 use tessera_store::read::open_bundle;
 use tessera_store::StoreError;
 use tessera_types::{EntityId, IdentityError, IdentityKey, TermId, TesseraId};
 
-use crate::single_flight::SingleFlightCache;
+use crate::cache::RowProjectionCache;
+use crate::pins::PinManager;
+use crate::write::WritePath;
 use crate::{Generation, GenerationHandle};
 
 /// Engine-wide configuration (SA §7's `[disclosure]`/`[serve]` sections, the subset this task
@@ -100,6 +98,16 @@ pub struct EngineConfig {
     /// rayon's own default (`RAYON_NUM_THREADS` or the logical core count), so a `0` here is
     /// harmless rather than a zero-width pool that can run nothing.
     pub compute_threads: usize,
+    /// Lifecycle §2.2's pin TTL, in seconds — how long a pin stays resolvable once the generation
+    /// it names has been superseded. Handed to [`crate::pins::PinManager`] at open; **nothing
+    /// reads it until Task 4** builds the drain list it bounds. Mirrors `tessera-server::config`'s
+    /// `serve.pin_ttl_secs`, whose doc carries the page-cache argument that sizes it.
+    pub pin_ttl_secs: u64,
+    /// Lifecycle §2.2's per-session pin cap. Same wiring and the same "not read until Task 4"
+    /// status as [`Self::pin_ttl_secs`]; a mint above it becomes
+    /// [`EngineError::PinCapExceeded`]. Mirrors `tessera-server::config`'s
+    /// `serve.pins_per_session_max`.
+    pub pins_per_session_max: usize,
 }
 
 /// D-D's default: fill the machine. Identical reasoning and identical fallback (`1`, never
@@ -148,6 +156,25 @@ pub enum EngineError {
     /// A presented pin's `(prefix, segments_version)` does not match the live generation (I11) —
     /// maps to HTTP 410 at the server boundary.
     PinExpired,
+    /// This session already holds `pins_per_session_max` pins and asked for another (lifecycle
+    /// §2.2's per-session cap). Maps to **422 `contract`** — contracts §3.1's 422 row is
+    /// "malformed request, **bounds exceeded**, unknown filter operand", the same row
+    /// [`Self::TooManyTiles`] and [`Self::UnderlayRefused`] take. Not a 429: a cap that clears
+    /// only when a pin TTLs out is not backpressure, and `Retry-After: 1` would be a lie at a
+    /// five-minute TTL.
+    ///
+    /// **Landed by the seam commit, constructed by nobody yet** *(Task 0 gate, C2)*. Task 4 is
+    /// where a session can first hold more than one pin, and its
+    /// `a_session_cannot_exceed_its_pin_cap` is where this variant acquires a caller. It is here
+    /// now because the alternative was worse: `tessera-server/src/error.rs` belongs to Track B, so
+    /// Track C adding the variant later would either have to edit another track's file or let the
+    /// refusal fall through `map_engine_error`'s catch-all into a fail-closed 500 — a
+    /// caller-fixable bound reported as a server fault. Both counts are the caller's own and the
+    /// configured limit; no corpus fact rides on this error.
+    PinCapExceeded {
+        held: usize,
+        limit: usize,
+    },
     /// A viewport request named a slice this bundle doesn't have.
     UnknownSlice(String),
     /// A slice with more than one segment. `tile_ranges` returns **segment-local** row indices
@@ -245,6 +272,11 @@ impl std::fmt::Display for EngineError {
             EngineError::Plugin(e) => write!(f, "plugin error: {e}"),
             EngineError::Io(e) => write!(f, "io error: {e}"),
             EngineError::PinExpired => write!(f, "pin expired"),
+            EngineError::PinCapExceeded { held, limit } => write!(
+                f,
+                "this session already holds {held} pins, at its configured maximum of {limit}; \
+                 reuse a pin it holds, or let one expire"
+            ),
             EngineError::UnknownSlice(slice) => write!(f, "unknown slice '{slice}'"),
             EngineError::MultiSegmentSlice(slice) => write!(
                 f,
@@ -291,23 +323,17 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 /// pointer, plus the process-lifetime state that doesn't change on an overlay/bundle swap (the
 /// dictionary, the postings reader, the fragment cache).
 pub struct Engine {
-    pub(crate) generation: GenerationHandle,
+    /// The live generation pointer. `Arc`-shared with [`WritePath`], which publishes every
+    /// generation swap through this exact pointer (Task 0a: the write path owns the swap, the
+    /// read paths own the load, and both must see one pointer or a swap would be invisible).
+    pub(crate) generation: Arc<GenerationHandle>,
     pub(crate) plugin: Arc<dyn Plugin>,
     pub(crate) dict: Arc<Dict>,
     pub(crate) postings: Arc<PostingsReader>,
     pub(crate) fragment_cache: Arc<FragmentCache>,
-    /// Cached row-space projections, keyed `(token_id, slice, segments_version)` — never
-    /// recomputed on the per-viewport path (shared-context constraint 8; see
-    /// `crate::compose::RowProjection`'s doc for the cost this avoids).
-    ///
-    /// D-G slot-state single-flight (F4, `tessera-bench/src/arms/load.rs:34-76`): the map lock is
-    /// held only for the O(1) `Building`/`Ready` transition, never across `RowProjection::new`
-    /// itself — see [`SingleFlightCache`]'s doc. A concurrent arrival on the same key while a
-    /// build is in flight does not wait for it; it gets [`EngineError::ProjectionBuilding`] and
-    /// retries. Unbounded growth (eviction) is out of scope here — a memory concern, not the
-    /// concurrency one this cache exists to fix.
-    pub(crate) row_projection_cache:
-        SingleFlightCache<(u64, String, u64), crate::compose::RowProjection>,
+    /// The row-projection cache — see [`RowProjectionCache`]'s own doc, which this field's
+    /// doc moved to when the seam was carved (Task 0a).
+    pub(crate) row_projection_cache: RowProjectionCache,
     /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
     /// onto (`Engine::viewport`). Built once, here, at open — never per request, and never a
     /// second pool anywhere else in this crate (no nested throttling). `pool.install` from more
@@ -316,26 +342,18 @@ pub struct Engine {
     pub(crate) pool: rayon::ThreadPool,
     pub(crate) config: EngineConfig,
     next_token_id: AtomicU64,
-    /// The write-ahead log handle, kept open for future ingest/change acceptance (Task 13); not
-    /// exercised by this task's authorise/viewport paths.
-    wal: Mutex<Wal>,
-    /// The I9 allocator, seeded at open (`max(manifest high-water, WAL high-water)`); not
-    /// exercised by this task's authorise/viewport paths, but seeding it here — rather than
-    /// leaving it to whichever task first needs it — is what the brief asks `Engine::open` to do.
-    allocator: Mutex<Allocator>,
+    /// The pin seam (I11) — see [`PinManager`]. Stateless today; `Engine::viewport` resolves
+    /// every request's pin through it rather than comparing fields inline.
+    pub(crate) pins: PinManager,
+    /// The write path: the WAL, the I9 allocator, the live external-id maps, the resolver's
+    /// extension state and the idempotency index (Task 0a). Every mutating engine method below is
+    /// a thin delegation to this; the read paths that need write-side state (`resolve_external_id`
+    /// and its two siblings) compose over its read accessors, so this crate has one owner for each
+    /// mutable field rather than two.
+    pub(crate) write: WritePath,
     /// External ids established by the bundle's own extent, at open — immutable for the process
     /// lifetime (Task 11).
     external_index: ExternalIdIndex,
-    /// External ids established live (bundle replay's `IngestBatch` rows, plus every
-    /// subsequently-accepted `/control/ingest` batch) — consulted before falling back to
-    /// `external_index`, so a `/control/changes` naming an item ingested only seconds ago (not
-    /// yet in any bundle) still resolves (Task 13).
-    established: Mutex<FxHashMap<Vec<u8>, EntityId>>,
-    /// The inverse of `established` — `entity -> external_id` — for the drill-down direction
-    /// (Important I-9). Written by the same two writers as `established` (`Engine::open`'s
-    /// replay and `Engine::accept_ingest`), in the same critical section each time, so the two
-    /// maps can never disagree about the same item (task-9 brief).
-    established_inverse: Mutex<FxHashMap<EntityId, Vec<u8>>>,
     /// The `tessera_id` blinding permutation's per-deployment key (contracts §2.6 r6, design
     /// memo `docs/design-memos/2026-07-30-tessera-id-construction.md`) — parsed once at open from
     /// MANIFEST's `identity.key` and held for the process lifetime. Never leaves the server (I10).
@@ -346,16 +364,6 @@ pub struct Engine {
     /// this type alone. `pub(crate)`: `viewport.rs`'s
     /// `Engine::item` inverts a caller-supplied `tessera_id` with it directly.
     pub(crate) identity_key: IdentityKey,
-    /// The descriptor resolver's extension state (dictionary-miss descriptors interned in
-    /// replay/accept order), detached from replay's borrow of `dict` and resumed on every live
-    /// resolution — see `DescriptorResolver::resume`'s doc (Task 13).
-    resolver_state: Mutex<(FxHashMap<Vec<u8>, TermId>, u32)>,
-    /// `/control/ingest` idempotency index: accepted batch id -> `(body hash, entity ids)` it was
-    /// accepted with (Task 13). The entity ids ride along so a byte-identical replay can answer
-    /// with the same `tessera_id`s per row (contracts §3.4 r6) without needing to re-resolve them
-    /// from `external_id` — which a null-external-id row has none of.
-    #[allow(clippy::type_complexity)]
-    accepted_batches: Mutex<FxHashMap<String, ([u8; 32], Vec<EntityId>)>>,
     /// §14 fix round 1: the effective serial/parallel fan-out threshold
     /// (`viewport::SERIAL_FALLBACK_MAX_ROWS`) this engine reads on every `viewport` call,
     /// defaulted at `open` to that constant and never otherwise written in production. Exists so
@@ -447,67 +455,17 @@ impl Engine {
         let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
             .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
 
-        let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
-
-        let high_water = bundle
-            .manifest
-            .entity_id_high_water
-            .max(high_water_from(&records));
-        // `try_new`, not `new`: the seed comes from durable state this process did not write in
-        // this run (MANIFEST's `entity_id_high_water`, or a replayed WAL row/lease), so a
-        // corrupt or hand-edited value at or above `u32::MAX` must be refused **here**, before
-        // any ingest, rather than surfacing later as an opaque exhaustion error on whichever
-        // request happened to allocate first. This is the check `Allocator::try_new`'s own doc
-        // says "belongs at open" — open is this function.
-        let allocator = Allocator::try_new(high_water).map_err(|e| {
-            EngineError::Malformed(format!(
-                "entity-ID allocator seed from durable state (MANIFEST high-water {}, WAL \
-                 high-water {}): {e}",
-                bundle.manifest.entity_id_high_water,
-                high_water_from(&records),
-            ))
-        })?;
-
-        // **C3 closed (review round 4, Critical)**: `resolve_from_bundle` propagates a real
-        // sidecar failure through `replay` as `Err`, rather than the closure panicking on it —
-        // `ExternalIdIndex::resolve` below is fallible end to end.
-        let (overlay, buffer, established, resolver) = replay(&records, &dict, |external_id| {
-            external_index.resolve(external_id)
-        })
-        .map_err(EngineError::Overlay)?;
-
-        // `established_inverse` — the drill-down direction (Important I-9) — is the exact
-        // inverse of `established`, built once here from the same replay pass; the two are kept
-        // in sync from this point on by `Engine::accept_ingest`'s single critical section.
-        let established_inverse: FxHashMap<EntityId, Vec<u8>> = established
-            .iter()
-            .map(|(ext, ent)| (*ent, ext.clone()))
-            .collect();
-        // Detach the resolver's extension state from `dict`'s borrow immediately (Task 13): the
-        // live serving path resumes exactly this state on every future descriptor resolution, so
-        // novel-descriptor extension ids keep counting down from wherever replay left off, rather
-        // than restarting and colliding with ids already handed out earlier in this process's
-        // lifetime (see `DescriptorResolver::resume`'s doc).
-        let resolver_state = resolver.into_state();
-
-        // The idempotency index for `/control/ingest` (Task 13): every previously-accepted batch
-        // id, mapped to the body hash it was accepted with plus the entity ids that batch's rows
-        // were assigned, so a retried request with the same id and body is recognised as a no-op
-        // 200 rather than re-applied, and can still answer with the same `tessera_id`s (contracts
-        // §3.4 r6) even for a row that carried no external id to re-resolve from.
-        let mut accepted_batches: FxHashMap<String, ([u8; 32], Vec<EntityId>)> =
-            FxHashMap::default();
-        for record in &records {
-            if let WalRecord::IngestBatch {
-                batch_id,
-                body_hash,
-                rows,
-            } = record
-            {
-                let entity_ids = rows.iter().map(|row| row.entity_id).collect();
-                accepted_batches.insert(batch_id.clone(), (*body_hash, entity_ids));
-            }
-        }
+        // Every piece of state that comes from durable storage — the WAL handle, the seeded I9
+        // allocator, replay's overlay/buffer/`established` maps, the detached resolver state and
+        // the idempotency index — is rebuilt behind one call (Task 0 gate, F7). It lives with the
+        // type that owns it: Track B's Tasks 3a and 8 both rewrite that block, and this function
+        // is edited by Track C too.
+        let (overlay, buffer, write_state) = WritePath::reconstruct(
+            wal_path,
+            bundle.manifest.entity_id_high_water,
+            &dict,
+            |external_id| external_index.resolve(external_id),
+        )?;
 
         let plugin: Arc<dyn Plugin> = Arc::new(plugin);
         let auth_plugin_hash = hex_decode_32(&plugin.auth_plugin_hash()).ok_or_else(|| {
@@ -529,7 +487,9 @@ impl Engine {
             .build()
             .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?;
 
-        let generation = Generation {
+        // `Arc`-wrapped from the start (Task 0a): the `Engine` and its `WritePath` share this one
+        // pointer, so a swap published by an acceptance is the swap every read path observes.
+        let generation = Arc::new(ArcSwap::new(Arc::new(Generation {
             prefix,
             segments_version,
             watermark,
@@ -537,26 +497,22 @@ impl Engine {
             overlay_version: 0,
             overlay: Arc::new(overlay),
             buffer: Arc::new(buffer),
-        };
+        })));
 
         Ok(Engine {
-            generation: ArcSwap::new(Arc::new(generation)),
+            generation: Arc::clone(&generation),
             plugin,
-            dict,
+            dict: Arc::clone(&dict),
             postings,
             fragment_cache,
-            row_projection_cache: SingleFlightCache::new(),
+            row_projection_cache: RowProjectionCache::new(),
             pool,
             config,
             next_token_id: AtomicU64::new(0),
-            wal: Mutex::new(wal),
-            allocator: Mutex::new(allocator),
+            pins: PinManager::new(config.pin_ttl_secs, config.pins_per_session_max),
+            write: WritePath::new(write_state, generation, dict),
             external_index,
-            established: Mutex::new(established),
-            established_inverse: Mutex::new(established_inverse),
             identity_key,
-            resolver_state: Mutex::new(resolver_state),
-            accepted_batches: Mutex::new(accepted_batches),
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
         })
     }
@@ -667,11 +623,10 @@ impl Engine {
         })
     }
 
-    /// The I9 allocator's current high-water mark — exposed for tests/diagnostics confirming
-    /// `Engine::open`'s seeding rule (`max(manifest high-water, WAL high-water)`); not otherwise
-    /// used by this task's request paths.
+    /// Delegates to `WritePath::allocator_high_water` (Task 0a moved the allocator behind the
+    /// write-path seam); see that method's doc.
     pub fn allocator_high_water(&self) -> u64 {
-        self.allocator.lock().unwrap().high_water()
+        self.write.allocator_high_water()
     }
 
     /// The number of cached row-space projection slots currently held (`Building` and `Ready`
@@ -702,34 +657,23 @@ impl Engine {
         self.plugin.declared_bounds()
     }
 
-    /// Resolve raw term descriptors to `TermId`s: a dictionary hit resolves to its durable,
-    /// bundle-relative id; a miss is interned into the process-lifetime extension state, resumed
-    /// from wherever WAL replay (or the previous call to this method) left off — see
-    /// `DescriptorResolver::resume`'s doc for why restarting that sequence per call would be
-    /// fail-open.
+    /// Resolve raw term descriptors to `TermId`s (dictionary hit → durable bundle-relative id;
+    /// miss → an id interned in this process's extension state, resumed across calls).
     ///
-    /// **Durability-ordering exemption (review finding, Important 3):** ideally every call to
-    /// this method happens only after the record that will carry its descriptors is durably WAL
-    ///-appended and fsynced — otherwise an extension id can be minted in-process for a batch
-    /// whose append then fails, leaving the live resolver's state one step ahead of what a
-    /// restart-replay would ever reconstruct from the WAL alone. `Engine::accept_change` honours
-    /// that ordering (it resolves only after its `Change` record's append/fsync succeeds).
-    /// `/control/ingest` is a deliberate, structural exception: signature-sorted entity-id
-    /// assignment (I9/§11.1, `allocate_sorted`) needs each item's resolved terms to compute its
-    /// sort key *before* the item's `WalRow` (which carries the assigned id) can even be framed
-    /// for append — so this call cannot be deferred past the durability boundary for ingest
-    /// without abandoning signature-sorted assignment itself. This is judged safe in practice
-    /// (not merely convenient) because an extension id is, by construction, unsatisfiable by any
-    /// session's `satisfied` set (`tessera_lifecycle::buffer`'s module doc) — a live/replay
-    /// mismatch in exactly *which* extension id a novel descriptor got renumbers internal
-    /// bookkeeping only, never a visibility outcome.
+    /// **Caller obligation — the durability-ordering exemption.** Every other resolution site
+    /// resolves *after* the record carrying the descriptors is durably appended and fsynced, so a
+    /// batch whose append fails cannot leave the live resolver a step ahead of what a replay would
+    /// reconstruct. `/control/ingest` is the one structural exception: signature-sorted assignment
+    /// (I9/§11.1) needs each item's terms to compute its sort key before its `WalRow` can be
+    /// framed at all. Judged safe because an extension id is by construction unsatisfiable by any
+    /// session, so a live/replay mismatch renumbers bookkeeping and never a visibility outcome —
+    /// the full argument, and why it is not merely convenient, is at `WritePath::resolve_terms`.
+    ///
+    /// *(Restated here at the Task 0 gate, F5: `WritePath` is `pub(crate)`, so rustdoc renders
+    /// none of its docs for a reader of this public API — a bare pointer to an invisible page is
+    /// not an obligation a caller can honour.)*
     pub fn resolve_terms(&self, descriptors: &[Descriptor]) -> Vec<TermId> {
-        let mut state = self.resolver_state.lock().unwrap();
-        let (extension, next_extension_id) = std::mem::take(&mut *state);
-        let mut resolver = DescriptorResolver::resume(&self.dict, extension, next_extension_id);
-        let ids = descriptors.iter().map(|d| resolver.resolve(d)).collect();
-        *state = resolver.into_state();
-        ids
+        self.write.resolve_terms(descriptors)
     }
 
     /// Resolve an external id to its `EntityId`, checking every item established live (bundle
@@ -745,7 +689,7 @@ impl Engine {
         &self,
         external_id: &[u8],
     ) -> std::result::Result<Option<EntityId>, StoreError> {
-        if let Some(&entity) = self.established.lock().unwrap().get(external_id) {
+        if let Some(entity) = self.write.established_entity(external_id) {
             return Ok(Some(entity));
         }
         self.external_index.resolve(external_id)
@@ -763,12 +707,7 @@ impl Engine {
         &self,
         external_ids: &[Vec<u8>],
     ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        let established = self.established.lock().unwrap();
-        let mut results: Vec<Option<EntityId>> = external_ids
-            .iter()
-            .map(|id| established.get(id.as_slice()).copied())
-            .collect();
-        drop(established);
+        let mut results: Vec<Option<EntityId>> = self.write.established_entities(external_ids);
 
         let residual_positions: Vec<usize> = results
             .iter()
@@ -802,50 +741,56 @@ impl Engine {
         &self,
         entity: EntityId,
     ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
-        if let Some(external_id) = self.established_inverse.lock().unwrap().get(&entity) {
-            return Ok(Some(external_id.clone()));
+        if let Some(external_id) = self.write.established_external_id(entity) {
+            return Ok(Some(external_id));
         }
         self.external_index
             .external_id_of_checked(entity, self.allocator_high_water())
     }
 
-    /// Allocate entity ids for a freshly-parsed ingest batch, in signature-sorted order (I9/§11.1)
-    /// — must be called after every item's `terms` field is populated (via
-    /// [`Engine::resolve_terms`]) and before the batch's `WalRow`s are framed for WAL append.
+    /// Allocate entity ids for a freshly-parsed ingest batch, in signature-sorted order (I9/§11.1).
     ///
-    /// **Propagates `AllocError`** rather than silently discarding it (a pre-existing
-    /// `unused_must_use` gap this task closes incidentally, to keep `cargo clippy -D warnings`
-    /// green): the allocator's ceiling is a real, reachable failure (I9's u32 cap), and an
-    /// ingest batch left with unassigned or partially-assigned ids would frame `WalRow`s the WAL
-    /// must never see.
+    /// **Caller obligation, in one sentence:** call this *after* every item's `terms` are
+    /// populated (via [`Self::resolve_terms`]) and *before* the batch's `WalRow`s are framed for
+    /// append — the sort key is the term set, and the id it yields is a field of the row the WAL
+    /// will carry. Propagates `AllocError` rather than discarding it: I9's `u32` ceiling is
+    /// reachable, and a partially-assigned batch would frame rows the WAL must never see. See
+    /// `WritePath::allocate_sorted` for the argument.
+    ///
+    /// *(Restated at the Task 0 gate, F5 — the delegator did not previously name the obligation
+    /// at all, and the method it pointed at is `pub(crate)` and so unrendered.)*
     pub fn allocate_sorted(
         &self,
         items: &mut [PendingItem],
     ) -> std::result::Result<(), tessera_lifecycle::alloc::AllocError> {
-        let mut alloc = self.allocator.lock().unwrap();
-        assign_sorted(items, &mut alloc)
+        self.write.allocate_sorted(items)
     }
 
-    /// The body hash and per-row entity ids a batch id was previously accepted with, if any — the
-    /// idempotency check for `/control/ingest`'s replay rule (R5): equal hash -> 200 no-op
-    /// (returning the same `tessera_id`s, via the entity ids here); different hash -> 409.
+    /// Delegates to `WritePath::accepted_batch` (Task 0a moved the idempotency index behind the
+    /// write-path seam); see that method's doc.
     pub fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
-        self.accepted_batches.lock().unwrap().get(batch_id).cloned()
+        self.write.accepted_batch(batch_id)
     }
 
-    /// Record a batch id as accepted. Must only be called after the batch's `IngestBatch` record
-    /// has been WAL-appended and fsynced (the ack contract) — this index is purely an in-memory
-    /// accelerant for the idempotency check above, not itself a durability boundary.
+    /// Record a batch id as accepted, with the body hash and per-row entity ids it was accepted
+    /// with (the `/control/ingest` idempotency index).
+    ///
+    /// **Caller obligation, in one sentence:** call this only *after* the batch's `IngestBatch`
+    /// record has been WAL-appended and fsynced — the ack contract. This index is an in-memory
+    /// accelerant for the replay check, never itself a durability boundary, so a batch recorded
+    /// ahead of its fsync would answer a retry `200, same ids` for bytes that a crash then loses.
+    /// See `WritePath::record_accepted_batch`.
+    ///
+    /// *(Restated at the Task 0 gate, F5: the delegator named "an ack-contract obligation" without
+    /// stating it, and pointed at a `pub(crate)` method rustdoc does not render.)*
     pub fn record_accepted_batch(
         &self,
         batch_id: String,
         body_hash: [u8; 32],
         entity_ids: Vec<EntityId>,
     ) {
-        self.accepted_batches
-            .lock()
-            .unwrap()
-            .insert(batch_id, (body_hash, entity_ids));
+        self.write
+            .record_accepted_batch(batch_id, body_hash, entity_ids);
     }
 
     /// Compute the wire `tessera_id` for `entity` under this deployment's current shard id and
@@ -864,35 +809,9 @@ impl Engine {
             .forward(generation.bundle.manifest.identity.shard_id, entity)
     }
 
-    /// Accept an ingest batch atomically: WAL append -> fsync -> apply (buffer clone + insert) ->
-    /// generation swap, all while holding `self.wal`'s lock (**review finding, Critical 1**: the
-    /// previous split — append/fsync under the caller's own WAL lock, then a *separate*,
-    /// unlocked `apply_ingest`/`apply_change` call — let two concurrent acceptances race on
-    /// `ArcSwap::load_full`/`store`: both load the same pre-swap generation, both clone it, and
-    /// whichever `store`s last silently discards the other's already-fsynced, already-acked
-    /// change with no error. Holding the WAL mutex across the *entire* append-through-swap
-    /// sequence, for both this method and [`Engine::accept_change`], serialises every generation
-    /// swap through one lock: the second of two concurrent acceptances cannot even begin its
-    /// `load_full()` until the first has finished its `store()`, so it always builds its new
-    /// generation on top of the first's effect rather than racing it.
-    ///
-    /// `rows` carry raw descriptor bytes (never `TermId`s — see `WalRow`'s doc); `terms` is each
-    /// row's already-resolved term set, in the same order (resolved by the caller via
-    /// [`Engine::resolve_terms`] before this call — see that method's doc for why ingest,
-    /// specifically, cannot defer resolution past this call the way [`Engine::accept_change`]
-    /// does).
-    ///
-    /// On success, also records `batch_id`/`body_hash` as accepted (the idempotency index) before
-    /// releasing the lock, so a concurrent replay of the same batch id can never observe a window
-    /// where the generation has swapped but the idempotency index hasn't caught up yet.
-    ///
-    /// Returns each accepted row's `EntityId`, in the same order as `rows` — never the caller's
-    /// raw entity ids to keep (I10 stays server-side), but the caller (`/control/ingest`) needs
-    /// them for exactly as long as it takes to turn each into a `tessera_id` (via
-    /// [`Engine::tessera_id_of`]) for the 200 response (contracts §3.4 r6). Also recorded, keyed
-    /// by `batch_id`, so a byte-identical replay of an already-acked batch can answer with the
-    /// same `tessera_id`s without re-deriving them from `external_id` — which would not work at
-    /// all for a row that has none.
+    /// Delegates to `WritePath::accept_ingest` (Task 0a moved the WAL and the acceptance path
+    /// behind the write-path seam); see that method's doc, which carries the Critical-1
+    /// lost-update argument for holding the WAL lock across append -> fsync -> apply -> swap.
     pub fn accept_ingest(
         &self,
         rows: Vec<WalRow>,
@@ -900,78 +819,12 @@ impl Engine {
         batch_id: String,
         body_hash: [u8; 32],
     ) -> std::result::Result<Vec<EntityId>, WalError> {
-        debug_assert_eq!(rows.len(), terms.len());
-        let record = WalRecord::IngestBatch {
-            batch_id: batch_id.clone(),
-            body_hash,
-            rows: rows.clone(),
-        };
-
-        let mut wal = self.wal.lock().unwrap();
-        wal.append(&record)?;
-        wal.fsync()?;
-
-        let generation = self.generation.load_full();
-        let mut buffer = (*generation.buffer).clone();
-        let mut established = self.established.lock().unwrap();
-        // `established` and `established_inverse` are updated together, in this one critical
-        // section, so a `/control/changes` lookup and a `/v1/items` drill-down can never
-        // disagree about the same item (task-9 brief, Important I-9).
-        let mut established_inverse = self.established_inverse.lock().unwrap();
-        for (row, row_terms) in rows.iter().zip(&terms) {
-            // Contracts §3.4 r6: no external id means no sidecar entry and nothing to establish
-            // here either -- the item is addressable only by its `tessera_id`. `None` must never
-            // collide with `None`, so this simply skips the insert rather than inserting under a
-            // shared "empty" key.
-            if let Some(external_id) = &row.external_id {
-                established.insert(external_id.clone(), row.entity_id);
-                established_inverse.insert(row.entity_id, external_id.clone());
-            }
-            buffer.insert_row_with_terms(row, row_terms.clone());
-        }
-        drop(established);
-        drop(established_inverse);
-
-        let next = Generation {
-            prefix: generation.prefix.clone(),
-            segments_version: generation.segments_version,
-            watermark: generation.watermark,
-            bundle: Arc::clone(&generation.bundle),
-            overlay_version: generation.overlay_version + 1,
-            overlay: Arc::clone(&generation.overlay),
-            buffer: Arc::new(buffer),
-        };
-        self.generation.store(Arc::new(next));
-
-        let entity_ids: Vec<EntityId> = rows.iter().map(|row| row.entity_id).collect();
-        self.accepted_batches
-            .lock()
-            .unwrap()
-            .insert(batch_id, (body_hash, entity_ids.clone()));
-
-        drop(wal);
-        Ok(entity_ids)
+        self.write.accept_ingest(rows, terms, batch_id, body_hash)
     }
 
-    /// Accept one `/control/changes` disposition change atomically: WAL append -> fsync -> apply
-    /// (overlay clone + `Overlay::apply`) -> generation swap, all while holding `self.wal`'s lock
-    /// — see [`Engine::accept_ingest`]'s doc for why (Critical 1) and this crate's `ChangeOp`
-    /// doc for the three retirement rules this composes with.
-    ///
-    /// **Deny-op append failure** (lifecycle §4): if the append/fsync genuinely fails and `op` is
-    /// `Delete`/`Suppress`, the change is still applied (the item hidden immediately) before this
-    /// returns `Err` — never a refusal that leaves a deny unapplied. For any other op, a failed
-    /// append/fsync applies nothing.
-    ///
-    /// **Durability-ordering fix (review finding, Important 3):** `raw_descriptors` (present only
-    /// for `Predicate`) are resolved to `TermId`s via [`Engine::resolve_terms`] *inside* this
-    /// method, only after the append/fsync has already succeeded — never before. Unlike ingest
-    /// (see `resolve_terms`'s doc for why that path is a structural exception), a change's
-    /// resolved terms are needed only for the subsequent `Overlay::apply` call, not for anything
-    /// that must be decided before the record can be framed, so there is no reason to mint an
-    /// extension id for a record that might never become durable. `Delete`/`Suppress`/
-    /// `Unsuppress` never carry descriptors, so the deny-op append-failure path never resolves
-    /// anything either.
+    /// Delegates to `WritePath::accept_change` (Task 0a moved the WAL and the acceptance path
+    /// behind the write-path seam); see that method's doc, which carries the deny-op
+    /// append-failure rule (lifecycle §4) and the durability-ordering fix.
     pub fn accept_change(
         &self,
         external_id: Vec<u8>,
@@ -979,54 +832,8 @@ impl Engine {
         op: ChangeOp,
         raw_descriptors: Option<Vec<Vec<u8>>>,
     ) -> std::result::Result<(), WalError> {
-        let record = WalRecord::Change {
-            external_id,
-            op,
-            descriptors: raw_descriptors.clone(),
-        };
-
-        let mut wal = self.wal.lock().unwrap();
-        let append_result = wal.append(&record).and_then(|()| wal.fsync());
-
-        let result = match append_result {
-            Ok(_) => {
-                let terms = raw_descriptors.as_ref().map(|ds| self.resolve_terms(ds));
-                self.apply_change_locked(entity, op, terms);
-                Ok(())
-            }
-            Err(e) => {
-                if matches!(op, ChangeOp::Delete | ChangeOp::Suppress) {
-                    self.apply_change_locked(entity, op, None);
-                }
-                Err(e)
-            }
-        };
-
-        drop(wal);
-        result
-    }
-
-    /// The overlay-clone-and-swap step shared by both of [`Engine::accept_change`]'s outcomes.
-    /// Private: called only while `self.wal`'s lock is held (see [`Engine::accept_ingest`]'s doc
-    /// for why every generation swap must be serialised through that one lock). Pins are never
-    /// invalidated by this (I11: a pin fixes `(prefix, segments_version)` only, and this bumps
-    /// `overlay_version`, not `segments_version`) — lifecycle §2.3's rule that a suppression
-    /// applies to a pinned request the moment it is accepted, without expiring the pin.
-    fn apply_change_locked(&self, entity: EntityId, op: ChangeOp, terms: Option<Vec<TermId>>) {
-        let generation = self.generation.load_full();
-        let mut overlay: Overlay = (*generation.overlay).clone();
-        overlay.apply(entity, op, terms);
-
-        let next = Generation {
-            prefix: generation.prefix.clone(),
-            segments_version: generation.segments_version,
-            watermark: generation.watermark,
-            bundle: Arc::clone(&generation.bundle),
-            overlay_version: generation.overlay_version + 1,
-            overlay: Arc::new(overlay),
-            buffer: Arc::clone(&generation.buffer),
-        };
-        self.generation.store(Arc::new(next));
+        self.write
+            .accept_change(external_id, entity, op, raw_descriptors)
     }
 }
 
