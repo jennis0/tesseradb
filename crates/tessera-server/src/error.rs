@@ -257,6 +257,14 @@ pub fn map_wal_error<E: std::fmt::Display>(e: E) -> ApiError {
 /// `Display` composes `WalError`'s, which carries the WAL's filesystem path and the OS error
 /// string; `map_wal_error_does_not_forward_the_detail_to_the_caller` is the standing regression
 /// test for exactly that door.
+///
+/// **The catch-all body does not say "refused".** [`map_wal_error`]'s wording — "the request was
+/// refused rather than answered partially" — is false of the case that reaches here most often: a
+/// `Delete`/`Suppress` whose WAL append failed is applied *anyway* (lifecycle §4,
+/// `ExecError::Wal`), so the 500 accompanies an effect that is in force. Telling an operator the
+/// request was refused invites them to retry a suppression that has already taken hold, and to
+/// believe the item is still visible when it is not. The body below states the one thing true of
+/// every variant that lands in this arm.
 pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
     use tessera_engine::AcceptError;
     use tessera_lifecycle::ExecError;
@@ -272,7 +280,8 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         other => {
             tracing::error!(detail = %other, "the write executor refused; answering fail-closed");
             ApiError::FailClosed(
-                "a durability write failed; the request was refused rather than answered partially"
+                "the write could not be completed durably; a deletion or suppression in this \
+                 request may nonetheless be in force, so do not treat this as a no-op"
                     .to_string(),
             )
         }

@@ -81,8 +81,10 @@ if ! grep -q "stage_timing.unwrap_or(false)" crates/tessera-server/src/config.rs
 fi
 
 # ---------------------------------------------------------------------------------------------
-# Track B, Task 3a. Two rules, both guarding a property that is structural TODAY and stays that
-# way only while nothing new is added beside it.
+# Track B, Task 3a. Three rules, each guarding a property that is structural TODAY and stays that
+# way only while nothing new is added beside it. Each is DEMONSTRATED going red -- planted, run,
+# reverted -- because an unfalsifiable rule reads as evidence while providing none, which is how
+# rule 2 came to exempt the only two manifests it existed to police.
 
 # 1. ONE PUBLISHER. Track C's finding S2: `write.rs`'s generation swaps use `load_full` + `store`,
 #    which loses a concurrent geometry publication -- leaving the LIVE generation on the pin drain
@@ -95,11 +97,19 @@ fi
 #    were vacuous: `GenerationHandle::store` appears nowhere in the tree (both real sites are
 #    `self.generation.store(...)`), and `.store(Arc::new(` misses the equally valid
 #    `.store(std::sync::Arc::new(` -- verified by planting one and watching this rule stay green.
-#    So the rule flags EVERY `.store(` in the engine's sources outside `write.rs`, minus the
-#    atomic ones, which are told apart by the `Ordering::` argument that `Atomic*::store` requires
-#    and `ArcSwap::store` does not take. A rule that cannot go red is worse than no rule, because
-#    it is evidence.
-if grep -rn '\.store(' --include=*.rs crates/tessera-engine/src/ \
+#    So the rule flags EVERY publishing CALL FORM in the engine's sources outside `write.rs`,
+#    minus the atomic ones, which are told apart by the `Ordering::` argument that `Atomic*::store`
+#    requires and `ArcSwap::store` does not take. A rule that cannot go red is worse than no rule,
+#    because it is evidence.
+#
+#    FOUR call forms, not one. `.store(` alone was vacuous against three of the four ways arc-swap
+#    publishes -- `.swap(` and `.rcu(` were both planted in `viewport.rs`, both compiled, and both
+#    left this rule green. `rcu` matters most: it is the read-modify-write spelling arc-swap's own
+#    documentation recommends, so it is exactly what a stage-2.2 flush author reaches for while
+#    "properly fixing" the race. `.swap(` on a slice or a `Vec` would false-positive here; there is
+#    no such call in this crate today, and a mechanical `.swap(i, j)` is a one-line exclusion to
+#    argue at review, which is the right cost for keeping the publishing form covered.
+if grep -rnE '\.(store|swap|rcu|compare_and_swap)\(' --include=*.rs crates/tessera-engine/src/ \
      | grep -v '^crates/tessera-engine/src/write\.rs:' \
      | grep -v 'Ordering::'; then
   echo "FAIL: a generation is published outside crates/tessera-engine/src/write.rs."
@@ -114,15 +124,35 @@ fi
 #    so assert it rather than document it. (Measured caveat, stated honestly in the feature's own
 #    comment: `cargo test --workspace` DOES unify the feature across the workspace, exactly as
 #    `bench-timing` does. This rule guards the release path, which is the one that matters.)
-for m in crates/*/Cargo.toml; do
-  if awk '/^\[dev-dependencies\]/{d=1} /^\[/{if ($0 !~ /dev-dependencies/) d=0} !d' "$m" \
-       | grep -q 'fault-injection'; then
-    if ! grep -q '^fault-injection = ' "$m"; then
-      echo "FAIL: $m enables 'fault-injection' outside [dev-dependencies]"
-      echo "      The gate's whole guarantee is that cargo build cannot reach it."
-      fail=1
-    fi
-  fi
-done
+#
+#    ASK CARGO, DO NOT GREP THE MANIFEST. The first version of this rule read manifest text and
+#    exempted any manifest containing a `^fault-injection = ` line -- i.e. it exempted, wholesale,
+#    `tessera-lifecycle/Cargo.toml` and `tessera-engine/Cargo.toml`, the only two manifests that
+#    could ever acquire a normal dependency enabling the feature. Demonstrated, not inferred:
+#    setting tessera-engine's `tessera-lifecycle` dependency to `features = ["fault-injection"]`
+#    left the rule green while `cargo tree -e normal -p tessera-cli` showed the switchboard reaching
+#    the release binary. The resolved feature set is the only thing that can answer this question,
+#    and `-e normal` is what excludes the self dev-dependency edge the gate is built on.
+if cargo tree -e normal --workspace -f "{p} {f}" | grep -n 'fault-injection'; then
+  echo "FAIL: 'fault-injection' is enabled on a NORMAL dependency edge (lines above)."
+  echo "      The gate's whole guarantee is that cargo build cannot reach it, and a normal edge"
+  echo "      puts the fault switchboard in the shipped binary. It may be enabled ONLY through the"
+  echo "      self dev-dependency in tessera-lifecycle/tessera-engine's [dev-dependencies]."
+  fail=1
+fi
+
+# 3. THE ACK PROOF HAS ONE HOME. `write.rs`'s `Published` token is what `Executor::ack` demands
+#    before it will send a *successful* receipt, and the ack-ordering fail-open it guards
+#    (lifecycle §4: a client holding 200 for a suppression not yet in force) is reintroduced by any
+#    code that can mint one. The token's own module argues the residual hole honestly -- inside
+#    `write.rs` a `Published::already_in_force(..)` call is still reachable, which is exactly what
+#    the reviewer's mutation used -- so pin construction to that file and keep the count auditable.
+#    A new crate or module minting proofs is the change this refuses.
+if grep -rn 'Published::' --include=*.rs crates/ | grep -v '^crates/tessera-engine/src/write\.rs:'; then
+  echo "FAIL: the ack proof token is constructed outside crates/tessera-engine/src/write.rs."
+  echo "      Only the generation swap (and contracts 3.4 replay) may produce one; see the"
+  echo "      'mod ack' block in write.rs. A third producer is the guarantee gone."
+  fail=1
+fi
 
 exit $fail

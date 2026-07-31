@@ -21,8 +21,17 @@
 //! indistinguishable from a real one, which `tessera-lifecycle/tests/wal.rs` pins independently.
 //!
 //! **No test here sleeps.** Every wait is on a condition the executor itself publishes — the
-//! switchboard's arrival counter, the submitted-command counters, `JoinHandle::is_finished` — so a
-//! failure means the property broke, never that a runner was slow.
+//! switchboard's per-site arrival counter, the submitted-command counters — so a failure means the
+//! property broke, never that a runner was slow.
+//!
+//! **One assertion form here is not a witness, and is marked as such wherever it appears.**
+//! `!handle.is_finished()` states that another thread has *not* made progress, and no such
+//! statement can be established without waiting: it is true the instant it is checked whether or
+//! not the property holds. Those assertions are kept for the message they carry when they do fire,
+//! never relied on. Where an ordering has to be *proved*, it is proved by engine state observed
+//! while the executor is demonstrably parked, or by the switchboard's step log — see
+//! [`ack_follows_fsync_then_swap`], which was measurably passing over a planted fail-open before
+//! this distinction was drawn.
 
 mod common;
 
@@ -34,7 +43,7 @@ use tempfile::TempDir;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, ExecutorPosture};
 use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, Step};
+use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
 use tessera_lifecycle::ChangeOp;
 use tessera_types::EntityId;
 
@@ -202,42 +211,61 @@ fn per_command_assignment_is_signature_sorted_and_monotone() {
 // =================================================================================================
 
 /// **The fail-open this exists to catch is an ack that precedes the swap** — a client observing 200
-/// for a suppression that is not yet in force.
+/// for a suppression that is not yet in force (lifecycle §4).
 ///
-/// Two halves, and the behavioural one is the test. The executor is parked at its kill point
-/// (durable, not yet applied) and, *while it is provably parked*, the caller must still be blocked
-/// and the item must still be visible. After release, both flip together. The ordering log is the
-/// corroborating diagnostic: on its own it would assert little more than the source order of four
-/// `record` calls in one function.
+/// ## Two legs, and which half of each one is the witness
 ///
-/// The type system carries the same rule independently — `Executor::ack` cannot send a successful
-/// receipt without a `Published` token, and only the swap produces one — so this is the behavioural
-/// witness for a property that no longer depends on statement order surviving Tasks 7a, 7b and 9's
-/// rewrites of this same loop.
+/// The first draft of this comment said "the behavioural one is the test" and called the ordering
+/// log "the corroborating diagnostic … on its own it would assert little more than the source order
+/// of four `record` calls". **Measured, that was exactly backwards.** A reviewer planted a real
+/// ack-before-swap in `execute_change`; only the log assertion failed, and with that one assertion
+/// deleted the test was green five runs out of five with the fail-open live. The cause was
+/// structural rather than luck: there was one pause site and it sat **before both** the ack and the
+/// swap, so parking there said nothing about their relative order, and after `join()` the main
+/// thread's own `authorise` + `viewport` round-trip meant the swap had always landed by the time
+/// anything was checked.
+///
+/// So the fix is a second armed site, and the two legs below are what each site can actually prove:
+///
+/// - **Leg 1, parked at `AfterFsync`** — durable, not yet in force. The behavioural half is real
+///   here (the item must still be visible; nothing has been applied) but it cannot see ack ordering,
+///   for the reason above. Its ordering witness is the step log.
+/// - **Leg 2, parked at `BeforeAck`** — in force, not yet acknowledged. This is the discriminating
+///   leg. The pause point lives *inside* `Executor::ack`, one statement above the send, so it
+///   travels with the ack rather than with a line number: a build that acks before it swaps parks
+///   here with the swap still ahead of it, and `visible()` still shows the item. **The assertion
+///   that fails is `visible(&engine) == before - 1` — engine state, no reference to the log.**
+///
+/// One honest limit, because it is what made the first draft wrong: `!handle.is_finished()` proves
+/// nothing on its own. A negative statement about another thread's progress cannot be established
+/// without waiting, so those assertions can only ever fail *late*, never soon enough to be relied
+/// on. They are kept because when they do fire they name the fault precisely; they are not the
+/// witness. The witnesses are the two `visible()` assertions and the step log.
 #[test]
 fn ack_follows_fsync_then_swap() {
     let tmp = TempDir::new().unwrap();
     let (engine, faults) = engine_with_faults(&tmp, 8);
     let engine = Arc::new(engine);
 
-    let entity = entity_of(&engine, 3);
     let before = visible(&engine);
     assert_eq!(
         before, N_ITEMS,
-        "the item must be visible before we suppress it"
+        "the items must be visible before we suppress them"
     );
 
+    // --- Leg 1: parked after fsync, before the swap. Durable, not yet in force. -----------------
+    let entity = entity_of(&engine, 3);
     faults.clear_log();
-    faults.arm_pause(PauseAction::Stall);
+    faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
 
     let e = Arc::clone(&engine);
     let suppress = std::thread::spawn(move || {
         e.accept_change(source_id_key(3), entity, ChangeOp::Suppress, None)
     });
 
-    // Wait for the executor to be *demonstrably* parked between fsync and swap. Not a sleep: this
-    // returns only once the executor has published its arrival.
-    faults.await_arrivals(1, WAIT);
+    // Wait for the executor to be *demonstrably* parked. Not a sleep: this returns only once the
+    // executor has published its arrival.
+    faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
 
     assert!(
         !suppress.is_finished(),
@@ -267,6 +295,46 @@ fn ack_follows_fsync_then_swap() {
         before - 1,
         "so the 200 the caller now holds is a promise the effect is in force"
     );
+
+    // --- Leg 2: parked after the swap, before the ack. In force, not yet acknowledged. ----------
+    //
+    // This is the leg that discriminates. An executor that acked before it swapped parks here with
+    // the swap still ahead of it, and the assertion below reads the *engine*, not the log.
+    let second = entity_of(&engine, 6);
+    faults.clear_log();
+    faults.arm_pause(PauseSite::BeforeAck, PauseAction::Stall);
+
+    let e = Arc::clone(&engine);
+    let suppress = std::thread::spawn(move || {
+        e.accept_change(source_id_key(6), second, ChangeOp::Suppress, None)
+    });
+
+    faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
+
+    assert_eq!(
+        visible(&engine),
+        before - 2,
+        "the executor is parked in `ack`, one statement before the send: the effect it is about \
+         to acknowledge MUST already be in force. Seeing {} here means the ack reached this point \
+         with its swap still ahead of it — lifecycle §4's ack-ordering fail-open.",
+        before - 1
+    );
+    assert!(
+        !suppress.is_finished(),
+        "and the receipt has not been sent yet"
+    );
+    assert_eq!(
+        faults.log(),
+        vec![Step::Append, Step::Fsync, Step::Swap],
+        "the swap has run and the ack has not"
+    );
+
+    faults.release();
+    suppress.join().unwrap().expect("the suppression succeeds");
+    assert_eq!(
+        faults.log(),
+        vec![Step::Append, Step::Fsync, Step::Swap, Step::Ack]
+    );
 }
 
 /// **Lifecycle §1.3's deny priority lane.** A deny must not queue behind work.
@@ -293,7 +361,7 @@ fn a_deny_is_never_queued_behind_work() {
     let started = Arc::new(AtomicU64::new(0));
 
     // Park the executor inside the first work item so the queue can be filled behind it.
-    faults.arm_pause(PauseAction::Stall);
+    faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
 
     let mut workers = Vec::new();
     for i in 0..=BOUND {
@@ -312,7 +380,7 @@ fn a_deny_is_never_queued_behind_work() {
         if i == 0 {
             // Make sure the first submission is the one occupying the executor, so the remaining
             // BOUND fill the queue rather than racing for the running slot.
-            faults.await_arrivals(1, WAIT);
+            faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
         }
     }
 
@@ -488,7 +556,7 @@ fn an_executor_panic_is_reported_dead() {
 
     assert_eq!(engine.write_executor_posture(), ExecutorPosture::Running);
 
-    faults.arm_pause(PauseAction::Panic);
+    faults.arm_pause(PauseSite::AfterFsync, PauseAction::Panic);
     let _ = engine.accept_ingest(vec![row("boom")], "boom".to_string(), [5u8; 32]);
 
     let deadline = std::time::Instant::now() + WAIT;

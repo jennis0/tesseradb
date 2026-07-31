@@ -27,7 +27,10 @@ rustc-hash = "1"
 [dev-dependencies]
 # Self dev-dependency: the only way this crate's own integration tests can turn on a feature of
 # the library they link. Not a cycle — cargo permits it for dev-dependencies precisely for this,
-# and `cargo tree -e normal` (what `scripts/check-layers.sh` reads) does not see the edge.
+# and `cargo tree -e normal` does not see the edge — which is what `scripts/check-layers.sh`'s
+# rule 2 relies on: it asks cargo for the resolved feature set on normal edges and fails on any
+# `fault-injection` there. (The earlier note here claimed the rule read `cargo tree`; it was a grep
+# over manifest text that exempted this file wholesale. Now it is one, and demonstrated red.)
 tessera-lifecycle = { path = ".", features = ["fault-injection"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }

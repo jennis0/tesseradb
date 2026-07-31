@@ -29,16 +29,24 @@ pub use cancel::CancelToken;
 pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
 pub use session::{default_compute_threads, Engine, EngineConfig, EngineError, Session};
 pub use timing::{Probe, StageTimings};
-// The write executor's delivery half (Task 0b landed the data half in `tessera_lifecycle::command`).
-// Re-exported because `tessera-server`'s handlers hold the handle and submit through it (Task 3b),
-// while `write.rs` itself stays private — `WritePath` is engine-internal.
 pub use viewport::{
     EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,
 };
-pub use write::{
-    AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, Job,
-    LifecycleHandle, LifecycleQueues, Responder,
-};
+// The write path's **outcome** vocabulary, and nothing else.
+//
+// An earlier draft also re-exported `LifecycleHandle`, `LifecycleQueues`, `Job` and `Responder`,
+// with a comment saying `tessera-server`'s handlers hold the handle and submit through it. That
+// design was cancelled in review (Task 3a's C1/A1) and the opposite is now true: `LifecycleHandle`
+// is deliberately not `Clone` and `WritePath` is its sole owner, precisely so `WritePath::drop` can
+// disconnect the queues and join the thread. No handler can hold one, and none of those four types
+// appeared anywhere outside `write.rs` — a 3b worker following that comment would have found the
+// handle unreachable and then reached for whatever compiled instead. They are `pub(crate)` now.
+//
+// What a handler does hold is `Engine`, and it submits through `Engine::accept_ingest` /
+// `Engine::accept_change` — blocking calls, hence inside `spawn_blocking`. What it needs from here
+// is how to answer: `AcceptError` for the status mapping (Task 3b owns the table) and
+// `ExecutorPosture`/`ExecutorStats` for `readyz` and `/control/status`.
+pub use write::{AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats};
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1, slimmed for
 /// Phase 1: no merge/compaction fields yet).

@@ -45,7 +45,18 @@
 //! apply-anyway branch all switch on — the one call whose variant matters most. The real sequence
 //! is pinned independently by `tests/wal.rs`'s `a_real_fsync_failure_poisons_the_handle`, which
 //! provokes a genuine `io::Error` rather than an injected one; if these two ever disagree, the
-//! tests that depend on injection are measuring the harness.
+//! tests that depend on injection are measuring the harness. Both injection arms are exercised:
+//! `an_injected_append_failure_follows_the_real_sequence` and its fsync twin, in `tests/wal.rs`.
+//!
+//! ## Why this module is here and not in `tessera-engine`
+//!
+//! [`Step`], [`PauseSite`] and [`FaultSwitchboard::pause_point`] describe **the executor**, and
+//! `ExecutorHealth` was moved into `tessera-engine` on exactly that argument (the crate that
+//! deliberately owns no executor should not own the executor's vocabulary). This module breaks
+//! that rule knowingly: the switches ride on [`crate::wal::ExecutorWal`], which is here, and one
+//! switchboard a test can arm in a single call beats two half-boards that have to agree about
+//! arming and release. Ergonomics won over the boundary rule; the boundary rule is the one that
+//! would have to be re-argued to move it, not this note.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "fault-injection")]
@@ -58,6 +69,13 @@ use std::sync::{atomic::AtomicUsize, Condvar, Mutex};
 /// belongs on the bearer-gated `/control/status` — not a debugging affordance to be compiled out.
 /// It is here rather than in `wal.rs` because the counting belongs to the *executor's* handle, not
 /// to the durability primitive: `Wal` should stay a file format and a positional CRC rule.
+///
+/// **Reachable, and that had to be built rather than asserted.** The first draft of this comment
+/// made the argument above while the meter was constructed in `WritePath::start_executor` and
+/// *moved* into the `ExecutorWal` with no accessor left behind — so the only readers in the tree
+/// were this crate's own tests, and Task 7a's headline assertion was defined against a counter it
+/// could not reach. It now hangs off `ExecutorHealth`, which keeps a clone, and surfaces as
+/// `ExecutorStats::wal_appends`/`wal_fsyncs`.
 #[derive(Debug, Default)]
 pub struct WalMeter {
     appends: AtomicU64,
@@ -105,31 +123,74 @@ pub enum Step {
     Ack,
 }
 
+/// Where in the executor's `append → fsync → apply → swap → ack` sequence a pause point sits.
+///
+/// **Two sites, because one cannot discriminate the ordering it exists to protect.** With only
+/// [`PauseSite::AfterFsync`], parking proves nothing about the *relative* order of the swap and
+/// the ack: both are still ahead of the parked executor, so a build that acked first and swapped
+/// second parks in exactly the same place and presents exactly the same engine state. Measured,
+/// not reasoned: with a real ack-before-swap planted in `execute_change`, every behavioural
+/// assertion in `ack_follows_fsync_then_swap` passed and only the step-log assertion failed.
+/// [`PauseSite::BeforeAck`] is what closes that — see its own doc for why its *position inside
+/// `ack`* rather than at a call site is the load-bearing part.
+#[cfg(feature = "fault-injection")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseSite {
+    /// After fsync, before the generation swap: **durable, not yet in force**.
+    ///
+    /// The position lifecycle §8's crash table calls "after fsync, before swap" (at risk: none),
+    /// and where Task 8's crash test needs a process to have died so that replay reinstates the
+    /// effect rather than reallocating it.
+    AfterFsync,
+    /// After the generation swap, before the receipt is sent: **in force, not yet acknowledged**.
+    ///
+    /// Armed *inside* `Executor::ack`, not at its call site, and that is the whole point. A pause
+    /// point at a call site is a statement about source order — move the `ack(..)` call above the
+    /// swap and the pause point stays obediently below it. Inside `ack`, the point **travels with
+    /// the ack**: a build that acks before it swaps parks here with the swap still ahead of it, so
+    /// a test parked at this site sees the effect *not* in force and fails on engine state alone,
+    /// with no reference to the step log. That is the discrimination Task 7a's rewrite of this loop
+    /// will be caught by.
+    BeforeAck,
+}
+
+#[cfg(feature = "fault-injection")]
+impl PauseSite {
+    const COUNT: usize = 2;
+    fn index(self) -> usize {
+        match self {
+            PauseSite::AfterFsync => 0,
+            PauseSite::BeforeAck => 1,
+        }
+    }
+}
+
 /// What the executor does when it reaches an armed pause point.
 ///
-/// The point itself is **between fsync and swap** — the one place the plan needs twice: Task 9's
-/// coupled-ack test parks there to prove the receipt is still outstanding while the effect is not
-/// yet in force, and Task 8's crash test needs a process that died exactly there to replay rather
-/// than reallocate (lifecycle §8's "after fsync, before swap" crash row).
+/// **One action, deliberately.** The first draft carried an `Abort` variant documented as stopping
+/// "as a killed process would"; it was a second `panic!` with a different message. A panic unwinds,
+/// runs `DeathGuard`, drops the `Job` and closes the `ExecutorWal` — a `SIGKILL` does none of those,
+/// and Task 8's crash test is about lifecycle §8's crash table, so a worker who armed `Abort`
+/// would have modelled a clean shutdown and called it a crash. Stage 2.1 therefore ships **one**
+/// kill action, the honest one; Task 8 must build a real crash (a child process the test kills),
+/// which no in-process switch can fake.
 #[cfg(feature = "fault-injection")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseAction {
     /// Block until released. The command then completes normally.
     Stall,
-    /// Stop executing without acking, as a killed process would: the responder drops, the caller's
-    /// `recv()` fails, and the posture becomes dead. The fsynced record survives for replay.
-    Abort,
     /// Panic on the executor thread. Exercises the drop guard that reports the posture — the one
-    /// construction that survives a panic anywhere in the loop body.
+    /// construction that survives a panic anywhere in the loop body. **Unwinds**; it is not a
+    /// crash, and nothing may read it as one.
     Panic,
 }
 
 #[cfg(feature = "fault-injection")]
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 struct Pause {
     /// `None` when disarmed. Set by `arm_pause`, cleared by `release`.
     action: Option<PauseAction>,
-    /// How many times the executor has reached the point. A test waits on *this* rather than
+    /// How many times the executor has reached this site. A test waits on *this* rather than
     /// sleeping: "the executor is demonstrably parked" is a condition to observe, not a duration
     /// to guess at.
     arrivals: u64,
@@ -145,7 +206,10 @@ struct Pause {
 pub struct FaultSwitchboard {
     fail_appends: AtomicUsize,
     fail_fsyncs: AtomicUsize,
-    pause: Mutex<Pause>,
+    /// One [`Pause`] per [`PauseSite`], behind **one** mutex and **one** condvar: a test arms one
+    /// site at a time, and a single wait set means `release` cannot leave a thread parked at the
+    /// other site asleep.
+    pause: Mutex<[Pause; PauseSite::COUNT]>,
     pause_cv: Condvar,
     log: Mutex<Vec<Step>>,
 }
@@ -177,36 +241,45 @@ impl FaultSwitchboard {
         consume(&self.fail_fsyncs)
     }
 
-    /// Arm the between-fsync-and-swap point.
-    pub fn arm_pause(&self, action: PauseAction) {
+    /// Arm one [`PauseSite`]. Arming resets that site's arrival count, so a test that arms twice
+    /// counts arrivals for the leg it is on rather than for the whole run.
+    pub fn arm_pause(&self, site: PauseSite, action: PauseAction) {
         let mut pause = self.pause.lock().unwrap_or_else(|e| e.into_inner());
-        pause.action = Some(action);
-        pause.released = false;
+        pause[site.index()] = Pause {
+            action: Some(action),
+            arrivals: 0,
+            released: false,
+        };
     }
 
-    /// Release a stalled executor and disarm the point.
+    /// Release every parked executor and disarm **every** site.
+    ///
+    /// All sites, not the one the caller happens to be thinking of: `WritePath::drop` calls this to
+    /// guarantee teardown cannot deadlock on a fault a test forgot to clear, and a per-site release
+    /// would make that guarantee depend on the test's own bookkeeping.
     pub fn release(&self) {
         let mut pause = self.pause.lock().unwrap_or_else(|e| e.into_inner());
-        pause.action = None;
-        pause.released = true;
+        for p in pause.iter_mut() {
+            p.action = None;
+            p.released = true;
+        }
         self.pause_cv.notify_all();
     }
 
-    /// Block until the executor has reached the pause point at least `n` times.
+    /// Block until the executor has reached `site` at least `n` times since it was armed.
     ///
     /// The deterministic alternative to sleeping: it observes the executor's own state rather than
     /// betting on how long "the executor has got that far" takes on this run's scheduler. Bounded
     /// so a genuine hang fails the test rather than hanging CI.
-    pub fn await_arrivals(&self, n: u64, timeout: std::time::Duration) {
+    pub fn await_arrivals(&self, site: PauseSite, n: u64, timeout: std::time::Duration) {
         let deadline = std::time::Instant::now() + timeout;
         let mut pause = self.pause.lock().unwrap_or_else(|e| e.into_inner());
-        while pause.arrivals < n {
+        while pause[site.index()].arrivals < n {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             assert!(
                 !remaining.is_zero(),
-                "executor did not reach the pause point {n} time(s) within {timeout:?} \
-                 (arrivals: {})",
-                pause.arrivals
+                "executor did not reach {site:?} {n} time(s) within {timeout:?} (arrivals: {})",
+                pause[site.index()].arrivals
             );
             let (guard, _) = self
                 .pause_cv
@@ -216,15 +289,15 @@ impl FaultSwitchboard {
         }
     }
 
-    /// The executor's side of the pause point. Returns the action to take, having already blocked
+    /// The executor's side of one pause site. Returns the action to take, having already blocked
     /// for [`PauseAction::Stall`].
-    pub fn pause_point(&self) -> Option<PauseAction> {
+    pub fn pause_point(&self, site: PauseSite) -> Option<PauseAction> {
         let mut pause = self.pause.lock().unwrap_or_else(|e| e.into_inner());
-        let action = pause.action?;
-        pause.arrivals += 1;
+        let action = pause[site.index()].action?;
+        pause[site.index()].arrivals += 1;
         self.pause_cv.notify_all();
         if action == PauseAction::Stall {
-            while !pause.released {
+            while !pause[site.index()].released {
                 pause = self.pause_cv.wait(pause).unwrap_or_else(|e| e.into_inner());
             }
         }

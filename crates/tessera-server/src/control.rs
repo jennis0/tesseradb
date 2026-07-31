@@ -444,7 +444,7 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     // the second, apply-only loop below is a different class of failure — an infrastructure
     // fault, not a client-correctable validation error — and is not, and cannot be, rolled back:
     // each item's `Engine::accept_change` call is its own complete ack-contract unit, exactly as
-    // `/control/ingest`'s batches are.)
+    // `/control/ingest`'s batches are. Nor does it abort the second loop; see the comment there.)
     let mut validated = Vec::with_capacity(items.len());
     for item in &items {
         let op = match item.op.as_str() {
@@ -489,36 +489,55 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
         });
     }
 
+    // **Every item is submitted, even after one fails.** The obvious `?` here aborts the batch at
+    // the first failure, and that is fail-open at batch scope now that Task 3a made a WAL failure a
+    // sustained *posture* rather than a one-off: `WalPoisoned` refuses every subsequent append, so
+    // an aborting loop applies exactly the first item of a multi-item change batch, on every retry,
+    // until the WAL is reopened — every other suppression in the request silently unapplied behind
+    // a 500 that reads as "retry for durability". Continuing is strictly more fail-closed and is
+    // this lane's whole ethos (lifecycle §4: never a refusal that leaves a deny unapplied): each
+    // remaining `Delete`/`Suppress` is applied to the live overlay by the executor even though its
+    // append fails, so the items are hidden and the caller still gets a 500.
+    //
+    // The **first** error is the one reported, so the status a caller sees does not depend on which
+    // item happened to fail last. Validation is already wholesale above, so nothing reached here
+    // can be a client-correctable fault: everything below is an infrastructure failure and every
+    // one of them is alarmed individually.
+    let mut first_error = None;
     for change in validated {
-        state
-            .engine
-            .accept_change(
-                change.external_id,
-                change.entity,
-                change.op,
-                change.raw_descriptors,
-            )
-            .map_err(|e| {
-                if matches!(change.op, ChangeOp::Delete | ChangeOp::Suppress) {
-                    // Deny-op append failure (lifecycle §4): the executor already applied the
-                    // change to the live overlay before returning this error — never a refusal
-                    // that leaves a deny unapplied.
-                    tracing::error!(
-                        op = ?change.op,
-                        "ALARM: wal append/fsync failed for a deny-op change; applied to the \
-                         in-memory overlay anyway (item hidden immediately) and returning 500 — \
-                         durability is owed, caller must retry"
-                    );
-                } else {
-                    tracing::error!(
-                        "wal append/fsync failed for a non-deny change; refusing without applying"
-                    );
-                }
-                map_accept_error(e)
-            })?;
+        let op = change.op;
+        if let Err(e) = state.engine.accept_change(
+            change.external_id,
+            change.entity,
+            op,
+            change.raw_descriptors,
+        ) {
+            if matches!(op, ChangeOp::Delete | ChangeOp::Suppress) {
+                // Deny-op append failure (lifecycle §4): the executor already applied the
+                // change to the live overlay before returning this error — never a refusal
+                // that leaves a deny unapplied.
+                tracing::error!(
+                    op = ?op,
+                    "ALARM: wal append/fsync failed for a deny-op change; applied to the \
+                     in-memory overlay anyway (item hidden immediately) and returning 500 — \
+                     durability is owed, caller must retry"
+                );
+            } else {
+                tracing::error!(
+                    op = ?op,
+                    "wal append/fsync failed for a non-deny change; refusing without applying"
+                );
+            }
+            if first_error.is_none() {
+                first_error = Some(map_accept_error(e));
+            }
+        }
     }
 
-    Ok(())
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 async fn changes(

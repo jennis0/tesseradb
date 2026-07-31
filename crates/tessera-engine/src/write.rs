@@ -3,6 +3,17 @@
 //!
 //! Carved out of `session.rs` by the stage-2.1 seam (Task 0a); given its executor by Task 3a.
 //!
+//! ## "Executor" and "the lifecycle thread" are the same thing
+//!
+//! Lifecycle §1.3, §4 and §7 call this **the lifecycle thread**; the stage-2.1 plan's brief
+//! introduced "executor" and the types below took the name. They denote one object — the OS thread
+//! is literally named `"tessera-lifecycle"` at [`WritePath::start_executor`]. In particular §7's
+//! "the engine's public API is sync and owns no executor" is about **async runtimes**: it forbids
+//! `tessera-engine` acquiring tokio and running futures (policed by `scripts/check-layers.sh`'s
+//! `deny tessera-engine tokio`), not owning a plain `std::thread`. A synchronous engine that owns
+//! one writer thread is what §1.3 asks for; `Engine::accept_ingest` blocking its caller is the
+//! visible consequence, and is why a tokio handler must wrap it in `spawn_blocking`.
+//!
 //! ## What changed at Task 3a, and why it is the substance rather than a refactor
 //!
 //! Phase 1 served `/control/ingest` and `/control/changes` **inline**, on whichever thread the
@@ -118,7 +129,14 @@ pub struct ExecutorHealth {
     posture: AtomicU8,
     work_submitted: AtomicU64,
     deny_submitted: AtomicU64,
-    /// Total nanoseconds spent cloning the `IngestBuffer`/`Overlay` inside the apply step.
+    /// Total nanoseconds spent in **the whole apply step** — the `IngestBuffer`/`Overlay` clone,
+    /// the per-row inserts, the `Generation` construction and the swap.
+    ///
+    /// **Named for what it measures.** It was `clone_nanos_*` while the timer already started at
+    /// the top of `apply_ingest`/`apply_change`, so it was never the clone alone, and Task 7b is
+    /// told to size the deny-ack floor from it — a figure that must not quietly be something else.
+    /// The clone dominates it (it is O(total buffered items) while the inserts are O(batch)), which
+    /// is why it is still the right operand for that sizing; but the name now says what was timed.
     ///
     /// **This is the deny-ack latency floor, and in stage 2.1 nothing caps it.** A deny's wait is
     /// bounded by "the work item currently executing", and that item includes a clone that is
@@ -126,8 +144,14 @@ pub struct ExecutorHealth {
     /// and 1–3 s at 10 M — while `flush_max_items` is inert until stage 2.2, so the buffer only
     /// grows. Counted from Task 3a rather than 7b precisely because 3a is where lifecycle §1.3's
     /// "never queued behind work of unbounded duration" first becomes a claim made in code.
-    clone_nanos_total: AtomicU64,
-    clone_nanos_max: AtomicU64,
+    apply_nanos_total: AtomicU64,
+    apply_nanos_max: AtomicU64,
+    /// The executor's WAL counters. A **clone** of the meter the [`ExecutorWal`] holds, kept here
+    /// so the numbers have a reader: `/control/status` (Task 3b) and Task 7a's
+    /// `one_fsync_per_window`, whose whole subject is `wal_fsyncs` not rising with the number of
+    /// submissions in a window. Constructed here and cloned into the handle at
+    /// [`WritePath::start_executor`], never moved into it.
+    wal: Arc<WalMeter>,
 }
 
 /// A snapshot of [`ExecutorHealth`], for `/control/status` and for tests.
@@ -136,8 +160,15 @@ pub struct ExecutorStats {
     pub posture: ExecutorPosture,
     pub work_submitted: u64,
     pub deny_submitted: u64,
-    pub clone_nanos_total: u64,
-    pub clone_nanos_max: u64,
+    /// See [`ExecutorHealth::apply_nanos_total`] — the whole apply step, not the clone alone.
+    pub apply_nanos_total: u64,
+    pub apply_nanos_max: u64,
+    /// Successful WAL appends since the executor started.
+    pub wal_appends: u64,
+    /// Successful WAL fsyncs since the executor started — the unit Task 7a's group commit is
+    /// defined in ("one fsync per window") and the one the ingest baseline memo's ~3.2 ms floor is
+    /// a cost per.
+    pub wal_fsyncs: u64,
 }
 
 impl ExecutorHealth {
@@ -146,8 +177,9 @@ impl ExecutorHealth {
             posture: AtomicU8::new(ExecutorPosture::NotStarted as u8),
             work_submitted: AtomicU64::new(0),
             deny_submitted: AtomicU64::new(0),
-            clone_nanos_total: AtomicU64::new(0),
-            clone_nanos_max: AtomicU64::new(0),
+            apply_nanos_total: AtomicU64::new(0),
+            apply_nanos_max: AtomicU64::new(0),
+            wal: Arc::new(WalMeter::new()),
         }
     }
 
@@ -164,43 +196,115 @@ impl ExecutorHealth {
             posture: self.posture(),
             work_submitted: self.work_submitted.load(Ordering::Relaxed),
             deny_submitted: self.deny_submitted.load(Ordering::Relaxed),
-            clone_nanos_total: self.clone_nanos_total.load(Ordering::Relaxed),
-            clone_nanos_max: self.clone_nanos_max.load(Ordering::Relaxed),
+            apply_nanos_total: self.apply_nanos_total.load(Ordering::Relaxed),
+            apply_nanos_max: self.apply_nanos_max.load(Ordering::Relaxed),
+            wal_appends: self.wal.appends(),
+            wal_fsyncs: self.wal.fsyncs(),
         }
     }
 
-    fn record_clone(&self, nanos: u64) {
-        self.clone_nanos_total.fetch_add(nanos, Ordering::Relaxed);
-        self.clone_nanos_max.fetch_max(nanos, Ordering::Relaxed);
+    fn record_apply(&self, nanos: u64) {
+        self.apply_nanos_total.fetch_add(nanos, Ordering::Relaxed);
+        self.apply_nanos_max.fetch_max(nanos, Ordering::Relaxed);
     }
 }
 
-/// Proof that a generation carrying a command's effect is live.
-///
-/// **The ack-ordering rule, in the type system.** [`Executor::ack`] cannot send a *successful*
-/// receipt without one of these, so "ack before swap" — a client observing 200 for a suppression
-/// not yet in force — does not compile. Statement order inside one function would not survive the
-/// three rewrites this loop is scheduled for (7a's window, 7b's close policy, 9's coupled ack);
-/// a required argument does.
-///
-/// It has exactly two producers, both named and both auditable in this file. If a third appears,
-/// the guarantee is gone.
-#[must_use = "a Published token exists to be handed to `ack`; dropping it discards the proof"]
-pub(crate) struct Published(());
+// =================================================================================================
+// The ack channel, and the proof it demands
+// =================================================================================================
 
-impl Published {
-    /// Produced by the generation swap, and by nothing else on the success path.
-    fn by_swap() -> Self {
-        Published(())
+/// The receipt half of a submitted command: the sender, the proof token, and **nothing else**.
+///
+/// ## Why this is a module and not two types beside the executor
+///
+/// The first draft put `Published` next to [`Executor`] and claimed "ack before swap does not
+/// compile". It was false, and demonstrably so. The proof was demanded only by the *helper*
+/// [`Responder::ack`]; `Receipt::ok` is a public constructor with no proof parameter and
+/// `Job.respond` was a public raw `SyncSender<Receipt>`, so `respond.send(Receipt::ok(ack))`
+/// compiled anywhere — including inside this file, which is the only place that matters, since the
+/// rewrites the token exists to survive (7a's window, 7b's close policy, 9's coupled ack) are all
+/// rewrites *of this file*. Rust's privacy is per **module**, so a guard that lives in the same
+/// module as the code it guards guards nothing.
+///
+/// So the sender moves in here and the field is private to this module. Outside it — which is all
+/// of the executor — a `Responder` offers exactly two operations, [`Responder::ack`] (needs a
+/// [`Published`]) and [`Responder::fail`] (cannot carry an `Ack`). There is no third route to a
+/// successful receipt, because there is no way to reach the channel.
+///
+/// ## What this still does not buy, stated because the last version of this comment overclaimed
+///
+/// [`Published::by_swap`] and [`Published::already_in_force`] are callable from anywhere in
+/// `write.rs`. A worker who *wants* to ack early can still mint a token — the replay path's
+/// `already_in_force()` is the obvious thing to reach for, and is exactly what the reviewer's
+/// mutation used. Two things catch that rather than the type system: `check-layers.sh` rule 3 pins
+/// every `Published::` construction to this file, and there are exactly two (`publish`, and
+/// `execute_ingest`'s replay arm); and `ack_follows_fsync_then_swap`'s `BeforeAck` leg fails on
+/// engine state — the effect is not in force at the moment the ack is being sent — with no
+/// reference to the step log. Type, rule, test: the claim is that no *one* of them is the
+/// guarantee.
+mod ack {
+    use std::sync::mpsc::SyncSender;
+
+    use tessera_lifecycle::command::{Ack, ExecError, Receipt};
+
+    /// Proof that a generation carrying a command's effect is live.
+    ///
+    /// [`super::Responder::ack`] cannot send a *successful* receipt without one, and the only
+    /// producers are the three named constructors below.
+    #[must_use = "a Published token exists to be handed to `ack`; dropping it discards the proof"]
+    pub(super) struct Published(());
+
+    impl Published {
+        /// Produced by the generation swap, and by nothing else on the success path.
+        pub(super) fn by_swap() -> Self {
+            Published(())
+        }
+
+        /// The one case where a success ack is honest without *this* command having swapped: an
+        /// idempotent replay of a `batch_id` whose **original** acceptance already swapped
+        /// (contracts §3.4's replay rule). The effect is in force; it was simply put there by an
+        /// earlier command.
+        ///
+        /// Takes the recorded ids it is replaying so it cannot be conjured out of nothing at a
+        /// site that has looked nothing up — the argument is the evidence, and the borrow makes
+        /// "I found this batch already accepted" a precondition of the call rather than a comment
+        /// above it.
+        pub(super) fn already_in_force(_replay_of: &[tessera_types::EntityId]) -> Self {
+            Published(())
+        }
     }
 
-    /// The one case where a success ack is honest without this command having swapped: an
-    /// idempotent replay of a `batch_id` whose **original** acceptance already swapped (contracts
-    /// §3.4's replay rule). The effect is in force; it was simply put there by an earlier command.
-    fn already_in_force() -> Self {
-        Published(())
+    /// Where one submitted `Command`'s [`Receipt`] is delivered.
+    ///
+    /// A **synchronous** channel sender, and that is forced rather than chosen: `tessera-engine`
+    /// has no tokio dependency and must not acquire one, so the plan's two options for "receipt
+    /// awaiting must not block the reactor" collapse to one — the handler wraps its submit in
+    /// `spawn_blocking`, and this stays a plain `std::sync::mpsc` sender. `sync_channel(1)`, not
+    /// `channel()`, so the executor's ack send never blocks on a caller that has gone away.
+    pub(crate) struct Responder(SyncSender<Receipt>);
+
+    impl Responder {
+        pub(super) fn new(tx: SyncSender<Receipt>) -> Self {
+            Responder(tx)
+        }
+
+        /// Send a **successful** receipt. Requires proof that the effect is live.
+        ///
+        /// A dropped receiver is not an error: the caller's connection went away, and by then the
+        /// effect is already in force.
+        pub(super) fn ack(&self, ack: Ack, _proof: Published) {
+            let _ = self.0.send(Receipt::ok(ack));
+        }
+
+        /// Send a failure receipt. No proof, because there is no effect to prove — and no way to
+        /// smuggle an [`Ack`] through it.
+        pub(super) fn fail(&self, error: ExecError) {
+            let _ = self.0.send(Receipt::failed(error));
+        }
     }
 }
+
+use ack::{Published, Responder};
 
 // =================================================================================================
 // Live state
@@ -355,6 +459,15 @@ pub(crate) struct WritePath {
 pub enum ExecutorStartError {
     /// This engine already has one. The WAL can be owned once.
     AlreadyStarted,
+    /// The OS refused the thread (`EAGAIN`: thread or memory limits).
+    ///
+    /// Its own variant rather than an `expect`, because the panic it replaces would have fired
+    /// **after** the WAL was taken out of the request path and could reach the caller as a startup
+    /// abort with no posture to read. As a returned error, `tessera-server`'s `prepare` fails
+    /// startup deliberately and the posture stays [`ExecutorPosture::NotStarted`]. The engine is
+    /// permanently writer-less either way: the WAL moved into the closure that failed to spawn and
+    /// was dropped with it, so a retry answers `AlreadyStarted`. Restart the process.
+    Spawn(std::io::ErrorKind),
 }
 
 impl std::fmt::Display for ExecutorStartError {
@@ -363,6 +476,11 @@ impl std::fmt::Display for ExecutorStartError {
             ExecutorStartError::AlreadyStarted => {
                 write!(f, "this engine's write executor is already running")
             }
+            ExecutorStartError::Spawn(kind) => write!(
+                f,
+                "the lifecycle thread could not be spawned ({kind:?}); this engine can no longer \
+                 accept writes"
+            ),
         }
     }
 }
@@ -521,7 +639,9 @@ impl WritePath {
         // safe — see [`Executor::run`].
         let (bell_tx, bell_rx) = std::sync::mpsc::sync_channel(1);
 
-        let meter = Arc::new(WalMeter::new());
+        // A clone, not a move: `ExecutorHealth` keeps the other end, which is what gives the
+        // counters a reader outside the executor thread (`ExecutorStats::wal_fsyncs`).
+        let meter = Arc::clone(&self.health.wal);
         #[cfg(not(feature = "fault-injection"))]
         let exec_wal = ExecutorWal::new(wal, meter);
         #[cfg(feature = "fault-injection")]
@@ -538,7 +658,6 @@ impl WritePath {
         #[cfg(feature = "fault-injection")]
         let thread_faults = faults.clone();
 
-        health.advance(ExecutorPosture::Running);
         let join = std::thread::Builder::new()
             .name("tessera-lifecycle".to_string())
             .spawn(move || {
@@ -561,7 +680,14 @@ impl WritePath {
                 let _guard = DeathGuard(health);
                 executor.run();
             })
-            .expect("spawning the lifecycle thread");
+            .map_err(|e| ExecutorStartError::Spawn(e.kind()))?;
+
+        // Advanced **after** a successful spawn, not before it: a failed spawn must leave the
+        // posture at `NotStarted` (an operator configuration fault — writes refused, reads
+        // untouched) rather than at a `Running` no thread is behind. Safe against the thread that
+        // panics the instant it starts, because `advance` is `fetch_max` and `Dead` outranks
+        // `Running` whichever order the two land in.
+        self.health.advance(ExecutorPosture::Running);
 
         self.handle = Some(LifecycleHandle {
             work: work_tx,
@@ -726,29 +852,21 @@ impl Drop for DeathGuard {
 // The queues
 // =================================================================================================
 
-/// Where one submitted [`Command`]'s [`Receipt`] is delivered.
-///
-/// A **synchronous** channel sender, and that is forced rather than chosen: `tessera-engine` has no
-/// tokio dependency and must not acquire one, so the plan's two options for "receipt awaiting must
-/// not block the reactor" collapse to one — the handler wraps its submit in `spawn_blocking`, and
-/// this stays a plain `std::sync::mpsc` sender. `sync_channel(1)`, not `channel()`, so the
-/// executor's ack send never blocks on a caller that has gone away.
-pub type Responder = SyncSender<Receipt>;
-
 /// One queued unit of work: what to do, and where to say it was done.
 ///
 /// The responder travels **with** the command rather than being looked up afterwards, because Task
-/// 8's join case needs several of them against one entry.
-pub struct Job {
-    pub command: Command,
-    pub respond: Responder,
+/// 8's join case needs several of them against one entry. It is an [`ack::Responder`], not a raw
+/// sender — see that module for why the difference is the whole of the ack-ordering guarantee.
+pub(crate) struct Job {
+    command: Command,
+    respond: Responder,
 }
 
 /// The handler-side end of the write executor: two queues, and the asymmetry between them.
 ///
 /// **Not `Clone`, and that is load-bearing** — [`WritePath::drop`] joins the executor thread, which
 /// terminates only when every sender has disconnected. One owner means the join always completes.
-pub struct LifecycleHandle {
+pub(crate) struct LifecycleHandle {
     /// Bounded by `ingest_queue_bound`; full → [`SubmitError::QueueFull`].
     work: SyncSender<Job>,
     /// Unbounded: a deny is never refused for load.
@@ -762,30 +880,27 @@ pub struct LifecycleHandle {
 }
 
 impl LifecycleHandle {
-    /// Submit an ingest command and wait for its receipt. **May 429** (queue full).
-    pub fn submit(&self, command: Command) -> std::result::Result<Receipt, SubmitError> {
-        self.enqueue(command)
-    }
-
-    /// Submit a `/control/changes` command and wait for its receipt. **Never 429**, but it can
-    /// still report [`SubmitError::ExecutorDead`]: a deny is never refused for *load*, which is not
-    /// the same as never refused.
-    pub fn submit_deny(&self, command: Command) -> std::result::Result<Receipt, SubmitError> {
-        self.enqueue(command)
-    }
-
-    /// The lane is chosen by the **command**, not by which method was called.
+    /// Submit any [`Command`] and block until its receipt arrives.
     ///
-    /// Both public methods funnel here, so `submit(Command::Change { .. })` cannot put a
-    /// suppression on the bounded queue and 429 it — contracts §3.1 forbids `/control/changes`
-    /// answering 429, and a one-line slip at a handler is exactly how that would happen.
-    /// [`Command::is_never_shed`] exists to make this structural and this is the only place it is
-    /// consulted.
-    fn enqueue(&self, command: Command) -> std::result::Result<Receipt, SubmitError> {
+    /// **One method, because the lane is chosen by the command and not by the call site.**
+    /// `Command::Change` rides the unbounded never-shed queue and can therefore never answer
+    /// [`SubmitError::QueueFull`] — contracts §3.1 forbids `/control/changes` answering 429 —
+    /// while `Command::Ingest` rides the bounded one and can. There was briefly a `submit_deny`
+    /// beside this; its body was byte-identical, so its "Never 429" doc described the *abandoned*
+    /// by-call-site rule and was false of itself in both directions. Deleted rather than
+    /// documented: a second name for one behaviour is how a stage-2.2 author ends up believing the
+    /// lane follows the call.
+    ///
+    /// Both lanes can still report [`SubmitError::ExecutorDead`]. A deny is never refused for
+    /// *load*, which is not the same as never refused; there is no honest 200 to give when there is
+    /// nothing left to apply the write to.
+    ///
+    /// [`Command::is_never_shed`] is the rule, and this is the only place it is consulted.
+    pub(crate) fn submit(&self, command: Command) -> std::result::Result<Receipt, SubmitError> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let job = Job {
             command,
-            respond: tx,
+            respond: Responder::new(tx),
         };
 
         if job.command.is_never_shed() {
@@ -822,11 +937,11 @@ impl LifecycleHandle {
 /// Named as a pair so the ordering rule is visible from the handle: `deny` is drained to empty
 /// before `work` is touched, which is what makes the starvation bound "the work item currently
 /// executing" rather than "the work queue's depth".
-pub struct LifecycleQueues {
-    pub work: Receiver<Job>,
-    pub deny: Receiver<Job>,
+pub(crate) struct LifecycleQueues {
+    work: Receiver<Job>,
+    deny: Receiver<Job>,
     /// The wake signal. Capacity one — see [`LifecycleHandle::bell`] and [`Executor::run`].
-    pub bell: Receiver<()>,
+    bell: Receiver<()>,
 }
 
 // =================================================================================================
@@ -867,10 +982,13 @@ impl Executor {
     /// yet, and an item is established only at apply. So no deny naming a still-queued ingest's
     /// item can be submitted at all, and WAL append order still equals apply order.
     ///
-    /// **Shutdown discards rather than executes.** A submitter holds `&self` on the handle for the
-    /// whole call, so `bell.recv()` cannot return `Err` while any submit is in flight — the three
-    /// senders live in one struct and disconnect together. Anything still queued at that point had
-    /// no waiter left to ack.
+    /// **Shutdown drains and executes; it does not discard.** The loop leaves only from
+    /// `bell.recv()`, which sits *after* both `try_recv`s, so the disconnect iteration has already
+    /// drained deny to empty and run one work item. Anything genuinely left behind — work queued
+    /// beyond that one item — is dropped with the receivers, and had no waiter left to ack anyway:
+    /// a submitter holds `&self` on the handle for the whole call, so `bell.recv()` cannot return
+    /// `Err` while any submit is in flight, since the three senders live in one struct and
+    /// disconnect together.
     ///
     /// *At-most-one-work-item is Task 3a's shape, not the executor's permanent one*: Task 7a drains
     /// work into a commit window. Leftover tokens stay harmless under that change.
@@ -925,12 +1043,13 @@ impl Executor {
         // burns no entity ids.
         if let Some((prev_hash, prev_ids)) = self.live.accepted_batch(&batch_id) {
             return if prev_hash == body_hash {
+                let proof = Published::already_in_force(&prev_ids);
                 self.ack(
                     respond,
                     Ack::Ingested {
                         entity_ids: prev_ids,
                     },
-                    Published::already_in_force(),
+                    proof,
                 )
             } else {
                 self.ack_failed(respond, ExecError::BatchConflict { batch_id })
@@ -983,7 +1102,7 @@ impl Executor {
         }
 
         // Durable, not yet in force. See `pause_point`.
-        self.pause_point();
+        self.pause_point(PauseSiteArg::AfterFsync);
         let published = self.apply_ingest(&wal_rows, terms);
         // Recorded after the swap, so a concurrent replay of the same batch id can never observe a
         // window where the generation has swapped but the idempotency index has not caught up.
@@ -1021,7 +1140,7 @@ impl Executor {
                     .as_ref()
                     .map(|ds| self.live.resolve_terms(ds));
                 // Durable, not yet in force. See `pause_point`.
-                self.pause_point();
+                self.pause_point(PauseSiteArg::AfterFsync);
                 let published = self.apply_change(entity, op, terms);
                 self.ack(respond, Ack::Changed, published);
             }
@@ -1124,7 +1243,7 @@ impl Executor {
         // only grows. This counter is what makes the deny-ack floor measurable rather than
         // asserted — see `ExecutorHealth::clone_nanos_total`.
         self.health
-            .record_clone(started.elapsed().as_nanos() as u64);
+            .record_apply(started.elapsed().as_nanos() as u64);
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
             faults.record(tessera_lifecycle::faults::Step::Swap);
@@ -1143,50 +1262,64 @@ impl Executor {
     }
 
     /// Send a **successful** receipt. Requires proof that the effect is live — see [`Published`].
-    fn ack(&self, respond: &Responder, ack: Ack, _proof: Published) {
+    ///
+    /// The [`PauseSite::BeforeAck`] point is armed **here**, one statement above the send, rather
+    /// than at either call site. That is what makes it a statement about the ack rather than about
+    /// a line number: whichever rewrite 7a, 7b or 9 performs, an ack that has moved above the swap
+    /// takes this pause point with it, and a test parked here then observes the effect *not* in
+    /// force.
+    fn ack(&self, respond: &Responder, ack: Ack, proof: Published) {
+        self.pause_point(PauseSiteArg::BeforeAck);
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
             faults.record(tessera_lifecycle::faults::Step::Ack);
         }
-        // A dropped responder is not an error: the caller's connection went away, and by then the
-        // effect is already in force.
-        let _ = respond.send(Receipt::ok(ack));
+        respond.ack(ack, proof);
     }
 
+    /// Send a failure receipt. **Not** armed with the pause point above: parking there would stall
+    /// the WAL-failure tests inside a path that has nothing to say about ack ordering, and there is
+    /// no effect for a parked test to look for.
     fn ack_failed(&self, respond: &Responder, error: ExecError) {
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
             faults.record(tessera_lifecycle::faults::Step::Ack);
         }
-        let _ = respond.send(Receipt::failed(error));
+        respond.fail(error);
     }
 
-    /// The armed kill point **between fsync and swap** — durable, not yet in force.
+    /// Reach an armed pause site, if any. Test builds only; a no-op otherwise.
     ///
-    /// That exact position is needed twice by the plan and is why the hook lands at 3a rather than
-    /// at stage 2.4: Task 9's coupled-ack test parks here to prove the receipt is still outstanding
-    /// while the effect is not yet visible, and Task 8's crash test needs a process that died here
-    /// to replay rather than reallocate (lifecycle §8's "after fsync, before swap" row, whose
-    /// "at risk: none" is precisely what it exists to demonstrate). Test builds only; a no-op
-    /// otherwise.
+    /// The two sites are `faults::PauseSite`'s, and the reason there are two is argued there: with
+    /// only the after-fsync one, parking proves nothing about the relative order of the swap and
+    /// the ack, because both are still ahead of the parked executor.
     #[cfg(feature = "fault-injection")]
-    fn pause_point(&self) {
+    fn pause_point(&self, site: PauseSiteArg) {
         use tessera_lifecycle::faults::PauseAction;
         let Some(faults) = &self.faults else { return };
-        match faults.pause_point() {
+        match faults.pause_point(site) {
             None | Some(PauseAction::Stall) => {}
-            Some(PauseAction::Abort) => {
-                // As a killed process would: no ack, the responder drops, the caller sees
-                // `ExecutorDead`, and the fsynced record survives for replay (lifecycle §8's
-                // "after fsync, before swap" row).
-                panic!("fault-injection: executor aborted at the pause point");
-            }
             Some(PauseAction::Panic) => {
-                panic!("fault-injection: executor panicked at the pause point")
+                panic!("fault-injection: executor panicked at the {site:?} pause point")
             }
         }
     }
 
     #[cfg(not(feature = "fault-injection"))]
-    fn pause_point(&self) {}
+    fn pause_point(&self, _site: PauseSiteArg) {}
+}
+
+/// The pause-site argument, so the executor's two call sites read the same in both builds.
+///
+/// In a fault-injection build this **is** `faults::PauseSite`. In a shipped build the module does
+/// not exist, so it is a local zero-variant-cost stand-in and `pause_point` is a no-op — the
+/// alternative, `#[cfg]` at each call site, is the footgun `faults`'s module doc warns about.
+#[cfg(feature = "fault-injection")]
+type PauseSiteArg = tessera_lifecycle::faults::PauseSite;
+
+#[cfg(not(feature = "fault-injection"))]
+#[derive(Debug, Clone, Copy)]
+enum PauseSiteArg {
+    AfterFsync,
+    BeforeAck,
 }

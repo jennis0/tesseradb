@@ -142,6 +142,14 @@ impl Command {
     ///
     /// Two consequences to choose rather than discover (plan Task 3a): a sustained deny flood
     /// starves ingest completely, and this queue is unbounded in memory.
+    ///
+    /// **A NEW VARIANT DEFAULTS TO THE BOUNDED, SHEDDABLE LANE.** This is a `matches!` over one
+    /// variant, so stage 2.2's `Flush` and stage 2.3's `Compact` are sheddable the moment they are
+    /// added and nothing warns about it. That default is right for those two — a flush that cannot
+    /// be admitted is backpressure working — but it is the wrong default for anything a caller is
+    /// owed an unrefusable answer to, and adding a variant without visiting this line is how such a
+    /// thing ships. There is no `submit_deny` to reach for instead: the lane follows the command,
+    /// and this function is the whole of the rule.
     pub fn is_never_shed(&self) -> bool {
         matches!(self, Command::Change { .. })
     }
@@ -215,6 +223,15 @@ pub enum ExecError {
     /// to treat the WAL as the problem rather than to retry the suppression. For every other
     /// command nothing is applied. The op is the caller's own, so the caller can tell which case
     /// it is in.
+    ///
+    /// **At batch scope, one of these does not stop the batch.** A `/control/changes` request is a
+    /// list, and `tessera-server`'s `run_changes` submits **every** validated item even after one
+    /// of them fails this way, then reports the first failure. That matters because
+    /// [`crate::wal::WalError::Poisoned`] is a sustained posture, not a transient: a batch against
+    /// a poisoned node would otherwise apply exactly its first item on every retry until the WAL is
+    /// reopened, leaving the rest of the denies unapplied under a 500 that says durability is owed.
+    /// So the 500 means "at least one item is in force but not durable, and every deny in the
+    /// request was attempted", never "the batch was refused".
     Wal(WalError),
     /// Entity-ID assignment refused (I9's `u32` ceiling) → HTTP 500, fail closed. The batch has
     /// no effect: `Allocator::allocate` leaves the high-water mark unchanged on this path.

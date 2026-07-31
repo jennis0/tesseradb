@@ -387,6 +387,60 @@ fn an_injected_failure_is_indistinguishable_from_a_real_one() {
     );
 }
 
+/// The **append** injection arm, which nothing else exercises.
+///
+/// Every WAL-failure test in the tree reaches for `fail_next_fsyncs`, so without this
+/// `fail_next_appends` was an unverified arm of a harness whose entire value is fidelity — the one
+/// thing a fault switchboard may not have. The real sequence it must match is `Wal::append`'s error
+/// arm: `Io` on the failing call (the partial `write_all` that left `self.len` unable to name a
+/// record boundary), `Poisoned` on everything after, and a poisoned handle throughout.
+///
+/// A real append failure is harder to provoke than a real fsync failure — a read-only *directory*
+/// does not stop writes to an already-open fd, which is precisely why the fsync test above works —
+/// so this pins the injected arm against the source of truth in `wal.rs` rather than against a
+/// second provoked failure.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_injected_append_failure_follows_the_real_sequence() {
+    use std::sync::Arc;
+    use tessera_lifecycle::faults::{FaultSwitchboard, WalMeter};
+    use tessera_lifecycle::wal::ExecutorWal;
+
+    let dir = tempdir().unwrap();
+    let (wal, _) = Wal::open(dir.path().join("wal.log")).unwrap();
+    let faults = Arc::new(FaultSwitchboard::new());
+    let meter = Arc::new(WalMeter::new());
+    let mut wal = ExecutorWal::new(wal, Arc::clone(&meter)).with_faults(Arc::clone(&faults));
+
+    wal.append(&sample_record(1)).unwrap();
+    wal.fsync().unwrap();
+
+    faults.fail_next_appends(1);
+    let first = wal.append(&sample_record(2));
+    assert!(
+        matches!(first, Err(WalError::Io(_))),
+        "an injected append failure must report Io on the failing call, exactly as `Wal::append`'s \
+         own error arm does; got {first:?}"
+    );
+    assert!(
+        wal.is_poisoned(),
+        "and it must poison the handle — a partial append cannot name a record boundary"
+    );
+
+    // BOTH operations refuse afterwards, not just the one that failed: the poison is the handle's.
+    assert!(matches!(
+        wal.append(&sample_record(3)),
+        Err(WalError::Poisoned)
+    ));
+    assert!(matches!(wal.fsync(), Err(WalError::Poisoned)));
+
+    assert_eq!(
+        (meter.appends(), meter.fsyncs()),
+        (1, 1),
+        "the failed append must not be counted"
+    );
+}
+
 extern "C" {
     #[link_name = "geteuid"]
     fn geteuid() -> u32;
