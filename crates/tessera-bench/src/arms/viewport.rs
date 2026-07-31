@@ -177,6 +177,7 @@ pub fn run(
                         max_underlay_offset: 4,
                         max_underlay_cells: 8192,
                         max_tiles_per_request: 262_144,
+                        compute_threads: tessera_engine::default_compute_threads(),
                     },
                 )?;
                 let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;

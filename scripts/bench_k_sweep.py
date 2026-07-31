@@ -60,10 +60,25 @@ def write_config_with_max_k(
     session_port: int,
     control_port: int,
     max_k: int,
+    *,
+    compute_threads: int | None = None,
+    compute_admission: int | None = None,
+    compute_queue: int | None = None,
+    admission_timeout_ms: int | None = None,
 ) -> Path:
     """Like `harness.write_config`, but with `[serve] max_k` raised above the default 200 --
     otherwise `Engine::viewport` silently clamps every k > 200 and the sweep is measuring the
-    same 200-per-tile budget five times over."""
+    same 200-per-tile budget five times over.
+
+    Task 9: the four `compute_*` knobs (D-B/D-E's admission gate) are optional overrides, `None`
+    by default -- omitted from the written config, so every existing caller keeps getting the
+    server's own defaults (`compute_threads` = available parallelism, `compute_admission` =
+    `COMPUTE_ADMISSION_MULTIPLIER` (4) x `compute_threads` -- retuned 2026-07-31, was 1x --,
+    `compute_queue` = 2x that, `admission_timeout_ms` = 250) exactly as before this task.
+    `scripts/bench_concurrency.py` is the only caller that passes them explicitly, to force a low
+    admission bound for its shed cell (criterion 3) or a shorter timeout for its cold-build cell
+    (criterion 6).
+    """
     config_text = f"""
 [bundle]
 path = "{bundle_root}"
@@ -85,12 +100,32 @@ max_k = {max_k}
 session_credential_env = "TESSERA_REFERENCE_SESSION_CRED"
 operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"
 """
+    overrides = {
+        "compute_threads": compute_threads,
+        "compute_admission": compute_admission,
+        "compute_queue": compute_queue,
+        "admission_timeout_ms": admission_timeout_ms,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            config_text += f"{key} = {value}\n"
+
     config_path = tmp_dir / "tessera.toml"
     config_path.write_text(config_text)
     return config_path
 
 
-def spawn_with_long_boot_deadline(bundle_root: Path, tmp_dir: Path, boot_deadline_s: float, max_k: int):
+def spawn_with_long_boot_deadline(
+    bundle_root: Path,
+    tmp_dir: Path,
+    boot_deadline_s: float,
+    max_k: int,
+    *,
+    compute_threads: int | None = None,
+    compute_admission: int | None = None,
+    compute_queue: int | None = None,
+    admission_timeout_ms: int | None = None,
+):
     harness.ensure_cli_built()
 
     cache_dir = tmp_dir / "cache"
@@ -102,7 +137,18 @@ def spawn_with_long_boot_deadline(bundle_root: Path, tmp_dir: Path, boot_deadlin
     control_port = harness.free_port()
 
     config_path = write_config_with_max_k(
-        tmp_dir, bundle_root, cache_dir, wal_path, viewer_port, session_port, control_port, max_k
+        tmp_dir,
+        bundle_root,
+        cache_dir,
+        wal_path,
+        viewer_port,
+        session_port,
+        control_port,
+        max_k,
+        compute_threads=compute_threads,
+        compute_admission=compute_admission,
+        compute_queue=compute_queue,
+        admission_timeout_ms=admission_timeout_ms,
     )
 
     import os

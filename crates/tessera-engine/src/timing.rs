@@ -28,6 +28,24 @@
 /// Durations are nanoseconds and are *inclusive of nothing else*: they partition the request,
 /// so `total_ns` minus the sum is unattributed time (allocation, `Vec` growth, the loop
 /// scaffolding itself). Counters are exact.
+///
+/// **D-D/D-E: the per-tile fields stopped partitioning wall clock the moment the tile loop went
+/// parallel.** `count_ns`, `select_ns`, `gather_ns`, `underlay_ns` and every per-tile counter
+/// (`rows_in_ranges`, `tiles_nonempty`, `sigma_visible`, `select_rows_visited`,
+/// `points_gathered`, `underlay_cells_evaluated`) are now **cross-worker sums**: each tile's own
+/// contribution ([`crate::viewport::TileResult`]'s [`TileStats`]) is measured locally inside that
+/// tile's own `tile_result` call, on whatever rayon worker ran it, and summed into these fields by
+/// [`TileStats::fold_into`] in `Engine::viewport`'s serial in-order fold. At `compute_threads = 1`
+/// this sum coincides with the old wall-clock partition (one worker, one tile at a time — nothing
+/// changes). At `compute_threads > 1` these fields report *aggregate CPU time spent*, not *wall
+/// time elapsed*, and the sum can legitimately exceed the request's own `total_ns` — that is
+/// concurrency showing up in the numbers honestly, not a bug. The serial-prefix fields
+/// (`generation_resolve_ns` through `tile_ranges_ns`, plus `theta_anchor_ns`) and `total_ns` keep
+/// their pre-parallelism meaning unchanged: nothing before the parallel sweep runs concurrently.
+///
+/// See [`Self::unattributed_ns`] for the direct consequence of this for that quantity, and
+/// `Probe::skip`'s call site in `Engine::viewport` for how the parallel section's own wall time
+/// avoids being misattributed to whatever lap runs next.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StageTimings {
     /// False in a build without `bench-timing`. Distinguishes "this stage cost nothing" from
@@ -54,18 +72,30 @@ pub struct StageTimings {
     /// ever tracks `sigma_visible` or the projection's size, that memoisation has been lost and the
     /// anchor has quietly become a per-viewport scan.
     pub theta_anchor_ns: u64,
-    /// `tiles_for_bbox` — pure geometry, no data touched.
+    /// `tiles_for_bbox` — pure geometry, no data touched. Serial-prefix: computed once, before
+    /// the parallel tile sweep, so this keeps its wall-clock meaning at every `compute_threads`.
     pub tiles_for_bbox_ns: u64,
-    /// `tile_ranges` binary searches, summed over tiles.
+    /// `tile_ranges` binary searches — one sweep over every tile (`tile_ranges_all`), computed
+    /// once before the parallel section. Serial-prefix, same wall-clock meaning at every
+    /// `compute_threads` — not to be confused with the genuinely per-tile fields below.
     pub tile_ranges_ns: u64,
     /// `EffectiveMask::count_range`, summed over tiles. The count loop.
+    ///
+    /// **Cross-worker sum under `compute_threads > 1`, not a wall-clock partition** — see this
+    /// struct's doc.
     pub count_ns: u64,
     /// §7.2's selection, summed over tiles: the tiered decode of the visible set
     /// (`select::decode_tier` — full-range slice, run decode, or batched value decode, each
     /// walking `base` steady-state and the `rows_in_range` bitmap fallback when overlay diffs
     /// exist) plus the threshold count and the bounded selection over it.
+    ///
+    /// **Cross-worker sum under `compute_threads > 1`, not a wall-clock partition** — see this
+    /// struct's doc.
     pub select_ns: u64,
     /// The per-row column gather (`row_to_point`), summed over tiles.
+    ///
+    /// **Cross-worker sum under `compute_threads > 1`, not a wall-clock partition** — see this
+    /// struct's doc.
     pub gather_ns: u64,
     /// Design §7.3's density underlay: the sub-cell `count_range` calls, summed over tiles. Zero
     /// when the request did not ask for the underlay, which is the default.
@@ -74,6 +104,9 @@ pub struct StageTimings {
     /// here: it is `tiles × 4^offset` range-cardinality calls, so it grows with a *request
     /// parameter* rather than with the corpus or the viewer's coverage. That is why it is capped
     /// (`max_underlay_cells`) and why the cap needs a number behind it rather than a guess.
+    ///
+    /// **Cross-worker sum under `compute_threads > 1`, not a wall-clock partition** — see this
+    /// struct's doc.
     pub underlay_ns: u64,
     /// Whole-request wall time inside `Engine::viewport`.
     pub total_ns: u64,
@@ -131,6 +164,16 @@ pub struct StageTimings {
 impl StageTimings {
     /// Time not attributed to any named stage: allocation, `Vec` growth, loop scaffolding.
     /// Saturating, because clock perturbation can make the parts exceed the whole by a few ns.
+    ///
+    /// **Pinned at zero under `compute_threads > 1`, and that is the defined, expected value —
+    /// not a coincidence of the saturating subtraction.** Once the tile-loop fields become
+    /// cross-worker sums (this struct's doc), their sum routinely exceeds `total_ns` (real wall
+    /// time) by roughly the achieved parallelism, so `total_ns.saturating_sub(named)` floors at
+    /// `0` on any request that used more than one worker. This quantity is defined over the
+    /// **serial prefix only**: it answers "what fraction of the serial stages went unaccounted
+    /// for", and stops answering that question the moment stages start running concurrently.
+    /// Reading it as "idle time" under `compute_threads > 1` is the mistake this note exists to
+    /// head off.
     pub fn unattributed_ns(&self) -> u64 {
         let named = self.generation_resolve_ns
             + self.pin_resolve_ns
@@ -260,6 +303,125 @@ impl Probe {
     }
 }
 
+/// One tile's contribution to the summed-over-tiles stage numbers (D-E) — the parallel-sweep
+/// counterpart to [`StageTimings`]. `Engine::viewport`'s per-tile function (`tile_result`) builds
+/// one of these locally, on whatever rayon worker runs that tile; the request's serial in-order
+/// fold sums each field into the request's own [`StageTimings`] via [`Self::fold_into`].
+///
+/// Only the fields a tile can meaningfully report live here — no `total_ns`, no `enabled`, no
+/// `row_projection_built`: those describe the whole request or its serial prefix, not one tile,
+/// and giving a per-tile struct request-scoped fields would invite exactly the kind of
+/// misattribution D-E's timing redefinition exists to avoid.
+///
+/// Same shape in both builds and the same zero-cost/zero-value-when-off discipline as
+/// [`StageTimings`] itself (this module's doc): every field stays at zero without `bench-timing`,
+/// via [`TileProbe`]'s internal `#[cfg]`, so a consumer can never mistake an uninstrumented
+/// build's zeros for a genuinely free tile.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TileStats {
+    pub count_ns: u64,
+    pub select_ns: u64,
+    pub gather_ns: u64,
+    pub underlay_ns: u64,
+    pub rows_in_ranges: u64,
+    pub tiles_nonempty: u64,
+    pub sigma_visible: u64,
+    pub select_rows_visited: u64,
+    pub points_gathered: u64,
+    pub underlay_cells_evaluated: u64,
+    pub clock_laps: u64,
+}
+
+impl TileStats {
+    /// Sum `self` into `t` — D-E's reduction: the per-tile stage numbers become cross-worker sums
+    /// rather than a partition of wall clock. Called once per tile, serially, in
+    /// `Engine::viewport`'s in-order fold over the parallel sweep's results — never from a rayon
+    /// worker itself, so this plain (non-atomic) addition is sound.
+    pub fn fold_into(&self, t: &mut StageTimings) {
+        t.count_ns += self.count_ns;
+        t.select_ns += self.select_ns;
+        t.gather_ns += self.gather_ns;
+        t.underlay_ns += self.underlay_ns;
+        t.rows_in_ranges += self.rows_in_ranges;
+        t.tiles_nonempty += self.tiles_nonempty;
+        t.sigma_visible += self.sigma_visible;
+        t.select_rows_visited += self.select_rows_visited;
+        t.points_gathered += self.points_gathered;
+        t.underlay_cells_evaluated += self.underlay_cells_evaluated;
+        t.clock_laps += self.clock_laps;
+    }
+}
+
+/// A [`Probe`]-shaped clock for one tile, owned locally inside `tile_result` — **never shared
+/// across threads**: each rayon worker constructs and discards its own, which is what makes this
+/// safe to call from `par_iter`'s closure with no synchronisation at all. Same lap/count API as
+/// [`Probe`], over [`TileStats`] instead of [`StageTimings`], for the same reason `Probe` has it:
+/// the gate is on the clock, not on the call site, so `tile_result` carries no `#[cfg]` at any of
+/// its own measurement points either.
+pub struct TileProbe {
+    /// The accumulated per-tile breakdown. Public so `tile_result` can move it into
+    /// `TileResult::stats` at the end of the call.
+    pub t: TileStats,
+    #[cfg(feature = "bench-timing")]
+    mark: std::time::Instant,
+}
+
+impl Default for TileProbe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TileProbe {
+    #[inline(always)]
+    pub fn new() -> Self {
+        #[cfg(feature = "bench-timing")]
+        {
+            TileProbe {
+                t: TileStats::default(),
+                mark: std::time::Instant::now(),
+            }
+        }
+        #[cfg(not(feature = "bench-timing"))]
+        {
+            TileProbe {
+                t: TileStats::default(),
+            }
+        }
+    }
+
+    /// Charge the time since the last lap (or construction) to `sel`'s field, and reset the mark.
+    /// See [`Probe::lap`]'s doc — identical semantics, over [`TileStats`].
+    #[inline(always)]
+    pub fn lap(&mut self, sel: impl FnOnce(&mut TileStats) -> &mut u64) {
+        #[cfg(feature = "bench-timing")]
+        {
+            let now = std::time::Instant::now();
+            *sel(&mut self.t) += now.duration_since(self.mark).as_nanos() as u64;
+            self.mark = now;
+            self.t.clock_laps += 1;
+        }
+        #[cfg(not(feature = "bench-timing"))]
+        {
+            let _ = sel;
+        }
+    }
+
+    /// Add `n` to a counter field. See [`Probe::count`]'s doc — identical semantics, over
+    /// [`TileStats`].
+    #[inline(always)]
+    pub fn count(&mut self, sel: impl FnOnce(&mut TileStats) -> &mut u64, n: u64) {
+        #[cfg(feature = "bench-timing")]
+        {
+            *sel(&mut self.t) += n;
+        }
+        #[cfg(not(feature = "bench-timing"))]
+        {
+            let _ = (sel, n);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +467,50 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(t.unattributed_ns(), 0);
+    }
+
+    /// D-E: `TileProbe` follows the exact same zero-when-off discipline as `Probe` — see
+    /// `disabled_probe_reports_not_enabled_and_stays_zero` above for the reasoning.
+    #[test]
+    fn disabled_tile_probe_stays_zero() {
+        let mut tp = TileProbe::new();
+        tp.lap(|t| &mut t.count_ns);
+        tp.count(|t| &mut t.sigma_visible, 7);
+
+        if cfg!(feature = "bench-timing") {
+            assert_eq!(tp.t.sigma_visible, 7);
+        } else {
+            assert_eq!(tp.t.sigma_visible, 0);
+            assert_eq!(tp.t.count_ns, 0);
+        }
+    }
+
+    /// D-E's reduction: two tiles' stats fold into one `StageTimings` by plain summation, and a
+    /// pre-existing (serial-prefix) value on the target is additive, not overwritten.
+    #[test]
+    fn fold_into_sums_rather_than_overwrites() {
+        let mut t = StageTimings {
+            count_ns: 100,
+            sigma_visible: 5,
+            ..Default::default()
+        };
+        let tile_a = TileStats {
+            count_ns: 10,
+            sigma_visible: 3,
+            points_gathered: 2,
+            ..Default::default()
+        };
+        let tile_b = TileStats {
+            count_ns: 20,
+            sigma_visible: 4,
+            points_gathered: 1,
+            ..Default::default()
+        };
+        tile_a.fold_into(&mut t);
+        tile_b.fold_into(&mut t);
+
+        assert_eq!(t.count_ns, 130, "100 serial-prefix + 10 + 20 tile sums");
+        assert_eq!(t.sigma_visible, 12, "5 + 3 + 4");
+        assert_eq!(t.points_gathered, 3, "2 + 1, starting from an unset 0");
     }
 }

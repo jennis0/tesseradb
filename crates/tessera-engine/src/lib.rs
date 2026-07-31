@@ -7,9 +7,11 @@
 //! `/control/changes` or `/control/ingest` acceptance advances the overlay/buffer, or a
 //! `tessera build` advances the bundle.
 
+pub mod cancel;
 pub mod compose;
 pub mod select;
 pub mod session;
+mod single_flight;
 pub mod timing;
 pub mod viewport;
 
@@ -20,8 +22,9 @@ use arc_swap::ArcSwap;
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
+pub use cancel::CancelToken;
 pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
-pub use session::{Engine, EngineConfig, EngineError, Session};
+pub use session::{default_compute_threads, Engine, EngineConfig, EngineError, Session};
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
     EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,

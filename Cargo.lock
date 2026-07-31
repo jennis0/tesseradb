@@ -2252,6 +2252,7 @@ dependencies = [
 name = "tessera-bench"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "clap",
  "croaring",
  "libc",
@@ -2325,6 +2326,7 @@ dependencies = [
  "croaring",
  "parquet",
  "rand 0.8.7",
+ "rayon",
  "rustc-hash 1.1.0",
  "serde_json",
  "sha2",
@@ -2404,6 +2406,7 @@ dependencies = [
  "croaring",
  "memmap2",
  "rand 0.8.7",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",

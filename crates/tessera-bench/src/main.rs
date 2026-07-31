@@ -225,6 +225,23 @@ enum Command {
         zoom: u8,
         #[arg(long, default_value_t = 0)]
         seed: u64,
+        /// Pan-storm mode (Task 9, criterion 5): each worker races its request against
+        /// `--abort-after-ms` and, on losing that race, drops the in-flight request (D-C
+        /// cancellation) and immediately issues its next one rather than waiting.
+        #[arg(long, default_value_t = false)]
+        pan_storm: bool,
+        #[arg(long, default_value_t = 50)]
+        abort_after_ms: u64,
+        /// Hang-watchdog (Task 9, criterion 2): a hard client-side deadline used to positively
+        /// catch a hang rather than rely on the 120 s connection timeout. Ignored when
+        /// `--pan-storm` is also set (that mode's own deadline already bounds every request).
+        #[arg(long)]
+        hang_timeout_ms: Option<u64>,
+        /// Cold-build storm (Task 9, criterion 6): the first N workers reuse `tokens[0]` (the
+        /// shared cold key) on every request; the rest round-robin `tokens[1..]` (the warm
+        /// pool). `0` (default) disables the split.
+        #[arg(long, default_value_t = 0)]
+        cold_workers: usize,
     },
 
     /// Morton tile enumeration and masked counting, swept over zoom.
@@ -335,6 +352,10 @@ fn main() -> std::process::ExitCode {
             k,
             zoom,
             seed,
+            pan_storm,
+            abort_after_ms,
+            hang_timeout_ms,
+            cold_workers,
         } => arms::load::run(
             &ctx,
             &viewer_url,
@@ -349,6 +370,12 @@ fn main() -> std::process::ExitCode {
             k,
             zoom,
             seed,
+            arms::load::StormOptions {
+                pan_storm,
+                abort_after_ms,
+                hang_timeout_ms,
+                cold_workers,
+            },
         ),
         Command::Changes {
             op,

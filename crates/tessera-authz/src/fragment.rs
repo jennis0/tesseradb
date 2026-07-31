@@ -31,6 +31,7 @@ use sha2::{Digest, Sha256};
 use tessera_types::TermId;
 
 use crate::postings::{PostingRef, PostingsReader};
+use crate::single_flight::{SingleFlightCache, SingleFlightError};
 
 /// Union the postings of every term in `terms` into one bitmap: this *is* the authorisation
 /// decision (I2). Partitions the granted postings into Roaring views (unioned in bulk via
@@ -349,12 +350,69 @@ const META_LEN: usize = 48;
 /// decisions and holds nothing that must survive a restart (the on-disk `.frag`/`.meta` pair is
 /// the durable cache; this map is not). Because the fast path skips recomputation, it trusts that
 /// **`auth_data_hash` determines `satisfied`** — see [`get_or_build`](Self::get_or_build)'s doc.
+///
+/// **D-G slot-state single-flight (lifecycle §3.3).** A second map, [`Self::slots`], is keyed by
+/// the CANONICAL key (never `auth_data_hash` — see [`get_or_build`](Self::get_or_build)'s doc for
+/// why the fast-path key would be an I2 hazard here) and holds each key's build state: `Building`
+/// while a build is in flight, `Ready(Arc<FrozenFragment>)` once it lands. `Ready` doubles as the
+/// in-memory cache — a warm `get_or_build` call returns straight from this map without any file
+/// IO (no mmap, no SHA-256 verify), which is the fix for the other half of this cache's defect
+/// (every warm authorise previously re-mmapped and re-verified the frozen file on every hit). A
+/// concurrent arrival on a key already `Building` does not wait for it (D-G's non-blocking-waiters
+/// rule); it gets `FragmentCacheError::Building` immediately. A failed build never publishes
+/// `Ready` and never leaves `Building` behind — see [`crate::single_flight`]'s module doc.
 pub struct FragmentCache {
     dir: PathBuf,
     bundle_identity: [u8; 32],
     auth_plugin_hash: [u8; 32],
     key_memo: Mutex<FxHashMap<[u8; 32], [u8; 32]>>,
+    slots: SingleFlightCache<[u8; 32], FrozenFragment>,
     rebuilds: AtomicU64,
+}
+
+/// [`FragmentCache::get_or_build`]'s failure modes. Neither variant is ever cached (I13
+/// fail-closed): a `Building` observation means some other caller owns the in-flight build, and
+/// an `Io` failure means the canonical key is left absent so the very next call retries from
+/// scratch.
+#[derive(Debug)]
+pub enum FragmentCacheError {
+    /// D-G: another caller is already building this exact canonical key right now (lifecycle
+    /// §3.3's single-flight rule). This call did not wait for it — retry shortly. `Engine::
+    /// authorise` maps this to `EngineError::FragmentBuilding`, which the server maps to a
+    /// fail-closed 500 today and HTTP 429 once a later task wires that mapping.
+    Building,
+    /// The build itself failed (postings read, directory creation, or the write-then-rename
+    /// persist step). The failing canonical key was removed before this was returned, never
+    /// cached — a cached `Err` would be a permanent fail-closed wedge for that credential.
+    Io(io::Error),
+}
+
+impl std::fmt::Display for FragmentCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FragmentCacheError::Building => write!(
+                f,
+                "fragment build already in progress for this credential's canonical key; retry \
+                 shortly"
+            ),
+            FragmentCacheError::Io(e) => write!(f, "fragment cache: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for FragmentCacheError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            FragmentCacheError::Building => None,
+            FragmentCacheError::Io(e) => Some(e),
+        }
+    }
+}
+
+impl From<io::Error> for FragmentCacheError {
+    fn from(e: io::Error) -> Self {
+        FragmentCacheError::Io(e)
+    }
 }
 
 impl FragmentCache {
@@ -368,6 +426,7 @@ impl FragmentCache {
             bundle_identity,
             auth_plugin_hash,
             key_memo: Mutex::new(FxHashMap::default()),
+            slots: SingleFlightCache::new(),
             rebuilds: AtomicU64::new(0),
         }
     }
@@ -375,9 +434,18 @@ impl FragmentCache {
     /// Number of times [`get_or_build`](Self::get_or_build) has actually called
     /// [`build_fragment`] (cache miss, on this `FragmentCache` instance) rather than reusing an
     /// existing frozen fragment. Exposed for cache-behaviour tests and operational metrics; not
-    /// itself part of the authorisation decision.
+    /// itself part of the authorisation decision. D-G: increments exactly once per single-flight
+    /// build — a losing arrival that retries into a `Ready` hit never increments this, whether
+    /// that hit came from this process's in-memory cache or another process's on-disk one.
     pub fn rebuild_count(&self) -> u64 {
         self.rebuilds.load(Ordering::Relaxed)
+    }
+
+    /// Canonical-key slots currently held (`Building` and `Ready` both counted) — exposed for
+    /// fail-closed tests confirming a failed build leaves no wedge (I13), analogous to
+    /// `tessera_engine::Engine::row_projection_cache_len`.
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
     }
 
     fn frag_path(&self, key: &[u8; 32]) -> PathBuf {
@@ -409,13 +477,26 @@ impl FragmentCache {
     /// SEGMENTS watermark to persist alongside a freshly built fragment; it is ignored on a cache
     /// hit (the hit's own persisted watermark, from when it was built, is what's returned —
     /// Task 10's composition uses the fragment's own watermark).
+    ///
+    /// **D-G slot-state single-flight (lifecycle §3.3).** The single-flight map is keyed by the
+    /// canonical key computed just below — never by `auth_data_hash` — so two different
+    /// credentials that happen to satisfy the same term set correctly single-flight onto the same
+    /// build, and (more importantly for I2) a fast-path `auth_data_hash` collision could never be
+    /// mistaken for a build-in-flight signal on the wrong key. On a hit against `Ready`, this
+    /// returns straight from memory: no file open, no mmap, no SHA-256 verify (the "warm authorise
+    /// does no file IO" fix). On a miss, the closure below still tries the on-disk pair first (a
+    /// **different** process, or an earlier run of this one before this map existed in memory, may
+    /// already have persisted it) before falling back to [`build_fragment`]. A concurrent arrival
+    /// on the same canonical key while a build is in flight gets `Err(FragmentCacheError::
+    /// Building)` immediately — it does not wait (D-G's non-blocking-waiters rule) — and a failed
+    /// build (`Err` or panic) leaves the key absent rather than wedged or cached (I13).
     pub fn get_or_build(
         &self,
         satisfied: &[TermId],
         auth_data_hash: [u8; 32],
         postings: &PostingsReader,
         watermark: u64,
-    ) -> io::Result<Arc<FrozenFragment>> {
+    ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
         let key = {
             let cached = self.key_memo.lock().unwrap().get(&auth_data_hash).copied();
             match cached {
@@ -440,20 +521,29 @@ impl FragmentCache {
             }
         };
 
-        let frag_path = self.frag_path(&key);
-        let meta_path = self.meta_path(&key);
+        self.slots
+            .get_or_try_build(key, || {
+                let frag_path = self.frag_path(&key);
+                let meta_path = self.meta_path(&key);
 
-        // No existence pre-check: `open()` itself fails closed on anything short of a fully
-        // valid, digest-matching pair, so a missing file and a corrupt one are indistinguishable
-        // "miss, rebuild" outcomes here — there is nothing a pre-check would add.
-        if let Ok(frozen) = FrozenFragment::open(&frag_path, &meta_path) {
-            return Ok(Arc::new(frozen));
-        }
+                // No existence pre-check: `open()` itself fails closed on anything short of a
+                // fully valid, digest-matching pair, so a missing file and a corrupt one are
+                // indistinguishable "miss, rebuild" outcomes here — there is nothing a pre-check
+                // would add. This only runs on a genuine slot-state miss (never on a `Ready`
+                // hit), so it is the cold path: a first-ever build in this process, or a
+                // fragment another process already persisted.
+                if let Ok(frozen) = FrozenFragment::open(&frag_path, &meta_path) {
+                    return Ok(frozen);
+                }
 
-        create_private_dir_all(&self.dir)?;
-        let bitmap = build_fragment(satisfied, postings)?;
-        self.rebuilds.fetch_add(1, Ordering::Relaxed);
-        let frozen = FrozenFragment::build_and_persist(&frag_path, &meta_path, &bitmap, watermark)?;
-        Ok(Arc::new(frozen))
+                create_private_dir_all(&self.dir)?;
+                let bitmap = build_fragment(satisfied, postings)?;
+                self.rebuilds.fetch_add(1, Ordering::Relaxed);
+                FrozenFragment::build_and_persist(&frag_path, &meta_path, &bitmap, watermark)
+            })
+            .map_err(|e| match e {
+                SingleFlightError::Building => FragmentCacheError::Building,
+                SingleFlightError::Build(io_err) => FragmentCacheError::Io(io_err),
+            })
     }
 }

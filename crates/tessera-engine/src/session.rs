@@ -20,7 +20,7 @@ use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
-use tessera_authz::{Dict, FragmentCache, FrozenFragment, PostingsReader};
+use tessera_authz::{Dict, FragmentCache, FragmentCacheError, FrozenFragment, PostingsReader};
 use tessera_lifecycle::alloc::{high_water_from, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::overlay::replay;
@@ -32,6 +32,7 @@ use tessera_store::read::open_bundle;
 use tessera_store::StoreError;
 use tessera_types::{EntityId, IdentityError, IdentityKey, TermId, TesseraId};
 
+use crate::single_flight::SingleFlightCache;
 use crate::{Generation, GenerationHandle};
 
 /// Engine-wide configuration (SA §7's `[disclosure]`/`[serve]` sections, the subset this task
@@ -85,6 +86,29 @@ pub struct EngineConfig {
     /// see [`Self::max_tiles_per_request`]) tile set by `4^offset`, so without this a single request
     /// can still ask for ~77k `count_range` calls and blow the 10 ms p99 latency gate.
     pub max_underlay_cells: usize,
+    /// D-D: the size of `Engine::open`'s single shared `rayon::ThreadPool`, which every admitted
+    /// request's tile loop `install`s onto (`Engine::viewport`, D-F). No second throttle exists
+    /// inside the engine — `tessera-server`'s admission gate (Task 4) already bounds how many
+    /// requests are concurrently *in* the engine at all, so this is sized to fill the machine, not
+    /// to further divide it.
+    ///
+    /// Mirrors `tessera-server::config`'s `serve.compute_threads` (D-B, same knob, same default —
+    /// [`default_compute_threads`]) so an embedder constructing this struct directly gets the same
+    /// "fill the machine" behaviour the server's config loader enforces. Unlike the server's config
+    /// loader, this struct does not refuse `0` itself (there is no fail-closed startup path at this
+    /// layer to refuse *through*) — `rayon::ThreadPoolBuilder::num_threads(0)` falls back to
+    /// rayon's own default (`RAYON_NUM_THREADS` or the logical core count), so a `0` here is
+    /// harmless rather than a zero-width pool that can run nothing.
+    pub compute_threads: usize,
+}
+
+/// D-D's default: fill the machine. Identical reasoning and identical fallback (`1`, never
+/// propagated — see `tessera-server::config::default_compute_threads`'s doc) to the server's own
+/// default, kept as a free function here so every non-server construction site (tests, benches,
+/// examples, embedders) gets the same "fill the machine" behaviour without having to know the
+/// number itself.
+pub fn default_compute_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
 /// One authorised viewer session: the credential's granted term set and the mask fragment it
@@ -164,6 +188,52 @@ pub enum EngineError {
     /// depth of its own, so a silently-reduced offset would hand the client cells it cannot
     /// interpret; rejecting means the depth is always `zoom + offset` from the caller's own request.
     UnderlayRefused(String),
+    /// D-G: this session's row projection for `(token_id, slice, segments_version)` is being
+    /// built by a concurrent request right now. Non-blocking waiters (F4,
+    /// `tessera-bench/src/arms/load.rs:34-76`): a parked waiter would hold the server's admission
+    /// budget while burning zero CPU, so this call does not wait for the in-flight build — it
+    /// returns immediately and the caller is expected to retry. Maps to HTTP 429 with
+    /// `Retry-After` once the server wires that mapping (a later task); until then it takes the
+    /// server's fail-closed 500 arm, which is honest — never fail-open — but not yet the
+    /// retryable signal it should be.
+    ProjectionBuilding,
+    /// D-G (task 2 of the concurrency workstream, lifecycle §3.3): this credential's mask fragment
+    /// (keyed by the canonical `(bundle_identity, auth_plugin_hash, satisfied terms)` key, never
+    /// `auth_data_hash` — see `tessera_authz::FragmentCache::get_or_build`'s doc) is being built by
+    /// a concurrent `authorise` call right now. Same non-blocking-waiters rule and the same
+    /// transitional mapping as [`Self::ProjectionBuilding`]: this call does not wait, the caller
+    /// retries, and the server takes the fail-closed 500 arm until a later task wires HTTP 429 +
+    /// `Retry-After`.
+    FragmentBuilding,
+    /// D-C: the caller's [`crate::cancel::CancelToken`] was observed flipped mid-request (the
+    /// rapid-pan case — a client aborted a fetch it no longer needs). Whole-request abort:
+    /// [`crate::viewport::Engine::viewport`] returns this the instant a check catches the flip,
+    /// and no partial `ViewportOut` is ever constructed past that point (I13 — cancelled is not
+    /// an empty-but-valid contribution, it is no contribution). Maps to a fixed fail-closed 500 at
+    /// the server boundary (`tessera-server::error::map_engine_error`'s explicit arm) — this must
+    /// never become a 2xx or any 4xx, even if a future refactor makes the arm reachable on a
+    /// still-live connection (today it is not: the server's drop-guard only flips the token when
+    /// the whole handler future is dropped, which also means nobody is left to read a response).
+    Cancelled,
+    /// D-D: `Engine::open` failed to build the shared `rayon::ThreadPool` from
+    /// `EngineConfig::compute_threads` (e.g. a platform that refuses the requested thread count).
+    /// Fail-closed: an engine that cannot build its compute pool does not open at all — there is
+    /// no fallback to per-request ad hoc threading or to a serial tile loop, because either would
+    /// be a silent behaviour change the D-D design (one shared pool, no second throttle) does not
+    /// admit.
+    ThreadPoolBuild(String),
+    /// `POST /v1/items/{tessera_id}` (contracts §2.2/§3.2 r6): the caller-supplied `epoch` does
+    /// not match the identity epoch of the generation [`crate::viewport::Engine::item`] loaded
+    /// for this call. Named explicitly so the epoch check can run *inside* `item`, against the
+    /// SAME `generation.load_full()` the lookup that follows already needs — not a separate
+    /// `Engine::meta()` call (and its own, second `load_full`) ahead of it. That used to be two
+    /// independent loads for one logical request, against lifecycle §1.1's one-load-per-request
+    /// invariant: a generation swap landing between them could check the epoch against one
+    /// snapshot and serve the lookup from another. Maps to HTTP 409 `conflict` with a fixed
+    /// detail string (`tessera-server::error::map_engine_error`'s explicit arm) — entity
+    /// independent, decided before the id is inverted, so it opens no timing channel (Appendix C,
+    /// C4).
+    StaleIdentityEpoch,
 }
 
 impl std::fmt::Display for EngineError {
@@ -194,6 +264,21 @@ impl std::fmt::Display for EngineError {
                  narrow the bbox or request a shallower zoom"
             ),
             EngineError::UnderlayRefused(detail) => write!(f, "underlay refused: {detail}"),
+            EngineError::ProjectionBuilding => write!(
+                f,
+                "this session's row projection is being built by a concurrent request; retry \
+                 shortly"
+            ),
+            EngineError::FragmentBuilding => write!(
+                f,
+                "this credential's mask fragment is being built by a concurrent request; retry \
+                 shortly"
+            ),
+            EngineError::Cancelled => write!(f, "request cancelled"),
+            EngineError::ThreadPoolBuild(detail) => {
+                write!(f, "failed to build the shared compute pool: {detail}")
+            }
+            EngineError::StaleIdentityEpoch => write!(f, "stale identity epoch"),
         }
     }
 }
@@ -214,9 +299,21 @@ pub struct Engine {
     /// Cached row-space projections, keyed `(token_id, slice, segments_version)` — never
     /// recomputed on the per-viewport path (shared-context constraint 8; see
     /// `crate::compose::RowProjection`'s doc for the cost this avoids).
-    #[allow(clippy::type_complexity)]
+    ///
+    /// D-G slot-state single-flight (F4, `tessera-bench/src/arms/load.rs:34-76`): the map lock is
+    /// held only for the O(1) `Building`/`Ready` transition, never across `RowProjection::new`
+    /// itself — see [`SingleFlightCache`]'s doc. A concurrent arrival on the same key while a
+    /// build is in flight does not wait for it; it gets [`EngineError::ProjectionBuilding`] and
+    /// retries. Unbounded growth (eviction) is out of scope here — a memory concern, not the
+    /// concurrency one this cache exists to fix.
     pub(crate) row_projection_cache:
-        Mutex<FxHashMap<(u64, String, u64), Arc<crate::compose::RowProjection>>>,
+        SingleFlightCache<(u64, String, u64), crate::compose::RowProjection>,
+    /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
+    /// onto (`Engine::viewport`). Built once, here, at open — never per request, and never a
+    /// second pool anywhere else in this crate (no nested throttling). `pool.install` from more
+    /// external (server-side) threads than this pool has workers only queues on rayon's injector;
+    /// it does not deadlock (D-D, verified in plan review).
+    pub(crate) pool: rayon::ThreadPool,
     pub(crate) config: EngineConfig,
     next_token_id: AtomicU64,
     /// The write-ahead log handle, kept open for future ingest/change acceptance (Task 13); not
@@ -415,6 +512,15 @@ impl Engine {
             auth_plugin_hash,
         ));
 
+        // D-D: build the shared compute pool now, not lazily on first request — a pool that
+        // cannot be built is an `Engine` that cannot serve any viewport, and that is a fact about
+        // this engine's *open*-time health, not a fact to discover on whichever request happens
+        // to be first (fail-closed: this engine simply does not open).
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.compute_threads)
+            .build()
+            .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?;
+
         let generation = Generation {
             prefix,
             segments_version,
@@ -431,7 +537,8 @@ impl Engine {
             dict,
             postings,
             fragment_cache,
-            row_projection_cache: Mutex::new(FxHashMap::default()),
+            row_projection_cache: SingleFlightCache::new(),
+            pool,
             config,
             next_token_id: AtomicU64::new(0),
             wal: Mutex::new(wal),
@@ -449,6 +556,11 @@ impl Engine {
     /// simply drop out, never an error) → `FragmentCache::get_or_build`. A zero-term credential
     /// (or one whose every descriptor is unknown) is a valid, zero-visibility session (R5) — not
     /// an error.
+    ///
+    /// D-G (lifecycle §3.3): `FragmentCache::get_or_build` single-flights concurrent same-key
+    /// misses and doubles as an in-memory cache for warm hits (see its doc); a concurrent
+    /// in-flight build on this exact canonical key surfaces here as `Err(EngineError::
+    /// FragmentBuilding)` rather than blocking.
     pub fn authorise(&self, auth_data: &[u8]) -> Result<Session> {
         let auth_terms = self
             .plugin
@@ -477,7 +589,10 @@ impl Engine {
                 &self.postings,
                 generation.watermark,
             )
-            .map_err(EngineError::Io)?;
+            .map_err(|e| match e {
+                FragmentCacheError::Building => EngineError::FragmentBuilding,
+                FragmentCacheError::Io(io_err) => EngineError::Io(io_err),
+            })?;
 
         let mut token_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut token_bytes);
@@ -507,12 +622,12 @@ impl Engine {
         self.allocator.lock().unwrap().high_water()
     }
 
-    /// The number of cached row-space projections currently held — exposed for tests confirming
-    /// `Engine::item`'s entity-space visibility test never constructs one (Critical C-5: this
-    /// must stay `0` across drill-down calls, warm or cold, unlike `Engine::viewport`'s path,
-    /// which populates this cache deliberately).
+    /// The number of cached row-space projection slots currently held (`Building` and `Ready`
+    /// both counted) — exposed for tests confirming `Engine::item`'s entity-space visibility test
+    /// never constructs one (Critical C-5: this must stay `0` across drill-down calls, warm or
+    /// cold, unlike `Engine::viewport`'s path, which populates this cache deliberately).
     pub fn row_projection_cache_len(&self) -> usize {
-        self.row_projection_cache.lock().unwrap().len()
+        self.row_projection_cache.len()
     }
 
     /// Whether the external-id sidecar has opened any extent (or its locator) yet — exposed for
@@ -945,5 +1060,59 @@ impl ExternalIdIndex {
         high_water: u64,
     ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
         self.0.external_id_of_checked(entity, high_water)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// I13 pin (D-F): a panic inside `install`/`par_iter` on the engine's shared pool must
+    /// propagate to the caller — never be swallowed into a truncated `Ok`. `Engine::viewport`'s
+    /// parallel tile sweep runs on exactly this pool, built exactly this way (`Engine::open`'s
+    /// `rayon::ThreadPoolBuilder::new().num_threads(..).build()`), via `self.pool.install(...)`;
+    /// if a worker-thread panic never reached `viewport`'s caller, a panicking tile would produce
+    /// a silently-truncated 200 instead of the fail-closed 500 I13 requires (the server's
+    /// `JoinError` arm, already pinned by its own test — this test pins the engine-side half of
+    /// that chain: the pool itself does not eat the panic before it ever reaches `spawn_blocking`).
+    ///
+    /// Deliberately **not** a full `Engine::open` + fixture-bundle test with an injection hook
+    /// into `tile_result` — the brief this task implements against says explicitly that a
+    /// `#[cfg(test)]`-visible injection point in the real per-tile path is not wanted, because it
+    /// would let a test-only branch diverge from the code every real request runs. This is rayon's
+    /// own propagation guarantee, pinned against the identical construction `Engine::open` uses,
+    /// which is what `self.pool.install(...)` in `Engine::viewport` actually relies on.
+    ///
+    /// **Why this builds its own pool rather than a real `Engine`'s.** `Engine::pool` is
+    /// `pub(crate)`, so an integration test in `tests/viewport.rs` cannot reach it at all — this
+    /// is precisely the case the fix-wave brief's fallback names ("if pub(crate) visibility
+    /// genuinely blocks an integration test, an engine-internal `#[cfg(test)]` test module is
+    /// acceptable"), which is why this test lives here rather than there. Going one step further
+    /// — opening a real `Engine` from *inside* this module instead of building a look-alike pool
+    /// — was considered and rejected as disproportionate for this one assertion: it would mean
+    /// duplicating `tests/viewport.rs`'s ~100-line bundle-fixture harness (`tessera_build::build`
+    /// plus Arrow-writing the points/pairs extents) into `src/session.rs`, or an invasive refactor
+    /// to share that harness across a `tests/` integration binary and an internal `src/` module
+    /// (different compilation units), for a test whose only load-bearing claim is "rayon
+    /// propagates a worker panic through `install()`" — a property of rayon's own pool, not of
+    /// anything `Engine::open` does when building one. The construction below is checked against
+    /// `Engine::open`'s by inspection (both are a bare
+    /// `rayon::ThreadPoolBuilder::new().num_threads(n).build()`, no further configuration either
+    /// side) rather than by sharing code, which is what "identical construction" above means.
+    #[test]
+    fn a_panic_inside_the_shared_pool_propagates_to_the_caller() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("pool should build");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.install(|| {
+                panic!("synthetic worker-thread panic");
+            })
+        }));
+
+        assert!(
+            result.is_err(),
+            "a panic inside install() must propagate to the caller, not be swallowed"
+        );
     }
 }

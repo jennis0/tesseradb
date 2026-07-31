@@ -15,6 +15,12 @@ deny tessera-server tessera-store     # server sees engine API types only
 deny tessera-server tessera-authz
 deny tessera-wire tessera-store
 deny tessera-wire tessera-authz
+# lifecycle §7's sync-engine rule, made mechanical (D-D/Task 6): the engine's intra-request
+# parallelism is rayon's plain-thread pool, never tokio — an async runtime inside a supposedly
+# synchronous engine would reintroduce exactly the reactor-blocking hazard Task 3 (D-A) moved off
+# the server's own reactor. rayon itself is fine and expected (the whole point of this task).
+deny tessera-engine tokio
+deny tessera-store tokio
 # I4: no ID conversions in types
 if grep -rn "impl From" crates/tessera-types/src/ | grep -E "EntityId|RowId|TermId|TesseraId|Handle"; then
   echo "FORBIDDEN: ID conversion in tessera-types"; fail=1

@@ -19,15 +19,32 @@ use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
 use tessera_build::{build, BuildArgs};
-use tessera_engine::viewport::ViewportRequest;
+use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
-use tessera_server::state::{AppState, SessionRegistry};
-use tessera_spatial::Extent;
+use tessera_server::state::{AppState, ComputeGate, SessionRegistry};
+use tessera_spatial::{tiles_for_bbox, Extent};
 use tessera_types::IdentityKey;
 
 const N_ITEMS: u64 = 1_000;
 const SESSION_CREDENTIAL: &str = "session-secret";
+
+/// Calibration task: item count for the two byte-equality tests below that must exercise the
+/// GENUINE parallel fan-out (`tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS`, currently
+/// 200,000) — see `tessera-engine/tests/viewport.rs`'s identically-named constant for the full
+/// argument (same fixed-extent scatter, so `Σ range.len() == n` exactly for a full-extent
+/// request). This crate does not depend on `tessera-engine`'s test binary, so the constant and its
+/// reasoning are duplicated rather than shared, matching this file's own existing "same fixture
+/// pattern" duplication of `tests/viewport.rs`'s fixture builder (this file's module doc).
+const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
+
+/// Fix round 1: compile-time twin of `tests/viewport.rs`'s identically-named assertion. Unlike
+/// the item count above (duplicated because a test *binary* cannot be imported across crates),
+/// `SERIAL_FALLBACK_MAX_ROWS` is a `pub` constant on the production `tessera_engine::viewport`
+/// module this crate already depends on, so it is imported and compared directly rather than
+/// duplicated as a bare number that could drift out of sync.
+const _: () = assert!(PARALLEL_HEADLINE_ITEMS >= SERIAL_FALLBACK_MAX_ROWS);
+
 const OPERATOR_CREDENTIAL: &str = "operator-secret";
 /// Fixed test key, matching `tessera-build`'s own test fixtures — not sensitive, this repository
 /// contains no real deployment key.
@@ -58,13 +75,16 @@ fn terms_of(source_id: u64) -> Vec<u64> {
     }
 }
 
-fn write_points(path: &Path) {
+/// Parameterised over the item count — see [`build_fixture_n`]'s doc for why (calibration task:
+/// the byte-equality tests below need a regime that clears `SERIAL_FALLBACK_MAX_ROWS`, well above
+/// this file's default `N_ITEMS`).
+fn write_points_n(path: &Path, n: u64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
     ]));
-    let ids: Vec<u64> = (0..N_ITEMS).collect();
+    let ids: Vec<u64> = (0..n).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let batch = RecordBatch::try_new(
@@ -81,14 +101,15 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
-fn write_pairs(path: &Path) {
+/// Parameterised over the item count — see [`build_fixture_n`]'s doc for why.
+fn write_pairs_n(path: &Path, n: u64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("term_id", DataType::UInt32, false),
     ]));
     let mut entities = Vec::new();
     let mut terms = Vec::new();
-    for e in 0..N_ITEMS {
+    for e in 0..n {
         for t in terms_of(e) {
             entities.push(e);
             terms.push(t as u32);
@@ -107,9 +128,10 @@ fn write_pairs(path: &Path) {
     w.close().unwrap();
 }
 
-fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
-    write_points(points_path);
-    write_pairs(pairs_path);
+/// See [`build_fixture`] — parameterised, same reason as [`write_points_n`].
+fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
+    write_points_n(points_path, n);
+    write_pairs_n(pairs_path, n);
     let args = BuildArgs {
         points: points_path.to_path_buf(),
         pairs: pairs_path.to_path_buf(),
@@ -128,6 +150,10 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
         band_rows: None,
     };
     build(&args).expect("fixture build should succeed");
+}
+
+fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
+    build_fixture_n(out, points_path, pairs_path, N_ITEMS)
 }
 
 /// `tessera_build`'s external-id convention (see its `write_external_ids` doc): the source
@@ -155,31 +181,75 @@ impl TestServer {
     }
 }
 
+/// The `EngineConfig` every test but the Task 3 concurrency tests uses.
+fn default_engine_config() -> EngineConfig {
+    EngineConfig {
+        token_max_lifetime_secs: 3600,
+        max_k: 200,
+        k_min: 2,
+        k_max_marks: 200,
+        // Saturate theta: these tests assert HTTP shape and masking, not density. See
+        // tessera-engine's tests/viewport.rs `config()` for the full reasoning.
+        theta_target_marks: u64::MAX,
+        max_underlay_offset: 4,
+        max_underlay_cells: 8192,
+        max_tiles_per_request: 262_144,
+        compute_threads: tessera_engine::default_compute_threads(),
+    }
+}
+
 async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> TestServer {
-    let engine = Engine::open(
+    spawn_server_with_config(bundle_root, cache_dir, wal_path, default_engine_config()).await
+}
+
+/// Task 4's default test gate: generous enough that no test written before this task's admission
+/// gate existed can ever observe it (every one of those tests issues at most a handful of
+/// sequential requests) — only the gate-specific tests below construct a deliberately tiny
+/// [`ComputeGate`] to exercise shedding.
+fn generous_test_gate() -> ComputeGate {
+    ComputeGate::new(64, 64, 250)
+}
+
+/// Like [`spawn_server`], but with a caller-supplied `EngineConfig` — Task 3's concurrency tests
+/// need a much wider underlay budget than every other test in this file to engineer a
+/// deterministic slow request (see `healthz_stays_prompt_while_a_long_viewport_runs`'s doc), and
+/// duplicating the whole engine-open-plus-three-listeners dance per test would be worse than one
+/// extra parameter.
+async fn spawn_server_with_config(
+    bundle_root: &Path,
+    cache_dir: &Path,
+    wal_path: &Path,
+    config: EngineConfig,
+) -> TestServer {
+    spawn_server_with_config_and_gate(
         bundle_root,
         cache_dir,
         wal_path,
-        Passthrough::new(),
-        EngineConfig {
-            token_max_lifetime_secs: 3600,
-            max_k: 200,
-            k_min: 2,
-            k_max_marks: 200,
-            // Saturate theta: these tests assert HTTP shape and masking, not density. See
-            // tessera-engine's tests/viewport.rs `config()` for the full reasoning.
-            theta_target_marks: u64::MAX,
-            max_underlay_offset: 4,
-            max_underlay_cells: 8192,
-            max_tiles_per_request: 262_144,
-        },
+        config,
+        generous_test_gate(),
     )
-    .expect("engine should open against a freshly built bundle");
+    .await
+}
+
+/// Like [`spawn_server_with_config`], but also with a caller-supplied [`ComputeGate`] — Task 4's
+/// admission-gate tests need a deliberately tiny gate (`compute_admission=1, compute_queue=0`) to
+/// hold saturated deterministically, which every other test in this file must not be affected by.
+async fn spawn_server_with_config_and_gate(
+    bundle_root: &Path,
+    cache_dir: &Path,
+    wal_path: &Path,
+    config: EngineConfig,
+    compute_gate: ComputeGate,
+) -> TestServer {
+    let max_k = config.max_k;
+    let engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+        .expect("engine should open against a freshly built bundle");
 
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
-        max_k: 200,
+        max_k,
+        compute_gate,
         // On, so the header assertions below exercise the emission path rather than only its
         // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
         stage_timing: true,
@@ -1545,6 +1615,7 @@ fn concurrent_ingest_and_change_both_survive() {
                 max_underlay_offset: 4,
                 max_underlay_cells: 8192,
                 max_tiles_per_request: 262_144,
+                compute_threads: tessera_engine::default_compute_threads(),
             },
         )
         .expect("engine should open"),
@@ -1906,4 +1977,1108 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
              `stage_timing = true` — a release build must not emit it"
         );
     }
+}
+
+/// Task 3 (D-A): `/healthz` must stay prompt while a viewport request runs, even on this test's
+/// single-threaded (`#[tokio::test]` default, current-thread) runtime — the strongest possible
+/// demonstration of the bug this task fixes. Pre-refactor, `viewport`'s whole body (the engine
+/// call through Arrow IPC framing) is synchronous Rust with no `.await` inside it; once tokio's
+/// one worker thread starts polling that task it cannot be interrupted, so a concurrent
+/// `/healthz` task cannot even be *polled* — let alone answered — until the viewport handler
+/// returns. `spawn_blocking` gives the viewport task a genuine `.await` point: the blocking work
+/// moves to tokio's separate blocking-thread pool (a real OS thread, regardless of runtime
+/// flavor), freeing the one reactor thread to service `/healthz` while it runs.
+///
+/// Slowness is engineered deterministically via the §3.3 density underlay's `4^offset` sub-cell
+/// fan-out (`tessera_engine::viewport`'s cost model — each sub-cell costs one small binary search
+/// plus one bitmap range-count, independent of corpus size), not via corpus size — so the fixture
+/// stays at the file's default `N_ITEMS` and builds in the same sub-second time every other test
+/// here does. `offset = 12` at `zoom = 0` (one tile, so the tile-count bound never engages) asks
+/// for `4^12 ≈ 16.8M` sub-cell evaluations.
+///
+/// **The passing (post-refactor) bound is self-scaling, not a fixed wall-clock bet.** A fixed
+/// `healthz_elapsed < 1s` assumed this debug-profile binary's absolute speed; on a slower or more
+/// loaded runner the sweep itself takes longer, and there is no reason `/healthz`'s bound should
+/// stay pinned to 1s while the workload it is racing against grows. Instead this asserts
+/// `healthz_elapsed < viewport_elapsed / 4`, computed from the *same run*'s own measurements:
+/// `/healthz` does no engine work at all (a constant in-memory response) and runs on a different
+/// OS thread than the viewport's `spawn_blocking` closure post-refactor, so its cost is bounded by
+/// ambient connection/scheduling overhead only — independent of how long the sweep happens to take
+/// on this particular machine. A quarter is generous headroom over that overhead on any runner,
+/// while still failing loudly if the reactor were starved for anywhere close to the sweep's own
+/// duration. The `viewport_elapsed > 200ms` floor below is a much weaker, absolute sanity check
+/// only — it exists so a degenerate near-zero workload (e.g. a future edit that shrinks `offset`)
+/// cannot make the ratio pass without genuinely engineering slowness — it is not the bound this
+/// test relies on for its pass/fail signal.
+#[tokio::test]
+async fn healthz_stays_prompt_while_a_long_viewport_runs() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let mut config = default_engine_config();
+    // Wide enough to let the request below through `Engine::viewport`'s own bounds checks
+    // (`EngineError::UnderlayRefused`) rather than being rejected before it ever costs anything.
+    config.max_underlay_offset = 12;
+    config.max_underlay_cells = 20_000_000;
+    let server = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        config,
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let viewport_task = tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        let resp = client
+            .post(viewer_url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
+                "underlay_offset": 12
+            }))
+            .send()
+            .await
+            .unwrap();
+        (resp.status(), start.elapsed())
+    });
+
+    // A short, empirically-bounded poll rather than a single `yield_now()`: one yield already
+    // reliably gets the freshly-`tokio::spawn`ed viewport task its first turn on this runtime (a
+    // newly spawned task is highly likely to run next), but a couple more give the scheduler a
+    // little extra room to actually get it moving through connect/accept/parse before this task's
+    // own `/healthz` clock starts, without over-polling.
+    //
+    // **This number is deliberately small, and was tuned, not guessed.** Pre-refactor, once the
+    // viewport task's poll reaches the synchronous handler body it runs to completion in that
+    // same turn with no further yield -- there is no observable "started but not finished" state
+    // to poll for. So more polling here does not make the wait-for-start more precise, it just
+    // gives the scheduler more chances to run the *entire* pre-refactor request (client connect
+    // through server response) to completion before `/healthz` is ever sent, which would silently
+    // stop this test from racing anything at all. Measured directly against the pre-refactor code
+    // (temporarily reverting the four `src/` files this task changes): looping 1 or 2 times still
+    // reliably starves `/healthz` (this test correctly fails); looping 3 or more times reliably
+    // lets the whole pre-refactor viewport request finish first, turning this into a no-op race
+    // every time (this test wrongly passes). `2` is the largest value on the correct side of that
+    // measured boundary.
+    for _ in 0..2 {
+        tokio::task::yield_now().await;
+    }
+
+    let healthz_start = std::time::Instant::now();
+    let healthz_resp = server
+        .client
+        .get(server.viewer_url("/healthz"))
+        .send()
+        .await
+        .unwrap();
+    let healthz_elapsed = healthz_start.elapsed();
+    assert_eq!(healthz_resp.status(), 200);
+
+    let (viewport_status, viewport_elapsed) = viewport_task.await.unwrap();
+    assert_eq!(viewport_status, 200);
+
+    // Weak absolute sanity floor only -- see this test's doc for why the real pass/fail signal is
+    // the relative bound below, not this one.
+    assert!(
+        viewport_elapsed > std::time::Duration::from_millis(200),
+        "the viewport request finished in {viewport_elapsed:?}, too fast to exercise this test's \
+         starvation scenario -- widen the underlay offset"
+    );
+    assert!(
+        healthz_elapsed < viewport_elapsed / 4,
+        "/healthz took {healthz_elapsed:?}, more than a quarter of the {viewport_elapsed:?} the \
+         concurrent viewport request took -- the reactor was starved"
+    );
+}
+
+/// `/control/ingest`'s external ids for [`concurrent_ingests_do_not_delay_a_control_changes_suppress`],
+/// chosen well clear of every other test's ranges in this file (`N_ITEMS`, and the `N_ITEMS +
+/// 10_000 ..` range `a_batch_resolution_opens_each_extent_at_most_once` uses) so a shared-fixture
+/// mistake would show up as a collision 409 rather than silently aliasing another test's ids.
+const CONCURRENT_INGEST_BASE_ID: u64 = 50_000_000;
+const CONCURRENT_INGEST_BATCHES: u64 = 8;
+const CONCURRENT_INGEST_ROWS_PER_BATCH: u64 = 40_000;
+
+/// Task 3 (D-A), review finding 7: a `/control/changes` suppression must not queue behind N
+/// concurrent `/control/ingest` batches durability-syncing (lifecycle §1.3's deny priority lane,
+/// reached through the reactor) — and this must hold even though `/control/ingest` and
+/// `/control/changes` are NEVER behind the Task 4 admission gate (that gate is viewer/session
+/// only). Same single-threaded-runtime argument as
+/// `healthz_stays_prompt_while_a_long_viewport_runs`: pre-refactor, each ingest handler's Arrow
+/// decode, term resolution and WAL append/fsync run synchronously with no `.await`, so once the
+/// reactor thread starts executing one, it cannot service any other task — including accepting
+/// or reading the suppress request's own connection — until that handler returns. Post-refactor,
+/// both handlers do only their bearer check and header/body parse on the reactor, then hand off
+/// to `spawn_blocking`'s separate thread pool — so the suppress request's own closure only has to
+/// wait, at most, for whichever ONE ingest happens to be inside `Engine::accept_ingest`'s WAL
+/// critical section at that instant (the WAL mutex is real and intentional — Critical 1's
+/// atomicity fix — the bug this task closes is reactor-thread occupation, not that lock).
+///
+/// **Why this is unflaky despite real TCP connections being involved.** Unlike the single
+/// `/healthz` race above, this test cannot rely on "the one other task must already be running
+/// and cannot be interrupted" alone: `CONCURRENT_INGEST_BATCHES` separate connections are
+/// accepted in whatever order the kernel happens to deliver their readiness, so pre-refactor the
+/// suppress request is not guaranteed to queue behind literally all of them — only behind
+/// whichever are already executing or queued ahead of it. All `CONCURRENT_INGEST_BATCHES`
+/// requests are constructed and hand off to `tokio::spawn` before the suppress request is ever
+/// sent, so it always races genuinely in-flight ingests, not hypothetical future ones.
+///
+/// **The passing (post-refactor) bound is self-scaling, not a fixed wall-clock bet** — this was
+/// flagged in review: a fixed `suppress_elapsed < 1s` assumes this debug-profile binary's absolute
+/// speed, but post-refactor the suppress closure still contends with up to `CONCURRENT_INGEST_
+/// BATCHES` blocking-pool threads for CPU and for the (real, intentional, unfair
+/// `std::sync::Mutex`) WAL lock each `accept_ingest` holds across its append+fsync — on a
+/// slow-fsync or few-core runner that contention genuinely grows, and a fixed 1s bound could trip
+/// for reasons that have nothing to do with this task's bug. So this asserts
+/// `suppress_elapsed < total_ingest_elapsed / 2`, where `total_ingest_elapsed` is this same run's
+/// own wall-clock time for every concurrent ingest batch to complete (measured from the same
+/// `Instant` the batches were spawned from, to the last one's `JoinHandle` resolving). That is a
+/// fair comparison because both numbers absorb the same runner's slowness together: whatever a
+/// batch's parse/resolve/WAL cost is on this machine right now, `total_ingest_elapsed` reflects
+/// roughly that cost repeated `CONCURRENT_INGEST_BATCHES` times (parse/resolve run in parallel
+/// across the blocking pool, but the WAL section is serialised by the mutex, so the total is
+/// dominated by something like `CONCURRENT_INGEST_BATCHES` WAL sections plus overhead), while the
+/// suppress request post-refactor only ever has to reach the reactor (bearer check, fast) and
+/// then wait for **at most one** ingest's WAL critical section before it gets the mutex itself —
+/// a small, close-to-constant fraction of the total regardless of how slow that one section is on
+/// this runner. `/2` leaves comfortable headroom over that expected ~1-in-`CONCURRENT_INGEST_
+/// BATCHES` fraction even allowing for the WAL mutex's lack of strict fairness. Pre-refactor this
+/// stays comfortably RED: the suppress request cannot even begin until the reactor is free, so it
+/// queues behind a large share of the full (parse+resolve+WAL) handler bodies, not just one WAL
+/// section — measured at ~3.0s suppress against a ~3.3s total in this task's tuning run, i.e. the
+/// ratio sits near 1, not under 1/2.
+#[tokio::test]
+async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    // Starts here, not just before the suppress request below: `total_ingest_elapsed` (used for
+    // the self-scaling bound at the end of this test) must cover every batch's full wall-clock
+    // life, spawn to completion, not just the portion that overlaps the suppress request.
+    let ingest_start = std::time::Instant::now();
+    let mut ingest_tasks = Vec::with_capacity(CONCURRENT_INGEST_BATCHES as usize);
+    for batch in 0..CONCURRENT_INGEST_BATCHES {
+        let rows: Vec<(u64, f32, f32, &str)> = (0..CONCURRENT_INGEST_ROWS_PER_BATCH)
+            .map(|row| {
+                let id = CONCURRENT_INGEST_BASE_ID + batch * CONCURRENT_INGEST_ROWS_PER_BATCH + row;
+                (id, row as f32, row as f32, "0")
+            })
+            .collect();
+        let body = build_ingest_batch(&rows);
+        let client = server.client.clone();
+        let url = server.control_url("/control/ingest");
+        let batch_id = format!("concurrent-{batch}");
+        ingest_tasks.push(tokio::spawn(async move {
+            client
+                .post(url)
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .header("x-tessera-batch-id", batch_id)
+                .header("content-type", "application/octet-stream")
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }));
+    }
+
+    // Every ingest task is now on the runtime's queue, none of them awaited yet — the suppress
+    // request below genuinely races them, not a hypothetical future batch.
+    tokio::task::yield_now().await;
+
+    const SUPPRESS_SOURCE_ID: u64 = 7;
+    let external_id =
+        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let suppress_start = std::time::Instant::now();
+    let suppress_resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .send()
+        .await
+        .unwrap();
+    let suppress_elapsed = suppress_start.elapsed();
+    assert_eq!(suppress_resp.status(), 200);
+
+    for task in ingest_tasks {
+        assert_eq!(
+            task.await.unwrap(),
+            200,
+            "every concurrent ingest batch should still succeed"
+        );
+    }
+    // Only measured once every batch has actually finished — see this test's doc for why this
+    // (rather than a fixed wall-clock bound) is what `suppress_elapsed` is compared against.
+    let total_ingest_elapsed = ingest_start.elapsed();
+
+    assert!(
+        suppress_elapsed < total_ingest_elapsed / 2,
+        "/control/changes suppress took {suppress_elapsed:?}, more than half of the \
+         {total_ingest_elapsed:?} the {CONCURRENT_INGEST_BATCHES} concurrent ingest batches took \
+         to all complete -- it queued behind them on the reactor instead of reaching its own \
+         spawn_blocking call promptly"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Task 4 (D-B/D-E): the two-stage admission gate, the 429 `backpressure` contract, and the
+// x-tessera-server-us / x-tessera-admission-us timing split.
+// ---------------------------------------------------------------------------------------------
+
+/// A slow viewport request, engineered exactly as `healthz_stays_prompt_while_a_long_viewport_runs`
+/// does (see its doc for the cost-model argument): `zoom = 0`, `underlay_offset = 12` against a
+/// server whose `EngineConfig` has been widened to allow it. Used throughout the gate tests below
+/// to hold the compute permit for long enough to deterministically observe saturation.
+fn slow_viewport_body() -> serde_json::Value {
+    serde_json::json!({
+        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
+        "underlay_offset": 12
+    })
+}
+
+fn fast_viewport_body() -> serde_json::Value {
+    serde_json::json!({ "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1 })
+}
+
+/// A server config wide enough for [`slow_viewport_body`] to pass `Engine::viewport`'s own
+/// bounds checks rather than being refused as `EngineError::UnderlayRefused` before it costs
+/// anything.
+fn engine_config_for_slow_viewport() -> EngineConfig {
+    let mut config = default_engine_config();
+    config.max_underlay_offset = 12;
+    config.max_underlay_cells = 20_000_000;
+    config
+}
+
+/// Poll `/control/status` until `compute.in_flight` reaches `want`, panicking after a generous
+/// bound rather than looping forever. **Deterministic, not a timing bet**: this is the
+/// poll-until-a-real-condition-holds pattern the brief asks for in place of a fixed sleep or a
+/// tuned yield count — it directly observes the gate's own state (derived from the semaphores'
+/// live permit counts, `state::ComputeGate::status`) rather than guessing how long "the slow
+/// request has started" takes on this run's scheduler.
+async fn poll_until_in_flight(server: &TestServer, want: u64) {
+    // Bound is generous (10s, not the original 2s) precisely so this helper's own panic stays
+    // rare: on a slow or contended runner, a tight bound here fires *this* panic instead of
+    // whichever ratio/timing assertion the calling test actually exists to check, which reads to
+    // a future maintainer as "the gate never reached this state" (implicating the mechanism under
+    // test) rather than "the runner was too slow for the poll bound" (an unrelated, purely
+    // cosmetic failure mode) — both are still test failures either way, just with different, and
+    // differently misleading, messages.
+    for _ in 0..10_000 {
+        let status = control_status(server).await;
+        if status["compute"]["in_flight"].as_u64() == Some(want) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    panic!(
+        "compute.in_flight did not reach {want} within the 10s poll bound -- this is \
+         poll_until_in_flight's own generous-but-finite timeout firing, not necessarily the \
+         calling test's real assertion; check whether the gate is genuinely stuck before \
+         assuming a regression in the mechanism the calling test targets"
+    );
+}
+
+/// D-B: with `compute_admission = 1, compute_queue = 0` (the deterministic configuration this
+/// task's brief names), a second concurrent `/v1/viewport` while the first is still running gets
+/// an immediate 429 — `try_acquire` on the outer slots semaphore fails synchronously, so this
+/// does not even need `admission_timeout_ms` to elapse. Verifies the full 429 contract: status,
+/// `Retry-After: 1` header, and `{"error": "backpressure", "retry_after_s": 1}` body.
+#[tokio::test]
+async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server_with_config_and_gate(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        engine_config_for_slow_viewport(),
+        ComputeGate::new(1, 0, 250),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let slow_token = token.clone();
+    let slow_task = tokio::spawn(async move {
+        client
+            .post(viewer_url)
+            .bearer_auth(slow_token)
+            .json(&slow_viewport_body())
+            .send()
+            .await
+            .unwrap()
+    });
+
+    // Deterministic: wait until the slow request has actually acquired its compute permit
+    // (`in_flight == 1`), not a guessed delay.
+    poll_until_in_flight(&server, 1).await;
+
+    let second_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(second_resp.status(), 429);
+    assert_eq!(
+        second_resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        Some("1"),
+        "a 429 must carry Retry-After: 1"
+    );
+    let body: serde_json::Value = second_resp.json().await.unwrap();
+    assert_eq!(body["error"], "backpressure");
+    assert_eq!(body["retry_after_s"], 1);
+
+    let slow_resp = slow_task.await.unwrap();
+    assert_eq!(
+        slow_resp.status(),
+        200,
+        "the request that actually held the gate must still succeed"
+    );
+}
+
+/// D-B/D13: `/healthz`, `/v1/meta`, `/session/revoke`, and a `/control/changes` suppress must all
+/// succeed while the viewer/session gate is fully saturated by a slow viewport — none of them is
+/// a gated path (D-B's gated-paths list is exactly `/v1/viewport`, `/v1/items`,
+/// `/session/authorise`), and the deny priority lane (lifecycle §1.3) must never be blocked by
+/// compute-admission pressure on an unrelated plane.
+#[tokio::test]
+async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server_with_config_and_gate(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        engine_config_for_slow_viewport(),
+        ComputeGate::new(1, 0, 250),
+    )
+    .await;
+
+    // Both sessions are minted BEFORE the gate is saturated below: `/session/authorise` IS one of
+    // D-B's gated paths (it shares the viewer/session compute budget), so acquiring a *second*
+    // session token during saturation would itself race the gate rather than testing the
+    // never-gated routes this test is actually about.
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+    let second_auth = authorise(&server, &["0"]).await;
+    let second_token_id = second_auth["token_id"].as_u64().unwrap();
+
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let slow_token = token.clone();
+    let slow_task = tokio::spawn(async move {
+        client
+            .post(viewer_url)
+            .bearer_auth(slow_token)
+            .json(&slow_viewport_body())
+            .send()
+            .await
+            .unwrap()
+    });
+
+    poll_until_in_flight(&server, 1).await;
+
+    // `/healthz`: no bearer, no gate.
+    let healthz_resp = server
+        .client
+        .get(server.viewer_url("/healthz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(healthz_resp.status(), 200, "/healthz must never be gated");
+
+    // `/v1/meta`: viewer-plane bearer, but never gated (D-B's gated-paths list is exact).
+    let meta_resp = server
+        .client
+        .get(server.viewer_url("/v1/meta"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(meta_resp.status(), 200, "/v1/meta must never be gated");
+
+    // `/session/revoke`: session-plane credential, never gated. Revokes the SECOND session
+    // (minted before saturation, above) so the slow request's own `Arc<SessionEntry>` — cloned
+    // into its `spawn_blocking` closure before this point — is unaffected either way; this
+    // assertion is purely about the revoke endpoint's own responsiveness under a saturated gate.
+    let revoke_resp = server
+        .client
+        .post(server.session_url("/session/revoke"))
+        .bearer_auth(SESSION_CREDENTIAL)
+        .json(&serde_json::json!({ "token_id": second_token_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        revoke_resp.status(),
+        204,
+        "/session/revoke must never be gated"
+    );
+
+    // `/control/changes` suppress: the D13 test proper. The entire control plane is off the
+    // viewer/session gate (D-B); a deny op must reach the WAL regardless.
+    const SUPPRESS_SOURCE_ID: u64 = 3;
+    let external_id =
+        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let suppress_resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        suppress_resp.status(),
+        200,
+        "D13: a suppress must succeed while the viewer gate is fully saturated"
+    );
+
+    let slow_resp = slow_task.await.unwrap();
+    assert_eq!(slow_resp.status(), 200);
+}
+
+/// Spec constraint: no permit leak. After a shed (a second request while the gate is saturated)
+/// and after the holder's own completion, both the outer and inner semaphores must show their
+/// permits fully returned — observed twice, live, via `/control/status`'s gauges rather than by
+/// inference from a single before/after snapshot.
+#[tokio::test]
+async fn no_permit_leak_after_a_shed_or_a_completion() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server_with_config_and_gate(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        engine_config_for_slow_viewport(),
+        ComputeGate::new(1, 0, 250),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let slow_token = token.clone();
+    let slow_task = tokio::spawn(async move {
+        client
+            .post(viewer_url)
+            .bearer_auth(slow_token)
+            .json(&slow_viewport_body())
+            .send()
+            .await
+            .unwrap()
+    });
+
+    poll_until_in_flight(&server, 1).await;
+
+    let shed_before = control_status(&server).await["compute"]["shed_total"]
+        .as_u64()
+        .unwrap();
+
+    let shed_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(shed_resp.status(), 429);
+
+    // The shed attempt's own (failed) permit acquisition must not have leaked: `in_flight` still
+    // reads exactly 1 (the still-running slow request, nothing more, nothing less) and
+    // `shed_total` incremented by exactly one.
+    let after_shed = control_status(&server).await;
+    assert_eq!(after_shed["compute"]["in_flight"], 1);
+    assert_eq!(after_shed["compute"]["waiting"], 0);
+    assert_eq!(
+        after_shed["compute"]["shed_total"].as_u64().unwrap(),
+        shed_before + 1
+    );
+
+    let slow_resp = slow_task.await.unwrap();
+    assert_eq!(slow_resp.status(), 200);
+
+    // Deterministic wait for the completed request's permits to be returned, then a fresh
+    // request must succeed — a leaked permit would make it shed too.
+    poll_until_in_flight(&server, 0).await;
+    let after_completion = control_status(&server).await;
+    assert_eq!(after_completion["compute"]["waiting"], 0);
+
+    let third_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        third_resp.status(),
+        200,
+        "a leaked permit would make this request shed too"
+    );
+}
+
+/// D-E: `x-tessera-server-us`'s clock starts AFTER admission, so it stays close to what an
+/// unqueued request measures even when this request was forced to queue for a long time; the
+/// queueing itself shows up only in `x-tessera-admission-us`, which must grow to reflect it.
+///
+/// Self-scaling, not a fixed wall-clock bet (this file's established pattern): rather than
+/// asserting an absolute microsecond bound, this compares the *queued* fast request's own two
+/// headers against each other (`server_us` must be much smaller than `admission_us` — most of
+/// its total time was spent waiting, not computing) and against a genuinely unqueued baseline
+/// request measured in the same run (`server_us` close to baseline; `admission_us` far above the
+/// baseline's own near-zero admission wait).
+#[tokio::test]
+async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    // compute_queue = 1 (not 0): the queued fast request below must be ADMITTED (a slot) and
+    // then WAIT for a compute permit, rather than being shed outright by stage 1 — that wait is
+    // exactly what `x-tessera-admission-us` needs to capture. A generous timeout so it is never
+    // shed by stage 2 either; this test is about the timing split, not the shedding contract.
+    let server = spawn_server_with_config_and_gate(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        engine_config_for_slow_viewport(),
+        ComputeGate::new(1, 1, 60_000),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    // Baseline: a solo fast request with no contention at all.
+    let baseline_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(baseline_resp.status(), 200);
+    let baseline_admission_us: u64 = header_u64(&baseline_resp, "x-tessera-admission-us");
+    let baseline_server_us: u64 = header_u64(&baseline_resp, "x-tessera-server-us");
+
+    // Now hold the gate with a slow request, and send a fast one behind it.
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let slow_token = token.clone();
+    let slow_task = tokio::spawn(async move {
+        client
+            .post(viewer_url)
+            .bearer_auth(slow_token)
+            .json(&slow_viewport_body())
+            .send()
+            .await
+            .unwrap()
+    });
+    poll_until_in_flight(&server, 1).await;
+
+    let queued_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(queued_resp.status(), 200);
+    let queued_admission_us = header_u64(&queued_resp, "x-tessera-admission-us");
+    let queued_server_us = header_u64(&queued_resp, "x-tessera-server-us");
+
+    let slow_resp = slow_task.await.unwrap();
+    assert_eq!(slow_resp.status(), 200);
+
+    assert!(
+        queued_admission_us > baseline_admission_us,
+        "a request forced to queue behind a slow one must show a larger admission wait than an \
+         unqueued baseline: queued={queued_admission_us}us baseline={baseline_admission_us}us"
+    );
+    assert!(
+        queued_server_us < queued_admission_us,
+        "server_us must exclude the queueing this request experienced -- it should be far \
+         smaller than admission_us, not comparable to it: server_us={queued_server_us}us \
+         admission_us={queued_admission_us}us"
+    );
+    // Generous relative bound (self-scaling, not an absolute figure): the queued request's own
+    // compute cost stays within an order of magnitude of the baseline's, plus a fixed epsilon so
+    // a near-zero baseline (a handful of microseconds, quite possible for this fixture's tiny
+    // corpus) cannot make the ratio unstable.
+    assert!(
+        queued_server_us < baseline_server_us.max(2_000) * 10,
+        "server_us should stay close to the unqueued baseline: queued={queued_server_us}us \
+         baseline={baseline_server_us}us"
+    );
+}
+
+fn header_u64(resp: &reqwest::Response, name: &str) -> u64 {
+    resp.headers()
+        .get(name)
+        .unwrap_or_else(|| panic!("response is missing the {name} header"))
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap_or_else(|_| panic!("{name} header is not a valid u64"))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Task 5 (D-C): cooperative cancellation wired to client disconnect (the rapid-pan case).
+// ---------------------------------------------------------------------------------------------
+
+/// A slow viewport request engineered to spread its cost across MANY tiles rather than
+/// [`slow_viewport_body`]'s one giant tile. D-C's per-tile cancellation check sits at the top of
+/// the tile loop — it is deliberately not checked mid-tile (a tile's own underlay sweep is
+/// bounded, in-flight work, same as every other per-tile stage) — so a single-tile fixture like
+/// `slow_viewport_body` (`zoom = 0`) cannot demonstrate early interruption at all: cancellation
+/// would only ever be observed once that one tile's entire sweep has already finished, which is
+/// indistinguishable from no cancellation. `zoom = 2` gives 16 tiles; `underlay_offset = 9` costs
+/// ~262144 sub-cell evaluations per tile (~4.2M total, tens of tiles' worth of real work), so a
+/// disconnect landing after any prefix of tiles releases the gate long before the rest would have
+/// run.
+fn slow_multi_tile_viewport_body() -> serde_json::Value {
+    serde_json::json!({
+        "slice": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
+        "underlay_offset": 9
+    })
+}
+
+/// D-C, warm-session scope: a client that drops its connection mid-viewport — the rapid-pan case
+/// — releases the compute-admission gate's permit well before the full service time an
+/// uncancelled request of the same shape takes. Observed two ways: directly, via `/control/
+/// status`'s `compute.in_flight` gauge dropping back to 0 promptly rather than only once the full
+/// sweep would naturally finish; and indirectly, via a follow-up request being admitted at once
+/// instead of shed.
+///
+/// **Warm-session scope, deliberately.** A slot-state row-projection build (Tasks 1-2, D-G) is
+/// non-cancellable bounded work by design — D-C's scope note: its result serves later arrivals,
+/// so it always runs to completion. A COLD first viewport's build cost would dominate this test's
+/// timing regardless of cancellation and would prove nothing about the per-tile checks this task
+/// adds. A fast warm-up request first, on the SAME token, gets this token/slice's row projection
+/// to `Ready` before either slow request below, so the slow request's cost is entirely its
+/// (cancellation-interruptible, per-tile) [`slow_multi_tile_viewport_body`] sweep.
+///
+/// **Self-scaling, not a fixed wall-clock bet** — same pattern as this file's other slow-viewport
+/// tests (see e.g. `healthz_stays_prompt_while_a_long_viewport_runs`'s doc): `baseline_elapsed` is
+/// this run's own measured time for the full, uncancelled sweep to complete on this machine, and
+/// the disconnected run's release time is compared against a fraction of it, never an absolute
+/// figure.
+///
+/// **Why `slow_task.abort()` is a faithful stand-in for a real client disconnect.** Aborting the
+/// tokio task driving the `reqwest` request drops that request's future at its next await point —
+/// which drops the underlying (not-yet-complete) connection, the same event a real browser
+/// tearing down a stale fetch produces. On the server side this is indistinguishable from any
+/// other broken connection: axum/hyper notice the peer went away and drop the handler's own
+/// future, which is the ONLY signal this transport gives for "the client left" and exactly what
+/// `CancelGuard` (`tessera-server::viewer`) is wired to.
+///
+/// **What this test does NOT claim.** Like the engine-level timing test
+/// (`cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes` in
+/// `tessera-engine`'s `tests/viewport.rs`), this does not pin down which of `Engine::viewport`'s
+/// three checkpoints the disconnect is caught at — `poll_until_in_flight(&server, 1)` only proves
+/// the request has been admitted and started running compute, not how far into the sweep it has
+/// gotten by the time `abort()` fires. The disconnect could equally land at the pre-compose
+/// checkpoint, before any tile. This test's value is observing permit release end to end (the
+/// drop-guard flips, SOME checkpoint catches it, the gate frees up) rather than proving the
+/// per-tile check specifically fires mid-sweep; per-tile placement is a code-review concern, per
+/// the D-C design brief.
+#[tokio::test]
+async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server_with_config_and_gate(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        engine_config_for_slow_viewport(),
+        ComputeGate::new(1, 0, 250),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    // Warm-session scope (see this test's doc): warms this token/slice's row-projection cache
+    // before either slow request below.
+    let warm = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(warm.status(), 200);
+
+    // Baseline: the full, uncancelled slow sweep's own wall-clock time on this run/machine, over
+    // the now-warm session.
+    let baseline_start = std::time::Instant::now();
+    let baseline_resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&slow_multi_tile_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    let baseline_elapsed = baseline_start.elapsed();
+    assert_eq!(baseline_resp.status(), 200);
+    assert!(
+        baseline_elapsed > std::time::Duration::from_millis(50),
+        "the uncancelled baseline finished in {baseline_elapsed:?}, too fast to exercise this \
+         test's early-release scenario -- widen the underlay offset"
+    );
+
+    // The actual scenario: a second slow request, admitted and genuinely running
+    // (`in_flight == 1`, a deterministic poll rather than a guessed delay) before the client
+    // disconnects.
+    let viewer_url = server.viewer_url("/v1/viewport");
+    let client = server.client.clone();
+    let slow_token = token.clone();
+    let slow_task = tokio::spawn(async move {
+        client
+            .post(viewer_url)
+            .bearer_auth(slow_token)
+            .json(&slow_multi_tile_viewport_body())
+            .send()
+            .await
+    });
+
+    poll_until_in_flight(&server, 1).await;
+
+    let release_start = std::time::Instant::now();
+    slow_task.abort();
+    // The task is cancelled at its next await point -- whether it resolves at all (and with what)
+    // depends on exactly where the abort landed; this test only cares about server-side gate
+    // state below, so the client-side outcome is discarded either way.
+    let _ = slow_task.await;
+
+    // D-C: the drop-guard flips the token when axum drops the handler future on disconnect; the
+    // engine's per-tile check observes it and aborts; the `spawn_blocking` closure returns `Err`
+    // and drops `_gate_permits` -- releasing both `OwnedSemaphorePermit`s well before the full
+    // sweep would naturally finish.
+    poll_until_in_flight(&server, 0).await;
+    let release_elapsed = release_start.elapsed();
+
+    assert!(
+        release_elapsed < baseline_elapsed / 2,
+        "the gate took {release_elapsed:?} to free its permit after the client disconnected, \
+         not meaningfully less than the {baseline_elapsed:?} an uncancelled sweep takes on this \
+         run -- the engine does not appear to be aborting on disconnect"
+    );
+
+    // Observable via a follow-up request being admitted promptly, not shed with 429.
+    let follow_up = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&fast_viewport_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        follow_up.status(),
+        200,
+        "the gate's only slot should already be free after the disconnect -- a 429 here would \
+         mean the permit leaked past the client's disconnect"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Concurrency — D-D/D-F intra-request rayon parallelism (Task 6)
+// ---------------------------------------------------------------------------------------------
+
+/// THE HEADLINE TEST, server-side (D-D/D-F): the full Arrow response **body** `POST /v1/viewport`
+/// returns is byte-for-byte identical whether `serve.compute_threads` is 1 or 8 — the same claim
+/// `tessera-engine`'s own
+/// `viewport_output_is_byte_identical_at_compute_threads_1_and_8` pins at the engine level,
+/// carried one layer further to what a real client actually receives on the wire, through
+/// `run_viewport`'s Arrow IPC framing (`viewer.rs`) and axum's response body.
+///
+/// Two servers, same bundle, differing only in `EngineConfig::compute_threads`; the same
+/// authorisation terms (so both sessions see the identical mask) and the identical request body.
+/// Only the response **body** is compared -- `x-tessera-server-us`, `x-tessera-admission-us` and
+/// (when enabled) `x-tessera-stage-ns` are wall-clock/CPU-time measurements of this specific run
+/// and are expected to differ between the two servers, and between runs of the same server; none
+/// of them are part of this byte-equality claim. `x-tessera-pin` IS compared -- it is derived from
+/// the bundle's own `(prefix, segments_version)`, not from timing, so it must agree too.
+///
+/// **Calibration task fix-wave note.** Uses `PARALLEL_HEADLINE_ITEMS` (300,000), not this file's
+/// default `N_ITEMS` (1,000) — at 1,000 items this request's `Σ range.len()` cannot reach
+/// `tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS` (200,000), so both servers would silently
+/// take the same serial-fold branch regardless of `compute_threads` and this test would no longer
+/// exercise the fan-out its own doc claims to. See that constant's doc, and
+/// `tessera-engine/tests/viewport.rs`'s identically-named constant, for the fixture-size argument.
+#[tokio::test]
+async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_n(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        PARALLEL_HEADLINE_ITEMS,
+    );
+
+    let config_1 = EngineConfig {
+        compute_threads: 1,
+        ..default_engine_config()
+    };
+    let config_8 = EngineConfig {
+        compute_threads: 8,
+        ..default_engine_config()
+    };
+
+    let server_1 = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache-1"),
+        &tmp.path().join("wal-1.log"),
+        config_1,
+    )
+    .await;
+    let server_8 = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache-8"),
+        &tmp.path().join("wal-8.log"),
+        config_8,
+    )
+    .await;
+
+    let auth_1 = authorise(&server_1, &["0"]).await;
+    let token_1 = auth_1["token"].as_str().unwrap();
+    let auth_8 = authorise(&server_8, &["0"]).await;
+    let token_8 = auth_8["token"].as_str().unwrap();
+
+    // zoom=3 over the full extent: 64 candidate tiles, most non-empty over this fixture's
+    // `(e*37, e*53) % 1000` scatter across `N_ITEMS = 1000` -- multiple non-empty tiles, so the
+    // response's tile-order/point-concatenation ordering is actually exercised, plus an underlay
+    // request so that per-tile path runs across tiles too.
+    let body = serde_json::json!({
+        "slice": "s0", "zoom": 3, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 50,
+        "underlay_offset": 2
+    });
+
+    let resp_1 = server_1
+        .client
+        .post(server_1.viewer_url("/v1/viewport"))
+        .bearer_auth(token_1)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_1.status(), 200);
+    let pin_1 = resp_1
+        .headers()
+        .get("x-tessera-pin")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let bytes_1 = resp_1.bytes().await.unwrap();
+
+    let resp_8 = server_8
+        .client
+        .post(server_8.viewer_url("/v1/viewport"))
+        .bearer_auth(token_8)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_8.status(), 200);
+    let pin_8 = resp_8
+        .headers()
+        .get("x-tessera-pin")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let bytes_8 = resp_8.bytes().await.unwrap();
+
+    assert_eq!(
+        pin_1, pin_8,
+        "the pin must agree -- same bundle, same generation"
+    );
+
+    let (tiles, points) = decode_viewport(&bytes_1);
+    assert!(
+        tiles.len() > 1,
+        "need more than one non-empty tile to exercise cross-tile ordering, got {}",
+        tiles.len()
+    );
+    assert!(!points.is_empty(), "the fixture must return some points");
+
+    assert_eq!(
+        bytes_1, bytes_8,
+        "the full Arrow response body must be byte-for-byte identical regardless of \
+         compute_threads -- this is also the statement that the Python differential oracle and \
+         the conformance byte-scanner's vectors are unaffected: they consume exactly these bytes \
+         and know nothing about compute_threads"
+    );
+}
+
+/// Server-level twin of
+/// `tessera-engine`'s `viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles`
+/// (fix-wave minor: the headline test above, like its engine-level counterpart, never exercises
+/// `tile_result`'s `visible == 0 -> Ok(None)` empty-tile skip path). Same trick, no new fixture
+/// data: this file's fixture scatter is `(e*37, e*53) % 1000`, a bijection of `e % 1000` onto the
+/// 1000×1000 residue lattice, so `N_ITEMS = 1_000` items occupy up to 1,000 distinct locations
+/// spread across the full extent -- dense enough at `zoom = 3` (64 candidate tiles) to leave almost
+/// every tile non-empty, but at `zoom = 8` (up to 65,536 candidate tiles) sparse enough that most
+/// candidate tiles are genuinely empty while a real minority are not.
+///
+/// **Calibration task fix-wave note.** Same reasoning as the headline test above:
+/// `PARALLEL_HEADLINE_ITEMS` replaces `N_ITEMS` so `Σ range.len()` clears
+/// `SERIAL_FALLBACK_MAX_ROWS` and the two servers are genuinely comparing serial against
+/// parallel. The occupied/empty tile mix (still 1,000 distinct locations, more items stacked on
+/// each) is unaffected — see the doc above.
+#[tokio::test]
+async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles(
+) {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_n(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        PARALLEL_HEADLINE_ITEMS,
+    );
+
+    let config_1 = EngineConfig {
+        compute_threads: 1,
+        ..default_engine_config()
+    };
+    let config_8 = EngineConfig {
+        compute_threads: 8,
+        ..default_engine_config()
+    };
+
+    let server_1 = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache-1"),
+        &tmp.path().join("wal-1.log"),
+        config_1,
+    )
+    .await;
+    let server_8 = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache-8"),
+        &tmp.path().join("wal-8.log"),
+        config_8,
+    )
+    .await;
+
+    let auth_1 = authorise(&server_1, &["0"]).await;
+    let token_1 = auth_1["token"].as_str().unwrap();
+    let auth_8 = authorise(&server_8, &["0"]).await;
+    let token_8 = auth_8["token"].as_str().unwrap();
+
+    let bbox = [0.0, 0.0, 1000.0, 1000.0];
+    let zoom = 8;
+    let body = serde_json::json!({
+        "slice": "s0", "zoom": zoom, "bbox": bbox, "k": 50
+    });
+    let candidate_tiles = tiles_for_bbox(bbox, zoom, &extent()).len();
+
+    let resp_1 = server_1
+        .client
+        .post(server_1.viewer_url("/v1/viewport"))
+        .bearer_auth(token_1)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_1.status(), 200);
+    let bytes_1 = resp_1.bytes().await.unwrap();
+
+    let resp_8 = server_8
+        .client
+        .post(server_8.viewer_url("/v1/viewport"))
+        .bearer_auth(token_8)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_8.status(), 200);
+    let bytes_8 = resp_8.bytes().await.unwrap();
+
+    let (tiles, _points) = decode_viewport(&bytes_1);
+    assert!(
+        !tiles.is_empty(),
+        "need at least one non-empty tile for this to be a real mixed case, got none"
+    );
+    assert!(
+        tiles.len() < candidate_tiles,
+        "need at least one genuinely empty (Ok(None)-skipped) tile among the {candidate_tiles} \
+         candidates to exercise the skip path this test is for -- got {} non-empty tiles",
+        tiles.len()
+    );
+
+    assert_eq!(
+        bytes_1, bytes_8,
+        "the full Arrow response body must be byte-for-byte identical regardless of \
+         compute_threads, including on the mostly-empty-tile Ok(None) skip path"
+    );
 }

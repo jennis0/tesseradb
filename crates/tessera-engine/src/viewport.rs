@@ -11,21 +11,48 @@
 //! argument and the two evaluation routes. This module's job is only to resolve the per-request
 //! parameters (notably θ's anchor, which **must** be the composed visible cardinality — see
 //! [`crate::select::Threshold::anchor`] for the I2 argument) and to gather what selection returns.
+//!
+//! **D-D/D-F: the per-tile body of the count-and-select loop runs on the engine's shared rayon
+//! pool.** [`tile_result`] is the pure per-tile function — no `&self`, no engine method, nothing
+//! but `&`-borrowed inputs and an owned result — that [`Engine::viewport`] fans out over every
+//! tile via `self.pool.install(|| tiles.par_iter().zip(..).map(tile_result).collect::<Vec<_>>())`.
+//! The collect target is deliberately `Vec<Result<Option<TileResult>, EngineError>>`, never
+//! `Result<Vec<TileResult>, EngineError>`: a `Result` collect drops rayon onto its unindexed
+//! reduce path, and this response's byte-equality claim (same request, same bytes, at
+//! `compute_threads = 1` or `8`) would then rest on an implementation detail of that reduce
+//! strategy rather than on anything stated here. Collecting `Vec<Result<..>>` stays on rayon's
+//! *indexed* collect path, so the output vector's order equals the input tiles' order **by
+//! construction** — not by convention, not by observation of the current rayon version. A serial,
+//! in-order fold over that vector (still in `Engine::viewport`) then short-circuits on the first
+//! `Err` (D-C's per-tile cancellation check, moved inside `tile_result` — see its doc) and
+//! concatenates `tile_counts`/`points`/`sub_cells` exactly as the pre-Task-6 serial loop did.
+//!
+//! **Calibration task: below [`SERIAL_FALLBACK_MAX_ROWS`], the fan-out above does not run at
+//! all.** Measured (2.42M-fixture, w=10 grant, zoom 8) at 2.97x-13x slower at
+//! `compute_threads = default` than at `compute_threads = 1` for a typical small viewport — the
+//! `pool.install` fan-out's own entry/scheduling cost dominates the ~µs of real per-tile work a
+//! sparse, ~256-tile request produces. `Engine::viewport` instead folds `tile_result` serially,
+//! in tile order, producing the identical `Vec<Result<Option<TileResult>>>` shape the fold below
+//! already consumes — so the fold, and therefore the response, is unaffected by which branch ran.
+//! See [`SERIAL_FALLBACK_MAX_ROWS`]'s doc for the predictor argument and the sweep data, and the
+//! calibration report for the full method.
 
 use std::ops::Range;
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Extent, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
-use tessera_store::StoreError;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
 use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
 
-use crate::compose::{compose, visible_to, RowProjection};
+use crate::cancel::CancelToken;
+use crate::compose::{compose, visible_to, EffectiveMask, RowProjection};
 use crate::select::{SelectParams, Selection, Threshold};
 use crate::session::{Engine, EngineError, Result, Session};
-use crate::timing::{Probe, StageTimings};
+use crate::timing::{Probe, StageTimings, TileProbe, TileStats};
 use crate::Generation;
 
 /// One declared-scalar value carried alongside a point (mirrors `tessera_spatial::ScalarValue`'s
@@ -124,6 +151,13 @@ pub struct ViewportRequest<'a> {
     /// Request §3.3 underlay sub-cell counts at depth `zoom + offset`. `None` or `Some(0)` serves
     /// none and costs nothing.
     pub underlay_offset: Option<u8>,
+    /// D-C: cooperative cancellation (the rapid-pan case) — checked once per tile and before each
+    /// long serial-prefix stage; see [`Engine::viewport`]'s doc for the exact checkpoints. `None`
+    /// costs one `Option` branch per check and nothing else, so every non-server embedder of this
+    /// API is unaffected. Never threaded into the slot-state single-flight builders (Tasks 1-2,
+    /// D-G) — a build already in flight runs to completion regardless of this token, because its
+    /// result serves later arrivals too (D-C's scope note: bounded, useful work).
+    pub cancel: Option<CancelToken>,
 }
 
 impl<'a> ViewportRequest<'a> {
@@ -136,6 +170,7 @@ impl<'a> ViewportRequest<'a> {
             k,
             pin: None,
             underlay_offset: None,
+            cancel: None,
         }
     }
 
@@ -148,6 +183,13 @@ impl<'a> ViewportRequest<'a> {
         self.underlay_offset = offset;
         self
     }
+
+    /// D-C: attach a cooperative-cancellation token. See [`Self::cancel`]'s field doc for the
+    /// checkpoints and the single-flight-builder exemption.
+    pub fn cancel(mut self, cancel: Option<CancelToken>) -> Self {
+        self.cancel = cancel;
+        self
+    }
 }
 
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
@@ -158,6 +200,13 @@ pub struct ViewportOut {
     pub points: Vec<PointOut>,
     /// The §3.3 density underlay, when requested — empty otherwise. Only non-empty cells appear.
     pub sub_cells: Vec<SubCellCount>,
+    /// The declared-scalar names, in manifest order, from the SAME generation this response's
+    /// points were gathered from (Task 8). Carried here rather than left for the caller to
+    /// re-fetch via `Engine::meta()` — that second call would `load_full()` the generation
+    /// pointer a second time, against lifecycle §1.1's "exactly once, at request start". The
+    /// names come from the same manifest either way, so response bytes are unaffected; this only
+    /// removes a redundant load.
+    pub scalar_names: Vec<String>,
     /// Per-stage breakdown, all zeros unless built with `bench-timing` (see
     /// [`crate::timing`]). **Excluded from `PartialEq`** — see the hand-written impl below.
     pub timings: StageTimings,
@@ -165,16 +214,23 @@ pub struct ViewportOut {
 
 /// `PartialEq` ignoring `timings`, hand-written rather than derived.
 ///
-/// Two responses carrying the same pin, tiles and points *are* the same response; the wall-clock
-/// it took to produce them is not part of that identity. A derived impl would make every
-/// `assert_eq!` over a whole `ViewportOut` in the test suite timing-dependent, and therefore
-/// flaky the moment `bench-timing` is enabled — which is exactly when those tests matter most.
+/// Two responses carrying the same pin, tiles, points and scalar names *are* the same response;
+/// the wall-clock it took to produce them is not part of that identity. A derived impl would make
+/// every `assert_eq!` over a whole `ViewportOut` in the test suite timing-dependent, and
+/// therefore flaky the moment `bench-timing` is enabled — which is exactly when those tests
+/// matter most.
+///
+/// `scalar_names` joins the comparison (Task 8): it is drawn from the same manifest as `points`'
+/// values, in the same generation, so two responses that agree on `points` already agree on it —
+/// including it costs nothing and is more honest than silently exempting a field that happens
+/// never to differ in practice.
 impl PartialEq for ViewportOut {
     fn eq(&self, other: &Self) -> bool {
         self.pin == other.pin
             && self.tiles == other.tiles
             && self.points == other.points
             && self.sub_cells == other.sub_cells
+            && self.scalar_names == other.scalar_names
     }
 }
 
@@ -238,17 +294,30 @@ impl Engine {
         )
     }
 
-    /// `POST /v1/items/{handle}` (R5): invert `id` to its entity, test visibility in entity
-    /// space, and only then locate a row and read its scalars/external id.
+    /// `POST /v1/items/{handle}` (R5): validate `epoch` if the caller sent one, invert `id` to
+    /// its entity, test visibility in entity space, and only then locate a row and read its
+    /// scalars/external id.
+    ///
+    /// **`epoch` is checked against the SAME generation this call loads for the lookup below —
+    /// never a separate `Engine::meta()` call.** Fix wave, Task 2 finding: the handler used to
+    /// call `Engine::meta()` (its own `generation.load_full()`, plus a clone of every declared
+    /// scalar and slice name, just to read one field) before calling this method, which loads
+    /// the generation again — two independent loads for one logical request, against lifecycle
+    /// §1.1's one-load-per-request invariant. Checking here, first, against the snapshot already
+    /// in hand removes the second load and closes the (correctness, not just cost) gap where a
+    /// generation swap landing between the two calls could validate the epoch against one
+    /// generation and serve the lookup from another.
     ///
     /// Returns `Ok(None)` both when `id` names nothing in this bundle and when it names an item
     /// the principal may not see — deliberately one outcome from one code path, so the server
     /// cannot differentiate what the engine does not tell it (owner ruling; contracts §3.2).
     ///
     /// **The timing channel is closed, not narrowed** (Critical C-5; design Appendix C, C4
-    /// annotation). Inversion is a pure function taking no I/O. The visibility test that follows
-    /// is an entity-space question — three constant-time probes — and is **the same three probes
-    /// for an identifier that names nothing and one that names an invisible item**. No
+    /// annotation). The epoch check is entity-independent — it runs identically for every `id`,
+    /// before inversion, and does not read `id` at all — so it opens no channel of its own.
+    /// Inversion is a pure function taking no I/O. The visibility test that follows is an
+    /// entity-space question — three constant-time probes — and is **the same three probes for
+    /// an identifier that names nothing and one that names an invisible item**. No
     /// `RowProjection` is constructed or read, so there is no per-ID cost for an attacker to
     /// correlate against, warm or cold. A row is located only after the answer is already
     /// "visible", and the sidecar is read only after that.
@@ -262,8 +331,18 @@ impl Engine {
         &self,
         session: &Session,
         id: TesseraId,
-    ) -> std::result::Result<Option<ItemOut>, StoreError> {
+        epoch: Option<u32>,
+    ) -> Result<Option<ItemOut>> {
         let generation = self.generation.load_full();
+
+        // Checked FIRST, against the generation this call already loaded above — see this
+        // method's doc for why that (not a separate `Engine::meta()` call) is load-bearing here.
+        if let Some(e) = epoch {
+            if e != generation.bundle.manifest.identity.epoch {
+                return Err(EngineError::StaleIdentityEpoch);
+            }
+        }
+
         let (shard, entity) = self.identity_key.invert(id);
         if shard != generation.bundle.manifest.identity.shard_id {
             return Ok(None);
@@ -292,7 +371,9 @@ impl Engine {
                 };
                 return Ok(Some(ItemOut {
                     scalars: row_to_point(segment, row.raw(), declared_scalars).scalars,
-                    external_id: self.external_id_of(entity)?, // N-3: propagate, never swallow
+                    // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
+                    // every other store-backed call in this crate uses (see `Engine::open`).
+                    external_id: self.external_id_of(entity).map_err(EngineError::Store)?,
                 }));
             }
         }
@@ -302,9 +383,30 @@ impl Engine {
     }
 }
 
+/// D-C: `Err(EngineError::Cancelled)` if `cancel` has been flipped, `Ok(())` otherwise (including
+/// when `cancel` is `None` — most callers, and every non-server embedder of this API, never set
+/// one). Called at the checkpoints [`Engine::viewport`]'s doc lists; **not** called around the
+/// row-projection single-flight build (D-G) — that stage is deliberately not gated by this check,
+/// so a build already in flight always runs to completion regardless of this particular caller's
+/// interest in it (its result serves later arrivals too).
+#[inline]
+fn check_cancelled(cancel: &Option<CancelToken>) -> Result<()> {
+    if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+        return Err(EngineError::Cancelled);
+    }
+    Ok(())
+}
+
 impl Engine {
     /// The masked viewport query — see [`ViewportRequest`] for the parameters and for the
     /// non-decreasing-`k` obligation that §7.2's nesting property rests on.
+    ///
+    /// **D-C cancellation checkpoints** (cooperative, the rapid-pan case): once per tile, at the
+    /// top of the tile loop below; once before [`compose`] runs; once before θ's anchor
+    /// (`mask.visible_total()`). A hit at any of these aborts the WHOLE request with
+    /// [`EngineError::Cancelled`] — no partial `ViewportOut` is ever returned (I13). The
+    /// row-projection single-flight build (D-G, above the compose checkpoint) is deliberately
+    /// NOT gated — see [`check_cancelled`]'s doc.
     pub fn viewport(&self, session: &Session, req: ViewportRequest<'_>) -> Result<ViewportOut> {
         let ViewportRequest {
             slice,
@@ -313,6 +415,7 @@ impl Engine {
             k,
             pin,
             underlay_offset,
+            cancel,
         } = req;
         // Load the generation pointer exactly once, at request start (see `GenerationHandle`'s
         // doc at its definition) — every subsequent read below (pin check, row-projection cache,
@@ -385,26 +488,50 @@ impl Engine {
             slice.to_string(),
             generation.segments_version,
         );
-        let base: Arc<RowProjection> = {
-            let mut cache = self.row_projection_cache.lock().unwrap();
-            match cache.get(&cache_key) {
-                Some(existing) => Arc::clone(existing),
-                None => {
-                    // Crosses entity space into row space over the *whole* fragment
-                    // (`Permutation::project`'s cost note: seconds at 10⁹ rows) — paid once per
-                    // (token, slice, segments_version) and cached here, never recomputed on a
-                    // per-viewport path (shared-context constraint 8).
-                    let projected = Arc::new(RowProjection::new(
-                        &session.fragment,
-                        &slice_data.permutation,
-                    ));
-                    cache.insert(cache_key, Arc::clone(&projected));
-                    probe.mark_projection_built();
-                    projected
-                }
-            }
-        };
+        // D-G slot-state single-flight (F4, `tessera-bench/src/arms/load.rs:34-76`): the map
+        // lock (`SingleFlightCache`) is held only for the O(1) `Building`/`Ready` transition —
+        // never across the build below — so distinct sessions' first viewports no longer
+        // serialise behind one global lock. Do NOT reintroduce that serialisation by narrowing
+        // this back to "lock, check, build, insert, unlock"; the F4 memo names exactly that as
+        // the anti-fix. A concurrent request racing the *same* key while this build is in flight
+        // does not wait for it — it gets `EngineError::ProjectionBuilding` and retries.
+        //
+        // **Guardrail (D-D/D-F): nothing reachable from a rayon worker below may touch this
+        // cache.** `base` is resolved once, here, on the calling thread, strictly before the
+        // parallel tile sweep begins, and is then only *borrowed* (via `compose`'s `EffectiveMask`)
+        // by every `tile_result` call — never re-fetched or re-built per tile. If a future change
+        // ever did call `get_or_build` from inside a rayon worker, it would still be safe rather
+        // than corrupting: `SingleFlightCache`'s state machine (this module's doc above) has no
+        // notion of "friendly" re-entrancy, so a worker racing an in-flight build on the *same*
+        // key would simply see `Slot::Building` and get back `EngineError::ProjectionBuilding`,
+        // same as any other concurrent caller. That safety is incidental, not a licence — the
+        // design intent is that this cache is touched once per request, from the serial prefix,
+        // full stop.
+        let base: Arc<RowProjection> = self
+            .row_projection_cache
+            .get_or_build(cache_key, || {
+                // Crosses entity space into row space over the *whole* fragment
+                // (`Permutation::project`'s cost note: seconds at 10⁹ rows) — paid once per
+                // (token, slice, segments_version) and cached here, never recomputed on a
+                // per-viewport path (shared-context constraint 8).
+                probe.mark_projection_built();
+                // Task 7: `Permutation::project` parallelises internally (ambient rayon,
+                // `par_chunks`/`par_sort_unstable`) but owns no pool of its own — this is the
+                // one call site that supplies one, the same shared pool `Engine::viewport`'s
+                // tile sweep uses (D-D: no second, per-request pool). Wrapping only this build,
+                // not the whole `get_or_build`, keeps the single-flight map lock's O(1) hold
+                // time (D-G) unaffected by the pool boundary.
+                self.pool
+                    .install(|| RowProjection::new(&session.fragment, &slice_data.permutation))
+            })
+            .map_err(|_building| EngineError::ProjectionBuilding)?;
         probe.lap(|t| &mut t.row_projection_ns);
+
+        // D-C checkpoint: before compose, one of the two long serial-prefix stages this task
+        // guards. Placed after the (non-cancellable, D-G) row-projection build so a cancellation
+        // observed here never interrupts that build — only work this request would otherwise go
+        // on to do itself.
+        check_cancelled(&cancel)?;
 
         let mask = compose(
             &session.fragment,
@@ -450,6 +577,14 @@ impl Engine {
         // §3.3 underlay bounds, all three checked up front and all three *rejecting* rather than
         // clamping (see `EngineError::UnderlayRefused`). The cell budget is checked before any
         // counting work because the underlay multiplies the (already-bounded) tile set by 4^offset.
+        //
+        // Fix round 1: `underlay_cells_demanded` (0 when no underlay was requested) is captured
+        // here, outside the match, so the serial-fallback predictor below can see it — review
+        // caught that the predictor was blind to underlay cost entirely (`total_rows_in_ranges`
+        // alone), which is a real gap since a saturated underlay (`max_underlay_cells`, default
+        // 8192) is comparable work to thousands of spanned rows and was previously invisible to
+        // the serial/parallel decision no matter how large it was.
+        let mut underlay_cells_demanded: u64 = 0;
         let underlay_offset = match underlay_offset {
             None | Some(0) => None,
             Some(offset) => {
@@ -476,6 +611,7 @@ impl Engine {
                         self.config.max_underlay_cells
                     )));
                 }
+                underlay_cells_demanded = demanded as u64;
                 Some(offset)
             }
         };
@@ -489,6 +625,8 @@ impl Engine {
         // forbids. It does move on an overlay swap, which is accepted: swaps are rare against pans,
         // and because the served set is a `tessera_id` prefix, a small θ move perturbs only the
         // marks nearest the cut.
+        // D-C checkpoint: before θ's anchor, the second long serial-prefix stage this task guards.
+        check_cancelled(&cancel)?;
         let v_total = mask.visible_total();
         probe.lap(|t| &mut t.theta_anchor_ns);
         let params = SelectParams {
@@ -523,84 +661,344 @@ impl Engine {
         };
         probe.lap(|t| &mut t.tile_ranges_ns);
 
-        for (tile, range) in tiles.iter().zip(ranges) {
-            let Some(segment) = segment else { continue };
+        // Calibration task: the predictor decides serial-fold vs `pool.install` fan-out, and it
+        // must be available BEFORE either path runs — `Σ range.len()`, the total rows every
+        // resolved tile spans (pre-mask, pre-select), is exactly that: already materialised by
+        // the `tile_ranges_all` sweep above, costs one pass over `ranges` to sum, and needs no
+        // work from either candidate path to compute. See [`SERIAL_FALLBACK_MAX_ROWS`]'s doc for
+        // why this predictor (and not tile count) is the one the sweep data supports.
+        //
+        // Fix round 1: `underlay_cells_demanded` is added in, not left out. The underlay's own
+        // per-cell cost is "one small binary search plus one bitmap range-count" (the underlay
+        // block's own comment, below) — the same shape of operation `count_range` performs per
+        // row-range, so summing the two into one row-equivalent total before comparing against
+        // the threshold is the natural extension of the same predictor, not a second one bolted
+        // on. Before this fix a saturated underlay (`max_underlay_cells`, default 8192) was
+        // invisible to this decision entirely, regardless of how large the resulting per-tile
+        // sub-cell fan-out actually was.
+        let total_rows_in_ranges: u64 =
+            ranges.iter().map(|r| r.len() as u64).sum::<u64>() + underlay_cells_demanded;
 
-            probe.count(|t| &mut t.rows_in_ranges, range.len() as u64);
+        // D-D/D-F, calibrated: below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_result` in place —
+        // same function, same input order, no `pool.install` — since below that line the fan-out's
+        // own entry/scheduling cost exceeds the per-tile work it would parallelise (measured; see
+        // the constant's doc). At or above it, the existing `pool.install` fan-out runs, on the
+        // ONE shared pool this engine built at `Engine::open` — no second, per-request pool, no
+        // nested throttling (D-D). Every input to `tile_result` is borrowed or `Copy`:
+        // `mask`/`segment`/`declared_scalars`/`params` are the generation- and request-derived
+        // values already resolved above (lifecycle §1.1 — nothing is re-loaded per tile), and
+        // `cancel` is the D-C token, checked inside `tile_result` at the very top (moved there
+        // from the old loop's first line — Task 5).
+        //
+        // Both branches produce `Vec<Result<Option<TileResult>>>` (this crate's `Result<T>` alias
+        // for `std::result::Result<T, EngineError>`), in `tiles`' order, so the fold below is
+        // identical either way — this is what makes the two paths byte-identical (see this
+        // module's doc; `with_min_len(TILE_PAR_MIN_LEN)` and the parallel branch's own collect
+        // shape are unchanged from Task 6, still load-bearing for THAT claim within the parallel
+        // branch itself).
+        //
+        // D-C cancellation bound, both branches: a `Cancelled` observed inside `tile_result`
+        // propagates to the fold below regardless of path, which discards every result after the
+        // first `Err` it walks (see the fold's own comment). What differs is how much wasted work
+        // can be IN FLIGHT past the checkpoint at the instant of cancellation. Serial fold: at
+        // most ONE tile — the one `tile_result` call currently running, since nothing else is
+        // concurrently past the checkpoint by construction. Parallel fan-out: at most
+        // `compute_threads` tiles (one per worker) — every tile that had already passed the
+        // checkpoint keeps running to completion; every tile whose worker had not yet reached it
+        // observes the flip there instead and returns immediately. The serial path's bound is
+        // therefore strictly tighter, not merely no-worse.
+        // Fix round 1: one closure, not two independently-maintained copies of the same 9-argument
+        // call — the duplication was a divergence risk (a future change to `tile_result`'s
+        // argument list would need to be made twice, silently, with no compiler help if one copy
+        // were missed). `run` captures only shared references and `Copy` values (`&mask`,
+        // `segment`, `declared_scalars`, `&params`, `zoom`, `underlay_offset`, `&cancel`), so it is
+        // `Sync` for free and usable from both the serial `Iterator::map` below and rayon's
+        // parallel `map` inside `pool.install` — no new bound this file did not already require of
+        // these captures for the parallel branch to compile before this change.
+        let run = |tile: &Tile, range: Range<u32>| {
+            tile_result(
+                tile,
+                range,
+                &mask,
+                segment,
+                declared_scalars,
+                &params,
+                zoom,
+                underlay_offset,
+                &cancel,
+            )
+        };
 
-            let visible = mask.count_range(range.clone());
-            probe.lap(|t| &mut t.count_ns);
+        let tile_outcomes: Vec<Result<Option<TileResult>>> =
+            if should_fold_serially(total_rows_in_ranges) {
+                tiles
+                    .iter()
+                    .zip(ranges)
+                    .map(|(tile, range)| run(tile, range))
+                    .collect::<Vec<Result<Option<TileResult>>>>()
+            } else {
+                self.pool.install(|| {
+                    tiles
+                        .par_iter()
+                        .zip(ranges.into_par_iter())
+                        .with_min_len(TILE_PAR_MIN_LEN)
+                        .map(|(tile, range)| run(tile, range))
+                        .collect::<Vec<Result<Option<TileResult>>>>()
+                })
+            };
+        // D-E: neither branch's own wall time is a named stage — it is already fully accounted
+        // for, per tile, inside each `TileResult::stats` (folded below) — so this resets the clock
+        // without charging the stretch to whatever lap runs next, rather than leaving it to be
+        // silently misattributed. True of the serial branch too: its per-tile costs are equally
+        // captured in `TileStats`, so `skip()` here keeps both branches' accounting symmetric.
+        probe.skip();
 
-            if visible == 0 {
-                // Skip empty: no count row, no selection work for a tile with nothing visible.
+        // D-F: the serial, IN-ORDER fold. `tile_outcomes`' order equals `tiles`' order by
+        // construction (the indexed collect path above — this module's doc), so this reconstructs
+        // exactly the concatenation the pre-Task-6 serial loop produced. Short-circuits on the
+        // first `Err` (D-C's `Cancelled`, or any other per-tile error): every tile's own work is
+        // already done by this point (the parallel sweep does not itself short-circuit — that is
+        // the point of collecting `Vec<Result<..>>` rather than `Result<Vec<..>>`), so bailing out
+        // here costs only the remaining `Result`s' worth of `?`, never any recomputation.
+        for outcome in tile_outcomes {
+            let Some(tr) = outcome? else {
                 continue;
-            }
-            probe.count(|t| &mut t.tiles_nonempty, 1);
-            probe.count(|t| &mut t.sigma_visible, visible);
-
-            let selected = Selection::of(&mask, segment, range.clone(), &params, visible);
-            probe.lap(|t| &mut t.select_ns);
-            // Counted by `Selection::of` itself, inside the loops that do the reading — not from
-            // `visible`, which would make the `visited == sigma_visible` cross-check a tautology.
-            probe.count(|t| &mut t.select_rows_visited, selected.rows_visited);
-
-            tile_counts.push(TileCount {
-                tile: tile.prefix,
-                visible,
-                // Phase 1 has no filters (Reference Sheet R5): matched == visible everywhere.
-                matched: visible,
-                served: selected.rows.len() as u64,
-            });
-
-            points.extend(
-                selected
-                    .rows
-                    .into_iter()
-                    .map(|row| row_to_point(segment, row, declared_scalars)),
-            );
-            probe.lap(|t| &mut t.gather_ns);
-
-            // §3.3: the tile's sub-cells, each an exact masked count over a contiguous Morton
-            // range. Only non-empty cells are emitted, exactly as empty tiles are skipped above.
-            if let Some(offset) = underlay_offset {
-                let sub_depth = zoom + offset;
-                let first = tile.prefix << (2 * offset as u32);
-                for i in 0..(1u64 << (2 * offset as u32)) {
-                    let cell = first + i;
-                    let sub_tile = Tile {
-                        prefix: cell,
-                        depth: sub_depth,
-                    };
-                    // Search only the parent's range: sub-cells partition their parent, so this is
-                    // exactly `tile_ranges` would return, over tens of kilobytes already touched by
-                    // the parent's own `count_range` rather than ~30 levels of a 4 GB mmap.
-                    let count =
-                        mask.count_range(tile_ranges_within(segment, &sub_tile, range.clone()));
-                    if count > 0 {
-                        sub_cells.push(SubCellCount { cell, count });
-                    }
-                }
-                probe.lap(|t| &mut t.underlay_ns);
-                // Evaluated, not emitted: the gap between this and `sub_cells.len()` is the work
-                // spent discovering that a sub-cell was empty, which on a clustered corpus is most
-                // of it.
-                probe.count(
-                    |t| &mut t.underlay_cells_evaluated,
-                    1u64 << (2 * offset as u32),
-                );
-            }
+            };
+            tr.stats.fold_into(&mut probe.t);
+            tile_counts.push(tr.count);
+            points.extend(tr.points);
+            sub_cells.extend(tr.sub_cells);
         }
-
-        probe.count(|t| &mut t.points_gathered, points.len() as u64);
 
         Ok(ViewportOut {
             pin: effective_pin,
             tiles: tile_counts,
             points,
             sub_cells,
+            // Task 8: from the SAME `declared_scalars` slice `row_to_point` read for every point
+            // above (`generation.bundle.manifest.declared_scalars`), not a fresh `meta()` call —
+            // that would `load_full()` the generation pointer a second time.
+            scalar_names: declared_scalars.iter().map(|d| d.name.clone()).collect(),
             timings: probe.finish(),
         })
     }
+}
+
+/// Calibration task threshold: below this many total rows spanned by a request's resolved tiles
+/// PLUS its §3.3 underlay cell demand if any (`Σ range.len() + underlay_cells_demanded`, pre-mask
+/// — see the call site's `total_rows_in_ranges`), `Engine::viewport` folds `tile_result` serially
+/// instead of calling `self.pool.install`.
+///
+/// `pub` (unlike [`TILE_PAR_MIN_LEN`]) so the byte-equality tests in `tests/viewport.rs` can
+/// assert a fixture genuinely cleared it, rather than duplicating the number and risking drift.
+///
+/// **Why this predictor and not tile count.** Both were measured (2.42M `categories-subclass`
+/// fixture, w=10 grant, 2026-07-31, 12-core WSL2 box — sweep table and method in
+/// `.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/calibration-report.md`). Tile count does NOT
+/// discriminate: the "natural" viewport family (a fixed-size client window at increasing zoom)
+/// resolves a near-constant ~289 tiles at every zoom from 6 to 14 regardless of density, yet the
+/// measured serial/parallel verdict at that SAME tile count varies with how many rows those tiles
+/// actually spanned. Conversely, a request touching as few as 4 tiles but spanning the WHOLE
+/// 2.42M-row corpus (a maximally zoomed-out view) still measured parallel breaking even or
+/// winning, despite the low tile count — there being few units to schedule did not make the
+/// spanned work small. `rows_in_ranges` tracks that driver directly and is consistent with the
+/// measured cost model this codebase designs against (module doc, and CLAUDE.md: "bitmap
+/// operations cost O(containers touched)", which scales with the range read, not the tile count).
+///
+/// **What this predictor does NOT model, stated plainly rather than glossed over (fix round 1).**
+/// `rows_in_ranges` is deliberately PRE-mask — it counts rows a tile's range spans, not how many
+/// of them pass the viewer's mask. Mask density (how much of a spanned range is actually visible)
+/// is therefore a real, independent cost driver this predictor cannot see: two requests with
+/// identical `Σ range.len()` can differ in true `count`/`select`/`gather` cost if one principal's
+/// grant is far narrower than the other's. This was checked, not assumed: fix round 1 re-ran the
+/// calibration sweep with the validation workload's own dense, uniform-random w=10 grant
+/// (`tessera_bench::corpus::build_grant`'s `GrantShape::Random`, duplicated in
+/// `examples/calibration_sweep.rs --dense`) against the original sweep's much sparser deterministic
+/// grant, on the same shapes, back to back on the same box. The crossover band did not move
+/// materially between the two (both runs' clearly-large-row shapes stayed clearly parallel-
+/// favouring, both runs' near-zero-row shapes stayed near parity or serial-favouring) — see the
+/// calibration report's fix-round-1 section for both tables side by side. This is one box, one
+/// corpus, one grant width; it is evidence the crossover is not obviously grant-width-sensitive
+/// at THIS scale, not a proof that mask density can never matter.
+///
+/// **Why 200,000 and not the exact crossover.** The sweep found a clean split below ~165,000 rows
+/// (serial wins or ties in nearly every sample) and above ~316,000 rows (parallel wins in every
+/// sample), with a noisy, inconsistently-ordered band between them (a `Σ range.len()` figure is a
+/// proxy for containers touched, not identical to it, so it does not order perfectly against
+/// measured cost in that band, and mask density is part of why not — see above). 200,000 sits
+/// inside the gap, close to its lower edge. The two misclassification costs are asymmetric:
+/// wrongly choosing the parallel path on genuinely small work measured 6-20x slower than serial in
+/// this sweep is the expensive mistake; wrongly choosing serial in the ambiguous band cost at most
+/// ~1.3x measured here (these are ~1 ms-scale requests either way, so the absolute cost of that
+/// mistake is small) — so the threshold is placed to bias toward serial in the ambiguous band
+/// rather than centred on it. A mis-prediction driven by the mask-density gap above is expected to
+/// fall in roughly this same ≤~1.5-2x band on a ~1 ms request, not a qualitatively different one,
+/// since it is the same "ambiguous middle" the row-count proxy already measures imperfectly.
+///
+/// No corpus- or deployment-dependent knob is exposed for this: viewport size feeds into
+/// `rows_in_ranges` directly (by construction — it is what the predictor sums), and the fix-round-1
+/// re-run found no clear evidence grant width moves the crossover enough at this scale to justify
+/// one either. A fixed constant is what the data supports — see the calibration report's concerns
+/// section if a future corpus at a very different scale, or a workload with much more extreme
+/// grant-width variance than this task exercised, calls this back into question.
+pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 200_000;
+
+/// The predictor, pulled out as its own pure function so it is unit-testable without an `Engine`
+/// or a bundle (see the `tests` module at the bottom of this file) — the behavioural claim ("a
+/// below-threshold request runs the serial fold") is otherwise only observable through output
+/// equality or timing, neither of which makes a good unit test on its own.
+#[inline]
+fn should_fold_serially(total_rows_in_ranges: u64) -> bool {
+    total_rows_in_ranges < SERIAL_FALLBACK_MAX_ROWS
+}
+
+/// D-F's per-tile scheduling grain: the number of tiles rayon hands to one worker before it will
+/// split the range again. Only reachable once `total_rows_in_ranges >= SERIAL_FALLBACK_MAX_ROWS`
+/// (the calibration task's serial fallback, above) — this grain governs the fan-out's own
+/// behaviour, not whether it runs at all.
+///
+/// **Measured (2.42M `categories-subclass`, w=10, 12-core WSL2 box, 2026-07-31)**, sweeping
+/// 4/8/16/32/64 across six clearly-parallel shapes (natural client windows and full-extent views
+/// spanning 16-1,024 tiles — table in the calibration report). 16 and above were consistently and
+/// often substantially worse than 4 or 8 (e.g. a 16-tile full-extent view: ~1.6 ms at 4 vs ~2.8 ms
+/// at 16 vs ~3.2 ms at 64) — confirming this constant's original "keep it small" reasoning, kept
+/// below verbatim. Between 4 and 8, two repeated trials found 8 reproducibly at least as fast
+/// everywhere tested and meaningfully faster on the lower-tile-count shapes (a 289-tile natural
+/// window: ~1.0 ms at 4 vs ~0.8 ms at 8; a 16-tile full-extent view: ~1.8 ms at 4 vs ~1.6 ms at
+/// 8), with no shape favouring 4. `8` replaces the original argued-not-measured `4`.
+///
+/// **The original reasoning, still the shape of the argument, only the number moves.** Measured
+/// per-tile cost is highly non-uniform — an empty-tile skip (`tile_result` returning `Ok(None)`
+/// after one `count_range`) is a handful of comparisons, while a dense tile at a high cap is a
+/// bitmap-range read plus a bounded heap sort — so work-stealing needs to be able to move
+/// *individual* tiles between workers rather than being locked into a few large, coarse chunks; a
+/// chunk of, say, 64 tiles handed to one worker while the other workers' chunks are all-empty
+/// would sit unstolen for the length of that chunk. `1` (rayon's own default for `par_iter`
+/// without `with_min_len`) avoids that entirely but pays a scheduling/steal-queue overhead on
+/// every single tile, including the very common empty-tile skip that is otherwise nearly free.
+/// `8` is a conservative middle point: small enough that a viewport of a few hundred tiles still
+/// splits into dozens of independently-stealable chunks, large enough to amortise the per-task
+/// overhead over the cheap tiles that dominate a sparse or clustered corpus — and, unlike `4`, the
+/// value the sweep actually measured as best or tied-best on every shape tried.
+const TILE_PAR_MIN_LEN: usize = 8;
+
+/// One tile's contribution to a `/v1/viewport` response (D-F) — the pure per-tile body pulled out
+/// of what was, before this task, a serial `for` loop over `Engine::viewport`'s tiles. Safe to
+/// call concurrently from any rayon worker: every parameter is `&`-borrowed or `Copy`, nothing
+/// here reaches back into `Engine` or any state shared across tiles (see the guardrail comment at
+/// the row-projection cache call site in `Engine::viewport`, above), and the return value is
+/// owned outright by the caller — no shared mutable state, no interior mutability, nothing to
+/// synchronise.
+///
+/// `Ok(None)` — an empty tile: no segment for this slice, or nothing visible in `range`. Exactly
+/// the "skip empty" rule the old inline loop applied (no count row, no selection work). `Err`
+/// carries [`EngineError::Cancelled`] from the D-C per-tile cancellation checkpoint below (moved
+/// here, unchanged, from the top of the old loop body — Task 5) — checked first, so a flip
+/// observed here costs only the one atomic read, never any of this tile's own
+/// count/select/gather/underlay work.
+#[allow(clippy::too_many_arguments)]
+fn tile_result(
+    tile: &Tile,
+    range: Range<u32>,
+    mask: &EffectiveMask,
+    segment: Option<&SegmentData>,
+    declared_scalars: &[DeclaredScalar],
+    params: &SelectParams,
+    zoom: u8,
+    underlay_offset: Option<u8>,
+    cancel: &Option<CancelToken>,
+) -> Result<Option<TileResult>> {
+    check_cancelled(cancel)?;
+
+    let Some(segment) = segment else {
+        return Ok(None);
+    };
+
+    let mut stats = TileProbe::new();
+    stats.count(|t| &mut t.rows_in_ranges, range.len() as u64);
+
+    let visible = mask.count_range(range.clone());
+    stats.lap(|t| &mut t.count_ns);
+
+    if visible == 0 {
+        // Skip empty: no count row, no selection work for a tile with nothing visible — the same
+        // rule the old inline loop applied.
+        return Ok(None);
+    }
+    stats.count(|t| &mut t.tiles_nonempty, 1);
+    stats.count(|t| &mut t.sigma_visible, visible);
+
+    let selected = Selection::of(mask, segment, range.clone(), params, visible);
+    stats.lap(|t| &mut t.select_ns);
+    // Counted by `Selection::of` itself, inside the loops that do the reading — not from
+    // `visible`, which would make the `visited == sigma_visible` cross-check a tautology.
+    stats.count(|t| &mut t.select_rows_visited, selected.rows_visited);
+
+    let count = TileCount {
+        tile: tile.prefix,
+        visible,
+        // Phase 1 has no filters (Reference Sheet R5): matched == visible everywhere.
+        matched: visible,
+        served: selected.rows.len() as u64,
+    };
+
+    let points: Vec<PointOut> = selected
+        .rows
+        .into_iter()
+        .map(|row| row_to_point(segment, row, declared_scalars))
+        .collect();
+    stats.lap(|t| &mut t.gather_ns);
+    stats.count(|t| &mut t.points_gathered, points.len() as u64);
+
+    // §3.3: the tile's sub-cells, each an exact masked count over a contiguous Morton range. Only
+    // non-empty cells are emitted, exactly as empty tiles are skipped above.
+    let mut sub_cells = Vec::new();
+    if let Some(offset) = underlay_offset {
+        let sub_depth = zoom + offset;
+        let first = tile.prefix << (2 * offset as u32);
+        for i in 0..(1u64 << (2 * offset as u32)) {
+            let cell = first + i;
+            let sub_tile = Tile {
+                prefix: cell,
+                depth: sub_depth,
+            };
+            // Search only the parent's range: sub-cells partition their parent, so this is exactly
+            // `tile_ranges` would return, over tens of kilobytes already touched by the parent's
+            // own `count_range` rather than ~30 levels of a 4 GB mmap.
+            let sub_count = mask.count_range(tile_ranges_within(segment, &sub_tile, range.clone()));
+            if sub_count > 0 {
+                sub_cells.push(SubCellCount {
+                    cell,
+                    count: sub_count,
+                });
+            }
+        }
+        stats.lap(|t| &mut t.underlay_ns);
+        // Evaluated, not emitted: the gap between this and `sub_cells.len()` is the work spent
+        // discovering that a sub-cell was empty, which on a clustered corpus is most of it.
+        stats.count(
+            |t| &mut t.underlay_cells_evaluated,
+            1u64 << (2 * offset as u32),
+        );
+    }
+
+    Ok(Some(TileResult {
+        count,
+        points,
+        sub_cells,
+        stats: stats.t,
+    }))
+}
+
+/// One tile's parallel-sweep output — [`tile_result`]'s return payload, folded serially and
+/// in-order into the request's `tile_counts`/`points`/`sub_cells`/[`StageTimings`] by
+/// `Engine::viewport` (D-F). An implementation detail of the parallel sweep, not part of this
+/// crate's public API — `ViewportOut` is what callers see.
+struct TileResult {
+    count: TileCount,
+    points: Vec<PointOut>,
+    sub_cells: Vec<SubCellCount>,
+    stats: TileStats,
 }
 
 /// Gather one row's `entity_id`/`x`/`y`/declared scalars through `ColumnsRef` — zero-copy reads,
@@ -631,5 +1029,21 @@ fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) ->
         x,
         y,
         scalars,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Calibration task's own behavioural test on the predictor, per the brief's preference for
+    /// this over test-only instrumentation: exact boundary behaviour, both edges.
+    #[test]
+    fn should_fold_serially_is_a_strict_less_than_at_the_calibrated_boundary() {
+        assert!(should_fold_serially(0));
+        assert!(should_fold_serially(SERIAL_FALLBACK_MAX_ROWS - 1));
+        assert!(!should_fold_serially(SERIAL_FALLBACK_MAX_ROWS));
+        assert!(!should_fold_serially(SERIAL_FALLBACK_MAX_ROWS + 1));
+        assert!(!should_fold_serially(u64::MAX));
     }
 }

@@ -96,7 +96,7 @@ bundle/
 
 ### R5. Service API (Phase 1 subset — contracts §3)
 
-Errors: JSON `{"error": code, "detail": string}`; closed code list: `bad-credential` 401, `expired-token` 403, `unknown` 404, `conflict` 409, `pin-expired` 410, `contract` 422, `backpressure` 429 (ingest only, never `/control/changes`), `fail-closed` 500, `not-ready` 503. Bearer auth on every plane; tokens never in URLs or logs. `/healthz` + `/readyz` on every listener.
+Errors: JSON `{"error": code, "detail": string}`; closed code list: `bad-credential` 401, `expired-token` 403, `unknown` 404, `conflict` 409, `pin-expired` 410, `contract` 422, `backpressure` 429 (ingest, and — *amendment, concurrency workstream Task 4* — the viewer/session compute-admission gate in front of `/v1/viewport`, `/v1/items`, `/session/authorise`; still never `/control/changes`), `fail-closed` 500, `not-ready` 503. Bearer auth on every plane; tokens never in URLs or logs. `/healthz` + `/readyz` on every listener.
 
 - **Viewer plane** (`serve.viewer`, default `127.0.0.1:7407`): `GET /v1/meta`; `POST /v1/viewport` `{slice, zoom, bbox:[x0,y0,x1,y1], k?, pin?}` → Arrow stream, batch 1 *tiles* `(tile: uint64, visible: uint64, matched: uint64)` (matched = visible; no filters in Phase 1), batch 2 *points* `(handle: uint32, x: float32, y: float32, …declared scalars)`; `POST /v1/items/{handle}` `{pin?}` → JSON scalars. All data responses set `x-tessera-pin`.
 - **Session plane** (`serve.session`, default `127.0.0.1:7408`): `POST /session/authorise` `{auth_data: "<base64>"}` → `{token, token_id, expires_at}` (zero-term credential mints a zero-visibility token — deliberate); `POST /session/revoke` `{token_id}` → 204.

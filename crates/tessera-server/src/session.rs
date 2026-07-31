@@ -12,7 +12,7 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{map_engine_error, ApiError};
+use crate::error::{map_engine_error, map_join_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
@@ -55,10 +55,25 @@ async fn authorise(
         .decode(&req.auth_data)
         .map_err(|e| ApiError::Contract(format!("auth_data is not valid base64: {e}")))?;
 
-    let session = state
-        .engine
-        .authorise(&auth_data)
-        .map_err(map_engine_error)?;
+    // D-B: gated the same way as the viewer plane's closures — `admit()` sheds with 429
+    // `backpressure` on either stage of the two-stage semaphore.
+    let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
+
+    // D-A: `engine.authorise` resolves the credential's granted terms and unions them into a
+    // fragment (I2) — on a fragment-cache miss this builds and writes the frozen fragment to
+    // disk (file IO), and either way is CPU work with no `.await` of its own. Moved off the
+    // reactor so a cold `authorise` cannot starve concurrent requests on this process's tokio
+    // worker threads. Closure capture: `state` is a cloned `Arc<AppState>` (cheap; sound because
+    // `Engine: Send + Sync`), `auth_data` is moved (owned `Vec<u8>`, only ever borrowed above),
+    // `gate_permits` (D-B) moves in so both permits release only when this closure returns.
+    let closure_state = Arc::clone(&state);
+    let session = tokio::task::spawn_blocking(move || {
+        let _gate_permits = gate_permits;
+        closure_state.engine.authorise(&auth_data)
+    })
+    .await
+    .map_err(map_join_error)?
+    .map_err(map_engine_error)?;
 
     let resp = AuthoriseResp {
         token: session.token.clone(),

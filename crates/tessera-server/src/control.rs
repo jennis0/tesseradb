@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use tessera_lifecycle::{ChangeOp, PendingItem, WalRow, WalScalar};
 use tessera_types::{EntityId, TermId};
 
-use crate::error::{map_store_error, ApiError};
+use crate::error::{map_join_error, map_store_error, map_wal_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
@@ -199,22 +199,17 @@ struct IngestResp {
     tessera_ids: Vec<u64>,
 }
 
-async fn ingest(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<IngestResp>, ApiError> {
-    state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
+/// The Arrow decode through the WAL append/fsync (D-A, review finding 7): everything CPU-bound
+/// or fsync-bearing for one `/control/ingest` request, run inside `spawn_blocking`. **Never
+/// behind the Task 4 admission gate** — that gate applies only to the viewer/session planes; an
+/// ingest batch durability-syncing must not be throttled by the same budget a slow viewport
+/// consumes, and more importantly a suppression on `/control/changes` must reach its own
+/// `spawn_blocking` call (and thus the WAL mutex) without first queueing behind N ingest
+/// *handlers* occupying reactor threads (lifecycle §1.3's deny priority lane).
+fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestResp, ApiError> {
+    let body_hash: [u8; 32] = Sha256::digest(body).into();
 
-    let batch_id = headers
-        .get("x-tessera-batch-id")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
-        .to_string();
-
-    let body_hash: [u8; 32] = Sha256::digest(&body).into();
-
-    let items = parse_ingest_batch(&body)?;
+    let items = parse_ingest_batch(body)?;
 
     // Resolve each item's descriptors and terms up front — idempotent even on a replayed
     // request, since `resolve_terms` looks up already-interned descriptors without reassigning
@@ -252,13 +247,13 @@ async fn ingest(
             // `tessera_id`s as the original acceptance, recovered from the recorded entity ids
             // rather than re-derived from `external_id` (a null-external-id row has none to
             // re-derive from).
-            let tessera_ids = tessera_ids_of(&state, &prev_entity_ids)?;
-            return Ok(Json(IngestResp {
+            let tessera_ids = tessera_ids_of(state, &prev_entity_ids)?;
+            return Ok(IngestResp {
                 accepted: items.len() as u64,
                 over_bound,
                 over_bound_ids,
                 tessera_ids,
-            }));
+            });
         }
         return Err(ApiError::Conflict(format!(
             "batch id '{batch_id}' was already accepted with a different body"
@@ -368,21 +363,49 @@ async fn ingest(
         .engine
         .accept_ingest(rows, terms_per_item, batch_id, body_hash)
         .map_err(|e| {
+            // Batch-level context, kept alongside `map_wal_error`'s own `error!` (which carries
+            // `e`'s Display — this crate rule closes error.rs:3-7's door, see that function's
+            // doc) rather than folded into one line, so an operator sees both without the body
+            // ever carrying either.
             tracing::error!("wal append/fsync failed for an ingest batch");
-            ApiError::FailClosed(format!("wal append/fsync failed: {e}"))
+            map_wal_error(e)
         })?;
 
     // Contracts §3.4 (r6): the 200 response returns each accepted row's `tessera_id`, in batch
     // order, so a caller who supplied no external id for an item still learns the identity it
     // was given -- otherwise that item would be unreachable by anyone.
-    let tessera_ids = tessera_ids_of(&state, &entity_ids)?;
+    let tessera_ids = tessera_ids_of(state, &entity_ids)?;
 
-    Ok(Json(IngestResp {
+    Ok(IngestResp {
         accepted,
         over_bound,
         over_bound_ids,
         tessera_ids,
-    }))
+    })
+}
+
+async fn ingest(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<IngestResp>, ApiError> {
+    state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
+
+    let batch_id = headers
+        .get("x-tessera-batch-id")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
+        .to_string();
+
+    // D-A / review finding 7: closure capture is `state` (moved in directly — nothing after this
+    // `.await` needs the handler's own copy), `body` (an owned `Bytes` — cheap, refcounted clone
+    // of the request body already read off the socket, not a copy) and `batch_id` (owned
+    // `String`). Never gated (see `run_ingest`'s doc).
+    let resp = tokio::task::spawn_blocking(move || run_ingest(&state, &body, batch_id))
+        .await
+        .map_err(map_join_error)??;
+
+    Ok(Json(resp))
 }
 
 /// `EntityId` -> `tessera_id`, per row, in the caller's given order. `Engine::tessera_id_of` is
@@ -424,13 +447,11 @@ struct ValidatedChange {
     raw_descriptors: Option<Vec<Vec<u8>>>,
 }
 
-async fn changes(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(items): Json<Vec<ChangeItem>>,
-) -> Result<StatusCode, ApiError> {
-    state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
-
+/// The validate-then-apply body of `/control/changes` (D-A, review finding 7): external-id
+/// resolution (sidecar IO) and every item's WAL append/fsync, run inside `spawn_blocking`. Same
+/// never-gated rule as [`run_ingest`] — this is the deny priority lane a suppression must reach
+/// without queueing behind concurrent ingest handlers on the reactor.
+fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError> {
     // Validate-first (Important 2 fix): parse every item's op, base64-decode and resolve its
     // external id, and validate its `access` field's shape — all *before* appending anything.
     // The previous item-by-item loop could append, fsync and apply items 1..n-1 before item n's
@@ -510,9 +531,30 @@ async fn changes(
                         "wal append/fsync failed for a non-deny change; refusing without applying"
                     );
                 }
-                ApiError::FailClosed(format!("wal append/fsync failed: {e}"))
+                // Op-level context above, kept alongside `map_wal_error`'s own `error!` (which
+                // carries `e`'s Display — error.rs:3-7's rule; see that function's doc) rather
+                // than folded into one line, so an operator sees both without the body ever
+                // carrying either.
+                map_wal_error(e)
             })?;
     }
+
+    Ok(())
+}
+
+async fn changes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(items): Json<Vec<ChangeItem>>,
+) -> Result<StatusCode, ApiError> {
+    state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
+
+    // D-A / review finding 7: closure captures `state` (moved in directly — nothing after this
+    // `.await` needs the handler's own copy) and `items` (moved — the request body is already
+    // fully decoded to owned `Vec<ChangeItem>` by this point, so there is nothing left to borrow).
+    tokio::task::spawn_blocking(move || run_changes(&state, items))
+        .await
+        .map_err(map_join_error)??;
 
     // R5: `/control/changes` is 200 after fsync, never 429.
     Ok(StatusCode::OK)
@@ -527,7 +569,21 @@ async fn status(
     // who could reach the control listener at all, which may be loopback TCP, not only a unix
     // socket (config.rs's `ControlListen::Tcp`).
     state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
+    // D-B: the viewer/session admission gate's gauges. `in_flight`/`waiting` are read live off
+    // the semaphores; `shed_total` is a single process-wide counter — no per-principal labels
+    // anywhere on this plane (SA §9). `shed_total` counts only this gate's own two shed paths —
+    // it does NOT include D-G single-flight builder 429s (`ProjectionBuilding`/`FragmentBuilding`,
+    // Tasks 1-2), which happen after admission and are invisible to this gate (see
+    // `ComputeGate::shed_total`'s doc).
+    let gate = state.compute_gate.status();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
+        "compute": {
+            "admission": gate.admission,
+            "queue": gate.queue,
+            "in_flight": gate.in_flight,
+            "waiting": gate.waiting,
+            "shed_total": gate.shed_total,
+        },
     })))
 }
