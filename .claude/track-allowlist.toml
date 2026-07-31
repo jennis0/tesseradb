@@ -44,6 +44,15 @@ paths = [
   # never a silent claim on another track's code.
   "Cargo.lock",
   "crates/*/Cargo.toml",
+  # FROZEN for stage 2.1 (controller ruling 2026-07-31, on the Task 0c report). After Task 0c's
+  # split these two hold the residue no track owns — viewer plane, config, byte shape, selection,
+  # counting, gather, density — plus a handful of cases that genuinely span two tracks
+  # (`never_gated_routes_succeed_while_the_viewer_gate_is_saturated` has five owners in one body).
+  # Every track has its own file to ADD tests to, so nothing should need to change here.
+  # If a track finds it must edit one of these, that is the plan's rule 3 firing: STOP and report.
+  # A test that needs changing here is usually a signal that a seam was drawn in the wrong place.
+  "crates/tessera-server/tests/http.rs",
+  "crates/tessera-engine/tests/viewport.rs",
 ]
 
 # Track A — store and reader. Tasks 1, 2.
@@ -69,9 +78,8 @@ paths = [
   "crates/tessera-server/src/health.rs",
   "crates/tessera-server/tests/http_write.rs",
   # The server's integration-test fixtures, factored out by Task 0c's split of `tests/http.rs`.
-  # Track B's rather than shared: B is the only track with a `tessera-server` test file, and the
-  # residual `tests/http.rs` belongs to no track, so a shared marking would name a co-owner that
-  # does not exist. A change here still affects `tests/http.rs`'s binary — B keeps it green.
+  # Shared with Track C since the controller ruling below gave C `tests/http_pins.rs`; B remains
+  # the primary editor, and a change here must keep BOTH server test binaries green.
   "crates/tessera-server/tests/common/**",
   "scripts/check-layers.sh",
 ]
@@ -87,6 +95,12 @@ paths = [
   "crates/tessera-server/src/session.rs",
   "crates/tessera-engine/tests/pins.rs",
   "crates/tessera-engine/tests/cache.rs",
+  # Controller ruling (2026-07-31, on the Task 0c report): C had no server-plane test file, so
+  # Task 4's drain list and Task 5's revoke-prunes-the-cache had nowhere to land an end-to-end
+  # assertion. Created by moving `c_revoke_then_viewport_is_rejected`, `g_stale_pin_is_410` and
+  # `g2_pins_survive_overlay_swaps` out of the now-frozen `tests/http.rs`.
+  "crates/tessera-server/tests/http_pins.rs",
+  "crates/tessera-server/tests/common/**",
 ]
 
 # Track T — the standing conformance track. Branches from 9f2424a and touches no crate the seam
