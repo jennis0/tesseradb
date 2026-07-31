@@ -201,6 +201,63 @@ fn serves_all_visible(params: &SelectParams, visible: u64) -> bool {
         || (params.threshold.is_saturated() && visible <= params.cap as u64)
 }
 
+/// The decode mechanism serving one tile, chosen from `(visible, range.len())` — two quantities
+/// already in hand — never from the data itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeTier {
+    /// `visible == range.len()`: the whole range is visible, so the visible set *is* the range —
+    /// one contiguous id slice, no bitmap decode of any kind.
+    FullRange,
+    /// Density at or above [`RUN_DECODE_MIN_DENSITY_PCT`]: contiguous-run decode
+    /// ([`EffectiveMask::for_each_visible_run`]).
+    Runs,
+    /// Everything else: batched value decode over [`EffectiveMask::decode_source`], with the
+    /// scan loop owned by [`Selection::of`] — run-length-indifferent, so its cost is flat where
+    /// the run tier's collapses.
+    Values,
+}
+
+/// How many values one `next_many` read decodes in the value tier: 1024 × 4 B is a 4 KiB stack
+/// buffer, enough to make the FFI crossing invisible and small enough to stay cache-resident
+/// while the id column streams past it.
+const VALUE_BUF_LEN: usize = 1024;
+
+/// The minimum tile density (`visible / range.len()`, in percent) at which run decoding beats
+/// the batched value decode.
+///
+/// **Measured, not guessed — and the measurement is re-runnable** (`examples/decode_tiers.rs`,
+/// general-branch work, 1M rows, half-admitting cut, ns per visible row, at the deployment
+/// operating point **cap = 500** — owner directive 2026-07-30; k defaults to the cap). Run
+/// decode's cost is per *run*, so it collapses as runs lengthen and drowns as they shrink — a
+/// Bernoulli mask at density d has mean run length 1/(1−d). Against the batch decode at cap 500
+/// it wins ~19% at density 1.0 (5.64 vs 6.91) and ~7% at 0.95 (6.67 vs 7.14), loses ~7% at 0.90
+/// (7.85 vs 7.32) and ~20% at 0.85 (9.01 vs 7.52), and is ~64% behind by 0.30 (20.8 vs 12.7);
+/// the secondary cap-50 sweep puts the crossover in the same interval, so the constant is not
+/// cap-sensitive in the measured band. The crossover sits between 90 and 95; 95 is the
+/// conservative rounding — near the
+/// boundary the gate prefers the batch decode, whose cost is flat in run length, over the run
+/// decode, whose failure mode on scattered masks was a measured +7.8% end-to-end regression at
+/// 2.4M (the regression that forced this gate to exist). Deleting the gate re-creates that
+/// regression on every scattered mask; moving the constant without re-running the example is
+/// guesswork.
+pub const RUN_DECODE_MIN_DENSITY_PCT: u64 = 95;
+
+/// The tier gate. Public so the equivalence tests stratify their corpora with the *same*
+/// predicate the selection uses, rather than a transcription that could drift.
+///
+/// Both inputs are already disclosed per tile (§7.1 discloses `visible`; the tile grid discloses
+/// `range.len()`), so the tier — though observable in timing — is a function of quantities the
+/// viewer already has. (C19 register note pending owner sign-off; recorded at landing, not here.)
+pub fn decode_tier(visible: u64, range_len: u64) -> DecodeTier {
+    if visible == range_len {
+        DecodeTier::FullRange
+    } else if visible * 100 >= range_len * RUN_DECODE_MIN_DENSITY_PCT {
+        DecodeTier::Runs
+    } else {
+        DecodeTier::Values
+    }
+}
+
 /// One tile's selected rows, ascending by `tessera_id`.
 pub struct Selection {
     /// Row indices, **ascending by the row's `tessera_id`** — not by row index.
@@ -221,6 +278,11 @@ impl Selection {
     /// Rows come back ascending by `tessera_id` whichever branch runs — the nesting argument's
     /// client-truncation clause needs the payload to be a *prefix*, and a branch-dependent order
     /// would be a differential-oracle landmine.
+    ///
+    /// `visible` must be `mask.count_range(range)` exactly. It always carried correctness (the
+    /// serve-all predicate and the `m` clamp read it); the [`DecodeTier::FullRange`] tier now
+    /// also decodes by it — `visible == range.len()` is taken as proof that the whole range is
+    /// visible, which is only true of the *composed* count.
     pub fn of(
         mask: &EffectiveMask,
         segment: &SegmentData,
@@ -237,9 +299,25 @@ impl Selection {
                 rows_visited: 0,
             };
         }
+        // An empty (or inverted) range holds nothing — decoded identically by every mechanism,
+        // but the FullRange tier's slice indexing needs the well-formedness guarantee explicit.
+        if range.start >= range.end {
+            return Selection {
+                rows: Vec::new(),
+                rows_visited: 0,
+            };
+        }
 
         let ids = segment.columns.tessera_id();
-        let visible_rows = mask.rows_in_range(range);
+        let range_len = u64::from(range.end - range.start);
+
+        // The decode mechanism is chosen per tile (`decode_tier`): the measured per-row cost of
+        // the retired always-per-value code was dominated by decode machinery, not column loads
+        // (memo `2026-07-30-viewport-hot-path-and-bundle-size-review.md` §B9), but run decoding
+        // only wins where runs are long — see `RUN_DECODE_MIN_DENSITY_PCT` for the measured
+        // crossover. Every tier reads the same rows in the same ascending order, so the output
+        // is bit-identical whichever fires.
+        let tier = decode_tier(visible, range_len);
 
         let mut rows_visited: u64 = 0;
         let rows: Vec<u32> = if serves_all_visible(params, visible) {
@@ -256,13 +334,49 @@ impl Selection {
             // than the saved lookups — the ids being read are in cache for the sizes the serve-all
             // branch handles (V <= cap). Recorded because the reasoning for the other choice is
             // more persuasive than the measurement, and someone will make it again.
-            // A plain loop rather than `map`/`inspect`: the increment is the point, not a side
-            // effect smuggled through an iterator adaptor. Capacity is exact — this branch runs
+            // The counter takes what each tier actually reads — clamped run lengths, or one per
+            // decoded value — which is the field's meaning. Capacity is exact — this branch runs
             // only when `visible <= cap`.
             let mut rows: Vec<u32> = Vec::with_capacity(params.cap.min(visible as usize));
-            for row in visible_rows.iter() {
-                rows_visited += 1;
-                rows.push(row);
+            match tier {
+                DecodeTier::FullRange => {
+                    rows_visited += range_len;
+                    rows.extend(range.start..range.end);
+                }
+                DecodeTier::Runs => mask.for_each_visible_run(range, |run| {
+                    rows_visited += u64::from(run.end - run.start);
+                    rows.extend(run);
+                }),
+                DecodeTier::Values => {
+                    // Reads are bounded by `visible`, not just by the range-end check: after the
+                    // seek, the next `visible` values of the source are exactly the tile's
+                    // visible set (diffs empty ⇒ source is the composed mask; diffs present ⇒
+                    // the source is already range-clamped), so an unbounded final `next_many`
+                    // would decode up to a buffer's worth of rows past the tile and throw them
+                    // away — measured at ~15% of the whole request on ~500-visible tiles, since
+                    // the waste is per tile. The `>= range.end` check stays as the fail-safe for
+                    // a caller-miscounted `visible`.
+                    let source = mask.decode_source(range.clone());
+                    let mut iter = source.bitmap().iter();
+                    iter.reset_at_or_after(range.start);
+                    let mut buf = [0u32; VALUE_BUF_LEN];
+                    let mut remaining = visible;
+                    'decode: while remaining > 0 {
+                        let want = remaining.min(VALUE_BUF_LEN as u64) as usize;
+                        let n = iter.next_many(&mut buf[..want]);
+                        if n == 0 {
+                            break;
+                        }
+                        for &row in &buf[..n] {
+                            if row >= range.end {
+                                break 'decode;
+                            }
+                            rows_visited += 1;
+                            rows.push(row);
+                        }
+                        remaining -= n as u64;
+                    }
+                }
             }
             rows.sort_unstable_by_key(|&row| ids[row as usize]);
             rows
@@ -270,6 +384,12 @@ impl Selection {
             // One pass. `m(T) <= cap` always, so the `cap` smallest ids in the tile contain the
             // served set for *any* m the counting pass can produce — which is what makes a single
             // pass sufficient.
+            //
+            // In the slice-fed tiers the threshold count goes first, over the contiguous id
+            // slice — a branchless filter-count the compiler vectorises — and the heap feed
+            // second; the value-fed tier interleaves them per row as the retired code did. The
+            // split changes nothing observable because `c_theta` and the heap never read each
+            // other.
             //
             // A `BinaryHeap` is a max-heap, which is what is wanted: the largest of the `cap`
             // best-so-far sits at the root, so it is both the eviction candidate and the rejection
@@ -282,25 +402,106 @@ impl Selection {
             // rate rises. Output is identical: a row not smaller than the largest of the `cap`
             // smallest cannot be among them.
             //
-            // Memory: O(min(cap, V)) for the heap, plus `rows_in_range`'s bitmap, which is
-            // O(containers touched) rather than O(V) — see its doc for what that used to cost.
+            // Memory: O(min(cap, V)) for the heap. The steady-state decode route (diffs empty)
+            // materialises nothing at all; with diffs present the run and value tiers pay one
+            // temporary `rows_in_range` bitmap, O(containers touched) rather than O(V) — see its
+            // doc for what that used to cost.
             let mut c_theta: u64 = 0;
             let heap_cap = params.cap.min(visible as usize).saturating_add(1);
             let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(heap_cap);
-            for row in visible_rows.iter() {
-                rows_visited += 1;
-                let id = ids[row as usize];
-                if params.threshold.admits(id) {
-                    c_theta += 1;
-                }
-                if heap.len() == params.cap {
-                    // Safe: len == cap >= 1 here, since cap == 0 returned early above.
-                    if id >= heap.peek().expect("non-empty at len == cap").0 {
-                        continue;
+
+            // The slice consumer, shared by the two contiguous tiers — one transcription, so the
+            // tiers cannot disagree about what a row means. A nested fn rather than a closure:
+            // the state is passed explicitly, which keeps the value tier free to drive its own
+            // loop over the same variables below.
+            fn scan_slice(
+                run_start: u32,
+                slice: &[u64],
+                params: &SelectParams,
+                rows_visited: &mut u64,
+                c_theta: &mut u64,
+                heap: &mut BinaryHeap<(u64, u32)>,
+            ) {
+                *rows_visited += slice.len() as u64;
+                match params.threshold {
+                    Threshold::Saturated => *c_theta += slice.len() as u64,
+                    Threshold::Cut(cut) => {
+                        *c_theta += slice.iter().filter(|&&id| id < cut).count() as u64;
                     }
-                    heap.pop();
                 }
-                heap.push((id, row));
+                for (i, &id) in slice.iter().enumerate() {
+                    if heap.len() == params.cap {
+                        // Safe: len == cap >= 1 here, since cap == 0 returned early in `of`.
+                        if id >= heap.peek().expect("non-empty at len == cap").0 {
+                            continue;
+                        }
+                        heap.pop();
+                    }
+                    heap.push((id, run_start + i as u32));
+                }
+            }
+
+            match tier {
+                DecodeTier::FullRange => {
+                    scan_slice(
+                        range.start,
+                        &ids[range.start as usize..range.end as usize],
+                        params,
+                        &mut rows_visited,
+                        &mut c_theta,
+                        &mut heap,
+                    );
+                }
+                DecodeTier::Runs => mask.for_each_visible_run(range, |run| {
+                    scan_slice(
+                        run.start,
+                        &ids[run.start as usize..run.end as usize],
+                        params,
+                        &mut rows_visited,
+                        &mut c_theta,
+                        &mut heap,
+                    );
+                }),
+                DecodeTier::Values => {
+                    // The loop is driven here rather than fed through a closure, and that is a
+                    // measured decision, not style: routing this per-value state through a
+                    // closure environment cost ~2× the whole scan (`examples/decode_tiers.rs`,
+                    // its doc records the history).
+                    // Bounded by `visible` for the same reason as the serve-all arm above: the
+                    // final unbounded read would decode a buffer's worth of rows past the tile.
+                    let source = mask.decode_source(range.clone());
+                    let mut iter = source.bitmap().iter();
+                    iter.reset_at_or_after(range.start);
+                    let mut buf = [0u32; VALUE_BUF_LEN];
+                    let mut remaining = visible;
+                    'decode: while remaining > 0 {
+                        let want = remaining.min(VALUE_BUF_LEN as u64) as usize;
+                        let n = iter.next_many(&mut buf[..want]);
+                        if n == 0 {
+                            break;
+                        }
+                        for &row in &buf[..n] {
+                            if row >= range.end {
+                                break 'decode;
+                            }
+                            rows_visited += 1;
+                            let id = ids[row as usize];
+                            if params.threshold.admits(id) {
+                                c_theta += 1;
+                            }
+                            if heap.len() == params.cap {
+                                // Safe: len == cap >= 1 here, since cap == 0 returned early
+                                // above.
+                                if id >= heap.peek().expect("non-empty at len == cap").0 {
+                                    continue;
+                                }
+                                heap.pop();
+                            }
+                            heap.push((id, row));
+                        }
+                        remaining -= n as u64;
+                    }
+                }
             }
 
             let m = served_count(c_theta, params, visible);
@@ -451,6 +652,33 @@ mod tests {
         assert!(
             !serves_all_visible(&sat, 129),
             "saturated but over the cap still needs selection"
+        );
+    }
+
+    #[test]
+    fn the_tier_gate_switches_exactly_at_full_coverage_and_the_density_constant() {
+        // Full coverage is its own tier, not merely 100% density.
+        assert_eq!(decode_tier(256, 256), DecodeTier::FullRange);
+        assert_eq!(decode_tier(0, 0), DecodeTier::FullRange);
+
+        // The boundary: exactly RUN_DECODE_MIN_DENSITY_PCT fires runs, one row below does not.
+        assert_eq!(
+            decode_tier(RUN_DECODE_MIN_DENSITY_PCT, 100),
+            DecodeTier::Runs
+        );
+        assert_eq!(
+            decode_tier(RUN_DECODE_MIN_DENSITY_PCT - 1, 100),
+            DecodeTier::Values
+        );
+        assert_eq!(decode_tier(99, 100), DecodeTier::Runs);
+        assert_eq!(decode_tier(0, 100), DecodeTier::Values);
+
+        // No overflow at the row-space extremes: visible and range_len are both < 2^32, so the
+        // ×100 stays far inside u64.
+        assert_eq!(decode_tier(u32::MAX as u64 - 1, u32::MAX as u64), DecodeTier::Runs);
+        assert_eq!(
+            decode_tier((u32::MAX as u64) / 2, u32::MAX as u64),
+            DecodeTier::Values
         );
     }
 

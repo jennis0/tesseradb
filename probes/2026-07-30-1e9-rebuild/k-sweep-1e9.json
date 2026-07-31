@@ -1,0 +1,268 @@
+{
+  "server_us": {
+    "p50": 8634.0,
+    "p99": 561045.0,
+    "max": 591533.0
+  },
+  "end_to_end_us": {
+    "p50": 10035.043000243604,
+    "p99": 562426.9140025717,
+    "max": 592879.8830063897
+  },
+  "response_bytes": {
+    "mean": 66726.304,
+    "max": 247828
+  },
+  "points_returned_sample_n": 50,
+  "points_returned": {
+    "mean": 3813.74,
+    "max": 12814
+  },
+  "free_g_after": "               total        used        free      shared  buff/cache   available\nMem:              47           2          13           0          30          44\nSwap:             12           2           9\n"
+}
+
+=== k=500 ===
+  200/500 viewports issued...
+  400/500 viewports issued...
+               total        used        free      shared  buff/cache   available
+Mem:              47           2          13           0          31          44
+Swap:             12           2           9
+
+{
+  "server_us": {
+    "p50": 19527.0,
+    "p99": 667549.0,
+    "max": 788888.0
+  },
+  "end_to_end_us": {
+    "p50": 20835.319999605417,
+    "p99": 669216.2949984777,
+    "max": 790653.3510031295
+  },
+  "response_bytes": {
+    "mean": 78868.256,
+    "max": 782676
+  },
+  "points_returned_sample_n": 50,
+  "points_returned": {
+    "mean": 4380.8,
+    "max": 19038
+  },
+  "free_g_after": "               total        used        free      shared  buff/cache   available\nMem:              47           2          13           0          31          44\nSwap:             12           2           9\n"
+}
+
+=== k=1000 ===
+  200/500 viewports issued...
+  400/500 viewports issued...
+               total        used        free      shared  buff/cache   available
+Mem:              47           2          12           0          31          44
+Swap:             12           2           9
+
+{
+  "server_us": {
+    "p50": 19264.0,
+    "p99": 707127.0,
+    "max": 770328.0
+  },
+  "end_to_end_us": {
+    "p50": 20960.866997484118,
+    "p99": 708417.3159964848,
+    "max": 771830.071003933
+  },
+  "response_bytes": {
+    "mean": 78868.256,
+    "max": 782676
+  },
+  "points_returned_sample_n": 50,
+  "points_returned": {
+    "mean": 4380.8,
+    "max": 19038
+  },
+  "free_g_after": "               total        used        free      shared  buff/cache   available\nMem:              47           2          12           0          31          44\nSwap:             12           2           9\n"
+}
+
+=== k=2500 ===
+  200/500 viewports issued...
+  400/500 viewports issued...
+               total        used        free      shared  buff/cache   available
+Mem:              47           2          12           0          31          43
+Swap:             12           2           9
+
+{
+  "server_us": {
+    "p50": 20689.0,
+    "p99": 709013.0,
+    "max": 747090.0
+  },
+  "end_to_end_us": {
+    "p50": 21981.595004035626,
+    "p99": 710521.3989998447,
+    "max": 748915.6429946888
+  },
+  "response_bytes": {
+    "mean": 78868.256,
+    "max": 782676
+  },
+  "points_returned_sample_n": 50,
+  "points_returned": {
+    "mean": 4380.8,
+    "max": 19038
+  },
+  "free_g_after": "               total        used        free      shared  buff/cache   available\nMem:              47           2          12           0          31          43\nSwap:             12           2           9\n"
+}
+
+=== k=5000 ===
+  200/500 viewports issued...
+  400/500 viewports issued...
+               total        used        free      shared  buff/cache   available
+Mem:              47           2          12           0          31          43
+Swap:             12           2           9
+
+{
+  "server_us": {
+    "p50": 20430.0,
+    "p99": 763961.0,
+    "max": 777002.0
+  },
+  "end_to_end_us": {
+    "p50": 22974.763000092935,
+    "p99": 765756.0290026595,
+    "max": 778629.7369966633
+  },
+  "response_bytes": {
+    "mean": 78868.256,
+    "max": 782676
+  },
+  "points_returned_sample_n": 50,
+  "points_returned": {
+    "mean": 4380.8,
+    "max": 19038
+  },
+  "free_g_after": "               total        used        free      shared  buff/cache   available\nMem:              47           2          12           0          31          43\nSwap:             12           2           9\n"
+}
+
+{
+  "bundle": "/tmp/tessera-1e9",
+  "frozen_bundle_bytes": 47017054303,
+  "boot_seconds": 31.565627762000076,
+  "max_k_config": 6000,
+  "n_viewports": 500,
+  "seed": 0,
+  "k_sweep": {
+    "50": {
+      "server_us": {
+        "p50": 8634.0,
+        "p99": 561045.0,
+        "max": 591533.0
+      },
+      "end_to_end_us": {
+        "p50": 10035.043000243604,
+        "p99": 562426.9140025717,
+        "max": 592879.8830063897
+      },
+      "response_bytes": {
+        "mean": 66726.304,
+        "max": 247828
+      },
+      "points_returned_sample_n": 50,
+      "points_returned": {
+        "mean": 3813.74,
+        "max": 12814
+      },
+      "free_g_after": "               total        used        free      shared  buff/cache   available\nMem:              47           2          13           0          30          44\nSwap:             12           2           9\n"
+    },
+    "500": {
+      "server_us": {
+        "p50": 19527.0,
+        "p99": 667549.0,
+        "max": 788888.0
+      },
+      "end_to_end_us": {
+        "p50": 20835.319999605417,
+        "p99": 669216.2949984777,
+        "max": 790653.3510031295
+      },
+      "response_bytes": {
+        "mean": 78868.256,
+        "max": 782676
+      },
+      "points_returned_sample_n": 50,
+      "points_returned": {
+        "mean": 4380.8,
+        "max": 19038
+      },
+      "free_g_after": "               total        used        free      shared  buff/cache   available\nMem:              47           2          13           0          31          44\nSwap:             12           2           9\n"
+    },
+    "1000": {
+      "server_us": {
+        "p50": 19264.0,
+        "p99": 707127.0,
+        "max": 770328.0
+      },
+      "end_to_end_us": {
+        "p50": 20960.866997484118,
+        "p99": 708417.3159964848,
+        "max": 771830.071003933
+      },
+      "response_bytes": {
+        "mean": 78868.256,
+        "max": 782676
+      },
+      "points_returned_sample_n": 50,
+      "points_returned": {
+        "mean": 4380.8,
+        "max": 19038
+      },
+      "free_g_after": "               total        used        free      shared  buff/cache   available\nMem:              47           2          12           0          31          44\nSwap:             12           2           9\n"
+    },
+    "2500": {
+      "server_us": {
+        "p50": 20689.0,
+        "p99": 709013.0,
+        "max": 747090.0
+      },
+      "end_to_end_us": {
+        "p50": 21981.595004035626,
+        "p99": 710521.3989998447,
+        "max": 748915.6429946888
+      },
+      "response_bytes": {
+        "mean": 78868.256,
+        "max": 782676
+      },
+      "points_returned_sample_n": 50,
+      "points_returned": {
+        "mean": 4380.8,
+        "max": 19038
+      },
+      "free_g_after": "               total        used        free      shared  buff/cache   available\nMem:              47           2          12           0          31          43\nSwap:             12           2           9\n"
+    },
+    "5000": {
+      "server_us": {
+        "p50": 20430.0,
+        "p99": 763961.0,
+        "max": 777002.0
+      },
+      "end_to_end_us": {
+        "p50": 22974.763000092935,
+        "p99": 765756.0290026595,
+        "max": 778629.7369966633
+      },
+      "response_bytes": {
+        "mean": 78868.256,
+        "max": 782676
+      },
+      "points_returned_sample_n": 50,
+      "points_returned": {
+        "mean": 4380.8,
+        "max": 19038
+      },
+      "free_g_after": "               total        used        free      shared  buff/cache   available\nMem:              47           2          12           0          31          43\nSwap:             12           2           9\n"
+    }
+  },
+  "dictionary_vocab": 47968,
+  "grant_width": 10000,
+  "authorise_seconds": 0.2621792159989127,
+  "warmup_end_to_end_ms": 10680.827324002166,
+  "warmup_server_us": 10677770
+}

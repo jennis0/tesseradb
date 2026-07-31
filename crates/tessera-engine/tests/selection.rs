@@ -19,8 +19,8 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
-use tessera_engine::select::{SelectParams, Selection, Threshold};
-use tessera_lifecycle::{IngestBuffer, Overlay};
+use tessera_engine::select::{decode_tier, DecodeTier, SelectParams, Selection, Threshold};
+use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_spatial::{morton_of, tiler::sort_batch, Extent, Tile, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::write::{write_permutation, write_segment};
@@ -89,6 +89,17 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
 ///
 /// Uses an identity permutation so entity ids and row indices coincide — see the module doc.
 fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
+    mask_over_with(visible_rows, row_count, &Overlay::default())
+}
+
+/// [`mask_over`], but composed against `overlay` — how the run-decode tests obtain masks with
+/// non-empty diffs (suppressions land in `minus`, predicate-widens onto rows outside
+/// `visible_rows` land in `plus`; entity id == row index, so the overlay names rows directly).
+fn mask_over_with(
+    visible_rows: &[u32],
+    row_count: u32,
+    overlay: &Overlay,
+) -> (TempDir, EffectiveMask) {
     let temp = TempDir::new().unwrap();
     let bound = row_count as u64;
 
@@ -111,7 +122,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
     let mask = compose(
         &fragment,
         &satisfied,
-        &Overlay::default(),
+        overlay,
         &IngestBuffer::default(),
         base,
         &perm,
@@ -668,6 +679,10 @@ fn a_zero_cap_serves_no_points() {
             got.rows.is_empty(),
             "cap 0 must serve nothing ({threshold:?})"
         );
+        assert_eq!(
+            got.rows_visited, 0,
+            "the cap-0 early return reads no rows, so it must report none read ({threshold:?})"
+        );
     }
 }
 
@@ -710,6 +725,290 @@ fn every_served_row_is_visible() {
                     "row {row} was served but is not visible (I7)"
                 );
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The run decode (B9): mechanism equivalence against the retired per-value path
+// ---------------------------------------------------------------------------------------------
+
+/// The pre-B9 `Selection::of`, transcribed: materialise `rows_in_range`, iterate it one value at
+/// a time, serve-all and counting/heap branches exactly as they stood. Kept as the oracle because
+/// the run decode claims to be a *mechanism* change only — so the reference is the retired
+/// mechanism itself, not the definition (the definition is already pinned by
+/// [`selection_matches_the_definition_over_both_internal_branches`]).
+///
+/// Returns `(rows, rows_visited)`: the counter is first-class output here, asserted un-gated —
+/// a clamp off-by-one in the run decode would corrupt the bench's C4 numerator without failing
+/// any served-set assertion.
+fn per_value_selection(
+    seg: &Segment,
+    mask: &EffectiveMask,
+    range: std::ops::Range<u32>,
+    p: &SelectParams,
+    visible: u64,
+) -> (Vec<u32>, u64) {
+    use std::collections::BinaryHeap;
+
+    if p.cap == 0 {
+        return (Vec::new(), 0);
+    }
+    let ids = seg.data.columns.tessera_id();
+    let visible_rows = mask.rows_in_range(range);
+    let floor = p.k_min.min(p.cap);
+    let serves_all =
+        visible <= floor as u64 || (p.threshold.is_saturated() && visible <= p.cap as u64);
+
+    let mut rows_visited: u64 = 0;
+    let rows: Vec<u32> = if serves_all {
+        let mut rows: Vec<u32> = Vec::new();
+        for row in visible_rows.iter() {
+            rows_visited += 1;
+            rows.push(row);
+        }
+        rows.sort_unstable_by_key(|&row| ids[row as usize]);
+        rows
+    } else {
+        let mut c_theta: u64 = 0;
+        let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::new();
+        for row in visible_rows.iter() {
+            rows_visited += 1;
+            let id = ids[row as usize];
+            if p.threshold.admits(id) {
+                c_theta += 1;
+            }
+            if heap.len() == p.cap {
+                if id >= heap.peek().expect("non-empty at len == cap").0 {
+                    continue;
+                }
+                heap.pop();
+            }
+            heap.push((id, row));
+        }
+        let m = p
+            .cap
+            .min(floor.max(usize::try_from(c_theta).unwrap_or(usize::MAX)))
+            .min(usize::try_from(visible).unwrap_or(usize::MAX));
+        let mut kept: Vec<(u64, u32)> = heap.into_vec();
+        kept.sort_unstable();
+        kept.truncate(m);
+        kept.into_iter().map(|(_, row)| row).collect()
+    };
+    (rows, rows_visited)
+}
+
+/// **The adaptive-decode equivalence property.** `Selection::of`'s tiered decode is
+/// bit-identical — same `rows`, same `rows_visited` — to the retired per-value path, over
+/// randomised masks, ranges and parameters, on **both** decode routes, **both** internal
+/// branches, and **all three** tiers.
+///
+/// The diffs-empty arm is the one that exercises the direct-over-`base` decodes; a corpus that
+/// always has non-empty diffs tests only the fallback, which shares its bitmap with the oracle
+/// and proves nothing. The route predicate is `diffs_are_empty` and the tier predicate is the
+/// engine's own `decode_tier` (imported, not transcribed, so the stratification cannot drift
+/// from the gate), so asserting the route per mask plus the fired-counter floors below pins that
+/// every route × tier and route × branch combination was genuinely reached — mirroring the
+/// per-branch coverage asserts in
+/// [`selection_matches_the_definition_over_both_internal_branches`].
+///
+/// Tier-0 and tier-1 corpora cannot be left to chance (a random range almost never lands with
+/// ≥95% density), so two of the four range flavours are crafted against the block shapes: a
+/// range wholly inside a fully visible stretch (tier 0) and a visible block plus a short
+/// invisible tail (density ≥ the gate constant but not full — tier 1). With diffs present the
+/// overlay is confined to the lower third of the row space and the crafted ranges to the upper
+/// two thirds, so the diffs flip the *route* without dirtying the crafted densities.
+#[test]
+fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
+    use std::collections::HashSet;
+
+    let mut rng = StdRng::seed_from_u64(0xB9_0002);
+    let points: Vec<(f32, f32, u64)> = (0..4096)
+        .map(|_| {
+            (
+                rng.gen_range(0.0f32..1024.0),
+                rng.gen_range(0.0f32..1024.0),
+                rng.gen(),
+            )
+        })
+        .collect();
+    let seg = segment_of(&points);
+    let n = seg.row_count();
+    let diffs_bound = n / 3; // overlay effects stay below this row
+
+    // Four visibility shapes, density-stratified: sparse scatter and dense scatter feed tier 2,
+    // 256-row blocks feed tiers 0 (inside a block) and 1 (block + short tail) via the crafted
+    // ranges, and the 95%-scatter shape gives the run tier organic wide-range hits at the gate
+    // boundary.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Shape {
+        Sparse,
+        Dense,
+        Blocks,
+        NearFull,
+    }
+    let shapes: Vec<(Shape, Vec<u32>)> = vec![
+        (Shape::Sparse, (0..n).filter(|_| rng.gen_bool(0.07)).collect()),
+        (Shape::Dense, (0..n).filter(|_| rng.gen_bool(0.7)).collect()),
+        (Shape::Blocks, (0..n).filter(|r| (r / 256) % 2 == 0).collect()),
+        (Shape::NearFull, (0..n).filter(|r| r % 20 != 0).collect()),
+    ];
+
+    // fired_branch[route][branch]: branch 0 = serve-all, 1 = counting/heap.
+    // fired_tier[route][tier]: tier by the engine's own gate. Route 0 = diffs empty.
+    let mut fired_branch = [[0usize; 2]; 2];
+    let mut fired_tier = [[0usize; 3]; 2];
+
+    for (shape, visible_rows) in &shapes {
+        for diffs_present in [false, true] {
+            let mut overlay = Overlay::new();
+            if diffs_present {
+                // `minus ⊆ base`: suppress a sample of visible rows below `diffs_bound`.
+                // `plus ∩ base = ∅`: widen a sample of invisible rows below `diffs_bound` via a
+                // predicate onto the granted term (entity id == row index in this fixture).
+                for &row in visible_rows
+                    .iter()
+                    .filter(|&&r| r < diffs_bound)
+                    .step_by(43)
+                {
+                    overlay.apply(EntityId::new(row as u64), ChangeOp::Suppress, None);
+                }
+                let vis_set: HashSet<u32> = visible_rows.iter().copied().collect();
+                for row in (0..diffs_bound).filter(|r| !vis_set.contains(r)).step_by(11) {
+                    overlay.apply(
+                        EntityId::new(row as u64),
+                        ChangeOp::Predicate,
+                        Some(vec![TermId::new(0)]),
+                    );
+                }
+            }
+            let (_t, mask) = mask_over_with(visible_rows, n, &overlay);
+            assert_eq!(
+                mask.diffs_are_empty(),
+                !diffs_present,
+                "route-coverage precondition: the fixture must actually put each mask on the \
+                 route this arm claims to test"
+            );
+
+            for threshold in [
+                Threshold::Saturated,
+                Threshold::Cut(1),
+                Threshold::Cut(1u64 << 62),
+                Threshold::Cut(u64::MAX),
+            ] {
+                for cap in [1usize, 4, 30, 4096] {
+                    for k_min in [1usize, 2] {
+                        let p = params(k_min, cap, threshold);
+                        for i in 0..16 {
+                            let range = match i % 4 {
+                                // Wide random: multi-run decodes, the counting/heap branch.
+                                0 => {
+                                    let a = rng.gen_range(0..n);
+                                    let b = rng.gen_range(0..n);
+                                    a.min(b)..a.max(b) + 1
+                                }
+                                // Narrow random: the low counts the serve-all branch fires on.
+                                1 => {
+                                    let a = rng.gen_range(0..n);
+                                    a..(a + rng.gen_range(1..64)).min(n)
+                                }
+                                // Tier 0 crafted: wholly inside a fully visible stretch.
+                                2 => match shape {
+                                    Shape::Blocks => {
+                                        // Visible blocks start at 512·j; stay above diffs_bound.
+                                        let j = rng.gen_range(3..8u32);
+                                        let start = 512 * j + rng.gen_range(0..200);
+                                        start..start + rng.gen_range(1..56)
+                                    }
+                                    Shape::NearFull => {
+                                        // Rows 20k+1 ..= 20k+19 are all visible.
+                                        let k = rng.gen_range(69..203u32);
+                                        let start = 20 * k + 1 + rng.gen_range(0..10);
+                                        start..start + rng.gen_range(1..9)
+                                    }
+                                    _ => {
+                                        let a = rng.gen_range(0..n);
+                                        a..(a + rng.gen_range(1..64)).min(n)
+                                    }
+                                },
+                                // Tier 1 crafted: a visible block plus a short invisible tail —
+                                // density ≥ the gate constant, strictly below full.
+                                _ => match shape {
+                                    Shape::Blocks => {
+                                        let j = rng.gen_range(3..7u32);
+                                        let start = 512 * j;
+                                        start..start + 256 + rng.gen_range(1..13)
+                                    }
+                                    _ => {
+                                        let a = rng.gen_range(0..n);
+                                        let b = rng.gen_range(0..n);
+                                        a.min(b)..a.max(b) + 1
+                                    }
+                                },
+                            };
+                            let vis = mask.count_range(range.clone());
+                            if vis == 0 {
+                                continue;
+                            }
+                            let got = Selection::of(&mask, &seg.data, range.clone(), &p, vis);
+                            let (want_rows, want_visited) =
+                                per_value_selection(&seg, &mask, range.clone(), &p, vis);
+                            assert_eq!(
+                                got.rows, want_rows,
+                                "tiered decode diverged from the per-value path: diffs_present=\
+                                 {diffs_present} k_min={k_min} cap={cap} threshold={threshold:?} \
+                                 range={range:?} visible={vis}"
+                            );
+                            // R3: the counter, un-gated. Every tier counts the clamped rows it
+                            // actually reads, so both sides must equal the visible cardinality.
+                            assert_eq!(
+                                got.rows_visited, want_visited,
+                                "rows_visited diverged at diffs_present={diffs_present} \
+                                 cap={cap} threshold={threshold:?} range={range:?}"
+                            );
+                            assert_eq!(
+                                want_visited, vis,
+                                "the per-value oracle itself must read exactly the visible \
+                                 cardinality — if this fails the fixture is broken, not the \
+                                 tiered decode"
+                            );
+
+                            // Stratify by the engine's own predicates.
+                            let range_len = u64::from(range.end - range.start);
+                            let tier = match decode_tier(vis, range_len) {
+                                DecodeTier::FullRange => 0,
+                                DecodeTier::Runs => 1,
+                                DecodeTier::Values => 2,
+                            };
+                            fired_tier[usize::from(diffs_present)][tier] += 1;
+                            let floor = p.k_min.min(p.cap);
+                            let serves_all = vis <= floor as u64
+                                || (p.threshold.is_saturated() && vis <= p.cap as u64);
+                            fired_branch[usize::from(diffs_present)]
+                                [usize::from(!serves_all)] += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (route, route_name) in [(0, "diffs-empty"), (1, "diffs-present fallback")] {
+        for (branch, branch_name) in [(0, "serve-all"), (1, "counting/heap")] {
+            assert!(
+                fired_branch[route][branch] > 100,
+                "only {} comparisons hit the {route_name} route's {branch_name} branch — that \
+                 combination is barely covered and this test's silence proves nothing for it",
+                fired_branch[route][branch]
+            );
+        }
+        for (tier, tier_name) in [(0, "full-range"), (1, "runs"), (2, "values")] {
+            assert!(
+                fired_tier[route][tier] > 100,
+                "only {} comparisons hit the {route_name} route's {tier_name} tier — that \
+                 combination is barely covered and this test's silence proves nothing for it",
+                fired_tier[route][tier]
+            );
         }
     }
 }

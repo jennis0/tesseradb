@@ -24,6 +24,7 @@ pub mod input;
 pub mod observer;
 mod pipeline;
 
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
@@ -94,6 +95,24 @@ pub struct BuildArgs {
     pub identity_epoch: u32,
     /// The §13.3 row-range shard this build produces. Phase 1: 0.
     pub shard_id: u32,
+    /// Mint an external ID for every item from its source entity id (8 bytes LE), and write
+    /// the external-id extents and `ext-locator.u32`.
+    ///
+    /// **Off by default, deliberately** (2026-07-30 memo §3.2 D1; CLI `--mint-external-ids`):
+    /// contracts §2.4 forbids manufacturing an external ID for an item whose caller supplied
+    /// none, and the Phase 0 corpus supplies none — so the conformant default build writes no
+    /// sidecar at all (the reader is built for that: no extents, no locator, every resolve is
+    /// `None`). Bench fixtures pass the flag so they keep carrying the family's cost
+    /// realistically, per the owner ruling that made it a representative cost rather than a
+    /// reduction target.
+    pub mint_external_ids: bool,
+    /// Write `pairs.parquet` (R4). On by default; `--no-oracle-pairs` clears it.
+    ///
+    /// The file is read by nothing on any request path — its consumers are the test-only
+    /// Python reference oracle and build-cadence tooling — so a deployment that runs no
+    /// conformance suite against the bundle can skip writing and hashing it (~5–7 GB at 10⁹).
+    /// A bundle without it is still verifiable: MANIFEST lists only what was written.
+    pub emit_oracle_pairs: bool,
 }
 
 /// **Hand-written, not derived: `identity_key_hex` is the deployment key in plaintext.**
@@ -117,6 +136,8 @@ impl std::fmt::Debug for BuildArgs {
             )
             .field("identity_epoch", &self.identity_epoch)
             .field("shard_id", &self.shard_id)
+            .field("mint_external_ids", &self.mint_external_ids)
+            .field("emit_oracle_pairs", &self.emit_oracle_pairs)
             .finish()
     }
 }
@@ -355,10 +376,23 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         .map_err(|e| BuildError::io(&postings_path, e))?;
     fsync_file(&postings_path)?;
 
-    let pairs_path = terms_dir.join("pairs.parquet");
-    write_pairs_parquet(&pairs_path, &per_term)?;
+    let mut other_paths: Vec<PathBuf> = vec![postings_path.clone()];
+    if args.emit_oracle_pairs {
+        let pairs_path = terms_dir.join("pairs.parquet");
+        write_pairs_parquet(&pairs_path, &per_term)?;
+        other_paths.push(pairs_path);
+    }
 
-    let (external_ids_paths, ext_locator_path) = write_external_ids(&entities_dir, &staged, n)?;
+    // Minting is opt-in (see `BuildArgs::mint_external_ids`): with it off, no extent and no
+    // locator exist, which the reader treats as "no item has an external ID" — the ordinary
+    // case, not a degraded one.
+    let external_ids_paths = if args.mint_external_ids {
+        let (extent_paths, ext_locator_path) = write_external_ids(&entities_dir, &staged, n)?;
+        other_paths.push(ext_locator_path);
+        extent_paths
+    } else {
+        Vec::new()
+    };
 
     // ---- 6. the identity, computed BEFORE the tiler (2026-07-30 fold, memo §6) --------
     // `tessera_id` is now a sort key (`priority = high16(tessera_id)`, and the storage order is
@@ -393,20 +427,18 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     fsync_file(&permutation_path)?;
 
     // ---- 8. manifests ------------------------------------------------------------------
+    other_paths.extend([
+        permutation_path,
+        segment_dir.join("columns.arrow"),
+        segment_dir.join("morton.u32"),
+    ]);
     write_manifests(
         args,
         &BundleFiles {
             dict_paths,
             dict_records,
             external_ids_paths,
-            other_paths: vec![
-                postings_path,
-                pairs_path,
-                permutation_path,
-                segment_dir.join("columns.arrow"),
-                segment_dir.join("morton.u32"),
-                ext_locator_path,
-            ],
+            other_paths,
         },
         &plugin,
         n,
@@ -444,25 +476,30 @@ fn write_manifests(
     // accepts a file verified via either map, so both splits load — but the spec's wording is
     // what the Python oracle and the conformance byte-scanner will be written against.)
     let prefix_dir = args.out.join(PREFIX);
-    let mut manifest_files: BTreeMap<String, FileDigest> = BTreeMap::new();
     let mut dict_extents = Vec::new();
     for path in &files.dict_paths {
-        let rel = relative_to(&prefix_dir, path)?;
-        manifest_files.insert(rel.clone(), digest_file(path)?);
         dict_extents.push(DictExtent {
-            path: rel,
+            path: relative_to(&prefix_dir, path)?,
             records: files.dict_records,
         });
     }
     let mut external_id_extents = Vec::with_capacity(files.external_ids_paths.len());
     for path in &files.external_ids_paths {
-        let rel = relative_to(&prefix_dir, path)?;
-        manifest_files.insert(rel.clone(), digest_file(path)?);
-        external_id_extents.push(rel);
+        external_id_extents.push(relative_to(&prefix_dir, path)?);
     }
-    for path in &files.other_paths {
-        manifest_files.insert(relative_to(&prefix_dir, path)?, digest_file(path)?);
-    }
+    // Digest in parallel, one worker per file: SHA-256 is inherently sequential per file, but
+    // the files are independent, and at 10⁹ this stage re-reads ~47 GB. The map is assembled
+    // from (name, digest) pairs afterwards, so the manifest bytes cannot depend on scheduling.
+    let all_paths: Vec<&PathBuf> = files
+        .dict_paths
+        .iter()
+        .chain(&files.external_ids_paths)
+        .chain(&files.other_paths)
+        .collect();
+    let manifest_files: BTreeMap<String, FileDigest> = all_paths
+        .into_par_iter()
+        .map(|path| Ok((relative_to(&prefix_dir, path)?, digest_file(path)?)))
+        .collect::<Result<_>>()?;
 
     let bundle_bytes: u64 = manifest_files.values().map(|f| f.size).sum();
 
@@ -706,6 +743,25 @@ impl PairsParquetWriter {
         Ok(())
     }
 
+    /// Push one term's whole (ascending) entity list. Batch boundaries fall at exactly the
+    /// rows they would under per-row [`push`] — fill to `BATCH`, flush, continue — so the
+    /// file bytes are identical; only the 1.7 × 10⁹ call-per-row overhead is gone.
+    pub(crate) fn push_run(&mut self, term_id: u32, entities: &[u32]) -> Result<()> {
+        let mut rest = entities;
+        while !rest.is_empty() {
+            let take = (Self::BATCH - self.entities.len()).min(rest.len());
+            let (now, later) = rest.split_at(take);
+            self.entities.extend(now.iter().map(|&e| e as u64));
+            self.terms
+                .extend(std::iter::repeat_n(term_id, now.len()));
+            if self.entities.len() == Self::BATCH {
+                self.flush()?;
+            }
+            rest = later;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<()> {
         if self.entities.is_empty() {
             return Ok(());
@@ -802,11 +858,18 @@ fn write_ext_locator(
         }
         locator[entity] = ordinal as u32;
     }
-    let mut file = File::create(&path).map_err(|e| BuildError::io(&path, e))?;
+    // Buffered: an unbuffered 4-bytes-per-write loop is one syscall per entity — measured as
+    // the majority of the whole external-ids stage at 10⁸ (the bytes written are identical).
+    let file = File::create(&path).map_err(|e| BuildError::io(&path, e))?;
+    let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
     for slot in &locator {
-        file.write_all(&slot.to_le_bytes())
+        writer
+            .write_all(&slot.to_le_bytes())
             .map_err(|e| BuildError::io(&path, e))?;
     }
+    let file = writer
+        .into_inner()
+        .map_err(|e| BuildError::io(&path, e.into_error()))?;
     file.sync_all().map_err(|e| BuildError::io(&path, e))?;
     if let Some(parent) = path.parent() {
         fsync_dir(parent)?;
@@ -1027,6 +1090,8 @@ mod tests {
             identity_key_hex: KEY_HEX.to_string(),
             identity_epoch: 1,
             shard_id: 0,
+            mint_external_ids: true,
+            emit_oracle_pairs: true,
         };
         let printed = format!("{args:?}");
         assert!(

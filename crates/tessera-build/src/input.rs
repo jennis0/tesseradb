@@ -17,7 +17,9 @@
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::ops::ControlFlow;
 use std::path::Path;
+use std::sync::mpsc;
 
 use arrow::array::{Array, Float32Array, Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::DataType;
@@ -61,14 +63,43 @@ pub const IDENTITY_EXTENT: Extent = Extent {
 ///    with real coordinates must ship `x`/`y` and take branch 1.
 pub fn read_points(path: &Path, extent: &Extent, limit: Option<u64>) -> Result<Vec<PointRow>> {
     let mut out = Vec::new();
-    scan_points(path, extent, limit, |row| out.push(row))?;
+    scan_points(path, extent, limit, |row| {
+        out.push(row);
+        ControlFlow::Continue(())
+    })?;
     Ok(out)
 }
 
-/// The streaming form of [`read_points`]: calls `visit` once per selected row and never holds
-/// more than one decoded record batch. The batch build uses this so the points file — 10⁹ rows
-/// in the Phase 0 corpus — can be traversed several times without ever being materialised.
-pub fn scan_points<F: FnMut(PointRow)>(
+/// How many row groups each decoder worker claims, and the decoded-batch channel bound.
+///
+/// Decode is the expensive half of a scan (Snappy + delta unpacking); visiting is a few
+/// instructions per row. So row groups are decoded on a small pool of worker threads and
+/// *visited* on the calling thread, which keeps `visit` free of any `Send` requirement and the
+/// resident set bounded by `DECODE_CHANNEL_BATCHES` decoded batches. **Rows arrive in no
+/// particular order across row groups.** Every consumer is insensitive to arrival order: both
+/// builds sort or group everything they read (the streaming build's pipeline argues this per
+/// pass; the linear build sorts points by source id and groups pairs per entity before use).
+const DECODE_WORKERS_MAX: usize = 6;
+const DECODE_CHANNEL_BATCHES: usize = 16;
+
+fn decode_worker_count(row_groups: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(DECODE_WORKERS_MAX)
+        .min(row_groups)
+        .max(1)
+}
+
+/// The streaming form of [`read_points`]: calls `visit` once per selected row, holding only a
+/// bounded number of decoded record batches. The batch build uses this so the points file —
+/// 10⁹ rows in the Phase 0 corpus — can be traversed several times without ever being
+/// materialised. Row groups are decoded in parallel; rows are therefore visited in **no
+/// guaranteed order** (see [`decode_worker_count`]). `visit` returns [`ControlFlow`]:
+/// `Break(())` stops the scan promptly (remaining rows are skipped and the decode workers wind
+/// down) — the escape hatch for a caller whose own bookkeeping has already failed, so a fatal
+/// error does not decode the rest of a multi-gigabyte file first.
+pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     path: &Path,
     extent: &Extent,
     limit: Option<u64>,
@@ -108,71 +139,136 @@ pub fn scan_points<F: FnMut(PointRow)>(
         };
 
     // Project: the Phase 0 corpus carries columns this build has no use for, and at 10^9 rows
-    // not decoding them is the difference between one pass and two.
+    // not decoding them is the difference between one pass and two. Each decode worker builds
+    // its own `ProjectionMask` from these root indices against its own reader.
     let mut roots = Vec::with_capacity(wanted.len());
     for name in &wanted {
         roots.push(column_index(path, &schema, name)?);
     }
-    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
 
     let keep = prunable_row_groups(builder.metadata(), id_idx_in_file, limit);
-    let reader = builder
-        .with_row_groups(keep)
-        .with_projection(projection)
-        .with_batch_size(65_536)
-        .build()
-        .map_err(|e| BuildError::parquet(path, e))?;
+    drop(builder);
+    let morton_input = !wanted.contains(&"x");
+    let workers = decode_worker_count(keep.len());
+    let shards: Vec<Vec<usize>> = keep
+        .chunks(keep.len().div_ceil(workers).max(1))
+        .map(|c| c.to_vec())
+        .collect();
 
-    let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let id_idx = column_index(path, &projected, "entity_id")?;
-    let geometry = if wanted.contains(&"x") {
-        Geometry::Xy(
-            column_index(path, &projected, "x")?,
-            column_index(path, &projected, "y")?,
-        )
-    } else {
-        Geometry::Morton(column_index(path, &projected, "morton")?)
-    };
-
-    for batch in reader {
-        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
-        match geometry {
-            Geometry::Xy(xi, yi) => {
-                let xs = read_f32_column(path, &batch, xi, "x")?;
-                let ys = read_f32_column(path, &batch, yi, "y")?;
-                for i in 0..batch.num_rows() {
-                    if limit.is_some_and(|l| ids[i] >= l) {
-                        continue;
-                    }
-                    visit(PointRow {
-                        source_id: ids[i],
-                        x: xs[i],
-                        y: ys[i],
-                    });
-                }
-            }
-            Geometry::Morton(mi) => {
-                let codes = read_u64_column(path, &batch, mi, "morton")?;
-                for i in 0..batch.num_rows() {
-                    if limit.is_some_and(|l| ids[i] >= l) {
-                        continue;
-                    }
-                    let code = u32::try_from(codes[i]).map_err(|_| BuildError::Schema {
-                        path: path.to_path_buf(),
-                        detail: format!("morton code {} does not fit in u32", codes[i]),
-                    })?;
-                    let (cx, cy) = deinterleave(code);
-                    visit(PointRow {
-                        source_id: ids[i],
-                        x: cx as f32,
-                        y: cy as f32,
-                    });
-                }
-            }
-        }
+    /// One decoded batch's columns, extracted on a worker thread.
+    enum PointCols {
+        Xy(Vec<u64>, Vec<f32>, Vec<f32>),
+        Morton(Vec<u64>, Vec<u64>),
     }
-    Ok(())
+
+    let (tx, rx) = mpsc::sync_channel::<std::result::Result<PointCols, BuildError>>(
+        DECODE_CHANNEL_BATCHES,
+    );
+    std::thread::scope(|scope| {
+        for shard in shards {
+            let tx = tx.clone();
+            let roots = roots.clone();
+            scope.spawn(move || {
+                let decode = |tx: &mpsc::SyncSender<_>| -> Result<()> {
+                    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+                    let b = ParquetRecordBatchReaderBuilder::try_new(file)
+                        .map_err(|e| BuildError::parquet(path, e))?;
+                    let projection =
+                        parquet::arrow::ProjectionMask::roots(b.parquet_schema(), roots);
+                    let reader = b
+                        .with_row_groups(shard)
+                        .with_projection(projection)
+                        .with_batch_size(65_536)
+                        .build()
+                        .map_err(|e| BuildError::parquet(path, e))?;
+                    let projected = arrow::array::RecordBatchReader::schema(&reader);
+                    let id_idx = column_index(path, &projected, "entity_id")?;
+                    let geometry = if morton_input {
+                        Geometry::Morton(column_index(path, &projected, "morton")?)
+                    } else {
+                        Geometry::Xy(
+                            column_index(path, &projected, "x")?,
+                            column_index(path, &projected, "y")?,
+                        )
+                    };
+                    for batch in reader {
+                        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+                        let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
+                        let cols = match geometry {
+                            Geometry::Xy(xi, yi) => PointCols::Xy(
+                                ids,
+                                read_f32_column(path, &batch, xi, "x")?,
+                                read_f32_column(path, &batch, yi, "y")?,
+                            ),
+                            Geometry::Morton(mi) => PointCols::Morton(
+                                ids,
+                                read_u64_column(path, &batch, mi, "morton")?,
+                            ),
+                        };
+                        if tx.send(Ok(cols)).is_err() {
+                            // The consumer went away (its own error path); stop quietly.
+                            return Ok(());
+                        }
+                    }
+                    Ok(())
+                };
+                if let Err(e) = decode(&tx) {
+                    let _ = tx.send(Err(e));
+                }
+            });
+        }
+        drop(tx);
+
+        let mut consume = || -> Result<()> {
+            while let Ok(message) = rx.recv() {
+                match message? {
+                    PointCols::Xy(ids, xs, ys) => {
+                        for i in 0..ids.len() {
+                            if limit.is_some_and(|l| ids[i] >= l) {
+                                continue;
+                            }
+                            if visit(PointRow {
+                                source_id: ids[i],
+                                x: xs[i],
+                                y: ys[i],
+                            })
+                            .is_break()
+                            {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    PointCols::Morton(ids, codes) => {
+                        for i in 0..ids.len() {
+                            if limit.is_some_and(|l| ids[i] >= l) {
+                                continue;
+                            }
+                            let code = u32::try_from(codes[i]).map_err(|_| BuildError::Schema {
+                                path: path.to_path_buf(),
+                                detail: format!("morton code {} does not fit in u32", codes[i]),
+                            })?;
+                            let (cx, cy) = deinterleave(code);
+                            if visit(PointRow {
+                                source_id: ids[i],
+                                x: cx as f32,
+                                y: cy as f32,
+                            })
+                            .is_break()
+                            {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+        let result = consume();
+        // Drop the receiver BEFORE the scope joins the workers: a worker blocked mid-send into
+        // a full channel would otherwise deadlock the join when `consume` exited early.
+        drop(rx);
+        result
+    })
 }
 
 /// Read `pairs` (`entity_id`, `term_id`), keeping rows with `entity_id < limit`, grouped into
@@ -181,7 +277,8 @@ pub fn scan_points<F: FnMut(PointRow)>(
 pub fn read_pairs(path: &Path, limit: Option<u64>) -> Result<HashMap<u64, Vec<u64>>> {
     let mut grouped: HashMap<u64, Vec<u64>> = HashMap::new();
     scan_pairs(path, limit, |source_id, term| {
-        grouped.entry(source_id).or_default().push(term)
+        grouped.entry(source_id).or_default().push(term);
+        ControlFlow::Continue(())
     })?;
     for terms in grouped.values_mut() {
         terms.sort_unstable();
@@ -191,10 +288,17 @@ pub fn read_pairs(path: &Path, limit: Option<u64>) -> Result<HashMap<u64, Vec<u6
 }
 
 /// The streaming form of [`read_pairs`]: calls `visit(source_entity_id, source_term_id)` once
-/// per selected row, in file order, holding only one decoded record batch. Rows are **not**
+/// per selected row, holding only a bounded number of decoded record batches. Rows are **not**
 /// grouped, sorted or deduplicated — that is the caller's business, and at 1.72 × 10⁹ pairs it
-/// is the difference between a bounded traversal and a 70 GB `HashMap`.
-pub fn scan_pairs<F: FnMut(u64, u64)>(path: &Path, limit: Option<u64>, mut visit: F) -> Result<()> {
+/// is the difference between a bounded traversal and a 70 GB `HashMap`. Row groups are decoded
+/// in parallel; rows are therefore visited in **no guaranteed order** (see
+/// [`decode_worker_count`]), and `visit`'s `Break` stops the scan promptly (see
+/// [`scan_points`]).
+pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
+    path: &Path,
+    limit: Option<u64>,
+    mut visit: F,
+) -> Result<()> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
@@ -203,24 +307,78 @@ pub fn scan_pairs<F: FnMut(u64, u64)>(path: &Path, limit: Option<u64>, mut visit
     let term_idx = column_index(path, &schema, "term_id")?;
 
     let keep = prunable_row_groups(builder.metadata(), id_idx, limit);
-    let reader = builder
-        .with_row_groups(keep)
-        .with_batch_size(65_536)
-        .build()
-        .map_err(|e| BuildError::parquet(path, e))?;
+    drop(builder);
+    let workers = decode_worker_count(keep.len());
+    let shards: Vec<Vec<usize>> = keep
+        .chunks(keep.len().div_ceil(workers).max(1))
+        .map(|c| c.to_vec())
+        .collect();
 
-    for batch in reader {
-        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
-        let terms = read_u64_column(path, &batch, term_idx, "term_id")?;
-        for i in 0..batch.num_rows() {
-            if limit.is_some_and(|l| ids[i] >= l) {
-                continue;
-            }
-            visit(ids[i], terms[i]);
+    let (tx, rx) = mpsc::sync_channel::<std::result::Result<(Vec<u64>, Vec<u64>), BuildError>>(
+        DECODE_CHANNEL_BATCHES,
+    );
+    std::thread::scope(|scope| {
+        for shard in shards {
+            let tx = tx.clone();
+            scope.spawn(move || {
+                let decode = |tx: &mpsc::SyncSender<_>| -> Result<()> {
+                    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+                    let b = ParquetRecordBatchReaderBuilder::try_new(file)
+                        .map_err(|e| BuildError::parquet(path, e))?;
+                    let reader = b
+                        .with_row_groups(shard)
+                        .with_batch_size(65_536)
+                        .build()
+                        .map_err(|e| BuildError::parquet(path, e))?;
+                    for batch in reader {
+                        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+                        let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
+                        let terms = read_u64_column(path, &batch, term_idx, "term_id")?;
+                        if tx.send(Ok((ids, terms))).is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Ok(())
+                };
+                if let Err(e) = decode(&tx) {
+                    let _ = tx.send(Err(e));
+                }
+            });
         }
-    }
-    Ok(())
+        drop(tx);
+
+        let mut consume = || -> Result<()> {
+            while let Ok(message) = rx.recv() {
+                let (ids, terms) = message?;
+                for i in 0..ids.len() {
+                    if limit.is_some_and(|l| ids[i] >= l) {
+                        continue;
+                    }
+                    if visit(ids[i], terms[i]).is_break() {
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(())
+        };
+        let result = consume();
+        // See scan_points: the receiver must drop before the scope joins the workers.
+        drop(rx);
+        result
+    })
+}
+
+/// The points file's total row count, from parquet metadata alone — no decode.
+///
+/// Exact for an unfiltered scan: [`scan_points`] visits every row when there is no limit
+/// (the extent quantises, it never filters). With a limit the selected count is data-dependent
+/// and only a counting scan can establish it. The count is advisory (it sizes an allocation);
+/// every correctness property downstream is established from the rows actually read.
+pub fn count_point_rows(path: &Path) -> Result<u64> {
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    Ok(builder.metadata().file_metadata().num_rows().max(0) as u64)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -309,6 +467,16 @@ fn read_u64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
         DataType::Int64 | DataType::Int32 => {
             let cast = arrow::compute::cast(column, &DataType::UInt64)
                 .map_err(|e| BuildError::arrow(path, e))?;
+            // Arrow's default cast is *safe*: a negative value becomes a null, and reading
+            // `.values()` underneath a null yields an arbitrary id silently. Nulls were checked
+            // on the source column above; check again after the cast so a negative id is a
+            // schema error, never a wrong id.
+            if cast.null_count() > 0 {
+                return Err(BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!("column '{name}' contains negative values"),
+                });
+            }
             cast.as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("cast to UInt64")

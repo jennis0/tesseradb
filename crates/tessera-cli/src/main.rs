@@ -40,6 +40,18 @@ enum Command {
         /// Keep only source rows with `entity_id < LIMIT` (a prefix of entity space).
         #[arg(long)]
         limit: Option<u64>,
+        /// Mint an external ID for every item from its source entity id, and write the
+        /// external-id extents and locator. **Off by default**: contracts §2.4 forbids
+        /// manufacturing an external ID for an item whose caller supplied none, and this
+        /// build's inputs carry none — the flag exists so benchmark fixtures can keep carrying
+        /// the sidecar's cost realistically (2026-07-30 memo §3.2 D1).
+        #[arg(long)]
+        mint_external_ids: bool,
+        /// Skip writing `pairs.parquet`. The file serves only the test-time reference oracle
+        /// and build-cadence tooling — nothing on any request path reads it — so a deployment
+        /// that runs no conformance suite against the bundle can save writing and hashing it.
+        #[arg(long)]
+        no_oracle_pairs: bool,
 
         /// Carry `identity.key` and `identity.epoch` forward from an existing bundle's
         /// MANIFEST.json. **This is the normal rebuild path** (contracts §2.2).
@@ -434,6 +446,8 @@ fn main() -> ExitCode {
             extent,
             slice_id,
             limit,
+            mint_external_ids,
+            no_oracle_pairs,
             carry_id_key_from,
             id_key_file,
             id_key,
@@ -479,6 +493,8 @@ fn main() -> ExitCode {
                 identity_key_hex: identity.hex,
                 identity_epoch: identity.epoch,
                 shard_id: 0,
+                mint_external_ids,
+                emit_oracle_pairs: !no_oracle_pairs,
             };
             match tessera_build::build(&args) {
                 Ok(report) => {

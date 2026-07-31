@@ -189,6 +189,8 @@ fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
         identity_key_hex: TEST_KEY_HEX.to_string(),
         identity_epoch: 1,
         shard_id: 0,
+        mint_external_ids: true,
+        emit_oracle_pairs: true,
     };
     build(&args).expect("fixture build should succeed");
 }
@@ -1006,6 +1008,58 @@ fn item_epoch_check_is_entity_independent_and_decided_before_inversion() {
     ));
 }
 
+/// A bundle built without minted external IDs (the spec-conformant default — contracts §2.4:
+/// callers supplied none, so the build wrote no extents and no locator) must serve the item
+/// drill-down normally: `external_id` is `None` — the ordinary "identity is the tessera_id"
+/// case — never an `InvalidSidecar` error. Regression test for the review finding that
+/// `external_id_of_checked` treated every built entity of a no-sidecar bundle as a
+/// live-map inconsistency and 500'd the whole `/v1/items` verb.
+#[test]
+fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    write_points_n(&tmp.path().join("points.parquet"), N_ITEMS);
+    write_pairs_n(&tmp.path().join("pairs.parquet"), N_ITEMS);
+    let args = BuildArgs {
+        points: tmp.path().join("points.parquet"),
+        pairs: tmp.path().join("pairs.parquet"),
+        out: bundle_root.clone(),
+        extent: extent(),
+        slice_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        identity_epoch: 1,
+        shard_id: 0,
+        mint_external_ids: false,
+        emit_oracle_pairs: false,
+    };
+    build(&args).expect("no-mint build should succeed");
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    // Any built entity: below the high-water, no locator anywhere. Drill-down must succeed
+    // with no external id, for the first entity and the last alike.
+    // (`item`'s third argument is the fix-wave epoch check, landed on this branch after main's
+    // version of this test was written; `None` preserves its original meaning.)
+    for entity in [0, N_ITEMS - 1] {
+        let id = test_key().forward(0, EntityId::new(entity)).unwrap();
+        let out = engine
+            .item(&session, id, None)
+            .expect("a no-sidecar bundle must serve items, not error");
+        let out = out.expect("a visible item must resolve");
+        assert_eq!(
+            out.external_id, None,
+            "an item with no caller-supplied external id reports None"
+        );
+    }
+}
+
 /// Owner ruling: an identifier naming nothing and one naming an invisible item are indistinguishable
 /// — one `Ok(None)` from one code path, with no error variant separating the two.
 #[test]
@@ -1362,6 +1416,8 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             identity_key_hex: TEST_KEY_HEX.to_string(),
             identity_epoch: 1,
             shard_id: 0,
+            mint_external_ids: true,
+            emit_oracle_pairs: true,
         };
         build(&args).expect("2.4M fixture build should succeed");
     }

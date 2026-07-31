@@ -1,0 +1,59 @@
+{
+  "bundle": "/tmp/tessera-1e9-categories-archive",
+  "frozen_bundle_bytes": 46774582068,
+  "boot_seconds": 23.045421559996612,
+  "n_repeats": 500,
+  "seed": 0,
+  "fixed_viewport": {
+    "zoom": 6,
+    "bbox": [
+      27977.508855261374,
+      39432.932286538555,
+      44361.508855261374,
+      55816.932286538555
+    ]
+  },
+  "k_sweep_fixed": {
+    "50": {
+      "server_us": {
+        "p50": 58459.0,
+        "p99": 66895.0,
+        "max": 67722.0,
+        "min": 56649.0
+      },
+      "end_to_end_us": {
+        "p50": 59814.59000031464,
+        "p99": 68321.7749974574,
+        "max": 69225.5780013511
+      },
+      "response_bytes": {
+        "mean": 91860.0,
+        "max": 91860
+      },
+      "server_us_p99_minus_p50": 8436.0
+    },
+    "1000": {
+      "server_us": {
+        "p50": 79059.0,
+        "p99": 86016.0,
+        "max": 89418.0,
+        "min": 77201.0
+      },
+      "end_to_end_us": {
+        "p50": 80462.8639962175,
+        "p99": 87498.23800462764,
+        "max": 90745.7159992191
+      },
+      "response_bytes": {
+        "mean": 107156.0,
+        "max": 107156
+      },
+      "server_us_p99_minus_p50": 6957.0
+    }
+  },
+  "dictionary_vocab": 15694,
+  "grant_width": 1000,
+  "authorise_seconds": 0.03223007800261257,
+  "warmup_end_to_end_ms": 2714.53257399844,
+  "warmup_server_us": 2711741
+}

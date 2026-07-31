@@ -115,9 +115,12 @@ for scale in "${SCALES[@]}"; do
     echo "BUILD scale=$scale set=$set_name -> $out"
     rm -rf "$out"; mkdir -p "$out"
     started=$(date +%s)
+    # --mint-external-ids: fixtures keep carrying the external-ID family's cost realistically
+    # (memo 2026-07-30 §3.2 D1 — the default build is now spec-conformant and writes none).
     if "$TESSERA" build \
         --points "$GEOMETRY" --pairs "$pairs" --out "$out" \
         --extent "$EXTENT" --slice s0 --limit "$scale" \
+        --mint-external-ids \
         --id-key "$KEY" --epoch 1 >"$log" 2>&1; then
       elapsed=$(( $(date +%s) - started ))
       bytes=$(du -sb "$out" | cut -f1)

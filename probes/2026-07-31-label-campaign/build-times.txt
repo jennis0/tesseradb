@@ -1,0 +1,6 @@
+/tmp/claude-1000/-home-joe-code-tessera/60a64ead-904b-4305-a434-fd88c8f93418/scratchpad/build_surnames.log:	Elapsed (wall clock) time (h:mm:ss or m:ss): 3:11:50
+/tmp/claude-1000/-home-joe-code-tessera/60a64ead-904b-4305-a434-fd88c8f93418/scratchpad/build_surnames.log:	Maximum resident set size (kbytes): 47643300
+/tmp/claude-1000/-home-joe-code-tessera/60a64ead-904b-4305-a434-fd88c8f93418/scratchpad/build_categories-archive.log:	Elapsed (wall clock) time (h:mm:ss or m:ss): 6:45.89
+/tmp/claude-1000/-home-joe-code-tessera/60a64ead-904b-4305-a434-fd88c8f93418/scratchpad/build_categories-archive.log:	Maximum resident set size (kbytes): 27626144
+/tmp/claude-1000/-home-joe-code-tessera/60a64ead-904b-4305-a434-fd88c8f93418/scratchpad/build_hash-flat.log:	Elapsed (wall clock) time (h:mm:ss or m:ss): 7:24.68
+/tmp/claude-1000/-home-joe-code-tessera/60a64ead-904b-4305-a434-fd88c8f93418/scratchpad/build_hash-flat.log:	Maximum resident set size (kbytes): 28408996

@@ -63,6 +63,8 @@ fn ensure_bundle() -> PathBuf {
             identity_key_hex: TEST_KEY_HEX.to_string(),
             identity_epoch: 1,
             shard_id: 0,
+            mint_external_ids: false,
+            emit_oracle_pairs: false,
         };
         build(&args).expect("2.4M fixture build should succeed");
     }

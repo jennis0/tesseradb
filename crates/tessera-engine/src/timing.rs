@@ -84,8 +84,10 @@ pub struct StageTimings {
     /// **Cross-worker sum under `compute_threads > 1`, not a wall-clock partition** — see this
     /// struct's doc.
     pub count_ns: u64,
-    /// §7.2's selection, summed over tiles: `rows_in_range`'s bitmap work plus the threshold count
-    /// and the bounded selection over it.
+    /// §7.2's selection, summed over tiles: the tiered decode of the visible set
+    /// (`select::decode_tier` — full-range slice, run decode, or batched value decode, each
+    /// walking `base` steady-state and the `rows_in_range` bitmap fallback when overlay diffs
+    /// exist) plus the threshold count and the bounded selection over it.
     ///
     /// **Cross-worker sum under `compute_threads > 1`, not a wall-clock partition** — see this
     /// struct's doc.
@@ -127,8 +129,10 @@ pub struct StageTimings {
     /// Σ over tiles of the rows selection actually **read**, counted inside the loops that read
     /// them (`Selection::rows_visited`).
     ///
-    /// Renamed from `select_rows_materialised`: nothing is materialised any more — `rows_in_range`
-    /// returns a bitmap — so the old name described a `Vec` that no longer exists.
+    /// Renamed from `select_rows_materialised`: no row `Vec` is materialised any more — the
+    /// steady-state decode route walks `base` in place, and the diffs-present fallback's
+    /// `rows_in_range` temporary is a bitmap — so the old name described a `Vec` that no longer
+    /// exists.
     ///
     /// **It must be an observation of the selection path, never a restatement of another counter.**
     /// A version of this briefly took its value from the caller's `visible`, which made the natural

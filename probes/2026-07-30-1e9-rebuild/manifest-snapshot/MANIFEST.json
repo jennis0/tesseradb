@@ -1,0 +1,111 @@
+{
+  "bundle_format": 1,
+  "created_at": "2026-07-30T19:01:30.034979317+00:00",
+  "data_plugin_hash": "d77ad0a767df7d1b6d9f0a962d81c0f9fc42b282ce493c0d7141676576e4d879",
+  "declared_bounds": {
+    "max_distinct_terms": 200000000,
+    "max_terms_per_item": 4096,
+    "max_terms_per_token": 100000
+  },
+  "declared_scalars": [],
+  "small_term_threshold": 32,
+  "quantisation": {
+    "x_min": 0.0,
+    "x_max": 65536.0,
+    "y_min": 0.0,
+    "y_max": 65536.0
+  },
+  "entity_id_high_water": 1000000000,
+  "identity": {
+    "construction": "feistel-splitmix64-v1",
+    "rounds": 8,
+    "key": "000102030405060708090a0b0c0d0e0f",
+    "shard_id": 0,
+    "epoch": 1
+  },
+  "slices": [
+    {
+      "id": "s0",
+      "display_name": "s0"
+    }
+  ],
+  "partitions": [
+    {
+      "phash": "default",
+      "required_terms": []
+    }
+  ],
+  "provenance": {
+    "generating_set_choice": "prompt-sample"
+  },
+  "files": {
+    "dictionary/terms-0.dict": {
+      "size": 420602,
+      "sha256": "ae2e302cfc9d666d2cb77556aeeb6ebb195624cc12629c79ab4d85dfa59f7bfa"
+    },
+    "partitions/default/entities/ext-locator.u32": {
+      "size": 4000000000,
+      "sha256": "a504da1ea0f33c7452e08e2d1f0450e5f0672d68e97a92446948be79a2b3d9bd"
+    },
+    "partitions/default/entities/external-ids-0.arrow": {
+      "size": 1625000962,
+      "sha256": "e83485e3c7013483d9d440034dee1a1d0c84fdee3df80bd9e9916c0591ada1c7"
+    },
+    "partitions/default/entities/external-ids-1.arrow": {
+      "size": 1625000962,
+      "sha256": "c3506f0381f1c7d1718c20c153cfe16cb31e55e5994e0ebcce1b87a82f4102c6"
+    },
+    "partitions/default/entities/external-ids-2.arrow": {
+      "size": 1625000962,
+      "sha256": "32d5f88203f2a206cf7fbea5bdc504186ff2a0057ab2c2539008788dc7944c23"
+    },
+    "partitions/default/entities/external-ids-3.arrow": {
+      "size": 1625000962,
+      "sha256": "1abdb38bca24cce26975e2915a91a6d9eb5d594cf213ba396cffb9c9025b4372"
+    },
+    "partitions/default/entities/external-ids-4.arrow": {
+      "size": 1625000962,
+      "sha256": "22ba9b4f9aa5a74a397729ceefa1c5060dfeecbfd3b90cbfa62f8686b4ba24c4"
+    },
+    "partitions/default/entities/external-ids-5.arrow": {
+      "size": 1625000962,
+      "sha256": "aa274fc7fea3d75fcb3853efbf32bb6fb590ee0dba22dd425055cdb7029c0b47"
+    },
+    "partitions/default/entities/external-ids-6.arrow": {
+      "size": 1625000962,
+      "sha256": "6440444a1bfcc002905be5fae82c8bcde0626a0ca45dfb29d1531e32cec0cbb6"
+    },
+    "partitions/default/entities/external-ids-7.arrow": {
+      "size": 1625000962,
+      "sha256": "5c69740cdf567df180d4156de46b44c3883e517b33a9a86a5e68ef8266fd6317"
+    },
+    "partitions/default/entities/external-ids-8.arrow": {
+      "size": 1625000962,
+      "sha256": "820a66d6e31110fff0f58cb96839bb672cdee5557fdc121f0bb80128715851fb"
+    },
+    "partitions/default/entities/external-ids-9.arrow": {
+      "size": 1625000962,
+      "sha256": "07a35162c187d5bca00743713cfbfa16f08737d557a8793defb97b5f5ec5fe09"
+    },
+    "partitions/default/slices/s0/permutation.bin": {
+      "size": 4000000016,
+      "sha256": "a5e76ab33160d8e4b821ad1a52d85102254f036cef38912c78194718fc32366c"
+    },
+    "partitions/default/slices/s0/segments/seg-0/columns.arrow": {
+      "size": 18500001058,
+      "sha256": "c751a4a1bbdcb9756469f431a3d22c9a9492d6f875fff35c11cb396f30f3f63c"
+    },
+    "partitions/default/slices/s0/segments/seg-0/morton.u32": {
+      "size": 4000000000,
+      "sha256": "c4761913c3dda52c8e9ce904c4dabb16deef710ba864fd889919a8b076f17e85"
+    },
+    "partitions/default/terms/pairs.parquet": {
+      "size": 121442840,
+      "sha256": "e6ea0d2140774087a21b654bcc14ec3f18432ac26ed6c0287926d16653642c4a"
+    },
+    "partitions/default/terms/postings.arrow": {
+      "size": 145175218,
+      "sha256": "d76aea8be595feeb3cd9c9fe0f0a9a14266f82996be36c681f57e83206110a38"
+    }
+  }
+}

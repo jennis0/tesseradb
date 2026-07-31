@@ -80,6 +80,8 @@ fn ensure_bundle() -> PathBuf {
             identity_key_hex: TEST_KEY_HEX.to_string(),
             identity_epoch: 1,
             shard_id: 0,
+            mint_external_ids: true,
+            emit_oracle_pairs: true,
         };
         build(&args).expect("2.4M fixture build should succeed");
     }
@@ -161,9 +163,14 @@ fn bench_viewport(c: &mut Criterion) {
         // `min(k, visible)`.
         EngineConfig {
             token_max_lifetime_secs: 3600,
-            max_k: 200,
+            // Raised from 200/128 so `gather_k500` measures a genuine cap of 500 — the
+            // deployment operating point (owner directive 2026-07-30). Deliberately NOT a
+            // semantics change for the other groups: `cap = min(request_k, k_max_marks)`, so
+            // k=0 and k=30 produce the same cap under either limit and those baselines stay
+            // comparable across the change.
+            max_k: 500,
             k_min: 2,
-            k_max_marks: 128,
+            k_max_marks: 500,
             theta_target_marks: 16,
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
@@ -196,6 +203,15 @@ fn bench_viewport(c: &mut Criterion) {
         b.iter(|| {
             engine
                 .viewport(&session, ViewportRequest::new("s0", ZOOM, bbox, 30))
+                .expect("viewport should succeed")
+        });
+    });
+    // k=500 is the deployment operating point (k defaults to the cap); k=30 is kept above it for
+    // comparability with the recorded 2.4M baselines, not because anything still requests 30.
+    group.bench_function("gather_k500", |b| {
+        b.iter(|| {
+            engine
+                .viewport(&session, ViewportRequest::new("s0", ZOOM, bbox, 500))
                 .expect("viewport should succeed")
         });
     });

@@ -209,6 +209,8 @@ pub fn run_build(
                 identity_key_hex: TEST_KEY_HEX.to_string(),
                 identity_epoch: 1,
                 shard_id: 0,
+                mint_external_ids: true,
+                emit_oracle_pairs: true,
             };
 
             eprintln!("ingest_build: scale={scale} set={label_set} (one repetition — a build is minutes, not microseconds)");

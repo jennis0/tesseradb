@@ -407,6 +407,63 @@ fn g_count_range_matches_brute_force_rows_in_range() {
     }
 }
 
+/// The run decode (`for_each_visible_run`) flattens to exactly `rows_in_range`, on **both**
+/// routes: the diffs-empty cursor walk of `base`, and the diffs-present fallback through the
+/// materialised bitmap. `diffs_are_empty` is the route predicate, so asserting it per mask pins
+/// which route each half of this test actually exercised.
+#[test]
+fn g2_visible_runs_flatten_to_rows_in_range_on_both_routes() {
+    let fx = build_fixture();
+
+    // Route 1: no overlay, no buffer — diffs empty, the cursor walks `base` directly.
+    let empty_mask = compose_with(&fx, &Overlay::new(), &IngestBuffer::new());
+    assert!(empty_mask.diffs_are_empty(), "route predicate: base walk");
+
+    // Route 2: the same composite scenario as `g_...` — non-empty minus AND plus, so the
+    // fallback must include `plus` rows the base cursor could never see.
+    let mut overlay = Overlay::new();
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress, None);
+    overlay.apply(
+        e(EVAL_WIDEN),
+        ChangeOp::Predicate,
+        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+    );
+    let diff_mask = compose_with(&fx, &overlay, &IngestBuffer::new());
+    assert!(!diff_mask.diffs_are_empty(), "route predicate: fallback");
+
+    let mut rng = StdRng::seed_from_u64(0xB9);
+    for mask in [&empty_mask, &diff_mask] {
+        for _ in 0..200 {
+            let a = rng.gen_range(0..BOUND as u32);
+            let b = rng.gen_range(0..BOUND as u32);
+            let r = a.min(b)..a.max(b) + 1;
+
+            let mut flat: Vec<u32> = Vec::new();
+            let mut prev_end: u32 = 0;
+            mask.for_each_visible_run(r.clone(), |run| {
+                assert!(run.start < run.end, "empty run emitted for {r:?}");
+                assert!(
+                    flat.is_empty() || run.start > prev_end,
+                    "runs not ascending/disjoint for {r:?}"
+                );
+                prev_end = run.end;
+                flat.extend(run);
+            });
+            let expected = mask.rows_in_range(r.clone()).to_vec();
+            assert_eq!(flat, expected, "range {r:?}");
+        }
+    }
+
+    // The plus row is genuinely reachable only through the fallback: prove the scenario keeps
+    // exercising the property the fallback exists for.
+    let widen_row = EVAL_WIDEN as u32;
+    let mut saw_widen = false;
+    diff_mask.for_each_visible_run(widen_row..widen_row + 1, |run| {
+        saw_widen = saw_widen || (run.start..run.end).contains(&widen_row);
+    });
+    assert!(saw_widen, "the widened (plus) row must be yielded by the fallback route");
+}
+
 #[test]
 fn h_structural_invariants_hold_pervasively() {
     let fx = build_fixture();
