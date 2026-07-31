@@ -232,6 +232,64 @@ pub struct SegmentsManifest {
     pub files: BTreeMap<String, FileDigest>,
 }
 
+/// The `SEGMENTS-<n>.json` state fields this reader **honours** — reads and acts on.
+///
+/// **Empty, and that is the accurate value.** `deltas`, `tombstones` and `deny` all parse
+/// above and no read path consults any of them: there is no delta tier, no tombstone fold and
+/// no deny application in the loader or the query path. Stage 2.2 adds each name here as, and
+/// only as, the corresponding behaviour lands — the entry is the claim "a manifest carrying
+/// this is served correctly", so adding one ahead of the code re-opens the fail-open this
+/// list exists to close.
+///
+/// **Why an honoured list and not a forbidden list.** The default for a field this reader does
+/// not understand has to be *refuse*, not *ignore*. A forbidden list is a list someone must
+/// remember to extend when the format grows; an honoured list is one someone must remember to
+/// extend when the *reader* grows, and forgetting it costs availability rather than
+/// correctness. Note the deliberate asymmetry with this module's `#[derive(Deserialize)]`
+/// without `deny_unknown_fields`: an unknown *JSON* field is ignored so a newer writer can add
+/// one, but a **known** field carrying state this reader cannot act on is not.
+pub const HONOURED_STATE: &[&str] = &[];
+
+/// The subset of state fields a manifest carries **because a deny was accepted** (contracts
+/// §2.3's publication rule: "any accepted deny-disposition change (delete, suppress) triggers
+/// immediate publication of a new side-manifest").
+///
+/// This is what separates the two reader responses, and the separation is not decoration. An
+/// unhonourable `deltas` means *items are missing* — staleness in the fail-safe direction, so
+/// stepping down to an older manifest is legitimate and the availability argument for a
+/// mid-sync replica applies. An unhonourable `tombstones` or `deny` means *items are meant to
+/// be gone*, so stepping down past it re-exposes every entity suppressed or deleted since the
+/// older manifest was written — the precise state §2.3 forbids a syncing replica to
+/// reconstruct — and there is no bound on how long it lasts, because the freshness gate §2.3
+/// pairs with step-down is a stage-2.2 obligation.
+pub const DENY_DISPOSITION_STATE: &[&str] = &["tombstones", "deny"];
+
+impl SegmentsManifest {
+    /// The state fields this manifest carries that [`HONOURED_STATE`] does not cover, by name.
+    ///
+    /// **A list of names, never a bool**, because the caller has to make two decisions from
+    /// one answer: *what to tell the operator* (which build capability is missing) and *what
+    /// posture to take* (step down, or refuse the partition — see [`DENY_DISPOSITION_STATE`]).
+    /// A bool collapses a suppression that must not be stepped past into the same value as a
+    /// missing delta tier, which is exactly the conflation that makes the refusal fail-open.
+    ///
+    /// Empty is the ordinary case: a bundle straight out of `tessera build` carries none of
+    /// these, so the guard is invisible until something writes them.
+    pub fn unhonourable_state(&self) -> Vec<&'static str> {
+        // Deny-disposition fields first, so a truncated message still names the field that
+        // decided the posture.
+        [
+            ("tombstones", !self.tombstones.is_empty()),
+            ("deny", !self.deny.is_empty()),
+            ("deltas", !self.deltas.is_empty()),
+        ]
+        .into_iter()
+        .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
+        .map(|(name, _)| name)
+        .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +330,76 @@ mod tests {
         assert!(
             json.contains(KEY_HEX),
             "MANIFEST must carry the key: {json}"
+        );
+    }
+
+    fn empty_segments_manifest() -> SegmentsManifest {
+        SegmentsManifest {
+            segments_version: 0,
+            watermark: 0,
+            entity_id_high_water: 0,
+            segments: Vec::new(),
+            deltas: Vec::new(),
+            dict_extents: Vec::new(),
+            external_id_extents: Vec::new(),
+            tombstones: Vec::new(),
+            deny: Vec::new(),
+            files: BTreeMap::new(),
+        }
+    }
+
+    /// The guard must be invisible on the shape `tessera build` writes, or every bundle in the
+    /// project stops opening.
+    #[test]
+    fn a_manifest_with_no_state_carries_nothing_unhonourable() {
+        assert!(empty_segments_manifest().unhonourable_state().is_empty());
+    }
+
+    /// Each field is reported by name and independently — a reader that collapsed them would
+    /// hand `load_verifying_segments_manifest` no way to tell "step down" from "unready".
+    #[test]
+    fn each_carried_state_field_is_reported_by_name() {
+        let mut with_tombstone = empty_segments_manifest();
+        with_tombstone.tombstones.push(17);
+        assert_eq!(with_tombstone.unhonourable_state(), vec!["tombstones"]);
+
+        let mut with_deny = empty_segments_manifest();
+        with_deny.deny.push(DenyEntry {
+            entity_id: 17,
+            cause: "suppress".to_string(),
+        });
+        assert_eq!(with_deny.unhonourable_state(), vec!["deny"]);
+
+        let mut with_delta = empty_segments_manifest();
+        with_delta.deltas.push(1);
+        assert_eq!(with_delta.unhonourable_state(), vec!["deltas"]);
+    }
+
+    /// A manifest carrying deltas *and* a deny must still be classified as a deny — which it is
+    /// only because every carried field is reported, not just the first. The ordering is part of
+    /// the contract: the field deciding the posture is named first.
+    #[test]
+    fn a_deny_alongside_deltas_is_still_named() {
+        let mut manifest = empty_segments_manifest();
+        manifest.deltas.push(1);
+        manifest.deny.push(DenyEntry {
+            entity_id: 17,
+            cause: "suppress".to_string(),
+        });
+        let fields = manifest.unhonourable_state();
+        assert_eq!(fields, vec!["deny", "deltas"]);
+        assert!(fields.iter().any(|f| DENY_DISPOSITION_STATE.contains(f)));
+    }
+
+    /// `HONOURED_STATE` is the claim "the read path acts on this field". It is empty today, and
+    /// this test is the tripwire on an entry being added ahead of the behaviour it asserts —
+    /// stage 2.2 must delete or amend it deliberately, with the code to justify it.
+    #[test]
+    fn no_state_field_is_claimed_as_honoured_yet() {
+        assert!(
+            HONOURED_STATE.is_empty(),
+            "the read path consults no delta tier, no tombstone fold and no deny set; \
+             adding a name here without the behaviour re-opens the fail-open"
         );
     }
 

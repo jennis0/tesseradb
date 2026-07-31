@@ -334,6 +334,191 @@ fn edit_segments_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)
     fs::write(&path, serde_json::to_vec_pretty(&value).expect("serialise")).expect("rewrite");
 }
 
+/// Copy `SEGMENTS-0.json` to `SEGMENTS-<n>.json` in the same partition directory, setting
+/// `segments_version` to `n` and applying `edit` to the parsed JSON.
+///
+/// Every file the copy names is untouched on disk, so the copy verifies by size and digest
+/// exactly as the original does. That is the point: with verification held constant, a
+/// step-down (or a refusal to step down) in these fixtures can only have come from the
+/// honourable-state check, never from a file that failed to verify.
+fn add_segments_manifest(root: &Path, n: u64, edit: impl FnOnce(&mut serde_json::Value)) {
+    let dir = root.join("v00000/partitions/default");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("SEGMENTS-0.json")).expect("read SEGMENTS-0"))
+            .expect("parse SEGMENTS-0.json");
+    value["segments_version"] = serde_json::json!(n);
+    edit(&mut value);
+    fs::write(
+        dir.join(format!("SEGMENTS-{n}.json")),
+        serde_json::to_vec_pretty(&value).expect("serialise"),
+    )
+    .expect("write SEGMENTS-<n>");
+}
+
+// -------------------------------------------------------------------------------------------
+// The honourable-state guard (Task 1; contracts §2.3's publication rule, SA §9).
+//
+// `SegmentsManifest` parses `deltas`, `tombstones` and `deny`, and the read path acts on none
+// of them. That is inert only while nothing writes them, and stage 2.2 starts writing them —
+// so *today* a manifest carrying `"tombstones": [17]` opens and serves entity 17. These tests
+// pin the two dispositions apart:
+//
+//   * `deltas` alone is missing data — step down, staleness in the fail-safe direction.
+//   * `tombstones` or `deny` means a deny was ACCEPTED. Stepping down past one silently undoes
+//     every suppression and deletion since the last honourable manifest, indefinitely, and
+//     the freshness gate §2.3 pairs with step-down does not land until 2.2. The partition is
+//     unready instead.
+//
+// Each test therefore asserts the *disposition*, not merely "an error happened": a guard that
+// refused everything would pass a test that only checked for `Err`.
+// -------------------------------------------------------------------------------------------
+
+#[test]
+fn a_manifest_carrying_tombstones_does_not_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+
+    // A tombstone names a deleted entity. Nothing in this reader folds it away, so opening
+    // would serve entity 17's row to every viewer authorised for it.
+    edit_segments_manifest(dir.path(), |value| {
+        value["tombstones"] = serde_json::json!([17]);
+    });
+
+    let err = open_bundle(dir.path())
+        .expect_err("a manifest naming a tombstone this build cannot honour must not open");
+    match err {
+        StoreError::UnhonourableManifest {
+            partition,
+            n,
+            fields,
+        } => {
+            assert_eq!(partition, "default");
+            assert_eq!(n, 0);
+            assert!(
+                fields.contains(&"tombstones"),
+                "the error must name the field that decided the posture, got: {fields:?}"
+            );
+        }
+        other => panic!("expected UnhonourableManifest, got: {other}"),
+    }
+}
+
+#[test]
+fn a_manifest_carrying_a_deny_entry_does_not_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+
+    edit_segments_manifest(dir.path(), |value| {
+        value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
+    });
+
+    let err = open_bundle(dir.path())
+        .expect_err("a manifest carrying a suppression this build cannot honour must not open");
+    match err {
+        StoreError::UnhonourableManifest { fields, .. } => assert!(
+            fields.contains(&"deny"),
+            "the error must name `deny`, got: {fields:?}"
+        ),
+        other => panic!("expected UnhonourableManifest, got: {other}"),
+    }
+}
+
+/// **The fail-open this task exists to close.** The obvious implementation — check inside the
+/// candidate loop, step down on failure — passes both tests above and fails this one, because
+/// with an older honourable manifest present it would happily serve the pre-suppression state.
+#[test]
+fn an_unhonourable_deny_is_not_stepped_past_to_an_older_manifest() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+
+    // SEGMENTS-1 is the newest and carries an accepted suppression; SEGMENTS-0 is clean, older,
+    // and verifies perfectly. Serving it is precisely "reconstruct a state in which a suppressed
+    // item is visible" (contracts §2.3).
+    add_segments_manifest(dir.path(), 1, |value| {
+        value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
+    });
+
+    let err = open_bundle(dir.path())
+        .expect_err("a deny-carrying manifest must make the partition unready, not step down");
+    match err {
+        StoreError::UnhonourableManifest { n, fields, .. } => {
+            assert_eq!(
+                n, 1,
+                "the refusal must name the manifest that carried the deny"
+            );
+            assert!(fields.contains(&"deny"), "got: {fields:?}");
+        }
+        other => panic!(
+            "expected UnhonourableManifest — stepping down to SEGMENTS-0 here undoes an \
+             accepted suppression. Got: {other}"
+        ),
+    }
+}
+
+/// The other half of the split, and the reason it is not a uniform refusal: missing deltas are
+/// staleness in the fail-safe direction — items absent, never items re-exposed — so the
+/// availability argument for a mid-sync replica holds here and only here.
+#[test]
+fn a_manifest_carrying_only_deltas_steps_down_and_serves() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+    add_segments_manifest(dir.path(), 1, |value| {
+        value["deltas"] = serde_json::json!([1]);
+    });
+
+    let bundle = open_bundle(dir.path()).expect("a deltas-only manifest must step down and serve");
+    let partition = bundle.partitions.get("default").expect("default partition");
+    assert_eq!(
+        partition.manifest.segments_version, 0,
+        "must have stepped down to SEGMENTS-0, not opened SEGMENTS-1"
+    );
+    assert_eq!(
+        partition.slices["main"].segments[0].row_count, 50,
+        "and the stepped-down state must actually serve"
+    );
+}
+
+/// Not "serves the oldest". Every candidate carrying state the reader cannot honour leaves the
+/// partition with nothing it may serve, which is a fail-closed error like any other candidate
+/// exhaustion — carrying the reason, so an operator is told to run a build that honours it
+/// rather than left with "nothing verified".
+#[test]
+fn every_candidate_unhonourable_is_not_ready() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+    edit_segments_manifest(dir.path(), |value| {
+        value["deltas"] = serde_json::json!([1]);
+    });
+    add_segments_manifest(dir.path(), 1, |value| {
+        value["deltas"] = serde_json::json!([1, 2]);
+    });
+
+    let err = open_bundle(dir.path())
+        .expect_err("with no honourable candidate the partition must not open");
+    match err {
+        StoreError::NoVerifyingSegmentsManifest {
+            last_error: Some(reason),
+            ..
+        } => assert!(
+            reason.contains("deltas"),
+            "the reason must name the unhonourable state, got: {reason}"
+        ),
+        other => panic!("expected NoVerifyingSegmentsManifest naming `deltas`, got: {other}"),
+    }
+}
+
+/// The negative control for all of the above: with every state field empty the guard is
+/// invisible and the newest manifest opens, exactly as before this task.
+#[test]
+fn a_manifest_with_no_unhonourable_state_opens_at_the_highest_n() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+    add_segments_manifest(dir.path(), 1, |_| {});
+
+    let bundle = open_bundle(dir.path()).expect("a clean manifest must open");
+    assert_eq!(bundle.partitions["default"].manifest.segments_version, 1);
+}
+
 #[test]
 fn open_bundle_fails_closed_on_a_corrupted_columns_arrow_byte() {
     let dir = tempfile::tempdir().expect("tempdir");

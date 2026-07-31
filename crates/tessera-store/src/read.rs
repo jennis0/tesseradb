@@ -30,7 +30,9 @@ use tessera_spatial::Tile;
 use tessera_types::BUNDLE_FORMAT;
 
 use crate::error::{read_to_vec, Result, StoreError};
-use crate::manifest::{CurrentPointer, FileDigest, Manifest, SegmentsManifest};
+use crate::manifest::{
+    CurrentPointer, FileDigest, Manifest, SegmentsManifest, DENY_DISPOSITION_STATE,
+};
 use crate::permutation::Permutation;
 
 /// One loaded (partition, slice) pair: the permutation addressing its rows, and every segment
@@ -270,8 +272,41 @@ fn ensure_verified(
 }
 
 /// Find the highest-numbered `SEGMENTS-<n>.json` under `partition_dir` whose own `files` all
-/// verify by size and SHA-256, stepping down through lower `n` on failure. Errors (fail-closed)
-/// if none verify.
+/// verify by size and SHA-256 **and** whose state this reader can honour, stepping down through
+/// lower `n` on failure. Errors (fail-closed) if none qualifies.
+///
+/// # The honourable-state check, and why it does not step down uniformly
+///
+/// `SegmentsManifest` parses `deltas`, `tombstones` and `deny`, and nothing in this crate or
+/// above it acts on any of them ([`SegmentsManifest::unhonourable_state`]). That is harmless
+/// only while nothing *writes* them. The moment something does, opening such a manifest serves
+/// rows a tombstone deletes and rows a `deny` suppresses — an accepted deny silently undone,
+/// which is the whole of what contracts §2.3's publication rule exists to prevent.
+///
+/// Refusing every unhonourable manifest by stepping down to an older one is the obvious
+/// implementation and it is the same fail-open wearing a fallback's clothes: the older manifest
+/// predates the deny, so serving it re-exposes the suppressed item indefinitely, with no
+/// operator signal, because the freshness gate §2.3 pairs with step-down does not exist yet.
+/// So the two dispositions separate ([`DENY_DISPOSITION_STATE`]):
+///
+/// - **`deltas` alone** → step down. Items are *missing*, never re-exposed; the availability
+///   argument for a mid-sync replica holds here and only here.
+/// - **`tombstones` or `deny`** → the partition is unready ([`StoreError::UnhonourableManifest`]).
+///   SA §9: "a worker that cannot verify its partition marks itself unready rather than serving
+///   partial data."
+///
+/// **The check runs before `verify_files`, deliberately.** A `SEGMENTS-<n>.json` carries no
+/// digest of its own — only the files it names are verified — so its `deny` list is exactly as
+/// trustworthy whether or not those files check out, and the mid-sync replica that has the new
+/// manifest but not yet its data files is the *most* likely way to meet a deny-carrying manifest
+/// whose files fail. Verifying first would step that case down and re-expose the item. It is
+/// also the cheaper order: the refusal costs no I/O where `verify_files` hashes every named
+/// file.
+///
+/// **Known residual, out of scope here:** a manifest that carries a deny and does not *parse*
+/// is still stepped past, because an unparseable manifest tells the reader nothing about what
+/// it carried. Nothing in this function can close that; the bound on it is the `readyz`
+/// freshness gate (contracts §2.3, roadmap O4), a stage-2.2 obligation.
 // `SEGMENTS-<n>.json`'s own `files` map, like `MANIFEST.json`'s, is keyed by paths relative to
 // the bundle *prefix* directory (R1: "manifest paths prefix-relative"), not to the partition
 // directory the side-manifest itself lives in — so verification is against `prefix_dir`, even
@@ -307,6 +342,32 @@ fn load_verifying_segments_manifest(
                 continue;
             }
         };
+        let unhonourable = segments_manifest.unhonourable_state();
+        if !unhonourable.is_empty() {
+            let carries_a_deny = unhonourable
+                .iter()
+                .any(|field| DENY_DISPOSITION_STATE.contains(field));
+            // Field *names* and counter values only — no entity ID reaches this error, or the
+            // log below (SA §9).
+            let refusal = StoreError::UnhonourableManifest {
+                partition: partition_label.clone(),
+                n,
+                fields: unhonourable.clone(),
+            };
+            if carries_a_deny {
+                return Err(refusal);
+            }
+            tracing::warn!(
+                partition = %partition_label,
+                n,
+                fields = ?unhonourable,
+                "stepping down past a SEGMENTS manifest carrying state this reader cannot \
+                 honour; the items it adds stay missing until a build that honours it runs"
+            );
+            last_error = Some(refusal.to_string());
+            continue;
+        }
+
         match verify_files(prefix_dir, &segments_manifest.files) {
             Ok(()) => return Ok(segments_manifest),
             Err(e) => {

@@ -27,11 +27,33 @@ pub enum StoreError {
     FileVerificationFailed { path: PathBuf, reason: String },
     /// No `SEGMENTS-<n>.json` for a partition verified, at any `n` — the bundle is unusable
     /// for that partition (and therefore, fail-closed, unusable at all). `last_error` carries
-    /// the reason the highest (most recently tried) candidate failed, so a caller isn't left
-    /// with only "nothing verified" when there's a more specific, actionable cause.
+    /// the reason the *last* candidate tried failed — the lowest `n`, since the loop walks
+    /// highest-first — so a caller isn't left with only "nothing verified" when there's a more
+    /// specific, actionable cause.
     NoVerifyingSegmentsManifest {
         partition: String,
         last_error: Option<String>,
+    },
+    /// A `SEGMENTS-<n>.json` carries state this reader does not implement, and the state is of
+    /// the kind that may not be stepped past: a non-empty `tombstones` or `deny` (contracts
+    /// §2.3's publication rule). **The partition is unready, not merely stale.**
+    ///
+    /// A manifest carries either field *because a deny was accepted*. Falling back to an older
+    /// manifest would therefore re-expose every entity suppressed or deleted since that older
+    /// one was written, indefinitely and silently — which is exactly the state §2.3 forbids a
+    /// syncing replica to reconstruct. Between hard-down and serving suppressed items forever,
+    /// this corpus chooses hard-down (SA §9: "a worker that cannot verify its partition marks
+    /// itself unready rather than serving partial data").
+    ///
+    /// The operator response is to run a build that honours this manifest — which is why the
+    /// variant names the fields rather than reporting a bare boolean. `fields` is
+    /// `&'static str` by construction: these are field *names* from
+    /// [`crate::manifest::SegmentsManifest`], never entity IDs, so nothing item-shaped can
+    /// reach a log through this variant (SA §9).
+    UnhonourableManifest {
+        partition: String,
+        n: u64,
+        fields: Vec<&'static str>,
     },
     /// A manifest referenced a partition/slice/segment directory structure that doesn't exist
     /// or doesn't match the expected `columns.arrow` / `morton.u32` / `permutation.bin` shape.
@@ -106,6 +128,16 @@ impl fmt::Display for StoreError {
                      (no SEGMENTS-<n>.json present)"
                 ),
             },
+            StoreError::UnhonourableManifest {
+                partition,
+                n,
+                fields,
+            } => write!(
+                f,
+                "SEGMENTS-{n}.json for partition '{partition}' carries state this reader does \
+                 not honour ({}); run a build that honours it",
+                fields.join(", ")
+            ),
             StoreError::MalformedBundle { detail } => write!(f, "malformed bundle: {detail}"),
             StoreError::UnverifiedFile { path } => write!(
                 f,
