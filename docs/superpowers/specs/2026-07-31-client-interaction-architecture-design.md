@@ -625,11 +625,27 @@ app-side from the Arrow column, so `tessera_id` never enters the render path —
 opposite of MVT. One caught detail: `TileLayer` overrides sublayers'
 `highlightedObjectIndex`, so selection highlight must be its own overlay layer.
 
+**deck.gl does not consume Arrow** *(checked against current upstream docs,
+2026-08-01)*. Layers take typed arrays or luma.gl `Buffer`s through `data.attributes`;
+Arrow ingestion is an explicit *roadmap* item on the `GPUTable` class, not shipped. So
+the Arrow path is ours to build — decode with `apache-arrow` JS or loaders.gl's
+`@loaders.gl/arrow` (which does handle IPC streams in batches), then hand the underlying
+typed-array views to `data.attributes`. That is genuinely zero-copy, since Arrow buffers
+*are* views over an `ArrayBuffer`, but **only where the layout already matches the
+attribute**. The one library consuming Arrow directly is `@geoarrow/deck.gl-layers`,
+third-party and outside core, and it is what lonboard uses.
+
 Two frictions to record rather than discover. The x/y **interleave**: `getPosition`
 wants interleaved pairs and we ship separate `x`/`y` columns, so the core does an
 O(served) pass — noise at small *k*, an ~80 MB shuffle per refresh at 10⁷ marks. An
 Arrow `fixed_size_list<f32,2>` position column would be zero-copy, and is GeoArrow's
-point encoding; a candidate **additive** wire change to decide on P2's numbers. And
+point encoding; a candidate **additive** wire change to decide on P2's numbers. Note that
+attribute descriptors accept `offset` and `stride`, so several attributes may read from
+one interleaved buffer — which means deck.gl consumes interleaved layouts *natively*
+rather than merely tolerating them, strengthening that open question. It does **not**
+rescue the current layout: stride reads separate attributes *out of* an interleaved
+buffer, whereas our problem is the reverse — two contiguous columns that must be fused
+into one attribute, which no stride arrangement achieves. And
 **cross-tile draw order** for the underlay: tiles render in arbitrary order, so one
 tile's opaque cells can overdraw an adjacent tile's marks — mitigable with a
 translucent underlay and depth test off, or by separating the layers.
