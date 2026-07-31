@@ -191,6 +191,9 @@ fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     };
     build(&args).expect("fixture build should succeed");
 }
@@ -1033,6 +1036,9 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
         shard_id: 0,
         mint_external_ids: false,
         emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     };
     build(&args).expect("no-mint build should succeed");
 
@@ -1418,6 +1424,9 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             shard_id: 0,
             mint_external_ids: true,
             emit_oracle_pairs: true,
+            batch_items: None,
+            memory_budget: None,
+            band_rows: None,
         };
         build(&args).expect("2.4M fixture build should succeed");
     }

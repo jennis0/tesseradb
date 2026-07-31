@@ -1,5 +1,6 @@
 use rustc_hash::FxHashMap;
-use std::io;
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tessera_types::TermId;
 
@@ -65,6 +66,104 @@ impl DictWriter {
 
         std::fs::write(&dict_path, data)?;
         Ok(vec![dict_path])
+    }
+}
+
+/// Streaming counterpart to [`DictWriter`]: each descriptor goes straight through a buffered
+/// file handle instead of being interned, so memory stays O(1) in the descriptor count.
+///
+/// Caller contract: descriptors must be distinct and arrive in term-id order — `append` assigns
+/// sequential ids from 0 and never deduplicates. Given the same descriptor sequence
+/// [`DictWriter`] would intern (in first-intern order), `finish` produces byte-identical output:
+/// a single `terms-0.dict` extent of `u32 LE length ‖ descriptor` records. The format carries
+/// no record count or total size, and [`DictWriter`] never splits extents, so nothing needs
+/// buffering beyond the `BufWriter`.
+///
+/// `append` is infallible by signature (mirroring [`DictWriter::intern`]); an IO error it hits
+/// is held and returned by [`DictStreamWriter::finish`], which must be called for errors to be
+/// observed. After an error, later `append`s still assign sequential ids but write nothing.
+pub struct DictStreamWriter {
+    dict_path: PathBuf,
+    writer: Option<BufWriter<File>>,
+    pending_err: Option<io::Error>,
+    next_term_id: u32,
+}
+
+impl DictStreamWriter {
+    /// Create a streaming dictionary writer for the given directory. The extent file is created
+    /// on first `append` (or at `finish`, so an empty dictionary still writes an empty extent,
+    /// as [`DictWriter`] does).
+    pub fn new(dir: &Path) -> Self {
+        DictStreamWriter {
+            dict_path: dir.join("terms-0.dict"),
+            writer: None,
+            pending_err: None,
+            next_term_id: 0,
+        }
+    }
+
+    /// Append the next descriptor and return its term ID (sequential from 0). The caller
+    /// guarantees distinctness and term-id order; violations are not detected here — a duplicate
+    /// would silently get a fresh id, which [`DictWriter`] would not have assigned.
+    pub fn append(&mut self, descriptor: &[u8]) -> TermId {
+        let term_id = TermId::new(self.next_term_id);
+        self.next_term_id += 1;
+        if self.pending_err.is_none() {
+            if let Err(e) = self.write_record(descriptor) {
+                self.pending_err = Some(e);
+            }
+        }
+        term_id
+    }
+
+    fn write_record(&mut self, descriptor: &[u8]) -> io::Result<()> {
+        let writer = match self.writer {
+            Some(ref mut w) => w,
+            None => self
+                .writer
+                .insert(BufWriter::new(File::create(&self.dict_path)?)),
+        };
+        // The extent record length field is u32; a descriptor over u32::MAX bytes cannot be
+        // represented and must fail closed, not truncate.
+        let len = u32::try_from(descriptor.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "dictionary descriptor of {} bytes exceeds the u32 record length field",
+                    descriptor.len()
+                ),
+            )
+        })?;
+        writer.write_all(&len.to_le_bytes())?;
+        writer.write_all(descriptor)?;
+        Ok(())
+    }
+
+    /// The number of descriptors appended so far — equivalently, the next term ID that would be
+    /// assigned. Same sizing contract as [`DictWriter::len`].
+    pub fn len(&self) -> u32 {
+        self.next_term_id
+    }
+
+    /// Whether nothing has been appended yet.
+    pub fn is_empty(&self) -> bool {
+        self.next_term_id == 0
+    }
+
+    /// Finish writing: flush the extent and return the paths written. Surfaces any IO error
+    /// deferred from `append`.
+    pub fn finish(mut self) -> io::Result<Vec<PathBuf>> {
+        if let Some(e) = self.pending_err.take() {
+            return Err(e);
+        }
+        match self.writer.take() {
+            Some(mut writer) => writer.flush()?,
+            // No append happened; DictWriter still writes an (empty) extent file.
+            None => {
+                File::create(&self.dict_path)?;
+            }
+        }
+        Ok(vec![self.dict_path])
     }
 }
 

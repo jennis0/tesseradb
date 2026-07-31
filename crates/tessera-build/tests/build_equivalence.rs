@@ -150,6 +150,9 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     }
 }
 
@@ -401,6 +404,108 @@ fn conformant_no_mint_no_pairs_build_is_byte_identical_and_verifiable() {
     assert_eq!(report.rows, N_ITEMS);
 }
 
+/// Batch-scoped assignment (§11.1 r23): with an explicit batch size the streaming build must
+/// (a) byte-match the reference build running the same per-chunk sort, (b) spill its buckets
+/// and sweep multiple bands when forced (the band seam), (c) record the batch size in
+/// MANIFEST provenance, and (d) stay deterministic. The batch splits ordinal space mid-corpus
+/// — including an uneven tail — so cross-batch band emission, per-batch dedup, and the
+/// entity-base continuation are all on the line.
+#[test]
+fn batched_build_is_byte_identical_to_the_batched_reference() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let points = temp.path().join("points.parquet");
+    let pairs = temp.path().join("pairs.parquet");
+    write_points(&points);
+    write_pairs(&pairs);
+
+    // Two batches with an uneven tail (4000 = 2100 + 1900), a tiny budget that forces the
+    // buckets to spill (but stays above the plan's floors), and bands of at most 400 pre-dedup
+    // rows so the postings sweep runs several bands.
+    let make_args = |out: PathBuf| {
+        let mut args = args_for(&points, &pairs, out);
+        args.batch_items = Some(2_100);
+        args.memory_budget = Some(96 << 20);
+        args.band_rows = Some(400);
+        args
+    };
+
+    let reference_out = temp.path().join("reference");
+    let streaming_out = temp.path().join("streaming");
+    build_in_memory(&make_args(reference_out.clone())).unwrap();
+    build(&make_args(streaming_out.clone())).unwrap();
+    assert_bundles_identical(&reference_out, &streaming_out, "batched, forced spill+bands");
+
+    // Determinism of the batched path.
+    let again = temp.path().join("again");
+    build(&make_args(again.clone())).unwrap();
+    assert_bundles_identical(&streaming_out, &again, "batched run 1 vs run 2");
+
+    // The batch size is identity-bearing and must be recorded (and the single-batch builds
+    // above must NOT record one — checked in the conformant test's manifest assertions).
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(streaming_out.join("v00000/MANIFEST.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["provenance"]["batch_items"].as_u64(),
+        Some(2_100),
+        "a batched build must record its batch size in provenance"
+    );
+    assert!(
+        !streaming_out.join(".build-tmp").exists(),
+        "spill files must not survive a successful build"
+    );
+
+    // And the batching genuinely changed the assignment (the fragmentation is real, not a
+    // no-op): the batched bundle differs from the single-batch one.
+    let single = temp.path().join("single");
+    build(&args_for(&points, &pairs, single.clone())).unwrap();
+    let batched_perm =
+        std::fs::read(streaming_out.join("v00000/partitions/default/slices/s0/permutation.bin"))
+            .unwrap();
+    let single_perm =
+        std::fs::read(single.join("v00000/partitions/default/slices/s0/permutation.bin")).unwrap();
+    assert_ne!(
+        batched_perm, single_perm,
+        "two batches must produce a different (per-batch) assignment than one"
+    );
+    let single_manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(single.join("v00000/MANIFEST.json")).unwrap())
+            .unwrap();
+    assert!(
+        single_manifest["provenance"].get("batch_items").is_none(),
+        "a single-batch build must not record a batch size"
+    );
+}
+
+/// The plan's refusals are typed and arrive before any output: a batch size far below what the
+/// budget supports permanently fragments posting runs and is refused (the operator states a
+/// matching budget to make a small batch deliberate), and `--batch-items 0` is meaningless.
+#[test]
+fn needlessly_small_batches_are_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let points = temp.path().join("points.parquet");
+    let pairs = temp.path().join("pairs.parquet");
+    write_points(&points);
+    write_pairs(&pairs);
+
+    let mut args = args_for(&points, &pairs, temp.path().join("out"));
+    args.batch_items = Some(50); // 80 batches where the budget supports one
+    let err = build(&args).unwrap_err().to_string();
+    assert!(
+        err.contains("fragment"),
+        "refusal must explain the permanent fragmentation: {err}"
+    );
+    assert!(
+        !temp.path().join("out").join("CURRENT").exists(),
+        "a refused build must produce no bundle"
+    );
+
+    let mut zero = args_for(&points, &pairs, temp.path().join("out2"));
+    zero.batch_items = Some(0);
+    assert!(build(&zero).is_err());
+}
+
 /// The same equivalence under `--limit`, which selects a prefix of *source* entity space and so
 /// changes which terms appear at all, and in what order they first appear.
 #[test]
@@ -521,6 +626,9 @@ fn reference_build_at_scale() {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     })
     .unwrap();
     assert_eq!(report.items, limit);

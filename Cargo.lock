@@ -2280,7 +2280,9 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "chrono",
+ "libc",
  "parquet",
+ "proptest",
  "rayon",
  "rustc-hash 1.1.0",
  "serde",
