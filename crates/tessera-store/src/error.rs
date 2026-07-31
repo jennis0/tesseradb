@@ -26,13 +26,22 @@ pub enum StoreError {
     /// A file named in a manifest's `files` map failed size or SHA-256 verification.
     FileVerificationFailed { path: PathBuf, reason: String },
     /// No `SEGMENTS-<n>.json` for a partition verified, at any `n` — the bundle is unusable
-    /// for that partition (and therefore, fail-closed, unusable at all). `last_error` carries
-    /// the reason the *last* candidate tried failed — the lowest `n`, since the loop walks
-    /// highest-first — so a caller isn't left with only "nothing verified" when there's a more
-    /// specific, actionable cause.
+    /// for that partition (and therefore, fail-closed, unusable at all).
+    ///
+    /// `highest_candidate_error` carries the reason the **highest** `n` failed — the newest
+    /// manifest the partition published, and the one an operator must actually fix. The loop
+    /// walks highest-first and keeps the *first* reason rather than overwriting per iteration:
+    /// overwriting leaves the oldest candidate's reason, which is the least actionable one on
+    /// offer (an ancient manifest failing is expected once a newer one exists; the newest one
+    /// failing is the incident).
+    ///
+    /// One reason, not a per-candidate `Vec`: a partition directory accumulates
+    /// `SEGMENTS-<n>.json` files without bound, and the older candidates almost always failed
+    /// for the same reason or for one that no longer matters — an unbounded list in an
+    /// operator's face buries the line that names the fix.
     NoVerifyingSegmentsManifest {
         partition: String,
-        last_error: Option<String>,
+        highest_candidate_error: Option<String>,
     },
     /// A `SEGMENTS-<n>.json` carries state this reader does not implement, and the state is of
     /// the kind that may not be stepped past: a non-empty `tombstones` or `deny` (contracts
@@ -45,9 +54,15 @@ pub enum StoreError {
     /// this corpus chooses hard-down (SA §9: "a worker that cannot verify its partition marks
     /// itself unready rather than serving partial data").
     ///
-    /// The operator response is to run a build that honours this manifest — which is why the
-    /// variant names the fields rather than reporting a bare boolean. `fields` is
-    /// `&'static str` by construction: these are field *names* from
+    /// **The operator response is to move the reader, not to rebuild.** The shape that produces
+    /// this error is a writer ahead of its reader — a manifest published by a build that
+    /// implements suppression against a replica that does not — so "run another build" usually
+    /// cannot fix it: the next build publishes the same fields. The remedy is to upgrade this
+    /// replica to a reader that honours them, or to roll the writer back to one that does not
+    /// publish them. That is why the variant names the fields rather than reporting a bare
+    /// boolean: the field names *are* the missing capability.
+    ///
+    /// `fields` is `&'static str` by construction: these are field *names* from
     /// [`crate::manifest::SegmentsManifest`], never entity IDs, so nothing item-shaped can
     /// reach a log through this variant (SA §9).
     UnhonourableManifest {
@@ -115,8 +130,8 @@ impl fmt::Display for StoreError {
             }
             StoreError::NoVerifyingSegmentsManifest {
                 partition,
-                last_error,
-            } => match last_error {
+                highest_candidate_error,
+            } => match highest_candidate_error {
                 Some(reason) => write!(
                     f,
                     "no verifying SEGMENTS-<n>.json found for partition '{partition}' \
@@ -135,7 +150,9 @@ impl fmt::Display for StoreError {
             } => write!(
                 f,
                 "SEGMENTS-{n}.json for partition '{partition}' carries state this reader does \
-                 not honour ({}); run a build that honours it",
+                 not honour ({}); the writer is ahead of this reader — upgrade the reader, or \
+                 roll back the writer that published these fields. The partition is unready \
+                 until then, deliberately: stepping down past this would undo an accepted deny",
                 fields.join(", ")
             ),
             StoreError::MalformedBundle { detail } => write!(f, "malformed bundle: {detail}"),

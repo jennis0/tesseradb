@@ -30,9 +30,7 @@ use tessera_spatial::Tile;
 use tessera_types::BUNDLE_FORMAT;
 
 use crate::error::{read_to_vec, Result, StoreError};
-use crate::manifest::{
-    CurrentPointer, FileDigest, Manifest, SegmentsManifest, DENY_DISPOSITION_STATE,
-};
+use crate::manifest::{CurrentPointer, FileDigest, Honourability, Manifest, SegmentsManifest};
 use crate::permutation::Permutation;
 
 /// One loaded (partition, slice) pair: the permutation addressing its rows, and every segment
@@ -56,11 +54,41 @@ pub struct SegmentData {
     pub columns: ColumnsRef,
 }
 
-/// One loaded partition: its verified side-manifest and every slice it names.
+/// One loaded partition: its verified side-manifest, the `n` that manifest was found at, the
+/// highest `n` present in the partition directory, and every slice it names.
 #[derive(Debug)]
 pub struct PartitionData {
     pub manifest: SegmentsManifest,
+    /// The `n` of the `SEGMENTS-<n>.json` actually served — taken from the **filename**, not
+    /// from the manifest's self-declared `segments_version`. The two agree in every bundle a
+    /// conforming writer produces, and where they do not it is the filename that decided which
+    /// candidate this reader walked to.
+    pub segments_n: u64,
+    /// The highest `SEGMENTS-<n>.json` present for this partition at open, whether or not it
+    /// was the one served.
+    ///
+    /// **Carried as data because a log line cannot be gated on.** A step-down is a *success*
+    /// return: the partition opens and serves, and the only trace of it is the `warn!` in
+    /// [`load_verifying_segments_manifest`]. Contracts §2.3 pairs step-down with a `readyz`
+    /// freshness gate — "`readyz` fails if the newest verifying `n` is older than the
+    /// deployment's configured lag bound; unbounded step-down would let a badly synced replica
+    /// serve long-deleted items as live" — and that gate cannot be built from a log. This field
+    /// and [`Self::segments_n`] are what it needs (roadmap O4, stage 2.2). They are also the
+    /// only way a test can assert that a step-down did, or did not, happen.
+    pub highest_candidate_n: u64,
     pub slices: HashMap<String, SliceData>,
+}
+
+impl PartitionData {
+    /// `true` if the served manifest is not the newest one on disk — i.e. the candidate walk
+    /// stepped down past at least one manifest carrying state this reader cannot honour.
+    ///
+    /// Every stepped-past candidate was examined and *refused*; see
+    /// [`load_verifying_segments_manifest`] for why that enumeration is what makes the
+    /// step-down safe.
+    pub fn stepped_down(&self) -> bool {
+        self.highest_candidate_n > self.segments_n
+    }
 }
 
 /// An open, digest-verified bundle: the top-level manifest plus every partition's loaded data.
@@ -124,7 +152,8 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
     for partition_desc in &manifest.partitions {
         sanitize_component("partition phash", &partition_desc.phash)?;
         let partition_dir = prefix_dir.join("partitions").join(&partition_desc.phash);
-        let segments_manifest = load_verifying_segments_manifest(&prefix_dir, &partition_dir)?;
+        let selected = load_verifying_segments_manifest(&prefix_dir, &partition_dir)?;
+        let segments_manifest = selected.manifest;
 
         let mut slices: HashMap<String, SliceData> = HashMap::new();
         for seg_desc in &segments_manifest.segments {
@@ -217,6 +246,8 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
             partition_desc.phash.clone(),
             PartitionData {
                 manifest: segments_manifest,
+                segments_n: selected.n,
+                highest_candidate_n: selected.highest_candidate_n,
                 slices,
             },
         );
@@ -287,13 +318,20 @@ fn ensure_verified(
 /// implementation and it is the same fail-open wearing a fallback's clothes: the older manifest
 /// predates the deny, so serving it re-exposes the suppressed item indefinitely, with no
 /// operator signal, because the freshness gate §2.3 pairs with step-down does not exist yet.
-/// So the two dispositions separate ([`DENY_DISPOSITION_STATE`]):
+/// So the two dispositions separate ([`Honourability`],
+/// [`crate::manifest::DENY_DISPOSITION_STATE`]):
 ///
-/// - **`deltas` alone** → step down. Items are *missing*, never re-exposed; the availability
-///   argument for a mid-sync replica holds here and only here.
-/// - **`tombstones` or `deny`** → the partition is unready ([`StoreError::UnhonourableManifest`]).
-///   SA §9: "a worker that cannot verify its partition marks itself unready rather than serving
-///   partial data."
+/// - **`deltas` alone** ([`Honourability::Steppable`]) → step down. Items are *missing*, never
+///   re-exposed; the availability argument for a mid-sync replica holds here and only here.
+/// - **`tombstones` or `deny`** ([`Honourability::Unready`]) → the partition is unready
+///   ([`StoreError::UnhonourableManifest`]). SA §9: "a worker that cannot verify its partition
+///   marks itself unready rather than serving partial data."
+///
+/// The classification is [`SegmentsManifest::honourability`]'s, not this loop's, and
+/// deliberately so: the shape §2.3 makes ordinary is a manifest carrying `deny` **and**
+/// `deltas` (a side-manifest is "full current state, not a diff", so every publication while a
+/// suppression is live carries both), and an `any`/`all` slip over that pair silently converts
+/// the refusal below into a step-down. Nothing here re-derives the posture from a field list.
 ///
 /// **The check runs before `verify_files`, deliberately.** A `SEGMENTS-<n>.json` carries no
 /// digest of its own — only the files it names are verified — so its `deny` list is exactly as
@@ -301,12 +339,39 @@ fn ensure_verified(
 /// manifest but not yet its data files is the *most* likely way to meet a deny-carrying manifest
 /// whose files fail. Verifying first would step that case down and re-expose the item. It is
 /// also the cheaper order: the refusal costs no I/O where `verify_files` hashes every named
-/// file.
+/// file. "Verify the bytes before interpreting them" is the right instinct and is what every
+/// other arm of this loop does — it is wrong *here*, for that reason, and
+/// `a_deny_carrying_manifest_whose_files_are_missing_is_still_refused` is the test that says so.
 ///
-/// **Known residual, out of scope here:** a manifest that carries a deny and does not *parse*
-/// is still stepped past, because an unparseable manifest tells the reader nothing about what
-/// it carried. Nothing in this function can close that; the bound on it is the `readyz`
-/// freshness gate (contracts §2.3, roadmap O4), a stage-2.2 obligation.
+/// # Why stepping down is safe, and the one thing that would make it unsafe
+///
+/// **The step-down's safety is a property of this loop, not of `deltas`.** It rests on every
+/// intervening candidate being *examined and refused*: between the manifest served and the
+/// highest one present, each `n` is read, classified, and — if it carries a deny disposition —
+/// turned into a hard error before any lower candidate is considered. "Items go missing, never
+/// re-exposed" follows from that enumeration, not from anything intrinsic to a delta tier.
+/// **Do not narrow the candidate list.** Trying only the top few candidates (an obvious-looking
+/// optimisation on [`list_segments_manifests`], which stats a whole directory) would let a
+/// deny-carrying manifest go unexamined and be stepped past unseen, which is this guard's
+/// fail-open reintroduced from the other end. If that list ever needs bounding, it must be
+/// bounded by *refusing* what it could not examine, never by ignoring it.
+///
+/// **Known residuals, out of scope here.** A deny-carrying manifest is still stepped past when
+/// this loop cannot tell that it carries one — three ways, all of them the same shape:
+///
+/// - it does not **parse** (`serde_json` error below),
+/// - it cannot be **read** (I/O error below — a permission or media fault),
+/// - it is present under a **non-canonical name** ([`list_segments_manifests`] parses
+///   `SEGMENTS-01.json` to `n = 1` and the loop then reads `SEGMENTS-1.json`, a different or
+///   absent file).
+///
+/// None is closable here, and none should be closed by guessing: an ordinary torn write must
+/// not become a hard partition failure, and a manifest whose bytes are unavailable tells the
+/// reader nothing about what it carried. **The bound on all three is time, and that bound does
+/// not exist yet** — the `readyz` freshness gate (contracts §2.3, roadmap O4) is a stage-2.2
+/// obligation, so today a replica in this state serves the older manifest indefinitely. That is
+/// acceptable *only* because nothing writes `deny` yet; the roadmap ships the deny writer and
+/// the freshness gate as one unit, and they must stay one unit.
 // `SEGMENTS-<n>.json`'s own `files` map, like `MANIFEST.json`'s, is keyed by paths relative to
 // the bundle *prefix* directory (R1: "manifest paths prefix-relative"), not to the partition
 // directory the side-manifest itself lives in — so verification is against `prefix_dir`, even
@@ -314,64 +379,89 @@ fn ensure_verified(
 fn load_verifying_segments_manifest(
     prefix_dir: &Path,
     partition_dir: &Path,
-) -> Result<SegmentsManifest> {
+) -> Result<SelectedManifest> {
     let mut candidates = list_segments_manifests(partition_dir)?;
     // Highest n first.
     candidates.sort_unstable_by(|a, b| b.cmp(a));
+    let highest_candidate_n = candidates.first().copied();
 
-    let partition_label = partition_dir
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| partition_dir.display().to_string());
+    // Bundle-root-relative rather than the bare phash: this process swaps bundles at runtime, so
+    // a log line or an error naming only `default` cannot say *which* bundle's `default` it
+    // means. Short enough to stay a decent structured field, and free of the absolute prefix.
+    let partition_label = match (prefix_dir.file_name(), partition_dir.file_name()) {
+        (Some(prefix), Some(phash)) => format!(
+            "{}/partitions/{}",
+            prefix.to_string_lossy(),
+            phash.to_string_lossy()
+        ),
+        _ => partition_dir.display().to_string(),
+    };
 
-    let mut last_error: Option<String> = None;
+    // The **first** failure recorded, not the last: the loop walks highest-first, so the first
+    // is the newest manifest's — the one an operator must fix. Overwriting per iteration leaves
+    // the oldest candidate's reason instead, which is the least actionable one on offer.
+    let mut highest_candidate_error: Option<String> = None;
 
     for n in candidates {
         let path = partition_dir.join(format!("SEGMENTS-{n}.json"));
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) => {
-                last_error = Some(format!("{}: {e}", path.display()));
+                highest_candidate_error.get_or_insert_with(|| format!("{}: {e}", path.display()));
                 continue;
             }
         };
         let segments_manifest = match serde_json::from_slice::<SegmentsManifest>(&bytes) {
             Ok(m) => m,
             Err(e) => {
-                last_error = Some(format!("{}: invalid JSON: {e}", path.display()));
+                highest_candidate_error
+                    .get_or_insert_with(|| format!("{}: invalid JSON: {e}", path.display()));
                 continue;
             }
         };
-        let unhonourable = segments_manifest.unhonourable_state();
-        if !unhonourable.is_empty() {
-            let carries_a_deny = unhonourable
-                .iter()
-                .any(|field| DENY_DISPOSITION_STATE.contains(field));
-            // Field *names* and counter values only — no entity ID reaches this error, or the
-            // log below (SA §9).
-            let refusal = StoreError::UnhonourableManifest {
-                partition: partition_label.clone(),
-                n,
-                fields: unhonourable.clone(),
-            };
-            if carries_a_deny {
-                return Err(refusal);
+        // One classification, made where the fields are defined (`SegmentsManifest`), never
+        // re-derived here — see this function's doc and [`Honourability`].
+        //
+        // `fields` is field *names* and `n` is a counter: no entity ID reaches either arm's
+        // error or the `warn!` (SA §9), which is why `Honourability` carries `&'static str`.
+        match segments_manifest.honourability() {
+            Honourability::Honourable => {}
+            Honourability::Unready { fields } => {
+                return Err(StoreError::UnhonourableManifest {
+                    partition: partition_label,
+                    n,
+                    fields,
+                });
             }
-            tracing::warn!(
-                partition = %partition_label,
-                n,
-                fields = ?unhonourable,
-                "stepping down past a SEGMENTS manifest carrying state this reader cannot \
-                 honour; the items it adds stay missing until a build that honours it runs"
-            );
-            last_error = Some(refusal.to_string());
-            continue;
+            Honourability::Steppable { fields } => {
+                tracing::warn!(
+                    partition = %partition_label,
+                    n,
+                    fields = ?fields,
+                    "stepping down past a SEGMENTS manifest carrying state this reader cannot \
+                     honour; the items it adds stay missing until a build that honours it runs"
+                );
+                let reason = StoreError::UnhonourableManifest {
+                    partition: partition_label.clone(),
+                    n,
+                    fields,
+                };
+                highest_candidate_error.get_or_insert_with(|| reason.to_string());
+                continue;
+            }
         }
 
         match verify_files(prefix_dir, &segments_manifest.files) {
-            Ok(()) => return Ok(segments_manifest),
+            Ok(()) => {
+                return Ok(SelectedManifest {
+                    manifest: segments_manifest,
+                    n,
+                    highest_candidate_n: highest_candidate_n
+                        .expect("a candidate was selected, so the candidate list is non-empty"),
+                })
+            }
             Err(e) => {
-                last_error = Some(e.to_string());
+                highest_candidate_error.get_or_insert_with(|| e.to_string());
                 continue;
             }
         }
@@ -379,8 +469,17 @@ fn load_verifying_segments_manifest(
 
     Err(StoreError::NoVerifyingSegmentsManifest {
         partition: partition_label,
-        last_error,
+        highest_candidate_error,
     })
+}
+
+/// What the candidate walk settled on for one partition: the manifest served, the `n` it was
+/// found at, and the highest `n` present — see [`PartitionData::highest_candidate_n`] for why
+/// the last of these is returned rather than left in the `warn!`.
+struct SelectedManifest {
+    manifest: SegmentsManifest,
+    n: u64,
+    highest_candidate_n: u64,
 }
 
 /// List the `n` values of every `SEGMENTS-<n>.json` present in `partition_dir` (unordered,

@@ -15,7 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # The reader's only log line: the honourable-state step-down (contracts §2.3). A facade crate
 # with no subscriber attached is a no-op, so this adds a diagnostic, not a runtime.
-tracing = "0.1"
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
