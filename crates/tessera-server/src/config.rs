@@ -809,10 +809,22 @@ const DEFAULT_PIN_TTL_SECS: u64 = 300;
 
 /// Task 4: the most pins one session may hold at once (lifecycle §2.2).
 ///
-/// The drain-list cost above is *per pin*, so this multiplies it: four is one pin per
-/// concurrently-open frozen view with room to spare, and it keeps a single session's worst-case
-/// retention to four superseded generations rather than an unbounded number. Exceeding it is
-/// refused at the pin, never silently ignored — a session that believes it holds a pin it does
+/// Four is one pin per concurrently-open frozen view, with room to spare.
+///
+/// **This knob does NOT bound retention, and an earlier draft of this comment claimed it did**
+/// *(controller, 2026-07-31, on Track C's Task 4 gate — `tessera_engine::pins`' module doc refutes
+/// the claim and asks that it not be reintroduced; this is where it survived)*. A drain entry
+/// holds its `Arc<Bundle>` from retirement until the TTL or the depth ceiling releases it,
+/// **whether or not any session ever presents a pin naming it** — the cap is consulted only when
+/// one is presented. And a client that wants N superseded geometries simply opens N sessions:
+/// `Engine::authorise` mints a fresh `token_id` per call against a cached fragment, so the
+/// rotation costs it nothing. What actually bounds retention is `DEFAULT_PIN_TTL_SECS` above and
+/// the engine's own `DRAIN_DEPTH_MAX`; see `tessera_engine::pins` for the page-cache argument
+/// that sizes them.
+///
+/// What this knob *does* bound is one session's claim on the resolve path — enough to keep a
+/// single client from pinning without limit, not enough to be a memory bound. Exceeding it is
+/// refused rather than silently ignored, because a session that believes it holds a pin it does
 /// not hold would compose against geometry it did not ask for.
 const DEFAULT_PINS_PER_SESSION_MAX: usize = 4;
 
