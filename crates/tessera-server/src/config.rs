@@ -82,6 +82,13 @@ pub enum ConfigError {
         compute_admission: usize,
         compute_queue: usize,
     },
+    /// `serve.compute_admission` was left to default and `COMPUTE_ADMISSION_MULTIPLIER *
+    /// compute_threads` overflows `usize` — an operator-supplied `compute_threads` extreme enough
+    /// to overflow here would silently wrap to a small, wrong permit count in a release build
+    /// (overflow checks are off), the same class of silent failure
+    /// `ComputeAdmissionQueueOverflow`'s checked-add exists to prevent one step downstream.
+    /// Refused here, at the multiplication itself, for the same reason.
+    ComputeAdmissionDefaultOverflow { compute_threads: usize },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -167,6 +174,12 @@ impl std::fmt::Display for ConfigError {
                  ({}) — the outer slots semaphore cannot be built at this size; lower one or both \
                  knobs",
                 tokio::sync::Semaphore::MAX_PERMITS
+            ),
+            ConfigError::ComputeAdmissionDefaultOverflow { compute_threads } => write!(
+                f,
+                "serve.compute_threads ({compute_threads}) is too large: the default \
+                 serve.compute_admission = {COMPUTE_ADMISSION_MULTIPLIER} * compute_threads \
+                 overflows usize — set serve.compute_admission explicitly to a sane value instead"
             ),
         }
     }
@@ -292,11 +305,17 @@ pub struct Config {
     /// D-B: the pool this sizes should fill the machine. This task adds the knob and its
     /// validation only — the rayon pool that consumes it arrives in a later task.
     pub compute_threads: usize,
-    /// D-B: the compute semaphore's permit count — one CPU-bound request per core, admitted for
-    /// the viewer/session planes only (never the control plane, D13).
+    /// D-B: the compute semaphore's permit count — a bound on in-flight *requests*, admitted for
+    /// the viewer/session planes only (never the control plane, D13), not a bound on runnable CPU:
+    /// `compute_threads` (the rayon pool) still bounds the parallel-sweep CPU each admitted
+    /// request may fan out across, and this gate deliberately lets the serialise phase
+    /// oversubscribe up to `compute_admission` because small requests are latency-bound on
+    /// scheduling, not CPU. Defaults to [`COMPUTE_ADMISSION_MULTIPLIER`]`× compute_threads` — see
+    /// that constant's doc for the measurement behind the multiplier.
     pub compute_admission: usize,
     /// D-B: the outer slots semaphore's *additional* permits beyond `compute_admission` — the
-    /// bounded queue. Legally `0` (shed the instant every compute permit is busy).
+    /// bounded queue. Legally `0` (shed the instant every compute permit is busy). Defaults to
+    /// `2 × compute_admission`, now effectively `2 × COMPUTE_ADMISSION_MULTIPLIER = 8×` cores.
     pub compute_queue: usize,
     /// D-E: how long a request may wait for a compute permit before it is shed with 429
     /// `backpressure` and `Retry-After: 1`.
@@ -396,6 +415,28 @@ fn default_compute_threads() -> usize {
 /// D-E: 25× the 10 ms p99 target — a request that cannot even *start* in 250 ms is better shed
 /// with `Retry-After: 1` than served at the measured 1.04 s worst case.
 const DEFAULT_ADMISSION_TIMEOUT_MS: u64 = 250;
+
+/// `compute_admission`'s default multiplier over `compute_threads` (resolved, D-B). **Retuned
+/// 2026-07-31** (was 1×, "one CPU-bound request per core") on the calibrated-viewport measurement
+/// that requests at this corpus scale are ~0.3 ms and mostly memory-bound: `compute_admission`
+/// bounds in-flight *requests*, not runnable CPU — the rayon pool (`compute_threads`) still bounds
+/// the parallel-sweep CPU each admitted request may fan out across, and the serialise phase
+/// deliberately oversubscribes up to `compute_admission`, because small requests are latency-bound
+/// on scheduling, not CPU, and a 1× gate left cores idle waiting on the next request rather than
+/// running the one already queued.
+///
+/// Measured (`.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/admission-4x-report.md`, 12-core
+/// WSL2 box, 2.42M-row fixture, Arm B): at 1× (`compute_admission=12`) closed-loop throughput was
+/// c=5 11,771 / c=100 31,248 / c=1000 28,929 rps against a pre-gate baseline of 15,277 / 48,588 /
+/// 49,475 rps, with shed% at c=100/c=1000 around 40%. At 4×, c=100 improves to 35,448 rps
+/// (shed% collapses to ~0.1%) and c=1000 to 32,645 rps (shed% to ~1.9%) — a real but partial
+/// recovery, not a full one; c=5 is essentially unchanged (11,515 rps) because that cell is
+/// latency-/generator-bound, not gate-bound, so a wider gate has nothing to admit that wasn't
+/// already getting in. p99 grew 1.02–1.47× over the 1× run across every cell measured, well inside
+/// the ~2× bound treated as the retune's own regression limit — the trade this constant makes is
+/// real (some tail risk under sustained oversubscription, since the queue is `2 × compute_admission`
+/// = 8× cores) but it stayed bounded at this measurement.
+const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;
 
 pub fn load(path: &Path) -> Result<Config> {
     let text = fs::read_to_string(path)?;
@@ -501,7 +542,17 @@ fn parse(text: &str) -> Result<Config> {
     if compute_threads == 0 {
         return Err(ConfigError::ComputeThreadsZero);
     }
-    let compute_admission = raw.serve.compute_admission.unwrap_or(compute_threads);
+    let compute_admission = match raw.serve.compute_admission {
+        Some(v) => v,
+        // `checked_mul`, not `*`: release builds have overflow checks off, so an unchecked
+        // multiply here would silently wrap to a small, wrong permit count for an
+        // operator-supplied `compute_threads` extreme enough to overflow — refused instead, the
+        // same discipline the `compute_admission + compute_queue` checked-add below already
+        // applies one step downstream.
+        None => compute_threads
+            .checked_mul(COMPUTE_ADMISSION_MULTIPLIER)
+            .ok_or(ConfigError::ComputeAdmissionDefaultOverflow { compute_threads })?,
+    };
     if compute_admission == 0 {
         return Err(ConfigError::ComputeAdmissionZero);
     }
@@ -664,22 +715,25 @@ mod tests {
         assert_eq!(config.max_underlay_cells, DEFAULT_MAX_UNDERLAY_CELLS);
         assert_eq!(config.max_k, DEFAULT_MAX_K);
         assert_eq!(config.compute_threads, default_compute_threads());
-        assert_eq!(config.compute_admission, config.compute_threads);
+        assert_eq!(
+            config.compute_admission,
+            COMPUTE_ADMISSION_MULTIPLIER * config.compute_threads
+        );
         assert_eq!(config.compute_queue, 2 * config.compute_admission);
         assert_eq!(config.admission_timeout_ms, DEFAULT_ADMISSION_TIMEOUT_MS);
     }
 
-    /// D-B: `compute_admission` defaults to `compute_threads`, not to a separate constant — an
-    /// explicit `compute_threads` must change the default admission bound too, or the "one
-    /// CPU-bound request per core" argument silently stops holding.
+    /// D-B: `compute_admission` defaults to `COMPUTE_ADMISSION_MULTIPLIER × compute_threads`, not
+    /// to a separate constant — an explicit `compute_threads` must change the default admission
+    /// bound too, or the measured small-request throughput argument silently stops holding.
     #[test]
     fn compute_admission_defaults_to_compute_threads() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
         let config = parse(&valid_toml("compute_threads = 7")).expect("must load");
         assert_eq!(config.compute_threads, 7);
-        assert_eq!(config.compute_admission, 7);
-        assert_eq!(config.compute_queue, 14);
+        assert_eq!(config.compute_admission, 28);
+        assert_eq!(config.compute_queue, 56);
     }
 
     /// D-B: `compute_queue = 0` is explicitly legal — it means "shed the instant every compute
@@ -700,6 +754,28 @@ mod tests {
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
         let err = parse(&valid_toml("compute_threads = 0")).unwrap_err();
         assert!(matches!(err, ConfigError::ComputeThreadsZero), "{err}");
+    }
+
+    /// D-B: an explicit `compute_threads` large enough that `COMPUTE_ADMISSION_MULTIPLIER *
+    /// compute_threads` overflows `usize` refuses to start rather than silently wrapping to a
+    /// small, wrong `compute_admission` — release builds have overflow checks off, so an
+    /// unchecked multiply would produce a bogus-but-plausible value with no error raised anywhere.
+    /// `compute_threads` here is `i64::MAX` (fits TOML's integer range) so `4 * compute_threads`
+    /// overflows `u64`/`usize` without overflowing on the way in from TOML itself.
+    #[test]
+    fn a_compute_threads_that_overflows_the_default_admission_multiply_refuses_to_start() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml("compute_threads = 9223372036854775807")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::ComputeAdmissionDefaultOverflow {
+                    compute_threads: 9223372036854775807
+                }
+            ),
+            "{err}"
+        );
     }
 
     /// D-B: `compute_admission = 0` refuses to start — a zero-permit compute semaphore sheds

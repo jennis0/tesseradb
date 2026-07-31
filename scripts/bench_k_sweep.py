@@ -73,10 +73,11 @@ def write_config_with_max_k(
     Task 9: the four `compute_*` knobs (D-B/D-E's admission gate) are optional overrides, `None`
     by default -- omitted from the written config, so every existing caller keeps getting the
     server's own defaults (`compute_threads` = available parallelism, `compute_admission` =
-    `compute_threads`, `compute_queue` = 2x that, `admission_timeout_ms` = 250) exactly as before
-    this task. `scripts/bench_concurrency.py` is the only caller that passes them explicitly, to
-    force a low admission bound for its shed cell (criterion 3) or a shorter timeout for its
-    cold-build cell (criterion 6).
+    `COMPUTE_ADMISSION_MULTIPLIER` (4) x `compute_threads` -- retuned 2026-07-31, was 1x --,
+    `compute_queue` = 2x that, `admission_timeout_ms` = 250) exactly as before this task.
+    `scripts/bench_concurrency.py` is the only caller that passes them explicitly, to force a low
+    admission bound for its shed cell (criterion 3) or a shorter timeout for its cold-build cell
+    (criterion 6).
     """
     config_text = f"""
 [bundle]

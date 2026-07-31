@@ -70,9 +70,13 @@ pub struct GatePermits {
 
 /// D-B: the two-stage admission gate in front of the viewer/session planes' CPU-bound closures
 /// (`/v1/viewport`, `/v1/items`, `/session/authorise`). `compute_admission` is DEFINED as a bound
-/// on *runnable* CPU work — one request per core. Never wraps `/healthz`, `/readyz`, `/v1/meta`,
-/// `/session/revoke`, or any control-plane route (D13: a suppression must always reach the WAL,
-/// gate saturated or not).
+/// on in-flight *requests*, not on runnable CPU: the rayon pool (`compute_threads`) is what bounds
+/// the parallel-sweep CPU any one admitted request may fan out across, and this gate deliberately
+/// lets the serialise phase oversubscribe up to `compute_admission` (default 4×
+/// `compute_threads` — `tessera-server::config::COMPUTE_ADMISSION_MULTIPLIER`'s doc has the
+/// measurement) because small requests at this corpus scale are latency-bound on scheduling, not
+/// CPU. Never wraps `/healthz`, `/readyz`, `/v1/meta`, `/session/revoke`, or any control-plane
+/// route (D13: a suppression must always reach the WAL, gate saturated or not).
 ///
 /// Two semaphores, not one, because they bound two different things: `slots` bounds *admitted*
 /// requests (running + queued) and is acquired non-blocking, so a caller arriving once every slot
