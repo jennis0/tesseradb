@@ -1,0 +1,26 @@
+   Compiling tessera-authz v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-authz)
+   Compiling tessera-store v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-store)
+   Compiling tessera-lifecycle v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-lifecycle)
+   Compiling tessera-engine v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-engine)
+   Compiling tessera-build v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-build)
+   Compiling tessera-server v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-server)
+   Compiling tessera-cli v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-cli)
+    Finished `release` profile [optimized] target(s) in 6.49s
+    Finished `release` profile [optimized] target(s) in 0.11s
+    Finished `release` profile [optimized] target(s) in 0.12s
+bundle data/bench-fixtures/2m4 -- 176 descriptors
+booting server (matrix/cpu)...
+  up in 0.5s (pid 3387375)
+
+criterion 4a: CPU saturation, open-loop near capacity (Arm B, shared fragments)
+  rate=18,000 rps target  achieved=17,991 rps  cpu=413% (threshold 680% of 8 cores)
+
+criterion 4b: c=1 latency, multi-tile viewport, compute_threads 1 vs machine default
+  threads=1        c=1 (small, z8) p50=0.317 ms  server_p50=0.143 ms  pts/s=994,825  pts/req=433.7
+  threads=1        c=1 (large, z4) p50=1.325 ms  server_p50=1.139 ms  pts/s=804,951  pts/req=1,092.8
+  threads=default  c=1 (small, z8) p50=0.338 ms  server_p50=0.151 ms  pts/s=811,568  pts/req=433.8
+  threads=default  c=1 (large, z4) p50=1.376 ms  server_p50=1.192 ms  pts/s=725,854  pts/req=1,093.2
+  small-viewport ratio (default/1) = 1.07 (within ~10%)
+  large-work ratio (default/1) = 1.04 (default did NOT win)
+
+wrote .superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/recalibration/validation/2m4/concurrency-summary.json

@@ -1,0 +1,8 @@
+bundle: /home/joe/code/tessera/data/bench-fixtures/1e9  grant: sparse (spread w=10)  reps: 60
+           shape   zoom      tiles  rows_in_rng       p50_ns       p99_ns
+      natural/z4      4         81    308361516       659899      9058091
+  full-extent/z1      1          4   1000000000      2967764      9785466
+  full-extent/z2      2         16   1000000000      3082797      3739645
+  full-extent/z3      3         64   1000000000      3578266      7004602
+  full-extent/z4      4        256   1000000000      4268940      5493818
+  full-extent/z5      5       1024   1000000000      5753706      8154381

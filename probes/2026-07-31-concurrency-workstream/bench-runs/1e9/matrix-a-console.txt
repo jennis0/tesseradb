@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized] target(s) in 0.12s
+bundle /home/joe/code/tessera/data/bench-fixtures/1e9 -- 47968 descriptors
+booting server (matrix/cpu)...
+  up in 27.6s (pid 3190178)
+
+calibrating generator ceiling against /healthz
+  c=100   healthz    122,082 rps  p99=   1.70 ms
+
+Arm A (distinct principals)
+    conc        rps    p50_ms    p99_ms  srv_p99_ms   shed%  hung   rss_gib    cpu%        pts/s   pts/user/s   pts/req  flags
+     100     16,820      4.75     25.00       20.88    0.0%     0     18.29     908    2,512,728     25,127.3     149.4  
+
+wrote .superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/1e9/matrix-a/concurrency-summary.json

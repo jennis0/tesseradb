@@ -1,0 +1,20 @@
+
+[bundle]
+path = "/home/joe/code/tessera/data/bench-fixtures/1e9"
+cache = ".superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/recalibration/validation/1e9/server/cache"
+wal = ".superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/recalibration/validation/1e9/server/wal.log"
+
+[plugin]
+module = "builtin:passthrough"
+
+[disclosure]
+min_visible_members = 10
+token_max_lifetime = 3600
+
+[serve]
+viewer = "127.0.0.1:60371"
+session = "127.0.0.1:48621"
+control = "127.0.0.1:36061"
+max_k = 200
+session_credential_env = "TESSERA_REFERENCE_SESSION_CRED"
+operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"

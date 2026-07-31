@@ -1,0 +1,26 @@
+{
+  "scale": 1000000000,
+  "label_set": "categories-subclass",
+  "cells": [],
+  "boot_s": 66.78671063900401,
+  "cpu_saturation_cell": {
+    "target_rate": 18000.0,
+    "available_cores": 8,
+    "threshold_pct": 680.0,
+    "cpu_mean_pct": 768.3522062288441,
+    "rps": 17452.8,
+    "p99_ms": 4.872713
+  },
+  "thread_scaling_cell": {
+    "threads=1": 0.533368,
+    "threads=1_points_per_second": 183592.4,
+    "threads=1_large_work": 0.455033,
+    "threads=1_large_work_points_per_second": 281491.0,
+    "threads=default": 0.521898,
+    "threads=default_points_per_second": 191044.2,
+    "threads=default_large_work": 0.456647,
+    "threads=default_large_work_points_per_second": 284062.8,
+    "small_ratio_default_over_1": 0.978495147815392,
+    "large_work_ratio_default_over_1": 1.0035469954926346
+  }
+}

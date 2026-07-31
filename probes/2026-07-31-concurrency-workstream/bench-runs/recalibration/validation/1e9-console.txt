@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized] target(s) in 0.12s
+    Finished `release` profile [optimized] target(s) in 0.87s
+    Finished `release` profile [optimized] target(s) in 0.11s
+bundle /home/joe/code/tessera/data/bench-fixtures/1e9 -- 47968 descriptors
+booting server (matrix/cpu)...
+  up in 66.8s (pid 3402448)
+
+criterion 4a: CPU saturation, open-loop near capacity (Arm B, shared fragments)
+  rate=18,000 rps target  achieved=17,453 rps  cpu=768% (threshold 680% of 8 cores)
+
+criterion 4b: c=1 latency, multi-tile viewport, compute_threads 1 vs machine default
+  threads=1        c=1 (small, z8) p50=0.533 ms  server_p50=0.373 ms  pts/s=183,592  pts/req=106.8
+  threads=1        c=1 (large, z4) p50=0.455 ms  server_p50=0.283 ms  pts/s=281,491  pts/req=144.3
+  threads=default  c=1 (small, z8) p50=0.522 ms  server_p50=0.366 ms  pts/s=191,044  pts/req=106.7
+  threads=default  c=1 (large, z4) p50=0.457 ms  server_p50=0.282 ms  pts/s=284,063  pts/req=144.2
+  small-viewport ratio (default/1) = 0.98 (within ~10%)
+  large-work ratio (default/1) = 1.00 (default did NOT win)
+
+wrote .superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/recalibration/validation/1e9/concurrency-summary.json

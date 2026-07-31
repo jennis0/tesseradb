@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized] target(s) in 0.13s
+    Finished `release` profile [optimized] target(s) in 0.18s
+    Finished `release` profile [optimized] target(s) in 0.13s
+bundle data/bench-fixtures/1e8 -- 4930 descriptors
+booting server (matrix/cpu)...
+  up in 4.5s (pid 3392626)
+
+criterion 4a: CPU saturation, open-loop near capacity (Arm B, shared fragments)
+  rate=18,000 rps target  achieved=15,721 rps  cpu=359% (threshold 680% of 8 cores)
+
+criterion 4b: c=1 latency, multi-tile viewport, compute_threads 1 vs machine default
+  threads=1        c=1 (small, z8) p50=0.334 ms  server_p50=0.177 ms  pts/s=403,057  pts/req=153.0
+  threads=1        c=1 (large, z4) p50=0.693 ms  server_p50=0.514 ms  pts/s=376,308  pts/req=269.0
+  threads=default  c=1 (small, z8) p50=0.361 ms  server_p50=0.191 ms  pts/s=329,376  pts/req=153.6
+  threads=default  c=1 (large, z4) p50=0.765 ms  server_p50=0.577 ms  pts/s=287,719  pts/req=269.1
+  small-viewport ratio (default/1) = 1.08 (within ~10%)
+  large-work ratio (default/1) = 1.10 (default did NOT win)
+
+wrote .superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/recalibration/validation/1e8/concurrency-summary.json

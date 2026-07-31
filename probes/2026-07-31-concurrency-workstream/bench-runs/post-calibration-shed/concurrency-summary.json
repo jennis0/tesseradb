@@ -1,0 +1,22 @@
+{
+  "scale": 2422486,
+  "label_set": "categories-subclass",
+  "cells": [],
+  "shed_cell": {
+    "compute_admission": 1,
+    "compute_queue": 0,
+    "concurrency": 1000,
+    "shed_rate": 0.9410870940778527,
+    "requests_shed_429": 722817,
+    "requests_ok": 45249,
+    "retry_after_violations": 0,
+    "requests_hung": 0,
+    "served_p50_ms": 11.497638,
+    "served_p99_ms": 46.382799,
+    "max_wall_ms": 264.884048,
+    "points_served_total": 15856505,
+    "points_per_second": 1585650.5,
+    "points_per_user_per_second": 1585.6505,
+    "points_per_request": 350.42774425954167
+  }
+}

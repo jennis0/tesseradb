@@ -1,9 +1,10 @@
 # Tile-loop parallelism: what the three-scale calibration found, chose, and recommends
 
 **Status:** landed on main (merge 55eab5f). Constants in `crates/tessera-engine/src/viewport.rs`;
-raw sweep data and the full process history in the concurrency worktree's SDD workspace
-(`.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/`, `bench-runs/recalibration/` +
-`calibration-report.md`). This memo is the decision record; read nothing else unless auditing.
+raw sweep data and the full process history archived in
+[probes/2026-07-31-concurrency-workstream/](../../probes/2026-07-31-concurrency-workstream/)
+(the SDD ledger, per-task reports, and `bench-runs/`). This memo is the decision record; read
+nothing else unless auditing.
 
 ## Results
 

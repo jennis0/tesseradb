@@ -1,0 +1,8 @@
+bundle: data/bench-fixtures/1e8  grant: sparse (spread w=10)  reps: 60
+           shape   zoom      tiles  rows_in_rng       p50_ns       p99_ns
+      natural/z4      4         81     38880468       805608      3849702
+  full-extent/z1      1          4    100000000      2791262      5047627
+  full-extent/z2      2         16    100000000      2785291      3493072
+  full-extent/z3      3         64    100000000      3043437      3895949
+  full-extent/z4      4        256    100000000      3544263      5529404
+  full-extent/z5      5       1024    100000000      3590527      4773947

@@ -1,0 +1,25 @@
+{
+  "scale": 1000000000,
+  "label_set": "categories-subclass",
+  "cells": [],
+  "coldbuild_cell": {
+    "cold_w": 47968,
+    "cold_authorise_s": 0.6650089150061831,
+    "admission_timeout_ms": 250,
+    "cold_workers": 50,
+    "warm_workers": 16,
+    "cold_build": {
+      "cold_max_wall_ms": 39.362422,
+      "cold_requests": 351904,
+      "cold_requests_ok": 0,
+      "cold_requests_shed": 351903,
+      "warm_p50_ms": 1.884109,
+      "warm_p99_ms": 6.113244,
+      "warm_requests": 61535,
+      "warm_requests_ok": 61535,
+      "warm_requests_shed": 0
+    },
+    "requests_hung": 1,
+    "retry_after_violations": 0
+  }
+}
