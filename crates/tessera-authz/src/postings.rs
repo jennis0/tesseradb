@@ -10,13 +10,13 @@
 //! appears here — postings are entity-space only.
 
 use std::fs::File;
-use std::io::{self, BufWriter};
-use std::path::Path;
+use std::io::{self, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arrow::array::{Array, LargeBinaryArray, LargeBinaryBuilder};
-use arrow::buffer::Buffer;
+use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::ipc::reader::{read_footer_length, FileDecoder};
 use arrow::ipc::writer::FileWriter;
@@ -92,8 +92,16 @@ pub fn write_posting_records(path: &Path, records: &[Vec<u8>]) -> io::Result<()>
     for record in records {
         builder.append_value(record);
     }
+    write_posting_array(path, builder.finish())
+}
 
-    let array = builder.finish();
+/// The single schema/batch/IPC-writer invocation behind [`write_posting_records`] and
+/// [`PostingsSpool::finish`]. Byte-identity between the buffered and spooled paths requires
+/// this to be literally the same code, not two copies that could drift. The column carries no
+/// validity buffer: the builder path appends no nulls (so its null buffer is `None`) and the
+/// spool path passes `None` explicitly — a spurious all-valid buffer would change the file
+/// bytes.
+fn write_posting_array(path: &Path, array: LargeBinaryArray) -> io::Result<()> {
     let schema = Arc::new(Schema::new(vec![Field::new(
         POSTING_COLUMN_NAME,
         DataType::LargeBinary,
@@ -112,6 +120,121 @@ pub fn write_posting_records(path: &Path, records: &[Vec<u8>]) -> io::Result<()>
         .finish()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     Ok(())
+}
+
+/// Streaming counterpart to [`write_posting_records`]: encoded records (see [`encode_posting`])
+/// are spooled to a temporary file as they arrive — record ordinal = term id — with only the
+/// Arrow offset table held in memory (one `i64` per record, plus a leading zero). `finish`
+/// memory-maps the spool as the column's values buffer and writes `postings.arrow` through the
+/// same IPC-writer invocation as [`write_posting_records`], so the output is byte-for-byte the
+/// file that function would write from the same records; the reader's single-record-batch
+/// layout constraint (see [`PostingsReader`]) is met the same way, with one batch.
+pub struct PostingsSpool {
+    spool_path: PathBuf,
+    writer: BufWriter<File>,
+    // Arrow LargeBinary offsets: offsets[t]..offsets[t + 1] bounds record t; leading 0.
+    offsets: Vec<i64>,
+}
+
+impl PostingsSpool {
+    /// Create (truncating) the spool file at `spool_path`.
+    pub fn create(spool_path: &Path) -> io::Result<Self> {
+        // Read access is required as well as write: `finish` memory-maps the spool through this
+        // same handle, and mapping a write-only descriptor fails with EACCES.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(spool_path)?;
+        Ok(PostingsSpool {
+            spool_path: spool_path.to_path_buf(),
+            writer: BufWriter::new(file),
+            offsets: vec![0],
+        })
+    }
+
+    /// Append the next term's encoded record. Records must arrive in term order; ordinal in the
+    /// finished file = term id.
+    pub fn append(&mut self, record: &[u8]) -> io::Result<()> {
+        let last = *self
+            .offsets
+            .last()
+            .expect("offsets holds a leading 0 from create");
+        let next = next_offset(last, record.len())?;
+        self.writer.write_all(record)?;
+        self.offsets.push(next);
+        Ok(())
+    }
+
+    /// Flush and fsync the spool, write `postings.arrow` at `postings_path` from it, and delete
+    /// the spool file on success.
+    pub fn finish(self, postings_path: &Path) -> io::Result<()> {
+        let file = self
+            .writer
+            .into_inner()
+            .map_err(io::IntoInnerError::into_error)?;
+        // The spool is about to be read back through a memory map; its bytes must be durable
+        // and visible before the map is taken.
+        file.sync_all()?;
+
+        let total = *self
+            .offsets
+            .last()
+            .expect("offsets holds a leading 0 from create");
+        let total = usize::try_from(total).map_err(|_| {
+            invalid_data("postings spool total exceeds usize on this platform")
+        })?;
+
+        let values = if total == 0 {
+            // memmap2 rejects zero-length maps; an empty values buffer is what the builder
+            // path produces for zero records (and for all-empty records) anyway.
+            Buffer::from_vec(Vec::<u8>::new())
+        } else {
+            let mapping = unsafe { memmap2::Mmap::map(&file) }?;
+            if mapping.len() != total {
+                return Err(invalid_data(format!(
+                    "postings spool is {} bytes but the offset table accounts for {total}",
+                    mapping.len()
+                )));
+            }
+            let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
+            // SAFETY: same argument as `PostingsReader::open`'s mmap arm — `arc` owns the
+            // mapping for as long as any Buffer built from it is alive (captured as the
+            // buffer's `Allocation`), the mapping is valid for `total` bytes for its entire
+            // lifetime, and memmap2::Mmap never returns a null base pointer.
+            let ptr = NonNull::new(arc.as_ptr() as *mut u8)
+                .expect("memmap2::Mmap never returns a null base pointer");
+            unsafe { Buffer::from_custom_allocation(ptr, total, arc) }
+        };
+        drop(file);
+
+        let offsets = OffsetBuffer::new(ScalarBuffer::from(self.offsets));
+        let array = LargeBinaryArray::try_new(offsets, values, None)
+            .map_err(|e| invalid_data(e.to_string()))?;
+        write_posting_array(postings_path, array)?;
+
+        // The map over the spool was dropped with the array inside `write_posting_array`;
+        // the spool is only removed once `postings.arrow` is fully written.
+        std::fs::remove_file(&self.spool_path)
+    }
+}
+
+/// Bounds-check the next Arrow offset. LargeBinary offsets are `i64`; a spool whose running
+/// total would exceed `i64::MAX` cannot be represented and must fail closed, not wrap.
+fn next_offset(last: i64, record_len: usize) -> io::Result<i64> {
+    let len = i64::try_from(record_len).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("posting record of {record_len} bytes exceeds i64::MAX"),
+        )
+    })?;
+    last.checked_add(len).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "postings spool exceeds i64::MAX total bytes",
+        )
+    })
 }
 
 /// A borrowed view of one term's postings, tied to the lifetime of the [`PostingsReader`] that
@@ -437,6 +560,17 @@ mod tests {
                 prop_assert_eq!(&got, expected);
             }
         }
+    }
+
+    /// The i64 offset overflow cannot be reached with real writes (it needs > 8 EiB of spool),
+    /// so the guard is exercised directly.
+    #[test]
+    fn next_offset_rejects_i64_overflow() {
+        assert_eq!(next_offset(i64::MAX - 4, 4).unwrap(), i64::MAX);
+        let err = next_offset(i64::MAX, 1).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let err = next_offset(i64::MAX - 3, 4).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

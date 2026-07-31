@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float32Array, StringArray, UInt16Array, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::buffer::{Buffer, ScalarBuffer};
+use arrow::datatypes::{ArrowNativeType, DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 
@@ -53,17 +54,42 @@ pub fn write_segment(
     Ok(())
 }
 
+/// The four fixed, non-nullable fields of `columns.arrow` (contracts §2.6 r6), in column
+/// order. One definition, so the three writers below cannot drift apart in name, type or
+/// nullability — the reader (`read::validate_schema`) checks all three per column.
+fn fixed_fields() -> Vec<Field> {
+    vec![
+        Field::new("tessera_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("priority", DataType::UInt16, false),
+    ]
+}
+
+/// The one writer path for `columns.arrow`: Arrow IPC file format, exactly one record batch
+/// (the reader's `decode_single_batch` refuses anything else), uncompressed buffers, no fsync
+/// (the build pipeline's manifest digests are what make a partially-written file detectable).
+/// Every `columns.arrow` writer funnels through here, so equal batches produce equal bytes by
+/// construction.
+fn write_single_batch(path: &Path, schema: &Arc<Schema>, batch: &RecordBatch) -> io::Result<()> {
+    let file = File::create(path)?;
+    let mut writer = FileWriter::try_new(BufWriter::new(file), schema)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    writer
+        .write(batch)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    writer
+        .finish()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    Ok(())
+}
+
 fn write_columns_arrow(
     path: &Path,
     items: &[TilerItem],
     scalar_schema: &[(String, ScalarType)],
 ) -> io::Result<()> {
-    let mut fields = vec![
-        Field::new("tessera_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        Field::new("priority", DataType::UInt16, false),
-    ];
+    let mut fields = fixed_fields();
     for (name, ty) in scalar_schema {
         fields.push(Field::new(name, arrow_type_of(*ty), false));
     }
@@ -89,16 +115,7 @@ fn write_columns_arrow(
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-    let file = File::create(path)?;
-    let mut writer = FileWriter::try_new(BufWriter::new(file), &schema)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    writer
-        .write(&batch)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    writer
-        .finish()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    Ok(())
+    write_single_batch(path, &schema, &batch)
 }
 
 fn arrow_type_of(ty: ScalarType) -> DataType {
@@ -210,9 +227,11 @@ pub fn write_morton_codes<I: IntoIterator<Item = u32>>(path: &Path, codes: I) ->
 /// 8+4+4+2 bytes per row), so a copy here would be another eighteen gigabytes. Produces
 /// byte-for-byte what [`write_segment`] writes for the same rows and no scalars.
 ///
-/// `priority` is derived here from `tessera_id` via `TesseraId::priority` — the same one place
+/// `priority` is derived from `tessera_id` via `TesseraId::priority` — the same one place
 /// `write_columns_arrow` derives it — so the two build paths are byte-identical by
-/// construction rather than by agreement (contracts §2.6 r6, 2026-07-30 fold).
+/// construction rather than by agreement (contracts §2.6 r6, 2026-07-30 fold). Since the
+/// 2026-07-31 rework this function is a thin wrapper over [`write_columns_from_parts`], which
+/// does that derivation and the writing; there is one code path.
 pub fn write_columns(
     path: &Path,
     tessera_id: Vec<u64>,
@@ -229,36 +248,110 @@ pub fn write_columns(
         }
     }
 
+    // Delegation, not duplication: `Buffer::from_vec` takes ownership of each `Vec`'s
+    // allocation with no copy, and `write_columns_from_parts` builds the identical record
+    // batch (same schema, same zero-null primitive arrays over the same bytes, same priority
+    // derivation) through the same `write_single_batch` path — so the delegated output is
+    // byte-for-byte what this function wrote before it delegated.
+    write_columns_from_parts(
+        path,
+        Buffer::from_vec(tessera_id),
+        Buffer::from_vec(x),
+        Buffer::from_vec(y),
+        rows,
+    )
+}
+
+/// [`write_columns`], but from raw column bytes instead of `Vec`s: `tessera_id` as `rows`
+/// little-endian `u64`s, `x` and `y` as `rows` little-endian `f32`s each, taken **without
+/// copying** — each `Buffer` *becomes* the record batch's values buffer. This is the batch
+/// build's handover point for file-backed columns: at 3×10⁹ rows the three `Vec`s of
+/// [`write_columns`] are 48 GB of anonymous memory, whereas mmap-backed `Buffer`s
+/// (`Buffer::from_custom_allocation` over a scratch file) cost address space only.
+///
+/// `priority` is still derived here, row by row, from the `tessera_id` buffer via
+/// [`TesseraId::priority`] — the same single definition site every `columns.arrow` writer uses
+/// (contracts §2.6 r6, 2026-07-30 fold). Its transient `Vec<u16>` (2 bytes × `rows`) is the
+/// only allocation proportional to the input and is bounded, accepted cost.
+///
+/// **Alignment**: Arrow requires each values buffer to be aligned to its element type —
+/// 8 bytes for `tessera_id`, 4 for `x`/`y` (`ScalarBuffer` refuses less). An mmap is
+/// page-aligned, so a buffer covering a mapping from offset 0 always qualifies; only a caller
+/// slicing a buffer at an offset that is not a multiple of the element size can violate it,
+/// and that (like a buffer shorter than `rows` elements) is rejected here as an
+/// `InvalidInput` error — fail closed, never a panic from inside arrow.
+///
+/// Output is byte-identical to [`write_columns`] over the same values: same schema
+/// ([`fixed_fields`]), same null-free primitive arrays (no validity buffers — every column is
+/// contractually non-nullable, R4), same single-batch writer ([`write_single_batch`]).
+pub fn write_columns_from_parts(
+    path: &Path,
+    tessera_id: Buffer,
+    x: Buffer,
+    y: Buffer,
+    rows: usize,
+) -> io::Result<()> {
+    let tessera_id: ScalarBuffer<u64> = typed_column("tessera_id", tessera_id, rows)?;
+    let x: ScalarBuffer<f32> = typed_column("x", x, rows)?;
+    let y: ScalarBuffer<f32> = typed_column("y", y, rows)?;
+
+    let tessera_id = UInt64Array::new(tessera_id, None);
     let priority: Vec<u16> = tessera_id
+        .values()
         .iter()
         .map(|&id| TesseraId::new(id).priority())
         .collect();
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("tessera_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        Field::new("priority", DataType::UInt16, false),
-    ]));
+    let schema = Arc::new(Schema::new(fixed_fields()));
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(UInt64Array::from(tessera_id)),
-        Arc::new(Float32Array::from(x)),
-        Arc::new(Float32Array::from(y)),
+        Arc::new(tessera_id),
+        Arc::new(Float32Array::new(x, None)),
+        Arc::new(Float32Array::new(y, None)),
         Arc::new(UInt16Array::from(priority)),
     ];
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-    let file = File::create(path)?;
-    let mut writer = FileWriter::try_new(BufWriter::new(file), &schema)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    writer
-        .write(&batch)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    writer
-        .finish()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    Ok(())
+    write_single_batch(path, &schema, &batch)
+}
+
+/// Check `buffer` can back `rows` values of `T` — long enough, and aligned to `T` (arrow's
+/// `ScalarBuffer` conversion *panics* on misalignment; this turns both failure modes into
+/// typed `InvalidInput` errors first). A buffer longer than `rows` values is fine — the tail
+/// is sliced off — so a page-rounded mapping needs no trimming by the caller.
+fn typed_column<T: ArrowNativeType>(
+    name: &str,
+    buffer: Buffer,
+    rows: usize,
+) -> io::Result<ScalarBuffer<T>> {
+    let width = std::mem::size_of::<T>();
+    let needed = rows.checked_mul(width).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("write_columns_from_parts: {rows} rows of '{name}' overflow usize"),
+        )
+    })?;
+    if buffer.len() < needed {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "write_columns_from_parts: column '{name}' has {} bytes, {rows} rows of \
+                 {width}-byte values need {needed}",
+                buffer.len()
+            ),
+        ));
+    }
+    let align = std::mem::align_of::<T>();
+    if buffer.as_ptr().align_offset(align) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "write_columns_from_parts: column '{name}' buffer is not {align}-byte aligned \
+                 (arrow requires element alignment; page-aligned mmaps always satisfy this)"
+            ),
+        ));
+    }
+    Ok(ScalarBuffer::new(buffer, 0, rows))
 }
 
 /// Write `permutation.bin` (R4): `"TSPM"` ‖ u16 version=1 ‖ u16 reserved=0 ‖ u64 `bound` ‖

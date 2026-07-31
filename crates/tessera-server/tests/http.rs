@@ -123,6 +123,9 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     };
     build(&args).expect("fixture build should succeed");
 }

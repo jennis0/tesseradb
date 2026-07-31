@@ -52,6 +52,19 @@ enum Command {
         /// that runs no conformance suite against the bundle can save writing and hashing it.
         #[arg(long)]
         no_oracle_pairs: bool,
+        /// Signature-sort batch size in items (design §11.1 r23: assignment is
+        /// signature-sorted per batch). Omit to derive the largest batch the memory budget
+        /// supports — usually the whole corpus in one batch. Whatever is used is recorded in
+        /// MANIFEST provenance when it batches, and is **identity-bearing**: a rebuild
+        /// preserving this corpus's identity must replay the recorded value
+        /// (`--carry-id-key-from` does so automatically).
+        #[arg(long)]
+        batch_items: Option<u64>,
+        /// Peak-memory budget for the build's own structures, e.g. `24g`, `900m` or bytes.
+        /// Omit to derive from the machine's available memory. Batch and band sizing, and the
+        /// fail-closed pre-flight, all follow from it.
+        #[arg(long, value_parser = parse_byte_size)]
+        memory_budget: Option<u64>,
 
         /// Carry `identity.key` and `identity.epoch` forward from an existing bundle's
         /// MANIFEST.json. **This is the normal rebuild path** (contracts §2.2).
@@ -287,6 +300,46 @@ fn mint_identity_key() -> (IdentityKey, String) {
 /// contracts §2.2/§2a specifies. Called, and must fail, **before any build work starts** — no
 /// output directory, no input read (plan Critical N-1).
 #[allow(clippy::too_many_arguments)]
+/// The carried bundle's recorded signature-batch size, if its build batched at all (absent
+/// key == one batch — pre-batching manifests never carry it).
+fn read_carried_batch_items(bundle_root: &Path) -> Result<Option<u64>, String> {
+    let current_path = bundle_root.join("CURRENT");
+    let current_bytes = std::fs::read(&current_path)
+        .map_err(|e| format!("--carry-id-key-from {}: {e}", current_path.display()))?;
+    let current: tessera_store::manifest::CurrentPointer = serde_json::from_slice(&current_bytes)
+        .map_err(|e| {
+            format!(
+                "--carry-id-key-from {}: CURRENT is not valid JSON: {e}",
+                current_path.display()
+            )
+        })?;
+    let manifest_path = bundle_root.join(&current.prefix).join("MANIFEST.json");
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .map_err(|e| format!("--carry-id-key-from {}: {e}", manifest_path.display()))?;
+    let manifest: tessera_store::manifest::Manifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("--carry-id-key-from {}: {e}", manifest_path.display()))?;
+    Ok(manifest
+        .provenance
+        .get("batch_items")
+        .and_then(|v| v.as_u64()))
+}
+
+/// `24g` / `512m` / `1073741824` — the human forms a budget is actually typed in.
+fn parse_byte_size(value: &str) -> Result<u64, String> {
+    let value = value.trim();
+    let (digits, multiplier) = match value.chars().last() {
+        Some('g') | Some('G') => (&value[..value.len() - 1], 1u64 << 30),
+        Some('m') | Some('M') => (&value[..value.len() - 1], 1u64 << 20),
+        Some('k') | Some('K') => (&value[..value.len() - 1], 1u64 << 10),
+        _ => (value, 1),
+    };
+    digits
+        .parse::<u64>()
+        .map_err(|e| format!("not a byte size: {e}"))?
+        .checked_mul(multiplier)
+        .ok_or_else(|| "byte size overflows u64".to_string())
+}
+
 fn resolve_identity(
     carry_id_key_from: &Option<PathBuf>,
     id_key_file: &Option<PathBuf>,
@@ -448,6 +501,8 @@ fn main() -> ExitCode {
             limit,
             mint_external_ids,
             no_oracle_pairs,
+            batch_items,
+            memory_budget,
             carry_id_key_from,
             id_key_file,
             id_key,
@@ -482,6 +537,41 @@ fn main() -> ExitCode {
                 );
             }
 
+            // The carried bundle's recorded batch size is identity-bearing exactly like its
+            // key: replayed when this rebuild names no size of its own, refused loudly when a
+            // conflicting size is given — a different batch size is a different permanent
+            // assignment under the same identity key, which is the one silent state this flow
+            // must never produce.
+            let batch_items = match (&carry_id_key_from, batch_items) {
+                (Some(root), passed) => {
+                    let carried = match read_carried_batch_items(root) {
+                        Ok(carried) => carried,
+                        Err(detail) => {
+                            eprintln!("build refused: {detail}");
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                    match (carried, passed) {
+                        (Some(recorded), Some(given)) if recorded != given => {
+                            eprintln!(
+                                "build refused: --carry-id-key-from {}: that bundle was built                                  with --batch-items {recorded}, but {given} was given; an                                  identity-preserving rebuild must replay the recorded value                                  (drop --batch-items to do so)",
+                                root.display()
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        (Some(recorded), _) => Some(recorded),
+                        (None, Some(given)) => {
+                            eprintln!(
+                                "note: the carried bundle was built as a single batch;                                  --batch-items {given} makes this build a DIFFERENT permanent                                  assignment under the same identity key"
+                            );
+                            Some(given)
+                        }
+                        (None, None) => None,
+                    }
+                }
+                (None, passed) => passed,
+            };
+
             let args = tessera_build::BuildArgs {
                 points,
                 pairs,
@@ -495,6 +585,9 @@ fn main() -> ExitCode {
                 shard_id: 0,
                 mint_external_ids,
                 emit_oracle_pairs: !no_oracle_pairs,
+                batch_items,
+                memory_budget,
+                band_rows: None,
             };
             match tessera_build::build(&args) {
                 Ok(report) => {

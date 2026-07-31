@@ -191,6 +191,9 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     };
     let report = build(&args).expect("build should succeed");
     assert_eq!(report.items, N_ITEMS);
@@ -477,6 +480,9 @@ fn build_refuses_to_clobber_an_existing_bundle() {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     };
     build(&args).unwrap();
     // A second build into the same root would leave the first bundle's files half-overwritten
@@ -506,6 +512,9 @@ fn build_rejects_an_empty_selection() {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     })
     .is_err());
 }
@@ -537,6 +546,9 @@ fn morton_input_requires_the_identity_extent() {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     };
 
     // The caller's own extent, which the x/y branch would happily accept, must be rejected here.
@@ -575,6 +587,9 @@ fn morton_input_requires_the_identity_extent() {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     })
     .unwrap();
     let bundle = open_bundle(&out).unwrap();
@@ -614,6 +629,9 @@ fn build_rejects_an_unsafe_slice_id() {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     })
     .is_err());
 }
@@ -652,6 +670,9 @@ fn limit_filters_the_source_entity_id_prefix() {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     })
     .unwrap();
     assert_eq!(report.items, 100);
@@ -684,6 +705,9 @@ fn verify_accepts_a_freshly_built_bundle() {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     })
     .unwrap();
 
@@ -719,6 +743,9 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
     })
     .unwrap();
 

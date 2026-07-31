@@ -10,22 +10,43 @@
 //!
 //! ## The construction
 //!
-//! Every intermediate here is a **flat, packed array indexed by an integer**, and anything that
-//! can be recomputed from the input parquet files is recomputed rather than retained — the
-//! inputs are read several times because a pass over them costs seconds while holding their
-//! contents costs gigabytes. The passes, with the arrays alive at each point (L = items whose
-//! signature exceeds two terms; the Phase 0 corpus has L ≈ 0.17N):
+//! Every intermediate here is a **flat, packed array indexed by an integer**, anything
+//! recomputable from the input parquet is recomputed rather than retained, and anything whose
+//! size scales with the corpus rather than with the budget either lives behind the plan's
+//! arithmetic or spills ([`spill`]). The passes:
 //!
-//! | pass | produces | resident |
+//! | pass | produces | bounded by |
 //! |---|---|---|
 //! | points ×2 | `source_ids`, sorted — an item's **ordinal** is its index here | 8N |
-//! | pairs ×1 | the dictionary: term ids in first-appearance order | 8N |
-//! | pairs ×1 | `packed`: one `u64` per pair, `ordinal << 32 \| term_id` | 8P |
-//! | — | `recs`: the signature sort, 12 bytes per item | 8P + 12N + 8L |
-//! | — | `entity_of_ordinal`: the permanent I9 assignment | 4N |
-//! | pairs ×1 | postings + `pairs.parquet`, via a term-bucketed `u32` array | 4P + 12N |
-//! | points ×1 | external ids | 20N |
+//! | pairs ×1 | dictionary (streamed), term-lookup arrays, pre-dedup `row_counts`, histogram | 12T + 8T |
+//! | pairs ×1 | resolved `ordinal << 32 \| term` per **batch bucket** (RAM when it fits, spilled otherwise) | plan |
+//! | per batch | sort+dedup the bucket; per-ordinal `starts`; signature sort + refinement; entity ids; **band emit** | plan |
+//! | per band | cursor-scatter (already sorted), Roaring-encode in sub-chunks, spool + `pairs.parquet` | plan |
+//! | — | postings assembly: the spool becomes `postings.arrow`'s one record batch, zero-copy | 8(T+1) |
+//! | points ×1 | external ids (when minting) | 20N |
 //! | points ×1 | geometry, the tiler sort, and the segment | 28N |
+//!
+//! ## Batch-scoped signature assignment (§11.1 r23)
+//!
+//! Entity ids are assigned by signature order **within each batch and only within one** — the
+//! design's own scope for the sort (I10's per-batch clause; the serving allocator's group
+//! commit is the same mechanism at window scale). A batch is a contiguous ordinal range of
+//! `batch_items` stride; ids are batch-major, so per-term posting lists stay globally
+//! ascending as the concatenation of per-batch runs, and one batch covering the corpus
+//! reproduces the historical global sort byte for byte. The batch size is **identity-bearing**
+//! (I9): derived deterministically from the memory budget (largest feasible, on a coarse
+//! grid), recorded in MANIFEST provenance whenever the build actually batches, replayed — not
+//! re-derived — by identity-preserving rebuilds, and refused when a stated size would
+//! needlessly fragment posting runs the budget could have kept whole.
+//!
+//! ## The spill discipline
+//!
+//! Bucket, band and spool files live under `<out>/.build-tmp/`, are deleted as consumed and
+//! on every exit path, and each carries a write-side `(count, mix64-sum)` receipt verified on
+//! read — the cross-pass anchor discipline extends across every spill boundary. Bands arrive
+//! with each term's entities strictly ascending by construction (bases ascend across batches,
+//! positions within one), which `encode_posting`'s unconditional sortedness check re-verifies
+//! from disk: a corrupted or reordered spill fails the build, never bends a posting.
 //!
 //! ## Ordinal resolution never assumes anything about the ids themselves
 //!
@@ -105,7 +126,7 @@ use std::path::PathBuf;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use tessera_authz::{encode_posting, write_posting_records, DictWriter};
+use tessera_authz::encode_posting;
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::morton::morton_of;
 use tessera_store::write::{write_columns, write_morton_codes, write_permutation_iter};
@@ -114,6 +135,7 @@ use tessera_types::{EntityId, IdentityKey, SMALL_TERM_THRESHOLD_DEFAULT};
 use crate::error::{BuildError, Result};
 use crate::input;
 use crate::observer::{BuildObserver, BuildStage, StageTimer};
+use crate::spill;
 use crate::{
     fsync_file, validate_args, write_ext_locator, write_external_id_extents, write_manifests,
     BuildArgs, BuildReport, BundleFiles, ExternalIdRow, PairsParquetWriter,
@@ -260,52 +282,291 @@ fn join_chunk<P: Copy + Send>(
     Ok(())
 }
 
-/// Where each long signature (more than two terms) lives in `packed`, addressable in O(1).
+/// Resolve a chunk of `(source_id, source_term)` rows to packed `ordinal << 32 | term` values
+/// by **two sorted merges** — the ordinal join ([`join_chunk`]) and then a term-sorted sweep
+/// over the dictionary's `term_keys` — never a per-row probe: at T = 117M a per-row hash or
+/// binary-search lookup is a random walk over gigabytes, which is the cost class this pipeline
+/// exists to avoid. `resolved` is caller-owned scratch, reused across chunks.
 ///
-/// [`refine_signature_ties`] needs the signature *tail* of every long member of a tie group.
-/// Locating it by binary search over `packed` per comparison — or even per member — is a
-/// random-probe walk over a multi-gigabyte array; the stage-4 cursor scan already stands on
-/// every signature's start, so the starts of the long ones are recorded there (`starts`,
-/// ordinal-ascending, **u64**: a u32 offset into `packed` would silently truncate past 2³²
-/// pairs, and a wrong slice here is a wrong permanent assignment under I9) and addressed by
-/// each ordinal's rank among long ordinals — a per-word popcount block over the `long_sig`
-/// bitset the scan builds anyway. 8 bytes per long item plus N/16 bytes of rank blocks.
-struct LongIndex {
-    bits: Vec<u64>,
-    /// `rank_blocks[w]` = set bits in `bits[..w]`. u32 suffices: there are at most N ≤ 2³²−1
-    /// long ordinals (the item-count ceiling is enforced before this is built).
-    rank_blocks: Vec<u32>,
-    starts: Vec<u64>,
+/// Chunk-order insensitivity: `emit` receives values in term-sorted chunk order; every consumer
+/// sorts or is commutative, so no order is observable downstream.
+fn resolve_pairs_chunk(
+    chunk: &mut Vec<(u64, u64)>,
+    resolved: &mut Vec<(u64, u64)>,
+    source_ids: &[u64],
+    term_keys: &[u64],
+    term_ids: &[u32],
+    mut emit: impl FnMut(u64) -> Result<()>,
+) -> Result<()> {
+    resolved.clear();
+    join_chunk(chunk, source_ids, |ordinal, source_id, source_term| {
+        // Established by the dictionary pass over this same file; a miss means the file is not
+        // the one that pass read.
+        let Some(ordinal) = ordinal else {
+            return Err(input_changed(&format!(
+                "the pairs file names entity {source_id}, which its first pass did not"
+            )));
+        };
+        resolved.push((source_term, ordinal as u64));
+        Ok(())
+    })?;
+    // Equal (term, ordinal) tuples are bit-identical, so the parallel unstable sort has one
+    // output; the sweep cursor then only moves forward.
+    resolved.par_sort_unstable();
+    let mut i = 0usize;
+    for &(source_term, ordinal) in resolved.iter() {
+        while i < term_keys.len() && term_keys[i] < source_term {
+            i += 1;
+        }
+        if i >= term_keys.len() || term_keys[i] != source_term {
+            return Err(input_changed(&format!(
+                "the pairs file names term {source_term}, which its first pass did not"
+            )));
+        }
+        emit((ordinal << 32) | term_ids[i] as u64)?;
+    }
+    resolved.clear();
+    Ok(())
 }
 
-impl LongIndex {
-    fn new(bits: Vec<u64>, starts: Vec<u64>) -> Self {
-        let mut rank_blocks = Vec::with_capacity(bits.len());
-        let mut acc = 0u32;
-        for &word in &bits {
-            rank_blocks.push(acc);
-            acc += word.count_ones();
-        }
-        debug_assert_eq!(acc as usize, starts.len(), "one start per long ordinal");
-        LongIndex {
-            bits,
-            rank_blocks,
-            starts,
+/// Where resolved pairs accumulate before the batch loop: in RAM when the plan proved the
+/// whole relation fits (the historical single-batch path — same allocation, same lifecycle),
+/// spilled to one file per batch otherwise.
+enum BucketSink {
+    Ram(Vec<u64>),
+    Files {
+        writers: Vec<spill::SpillWriter>,
+        batch_items: u64,
+    },
+}
+
+impl BucketSink {
+    fn push(&mut self, value: u64) -> Result<()> {
+        match self {
+            BucketSink::Ram(vec) => {
+                vec.push(value);
+                Ok(())
+            }
+            BucketSink::Files {
+                writers,
+                batch_items,
+            } => {
+                let batch = ((value >> 32) / *batch_items) as usize;
+                writers[batch].push(value)
+            }
         }
     }
 
-    fn is_long(&self, ordinal: u32) -> bool {
-        bit_get(&self.bits, ordinal as usize)
+    fn finish(self) -> Result<BucketStore> {
+        match self {
+            BucketSink::Ram(vec) => Ok(BucketStore::Ram(Some(vec))),
+            BucketSink::Files { writers, .. } => Ok(BucketStore::Files(
+                writers
+                    .into_iter()
+                    .map(|w| w.finish().map(Some))
+                    .collect::<Result<_>>()?,
+            )),
+        }
+    }
+}
+
+enum BucketStore {
+    Ram(Option<Vec<u64>>),
+    Files(Vec<Option<spill::SpillReceipt>>),
+}
+
+impl BucketStore {
+    /// Batch `k`'s packed values, moved out (RAM) or read and integrity-verified (file).
+    fn load(&mut self, k: u64) -> Result<Vec<u64>> {
+        match self {
+            BucketStore::Ram(slot) => {
+                debug_assert_eq!(k, 0, "the RAM backing exists only for a single batch");
+                slot.take()
+                    .ok_or_else(|| BuildError::Invalid("bucket 0 loaded twice".into()))
+            }
+            BucketStore::Files(receipts) => {
+                let receipt = receipts[k as usize]
+                    .as_ref()
+                    .ok_or_else(|| BuildError::Invalid(format!("bucket {k} loaded twice")))?;
+                spill::read_bucket(receipt)
+            }
+        }
     }
 
-    /// The `packed` index where `ordinal`'s signature begins. `ordinal` must be long.
-    fn start_of(&self, ordinal: u32) -> usize {
-        let word = ordinal as usize / 64;
-        let below = (1u64 << (ordinal % 64)) - 1;
-        let rank =
-            self.rank_blocks[word] as usize + (self.bits[word] & below).count_ones() as usize;
-        self.starts[rank] as usize
+    /// Release batch `k`'s backing (deletes the spill file; no-op for RAM, whose vector was
+    /// moved out by `load`).
+    fn delete(&mut self, k: u64) -> Result<()> {
+        if let BucketStore::Files(receipts) = self {
+            if let Some(receipt) = receipts[k as usize].take() {
+                std::fs::remove_file(&receipt.path)
+                    .map_err(|e| BuildError::io(&receipt.path, e))?;
+            }
+        }
+        Ok(())
     }
+}
+
+/// Everything the memory budget decides, decided once and printed. See `BuildArgs::batch_items`
+/// for why the batch size is derived deterministically and recorded rather than re-derived.
+struct BuildPlan {
+    batch_items: u64,
+    batches: u64,
+    bucket_in_ram: bool,
+    /// Term-id band ranges `[lo, hi)`, covering `0..term_count`, each band's pre-dedup rows
+    /// within the flat budget (a term never splits across bands).
+    band_bounds: Vec<(u32, u32)>,
+    /// What provenance records: the batch size iff the build actually batched.
+    recorded_batch_items: Option<u64>,
+}
+
+/// The budget when none is given: MemAvailable, damped to leave room for the page cache and
+/// the allocator's slack; clamped so a tiny CI box still gets a workable floor.
+fn detect_memory_budget() -> u64 {
+    const FALLBACK: u64 = 24 << 30;
+    let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") else {
+        return FALLBACK;
+    };
+    meminfo
+        .lines()
+        .find(|l| l.starts_with("MemAvailable:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|kib| ((kib * 1024) as f64 * 0.8) as u64)
+        .map(|b| b.clamp(2 << 30, 1 << 40))
+        .unwrap_or(FALLBACK)
+}
+
+/// The auto-batching grid: derived batch sizes are multiples of 2^24 items, so small budget
+/// differences between machines derive the same size — an accidental identity fork needs a
+/// budget step of a whole grid cell, not a few megabytes.
+const BATCH_GRID: u64 = 1 << 24;
+
+fn plan_build(
+    args: &BuildArgs,
+    n: u64,
+    pair_rows: usize,
+    row_counts: &[u64],
+    histogram: &[u64],
+    histogram_shift: u32,
+) -> Result<BuildPlan> {
+    let budget = args.memory_budget.unwrap_or_else(detect_memory_budget);
+
+    // The worst batch's pre-dedup pairs for stride `b`, bounded by summing every histogram
+    // range a batch window overlaps — conservative by at most the two boundary ranges.
+    let prefix: Vec<u64> = std::iter::once(0)
+        .chain(histogram.iter().scan(0u64, |acc, &v| {
+            *acc += v;
+            Some(*acc)
+        }))
+        .collect();
+    let worst_pairs = |b: u64| -> u64 {
+        let mut worst = 0u64;
+        let mut lo = 0u64;
+        while lo < n {
+            let hi = (lo + b).min(n);
+            let r_lo = (lo >> histogram_shift) as usize;
+            let r_hi = (((hi - 1) >> histogram_shift) as usize + 1).min(histogram.len());
+            worst = worst.max(prefix[r_hi] - prefix[r_lo]);
+            lo = hi;
+        }
+        worst
+    };
+    // The batch loop's residency model, stated so a refusal can print it: the batch's packed
+    // bucket (8 bytes/pair) + recs (12/item) + starts (4/item) + long bitset (1/8 per item),
+    // beside the loop-wide entity map (4/item over all n), per-term counters (4/term), the
+    // join-chunk buffer (which scales down with the corpus, so a tiny test budget stays
+    // feasible for a tiny corpus) and a fixed slack for band buffers, decoders and allocator.
+    const SLACK: u64 = 64 << 20;
+    let chunk_bytes = 16 * (JOIN_CHUNK_ROWS as u64).min(pair_rows.max(1) as u64);
+    let loop_fixed = 4 * n + 4 * row_counts.len() as u64 + chunk_bytes + SLACK;
+    let per_batch = |b: u64| 8 * worst_pairs(b) + 12 * b + 4 * (b + 1) + b / 8;
+    let feasible = |b: u64| per_batch(b).saturating_add(loop_fixed) <= budget;
+
+    // The largest feasible stride on the grid (or the whole corpus). If even one grid cell is
+    // infeasible the corpus cannot be built under this budget, and the refusal states the
+    // arithmetic rather than thrashing.
+    let auto_batch = if feasible(n) {
+        n
+    } else {
+        let mut b = (n / BATCH_GRID).saturating_mul(BATCH_GRID).max(BATCH_GRID);
+        while b > BATCH_GRID && !feasible(b) {
+            b -= BATCH_GRID;
+        }
+        if !feasible(b) {
+            return Err(BuildError::Invalid(format!(
+                "no feasible signature batch under the {budget}-byte memory budget: even \
+                 {BATCH_GRID} items need {} bytes beside the {loop_fixed}-byte loop floor \
+                 (n = {n}, pairs = {pair_rows}); raise --memory-budget",
+                per_batch(BATCH_GRID)
+            )));
+        }
+        b
+    };
+
+    let batch_items = match args.batch_items {
+        None => auto_batch,
+        Some(b) if b >= n => n,
+        Some(b) => {
+            if !feasible(b) {
+                return Err(BuildError::Invalid(format!(
+                    "--batch-items {b} needs {} bytes beside the {loop_fixed}-byte loop \
+                     floor, over the {budget}-byte budget; the largest feasible batch is \
+                     {auto_batch}",
+                    per_batch(b)
+                )));
+            }
+            // Needlessly small batches permanently forfeit posting compression (I9; §11.1
+            // r23's container model): refuse unless the budget itself is the reason. An
+            // operator who wants small batches states the matching budget, which makes the
+            // choice deliberate and reproducible.
+            if b.saturating_mul(2) < auto_batch {
+                return Err(BuildError::Invalid(format!(
+                    "--batch-items {b} is far below the {auto_batch} the budget supports; \
+                     smaller batches permanently fragment posting runs (§11.1 r23). Pass a \
+                     larger --batch-items, or lower --memory-budget to make this size the \
+                     derived choice"
+                )));
+            }
+            b
+        }
+    };
+    let batches = n.div_ceil(batch_items);
+
+    // The RAM backing needs the WHOLE relation beside the resolve scan's own residents.
+    let bucket_in_ram =
+        batches == 1 && (8 * pair_rows as u64).saturating_add(8 * n + loop_fixed) <= budget;
+
+    // Bands: pre-dedup row counts partition term space (post-dedup <= pre-dedup, so a band's
+    // flat is always large enough); the floor is the largest single term, which can never
+    // split. Flat budget: a quarter of the memory budget at 4 bytes per row, unless the
+    // explicit band-size seam overrides it (a corpus small enough to test cannot otherwise
+    // force more than one band).
+    let max_term_rows = row_counts.iter().copied().max().unwrap_or(0);
+    let band_rows_budget = args
+        .band_rows
+        .unwrap_or(budget / 16)
+        .max(max_term_rows)
+        .max(1);
+    let mut band_bounds: Vec<(u32, u32)> = Vec::new();
+    let mut lo = 0u32;
+    let mut acc = 0u64;
+    for (term, &rows) in row_counts.iter().enumerate() {
+        if acc + rows > band_rows_budget && term as u32 > lo {
+            band_bounds.push((lo, term as u32));
+            lo = term as u32;
+            acc = 0;
+        }
+        acc += rows;
+    }
+    band_bounds.push((lo, row_counts.len() as u32));
+
+    Ok(BuildPlan {
+        batch_items,
+        batches,
+        bucket_in_ram,
+        band_bounds,
+        recorded_batch_items: (batches > 1).then_some(batch_items),
+    })
 }
 
 pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<BuildReport> {
@@ -353,10 +614,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let dict_dir = args.out.join(PREFIX).join("dictionary");
     std::fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     let Dictionary {
-        term_of_source,
+        term_keys,
+        term_ids,
         row_counts,
         term_count,
         pair_rows,
+        histogram,
+        histogram_shift,
         dict_paths,
     } = build_dictionary(args, &source_ids, &dict_dir)?;
     if term_count >= u32::MAX as u64 {
@@ -367,38 +631,64 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     timer.end(BuildStage::Dictionary, term_count);
 
-    // ---- 3. the pairs relation, packed as `ordinal << 32 | term_id` -------------------
-    // Chunk-order insensitivity ([`join_chunk`]): `packed` is globally sorted and deduplicated
-    // immediately below, so the order rows are pushed in — file order before, chunk-sorted
-    // order now — never reaches the output.
-    let mut packed: Vec<u64> = Vec::with_capacity(pair_rows);
-    // Anchor for stage 6's re-read of the same relation: an order-independent mixed sum over
-    // the pre-deduplication resolved rows. Without it, a same-count substitution between the
-    // two passes — one entity's rows for another's, bucket counts preserved — would put an
-    // entity into a term's posting whose label does not carry the term, silently (fail-open).
-    let mut pairs_anchor = 0u64;
+    // ---- 2b. the plan: batch size, bucket backing, band boundaries, pre-flight --------
+    // Everything the budget arithmetic decides, decided in one place and printed — the batch
+    // size is identity-bearing (I9), so it is derived deterministically here, recorded in
+    // provenance when it batches, and never silently re-derived on a rebuild (the CLI replays
+    // a carried bundle's recorded value).
+    let plan = plan_build(args, n, pair_rows, &row_counts, &histogram, histogram_shift)?;
+    drop(histogram);
+    if plan.batches > 1 {
+        eprintln!(
+            "batching: {} batches of <= {} items (signature order is per-batch — \u{a7}11.1 r23; \
+             recorded in provenance; a rebuild preserving this identity must replay it)",
+            plan.batches, plan.batch_items
+        );
+    }
+
+    // ---- 3. the pairs relation, packed as `ordinal << 32 | term_id`, into buckets -----
+    // One bucket per batch — in RAM when the plan says the whole relation fits (the historical
+    // single-batch path, bit for bit), spilled per batch otherwise. Chunk-order insensitivity
+    // ([`join_chunk`]): every bucket is sorted and deduplicated before anything reads it, so
+    // the push order never reaches the output.
+    let tmp = spill::TmpDir::create(&args.out)?;
+    let mut sink = if plan.bucket_in_ram {
+        BucketSink::Ram(Vec::with_capacity(pair_rows))
+    } else {
+        let mut writers = Vec::with_capacity(plan.batches as usize);
+        for k in 0..plan.batches {
+            writers.push(spill::SpillWriter::create(
+                &tmp.path().join(format!("bucket-{k}.u64")),
+            )?);
+        }
+        BucketSink::Files {
+            writers,
+            batch_items: plan.batch_items,
+        }
+    };
+    let mut pushed = 0u64;
     let mut failure: Option<BuildError> = None;
     let mut chunk: Vec<(u64, u64)> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(pair_rows.max(1)));
-    let mut resolve = |chunk: &mut Vec<(u64, u64)>, packed: &mut Vec<u64>| {
-        join_chunk(chunk, &source_ids, |ordinal, source_id, source_term| {
-            // Both lookups were established by the dictionary pass over this same file. A miss
-            // here means the file is not the one that pass read.
-            let (Some(ordinal), Some(&term)) = (ordinal, term_of_source.get(&source_term)) else {
-                return Err(input_changed(&format!(
-                    "the pairs file names entity {source_id} term {source_term}, which its \
-                     first pass did not"
-                )));
-            };
-            let value = ((ordinal as u64) << 32) | term as u64;
-            pairs_anchor = pairs_anchor.wrapping_add(mix64(value));
-            packed.push(value);
-            Ok(())
-        })
+    let mut resolved: Vec<(u64, u64)> = Vec::new();
+    let mut resolve = |chunk: &mut Vec<(u64, u64)>,
+                       resolved: &mut Vec<(u64, u64)>,
+                       sink: &mut BucketSink| {
+        resolve_pairs_chunk(
+            chunk,
+            resolved,
+            &source_ids,
+            &term_keys,
+            &term_ids,
+            |value| {
+                pushed += 1;
+                sink.push(value)
+            },
+        )
     };
     input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
-            if let Err(e) = resolve(&mut chunk, &mut packed) {
+            if let Err(e) = resolve(&mut chunk, &mut resolved, &mut sink) {
                 failure = Some(e);
                 return ControlFlow::Break(());
             }
@@ -408,50 +698,81 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     if let Some(error) = failure {
         return Err(error);
     }
-    resolve(&mut chunk, &mut packed)?;
+    resolve(&mut chunk, &mut resolved, &mut sink)?;
     drop(chunk);
-    if packed.len() != pair_rows {
+    drop(resolved);
+    if pushed as usize != pair_rows {
         return Err(input_changed(&format!(
-            "the pairs file yielded {} rows, then {}",
-            pair_rows,
-            packed.len()
+            "the pairs file yielded {pair_rows} rows, then {pushed}"
         )));
     }
     drop(source_ids);
-    // A total order on (at worst bit-identical) u64s: the parallel unstable sort has exactly
-    // one output.
-    packed.par_sort_unstable();
-    // The label set is a *set*: a source file that repeats a `(entity, term)` row must not turn
-    // into a repeated posting (the linear build deduplicates in `read_pairs`).
-    packed.dedup();
-    let pair_count = packed.len() as u64;
+    drop(term_keys);
+    drop(term_ids);
+    drop(row_counts);
+    let mut store = sink.finish()?;
 
-    timer.end(BuildStage::PairsPack, packed.len() as u64);
+    timer.end(BuildStage::PairsPack, pushed);
 
-    // ---- 4. the signature sort (I9, permanent — see the module docs) ------------------
-    let mut long_sig: Vec<u64> = vec![0; (n as usize).div_ceil(64)];
-    let mut long_starts: Vec<u64> = Vec::new();
-    let mut recs: Vec<SortRec> = Vec::with_capacity(n as usize);
+    // ---- 4–5. per batch: sort, signature-refine, assign, emit bands (§11.1 r23) -------
+    // Entity id = batch base + position in the batch's signature order. Batches partition
+    // ordinal space, so per-batch sort+dedup of the packed relation equals the historical
+    // global sort+dedup (a duplicate pair shares its ordinal, hence its batch), and one batch
+    // covering everything reproduces the pre-batching assignment exactly.
+    let mut entity_of_ordinal: Vec<u32> = vec![0; n as usize];
+    // Exact per-term post-dedup counts, accumulated as bands are emitted; drives the band
+    // sweep's offsets. u32 is sound (a term's entities are distinct, so count <= n < 2^32).
+    let mut term_counts: Vec<u32> = vec![0; term_count as usize];
+    let mut band_writers: Vec<spill::BandWriter> = plan
+        .band_bounds
+        .iter()
+        .enumerate()
+        .map(|(j, &(lo, _))| {
+            spill::BandWriter::create(&tmp.path().join(format!("band-{j}.pairs")), lo)
+        })
+        .collect::<Result<_>>()?;
+    let band_los: Vec<u32> = plan.band_bounds.iter().map(|&(lo, _)| lo).collect();
+    let mut pair_count = 0u64;
     let mut over_bound_items = 0u64;
-    {
+    let mut entity_base = 0u64;
+    for k in 0..plan.batches {
+        let ordinal_lo = k * plan.batch_items;
+        let ordinal_hi = ((k + 1) * plan.batch_items).min(n);
+        let batch_len = (ordinal_hi - ordinal_lo) as usize;
+        let mut packed = store.load(k)?;
+        // A total order on (at worst bit-identical) u64s: one output under the parallel
+        // unstable sort. The label set is a *set*: a repeated input row must not become a
+        // repeated posting (per-batch dedup == global dedup, ordinals partition by batch).
+        packed.par_sort_unstable();
+        packed.dedup();
+        pair_count += packed.len() as u64;
+
+        // Per-ordinal signature starts (u32: the plan caps any batch's pairs well below
+        // 2^32), the long-signature bitset, and the pre-sort keys — today's stage 4 over one
+        // batch, with `starts` subsuming the old long-only start index because the band emit
+        // below needs every item's slice, not only the long ones.
+        let mut starts: Vec<u32> = Vec::with_capacity(batch_len + 1);
+        let mut long_sig: Vec<u64> = vec![0; batch_len.div_ceil(64)];
+        let mut recs: Vec<SortRec> = Vec::with_capacity(batch_len);
         let mut cursor = 0usize;
-        for ordinal in 0..n {
+        for local in 0..batch_len {
+            let ordinal = ordinal_lo + local as u64;
+            starts.push(cursor as u32);
             let start = cursor;
             while cursor < packed.len() && (packed[cursor] >> 32) == ordinal {
                 cursor += 1;
             }
             let sig = &packed[start..cursor];
             if sig.len() > bounds.max_terms_per_item as usize {
-                // A declared bound is a *declaration*: record it and carry on. Dropping terms
-                // here would silently widen the item's visibility (I2/I3).
+                // A declared bound is a *declaration*: record it and carry on. Dropping
+                // terms here would silently widen the item's visibility (I2/I3).
                 over_bound_items += 1;
             }
             if sig.len() > 2 {
-                bit_set(&mut long_sig, ordinal as usize);
-                long_starts.push(start as u64);
+                bit_set(&mut long_sig, local);
             }
-            // `term + 1` so that "no term at this position" (0) sorts before every real term,
-            // which is what makes a signature order before any signature extending it.
+            // `term + 1` so that "no term at this position" (0) sorts before every real
+            // term, which is what makes a signature order before any signature extending it.
             let key: u64 = match sig.len() {
                 0 => 0,
                 1 => (term_of(sig[0]) as u64 + 1) << 32,
@@ -463,7 +784,56 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 ordinal: ordinal as u32,
             });
         }
+        starts.push(cursor as u32);
+        if cursor != packed.len() {
+            return Err(input_changed(&format!(
+                "bucket {k} holds pairs outside its ordinal range [{ordinal_lo}, {ordinal_hi})"
+            )));
+        }
+        // The triple (key_hi, key_lo, ordinal) is unique per rec — a total order, so the
+        // parallel unstable sort has exactly one output; refinement makes it the reference
+        // `(signature, source_id)` order.
+        recs.par_sort_unstable_by_key(|r| r.order());
+        refine_signature_ties(&mut recs, &packed, &starts, ordinal_lo, &long_sig);
+        drop(long_sig);
+        timer.end(BuildStage::SignatureSort, recs.len() as u64);
+
+        // Assignment, and the band emit in the same walk: entities ascend with position, so
+        // every term's entity list arrives ascending — within this batch here, and across
+        // batches because bases ascend and the loop is sequential. `encode_posting`'s
+        // unconditional sortedness check later re-verifies exactly this property from disk.
+        for (position, rec) in recs.iter().enumerate() {
+            let entity = (entity_base + position as u64) as u32;
+            entity_of_ordinal[rec.ordinal as usize] = entity;
+            let local = (rec.ordinal as u64 - ordinal_lo) as usize;
+            let sig = &packed[starts[local] as usize..starts[local + 1] as usize];
+            for &value in sig {
+                let term = term_of(value);
+                let band = band_los.partition_point(|&lo| lo <= term) - 1;
+                band_writers[band].push(term, entity)?;
+                term_counts[term as usize] = term_counts[term as usize]
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        BuildError::Invalid(format!(
+                            "term {term} exceeds 2^32 postings, which the entity ceiling makes \
+                             impossible for an unmutated input"
+                        ))
+                    })?;
+            }
+        }
+        entity_base += recs.len() as u64;
+        store.delete(k)?;
+        timer.end(BuildStage::Assignment, recs.len() as u64);
     }
+    if entity_base != n {
+        return Err(input_changed(&format!(
+            "batches assigned {entity_base} entities for {n} items"
+        )));
+    }
+    let band_receipts: Vec<spill::SpillReceipt> = band_writers
+        .into_iter()
+        .map(|w| w.finish())
+        .collect::<Result<_>>()?;
     if over_bound_items > 0 {
         eprintln!(
             "warning: {over_bound_items} item(s) exceed the plugin's declared \
@@ -471,22 +841,6 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             bounds.max_terms_per_item
         );
     }
-    // The triple (key_hi, key_lo, ordinal) is unique per rec — a total order, so the parallel
-    // unstable sort has exactly one output.
-    recs.par_sort_unstable_by_key(|r| r.order());
-    let long_index = LongIndex::new(long_sig, long_starts);
-    refine_signature_ties(&mut recs, &packed, &long_index);
-    drop(packed);
-    drop(long_index);
-
-    timer.end(BuildStage::SignatureSort, recs.len() as u64);
-
-    // ---- 5. the permanent assignment: entity id = position in the signature order -----
-    let mut entity_of_ordinal: Vec<u32> = vec![0; n as usize];
-    for (entity, rec) in recs.iter().enumerate() {
-        entity_of_ordinal[rec.ordinal as usize] = entity as u32;
-    }
-    drop(recs);
 
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
     let terms_dir = partition_dir.join("terms");
@@ -531,25 +885,117 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     timer.end(BuildStage::Assignment, n);
 
-    // ---- 6. postings and pairs.parquet -----------------------------------------------
+    // ---- 6. postings and pairs.parquet, one term band at a time -----------------------
+    // Bands arrive from the batch loop with every term's entities strictly ascending (bases
+    // ascend across batches, positions within one); the cursor-scatter needs no sort, and
+    // `encode_posting`'s unconditional sortedness check re-verifies the whole spill path from
+    // disk, fail-closed. The integrity chain replacing the old third pairs scan: bucket
+    // receipts -> in-process emit -> band receipts (count + anchor, verified on read) ->
+    // per-term exact counts -> the total against the deduplicated relation.
     let postings_path = terms_dir.join("postings.arrow");
     let pairs_path = args
         .emit_oracle_pairs
         .then(|| terms_dir.join("pairs.parquet"));
-    write_terms(
-        args,
-        &postings_path,
-        pairs_path.as_deref(),
-        &source_ids,
-        &entity_of_ordinal,
-        &term_of_source,
-        &row_counts,
-        pair_count,
-        pairs_anchor,
-    )?;
+    let mut pairs_writer = pairs_path
+        .as_deref()
+        .map(PairsParquetWriter::create)
+        .transpose()?;
+    let mut spool = tessera_authz::PostingsSpool::create(&tmp.path().join("postings.spool"))
+        .map_err(|e| BuildError::io(&postings_path, e))?;
+    let mut written = 0u64;
+    for (j, &(band_lo, band_hi)) in plan.band_bounds.iter().enumerate() {
+        let width = (band_hi - band_lo) as usize;
+        let mut offsets: Vec<u64> = Vec::with_capacity(width + 1);
+        let mut total = 0u64;
+        offsets.push(0);
+        for term in band_lo..band_hi {
+            total += term_counts[term as usize] as u64;
+            offsets.push(total);
+        }
+        let mut flat: Vec<u32> = vec![0; total as usize];
+        let mut cursor: Vec<u64> = offsets[..width].to_vec();
+        let mut reader = spill::BandReader::open(&band_receipts[j])?;
+        while let Some((term, entity)) = reader.next()? {
+            if term < band_lo || term >= band_hi {
+                return Err(input_changed(&format!(
+                    "band {j} holds term {term}, outside its [{band_lo}, {band_hi}) range"
+                )));
+            }
+            let local = (term - band_lo) as usize;
+            let slot = &mut cursor[local];
+            // The band was sized by the emit's exact count for this term. Writing past its
+            // end would land in the next term's postings — one term's entities silently
+            // becoming another's, which is a disclosure. Check rather than trust.
+            if *slot >= offsets[local + 1] {
+                return Err(input_changed(&format!(
+                    "term {term} received more postings than the {} its emit counted",
+                    term_counts[term as usize]
+                )));
+            }
+            flat[*slot as usize] = entity;
+            *slot += 1;
+        }
+        // The mirror: a short-filled term would leave zeroed slots, and zero is a valid
+        // entity id — catch it by count, not by value.
+        for (local, slot) in cursor.iter().enumerate() {
+            if *slot != offsets[local + 1] {
+                return Err(input_changed(&format!(
+                    "term {} expected {} postings, received {}",
+                    band_lo as usize + local,
+                    offsets[local + 1] - offsets[local],
+                    slot - offsets[local]
+                )));
+            }
+        }
+        // Encode in bounded sub-chunks — parallel, collected in term order — and append to
+        // the spool; never one live record per term (T = 117M of those is gigabytes of Vec
+        // headers before a byte is written).
+        const ENCODE_CHUNK_TERMS: usize = 1 << 16;
+        let mut t = 0usize;
+        while t < width {
+            let hi = (t + ENCODE_CHUNK_TERMS).min(width);
+            let encoded: Vec<Vec<u8>> = (t..hi)
+                .into_par_iter()
+                .map(|local| {
+                    let slice = &flat[offsets[local] as usize..offsets[local + 1] as usize];
+                    encode_posting(
+                        band_lo as usize + local,
+                        slice,
+                        SMALL_TERM_THRESHOLD_DEFAULT,
+                    )
+                    .map_err(|e| BuildError::io(&postings_path, e))
+                })
+                .collect::<Result<_>>()?;
+            for (local, record) in (t..hi).zip(encoded) {
+                spool
+                    .append(&record)
+                    .map_err(|e| BuildError::io(&postings_path, e))?;
+                let slice = &flat[offsets[local] as usize..offsets[local + 1] as usize];
+                written += slice.len() as u64;
+                if let Some(writer) = pairs_writer.as_mut() {
+                    writer.push_run(band_lo + local as u32, slice)?;
+                }
+            }
+            t = hi;
+        }
+        drop(flat);
+        std::fs::remove_file(&band_receipts[j].path)
+            .map_err(|e| BuildError::io(&band_receipts[j].path, e))?;
+    }
+    drop(term_counts);
+    if written != pair_count {
+        return Err(BuildError::Invalid(format!(
+            "postings hold {written} pairs but the relation has {pair_count}"
+        )));
+    }
+    if let Some(writer) = pairs_writer {
+        writer.finish()?;
+    }
+    spool
+        .finish(&postings_path)
+        .map_err(|e| BuildError::io(&postings_path, e))?;
     fsync_file(&postings_path)?;
-    drop(term_of_source);
-    drop(row_counts);
+    tmp.close()?;
 
     timer.end(BuildStage::PostingsWrite, pair_count);
 
@@ -762,6 +1208,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         n,
         term_count,
         pair_count,
+        plan.recorded_batch_items,
     )?;
     // Reported in bytes, not rows: this stage re-reads and SHA-256s every byte the build wrote,
     // so it scales with bundle size rather than with item count.
@@ -843,14 +1290,22 @@ fn require_decomposable_labelling(plugin: &impl Plugin) -> Result<()> {
 
 /// What [`build_dictionary`] establishes in its single pass over the pairs relation.
 struct Dictionary {
-    /// Source term id -> the term id it interned to.
-    term_of_source: FxHashMap<u64, u32>,
+    /// Source term ids, ascending — with `term_ids` in parallel, the source-term → term-id map
+    /// as two flat arrays (12 bytes per term against an `FxHashMap`'s ~40 at T = 117M), looked
+    /// up by merge sweep over term-sorted chunks, never by per-row probe.
+    term_keys: Vec<u64>,
+    /// `term_ids[i]` is the term id `term_keys[i]` interned to.
+    term_ids: Vec<u32>,
     /// Per term id, how many pairs **rows** name it — counted before deduplication, so a bucket
     /// sized by this is wide enough even when the input repeats a `(entity, term)` row.
     row_counts: Vec<u64>,
     term_count: u64,
     /// Selected pairs rows, before deduplication.
     pair_rows: usize,
+    /// Resolved pairs rows per ordinal range (`ordinal >> histogram_shift`), for the batch
+    /// pre-flight: the worst batch's pairs are bounded by summing overlapping ranges.
+    histogram: Vec<u64>,
+    histogram_shift: u32,
     dict_paths: Vec<PathBuf>,
 }
 
@@ -868,9 +1323,12 @@ fn build_dictionary(
     source_ids: &[u64],
     dict_dir: &std::path::Path,
 ) -> Result<Dictionary> {
-    // Chunk-order insensitivity ([`join_chunk`]): per-term min-ordinal and row counts are
-    // commutative aggregations — no arrival order is observable in them.
+    // Chunk-order insensitivity ([`join_chunk`]): per-term min-ordinal and row counts, and the
+    // per-range histogram, are commutative aggregations — no arrival order is observable.
     let mut first_ordinal: FxHashMap<u64, (u64, u64)> = FxHashMap::default();
+    // Ordinal-range histogram for batch sizing: 2^16 ranges regardless of n.
+    let histogram_shift = (64 - (source_ids.len().max(1) as u64).leading_zeros()).saturating_sub(16);
+    let mut histogram = vec![0u64; (source_ids.len() >> histogram_shift) + 1];
     // Absent ids are reported by count and minimum, never collected: a mispaired input naming
     // billions of missing ids would otherwise accumulate a multi-gigabyte set — the exact
     // transient class this module exists to avoid — before producing its typed error.
@@ -887,6 +1345,7 @@ fn build_dictionary(
                     let slot = first_ordinal.entry(source_term).or_insert((u64::MAX, 0));
                     slot.0 = slot.0.min(ordinal as u64);
                     slot.1 += 1;
+                    histogram[(ordinal >> histogram_shift) as usize] += 1;
                 }
                 None => {
                     absent_count += 1;
@@ -928,25 +1387,38 @@ fn build_dictionary(
 
     // The Phase 0 corpus carries integer term ids; the item's `access` label is the comma-joined
     // decimal source term ids, so `builtin:passthrough` yields decimal-string descriptors (R6).
-    let mut dict = DictWriter::new(dict_dir);
-    let mut term_of_source: FxHashMap<u64, u32> =
-        FxHashMap::with_capacity_and_hasher(order.len(), Default::default());
+    // Streamed, not interned: the descriptors here are distinct by construction (one per
+    // distinct source term) and arrive in term-id order, which is `DictStreamWriter`'s exact
+    // contract — at T = 117M an interner is gigabytes of pointless ownership.
+    let mut dict = tessera_authz::DictStreamWriter::new(dict_dir);
+    let mut pairs_of_term: Vec<(u64, u32)> = Vec::with_capacity(order.len());
     let mut row_counts: Vec<u64> = Vec::with_capacity(order.len());
     for &(_, source_term) in &order {
-        let term = dict.intern(source_term.to_string().as_bytes());
-        term_of_source.insert(source_term, term.raw());
+        let term = dict.append(source_term.to_string().as_bytes());
+        pairs_of_term.push((source_term, term.raw()));
         row_counts.push(first_ordinal[&source_term].1);
     }
+    drop(first_ordinal);
+    drop(order);
     let term_count = dict.len() as u64;
     let dict_paths = dict.finish().map_err(|e| BuildError::io(dict_dir, e))?;
     for path in &dict_paths {
         fsync_file(path)?;
     }
+    // The lookup arrays: source-term-ascending, consumed by merge sweeps over term-sorted
+    // chunks. (Unique keys — one entry per distinct term — so the parallel unstable sort has
+    // one output.)
+    pairs_of_term.par_sort_unstable_by_key(|&(source_term, _)| source_term);
+    let term_keys: Vec<u64> = pairs_of_term.iter().map(|&(st, _)| st).collect();
+    let term_ids: Vec<u32> = pairs_of_term.iter().map(|&(_, tid)| tid).collect();
     Ok(Dictionary {
-        term_of_source,
+        term_keys,
+        term_ids,
         row_counts,
         term_count,
         pair_rows,
+        histogram,
+        histogram_shift,
         dict_paths,
     })
 }
@@ -974,7 +1446,8 @@ fn build_dictionary(
 ///   made explicit.
 ///
 /// Mechanically, each long member's tail is gathered **once** into a scratch arena — its
-/// location in `packed` comes from [`LongIndex`] in O(1), not from a binary search — and the
+/// location in `packed` comes from the batch's per-ordinal starts array in O(1), not from a
+/// binary search — and the
 /// long sort compares contiguous scratch, not the multi-gigabyte relation. The previous
 /// implementation did two `partition_point` probes over `packed` *per comparison*; with 46% of
 /// the Phase 0 corpus inside refined groups that was the single largest cost of the whole
@@ -982,7 +1455,13 @@ fn build_dictionary(
 ///
 /// Groups are disjoint slices of `recs`, so refinement runs in parallel across groups; each
 /// group's result is deterministic, so the whole pass is.
-fn refine_signature_ties(recs: &mut [SortRec], packed: &[u64], long: &LongIndex) {
+fn refine_signature_ties(
+    recs: &mut [SortRec],
+    packed: &[u64],
+    starts: &[u32],
+    base_ordinal: u64,
+    long_sig: &[u64],
+) {
     // Group boundaries first (cheap linear scan), keeping only groups that need refining.
     let mut refined: Vec<(usize, usize)> = Vec::new();
     let mut start = 0usize;
@@ -994,7 +1473,11 @@ fn refine_signature_ties(recs: &mut [SortRec], packed: &[u64], long: &LongIndex)
         {
             end += 1;
         }
-        if end - start > 1 && recs[start..end].iter().any(|r| long.is_long(r.ordinal)) {
+        if end - start > 1
+            && recs[start..end]
+                .iter()
+                .any(|r| bit_get(long_sig, (r.ordinal as u64 - base_ordinal) as usize))
+        {
             refined.push((start, end));
         }
         start = end;
@@ -1016,7 +1499,7 @@ fn refine_signature_ties(recs: &mut [SortRec], packed: &[u64], long: &LongIndex)
     groups
         .into_par_iter()
         .for_each_init(RefineScratch::default, |scratch, group| {
-            refine_group(group, packed, long, scratch)
+            refine_group(group, packed, starts, base_ordinal, long_sig, scratch)
         });
 }
 
@@ -1035,7 +1518,14 @@ struct RefineScratch {
 
 /// Refine one tie group: shorts keep their order at the front, longs sort by (tail, ordinal).
 /// See [`refine_signature_ties`] for why this equals the full-signature stable sort.
-fn refine_group(group: &mut [SortRec], packed: &[u64], long: &LongIndex, s: &mut RefineScratch) {
+fn refine_group(
+    group: &mut [SortRec],
+    packed: &[u64],
+    starts: &[u32],
+    base_ordinal: u64,
+    long_sig: &[u64],
+    s: &mut RefineScratch,
+) {
     // A refined group's key has both halves non-zero (the disjointness argument above); a
     // violation would mean a short member with fewer than two terms slipped in, which the
     // partition below would order incorrectly. Loud in debug, impossible by construction.
@@ -1047,15 +1537,13 @@ fn refine_group(group: &mut [SortRec], packed: &[u64], long: &LongIndex, s: &mut
     s.longs.clear();
     s.arena.clear();
     for &rec in group.iter() {
-        if long.is_long(rec.ordinal) {
-            let sig_start = long.start_of(rec.ordinal);
+        let local = (rec.ordinal as u64 - base_ordinal) as usize;
+        if bit_get(long_sig, local) {
             let tail_start = s.arena.len();
-            // Skip the two prefix terms every member shares; walk the run to its end. The run
-            // is contiguous and ordinal-delimited, so no length bookkeeping is needed.
-            let mut i = sig_start + 2;
-            while i < packed.len() && (packed[i] >> 32) == rec.ordinal as u64 {
-                s.arena.push(term_of(packed[i]));
-                i += 1;
+            // Skip the two prefix terms every member shares; the batch's per-ordinal starts
+            // array bounds the slice in O(1).
+            for &value in &packed[starts[local] as usize + 2..starts[local + 1] as usize] {
+                s.arena.push(term_of(value));
             }
             debug_assert!(
                 s.arena.len() > tail_start,
@@ -1080,197 +1568,10 @@ fn refine_group(group: &mut [SortRec], packed: &[u64], long: &LongIndex, s: &mut
     }
 }
 
-/// Write `postings.arrow` and `pairs.parquet`.
-///
-/// The `(entity, term)` relation is scattered into one flat `u32` array bucketed by term — the
-/// bucket boundaries are known in advance from the per-term **row** counts the dictionary pass
-/// took — and each bucket is then sorted and deduplicated. That yields exactly the ascending
-/// per-term entity lists the linear build accumulates by walking items in entity order, at four
-/// bytes per pair and with no per-term allocation.
-///
-/// Buckets are sized by the *pre-deduplication* row counts, so a repeated `(entity, term)` input
-/// row lands in its bucket and is removed by the per-bucket `dedup` rather than needing a
-/// seen-set: at 1.72 × 10⁹ pairs a set of every pair seen would be tens of gigabytes, which is
-/// the ceiling this whole module exists to stay under.
-#[allow(clippy::too_many_arguments)]
-fn write_terms(
-    args: &BuildArgs,
-    postings_path: &std::path::Path,
-    pairs_path: Option<&std::path::Path>,
-    source_ids: &[u64],
-    entity_of_ordinal: &[u32],
-    term_of_source: &FxHashMap<u64, u32>,
-    row_counts: &[u64],
-    pair_count: u64,
-    pairs_anchor: u64,
-) -> Result<()> {
-    let mut offsets: Vec<u64> = Vec::with_capacity(row_counts.len() + 1);
-    let mut total = 0u64;
-    offsets.push(0);
-    for &count in row_counts {
-        total += count;
-        offsets.push(total);
-    }
-
-    // Chunk-order insensitivity ([`join_chunk`]): each bucket's fill order varies with chunk
-    // boundaries, but every bucket is sorted and deduplicated below before anything reads it —
-    // the fill order never reaches the output.
-    let mut flat: Vec<u32> = vec![0; total as usize];
-    let mut cursor: Vec<u64> = offsets[..row_counts.len()].to_vec();
-    // This pass's accumulation of the stage-3 anchor: the same mixed sum over the same
-    // pre-deduplication `(ordinal, term)` multiset, compared below. Counts alone cannot catch
-    // a substitution that preserves per-term row counts; the anchor does.
-    let mut seen_anchor = 0u64;
-    let mut failure: Option<BuildError> = None;
-    let mut chunk: Vec<(u64, u64)> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(total as usize));
-    let mut resolve = |chunk: &mut Vec<(u64, u64)>, flat: &mut Vec<u32>, cursor: &mut Vec<u64>| {
-        join_chunk(chunk, source_ids, |ordinal, source_id, source_term| {
-            let (Some(ordinal), Some(&term)) = (ordinal, term_of_source.get(&source_term)) else {
-                return Err(input_changed(&format!(
-                    "the pairs file names entity {source_id} term {source_term}, which its \
-                     first pass did not"
-                )));
-            };
-            seen_anchor = seen_anchor.wrapping_add(mix64(((ordinal as u64) << 32) | term as u64));
-            let slot = &mut cursor[term as usize];
-            // The bucket was sized by the dictionary pass's count for this term. Writing past
-            // its end would land in the *next* term's bucket — one term's entities silently
-            // becoming another's posting, which is a disclosure. Check rather than trust the
-            // two counts agree.
-            if *slot >= offsets[term as usize + 1] {
-                return Err(input_changed(&format!(
-                    "term {term}'s bucket holds {} rows but a further row arrived",
-                    row_counts[term as usize]
-                )));
-            }
-            flat[*slot as usize] = entity_of_ordinal[ordinal as usize];
-            *slot += 1;
-            Ok(())
-        })
-    };
-    input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
-        chunk.push((source_id, source_term));
-        if chunk.len() == JOIN_CHUNK_ROWS {
-            if let Err(e) = resolve(&mut chunk, &mut flat, &mut cursor) {
-                failure = Some(e);
-                return ControlFlow::Break(());
-            }
-        }
-        ControlFlow::Continue(())
-    })?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    resolve(&mut chunk, &mut flat, &mut cursor)?;
-    drop(chunk);
-    if seen_anchor != pairs_anchor {
-        return Err(input_changed(
-            "the pairs file resolved to a different (entity, term) multiset than the relation \
-             pass read (row counts unchanged)",
-        ));
-    }
-    // The mirror of the overflow check: a bucket left short would leave its tail zeroed, and a
-    // zero is a valid entity id, so an under-filled bucket must be caught by count, not by value.
-    for (term, slot) in cursor.iter().enumerate() {
-        if *slot != offsets[term + 1] {
-            return Err(input_changed(&format!(
-                "term {term}'s bucket expected {} rows, received {}",
-                row_counts[term],
-                slot - offsets[term]
-            )));
-        }
-    }
-
-    // Split `flat` into one disjoint `&mut` bucket per term (safe: consecutive ranges walked
-    // off the front), then sort, deduplicate and Roaring-encode every bucket in parallel.
-    // Bucket contents are multisets of entity ids — sort+dedup normalises whatever fill order
-    // the chunks produced — and `encode_posting` is pure, so the collected results are
-    // deterministic and in term order.
-    let mut buckets: Vec<&mut [u32]> = Vec::with_capacity(row_counts.len());
-    let mut rest: &mut [u32] = &mut flat;
-    for term in 0..row_counts.len() {
-        let width = (offsets[term + 1] - offsets[term]) as usize;
-        let (bucket, tail) = rest.split_at_mut(width);
-        buckets.push(bucket);
-        rest = tail;
-    }
-    let encoded: Vec<(usize, Vec<u8>)> = buckets
-        .into_par_iter()
-        .enumerate()
-        .map(|(term, bucket)| {
-            bucket.sort_unstable();
-            let end = dedup_len(bucket);
-            let record = encode_posting(term, &bucket[..end], SMALL_TERM_THRESHOLD_DEFAULT)
-                .map_err(|e| BuildError::io(postings_path, e))?;
-            Ok((end, record))
-        })
-        .collect::<Result<_>>()?;
-
-    let mut records: Vec<Vec<u8>> = Vec::with_capacity(row_counts.len());
-    let mut pairs_writer = pairs_path.map(PairsParquetWriter::create).transpose()?;
-    let mut written = 0u64;
-    for (term, (end, record)) in encoded.into_iter().enumerate() {
-        let bucket = &flat[offsets[term] as usize..offsets[term] as usize + end];
-        written += end as u64;
-        records.push(record);
-        if let Some(writer) = pairs_writer.as_mut() {
-            writer.push_run(term as u32, bucket)?;
-        }
-    }
-    drop(flat);
-    if written != pair_count {
-        return Err(BuildError::Invalid(format!(
-            "postings hold {written} pairs but the relation has {pair_count}"
-        )));
-    }
-    if let Some(writer) = pairs_writer {
-        writer.finish()?;
-    }
-    write_posting_records(postings_path, &records).map_err(|e| BuildError::io(postings_path, e))?;
-    Ok(())
-}
-
-/// Deduplicate a sorted slice in place, returning the length of the deduplicated prefix.
-fn dedup_len(sorted: &mut [u32]) -> usize {
-    let mut end = 0usize;
-    for i in 0..sorted.len() {
-        if end == 0 || sorted[i] != sorted[end - 1] {
-            sorted[end] = sorted[i];
-            end += 1;
-        }
-    }
-    end
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tessera_types::IdentityKey;
-
-    /// `LongIndex::start_of` must agree with a naive rank computation at every long ordinal,
-    /// across word boundaries and word-aligned positions.
-    #[test]
-    fn long_index_rank_agrees_with_naive_rank() {
-        // Long ordinals chosen to straddle word boundaries: 0, mid-word, 63/64/65, and a
-        // sparse tail; every other ordinal is short.
-        let long_ordinals: Vec<u32> = vec![0, 3, 63, 64, 65, 127, 128, 300, 449];
-        let n = 450usize;
-        let mut bits = vec![0u64; n.div_ceil(64)];
-        for &o in &long_ordinals {
-            bit_set(&mut bits, o as usize);
-        }
-        // Each long ordinal's "start" is a distinct sentinel so a wrong rank reads as a wrong
-        // value, not a coincidence.
-        let starts: Vec<u64> = long_ordinals.iter().map(|&o| 1000 + o as u64).collect();
-        let index = LongIndex::new(bits, starts);
-        for &o in &long_ordinals {
-            assert!(index.is_long(o));
-            assert_eq!(index.start_of(o), 1000 + o as usize, "ordinal {o}");
-        }
-        assert!(!index.is_long(1));
-        assert!(!index.is_long(62));
-        assert!(!index.is_long(129));
-    }
 
     /// `join_chunk` must resolve every id that is present (including runs of duplicates, which
     /// all map to the same ordinal), report every id that is absent as `None`, and drain the

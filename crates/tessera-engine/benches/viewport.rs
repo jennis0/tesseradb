@@ -82,6 +82,9 @@ fn ensure_bundle() -> PathBuf {
             shard_id: 0,
             mint_external_ids: true,
             emit_oracle_pairs: true,
+            batch_items: None,
+            memory_budget: None,
+            band_rows: None,
         };
         build(&args).expect("2.4M fixture build should succeed");
     }

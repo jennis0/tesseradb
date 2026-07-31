@@ -404,3 +404,118 @@ fn a_manifest_without_an_identity_object_is_a_typed_error() {
         .expect_err("a manifest without `identity` must fail to deserialise, not default it");
     let _ = err; // a typed deserialisation error, not a defaulted/half-read Manifest.
 }
+
+/// Write `bytes` to `path`, mmap it, and wrap the mapping as an arrow `Buffer` without copying
+/// — the exact handover shape `write_columns_from_parts` exists for (a file-backed column the
+/// build pipeline spilled, mapped page-aligned at offset 0).
+fn mmap_buffer(path: &std::path::Path, bytes: &[u8]) -> arrow::buffer::Buffer {
+    fs::write(path, bytes).expect("write scratch column file");
+    let file = fs::File::open(path).expect("open scratch column file");
+    // SAFETY: the mapping is read-only and lives inside the Arc the Buffer captures as its
+    // allocation, so it outlives every view of it; nothing writes the file after this.
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.expect("mmap scratch column file");
+    let len = mmap.len();
+    let arc = Arc::new(mmap);
+    let ptr = std::ptr::NonNull::new(arc.as_ptr() as *mut u8).expect("mmap base is non-null");
+    unsafe { arrow::buffer::Buffer::from_custom_allocation(ptr, len, arc) }
+}
+
+#[test]
+fn write_columns_from_parts_matches_write_columns_byte_for_byte() {
+    use arrow::buffer::Buffer;
+    use tessera_store::write::{write_columns, write_columns_from_parts};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    for rows in [0usize, 1, 1000] {
+        let tessera: Vec<u64> = (0..rows as u64)
+            .map(|i| synthetic_tessera_id(i).raw())
+            .collect();
+        let x: Vec<f32> = (0..rows).map(|i| i as f32 * 0.25).collect();
+        let y: Vec<f32> = (0..rows).map(|i| 1.0 - i as f32 * 0.125).collect();
+
+        let via_vecs = dir.path().join(format!("vecs-{rows}.arrow"));
+        write_columns(&via_vecs, tessera.clone(), x.clone(), y.clone()).expect("write_columns");
+        let vec_bytes = fs::read(&via_vecs).expect("read write_columns output");
+
+        // Heap-backed buffers through the from-parts door.
+        let via_parts = dir.path().join(format!("parts-{rows}.arrow"));
+        write_columns_from_parts(
+            &via_parts,
+            Buffer::from_vec(tessera.clone()),
+            Buffer::from_vec(x.clone()),
+            Buffer::from_vec(y.clone()),
+            rows,
+        )
+        .expect("write_columns_from_parts (heap buffers)");
+        assert_eq!(
+            fs::read(&via_parts).expect("read from_parts output"),
+            vec_bytes,
+            "{rows} rows: heap-buffer from_parts output must be byte-identical"
+        );
+
+        // Mmap-backed buffers — the 48 GB-avoidance case this function exists for. (Skipped
+        // at zero rows: Linux refuses to mmap an empty file, and an empty column has nothing
+        // to spill anyway — the heap-buffer case above covers rows == 0.)
+        if rows > 0 {
+            let t_bytes: Vec<u8> = tessera.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let x_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let y_bytes: Vec<u8> = y.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let via_mmap = dir.path().join(format!("mmap-{rows}.arrow"));
+            write_columns_from_parts(
+                &via_mmap,
+                mmap_buffer(&dir.path().join(format!("t-{rows}.bin")), &t_bytes),
+                mmap_buffer(&dir.path().join(format!("x-{rows}.bin")), &x_bytes),
+                mmap_buffer(&dir.path().join(format!("y-{rows}.bin")), &y_bytes),
+                rows,
+            )
+            .expect("write_columns_from_parts (mmap buffers)");
+            assert_eq!(
+                fs::read(&via_mmap).expect("read mmap-backed output"),
+                vec_bytes,
+                "{rows} rows: mmap-backed from_parts output must be byte-identical"
+            );
+        }
+
+        // And the strict reader (one batch, uncompressed, aligned, fixed schema, no nulls)
+        // accepts it, with `priority` derived from `tessera_id` exactly as contracts §2.6 r6
+        // defines it.
+        let cols = ColumnsRef::load(&via_parts).expect("ColumnsRef must load from_parts output");
+        assert_eq!(cols.row_count() as usize, rows);
+        assert_eq!(cols.tessera_id(), &tessera[..]);
+        assert_eq!(cols.x(), &x[..]);
+        assert_eq!(cols.y(), &y[..]);
+        let expected_priority: Vec<u16> = tessera
+            .iter()
+            .map(|&id| TesseraId::new(id).priority())
+            .collect();
+        assert_eq!(cols.priority(), &expected_priority[..]);
+    }
+}
+
+#[test]
+fn write_columns_from_parts_rejects_short_and_misaligned_buffers_without_panicking() {
+    use arrow::buffer::Buffer;
+    use tessera_store::write::write_columns_from_parts;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("never-written.arrow");
+    let x = Buffer::from_vec(vec![0f32; 4]);
+    let y = Buffer::from_vec(vec![0f32; 4]);
+
+    // Too short: 3 u64s cannot back 4 rows.
+    let err = write_columns_from_parts(&path, Buffer::from_vec(vec![0u64; 3]), x.clone(), y.clone(), 4)
+        .expect_err("a buffer shorter than `rows` values must be a typed error");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+    // Misaligned: slicing a u64 buffer at byte 4 moves it off 8-byte alignment. Arrow's own
+    // ScalarBuffer conversion would panic here; the writer must fail closed with an error
+    // instead.
+    let misaligned = Buffer::from_vec(vec![0u64; 5]).slice(4);
+    let err = write_columns_from_parts(&path, misaligned, x, y, 4)
+        .expect_err("a misaligned buffer must be a typed error, not an arrow panic");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        err.to_string().contains("aligned"),
+        "error should name the alignment failure: {err}"
+    );
+}

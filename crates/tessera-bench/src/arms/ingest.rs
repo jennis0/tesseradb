@@ -211,6 +211,9 @@ pub fn run_build(
                 shard_id: 0,
                 mint_external_ids: true,
                 emit_oracle_pairs: true,
+                batch_items: None,
+                memory_budget: None,
+                band_rows: None,
             };
 
             eprintln!("ingest_build: scale={scale} set={label_set} (one repetition — a build is minutes, not microseconds)");
@@ -219,16 +222,29 @@ pub fn run_build(
             let total_ns = start.elapsed().as_nanos() as u64;
 
             let stages = collector.stages.lock().unwrap().clone();
-            let per_stage: serde_json::Map<String, serde_json::Value> = stages
-                .iter()
-                .map(|(stage, elapsed, rows, rss)| {
+            // A stage may fire once per signature batch (the batched build); aggregate by
+            // name — sum time and rows, keep the max RSS and the firing count — rather than
+            // letting the map's last write silently discard every batch but the final one.
+            let mut aggregated: std::collections::BTreeMap<&'static str, (u64, u64, u64, u64)> =
+                std::collections::BTreeMap::new();
+            for (stage, elapsed, rows, rss) in &stages {
+                let entry = aggregated.entry(stage.name()).or_insert((0, 0, 0, 0));
+                entry.0 += elapsed.as_nanos() as u64;
+                entry.1 += rows;
+                entry.2 = entry.2.max(*rss);
+                entry.3 += 1;
+            }
+            let per_stage: serde_json::Map<String, serde_json::Value> = aggregated
+                .into_iter()
+                .map(|(name, (ns, rows, rss, firings))| {
                     (
-                        stage.name().to_string(),
+                        name.to_string(),
                         serde_json::json!({
-                            "ns": elapsed.as_nanos() as u64,
-                            "pct": 100.0 * elapsed.as_nanos() as f64 / total_ns.max(1) as f64,
+                            "ns": ns,
+                            "pct": 100.0 * ns as f64 / total_ns.max(1) as f64,
                             "rows": rows,
                             "peak_rss_kib": rss,
+                            "firings": firings,
                         }),
                     )
                 })

@@ -23,6 +23,7 @@ pub mod error;
 pub mod input;
 pub mod observer;
 mod pipeline;
+pub(crate) mod spill;
 
 use rayon::prelude::*;
 use std::collections::BTreeMap;
@@ -113,6 +114,27 @@ pub struct BuildArgs {
     /// conformance suite against the bundle can skip writing and hashing it (~5–7 GB at 10⁹).
     /// A bundle without it is still verifiable: MANIFEST lists only what was written.
     pub emit_oracle_pairs: bool,
+    /// Signature-sort batch size, in items (§11.1 r23: assignment is signature-sorted **within
+    /// each append-only batch and only within one**; the fragmentation is monotone in batch
+    /// count and permanent under I9).
+    ///
+    /// `None` = derive: the largest batch the memory budget supports, rounded down to a
+    /// multiple of 2²⁴ items so budget jitter between machines does not gratuitously fork
+    /// identities — usually the whole corpus in one batch, which reproduces the pre-batching
+    /// output byte for byte. Whatever is *used* (derived or explicit, when it batches at all)
+    /// is recorded in MANIFEST provenance, and an identity-preserving rebuild must replay it:
+    /// a different batch size is a different permanent assignment, i.e. a different corpus.
+    pub batch_items: Option<u64>,
+    /// Peak-RSS budget in bytes for the build's own structures. `None` = detect from the
+    /// machine (MemAvailable, damped). Drives batch and band sizing and the fail-closed
+    /// pre-flight; it cannot buy off the irreducible floors (the sorted source ids, the
+    /// entity-of-ordinal map, the per-term offsets), which the pre-flight states when refusing.
+    pub memory_budget: Option<u64>,
+    /// Override the derived postings band size, in pre-dedup rows. A tuning and **test** seam
+    /// (a corpus small enough for a test cannot force multiple bands through the budget
+    /// alone); band boundaries never affect output bytes, only transient memory. `None`
+    /// derives from the budget.
+    pub band_rows: Option<u64>,
 }
 
 /// **Hand-written, not derived: `identity_key_hex` is the deployment key in plaintext.**
@@ -138,6 +160,9 @@ impl std::fmt::Debug for BuildArgs {
             .field("shard_id", &self.shard_id)
             .field("mint_external_ids", &self.mint_external_ids)
             .field("emit_oracle_pairs", &self.emit_oracle_pairs)
+            .field("batch_items", &self.batch_items)
+            .field("memory_budget", &self.memory_budget)
+            .field("band_rows", &self.band_rows)
             .finish()
     }
 }
@@ -178,6 +203,11 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
     args.extent
         .validate()
         .map_err(|detail| BuildError::Invalid(format!("extent: {detail}")))?;
+    if args.batch_items == Some(0) {
+        return Err(BuildError::Invalid(
+            "--batch-items 0 is meaningless; omit it for a single batch".into(),
+        ));
+    }
     for (what, value) in [("slice id", args.slice_id.as_str())] {
         if value.is_empty()
             || value.contains('/')
@@ -324,11 +354,21 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
 
     // ---- 3. signature-sorted entity-ID assignment (I9, permanent — see module docs) ---
-    staged.sort_by(|a, b| {
-        a.signature
-            .cmp(&b.signature)
-            .then(a.source_id.cmp(&b.source_id))
-    });
+    // §11.1 r23: the sort's scope is one batch. `staged` is in ascending source-id order
+    // (the sort above), i.e. ordinal order, so a batch is a contiguous chunk; each chunk is
+    // signature-sorted independently and the concatenation is the batch-major assignment.
+    // `None` (or one covering chunk) reproduces the historical global sort exactly.
+    let batch = args
+        .batch_items
+        .unwrap_or(u64::MAX)
+        .min(staged.len().max(1) as u64) as usize;
+    for chunk in staged.chunks_mut(batch) {
+        chunk.sort_by(|a, b| {
+            a.signature
+                .cmp(&b.signature)
+                .then(a.source_id.cmp(&b.source_id))
+        });
+    }
     let n = staged.len() as u64;
     if n > u32::MAX as u64 {
         return Err(BuildError::Invalid(format!(
@@ -444,6 +484,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         n,
         term_count,
         pair_count,
+        args.batch_items.filter(|&b| b < n),
     )
 }
 
@@ -465,6 +506,7 @@ fn write_manifests(
     n: u64,
     term_count: u64,
     pair_count: u64,
+    batch_items_recorded: Option<u64>,
 ) -> Result<BuildReport> {
     let bounds = plugin.declared_bounds();
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
@@ -560,7 +602,16 @@ fn write_manifests(
             phash: PHASH.to_string(),
             required_terms: Vec::new(),
         }],
-        provenance: serde_json::json!({ "generating_set_choice": "prompt-sample" }),
+        provenance: match batch_items_recorded {
+            // The batch size is identity-bearing (I9): a rebuild must replay it. Omitted
+            // entirely for a single-batch build, so pre-batching manifests stay well-defined
+            // (absent key == one batch).
+            Some(batch_items) => serde_json::json!({
+                "generating_set_choice": "prompt-sample",
+                "batch_items": batch_items,
+            }),
+            None => serde_json::json!({ "generating_set_choice": "prompt-sample" }),
+        },
         files: manifest_files,
     };
     let manifest_path = prefix_dir.join("MANIFEST.json");
@@ -1092,6 +1143,9 @@ mod tests {
             shard_id: 0,
             mint_external_ids: true,
             emit_oracle_pairs: true,
+            batch_items: None,
+            memory_budget: None,
+            band_rows: None,
         };
         let printed = format!("{args:?}");
         assert!(
