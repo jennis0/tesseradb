@@ -2505,10 +2505,7 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 /// D-F's collect shape — `self.pool.install(|| tiles.par_iter().zip(..).with_min_len(..)
 /// .map(tile_result).collect::<Vec<Result<Option<TileResult>>>>())`, never
 /// `Result<Vec<TileResult>>` (see `viewport.rs`'s module doc) — is WHY the parallel branch's
-/// output order equals the input tiles' order by construction. This particular test, at this
-/// particular fixture size, no longer exercises that branch — see the §14 note just below — but
-/// the engine-wiring claim it does still make (mask, segment, underlay, cross-tile concatenation
-/// are thread-count-independent) is real and worth keeping.
+/// output order equals the input tiles' order by construction.
 ///
 /// A multi-tile request (`zoom = 3`, full bbox — 64 tiles, most non-empty over this fixture's
 /// `(e*37, e*53) % 1000` scatter across `PARALLEL_HEADLINE_ITEMS = 300,000` items) with an
@@ -2516,11 +2513,19 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 /// the serve-all and the heap/threshold branch, since θ is saturated but many tiles exceed the
 /// `k = 50` cap — gather, underlay) runs across more than one tile.
 ///
-/// **§14 note.** `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 in the post-B9 three-scale
-/// re-calibration — see `PARALLEL_HEADLINE_ITEMS`'s doc for why this test's fixture is not raised
-/// to match (impractical at unit-test scale) and for where the parallel-branch-specific property
-/// (order preservation under rayon's indexed collect) is covered instead, decoupled from fixture
-/// size.
+/// **§14 fix round 1 note.** `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 in the post-B9
+/// three-scale re-calibration; a fixture that reaches it is impractical to build at unit-test
+/// scale (`PARALLEL_HEADLINE_ITEMS`'s doc). Review correctly caught that this left the parallel
+/// branch with NO test coverage at all — a fixture-size argument that only reaches the serial
+/// fold is not the claim this test's name makes. Fixed via
+/// `Engine::set_serial_fallback_max_rows_for_test` (`bench-timing`-gated, test-only, per-`Engine`
+/// — see that method's doc for the full argument): both engines below have their threshold forced
+/// to 0 before the request is issued, so BOTH genuinely take `pool.install`, differing only in
+/// worker count — exactly Task 6's original claim, restored. Under a build without
+/// `bench-timing` (the override does not exist there at all, not even as an unreachable symbol)
+/// this test still runs and still asserts byte-equality, just of the serial fold on both configs
+/// — weaker, but not silently wrong, and every guard-rail invocation that matters for this claim
+/// specifically builds with `bench-timing`.
 ///
 /// **What this does not (and cannot) test.** It says nothing about the Python differential oracle
 /// or the conformance byte-scanner directly — those consume `ViewportOut`/the wire bytes exactly
@@ -2566,6 +2571,19 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
         },
     );
 
+    // §14 fix round 1: force BOTH engines to take the genuine `pool.install` branch regardless of
+    // this fixture's actual row count, by setting each one's threshold to 0
+    // (`should_fold_serially(_, 0)` is unconditionally `false` — pinned directly by
+    // `viewport::tests::should_fold_serially_honours_an_arbitrary_threshold_not_just_the_constant`
+    // in `src/viewport.rs`). Deterministic by construction, so nothing below needs to re-measure
+    // it at runtime. `#[cfg]`, not `if`, because the method does not exist at all without
+    // `bench-timing` — see `Engine::set_serial_fallback_max_rows_for_test`'s doc.
+    #[cfg(feature = "bench-timing")]
+    {
+        engine_1.set_serial_fallback_max_rows_for_test(0);
+        engine_8.set_serial_fallback_max_rows_for_test(0);
+    }
+
     let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
     let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
 
@@ -2584,21 +2602,6 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
         !out_1.sub_cells.is_empty(),
         "the underlay request must produce some sub-cells for this test to cover that path too"
     );
-    // §14: `PARALLEL_HEADLINE_ITEMS` (300,000) is now well below `SERIAL_FALLBACK_MAX_ROWS`
-    // (500,000,000 — see that constant's doc), so both configs take the SERIAL branch here. This
-    // is a sanity check on that fact (not a "must be parallel" check any more) — if it ever fires,
-    // something about the predictor or this fixture changed in a way worth knowing about, since
-    // this test's own doc now explicitly says which branch it exercises.
-    if out_8.timings.enabled {
-        assert!(
-            out_8.timings.rows_in_ranges < SERIAL_FALLBACK_MAX_ROWS,
-            "rows_in_ranges = {} unexpectedly cleared the serial-fallback threshold ({}) -- this \
-             test's own doc says it exercises the serial branch on both configs; if this fires, \
-             the predictor or fixture changed and the doc above needs re-checking too",
-            out_8.timings.rows_in_ranges,
-            SERIAL_FALLBACK_MAX_ROWS
-        );
-    }
 
     assert_eq!(
         out_1, out_8,
@@ -2622,12 +2625,13 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
 /// are genuinely empty while a real minority are not — the mix this test needs, produced by
 /// changing only the requested zoom, not by hand-building a new sparse corpus.
 ///
-/// **Calibration task fix-wave note.** Same reasoning as the headline test above:
-/// `PARALLEL_HEADLINE_ITEMS` (300,000) replaces the file's default `N_ITEMS` (10,000) so `Σ
-/// range.len()` clears `SERIAL_FALLBACK_MAX_ROWS` and `compute_threads = 1` vs `= 8` are
-/// genuinely comparing serial against parallel, not serial against serial. The occupied/empty
-/// tile MIX this test is actually for is unaffected by the item count (still 1,000 distinct
-/// locations either way, just more items stacked on each) — see the doc above.
+/// **§14 fix round 1 note.** Same reasoning and the same fix as the headline test above: both
+/// engines' threshold is forced to 0 via `Engine::set_serial_fallback_max_rows_for_test` so both
+/// genuinely take `pool.install`, restoring "serial vs parallel", not "serial vs serial" — see the
+/// headline test's doc for the full argument. `PARALLEL_HEADLINE_ITEMS` (300,000) still matters
+/// here independent of the threshold: it is what gives this fixture 1,000 distinct scatter
+/// locations rather than the file's default `N_ITEMS = 10,000`'s smaller variety, which is what
+/// produces the occupied/empty tile MIX this test is actually for.
 #[test]
 fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles() {
     let tmp = TempDir::new().unwrap();
@@ -2660,6 +2664,14 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empt
         },
     );
 
+    // §14 fix round 1: force the genuine parallel branch — see the headline test's identical
+    // comment for the full argument.
+    #[cfg(feature = "bench-timing")]
+    {
+        engine_1.set_serial_fallback_max_rows_for_test(0);
+        engine_8.set_serial_fallback_max_rows_for_test(0);
+    }
+
     let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
     let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
 
@@ -2682,16 +2694,6 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empt
          none were skipped",
         out_1.tiles.len()
     );
-    // §14: same sanity check as the headline test above — this now exercises the serial branch
-    // on both configs (see `PARALLEL_HEADLINE_ITEMS`'s doc).
-    if out_8.timings.enabled {
-        assert!(
-            out_8.timings.rows_in_ranges < SERIAL_FALLBACK_MAX_ROWS,
-            "rows_in_ranges = {} unexpectedly cleared the serial-fallback threshold ({})",
-            out_8.timings.rows_in_ranges,
-            SERIAL_FALLBACK_MAX_ROWS
-        );
-    }
 
     assert_eq!(
         out_1, out_8,

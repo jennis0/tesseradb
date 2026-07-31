@@ -38,6 +38,7 @@
 //! calibration report for the full method.
 
 use std::ops::Range;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use rayon::prelude::*;
@@ -729,8 +730,14 @@ impl Engine {
             )
         };
 
+        // §14 fix round 1: the threshold is read from `self`, not the constant directly, so
+        // `set_serial_fallback_max_rows_for_test` (session.rs, `bench-timing`-gated, test-only)
+        // can override it per-`Engine` — see that method's doc. In every build without that
+        // feature this is always `SERIAL_FALLBACK_MAX_ROWS` (nothing else ever writes the field),
+        // so production behaviour is unchanged; the extra atomic load is the entire cost.
+        let serial_fallback_max_rows = self.serial_fallback_max_rows.load(Ordering::Relaxed);
         let tile_outcomes: Vec<Result<Option<TileResult>>> =
-            if should_fold_serially(total_rows_in_ranges) {
+            if should_fold_serially(total_rows_in_ranges, serial_fallback_max_rows) {
                 tiles
                     .iter()
                     .zip(ranges)
@@ -792,8 +799,10 @@ impl Engine {
 /// `pub` (unlike [`TILE_PAR_MIN_LEN`]) so the byte-equality tests in `tests/viewport.rs` can
 /// assert a fixture genuinely cleared it, rather than duplicating the number and risking drift.
 ///
-/// **§14 re-calibration (post-B9, three scales, commit `3862a61`+, 2026-07-31): 200,000 →
-/// 500,000,000.** B9's three-tier adaptive selection decode (`a62341f`) made per-row
+/// **§14 re-calibration (post-B9, three scales, sweeps run on merge commit `2c19e13` —
+/// `concurrency/viewpath` merged with `main`'s spilling build pipeline, `main` itself already
+/// carrying B9's decode via the earlier `3862a61` merge — 2026-07-31): 200,000 → 500,000,000.**
+/// B9's three-tier adaptive selection decode (`a62341f`) made per-row
 /// count/select/gather cost enough cheaper that the 2.42M-only calibration this constant
 /// originally carried (see the superseded argument below, kept for its still-valid tile-count
 /// reasoning) stopped holding at realistic corpus sizes — `bench-1e9-report.md` measured
@@ -863,9 +872,14 @@ pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 500_000_000;
 /// or a bundle (see the `tests` module at the bottom of this file) — the behavioural claim ("a
 /// below-threshold request runs the serial fold") is otherwise only observable through output
 /// equality or timing, neither of which makes a good unit test on its own.
+///
+/// Takes `threshold` explicitly (§14 fix round 1) rather than reading `SERIAL_FALLBACK_MAX_ROWS`
+/// directly, so the one call site (`Engine::viewport`) can supply either the production constant
+/// or a test's override — see `Engine::set_serial_fallback_max_rows_for_test`'s doc for why an
+/// override exists at all and why it lives on `Engine`, not here.
 #[inline]
-fn should_fold_serially(total_rows_in_ranges: u64) -> bool {
-    total_rows_in_ranges < SERIAL_FALLBACK_MAX_ROWS
+fn should_fold_serially(total_rows_in_ranges: u64, threshold: u64) -> bool {
+    total_rows_in_ranges < threshold
 }
 
 /// D-F's per-tile scheduling grain: the number of tiles rayon hands to one worker before it will
@@ -900,14 +914,21 @@ fn should_fold_serially(total_rows_in_ranges: u64) -> bool {
 /// **§14 re-calibration (post-B9, three scales, 2026-07-31): re-measured, UNCHANGED.** The
 /// coordinator's own hypothesis going in was that B9's cheaper per-row decode might favour a much
 /// bigger chunk (values up to 512 were swept: 8/32/128/512, `examples/min_len_sweep.rs`, on the
-/// `full-extent` shape family — the one family that still reaches the parallel branch post-§14's
-/// threshold revision above, at every scale). The data said the opposite: `8` was at least as fast
-/// as every larger value on every shape at every scale, and p50 grew close to monotonically from 8
-/// through 512 in most rows (e.g. 1e9 full-extent/z5: 2.95 ms at 8 → 2.95 ms at 32 → 4.70 ms at 128
-/// → 5.75 ms at 512). Cheaper per-tile work makes fine-grained work-stealing MORE valuable, not
-/// less — a bigger chunk now wastes proportionally more of an idle worker's time relative to the
-/// (now smaller) real work in each tile it could have stolen instead. Full table: calibration
-/// report §14.
+/// `full-extent` shape family and `natural/z4`).
+///
+/// **Claim, scoped precisely (fix round 1 correction — the first pass over-generalised).** `8` is
+/// decisively best on `full-extent/{z2,z3,z4,z5}` at 1e8 and 1e9 — these are the shapes that
+/// actually reach the parallel branch after §14's threshold change (`full-extent`'s row count is
+/// ~always the whole segment, comfortably above 500,000,000 at those two scales), and the wins
+/// there are large, not marginal (1e9 full-extent/z3: 2.16 ms at 8 vs 3.02 ms at 32, 4.00 ms at
+/// 128, 3.58 ms at 512; full-extent/z4: 1.76 ms at 8 vs 2.92/3.88/4.27 ms). It is NOT uniformly
+/// best everywhere measured, and the claim must not be read that way: `full-extent/z1` (only 4
+/// tiles — too few units for a small grain to help) measured faster at 512 than at 8 (1e9: 2.97 ms
+/// vs 3.25 ms), and `natural/z4` — which no longer reaches the parallel branch in production at
+/// any scale this task tested, since its own row count tops out at 354,900,645, below the new
+/// 500,000,000 threshold — sometimes measured faster at 32 than at 8 (1e9: 457 µs at 32 vs 832 µs
+/// at 8; 1e8: 522 µs at 32 vs 766 µs at 8). `8` is kept on the strength of the shapes that matter
+/// now, not because it won everywhere it was tried. Full table: calibration report §14.5.
 const TILE_PAR_MIN_LEN: usize = 8;
 
 /// One tile's contribution to a `/v1/viewport` response (D-F) — the pure per-tile body pulled out
@@ -1068,11 +1089,26 @@ mod tests {
     /// this over test-only instrumentation: exact boundary behaviour, both edges.
     #[test]
     fn should_fold_serially_is_a_strict_less_than_at_the_calibrated_boundary() {
-        assert!(should_fold_serially(0));
-        assert!(should_fold_serially(SERIAL_FALLBACK_MAX_ROWS - 1));
-        assert!(!should_fold_serially(SERIAL_FALLBACK_MAX_ROWS));
-        assert!(!should_fold_serially(SERIAL_FALLBACK_MAX_ROWS + 1));
-        assert!(!should_fold_serially(u64::MAX));
+        let t = SERIAL_FALLBACK_MAX_ROWS;
+        assert!(should_fold_serially(0, t));
+        assert!(should_fold_serially(t - 1, t));
+        assert!(!should_fold_serially(t, t));
+        assert!(!should_fold_serially(t + 1, t));
+        assert!(!should_fold_serially(u64::MAX, t));
+    }
+
+    /// §14 fix round 1: `should_fold_serially` takes its threshold as a parameter now (so
+    /// `Engine::set_serial_fallback_max_rows_for_test` has something to feed it) — this pins that
+    /// it is a genuine parameter, not the constant in disguise, at a threshold far from the real
+    /// production value.
+    #[test]
+    fn should_fold_serially_honours_an_arbitrary_threshold_not_just_the_constant() {
+        assert!(should_fold_serially(5, 10));
+        assert!(!should_fold_serially(10, 10));
+        assert!(!should_fold_serially(15, 10));
+        // The override this task added forces parallel unconditionally by setting the threshold
+        // to 0 (`total_rows_in_ranges < 0` is never true for a `u64`) — pin that too.
+        assert!(!should_fold_serially(0, 0));
     }
 
     /// §14: `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 (see its doc). A fixture that genuinely
@@ -1115,7 +1151,13 @@ mod tests {
                 .build()
                 .unwrap();
             let got: Vec<Option<u32>> = pool
-                .install(|| items.par_iter().with_min_len(min_len).map(make).collect::<Vec<_>>())
+                .install(|| {
+                    items
+                        .par_iter()
+                        .with_min_len(min_len)
+                        .map(make)
+                        .collect::<Vec<_>>()
+                })
                 .into_iter()
                 .map(|r| r.unwrap())
                 .collect();

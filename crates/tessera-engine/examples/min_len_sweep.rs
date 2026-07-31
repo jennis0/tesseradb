@@ -104,7 +104,11 @@ fn main() {
     println!(
         "bundle: {}  grant: {}  reps: {reps}",
         bundle_root.display(),
-        if dense { "dense (random w=10)" } else { "sparse (spread w=10)" }
+        if dense {
+            "dense (random w=10)"
+        } else {
+            "sparse (spread w=10)"
+        }
     );
 
     let all = all_descriptors(&bundle_root);

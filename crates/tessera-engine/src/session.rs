@@ -356,6 +356,14 @@ pub struct Engine {
     /// from `external_id` — which a null-external-id row has none of.
     #[allow(clippy::type_complexity)]
     accepted_batches: Mutex<FxHashMap<String, ([u8; 32], Vec<EntityId>)>>,
+    /// §14 fix round 1: the effective serial/parallel fan-out threshold
+    /// (`viewport::SERIAL_FALLBACK_MAX_ROWS`) this engine reads on every `viewport` call,
+    /// defaulted at `open` to that constant and never otherwise written in production. Exists so
+    /// `set_serial_fallback_max_rows_for_test` (below) has something per-`Engine` to override —
+    /// see that method's doc for why this lives here rather than as global or thread-local state.
+    /// `pub(crate)`: `viewport.rs`'s `Engine::viewport` (a different module, same crate) reads it
+    /// on every request.
+    pub(crate) serial_fallback_max_rows: AtomicU64,
 }
 
 impl Engine {
@@ -549,7 +557,44 @@ impl Engine {
             identity_key,
             resolver_state: Mutex::new(resolver_state),
             accepted_batches: Mutex::new(accepted_batches),
+            serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
         })
+    }
+
+    /// Test-only override for the serial/parallel fan-out threshold
+    /// (`viewport::SERIAL_FALLBACK_MAX_ROWS`, currently 500,000,000 — see that constant's doc).
+    /// Gated behind the `bench-timing` feature both crates' integration test suites already
+    /// build with, so this does not exist at all — not even as a compiled, unreachable symbol —
+    /// in a build without it, and a shipped binary never has it
+    /// (`scripts/check-no-stage-header.sh` asserts the compile gate stays off by default).
+    ///
+    /// **Why this exists.** `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 in §14's post-B9
+    /// re-calibration. A fixture that genuinely clears it is impractical to build inside a unit
+    /// test (real minutes even on the fast pipeline), which left the parallel branch's
+    /// `pool.install` sweep — the collect-order/byte-equality claim `viewport.rs`'s module doc
+    /// makes — with no test able to reach it. This is the fix: a per-`Engine` override, set once
+    /// after `Engine::open` and before issuing requests, that the byte-equality tests use to force
+    /// the fan-out to engage on a small, fast fixture without changing production behaviour at
+    /// all (the field/method do not exist outside `bench-timing`).
+    ///
+    /// **Why per-`Engine`, not global or thread-local state.** `cargo test` runs tests in
+    /// parallel by default, each typically constructing its own `Engine`; a process-global would
+    /// have one test's override leak into another's concurrently-running assertions, and a
+    /// thread-local would silently stop working the moment a request is served from a different
+    /// OS thread than the one that set it (exactly what happens in `tessera-server`'s tests,
+    /// where the engine is driven from `axum`/`tokio` task threads, not the test's own). Scoping
+    /// the override to the `Engine` instance itself — already constructed once per test, already
+    /// never shared between tests — sidesteps both hazards entirely.
+    ///
+    /// **Not a deployment knob.** No `tessera.toml` field reaches this; `#[doc(hidden)]` keeps it
+    /// out of this crate's public docs even in a `bench-timing` build; `pub` (not `pub(crate)`) is
+    /// required only because `tests/*.rs` integration tests are separate crate compilation units
+    /// that cannot see `pub(crate)` items in this library crate at all.
+    #[cfg(feature = "bench-timing")]
+    #[doc(hidden)]
+    pub fn set_serial_fallback_max_rows_for_test(&self, value: u64) {
+        self.serial_fallback_max_rows
+            .store(value, Ordering::Relaxed);
     }
 
     /// Authorise a credential: `plugin.terms_of_auth` → dictionary lookup (unknown descriptors
