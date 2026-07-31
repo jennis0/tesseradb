@@ -65,6 +65,21 @@ All work happens in worktrees; `main` is never committed to directly.
 .claude/worktrees/phase2-track-t    (branch phase2/track-t)   — the standing track
 ```
 
+**Creating a track worktree is three steps, not one** *(added at the Task 0 review gate, F2 — rule 3's teeth were still discipline: the allowlist and its check landed with no hook and no CI running them)*:
+
+```bash
+git worktree add .claude/worktrees/phase2-track-c phase2/track-c
+echo c > .claude/worktrees/phase2-track-c/.claude/track   # the per-worktree track marker
+bash scripts/install-hooks.sh                             # once per clone; hooks are shared
+```
+
+The marker is a file rather than a git config value because `core.hooksPath` and the hooks
+directory are **shared across every worktree** (`git rev-parse --git-common-dir` is one path for
+all of them), so the one installed `pre-commit` cannot know which track it is running for. It is
+gitignored, and a worktree without one — `main`, a scratch checkout — is not checked at all, which
+is deliberate: the controller commits across track boundaries by definition, and a hook that
+refused there would teach everyone `--no-verify`.
+
 `phase2/seam` branches from `9f2424a` and merges to `main` first — every other branch is cut **from the merged seam commit, not from `9f2424a`**, since the seam is what makes the tracks disjoint. Each track then merges after its review gate, in the order set out below. Track T can branch from `9f2424a` immediately; it touches no crate the seam moves.
 
 Stale worktrees from the merged branches (`concurrency-viewpath`, `agent-*`, `density-sampling`) should be pruned before starting, to keep `git worktree list` legible.
@@ -418,7 +433,7 @@ Four rules carry it:
 
 **Thrash protection — the part r1 was missing entirely** *(review perf C1)*. The miss/hit cost ratio here is 10⁵–10⁷: a projection miss is `RowProjection::new`, **measured** at seconds (the 10⁹ warm-up viewport is 10.7 s), and every ≥25%-coverage mask at 10⁹ serialises to a **measured** 125.12 MB dense bound — so at the w=10⁴ operating point each entry is ~125 MB. A `row_projection_cache_bytes` of 512 MB holds **four sessions**; five active sessions round-robining is a 100% miss rate, and because the single-flight miss path returns `ProjectionBuilding` to every racer, the failure presents as a permanent 429 storm with a core set pegged on rebuilds. Plain LRU does not degrade in this regime, it collapses. So:
 
-- **Startup validation**: `row_projection_cache_bytes` must admit at least `expected_concurrent_sessions` entries at the measured per-entry size, or the server refuses to start — the same pattern as Task 6's headroom assertion. Document ~125 MB/session at 10⁹ in the config doc.
+- **Startup validation**: `row_projection_cache_bytes` **and `fragment_cache_bytes`** must each admit at least `expected_concurrent_sessions` entries at the measured per-entry size, or the server refuses to start — the same pattern as Task 6's headroom assertion. Document ~125 MB/session at 10⁹ in the config doc. *(Both caches, added at the Task 0 review gate, F11: they hold the same-shaped Roaring object at the same measured size, and the fragment bound deliberately carries no margin — a validation covering only one leaves the other free to be set to a value that collapses. The two bounds' entry counts are governed by different quantities, sessions against distinct grant sets, and both constants now say so.)*
 - **Evicted `Arc`s are collected under the lock and dropped after release.** Dropping a ~125 MB bitmap frees ~15 k containers; doing it inside a lock the branch's module doc makes load-bearingly O(1) convoys 48 admitted requests. This must be stated or the natural implementation does the wrong thing.
 - **Eviction and miss counters on `/control/status`**, with an alarm on sustained eviction of young entries.
 - Sizing via `get_serialized_size_in_bytes` — O(containers), microseconds, fine; note at the accounting site that it underestimates in-memory footprint for array containers with capacity slack (up to ~2×), so the bound is approximate.

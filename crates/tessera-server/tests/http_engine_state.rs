@@ -1,10 +1,14 @@
-//! Pin identity and session revocation over HTTP — the server-plane half of what
+//! Engine state over HTTP: pin identity and session revocation — the server-plane half of what
 //! `tessera-engine/tests/pins.rs` asserts in-process.
 //!
 //! Split out of `tests/http.rs` at Task 0c (Phase 2 stage 2.1) so Track C owns a server-plane
 //! file. Task 4 replaces `PinManager`'s equality check with a drain list, and Task 5 makes
 //! `revoke` prune the projection cache; both need somewhere to land an end-to-end assertion, and
 //! `http.rs` is frozen for the stage.
+//!
+//! Named for Track C's subject in the plan (*engine state*) rather than for pins alone: it already
+//! holds a session-revocation case, and Task 5's cache-pruning assertions belong here too, so
+//! `http_pins.rs` would have read wrong by the end of the stage (Task 0 gate, minor).
 //!
 //! The property `g2_pins_survive_overlay_swaps` guards is lifecycle §2.3 and it is the one most
 //! easily broken by Task 4: **a pin fixes row-space geometry and never authorisation state**, so
