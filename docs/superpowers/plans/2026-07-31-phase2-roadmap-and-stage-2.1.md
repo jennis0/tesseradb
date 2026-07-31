@@ -323,7 +323,7 @@ pub enum WindowEntry {
 
 Then: one `WalRecord::IngestBatch` per entry (batch identity preserved for Task 8), **one** `fsync`, one generation swap applying every entry, then all waiters acked. WAL rows carry allocated IDs so replay reuses them.
 
-**A free win in code being rewritten anyway** (owner ruling 3): today the record is framed from `rows.clone()` inside `accept_ingest` ([session.rs:844](crates/tessera-engine/src/session.rs#L844)). Frame the bytes first, then move the rows into the buffer apply.
+**A free win in code being rewritten anyway** (owner ruling 3): today the record is framed from `rows.clone()` inside `WritePath::accept_ingest` (`crates/tessera-engine/src/write.rs` — **the seam moved this out of `session.rs`; find it by symbol, not by line**). Frame the bytes first, then move the rows into the buffer apply.
 
 **Tests.** `the_sort_scope_is_the_window_not_the_request` — four 25-row submissions with interleaving signatures produce an assignment **identical** to one 100-row submission; *if this does not hold, group commit is decoration*. `one_fsync_per_window`. `each_waiter_gets_its_own_ids` in its own row order. A proptest: IDs strictly monotone across windows, none twice, **none issued that is not in the WAL**.
 
@@ -359,7 +359,7 @@ Lookup order: durable index → open window → unknown, **evaluated on the exec
 
 Per state: *unknown* → new entry. *Accepted, same bytes* → replay recorded IDs (re-deriving would not work at all for a row with no external ID). *Accepted, different bytes* → 409, no effect. *Held, same bytes* → **join**: append the caller's responder to the existing entry's `waiters`, so both receive the same IDs off one allocation. *Held, different bytes* → 409, **and the held original still applies** (O1).
 
-*Record the retention bound on `Unknown`:* `accepted_batches` is rebuilt from WAL replay ([session.rs:490](crates/tessera-engine/src/session.rs#L490)), so past `wal_retention` an old `batch_id` regresses to `Unknown`. Rows with external IDs are caught by the duplicate check; **rows without one re-ingest silently as new entities.** Pre-existing, but this is the task that formalises the state machine and should carry the caveat.
+*Record the retention bound on `Unknown`:* `accepted_batches` is rebuilt from WAL replay in `WritePath::reconstruct` (`crates/tessera-engine/src/write.rs` — **the seam moved this out of `Engine::open`; find it by symbol**), so past `wal_retention` an old `batch_id` regresses to `Unknown`. Note there is no `wal_retention` config key yet — the seam's Task 0b report records its absence. Rows with external IDs are caught by the duplicate check; **rows without one re-ingest silently as new entities.** Pre-existing, but this is the task that formalises the state machine and should carry the caveat.
 
 **Tests.** `a_retry_joins_rather_than_reallocating` — hold the window, submit `B` twice byte-identically, release: high-water advanced by `rows` not `2·rows`, both responses carry the **same** `tessera_id` list, exactly one WAL record. `held_plus_different_bytes_409s_without_disturbing_the_original`. `crash_between_fsync_and_swap_replays_rather_than_reallocates`.
 
