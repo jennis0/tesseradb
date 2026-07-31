@@ -792,56 +792,72 @@ impl Engine {
 /// `pub` (unlike [`TILE_PAR_MIN_LEN`]) so the byte-equality tests in `tests/viewport.rs` can
 /// assert a fixture genuinely cleared it, rather than duplicating the number and risking drift.
 ///
-/// **Why this predictor and not tile count.** Both were measured (2.42M `categories-subclass`
-/// fixture, w=10 grant, 2026-07-31, 12-core WSL2 box — sweep table and method in
-/// `.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/calibration-report.md`). Tile count does NOT
-/// discriminate: the "natural" viewport family (a fixed-size client window at increasing zoom)
-/// resolves a near-constant ~289 tiles at every zoom from 6 to 14 regardless of density, yet the
-/// measured serial/parallel verdict at that SAME tile count varies with how many rows those tiles
-/// actually spanned. Conversely, a request touching as few as 4 tiles but spanning the WHOLE
-/// 2.42M-row corpus (a maximally zoomed-out view) still measured parallel breaking even or
-/// winning, despite the low tile count — there being few units to schedule did not make the
-/// spanned work small. `rows_in_ranges` tracks that driver directly and is consistent with the
-/// measured cost model this codebase designs against (module doc, and CLAUDE.md: "bitmap
-/// operations cost O(containers touched)", which scales with the range read, not the tile count).
+/// **§14 re-calibration (post-B9, three scales, commit `3862a61`+, 2026-07-31): 200,000 →
+/// 500,000,000.** B9's three-tier adaptive selection decode (`a62341f`) made per-row
+/// count/select/gather cost enough cheaper that the 2.42M-only calibration this constant
+/// originally carried (see the superseded argument below, kept for its still-valid tile-count
+/// reasoning) stopped holding at realistic corpus sizes — `bench-1e9-report.md` measured
+/// `compute_threads = default` **2.52x slower** on a small viewport and **2.19x slower** on the
+/// "large work" viewport that was supposed to win, at 1e9. Re-swept at three scales (2.42M, 1e8,
+/// 1e9; `examples/calibration_sweep.rs --bundle <path> [--dense]`, dense = the bench's own
+/// `GrantShape::Random`) with **no single row-count threshold able to serve all three** — the
+/// numbers force this, not a preference:
 ///
-/// **What this predictor does NOT model, stated plainly rather than glossed over (fix round 1).**
-/// `rows_in_ranges` is deliberately PRE-mask — it counts rows a tile's range spans, not how many
-/// of them pass the viewer's mask. Mask density (how much of a spanned range is actually visible)
-/// is therefore a real, independent cost driver this predictor cannot see: two requests with
-/// identical `Σ range.len()` can differ in true `count`/`select`/`gather` cost if one principal's
-/// grant is far narrower than the other's. This was checked, not assumed: fix round 1 re-ran the
-/// calibration sweep with the validation workload's own dense, uniform-random w=10 grant
-/// (`tessera_bench::corpus::build_grant`'s `GrantShape::Random`, duplicated in
-/// `examples/calibration_sweep.rs --dense`) against the original sweep's much sparser deterministic
-/// grant, on the same shapes, back to back on the same box. The crossover band did not move
-/// materially between the two (both runs' clearly-large-row shapes stayed clearly parallel-
-/// favouring, both runs' near-zero-row shapes stayed near parity or serial-favouring) — see the
-/// calibration report's fix-round-1 section for both tables side by side. This is one box, one
-/// corpus, one grant width; it is evidence the crossover is not obviously grant-width-sensitive
-/// at THIS scale, not a proof that mask density can never matter.
+/// - At 1e9 (the bench's own dense grant — the realistic one, per fix round 1's own finding):
+///   every "natural" client-viewport-shaped sample (a fixed-size window at any zoom) measured
+///   SERIAL-favouring, up to the highest row count that shape family reached in the sweep
+///   (354,900,645 rows). No amount of additional row count made that family favour parallel under
+///   a realistic grant.
+/// - At 1e8, the "full-extent" family (a bbox spanning the whole 65536×65536 grid — few, very
+///   large, near-uniformly-dense tiles) measured reliably PARALLEL-favouring, and by construction
+///   spans essentially the WHOLE segment: 100,000,000 rows at this scale.
+/// - **100,000,000 < 354,900,645.** A threshold that protects 1e9's natural-viewport regression
+///   (needs > 354,900,645) is *necessarily* above 1e8's genuine full-extent win (needs <
+///   100,000,000) — one number cannot sit on both sides of that gap. (2.42M sharpens the same
+///   point from the other end: its own genuine parallel wins topped out under 2,422,486 rows
+///   total, so a threshold large enough to protect 1e9's regression forfeits 2.42M's wins outright
+///   — the corpus is smaller than the threshold needs to be.) A fraction-of-corpus formula was
+///   tried and rejected on the same data: 1e9's natural family stays serial-favouring up to 35.5%
+///   of the segment's rows, while 2.42M's own genuine parallel wins started around 12-40% of ITS
+///   (much smaller) segment — the same *fraction* is parallel-favourable at one scale and
+///   serial-favourable at another, so scaling the threshold by corpus size does not separate the
+///   classes either. Full numbers, both grants, all three scales: calibration report §14.
 ///
-/// **Why 200,000 and not the exact crossover.** The sweep found a clean split below ~165,000 rows
-/// (serial wins or ties in nearly every sample) and above ~316,000 rows (parallel wins in every
-/// sample), with a noisy, inconsistently-ordered band between them (a `Σ range.len()` figure is a
-/// proxy for containers touched, not identical to it, so it does not order perfectly against
-/// measured cost in that band, and mask density is part of why not — see above). 200,000 sits
-/// inside the gap, close to its lower edge. The two misclassification costs are asymmetric:
-/// wrongly choosing the parallel path on genuinely small work measured 6-20x slower than serial in
-/// this sweep is the expensive mistake; wrongly choosing serial in the ambiguous band cost at most
-/// ~1.3x measured here (these are ~1 ms-scale requests either way, so the absolute cost of that
-/// mistake is small) — so the threshold is placed to bias toward serial in the ambiguous band
-/// rather than centred on it. A mis-prediction driven by the mask-density gap above is expected to
-/// fall in roughly this same ≤~1.5-2x band on a ~1 ms request, not a qualitatively different one,
-/// since it is the same "ambiguous middle" the row-count proxy already measures imperfectly.
+/// **Resolution landed here, reported rather than silently chosen.** Given the asymmetric cost
+/// this whole task keeps finding (wrongly-parallel measured 2-9x slower here and up to 20x in
+/// earlier rounds; wrongly-serial forfeits a win worth at most ~2-3x, never a regression against
+/// the pre-parallel baseline) and that ordinary client viewport traffic — not a whole-corpus
+/// low-zoom scan — is what this constant exists to protect, `500,000,000` is set above the
+/// highest observed natural-family SERIAL-favouring row count (354,900,645, ~40% margin) so
+/// realistic client traffic stays serial and safe at every scale this task could build a fixture
+/// for. **This makes the fan-out DORMANT for essentially all traffic at 2.42M and 1e8** (neither
+/// corpus has 500,000,000 rows to spend on one request) **and for "natural" traffic at 1e9**; it
+/// remains reachable at 1e9 for a whole-corpus-scale request (1,000,000,000 rows comfortably
+/// clears the bar). The machinery is not deleted — see [`TILE_PAR_MIN_LEN`]'s doc, re-measured at
+/// this same three-scale sweep and unchanged, for what still runs on the far side of this
+/// threshold. **This is a reported recommendation, not a claim of the unique right number**: the
+/// calibration report's §14 concerns section lays out the constant/formula/knob tension in full
+/// and flags that a corpus-size- or deployment-aware knob is the more complete fix if the
+/// controller wants one — this constant is the safe, single-number compromise that ships without
+/// one.
 ///
-/// No corpus- or deployment-dependent knob is exposed for this: viewport size feeds into
-/// `rows_in_ranges` directly (by construction — it is what the predictor sums), and the fix-round-1
-/// re-run found no clear evidence grant width moves the crossover enough at this scale to justify
-/// one either. A fixed constant is what the data supports — see the calibration report's concerns
-/// section if a future corpus at a very different scale, or a workload with much more extreme
-/// grant-width variance than this task exercised, calls this back into question.
-pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 200_000;
+/// **Superseded 2.42M-only argument, kept for its tile-count reasoning (still valid) — see above
+/// for why an updated row-count threshold from this argument no longer transfers.** Tile count
+/// does NOT discriminate: the "natural" viewport family (a fixed-size client window at increasing
+/// zoom) resolves a near-constant ~289 tiles at every zoom from 6 to 14 regardless of density, yet
+/// the measured serial/parallel verdict at that SAME tile count varies with how many rows those
+/// tiles actually spanned — true at every scale re-measured in §14, not just 2.42M. `rows_in_ranges`
+/// tracks that driver directly and is consistent with the measured cost model this codebase
+/// designs against (module doc, and CLAUDE.md: "bitmap operations cost O(containers touched)",
+/// which scales with the range read, not the tile count) — it is still the right *kind* of
+/// predictor, it just no longer maps to one right *number* across scales.
+///
+/// Mask density (fix round 1) remains unmodelled by this pre-mask predictor for the same reason
+/// as before — see the historical argument in this crate's git history (commit `7e5b553`) for the
+/// full reasoning; §14's re-sweep used both a sparse and the bench's dense grant at every scale and
+/// found the shape-family split above (natural vs full-extent) under BOTH, so mask density is not
+/// the dominant driver of the three-scale tension this revision addresses.
+pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 500_000_000;
 
 /// The predictor, pulled out as its own pure function so it is unit-testable without an `Engine`
 /// or a bundle (see the `tests` module at the bottom of this file) — the behavioural claim ("a
@@ -880,6 +896,18 @@ fn should_fold_serially(total_rows_in_ranges: u64) -> bool {
 /// splits into dozens of independently-stealable chunks, large enough to amortise the per-task
 /// overhead over the cheap tiles that dominate a sparse or clustered corpus — and, unlike `4`, the
 /// value the sweep actually measured as best or tied-best on every shape tried.
+///
+/// **§14 re-calibration (post-B9, three scales, 2026-07-31): re-measured, UNCHANGED.** The
+/// coordinator's own hypothesis going in was that B9's cheaper per-row decode might favour a much
+/// bigger chunk (values up to 512 were swept: 8/32/128/512, `examples/min_len_sweep.rs`, on the
+/// `full-extent` shape family — the one family that still reaches the parallel branch post-§14's
+/// threshold revision above, at every scale). The data said the opposite: `8` was at least as fast
+/// as every larger value on every shape at every scale, and p50 grew close to monotonically from 8
+/// through 512 in most rows (e.g. 1e9 full-extent/z5: 2.95 ms at 8 → 2.95 ms at 32 → 4.70 ms at 128
+/// → 5.75 ms at 512). Cheaper per-tile work makes fine-grained work-stealing MORE valuable, not
+/// less — a bigger chunk now wastes proportionally more of an idle worker's time relative to the
+/// (now smaller) real work in each tile it could have stolen instead. Full table: calibration
+/// report §14.
 const TILE_PAR_MIN_LEN: usize = 8;
 
 /// One tile's contribution to a `/v1/viewport` response (D-F) — the pure per-tile body pulled out
@@ -1045,5 +1073,56 @@ mod tests {
         assert!(!should_fold_serially(SERIAL_FALLBACK_MAX_ROWS));
         assert!(!should_fold_serially(SERIAL_FALLBACK_MAX_ROWS + 1));
         assert!(!should_fold_serially(u64::MAX));
+    }
+
+    /// §14: `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 (see its doc). A fixture that genuinely
+    /// crosses it is impractical to build inside a unit test — even the fast pipeline takes real
+    /// minutes at that scale, and the §3.3 underlay route costs exactly the real per-cell work the
+    /// threshold exists to gate, so there is no cheap way to reach it artificially either. The two
+    /// `tests/viewport.rs` integration byte-equality tests that used to cross the (much lower)
+    /// pre-§14 threshold now exercise the SERIAL branch on both `compute_threads` configs instead
+    /// — still a real, useful claim (engine wiring is thread-count-independent end to end), just
+    /// not the parallel branch specifically. What genuinely needs re-proof at any new threshold
+    /// value is narrower and decoupled from `Engine`/mask/fixture size entirely: that rayon's
+    /// INDEXED collect, over the exact shape `Engine::viewport` uses
+    /// (`Vec<Result<Option<TileResult>>>`, never `Result<Vec<TileResult>>` — this module's doc),
+    /// preserves input order regardless of pool size or `with_min_len`. That is what this test
+    /// isolates, cheaply, at every pool/grain combination this file's constants and sweeps used.
+    #[test]
+    fn indexed_collect_of_tile_shaped_results_preserves_order_at_any_pool_size() {
+        // The exact collect target shape as `tile_result`'s call sites use, without needing a
+        // real `Engine`, `mask` or bundle to produce one: `Result<Option<T>>` per item, `Ok(None)`
+        // standing in for `tile_result`'s empty-tile skip.
+        let items: Vec<u32> = (0..2000).collect();
+        let make = |i: &u32| -> Result<Option<u32>> {
+            if i.is_multiple_of(7) {
+                Ok(None)
+            } else {
+                Ok(Some(*i))
+            }
+        };
+        let expected: Vec<Option<u32>> = items.iter().map(|i| make(i).unwrap()).collect();
+
+        for &(threads, min_len) in &[
+            (1usize, 1usize),
+            (1, TILE_PAR_MIN_LEN),
+            (8, 1),
+            (8, TILE_PAR_MIN_LEN),
+            (8, 512), // the largest value §14's min_len sweep tried
+        ] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let got: Vec<Option<u32>> = pool
+                .install(|| items.par_iter().with_min_len(min_len).map(make).collect::<Vec<_>>())
+                .into_iter()
+                .map(|r| r.unwrap())
+                .collect();
+            assert_eq!(
+                got, expected,
+                "collect order diverged from input order at threads={threads} min_len={min_len}"
+            );
+        }
     }
 }

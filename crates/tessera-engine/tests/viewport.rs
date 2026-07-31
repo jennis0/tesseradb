@@ -38,24 +38,30 @@ const N_ITEMS: u64 = 10_000;
 const ALL_TERM: u64 = 0;
 const SUBSET_TERM: u64 = 1;
 
-/// Calibration task: item count for the byte-equality tests that must exercise the GENUINE
-/// parallel fan-out (`Engine::viewport`'s `SERIAL_FALLBACK_MAX_ROWS`, currently 200,000). The
-/// scatter these fixtures use (`write_points_n`: `(e*37, e*53) % 1000`) confines every item to the
-/// SAME fixed 1000x1000 extent regardless of `n`, and a full-extent request's resolved tiles
-/// partition the whole permutation, so `Σ range.len()` over such a request equals `n` exactly —
-/// 300,000 clears the threshold with 50% margin, comfortably outside measurement noise. Kept
-/// separate from `N_ITEMS` (10,000, well BELOW the threshold) rather than raising it globally: the
-/// two headline tests below need genuinely different regimes, and every other test in this file
-/// still wants the small, fast fixture.
+/// Item count for the two "headline" byte-equality tests below (cross-tile ordering and the
+/// sparse-empty-tile mix) — larger than the file's default `N_ITEMS` (10,000) so they exercise a
+/// genuinely multi-tile, multi-thousand-row request, not a token one.
+///
+/// **§14 note, read before trusting what these tests exercise.** `SERIAL_FALLBACK_MAX_ROWS` rose
+/// from 200,000 to 500,000,000 in the post-B9 three-scale re-calibration (`viewport.rs`'s doc on
+/// that constant has the full argument). A fixture that reaches 500,000,000 rows is impractical to
+/// build inside a unit test (real minutes even on the fast pipeline), so `PARALLEL_HEADLINE_ITEMS`
+/// is deliberately NOT raised to match — these two tests now exercise the SERIAL branch on BOTH
+/// `compute_threads` configs, same as the file's dedicated
+/// `..._below_the_serial_fallback_threshold` test, just at a different (still below-threshold)
+/// item count and tile shape. That is still a real, useful claim (engine wiring — mask, segment,
+/// underlay, cross-tile concatenation — behaves identically regardless of the configured thread
+/// count), just no longer "the parallel fan-out specifically", which is what their names and
+/// original docs claimed. The narrower property that DOES need re-proof at any new threshold value
+/// — that rayon's indexed collect preserves tile order regardless of pool size — is covered
+/// separately and cheaply by `viewport::tests::indexed_collect_of_tile_shaped_results_preserves_order_at_any_pool_size`
+/// in `src/viewport.rs`, decoupled from fixture size entirely.
 const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
 
-/// Fix round 1: the runtime `rows_in_ranges >= SERIAL_FALLBACK_MAX_ROWS` assertions in the two
-/// headline tests below only run under `--features bench-timing` (`StageTimings` is all-zero
-/// without it). This makes the SAME guarantee a compile-time fact instead, so a plain `cargo test`
-/// (no `bench-timing`) still catches `PARALLEL_HEADLINE_ITEMS` being dropped below the threshold
-/// by some future edit, rather than silently degrading to serial-vs-serial with no build ever
-/// catching it.
-const _: () = assert!(PARALLEL_HEADLINE_ITEMS >= SERIAL_FALLBACK_MAX_ROWS);
+/// Compile-time check on the OPPOSITE relationship from before §14: these two tests deliberately
+/// stay below the (now much higher) threshold, so this catches either constant drifting past the
+/// other without the doc above being updated to match.
+const _: () = assert!(PARALLEL_HEADLINE_ITEMS < SERIAL_FALLBACK_MAX_ROWS);
 
 /// A fixed, non-degenerate test key — the same canonical vector used across the identity
 /// construction's own tests (`tessera_types::identity`'s `CANONICAL_KEY`) and
@@ -2496,12 +2502,13 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 /// identical `ViewportOut` (`PartialEq` ignores only `timings` — see its hand-written impl)
 /// whether the engine's shared pool has one worker or eight.
 ///
-/// This is the whole point of D-F's collect shape — `self.pool.install(|| tiles.par_iter().zip
-/// (..).with_min_len(..).map(tile_result).collect::<Vec<Result<Option<TileResult>>>>())`, never
-/// `Result<Vec<TileResult>>` (see `viewport.rs`'s module doc) — the parallel sweep's output order
-/// equals the input tiles' order **by construction** (rayon's indexed collect path), so the serial
-/// fold's `tile_counts`/`points`/`sub_cells` concatenation is identical regardless of how many
-/// workers ran the sweep or in which order they happened to finish.
+/// D-F's collect shape — `self.pool.install(|| tiles.par_iter().zip(..).with_min_len(..)
+/// .map(tile_result).collect::<Vec<Result<Option<TileResult>>>>())`, never
+/// `Result<Vec<TileResult>>` (see `viewport.rs`'s module doc) — is WHY the parallel branch's
+/// output order equals the input tiles' order by construction. This particular test, at this
+/// particular fixture size, no longer exercises that branch — see the §14 note just below — but
+/// the engine-wiring claim it does still make (mask, segment, underlay, cross-tile concatenation
+/// are thread-count-independent) is real and worth keeping.
 ///
 /// A multi-tile request (`zoom = 3`, full bbox — 64 tiles, most non-empty over this fixture's
 /// `(e*37, e*53) % 1000` scatter across `PARALLEL_HEADLINE_ITEMS = 300,000` items) with an
@@ -2509,16 +2516,11 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 /// the serve-all and the heap/threshold branch, since θ is saturated but many tiles exceed the
 /// `k = 50` cap — gather, underlay) runs across more than one tile.
 ///
-/// **Calibration task fix-wave note.** This test used the file's default `N_ITEMS = 10,000`
-/// fixture until the serial-fallback threshold (`SERIAL_FALLBACK_MAX_ROWS`, `viewport.rs`) landed
-/// below it — at 10,000 items this request's `Σ range.len()` cannot reach the 200,000-row
-/// threshold, so `compute_threads = 1` and `= 8` would both silently take the SAME serial-fold
-/// branch and the comparison below would no longer test what its own doc claims (fan-out
-/// invariance), only that the serial path is deterministic, which was never in question.
-/// `PARALLEL_HEADLINE_ITEMS` (300,000, comfortable margin above the threshold) restores that: see
-/// its own doc for why the fixture's fixed-extent scatter makes `Σ range.len() == n` exactly for
-/// a full-extent request, and the `rows_in_ranges` assertion below for the belt-and-braces runtime
-/// check under `bench-timing`.
+/// **§14 note.** `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 in the post-B9 three-scale
+/// re-calibration — see `PARALLEL_HEADLINE_ITEMS`'s doc for why this test's fixture is not raised
+/// to match (impractical at unit-test scale) and for where the parallel-branch-specific property
+/// (order preservation under rayon's indexed collect) is covered instead, decoupled from fixture
+/// size.
 ///
 /// **What this does not (and cannot) test.** It says nothing about the Python differential oracle
 /// or the conformance byte-scanner directly — those consume `ViewportOut`/the wire bytes exactly
@@ -2582,16 +2584,17 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
         !out_1.sub_cells.is_empty(),
         "the underlay request must produce some sub-cells for this test to cover that path too"
     );
-    // Belt-and-braces alongside the fixture-size argument above (this only runs under
-    // `bench-timing`, since `StageTimings` is all-zero without it — `enabled` says which):
-    // directly confirm `engine_8`'s run crossed `SERIAL_FALLBACK_MAX_ROWS` and therefore actually
-    // took the `pool.install` branch rather than degrading to serial-vs-serial.
+    // §14: `PARALLEL_HEADLINE_ITEMS` (300,000) is now well below `SERIAL_FALLBACK_MAX_ROWS`
+    // (500,000,000 — see that constant's doc), so both configs take the SERIAL branch here. This
+    // is a sanity check on that fact (not a "must be parallel" check any more) — if it ever fires,
+    // something about the predictor or this fixture changed in a way worth knowing about, since
+    // this test's own doc now explicitly says which branch it exercises.
     if out_8.timings.enabled {
         assert!(
-            out_8.timings.rows_in_ranges >= SERIAL_FALLBACK_MAX_ROWS,
-            "rows_in_ranges = {} did not clear the serial-fallback threshold ({}) -- this test \
-             would silently be comparing serial against serial, not exercising the parallel \
-             fan-out its own doc claims to cover",
+            out_8.timings.rows_in_ranges < SERIAL_FALLBACK_MAX_ROWS,
+            "rows_in_ranges = {} unexpectedly cleared the serial-fallback threshold ({}) -- this \
+             test's own doc says it exercises the serial branch on both configs; if this fires, \
+             the predictor or fixture changed and the doc above needs re-checking too",
             out_8.timings.rows_in_ranges,
             SERIAL_FALLBACK_MAX_ROWS
         );
@@ -2679,12 +2682,12 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empt
          none were skipped",
         out_1.tiles.len()
     );
-    // Belt-and-braces, same as the headline test above.
+    // §14: same sanity check as the headline test above — this now exercises the serial branch
+    // on both configs (see `PARALLEL_HEADLINE_ITEMS`'s doc).
     if out_8.timings.enabled {
         assert!(
-            out_8.timings.rows_in_ranges >= SERIAL_FALLBACK_MAX_ROWS,
-            "rows_in_ranges = {} did not clear the serial-fallback threshold ({}) -- this test \
-             would silently be comparing serial against serial",
+            out_8.timings.rows_in_ranges < SERIAL_FALLBACK_MAX_ROWS,
+            "rows_in_ranges = {} unexpectedly cleared the serial-fallback threshold ({})",
             out_8.timings.rows_in_ranges,
             SERIAL_FALLBACK_MAX_ROWS
         );

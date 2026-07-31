@@ -29,21 +29,29 @@ use tessera_types::IdentityKey;
 const N_ITEMS: u64 = 1_000;
 const SESSION_CREDENTIAL: &str = "session-secret";
 
-/// Calibration task: item count for the two byte-equality tests below that must exercise the
-/// GENUINE parallel fan-out (`tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS`, currently
-/// 200,000) — see `tessera-engine/tests/viewport.rs`'s identically-named constant for the full
-/// argument (same fixed-extent scatter, so `Σ range.len() == n` exactly for a full-extent
-/// request). This crate does not depend on `tessera-engine`'s test binary, so the constant and its
-/// reasoning are duplicated rather than shared, matching this file's own existing "same fixture
-/// pattern" duplication of `tests/viewport.rs`'s fixture builder (this file's module doc).
+/// Item count for the two byte-equality tests below — see `tessera-engine/tests/viewport.rs`'s
+/// identically-named constant for the full argument (same fixed-extent scatter, so
+/// `Σ range.len() == n` exactly for a full-extent request). This crate does not depend on
+/// `tessera-engine`'s test binary, so the constant and its reasoning are duplicated rather than
+/// shared, matching this file's own existing "same fixture pattern" duplication of
+/// `tests/viewport.rs`'s fixture builder (this file's module doc).
+///
+/// **§14 note.** `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 post-B9 (three-scale
+/// re-calibration; see that constant's doc in `tessera-engine`). A fixture that reaches it is
+/// impractical at unit-test scale, so this constant is NOT raised to match — the two tests below
+/// now exercise the SERIAL branch on both `compute_threads` configs (still a real engine-wiring
+/// claim, just not "the parallel fan-out specifically", which their names/docs used to claim). The
+/// narrower, still-provable property (rayon's indexed collect preserves tile order regardless of
+/// pool size) is covered decoupled from fixture size by
+/// `tessera_engine::viewport::tests::indexed_collect_of_tile_shaped_results_preserves_order_at_any_pool_size`.
 const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
 
-/// Fix round 1: compile-time twin of `tests/viewport.rs`'s identically-named assertion. Unlike
-/// the item count above (duplicated because a test *binary* cannot be imported across crates),
-/// `SERIAL_FALLBACK_MAX_ROWS` is a `pub` constant on the production `tessera_engine::viewport`
-/// module this crate already depends on, so it is imported and compared directly rather than
-/// duplicated as a bare number that could drift out of sync.
-const _: () = assert!(PARALLEL_HEADLINE_ITEMS >= SERIAL_FALLBACK_MAX_ROWS);
+/// Compile-time twin of `tests/viewport.rs`'s identically-named assertion, now checking the
+/// OPPOSITE relationship from before §14: this crate's two byte-equality tests deliberately stay
+/// below the (now much higher) threshold, so if a future edit ever raised `PARALLEL_HEADLINE_ITEMS`
+/// past `SERIAL_FALLBACK_MAX_ROWS` (or lowered the threshold below it) without updating the doc
+/// above, this catches the drift at compile time rather than leaving a stale claim in a comment.
+const _: () = assert!(PARALLEL_HEADLINE_ITEMS < SERIAL_FALLBACK_MAX_ROWS);
 
 const OPERATOR_CREDENTIAL: &str = "operator-secret";
 /// Fixed test key, matching `tessera-build`'s own test fixtures — not sensitive, this repository
