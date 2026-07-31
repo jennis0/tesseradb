@@ -80,4 +80,49 @@ if ! grep -q "stage_timing.unwrap_or(false)" crates/tessera-server/src/config.rs
   fail=1
 fi
 
+# ---------------------------------------------------------------------------------------------
+# Track B, Task 3a. Two rules, both guarding a property that is structural TODAY and stays that
+# way only while nothing new is added beside it.
+
+# 1. ONE PUBLISHER. Track C's finding S2: `write.rs`'s generation swaps use `load_full` + `store`,
+#    which loses a concurrent geometry publication -- leaving the LIVE generation on the pin drain
+#    list, where Task 5's prune evicts projections still in use. Task 3a closes it structurally by
+#    moving every swap onto the single executor thread. Stage 2.2's flush is precisely a second
+#    publisher, and lifecycle §1.3 already requires it to submit a command rather than store
+#    directly ("a swap-only publication step" on the lifecycle thread).
+#
+#    Matches the CALL FORM, and matches it BROADLY. Two narrower spellings were tried and both
+#    were vacuous: `GenerationHandle::store` appears nowhere in the tree (both real sites are
+#    `self.generation.store(...)`), and `.store(Arc::new(` misses the equally valid
+#    `.store(std::sync::Arc::new(` -- verified by planting one and watching this rule stay green.
+#    So the rule flags EVERY `.store(` in the engine's sources outside `write.rs`, minus the
+#    atomic ones, which are told apart by the `Ordering::` argument that `Atomic*::store` requires
+#    and `ArcSwap::store` does not take. A rule that cannot go red is worse than no rule, because
+#    it is evidence.
+if grep -rn '\.store(' --include=*.rs crates/tessera-engine/src/ \
+     | grep -v '^crates/tessera-engine/src/write\.rs:' \
+     | grep -v 'Ordering::'; then
+  echo "FAIL: a generation is published outside crates/tessera-engine/src/write.rs."
+  echo "      Stage 2.1 made the executor thread the sole publisher (Track C finding S2); a second"
+  echo "      publisher reintroduces the lost-update race. Submit a Command instead (lifecycle §1.3)."
+  fail=1
+fi
+
+# 2. FAULT INJECTION STAYS OUT OF SHIPPED BUILDS. `fault-injection` is enabled only through a self
+#    dev-dependency, and `cargo build` does not build dev-dependencies -- so nothing `cargo build`
+#    produces can carry it. That property is worth exactly as much as the "only via dev-deps" part,
+#    so assert it rather than document it. (Measured caveat, stated honestly in the feature's own
+#    comment: `cargo test --workspace` DOES unify the feature across the workspace, exactly as
+#    `bench-timing` does. This rule guards the release path, which is the one that matters.)
+for m in crates/*/Cargo.toml; do
+  if awk '/^\[dev-dependencies\]/{d=1} /^\[/{if ($0 !~ /dev-dependencies/) d=0} !d' "$m" \
+       | grep -q 'fault-injection'; then
+    if ! grep -q '^fault-injection = ' "$m"; then
+      echo "FAIL: $m enables 'fault-injection' outside [dev-dependencies]"
+      echo "      The gate's whole guarantee is that cargo build cannot reach it."
+      fail=1
+    fi
+  fi
+done
+
 exit $fail

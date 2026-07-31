@@ -252,6 +252,20 @@ pub async fn spawn_server_from_engine(
     max_k: usize,
     compute_gate: ComputeGate,
 ) -> TestServer {
+    // Phase 2 stage 2.1 (Task 3a): the WAL now lives on its own executor thread, and `prepare`
+    // starts it for a real server. Every server test reaches its engine through this one function,
+    // so starting it here is what keeps `/control/ingest` and `/control/changes` working in the
+    // test harness — including in files this track may not edit.
+    //
+    // The bound is generous on purpose: no test here means to exercise queue-full backpressure
+    // (that is Task 6's `ingest_429s_when_the_queue_is_full`, which will set its own), and a small
+    // bound would turn an unrelated timing wobble into a spurious 429.
+    let mut engine = engine;
+    engine
+        .start_write_executor(1024)
+        .expect("the write executor starts once per engine");
+    let engine = engine;
+
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),

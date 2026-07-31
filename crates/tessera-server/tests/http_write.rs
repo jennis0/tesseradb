@@ -657,10 +657,19 @@ async fn changes_batch_validates_before_applying_anything() {
 }
 
 /// Critical 1: two concurrent acceptances (one `/control/ingest`, one `/control/changes`) must
-/// both survive — the previous unlocked apply+swap allowed a lost-update race where whichever
+/// both survive — Phase 1's unlocked apply+swap allowed a lost-update race where whichever
 /// `store()` won silently discarded the other's already-fsynced, already-acked change. Runs the
 /// engine's `accept_ingest`/`accept_change` directly (not through HTTP) on two OS threads, synced
-/// to start together, so both race to load/clone/store the same starting generation.
+/// to start together, so both race for the executor.
+///
+/// **Kept even though Task 3a makes the race structurally impossible.** There is now exactly one
+/// thread that can publish a generation, so there is no second `store()` to lose to — the mutex
+/// this test was written against has been deleted along with the hazard. What it still buys is a
+/// regression alarm on the *property* rather than on the mechanism: any future change that
+/// reintroduced a second publisher (stage 2.2's flush is the obvious candidate, and lifecycle
+/// §1.3 requires it to submit rather than store) would show up here as a silently lost
+/// suppression. That is Track C's S2, and this is the behavioural half of the guard —
+/// `scripts/check-layers.sh`'s `.store(Arc::new(` rule is the mechanical half.
 #[test]
 fn concurrent_ingest_and_change_both_survive() {
     let tmp = TempDir::new().unwrap();
@@ -671,28 +680,30 @@ fn concurrent_ingest_and_change_both_survive() {
         &tmp.path().join("pairs.parquet"),
     );
 
-    let engine = Arc::new(
-        Engine::open(
-            &bundle_root,
-            &tmp.path().join("cache"),
-            &tmp.path().join("wal.log"),
-            Passthrough::new(),
-            EngineConfig {
-                token_max_lifetime_secs: 3600,
-                max_k: 200,
-                k_min: 2,
-                k_max_marks: 200,
-                theta_target_marks: u64::MAX,
-                max_underlay_offset: 4,
-                max_underlay_cells: 8192,
-                max_tiles_per_request: 262_144,
-                compute_threads: tessera_engine::default_compute_threads(),
-                pin_ttl_secs: 300,
-                pins_per_session_max: 4,
-            },
-        )
-        .expect("engine should open"),
-    );
+    let mut engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        EngineConfig {
+            token_max_lifetime_secs: 3600,
+            max_k: 200,
+            k_min: 2,
+            k_max_marks: 200,
+            theta_target_marks: u64::MAX,
+            max_underlay_offset: 4,
+            max_underlay_cells: 8192,
+            max_tiles_per_request: 262_144,
+            compute_threads: tessera_engine::default_compute_threads(),
+            pin_ttl_secs: 300,
+            pins_per_session_max: 4,
+        },
+    )
+    .expect("engine should open");
+    engine
+        .start_write_executor(64)
+        .expect("the write executor starts once");
+    let engine = Arc::new(engine);
 
     const SUPPRESS_SOURCE_ID: u64 = 3;
     let suppress_entity = engine
@@ -720,28 +731,26 @@ fn concurrent_ingest_and_change_both_survive() {
     let barrier_b = Arc::clone(&barrier);
     let ingest_thread = std::thread::spawn(move || {
         let new_external_id = external_id_of(N_ITEMS + 100);
-        let row = tessera_lifecycle::WalRow {
+        // Unallocated: Task 3a moved signature-sorted assignment onto the executor, so a caller no
+        // longer names the entity id at all.
+        let row = tessera_lifecycle::UnallocatedRow {
             external_id: Some(new_external_id.clone()),
-            entity_id: tessera_types::EntityId::new(N_ITEMS + 100),
             descriptors: vec![b"0".to_vec()],
             x: 5.0,
             y: 5.0,
             scalars: Vec::new(),
+            terms: engine_b.resolve_terms(std::slice::from_ref(&b"0".to_vec())),
         };
-        let terms = engine_b.resolve_terms(std::slice::from_ref(&b"0".to_vec()));
         barrier_b.wait();
         engine_b
-            .accept_ingest(
-                vec![row],
-                vec![terms],
-                "concurrent-batch".to_string(),
-                [7u8; 32],
-            )
-            .expect("ingest should be accepted");
+            .accept_ingest(vec![row], "concurrent-batch".to_string(), [7u8; 32])
+            .expect("ingest should be accepted")[0]
     });
 
     change_thread.join().unwrap();
-    ingest_thread.join().unwrap();
+    // The id the EXECUTOR assigned, not one this test chose: Task 3a moved assignment off the
+    // caller, so the identity to assert against is the one that comes back.
+    let ingested_entity = ingest_thread.join().unwrap();
 
     // The suppression's effect: a viewport count one lower than the full-coverage baseline.
     // (Phase 1's ingested/buffered items have no row geometry yet — no flush — so the ingested
@@ -772,7 +781,7 @@ fn concurrent_ingest_and_change_both_survive() {
         engine
             .resolve_external_id(&new_external_id)
             .expect("resolve_external_id should not fail for a healthy bundle"),
-        Some(tessera_types::EntityId::new(N_ITEMS + 100)),
+        Some(ingested_entity),
         "the concurrent ingest must have survived — a lost update would drop it from the live \
          buffer/established state"
     );

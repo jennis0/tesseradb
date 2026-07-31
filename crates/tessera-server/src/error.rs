@@ -239,6 +239,46 @@ pub fn map_wal_error<E: std::fmt::Display>(e: E) -> ApiError {
     )
 }
 
+/// Map a write-executor refusal to its HTTP answer.
+///
+/// **Task 3a maps every variant to the fail-closed 500 arm, deliberately, and Task 3b refines it.**
+/// The variants that need distinct answers already exist and are already distinguishable —
+/// `SubmitError::QueueFull` is contracts §3.1's 429 with `Retry-After`, `SubmitError::ExecutorDead`
+/// is a 503 on a not-ready node, `ExecError::BatchConflict` and `ExecError::DuplicateExternalId`
+/// are 409s — but the mapping table, the `retry_after_s` derivation and the readiness posture are
+/// one task's subject, and splitting them across two would leave a half-wired 429 whose
+/// `Retry-After` is a guess. 500 is the honest interim: fail-closed, never a partial answer.
+///
+/// The two 409 cases are mapped now, because they are contract answers rather than backpressure
+/// and the handler's own duplicate/replay checks already return 409 for the same situations — a
+/// caller must not see the same condition as 409 or 500 depending on which of two checks caught it.
+///
+/// **The detail never reaches the caller** — the same rule as [`map_store_error`]. `ExecError`'s
+/// `Display` composes `WalError`'s, which carries the WAL's filesystem path and the OS error
+/// string; `map_wal_error_does_not_forward_the_detail_to_the_caller` is the standing regression
+/// test for exactly that door.
+pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
+    use tessera_engine::AcceptError;
+    use tessera_lifecycle::ExecError;
+
+    match e {
+        AcceptError::Exec(ExecError::BatchConflict { batch_id }) => ApiError::Conflict(format!(
+            "batch id '{batch_id}' was already accepted with a different body"
+        )),
+        AcceptError::Exec(ExecError::DuplicateExternalId { count }) => ApiError::Conflict(format!(
+            "{count} row(s) name an external id this deployment already knows; the batch had no \
+             effect"
+        )),
+        other => {
+            tracing::error!(detail = %other, "the write executor refused; answering fail-closed");
+            ApiError::FailClosed(
+                "a durability write failed; the request was refused rather than answered partially"
+                    .to_string(),
+            )
+        }
+    }
+}
+
 /// Map a `spawn_blocking` `JoinError` (Task 3, D-A) to the fail-closed 500 arm. A `JoinError` here
 /// means the closure running the engine call panicked — I13: a panic is a failed request, never
 /// an empty one, so this is a typed 500, not a dropped connection or a silently empty body.
