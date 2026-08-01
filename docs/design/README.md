@@ -113,7 +113,7 @@ Three of those gaps matter more than the rest, because a reader could otherwise 
 property as delivered:
 
 - **Two of the three deny-retirement rules are unbuilt.** A suppression retires only when lifted,
-  as specified. Deletion's epoch ledger and the predicate-change fold have no code — they are safe
+  as specified. Deletion's stamp ledger and the predicate-change fold have no code — they are safe
   today only because nothing retires at all, which is fail-closed but is not the mechanism.
 - **The conformance suite covers three of thirteen invariants as designed.** Two more are covered
   in substance but in Rust rather than the suite. None of the eight scripted interleavings exist,

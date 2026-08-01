@@ -44,3 +44,5 @@ prevent.
 | [0024](0024-leak-register-scope-is-viewer-inference.md) | 2026-08-01 | The leak register covers what a viewer can infer, not data at rest |
 | [0025](0025-rotation-is-a-session-invalidation-event.md) | 2026-08-01 | A key rotation invalidates sessions; identifiers are not stable across them |
 | [0026](0026-idset-stamp-version.md) | 2026-08-01 | Three concepts that shared the word "epoch" get three words |
+| [0027](0027-i5-is-unverified.md) | 2026-08-01 | I5 is unverified, and the specification says so |
+| [0028](0028-postings-requirement-and-the-pair-relation.md) | 2026-08-01 | What the postings build requires, and who needs the pair relation |

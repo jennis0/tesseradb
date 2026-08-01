@@ -41,8 +41,8 @@ this is harmless ambition. In three places it is not, because the present tense 
 assurance about a security property:
 
 1. **Of the three retirement rules, one is built.** Suppression retires only on unsuppress, as
-   specified. Deletion's epoch ledger does not exist — `retirement_floor`, `epoch_counts` and
-   `min_live_epoch` have zero occurrences in `crates/`; `deleted` is a terminal `bool`. The
+   specified. Deletion's stamp ledger does not exist — `retirement_floor`, `stamp_counts` and
+   `min_live_stamp` have zero occurrences in `crates/`; `deleted` is a terminal `bool`. The
    evaluate-entry fold does not exist because compaction does not. Both are currently *safe*, by
    never retiring at all, which is fail-closed but is not the mechanism the document describes.
    §3.2's retirement floor — the guard the review record calls "the one that could have
@@ -109,7 +109,7 @@ implemented?** Everything else follows from it.
 | A6 | Per-tile **`served`** count on the wire, with an argued no-op disclosure justification and a "do not cite as precedent" clause | A new wire quantity whose leak argument lives only in a doc comment, with no Appendix C row |
 | A7 | Tile-loop parallelism with three calibrated constants and a **response byte-equality guarantee** across `compute_threads` | Byte-equality under parallelism is a conformance property with no home in the specification |
 | A8 | **B9 three-tier adaptive decode**, gated at 95% density | C19 cites the mechanism; the corpus never defines it |
-| A9 | Identity-key operations: four key sources, rotation refused without `--rotate-id-key`, epoch bump, `StaleIdentityEpoch`→409 | r21 records that a re-key reorders tied rows and invalidates identifiers; the operational contract that follows is undocumented |
+| A9 | Identity-key operations: four key sources, rotation refused without `--rotate-id-key`, idset bump, `StaleIdSet`→409 | r21 records that a re-key reorders tied rows and invalidates identifiers; the operational contract that follows is undocumented |
 | A10 | Fault injection (`lifecycle/src/faults.rs`), with a **fidelity rule** — an injected failure must be indistinguishable from a real one in variant and order | Pre-empts conformance §5 by three stages, with different vocabulary |
 | A11 | `ExecutorPosture` — a four-state monotone readiness signal feeding `/readyz`, where **`WalPoisoned` keeps the executor alive and still applying denies** | A deliberate choice between two fail-closed answers, and the operator-visible face of lifecycle §4 |
 | A12 | Pin bounds `DRAIN_DEPTH_MAX = 4` / `DRAIN_DEPTH_ALARM = 1`, with a sizing obligation `pin_ttl_secs < DRAIN_DEPTH_MAX × publication_period`; and the per-session pin cap is "politeness, **not** the page-cache defence" — bypassable by session rotation | Two bounds and a defeated defence, none in the corpus |
@@ -146,7 +146,7 @@ Both audits were asked to name what must survive verbatim. Consolidated:
    excludes a suppressed entity, so its invisibility rests on the overlay entry for as long as
    the suppression stands."* Without this, a reader sees three rules and one mechanism and
    unifies them.
-2. *"r1 assigned every deny a retirement epoch; for suppressions that is fail-open."* The
+2. *"r1 assigned every deny a retirement stamp; for suppressions that is fail-open."* The
    counterexample is what makes the rule non-negotiable.
 3. The floor generalisation: *"a floor raised only on deletion retirements passes the deletion
    test and still fails open through a pre-fold fragment."* The only sentence explaining why

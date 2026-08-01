@@ -300,7 +300,7 @@ The rejection is **re-grounded, not withdrawn.** What actually survives it:
    no next request. Don't re-download is free; don't re-request needs an explicit staleness bound,
    and the bound is the epoch."* Client-derived membership is the unbounded form; §6.1's rule 3 —
    compare the epoch integer, render stale-marked — is the bound that makes it acceptable.
-3. **Removals stay server-authoritative** regardless, from the deny set and the epoch ledger. That
+3. **Removals stay server-authoritative** regardless, from the deny set and the stamp ledger. That
    is the half no client derivation may touch, and it is what the "fail-closed by naming" property
    in this section is really protecting.
 
@@ -395,7 +395,7 @@ clients authorisation state at all; the Zanzibar family is the exception and the
 
 **The reconcile table** — which signal voids which client state — is the artifact a
 mode-3 integrator most needs, and this document owes it: token expiry, pin drain
-(`410`), overlay version, identity epoch (`409`), and key rotation each void a
+(`410`), overlay version, idset advance (`409`), and key rotation each void a
 different subset of {attribute cache, prefix declarations, held identities, θ
 constants, node handles}. Writing it out is a task for the phase that implements the
 signal; naming it here is what stops five invalidation paths being discovered one at a
@@ -455,7 +455,7 @@ them together forces a full re-render for a change whose delta is tiny.
 
 | Tier | Advances on | What it voids for a client |
 |---|---|---|
-| **Identity generation** | key rotation, identity-epoch advance | **everything** — every held `tessera_id` becomes meaningless and row order changes with it |
+| **Identity generation** | key rotation, idset advance | **everything** — every held `tessera_id` becomes meaningless and row order changes with it |
 | **Content version** | flush; accepted deny | what is visible — a small delta (below) |
 | **Pin / segment-set version** | compaction | **nothing** |
 
@@ -544,7 +544,7 @@ rather than the candidate**: HMAC chaining means every verifier holds the mintin
 secret, which is why the one large modern deployment ended up building a centralised
 verification service. The costs are honest and mostly organisational — root-issuance
 discipline, since handing an integrator a broad root rebuilds the proxy with extra
-steps; a revocation denylist, which is the same class of machinery as the epoch ledger;
+steps; a revocation denylist, which is the same class of machinery as the stamp ledger;
 and Datalog debugging opacity.
 
 **Two anti-patterns, named as loudly as the three retirement rules.**

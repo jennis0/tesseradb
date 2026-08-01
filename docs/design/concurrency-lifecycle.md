@@ -2,7 +2,7 @@
 
 **Status:** Draft r5 — audited against the built system; every claim about absent machinery is now marked at the claim (Appendix R)
 
-**Owns:** the mechanism level of the lifecycle — thread and state ownership, the generation/pin machinery, the fragment-epoch and deny-retirement ledgers, merge-versus-snapshot interaction, the WAL, caching, and the router/worker protocol. Everything here is engine-internal — none of it is contract (contracts §6) — but it is *invariant-bearing* internal, so it gets design-and-review treatment.
+**Owns:** the mechanism level of the lifecycle — thread and state ownership, the generation/pin machinery, the fragment-stamp and deny-retirement ledgers, merge-versus-snapshot interaction, the WAL, caching, and the router/worker protocol. Everything here is engine-internal — none of it is contract (contracts §6) — but it is *invariant-bearing* internal, so it gets design-and-review treatment.
 
 **The simplicity rule applied here:** one mutation discipline — **immutable artifacts, atomic pointer swaps, refcounted pins, and a single writer thread per partition** — with every surviving subtlety given a named ledger and an explicit rule.
 
@@ -101,21 +101,21 @@ A pinned request uses the pinned `segments_version` for tiles, columns and permu
 
 The composition is coherent under mixed versions: `M_auth` is computed entirely in entity space with the *fragment's* watermark defining the live set, so every entity falls in exactly one of `fragment \ L` or `direct_eval(L)`; projection through the pinned permutation then drops row-absent entities via the sentinel — no gap, no double count. **The observable consequence — a pinned drill-down can return fewer items than the viewport before it — is correct behaviour**, not a bug to be fixed.
 
-The effective watermark in composition is always the fragment's own; a pin vector's `W` is advisory, carried for status and debugging. Design §11.2's "a request pins its watermark alongside the segment-set version" and SA §6.4's "binds the triple to the fragment epoch at load" are to be read that way.
+The effective watermark in composition is always the fragment's own; a pin vector's `W` is advisory, carried for status and debugging. Design §11.2's "a request pins its watermark alongside the segment-set version" and SA §6.4's "binds the triple to the fragment stamp at load" are to be read that way.
 
-## 3. The overlay, fragment epochs, and the two retirement ledgers
+## 3. The overlay, fragment stamps, and the two retirement ledgers
 
 ### 3.1 Overlay entries, by disposition and cause
 
 | Entry | Carries | Reflected in postings? | Retirement |
 |---|---|---|---|
-| **deny/deletion** | tombstone epoch *d* | yes — delta-tier tombstone at *d*; folded at compaction | ledger rule, §3.2 |
+| **deny/deletion** | tombstone stamp *d* | yes — delta-tier tombstone at *d*; folded at compaction | ledger rule, §3.2 |
 | **deny/suppression** | — | **never** — suppression does not touch postings | **only by unsuppress.** Non-retirable while active, by construction: no fragment rebuild ever excludes a suppressed entity, so its invisibility rests on the overlay entry for as long as the suppression stands |
-| **evaluate** (predicate change) | current term set, inline (design §11.2) | **not until compaction folds it** — deltas cover newly flushed entities only, so a change to an existing entity's terms is invisible to postings in both directions | fold epoch rule, §3.4 |
+| **evaluate** (predicate change) | current term set, inline (design §11.2) | **not until compaction folds it** — deltas cover newly flushed entities only, so a change to an existing entity's terms is invisible to postings in both directions | fold stamp rule, §3.4 |
 
 **The three-way answer in the middle column is the structural cause of the three rules.** Yes / never / not-until-compaction are three different relationships between an overlay entry and the postings that would otherwise carry the same fact, and each admits a different safe moment to drop the entry. A reader who sees three rules and one mechanism will unify them.
 
-The rejected alternative is a single rule: **r1 assigned every deny a retirement epoch; for suppressions that is fail-open** — any epoch eventually retires the entry and re-exposes the item. The counterexample is what makes the split non-negotiable.
+The rejected alternative is a single rule: **r1 assigned every deny a retirement stamp; for suppressions that is fail-open** — any stamp eventually retires the entry and re-exposes the item. The counterexample is what makes the split non-negotiable.
 
 Suppression count is a metric — a monotonically growing active-suppression set is a policy signal, not a leak — and `unsuppress` removes the entry and publishes a side-manifest immediately, as all deny-state changes do.
 
@@ -127,7 +127,7 @@ The precedence over the three fields is `deleted > suppressed > evaluate_terms`,
 flowchart TD
   subgraph deletion["deny / deletion — ⊘ ledger not built"]
     D0["Delete accepted"] --> D1["postings: tombstone at d,<br/>folded at compaction"]
-    D1 --> D2["retires when no servable<br/>fragment epoch predates d"]
+    D1 --> D2["retires when no servable<br/>fragment stamp predates d"]
   end
   subgraph suppression["deny / suppression — built"]
     S0["Suppress accepted"] --> S1["postings: never touched"]
@@ -135,38 +135,38 @@ flowchart TD
   end
   subgraph evaluate["evaluate / predicate change — ⊘ fold not built"]
     E0["Predicate accepted"] --> E1["postings: not until<br/>compaction folds it"]
-    E1 --> E2["retires at fold epoch f,<br/>under the same floor as d"]
+    E1 --> E2["retires at fold stamp f,<br/>under the same floor as d"]
   end
 ```
 *The three retirement rules and the postings relationship each one follows from. Only the middle lane exists in code; the other two currently never retire at all.*
 
 ### 3.2 The deletion-retirement ledger
 
-A deletion's deny entry (tombstone epoch *d*) may leave the overlay only when **no servable fragment epoch predates *d***:
+A deletion's deny entry (tombstone stamp *d*) may leave the overlay only when **no servable fragment stamp predates *d***:
 
-- **Scope: all of this is per partition, per worker, in memory.** Epochs are per-partition segments-versions, denies live in their partition's overlay, and fragments never leave their worker — so the epoch counts and the floor are worker-local structures, and losing them on restart is safe by construction: the cache restarts cold and §3.3 forces every rebuild from current postings.
-- The fragment cache maintains `epoch_counts: BTreeMap<postings_epoch, usize>`; `min_live_epoch()` is its first key (+∞ when empty).
-- The cache additionally tracks `retirement_floor` = **the highest epoch of *any* retired overlay entry — a deletion's tombstone epoch *d* or an evaluate entry's fold epoch *f* alike** — and **refuses insertion of any fragment with epoch < retirement_floor**. Without this, a pinned or slow request could rebuild an old-epoch fragment *after* the entries predating it were retired and resurrect a deleted item or a revoked term. The floor is deliberately defined over both retirement kinds: **a floor raised only on deletion retirements passes the deletion test and still fails open through a pre-fold fragment.** That is the only sentence explaining why deletion and evaluate share a floor while suppression touches neither. Refusal is cheap: the builder retries against current postings (§3.3).
-- The lifecycle thread retires the retirable-entry prefix below `min_live_epoch()` after evictions and periodically.
+- **Scope: all of this is per partition, per worker, in memory.** Stamps are per-partition segments-versions, denies live in their partition's overlay, and fragments never leave their worker — so the stamp counts and the floor are worker-local structures, and losing them on restart is safe by construction: the cache restarts cold and §3.3 forces every rebuild from current postings.
+- The fragment cache maintains `stamp_counts: BTreeMap<postings_stamp, usize>`; `min_live_stamp()` is its first key (+∞ when empty).
+- The cache additionally tracks `retirement_floor` = **the highest stamp of *any* retired overlay entry — a deletion's tombstone stamp *d* or an evaluate entry's fold stamp *f* alike** — and **refuses insertion of any fragment with stamp < retirement_floor**. Without this, a pinned or slow request could rebuild an old-stamp fragment *after* the entries predating it were retired and resurrect a deleted item or a revoked term. The floor is deliberately defined over both retirement kinds: **a floor raised only on deletion retirements passes the deletion test and still fails open through a pre-fold fragment.** That is the only sentence explaining why deletion and evaluate share a floor while suppression touches neither. Refusal is cheap: the builder retries against current postings (§3.3).
+- The lifecycle thread retires the retirable-entry prefix below `min_live_stamp()` after evictions and periodically.
 - Compaction may force-refresh all fragments to advance the floor; overlay size is the pressure gauge.
 
-> **⊘ Specified, not implemented — none of this ledger exists.** There is no `retirement_floor`, no `epoch_counts`, no `min_live_epoch` and no tombstone epoch anywhere in the engine. A deletion sets a terminal `deleted` flag that nothing clears. **What happens instead: deletion denies never retire, and the overlay grows monotonically under deletion.** That is safe — fail-closed, since an entry that never retires can never stop denying — but it is not the mechanism above, and it is safe *only* because nothing retires. The retirement floor is the guard the review record calls "the one that could have reintroduced a fail-open path": **when the epoch ledger lands, the floor must land in the same change.** A ledger without a floor is the fail-open, not a smaller version of the feature.
+> **⊘ Specified, not implemented — none of this ledger exists.** There is no `retirement_floor`, no `stamp_counts`, no `min_live_stamp` and no tombstone stamp anywhere in the engine. A deletion sets a terminal `deleted` flag that nothing clears. **What happens instead: deletion denies never retire, and the overlay grows monotonically under deletion.** That is safe — fail-closed, since an entry that never retires can never stop denying — but it is not the mechanism above, and it is safe *only* because nothing retires. The retirement floor is the guard the review record calls "the one that could have reintroduced a fail-open path": **when the stamp ledger lands, the floor must land in the same change.** A ledger without a floor is the fail-open, not a smaller version of the feature.
 
 An overlay soft limit exists as the pressure gauge this section describes, and it alarms on overlay depth. **It does not act — there is no fold to schedule.**
 
 ### 3.3 Fragment builds always read current postings
 
-Fragments are built by request threads on miss (single-flight per key, §7.2) **from the current generation's postings view, never from a pinned one** — consistent with §2.3: pins fix geometry, and a fragment is authorisation state. Together with the insertion floor in §3.2 this closes the epoch-regression path.
+Fragments are built by request threads on miss (single-flight per key, §7.2) **from the current generation's postings view, never from a pinned one** — consistent with §2.3: pins fix geometry, and a fragment is authorisation state. Together with the insertion floor in §3.2 this closes the stamp-regression path.
 
 This half *is* built: a fragment is always constructed against the live bundle's postings. Only the floor that backstops it (§3.2) is absent.
 
 ### 3.4 Evaluate entries retire at the fold
 
-A predicate change is invisible to postings until **compaction folds it**: compaction rewrites affected entities' postings from the term sets carried in their evaluate entries. After the fold, the entry carries its fold epoch *f* and retires under §3.2's rule — with *f* participating in the retirement floor exactly as a deletion's *d* does.
+A predicate change is invisible to postings until **compaction folds it**: compaction rewrites affected entities' postings from the term sets carried in their evaluate entries. After the fold, the entry carries its fold stamp *f* and retires under §3.2's rule — with *f* participating in the retirement floor exactly as a deletion's *d* does.
 
 The reason the same machinery must govern it is that **a fragment predating the fold misreads the entity in both directions: a revoked term still present is fail-open; a granted term absent is wrong counts.** Before any fold, evaluate entries are immortal, which is why overlay growth under predicate churn schedules compaction, not just fragment refresh.
 
-> **⊘ Specified, not implemented.** Compaction does not exist (§5.3), so there is no fold and no fold epoch. **What happens instead: evaluate entries are permanently immortal, and the composition consults the overlay entry on every request.** Fail-closed and correct in both directions today — the overlay entry, not the postings, is the answer — at the cost of an overlay that only grows. The bidirectional misread above is the reason this cannot be retrofitted as "retire evaluate entries when they look stale": staleness in the second direction is a counting error, not a refusal, and produces no symptom that fails safe.
+> **⊘ Specified, not implemented.** Compaction does not exist (§5.3), so there is no fold and no fold stamp. **What happens instead: evaluate entries are permanently immortal, and the composition consults the overlay entry on every request.** Fail-closed and correct in both directions today — the overlay entry, not the postings, is the answer — at the cost of an overlay that only grows. The bidirectional misread above is the reason this cannot be retrofitted as "retire evaluate entries when they look stale": staleness in the second direction is a counting error, not a refusal, and produces no symptom that fails safe.
 
 ## 4. The WAL
 
@@ -305,8 +305,8 @@ Two pause sites, not one, because one cannot discriminate the ordering it exists
 2. **Generations immutable and Arc-shared; drain-list reclaim is remove → verify → reclaim.** A drain entry is slimmed geometry, never an `Arc<Generation>` — §2.1.
 3. **Pins fix geometry, never authorisation.** The effective watermark in composition is the fragment's own; a pin vector's `W` is advisory.
 4. **Two version axes** matching design §8.5.
-5. **Three retirement rules, not one**: deletion denies by the epoch ledger with an insertion floor; suppressions only by unsuppress; evaluate entries at their compaction fold. A single rule is fail-open for two of the three. *One of the three is built — §3.*
-6. **Fragments build from current postings only**, with the cache refusing epochs below the retirement floor. *The build rule is built; the floor is not — §3.2, §3.3.*
+5. **Three retirement rules, not one**: deletion denies by the stamp ledger with an insertion floor; suppressions only by unsuppress; evaluate entries at their compaction fold. A single rule is fail-open for two of the three. *One of the three is built — §3.*
+6. **Fragments build from current postings only**, with the cache refusing stamps below the retirement floor. *The build rule is built; the floor is not — §3.2, §3.3.*
 7. **Protocol postcard over socketpairs; worker WAL wins lease arbitration.** *Unbuilt — §6.*
 8. **Single-flight waiters do not block**; a concurrent arrival on a building key is refused with a 429 rather than parked. A caching decision with a client-visible outcome — §7.2.
 9. **The ack contract is carried by a type**, not by call ordering: a success receipt requires proof that the generation carrying its effect is live — §4.
