@@ -26,6 +26,8 @@ export type AppState = {
   failures: RequestFailure[];
   selected: {id: bigint; scalars: unknown[]; externalId: string | null} | null;
   selectedWorldXY: [number, number] | null;
+  /** A refused `/v1/items` call. Distinct from `selected: null`, which means nothing is picked. */
+  itemError: {code: string; detail: string} | null;
 };
 
 export type Store = {

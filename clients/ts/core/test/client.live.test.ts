@@ -54,9 +54,11 @@ describe.skipIf(!live)('TesseraClient against a live server', () => {
     });
     const id = response.result.ids[0]!;
     const item = await client.item(session.token, id);
-    // The 2m4 fixture declares no scalars and minted no external ids, so a resolved item is
-    // legitimately empty. That the call succeeds at all is the round-trip being tested.
+    // The 2m4 fixture declares no scalars, so `scalars` is legitimately empty; it does carry
+    // external ids, so that field is populated. What is being tested is the round-trip: a served
+    // identity resolves back to an item this principal may see.
     expect(item.scalars).toBeInstanceOf(Array);
+    expect(item.externalId).toBeTypeOf('string');
   });
 
   it('reports a refusal as a typed error rather than an empty result', async () => {

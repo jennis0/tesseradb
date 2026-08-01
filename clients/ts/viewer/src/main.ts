@@ -6,6 +6,7 @@ import {esc} from './html.js';
 import {INITIAL_VIEW_STATE, VIEW, buildLayers} from './map.js';
 import {renderCounts} from './panels/counts.js';
 import {renderErrors} from './panels/errors.js';
+import {renderItem, renderItemError} from './panels/item.js';
 import {renderPrincipal, type Preset} from './panels/principal.js';
 import {renderK, renderStats, renderUnderlay} from './panels/stats.js';
 import {coalesce, createStore, type Store} from './state.js';
@@ -34,7 +35,8 @@ const store = createStore({
   inFlight: 0,
   failures: [],
   selected: null,
-  selectedWorldXY: null
+  selectedWorldXY: null,
+  itemError: null
 });
 
 const deck = new Deck({
@@ -42,7 +44,51 @@ const deck = new Deck({
   views: VIEW,
   initialViewState: INITIAL_VIEW_STATE,
   controller: true,
-  layers: []
+  // Marks are ~1.6 px: without a picking radius a click almost never lands on one, and the item
+  // panel would look broken rather than unaimed.
+  pickingRadius: 8,
+  layers: [],
+  onClick: (info) => {
+    // Picking returns a positional index into the tile's own buffers; identity is resolved
+    // app-side from the u64 column the sublayer carries, so `tessera_id` never enters the render
+    // path (client-interaction §8.2).
+    const ids = (info.sourceLayer?.props as {tesseraIds?: BigUint64Array} | undefined)?.tesseraIds;
+    const id = ids && info.index >= 0 ? ids[info.index] : undefined;
+    if (id === undefined || !store.state.session) {
+      store.update((s) => {
+        s.selected = null;
+        s.selectedWorldXY = null;
+        s.itemError = null;
+      });
+      return;
+    }
+    const worldXY = info.coordinate
+      ? ([info.coordinate[0]!, info.coordinate[1]!] as [number, number])
+      : null;
+    const token = store.state.session.token;
+    client
+      .item(token, id)
+      .then((detail) => {
+        store.update((s) => {
+          s.selected = {id, scalars: detail.scalars, externalId: detail.externalId};
+          s.selectedWorldXY = worldXY;
+          s.itemError = null;
+        });
+      })
+      .catch((error) => {
+        // A refused item is shown as refused. Silently clearing the panel would present "no such
+        // item" and "not yours to see" as the same blank, which is the collapse §5 forbids.
+        const e = error as {code?: string; detail?: string; message?: string};
+        store.update((s) => {
+          s.selected = null;
+          s.selectedWorldXY = worldXY;
+          s.itemError = {
+            code: e.code ?? 'fetch-failed',
+            detail: e.detail ?? e.message ?? String(error)
+          };
+        });
+      });
+  }
 });
 
 const panels = document.getElementById('panels')!;
@@ -69,6 +115,9 @@ function render() {
   panels.innerHTML =
     renderPrincipal(store.state, presets) +
     renderCounts(store.state) +
+    (store.state.itemError
+      ? renderItemError(store.state.itemError.code, store.state.itemError.detail)
+      : renderItem(store.state)) +
     renderK(store.state) +
     renderUnderlay(store.state) +
     renderStats(store.state) +
@@ -89,6 +138,7 @@ function render() {
           s.tiles.clear();
           s.selected = null;
           s.selectedWorldXY = null;
+          s.itemError = null;
         });
       })
       .catch((error) => recordFailure(store, `authorise ${preset.label}`, error));

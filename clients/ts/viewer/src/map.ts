@@ -1,6 +1,6 @@
 import {OrthographicView, type Layer} from '@deck.gl/core';
 import {TileLayer} from '@deck.gl/geo-layers';
-import {ScatterplotLayer} from '@deck.gl/layers';
+import {BitmapLayer, ScatterplotLayer} from '@deck.gl/layers';
 import {
   MAX_DEPTH,
   TILE_SIZE,
@@ -11,6 +11,7 @@ import {
   type ViewportResult
 } from '@tessera/client';
 import type {Store} from './state.js';
+import {subCellsToImage} from './underlay.js';
 
 export const VIEW = new OrthographicView({id: 'ortho', flipY: true});
 
@@ -33,6 +34,7 @@ export function buildLayers(store: Store, client: TesseraClient): Layer[] {
   if (!meta || !session) return [];
 
   const layerId = `tiles:${slice}:${termsLabel}:${k ?? 'default'}:${underlayOffset}`;
+  const {selectedWorldXY} = store.state;
 
   return [
     new TileLayer<TilePayload>({
@@ -114,25 +116,79 @@ export function buildLayers(store: Store, client: TesseraClient): Layer[] {
 
       renderSubLayers: (props) => {
         const payload = props.data as TilePayload | null;
-        if (!payload || payload.result.ids.length === 0) return null;
-        return new ScatterplotLayer({
-          id: `${props.id}-marks`,
-          data: {
-            length: payload.result.ids.length,
-            attributes: {getPosition: {value: payload.worldPositions, size: 2}}
-          },
-          // Carried explicitly rather than read back off `data`: picking returns a positional
-          // index, and this is what resolves it to an identity app-side, so `tessera_id` never
-          // enters the render path.
-          tesseraIds: payload.result.ids,
-          getFillColor: [120, 190, 255, 200],
-          radiusUnits: 'pixels',
-          getRadius: 1.6,
-          radiusMinPixels: 1,
-          pickable: true,
-          parameters: {depthCompare: 'always' as const}
-        });
+        if (!payload) return null;
+        const layers: Layer[] = [];
+        const offset = store.state.underlayOffset;
+
+        if (offset > 0 && payload.result.subCells) {
+          const b = props.tile.bbox as {
+            left: number;
+            top: number;
+            right: number;
+            bottom: number;
+          };
+          layers.push(
+            new BitmapLayer({
+              id: `${props.id}-underlay`,
+              image: subCellsToImage(payload.result.subCells, offset),
+              // BitmapLayer takes [left, bottom, right, top]. Under `flipY` the tile's `top` is
+              // numerically the smaller y, so passing the bbox's own fields in this order puts the
+              // image's first row at the tile's first cell row.
+              bounds: [b.left, b.bottom, b.right, b.top],
+              // Nearest, not linear: these are exact per-cell counts, and interpolating between
+              // them invents densities the server never reported. Crisp cells also make a
+              // misaligned underlay obvious instead of blurring it into plausibility.
+              textureParameters: {minFilter: 'nearest', magFilter: 'nearest'},
+              // Translucent with depth off: tiles render in arbitrary order, so one tile's cells
+              // could otherwise overdraw an adjacent tile's marks (client-interaction §8.2).
+              opacity: 0.75,
+              parameters: {depthCompare: 'always' as const}
+            })
+          );
+        }
+
+        if (payload.result.ids.length === 0) return layers;
+        layers.push(
+          new ScatterplotLayer({
+            id: `${props.id}-marks`,
+            data: {
+              length: payload.result.ids.length,
+              attributes: {getPosition: {value: payload.worldPositions, size: 2}}
+            },
+            // Carried explicitly rather than read back off `data`: picking returns a positional
+            // index, and this is what resolves it to an identity app-side, so `tessera_id` never
+            // enters the render path.
+            tesseraIds: payload.result.ids,
+            getFillColor: [120, 190, 255, 200],
+            radiusUnits: 'pixels',
+            getRadius: 1.6,
+            radiusMinPixels: 1,
+            pickable: true,
+            parameters: {depthCompare: 'always' as const}
+          })
+        );
+        return layers;
       }
-    })
+    }),
+    // A layer of its own, not a highlight prop: TileLayer overrides its sublayers'
+    // `highlightedObjectIndex`, so a highlight set on the scatterplot would not survive
+    // (client-interaction §8.2).
+    ...(selectedWorldXY
+      ? [
+          new ScatterplotLayer({
+            id: 'selection',
+            data: [selectedWorldXY],
+            getPosition: (d: [number, number]) => d,
+            getFillColor: [255, 210, 90, 255],
+            radiusUnits: 'pixels' as const,
+            getRadius: 5,
+            stroked: true,
+            getLineColor: [20, 20, 20, 255],
+            lineWidthUnits: 'pixels' as const,
+            getLineWidth: 1.5,
+            parameters: {depthCompare: 'always' as const}
+          })
+        ]
+      : [])
   ];
 }
