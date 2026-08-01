@@ -38,3 +38,5 @@ prevent.
 | [0018](0018-manifest-disposition-split-is-contract.md) | 2026-08-01 | The side-manifest disposition split is interchange contract |
 | [0019](0019-i13-lettered-properties.md) | 2026-08-01 | I13 names three lettered properties, and I13a is an addition |
 | [0020](0020-no-auth-data-retained-beside-a-mask.md) | 2026-08-01 | No authorisation data is retained beside a mask |
+| [0021](0021-rust-not-jvm.md) | 2026-07-28 | Rust rather than the JVM, and what that costs |
+| [0022](0022-deepscatter-rejected.md) | 2026-07-28 | deepscatter is rejected, on licence and on architecture |

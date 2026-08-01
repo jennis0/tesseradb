@@ -69,8 +69,9 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `concurrency-lifecycle.md` | Normative — r5 | 21 |
 | `conformance.md` | Normative — r4 | 14 |
 | `contracts.md` | Normative — r12 | 14 |
+| `deferred-index-ordinal-split.md` | Deferred |  |
+| `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
-| `implementation-plan.md` | Superseded in part |  |
 | `slices-and-multi-table.md` | Provisional — under review |  |
 | `system-architecture.md` | Normative — r7 | 17 |
 | `tile-addressed-integration.md` | Provisional — under review |  |

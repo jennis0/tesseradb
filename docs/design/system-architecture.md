@@ -1,8 +1,8 @@
 # Tessera — System Architecture: Storage, Serving and Lifecycle
 
-**Status:** Draft r7 — r6's rewrite against the built system (the streaming build, the write executor and its commit window, the admission gate, the current identity model, the bundle tree the code actually writes), with the losses that rewrite introduced restored: the I13a/I13b split, three rules returned to `concurrency-lifecycle.md` as citations, and three obligations the rewrite dropped (see Appendix R)
+**Status:** Draft r8 — r6's rewrite against the built system (the streaming build, the write executor and its commit window, the admission gate, the current identity model, the bundle tree the code actually writes); r7 restored the losses that rewrite introduced; r8 adds §3's dependency register, folded in from the retiring implementation plan and re-checked row by row against the tree (see Appendix R)
 
-**Companion to** `architecture.md` (the specification, which owns the invariants and the *why*) and `implementation-plan.md` (which owns phasing). This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the architecture design; `contracts §n` to `contracts.md`; `lifecycle §n` to `concurrency-lifecycle.md`. Where this document and the design disagree, the design is right; where this document and `contracts.md` disagree, contracts §0.3's recorded deviations govern.
+**Companion to** `architecture.md` (the specification, which owns the invariants and the *why*) and `../archive/implementation-plan.md` (which owns phasing). This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the architecture design; `contracts §n` to `contracts.md`; `lifecycle §n` to `concurrency-lifecycle.md`. Where this document and the design disagree, the design is right; where this document and `contracts.md` disagree, contracts §0.3's recorded deviations govern.
 
 **Scope.** Backend only — the storage engine, the query surface and the lifecycle. The client appears where its contract constrains the backend: `clients/ts/` is a live second reader of the wire format, and a second reader is what makes a contract a contract (contracts §0.1).
 
@@ -170,6 +170,30 @@ reference/           the deliberately slow, obviously correct Python oracle — 
 Four of those guard fail-open paths rather than layering: the single-publisher rule, the ack-proof token, the fault-injection gate and the candidate-list marker. The exemption-counting rule is the notable shape — the single publisher exemption is a marker on one line, and the rule fails on a *second* marker, so the cheap escape is exactly as visible as the honest fix.
 
 **Cache ownership.** Mask fragments → `tessera-authz` (built) and `tessera-store` (persisted, digest-verified); row projections of fragments, and the in-memory fragment cache → `tessera-engine`. `M_sel` and the label frontier have no cache and no code; filter results have no cache because there is no filter crate.
+
+### What is depended on, and what is refused
+
+Each row below replaces work the system would otherwise carry itself, in the trusted computing base or next to it. **Licences are stated because one of them has already been a decision point.**
+
+| Component | Choice | Licence | Replaces | Status |
+|---|---|---|---|---|
+| Bitmap kernel | CRoaring via the `croaring` crate; `pyroaring` in the reference oracle | Apache-2.0 | the entire mask layer | in the tree |
+| Columnar storage | `arrow-rs` + `memmap2`; PyArrow in the reference oracle | Apache-2.0 | the on-disk format and the zero-copy gather | in the tree |
+| Renderer, tiles, picking, labels (GPU profile) | deck.gl | MIT | WebGL scatterplot, tile lifecycle, GPU picking, collision-filtered labels | in `clients/ts/viewer` |
+| Transport decode (client) | `apache-arrow` (JS) | Apache-2.0 | client-side columnar decode | in `clients/ts/core` |
+| Tile grid and pan-as-transform (thin-client profile) | Leaflet or OpenLayers | BSD-2 | slippy-map machinery with no GPU dependency | ⊘ absent |
+| Policy evaluation behind `terms_of_auth` | OPA (partial evaluation) or AWS Cedar | Apache-2.0 | policy language, residual disjunctive-normal-form compilation | ⊘ absent |
+| Plugin sandbox | `wasmtime` | Apache-2.0 | determinism and isolation for caller code (§4.3) | ⊘ absent |
+| Label grammar | `accumulo-access` ABNF, reimplemented natively | Apache-2.0 | predicate syntax design | ⊘ absent |
+| **Test-only** — label oracle | `accumulo-access` on the JVM | Apache-2.0 | the only check on I5's label half | ⊘ absent |
+| **Test-only** — mask oracle | DuckDB over `pairs.parquet` | MIT | an independent mask-build implementation | ⊘ absent |
+| Clustering and labelling | UMAP, HDBSCAN, Toponymy | BSD-3 / BSD-3 / see repo | nothing here — the caller's model pipeline, out of scope, and the build reads only its Parquet outputs (§6.1) | caller-side |
+
+> **⊘ Specified, not implemented.** Six of these are choices rather than dependencies. There is no `wasmtime` and no module loading, no OPA or Cedar behind `terms_of_auth` — `builtin:passthrough` is the whole policy surface — no label grammar and no label machinery to parse for, no JVM and no `accumulo-access` anywhere in the tree, and no thin-client profile: `clients/ts/viewer` is deck.gl only. The mask oracle that exists is `reference/`, Python over `pyroaring` and PyArrow, independently derived; DuckDB appears only under `probes/`, which is measurement rather than conformance. A reader must not take the table as a bill of materials — what a build actually pulls is the first four rows.
+
+The renderer's nearest miss is worth naming because it will be proposed again: deepscatter is architecturally close, and is refused on both its licence and its fill-order tiler — the argument is in [decision 0022](../decisions/0022-deepscatter-rejected.md).
+
+**The frozen-view requirement is what selects `croaring` over the pure-Rust `roaring` crate.** Mask loading is a memory-mapped frozen bitmap read without a copy, so the binding has to expose the frozen family — serialisation into the `Frozen` format on the write side, a `BitmapView` deserialised from mapped bytes on the read side — and `roaring` has no equivalent. That requirement is **met**: `croaring` is a workspace dependency and `tessera-authz`'s persistent fragment cache is built on exactly those two calls. Were the binding ever to regress, the fallback is a thin FFI shim over CRoaring directly — a day of work, not a redesign — so the dependency is load-bearing without being a single point of architectural failure.
 
 ## 4. The contracts
 

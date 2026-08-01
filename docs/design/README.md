@@ -84,7 +84,12 @@ architecture design.
 | [`derived-artifact-gating.md`](derived-artifact-gating.md) | Provisional | Non-point artifacts: clusters, labels, hulls, cells — one class, three gates |
 | [`slices-and-multi-table.md`](slices-and-multi-table.md) | Provisional | Named orthogonal coordinate systems, and physical table shards |
 | [`tile-addressed-integration.md`](tile-addressed-integration.md) | Provisional | Serving MapLibre, OpenLayers and QGIS by tile addressing |
-| [`inventory.md`](inventory.md) | Generated | Every invariant and leak-register row, so a change to either is a one-line diff |
+| [`deferred-index-ordinal-split.md`](deferred-index-ordinal-split.md) | Deferred sketch | Splitting permanent identity from a renumberable index ordinal — **not approved**; its overlay question is open |
+| [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) | Deferred sketch | Sorting rows by (signature, morton) — **not approved**; three inputs it needs do not exist |
+| [`inventory.md`](inventory.md)(inventory.md) | Generated | Every invariant and leak-register row, so a change to either is a one-line diff |
+
+**Deferred sketch** means recorded so the option is not lost and its open problems are not
+rediscovered — explicitly not a design, and not to be built from.
 
 **Provisional** means code is already written against the document but it is not yet normative.
 Each says in its first lines what remains before it becomes so. Read the `Status:` line before

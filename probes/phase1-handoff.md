@@ -31,7 +31,7 @@ scaffold one without being asked.
 
 1. **`probes/phase0-memo.md`** — start here; it points at everything else
    and states the scoped verdict.
-2. **`docs/design/implementation-plan.md` §5** — Phase 1 as originally
+2. **`docs/archive/implementation-plan.md` §5** — Phase 1 as originally
    scoped (walking skeleton, exit criteria).
 3. **`docs/design/system-architecture.md` (r4)** — §3 crate
    decomposition, §4 the five contracts, §6 lifecycle. This is newer than

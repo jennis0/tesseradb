@@ -1,6 +1,18 @@
 # Tessera — Implementation Plan
 
-**Status:** Superseded in part — being retired, not yet retired. The six-phase model this document is organised around has been replaced by capability epics ([decision 0015](../decisions/0015-plans-retired-for-epics.md)), and §10.2's invariant matrix is superseded by `conformance.md` §4.6, which states the *measured* position rather than the intended one.
+> **ARCHIVED 2026-08-01 — the six-phase model it is organised around is replaced by capability
+> epics ([decision 0015](../decisions/0015-plans-retired-for-epics.md)), and every part of it worth
+> keeping now lives somewhere it can be maintained.**
+>
+> Where it went: the dependency register and its licence column → `../design/system-architecture.md`.
+> The Rust-rather-than-JVM trade → [decision 0021](../decisions/0021-rust-not-jvm.md). The
+> deepscatter rejection → [decision 0022](../decisions/0022-deepscatter-rejected.md). §10.2's
+> invariant matrix → `../design/conformance.md` §4.6, which states the *measured* position rather
+> than the intended one. §14's two deferred designs →
+> `../design/deferred-index-ordinal-split.md` and `../design/deferred-signature-major-layout.md`,
+> both marked explicitly not approved. The remaining deferred items are GitHub issues.
+>
+> Kept for its reasoning and its record. Do not execute it, and do not cite it as authority.
 
 It is kept in the corpus rather than archived because three things in it have no other home yet: §2's language and runtime arguments — including §2.4's fair statement of what is lost by not using Java — §3's dependency register with its **licence** rejections, and §14's deferred sketches. Those fold into `system-architecture.md` when someone does the work. Read the phases as history; read §2, §3 and §14 as current.
 
