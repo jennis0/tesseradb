@@ -140,6 +140,37 @@ paths = [
   # the build pipeline's, belongs to no stage-2.1 track, and is not Track B's to touch. Safe to
   # grant now only because A, C and T are merged and B is the sole live track.
   "crates/tessera-cli/src/main.rs",
+  # Controller ruling 2026-08-01, on the owner's correction: **if the right design is prevented by
+  # this file, that is a defect in this file, not a constraint on the design.**
+  #
+  # The first draft of Task 6's brief told the worker it could not add a config key, citing the
+  # plan's rule 2 ("config keys are landed by the seam, not the tracks"), and instructed it to
+  # derive every operand of its headroom arithmetic from keys the seam happened to land. That is a
+  # coordination mechanism deciding an engineering question. Rule 2's REASON was that `config.rs`
+  # is "the file every track wants" — it is contention control, and with A, C and T all merged
+  # there is no contention left to control. Task 6 also has a live case for a key: an ingest
+  # ADMISSION bound (concurrent handlers holding blocking-pool threads) is a different quantity
+  # from `ingest_queue_bound` (queued commands), and forcing them onto one number to avoid an
+  # allowlist edit is exactly the "silently admits the collapsing configuration" shape
+  # `validate_cache_bounds` refuses.
+  #
+  # Granted with its obligations, which the REVIEW gate polices rather than the hook: a new key
+  # carries the same argued doc block, `deny_unknown_fields` section placement, non-zero
+  # validation, default-pinning test and stated inertness-or-consumer that every one of the
+  # seam's fourteen carries. `config.rs` is 1,767 lines of argued prose and is reviewed by being
+  # read.
+  "crates/tessera-server/src/config.rs",
+  # Same ruling, same reason. `AppState` was Track C's for stage 2.1 and C is merged. Task 6 needs
+  # config values (batch caps, the admission bound) to reach `control.rs`, and the alternative —
+  # a module-private `OnceLock` in `control.rs` on the `init_deny_runtime` pattern — is the right
+  # answer for a RUNTIME resource and the wrong one for plain configuration, where a field on the
+  # state every handler already holds is both simpler and honest about lifetime. The worker
+  # chooses; it is no longer chosen for it by an allowlist.
+  #
+  # **Not a licence to touch `check_bearer` or the session registry.** S17 (the session-registry
+  # expiry sweep) is an OPEN OWNER DECISION and stays out of scope regardless of this grant —
+  # ownership was never what excluded it.
+  "crates/tessera-server/src/state.rs",
   "scripts/check-layers.sh",
 ]
 
@@ -161,6 +192,10 @@ paths = [
   "crates/tessera-engine/src/single_flight.rs",
   "crates/tessera-authz/src/fragment.rs",
   "crates/tessera-authz/src/single_flight.rs",
+  # ALSO in `[track.b]` from 2026-08-01, and `--audit` therefore reports it as an overlap
+  # alongside `check-layers.sh`. Deliberate, not drift: Track C is merged and this stage's
+  # remaining work is all Track B's. Left listed here so C's history reads correctly and so a
+  # re-parallelised 2.2 starts from the real map rather than from a grant made when B was alone.
   "crates/tessera-server/src/state.rs",
   "crates/tessera-server/src/session.rs",
   "crates/tessera-engine/tests/pins.rs",
