@@ -15,6 +15,19 @@ the probe records and the memos. Each row is classified:
 Nothing here has been corrected. That is deliberate: the rewrite applies rulings, it does not
 make them.
 
+## Owner rulings, 2026-08-01
+
+1. **Specified versus implemented is marked per claim**, at the point the claim is made — not in a
+   preamble the reader has forgotten by §5 — plus a summary table in the corpus index.
+2. **I10 is weakened to match the construction** (S6). It states what is actually defended: a
+   blinding permutation preventing viewer-plane correlation and enumeration, explicitly not a
+   cryptographic guarantee and explicitly not a defence against a bundle-holder. The threat model
+   is promoted from `identity.rs` into the specification. No code changes.
+3. **Scope of this rewrite:** every metadata and framing row, plus the substantive rows where a
+   wrong document misleads about a guarantee — S1, S6, S7, S10, S12, S18, S19, S20, S21, S22, S23
+   and the retirement rules. The remainder becomes GitHub issues against the epics that will build
+   the machinery.
+
 ---
 
 ## The systemic finding
@@ -70,6 +83,19 @@ implemented?** Everything else follows from it.
 | S16 | conformance §5 | Eight scripted interleavings, a `conformance` cargo feature, eight named pause points, three commands | None of it. A *different* pause mechanism exists in `lifecycle/src/faults.rs` with different vocabulary and a different home | A second pause mechanism will be built beside the existing one |
 | S17 | conformance §5 | Crash realism requires **truncate-to-`fsync_offset()`**; "SIGKILL loses nothing — an engine that acked before fsync would pass" | `test_restart_replay.py` uses SIGKILL only — precisely the variant the design calls insufficient | The suite contains the test its own design pre-emptively rejects |
 | S18 | conformance §4.2 | Canonicalised byte-comparison, with a **comparator positive control** proving it can fail | Decoded comparison, no canonicalisation, **no third fixture state** | A pass-only test with no proof it can fail — the failure mode the design names |
+
+| **S19** | **SA §4.5** | "**All identities are per-session `u32` handles** (I10, byte-scan tested)", issued as a router keyed permutation | Retired by design **r21** and contracts §0.3 deviation 8. The wire carries `points_tessera_ids: &[u64]`; `wire/tests/wire.rs:202` names "the r6/r21 boundary change". `handles.rs` survives `#[allow(dead_code)]` for Phase 3 node handles only | **The only place in the corpus still asserting the retired model — and it asserts it as the I10 mechanism.** A rewrite carrying §4.5 forward restates a superseded security mechanism as current |
+| **S20** | contracts §2.1 | "`SEGMENTS-<n>.json` … `n` zero-padded decimal" | The writer emits `SEGMENTS-0.json`, unpadded. The reader parses `SEGMENTS-01.json` → `n = 1`, then reconstructs `SEGMENTS-1.json` — a different, absent file. `read.rs:363` records it as a known fail-open residual | **A live spec-versus-code contradiction on the fail-closed replica path.** A spec-conforming writer produces manifests this reader silently steps past. Reconcile in one direction before either document restates it |
+| S21 | contracts §2.3 | "`readyz` fails if the newest verifying `n` is older than the configured lag bound — unbounded step-down would let a badly synced replica serve long-deleted items as live" | Not implemented. `read.rs:371` — "the bound on all three is time, and that bound does not exist yet"; `health.rs:19` tables it as **not enforced**; `stepped_down()` has zero non-test callers | A contract states a fail-closed gate in the present tense. Step-down itself *is* built; only its time bound is missing — and that bound is the gate that would have caught S20 |
+| S22 | contracts §2.2 | `identity.key` is "exactly 32 lowercase hex"; degenerate keys "refused at both write and read" | The check lives in `IdentityKey::from_hex`, reached only from `tessera_build::verify` and `Engine::open`. A bundle with an uppercase or degenerate key **opens fine through `tessera-store::open_bundle`** — the reader §2.3's protocol actually names | "Readers reject" is true of the engine and false of the store |
+| S23 | SA §3 | "Dependency rules **enforced in CI** (a `cargo-deny`-style layer check)" | There is no CI. `check-layers.sh` runs from an opt-in `pre-commit` hook, and is skipped entirely in a worktree with no `.claude/track` marker | The claim that the layering is mechanically enforced is false; enforcement is advisory unless a developer ran the installer |
+| S24 | SA §4.5 | (implied) the per-session handle table is live | `state.rs:23` still allocates `handles: Mutex<HandleTable>` per session and **nothing ever reads or writes it**, while its own comment claims it "grows with the session's own drill-downs" | A dead allocation carrying a false rationale, contradicted by its own crate's documentation |
+| S25 | contracts §3.1, §3.2 | An `x-tessera-api` header "everywhere"; Arrow bodies as `application/vnd.apache.arrow.stream`; `selection` is five keys | The header has zero implementation on either side; the server sends `application/octet-stream`; `selection` emits **six** keys, and `clients/ts` already consumes the sixth | Three stated wire requirements a conforming client would fail on. The sixth key is the r9 `max_k` defect recurring exactly |
+| S26 | SA §6.1 | An in-memory linear build, implied throughout | Eleven-stage streaming build with external spill and receipts; the linear build was **OOM-killed at 10⁹ on a 47 GiB box** and survives only as the byte-identity oracle | The build's memory-bounded character is what makes 10⁹ reachable, and it is the largest undocumented mechanism in the system |
+| S27 | SA §3, §2.2, §4.3 | Crates `tessera-labels` and `tessera-filter`; a `python/` SDK; a router/worker process split (`tessera --partition`); a wasmtime plugin host | None exist. Twelve crates, none of them those two; no `python/`; three CLI subcommands and no spawning; no `wasmtime` dependency, and `builtin:access-expressions` is **refused at startup** | SA's cache-ownership table and read-path map route steps to crates that do not exist. §2.2, §2.3, §4.5, §6.6 and decisions D7/D11/D12/D16 are written in the present tense about an unbuilt process model |
+| S28 | SA §7 | The `tessera.toml` example | **Would not parse.** Every section is `deny_unknown_fields`; five documented keys are wrong (`flush_max_age`, `wal_retention`, `token_max_lifetime` as a string, a `[merge]` section, `plugin.module`) | The config philosophy is correct and verified live; the example is not. Regenerate it from the code and keep the philosophy sentence |
+| S29 | SA §4.1, §4.2 | The bundle tree; ten `/control/*` verbs; a *build* credential tier; Prometheus metrics on an admin-trusted port | The tree is superseded by four §0.3 deviations. Three control verbs are mounted, not ten — **absent, not stubbed**, including `/control/allocate-ids`, which SA §6.6 makes load-bearing. One credential layer, not two. Zero hits for `prometheus`, `/metrics` or `metrics_addr` | SA §9's entire named-risk metrics list has no emitter; its substitute, `/control/status`, returns a large surface neither document describes |
+| S30 | SA §4.1, contracts §0.3 | SA: "§0.3 has since grown to **nine** deviations" | Eleven. Deviations 2, 5, 6, 8 have design companions applied; **1, 3, 4, 7, 9 target SA §4.1, which is unamended** — its tree still prints `morton.u64`, `pairs.arrow`, `tiles.bin`, `candidates.bin` | All eleven remain live. The count is the stale artefact, not the list |
 
 ## Absent — needs a ruling on whether it enters the specification
 
