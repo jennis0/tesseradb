@@ -979,6 +979,35 @@ The engine already has this machinery: §7.5 specifies a membership bitmap per n
 bounding box per slice for pruning, with geometry recomputed from masked membership. So
 the class needs no new mechanism, only a gate.
 
+**But a polygon may be independent of the points, and that splits it off the table above**
+*(owner, 2026-08-01)*. A cluster cannot exist without members; a boundary can. Three
+distinct things hide here, and only the first belongs to this class:
+
+*A geometry that **induces** a subset.* A postcode exists whether or not any document
+falls in it, so it is not a subset with an attachment — it is a shape whose relation to
+the point set is derived, and possibly **empty**. It joins the class through its induced
+count, not through its existence.
+
+*A geometry used purely as **context**.* Reference outlines the client draws. Viewer-
+independent, disclosing nothing, contributing to no displayed quantity. Free.
+
+*A polygon that is an **access-controlled item in its own right***, with its own identity
+and its own terms. This is **not a derived artifact at all** — it is an item that happens
+to have an extent, governed by the points framework rather than this one. At the
+cardinalities in question it is cheap: give it an entity ID and a code from its containing
+cell, and mask it exactly as a point is masked. The extent matters only for tile
+assignment, which the smallest-containing-tile convention handles, and at 10⁴–10⁶ objects
+a full scan per viewport is defensible anyway.
+
+**The trap sits between the first two, and it looks like no decision at all.** If a client
+draws only the boundaries that contain visible points, **that filtering is small-cell
+suppression with a threshold of one**: displaying a boundary asserts "at least one visible
+item here", omitting it asserts "none". One is precisely the threshold the census
+literature identifies as too low. So either draw **all** boundaries — context,
+viewer-independent, free — or gate them on `min_visible_members` like every other
+structure-revealing artifact. Gating on non-emptiness is the option that must not be taken
+by default.
+
 **And the gate is chosen by whether the attachment is corpus-derived**, which is sharper
 than "how it was produced". A city boundary exists independently of the data, so its
 *shape* needs no gate at all and only the count within it is masked. Label text derives
