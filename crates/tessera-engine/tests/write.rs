@@ -446,6 +446,126 @@ fn deny_priority_survives_the_window(window_max_rows: Option<usize>) {
     );
 }
 
+/// **The same property on the third close path — the one Task 7a's F1 fix did not reach.**
+///
+/// `run_work_pass` closes a window mid-drain when an entry conflicts with the one that is open
+/// (`CommitWindow::conflicts_with` — the mechanism that keeps Task 3a's security C1 closed). Until
+/// Task 7b that close *continued* draining, and `window.rows()` resets with the replacement, so the
+/// row bound could never trip on a conflict-heavy stream: a pass could perform an unbounded number
+/// of full `append → fsync → apply → swap` cycles without ever returning to `Executor::run`'s deny
+/// drain. That is lifecycle §1.3's prohibition verbatim — a deny queued behind work of unbounded
+/// duration — and it was reachable at the shipped defaults from a client retrying a `batch_id`
+/// while the original is still in the open window.
+///
+/// The workload is **pairs sharing a `batch_id`**: whichever member of a pair the drain meets
+/// second conflicts, whatever order the submitting threads reach the queue in. The executor is
+/// parked at `AfterFsync` inside that first conflict-forced close, which is what lets the deny be
+/// enqueued *during* the pass rather than before it — enqueueing it before would prove nothing,
+/// since `Executor::run` drains deny at the top of every iteration anyway.
+///
+/// Red on the defect (`yield_after_this_entry` removed): the deny lands last, after all six work
+/// items. Green with it: after two.
+#[test]
+fn a_deny_is_never_queued_behind_a_conflict_forced_window_split() {
+    const PAIRS: usize = 3;
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 16);
+    // Well above the six single-row submissions, so the *row* bound cannot trip and take the credit
+    // for a yield this test attributes to the conflict path.
+    engine.set_commit_window_max_rows(1_000);
+    let engine = Arc::new(engine);
+    let entity = entity_of(&engine, 3);
+
+    let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+
+    // Park the executor inside the priming submission's **ack**, leaving `AfterFsync` free for the
+    // conflict close this test is about. `Window::park` cannot be reused: it parks at `AfterFsync`.
+    faults.arm_pause(PauseSite::BeforeAck, PauseAction::Stall);
+    let e = Arc::clone(&engine);
+    let prime =
+        std::thread::spawn(move || e.accept_ingest(vec![row("prime")], "prime".into(), [0xEE; 32]));
+    faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
+
+    // **Enqueued one at a time**, each wait on the executor's own `work_submitted` counter, so the
+    // queue order is `pair-0 a, pair-0 b, pair-1 a, …` rather than a race between six threads. The
+    // first draft spawned them together and flaked 2 runs in 8: with the order `0a, 1a, 2a, 0b` the
+    // window legitimately holds three entries before the first conflict, so the deny lands at 3.
+    // Determinism here is what lets the assertion be `<= 2` — tight enough to discriminate — and it
+    // is also what makes the defect produce *three* conflict-forced closes rather than one.
+    let mut workers = Vec::new();
+    let deadline = std::time::Instant::now() + WAIT;
+    for i in 0..PAIRS {
+        for half in 0..2u8 {
+            let e = Arc::clone(&engine);
+            let order = Arc::clone(&order);
+            workers.push(std::thread::spawn(move || {
+                // Same batch id within a pair, different bytes and different external ids: the
+                // conflict is on `batch_id`, and the second one 409s once the close has applied the
+                // first.
+                let _ = e.accept_ingest(
+                    vec![row(&format!("c-{i}-{half}"))],
+                    format!("pair-{i}"),
+                    [(i as u8) * 2 + half; 32],
+                );
+                order.lock().unwrap().push("work");
+            }));
+            let want = workers.len() as u64 + 1; // +1 for the priming submission
+            while engine.write_executor_stats().work_submitted < want {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "submission {want} never reached the queue: {:?}",
+                    engine.write_executor_stats()
+                );
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    // Armed before the release that starts the run it must observe — the shape `release_site`
+    // exists for. The priming window's own `AfterFsync` is already behind it.
+    faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
+    faults.release_site(PauseSite::BeforeAck);
+    faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
+
+    let e = Arc::clone(&engine);
+    let order_d = Arc::clone(&order);
+    let deny = std::thread::spawn(move || {
+        let _ = e.accept_change(source_id_key(3), entity, ChangeOp::Suppress, None);
+        order_d.lock().unwrap().push("deny");
+    });
+    while engine.write_executor_stats().deny_submitted == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the deny never enqueued"
+        );
+        std::thread::yield_now();
+    }
+
+    faults.release();
+    deny.join().unwrap();
+    for w in workers {
+        w.join().unwrap();
+    }
+    prime.join().unwrap().expect("the priming submission");
+
+    let order = order.lock().unwrap().clone();
+    assert_eq!(
+        order.len(),
+        PAIRS * 2 + 1,
+        "every submission and the deny must have completed: {order:?}"
+    );
+    let deny_at = order
+        .iter()
+        .position(|s| *s == "deny")
+        .expect("the deny completed");
+    assert!(
+        deny_at <= 2,
+        "the deny must complete after the conflict-forced close and the entry that forced it — at \
+         most two work items; it completed at position {deny_at} of {order:?}. A pass that kept \
+         draining after a conflict close would put it last."
+    );
+}
+
 // =================================================================================================
 // WAL failure
 // =================================================================================================

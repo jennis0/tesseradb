@@ -1407,9 +1407,11 @@ impl LifecycleHandle {
 ///
 /// Named as a pair so the ordering rule is visible from the handle: `deny` is drained to empty
 /// before `work` is touched, which is what makes the starvation bound "the work in front of this
-/// deny" rather than "the work queue's depth". Since Task 7a that unit is **one commit window** —
-/// [`Executor::run_work_pass`] returns to `run`'s deny drain whenever it closes one, which is what
-/// keeps the bound finite while ingest keeps arriving.
+/// deny" rather than "the work queue's depth". Since Task 7a that unit is **one commit window**, and
+/// since Task 7b that is true of *every* close: [`Executor::run_work_pass`] returns to `run`'s deny
+/// drain whenever it closes one — the conflict-forced close was the exception until 7b — which is
+/// what keeps the bound finite while ingest keeps arriving. The bound in full, including the one
+/// case that costs two closes rather than one, is stated at [`Executor::run_work_pass`].
 pub(crate) struct LifecycleQueues {
     work: Receiver<Job>,
     deny: Receiver<Job>,
@@ -1448,8 +1450,9 @@ impl Executor {
     ///
     /// **Deny priority** (lifecycle §1.3): deny is drained to empty at the top of every iteration
     /// and [`Executor::run_work_pass`] returns as soon as it closes a window, so a deny's wait is
-    /// bounded by the window in front of it rather than by queue depth. The consequences are
-    /// chosen: a sustained
+    /// bounded by the window (at most two — see that function for the case, and for why the plan's
+    /// "≈ 2 × `commit_window_max_age_ms`" describes neither this code nor anything that was built)
+    /// in front of it rather than by queue depth. The consequences are chosen: a sustained
     /// deny flood starves ingest completely, and the deny queue is unbounded in memory.
     ///
     /// **Why a deny may safely overtake a queued ingest.** Reordering execution relative to
@@ -1497,14 +1500,42 @@ impl Executor {
     ///   never returns `Err` and "close when the queue is empty" bounds nothing at all. Tripping it
     ///   **returns**, for the same reason read the other way round: a pass that closed and carried
     ///   on draining would not come back here — or to the deny lane — until the load stopped.
-    /// - **The queue observed empty** — *structural, not a policy*. The alternative is not a
-    ///   different trigger; it is a window of un-appended, un-acked ingest surviving `bell.recv()`
-    ///   indefinitely. **Task 7b owns the age bound** and the racing-deny arithmetic that comes with
-    ///   it; 7a lands no timer, so no window here outlives one pass of this function.
+    /// - **The work queue observed empty** — *structural, not a policy*. (The **work** queue: the
+    ///   deny lane is not consulted here at all.) The alternative is not a different trigger; it is
+    ///   a window of un-appended, un-acked ingest surviving `bell.recv()` indefinitely.
     ///
     /// A third close is forced by a **conflicting entry** — see `CommitWindow::conflicts_with`.
     /// That one is a correctness mechanism (it is what keeps Task 3a's security C1 closed across a
-    /// window), not a policy.
+    /// window), not a policy; it also yields, for the reason written at the site.
+    ///
+    /// ## Why there is no age bound, and why the config key is inert (Task 7b)
+    ///
+    /// The plan gave this task a third trigger, `opened_at.elapsed() >= commit_window_max_age_ms`,
+    /// whose stated purpose was to stop a lone ingest on an idle server waiting the full window age
+    /// "for company that is not coming". **It was declined, and `ingest.commit_window_max_age_ms`
+    /// is inert** (`tessera_server::config::tests::the_commit_window_age_bound_is_inert` fails the
+    /// moment anything outside that module reads it).
+    ///
+    /// An age bound is the safety cap on a **linger** — "having drained the queue empty, wait for
+    /// more" — and this executor has no linger. A window is a local of this function and every exit
+    /// disposes of it; there is no `CommitWindow` on `Executor` and no path on which one survives
+    /// `bell.recv()`. So the interval an age bound would terminate does not exist, and the only
+    /// place such a check could fire is *inside* the drain, where it would be a less predictable
+    /// spelling of the row bound: the loop's per-entry work is hashing, and the rows it can gather
+    /// are bounded by `max_rows` above (worst case `max_rows - 1 + ingest_max_batch_rows`, ≈ 20 000
+    /// at the shipped defaults) and, for HTTP submitters, by `ingest_admission` as well — an
+    /// admission permit is held to the receipt, and nothing in an open window has been acked.
+    ///
+    /// The interval where the queue momentarily empties while more work is imminent **is** real (a
+    /// handler holds its permit across decode, term resolution and sidecar IO before it submits).
+    /// But that is a window closing *too early*, and an age bound only ever closes a window
+    /// *earlier* — it is the wrong sign. The mechanism that would address it is a linger, which is
+    /// declined: it would be paid by every submission, could gather at most the other admitted
+    /// handlers, and the sort-scope win it would buy is the one Task 7a's fix round already measured
+    /// as order 10¹ runs against the corpus's real signature distribution.
+    ///
+    /// Lifecycle §5.1 asks for a window "bounded by size **or** age". It is bounded — by size, and
+    /// by a drain-empty close that is strictly tighter than any age bound could be.
     ///
     /// ## Deny priority is unchanged
     ///
@@ -1514,17 +1545,35 @@ impl Executor {
     /// before Task 7b's partial-failure split, since a failed mixed window must apply its denies and
     /// drop its ingest.
     ///
-    /// So a deny waits at most for the window in front of it — but only because **closing a window
-    /// returns**. The bound is not "the deny lane is drained around this call": this function is
-    /// what decides how long "around" is, and while work keeps arriving it decides that by returning
-    /// at each close. `a_deny_is_never_queued_behind_work_with_group_commit_disabled` is the leg
-    /// that holds it, and it is red the moment the row-bound arm loops instead. Note that this is a
-    /// **starvation** bound and deliberately not a latency target (owner principle 3, Task 7a brief
-    /// §0): the window in front may be arbitrarily slow, and nothing here is sized to make it fast.
+    /// So a deny waits at most for the window in front of it — but only because **every close in
+    /// this function yields**. The bound is not "the deny lane is drained around this call": this
+    /// function is what decides how long "around" is, and while work keeps arriving it decides that
+    /// by returning at each close. `a_deny_is_never_queued_behind_work_with_group_commit_disabled`
+    /// holds the row-bound path (red the moment that arm loops instead) and
+    /// `a_deny_is_never_queued_behind_a_conflict_forced_window_split` holds the conflict path.
+    ///
+    /// **The honest bound, stated in full** (Task 7b, replacing the plan's "≈ 2 ×
+    /// `commit_window_max_age_ms`", whose two premises — an age bound, and denies joining the
+    /// window — are both false of this code). A deny waits for the deny entries ahead of it (that
+    /// lane is FIFO and unbounded) plus **at most two window closes** — and in stage 2.1 it is
+    /// one, because the replacement a conflict opens is closed empty on every path where the first
+    /// close succeeded (see the conflict arm). The worst case is two only when the first close
+    /// *failed*. What those closes cost is one `assign_sorted` run over the window's
+    /// rows, one append per entry, **one fsync** (~3.2 ms measured, ingest baseline memo) and one
+    /// `IngestBuffer` clone that is O(total buffered items) — the dominant term, the only one that
+    /// grows, and unbounded until stage 2.2's flush (see `Executor::apply_window`). That is why this
+    /// is a **starvation** bound and deliberately not a latency target (owner principle 3, Task 7a
+    /// brief §0): the window in front may be arbitrarily slow, and nothing here is sized to make it
+    /// fast.
     fn run_work_pass(&mut self) -> bool {
         let max_rows = self.health.commit_window_max_rows();
         let mut window: CommitWindow<Responder> = CommitWindow::new(self.next_window_seq());
         let mut did_work = false;
+        // Set by the conflict-forced close, and read at the tail of the loop body. A conflict
+        // closes a window *inside* the drain, so without this the pass would carry on draining —
+        // the Task 7a F1 defect, on the one close path F1's fix did not reach. See the conflict
+        // arm below.
+        let mut yield_after_this_entry = false;
 
         loop {
             if window.rows() >= max_rows {
@@ -1573,15 +1622,38 @@ impl Executor {
             // state that close just published — which is what makes the checks below the same
             // checks Task 3a wrote, with the same answers.
             if window.conflicts_with(&batch_id, &rows) {
-                // The replacement is constructed **after** `close_window` returns, never before:
-                // `CommitWindow::new` stamps `opened_at`, and the close it would be stamped ahead of
-                // is the append, the fsync, the apply and the swap of the *previous* window. Stamped
-                // first, every window after the first in a pass charges the previous window's
-                // service to itself — `record_window_service` doubles, and with it the
-                // `retry_after_s` a shed client is told. It is also what `opened_at` has to mean for
-                // Task 7b's age bound.
-                self.close_window(window);
-                window = CommitWindow::new(self.next_window_seq());
+                window = self.close_and_reopen(window);
+                // **And yield once this entry is handled** (Task 7b). This close is a full
+                // `append → fsync → apply → swap → ack` inside the drain loop, and `window.rows()`
+                // resets with the replacement — so the row bound above can never trip on a
+                // conflict-heavy stream and, before this line, a pass could close unboundedly many
+                // windows without ever returning to `Executor::run`'s deny drain. That is the Task
+                // 7a F1 defect exactly (`continue` where the code's own docs claimed a return), on
+                // the one close path F1's fix did not reach, and it is what lifecycle §1.3 forbids
+                // verbatim: a deny queued behind work of unbounded duration. Reachable at the
+                // shipped defaults from a client retrying a `batch_id` while the original is still
+                // in the open window — Task 8's `Held` case.
+                //
+                // The entry is handled first rather than yielding here, because it has already been
+                // taken off the queue and its waiter must be answered.
+                // `a_deny_is_never_queued_behind_a_conflict_forced_window_split` is the leg that
+                // holds it.
+                //
+                // **What the replacement window can hold, which is almost nothing in stage 2.1.**
+                // Every route by which an entry conflicts with the open window also refuses it in
+                // `admit` once that window has been closed and applied: a held `batch_id` is in
+                // `accepted_batch` (replay or 409), and a held external id is in
+                // `established_collisions`. So on every path where the close *succeeded*, the
+                // replacement is closed empty and discarded, and a pass commits exactly one window.
+                // The two exceptions, stated because they are the only reason the replacement is
+                // constructed at all: a close that **failed** records no accepted batch and
+                // establishes nothing, so the entry is admitted into the replacement (which then
+                // fails too, on the poisoned handle); and a 64-bit `digest` collision on an external
+                // id makes `conflicts_with` true where `established_collisions` is zero. **Task 8
+                // makes this live** — its `Held` join is what puts a real entry in a replacement
+                // window — and that is when the `opened_at` ordering below acquires an observable
+                // consequence again.
+                yield_after_this_entry = true;
                 // No `did_work` here: this job is still being handled, and the tail of this loop
                 // body sets it unconditionally.
             }
@@ -1597,6 +1669,9 @@ impl Executor {
                 window.push(entry);
             }
             did_work = true;
+            if yield_after_this_entry {
+                break;
+            }
         }
 
         if !window.is_empty() {
@@ -1604,6 +1679,24 @@ impl Executor {
             did_work = true;
         }
         did_work
+    }
+
+    /// Close `window` and return its replacement.
+    ///
+    /// **One function so that the ordering is not a statement order two edits apart** (Task 7a gate
+    /// F3, made structural by Task 7b). `CommitWindow::new` stamps `opened_at`, and the close it
+    /// would otherwise be stamped ahead of is the *previous* window's append, fsync, apply, swap and
+    /// acks. Stamped first, a replacement charges its predecessor's whole service to itself —
+    /// `record_window_service` doubles, and with it the `retry_after_s` a shed client is told. The
+    /// two lines below must stay in this order, and this doc is the only warning a future editor
+    /// gets, because **the defect currently has no observable consequence**: after 7b's
+    /// yield-on-conflict the replacement is closed empty on every path where the close succeeded
+    /// (see `run_work_pass`'s conflict arm), so no test in the tree can distinguish the orders.
+    /// Task 8's `Held` join is what makes a replacement window hold an entry, and it must bring the
+    /// test with it.
+    fn close_and_reopen(&mut self, window: CommitWindow<Responder>) -> CommitWindow<Responder> {
+        self.close_window(window);
+        CommitWindow::new(self.next_window_seq())
     }
 
     fn next_window_seq(&mut self) -> u64 {
@@ -1909,6 +2002,25 @@ impl Executor {
     /// the buffer only grows while flush is inert (stage 2.2), so a window of k entries pays it once
     /// instead of k times — and the same clone is the deny-ack latency floor
     /// (`ExecutorHealth::apply_nanos_total`).
+    ///
+    /// ## What the window did NOT do to this cost, recorded rather than implied (Task 7b)
+    ///
+    /// The window reduced the clone's **count**, not its **cost**. Two facts a reader sizing
+    /// anything from the paragraph above needs, and neither is fixed here:
+    ///
+    /// 1. **At the shipped defaults `commit_window_max_items == ingest_max_batch_rows == 10 000`,
+    ///    so a maximal batch is a one-entry window and gets no amortisation at all.** Ingesting
+    ///    10⁹ rows in maximal batches is 10⁵ submissions each cloning a buffer growing towards
+    ///    10⁹ — **O(N²/B)** — and *only stage 2.2's flush bounds it*. Measured today:
+    ///    `apply_nanos_max` 210–437 ms at ~1.34 M buffered items
+    ///    (`docs/design-memos/2026-08-01-deny-ack-baseline.md`, result 3). It is the *small*
+    ///    batches the window collects. Task 7a did not fix this and did not claim to.
+    /// 2. **Stage 2.2 makes the buffer chunked or persistent** when it rewrites buffer handling for
+    ///    flush. So 2.1's O(B) clone is a **known temporary**, not an inherited posture — do not
+    ///    build a second mechanism around it in the meantime.
+    ///
+    /// No counter is added for this: `apply_nanos_total` / `apply_nanos_max` (Task 3a) already
+    /// measure it and are already on `/control/status`.
     ///
     /// `terms` is **taken** out of each entry rather than borrowed: each row's resolved set is
     /// *moved* into the buffer, where borrowing would force one `Vec<TermId>` clone per row on the
