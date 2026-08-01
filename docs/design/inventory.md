@@ -29,6 +29,7 @@ the other.
 | **I13** | An answer that was not computed is a refusal, never a vacuous success |
 | **I13a** | a request that fails or is cancelled yields no partial answer |
 | **I13b** | a partition not consulted fails closed |
+| **I13c** | a partition unreachable through outage is an error, never an empty contribution |
 
 ## Leak register (19 rows)
 
@@ -62,7 +63,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r25 | 11 |
+| `architecture.md` | Normative — r27 | 11 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `concurrency-lifecycle.md` | Normative — r5 | 21 |

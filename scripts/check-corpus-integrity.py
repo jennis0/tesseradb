@@ -131,9 +131,11 @@ def main():
     previous = INVENTORY.read_text() if INVENTORY.exists() else None
     INVENTORY.write_text(content)
 
-    n_inv = content.count("| **I")
+    n_stated = content.count("| **I")
+    n_numbered = len({m.rstrip("abc") for m in re.findall(r"\| \*\*(I\d+[a-z]?)\*\*", content)})
     n_leak = content.count("| **C")
-    print(f"inventory: {n_inv} invariants, {n_leak} leak-register rows")
+    print(f"inventory: {n_numbered} numbered invariants ({n_stated} lettered statements), "
+          f"{n_leak} leak-register rows")
 
     if args.write:
         return 0
