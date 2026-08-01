@@ -31,7 +31,7 @@ the other.
 | **I13b** | a partition not consulted fails closed |
 | **I13c** | a partition unreachable through outage is an error, never an empty contribution |
 
-## Leak register (19 rows)
+## Leak register (20 rows)
 
 Exhaustive by construction: a disclosure not in this table is a bug, not an omission.
 
@@ -56,6 +56,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C17** | Stable wire identity across sessions and principals | Medium | Accepted — the point of the r21 mechanism change |
 | **C18** | Mark count and sub-cell counts track the masked visible count | Low | Accepted — no new channel |
 | **C19** | Per-tile selection work varies with the viewer's own visible count | Low | Accepted — C4/C14 shape |
+| **C20** | Probing how identifiers moved across a key rotation | Medium | Closed |
 
 ## Documents
 
@@ -63,7 +64,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r27 | 11 |
+| `architecture.md` | Normative — r28 | 14 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `concurrency-lifecycle.md` | Normative — r5 | 21 |
@@ -73,5 +74,5 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
 | `slices-and-multi-table.md` | Provisional — under review |  |
-| `system-architecture.md` | Normative — r8 | 25 |
+| `system-architecture.md` | Normative — r9 | 27 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
