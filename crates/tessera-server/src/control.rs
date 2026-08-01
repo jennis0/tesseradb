@@ -284,11 +284,14 @@ pub fn router(state: Arc<AppState>) -> Router {
 ///    unauthenticated half of the Task 6 gate's F11 (security IMPORTANT 1 + performance I4), closed
 ///    in code rather than by deployment posture.
 ///
-///    **What it does NOT close, stated because it is still open.** A caller holding a *valid*
-///    operator credential still buffers up to `ingest_max_batch_bytes` per in-flight request, and
-///    `axum::serve` still applies no connection or concurrency cap, so the *count* of connections
-///    remains unbounded. `config`'s relation 3 caps the size of one window; nothing caps how many
-///    there are. That residue is unchanged by this layer and remains an owner item.
+///    **What it does NOT close.** A caller holding a *valid* operator credential still buffers up
+///    to `ingest_max_batch_bytes` per in-flight request, and `axum::serve` applies no connection or
+///    concurrency cap, so the *count* of connections remains unbounded. What each one costs is
+///    bounded by `config::INGEST_MAX_BATCH_BYTES_CEILING`; how many there are is bounded by
+///    deployment posture — the control plane is a unix socket reachable only by admin systems, and
+///    where it is exposed more widely the connection bound is a reverse proxy's (SA §8). That
+///    constant records the two in-process mechanisms assessed for the count and why each was
+///    declined.
 /// 2. **A control route cannot be added unauthenticated by omission.** The layer wraps the whole
 ///    router, so a `.route(..)` added to [`router`] tomorrow is behind the credential the moment it
 ///    exists. There is no opt-out to reach for and no list to be added to by accident.
@@ -930,27 +933,27 @@ fn run_ingest(
 /// extractors, so a caller with no credential now meets a 401 while the body is still an unconsumed
 /// stream. Nothing is buffered on their behalf.
 ///
-/// **Not closed for a valid-credentialed caller, and not closed for connection count.** An
-/// authenticated request still buffers up to `ingest_max_batch_bytes` before `ingest_admission` is
-/// consulted, and `axum::serve` applies no connection or concurrency cap, so N authenticated
-/// connections still pin `N × ingest_max_batch_bytes`. `config`'s third startup relation —
-/// `(ingest_queue_bound + ingest_admission) × ingest_max_batch_bytes ≤ INGEST_RESIDENT_CEILING_BYTES`
-/// — caps the *size* of one window (roughly 170 MiB at the default bounds, refusing the
-/// `ingest_queue_bound = 1, ingest_max_batch_bytes = 1 GiB` configuration every earlier relation
-/// admitted). It does not cap the *count*, because nothing in this crate can. **That residual is an
-/// open owner decision** and is on the stage ledger.
+/// **Not closed for a valid-credentialed caller.** An authenticated request buffers up to
+/// `ingest_max_batch_bytes` before `ingest_admission` is consulted, and `axum::serve` applies no
+/// connection or concurrency cap, so N authenticated connections pin `N × ingest_max_batch_bytes`.
+/// The two factors are bounded by different things, and separating them is the whole of the answer:
 ///
-/// **A `tower` concurrency-limit layer was assessed as a close for the count and declined** (Task 6
-/// gate, F11), and this layer does not revisit it — it is an *authentication* layer, not a
-/// concurrency bound, and it adds no per-request wait. The declined assessment stands: on the
-/// *whole* control router a concurrency limit is disqualified outright, since it would put
-/// `/control/changes` behind an in-flight bound shared with ingest handlers that block on receipts,
-/// which is lifecycle §1.3's "a deny queued behind work of unbounded duration" reintroduced at the
-/// router — the exact shape [`DENY_RUNTIME`] exists to prevent, given up to close a memory window.
-/// On the *ingest route alone* it is technically available but not proportionate: `tower::limit`
-/// **queues** rather than sheds, so sized at or below `ingest_admission` it swallows D2's prompt 429
-/// (requests wait for a layer permit instead of being refused), and sized above it, it needs a
-/// second bound nobody has argued — while still leaving `limit × ingest_max_batch_bytes` resident.
+/// - **the per-connection factor** is bounded by `config::INGEST_MAX_BATCH_BYTES_CEILING`, a
+///   startup refusal on the key itself. Without it, small admission and queue bounds with a
+///   gigabyte batch cap satisfy every relation over the *admitted* window — which is what
+///   `INGEST_RESIDENT_CEILING_BYTES` weighs — and then die on the second concurrent upload, in
+///   front of it;
+/// - **the count** is bounded by deployment posture, not by this process. The constant's doc
+///   carries the argument, including why a `tower` concurrency limit and a listener-level
+///   connection cap were both declined: the first queues rather than sheds and, on the whole
+///   control router, would put `/control/changes` behind an in-flight bound shared with
+///   receipt-blocking ingest handlers — lifecycle §1.3's forbidden shape, the exact thing
+///   [`DENY_RUNTIME`] exists to prevent; the second refuses by not accepting, which leaves the
+///   caller in the kernel's accept backlog with no status code at all.
+///
+/// **The shape is what makes this a bound rather than a fix.** This endpoint buffers the whole body
+/// because it decodes the whole Arrow batch at once; streaming it is a change to the write path
+/// that belongs with flush, and no configuration bound substitutes for it.
 async fn ingest(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1391,7 +1394,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let projection_cache: tessera_engine::CacheStats = state.engine.row_projection_cache_stats();
     let fragment_cache: tessera_engine::FragmentCacheStats = state.engine.fragment_cache_stats();
     let ingest = state.ingest_admission.status();
-    let sessions_retained = state.sessions.lock().len();
+    let sessions = state.sessions.lock().stats();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
         "compute": {
@@ -1512,13 +1515,24 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             // The observable that separates an in-memory eviction from a genuinely cold rebuild.
             "rebuilds": state.engine.fragment_cache_rebuilds(),
         },
-        // The gauge only. **S17 — the expiry sweep — is out of scope** and remains an open owner
-        // decision: an expired session is 403'd but never removed, and each retained one pins an
-        // `Arc<FrozenFragment>`, so `fragment_cache.bytes` falling does not mean that memory was
-        // released. Publishing the number is what makes that visible to whoever rules on it; a
-        // count that only ever rises while `young_evictions` stays quiet is the signature.
+        // The registry sheds expired sessions on a growth-triggered sweep (`SessionRegistry`), and
+        // all four numbers are here because the third of them is what makes the second admissible:
+        // the sweep is an O(`retained`) pass under the mutex every viewer request takes, and this
+        // repository's standard is that such a pass is acceptable only where its `n` is observable.
+        // `sweep_at` is the bound above `retained` — `max(2 × live, 16)` — so an operator reads the
+        // policy rather than inferring it.
+        //
+        // What the pair says: `retained` rising while `swept_total` stays at zero means the
+        // registry is not shedding, which matters beyond the map entries because each retained
+        // session pins an `Arc<FrozenFragment>` and `fragment_cache.bytes` falling therefore does
+        // not mean that memory was released. Sweeping is memory hygiene only — an expired session
+        // is refused by the deadline check whether or not a sweep has run, and a revocation takes
+        // effect in its own handler.
         "sessions": {
-            "retained": sessions_retained,
+            "retained": sessions.retained,
+            "sweeps": sessions.sweeps,
+            "swept_total": sessions.swept_total,
+            "sweep_at": sessions.sweep_at,
         },
     })))
 }

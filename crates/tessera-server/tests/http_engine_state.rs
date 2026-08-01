@@ -400,3 +400,265 @@ async fn check_bearer_rejects_prefixes_extensions_and_the_empty_string() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The session registry's expiry sweep.
+//
+// The registry is the third attacker-driven memory path on this server, and the one whose cost is
+// least visible from its own size: each retained session holds an `Arc<FrozenFragment>`, a live
+// mapping, so the fragment cache's byte bound cannot release what a dead session still references.
+// The four cases below separate the two things the sweep must be — a memory mechanism — from the
+// two it must never become: the thing that refuses an expired session, or the thing that applies a
+// revocation.
+//
+// `token_max_lifetime_secs = 0` is how expiry is reached without waiting: a session is minted with
+// `expires_at == now`, so it is expired on arrival. **No test here sleeps**; every wait is on a
+// response the server has already produced.
+// ---------------------------------------------------------------------------------------------
+
+/// Mint `n` sessions against the same grant, sequentially. Same grant deliberately: distinct token
+/// ids and distinct registry entries, but one shared fragment, so these cases measure the registry
+/// rather than the fragment cache.
+async fn authorise_n(server: &TestServer, n: usize) -> Vec<serde_json::Value> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(authorise(server, &["0"]).await);
+    }
+    out
+}
+
+/// Sessions minted with a zero lifetime, at a rate the registry's own floor is set well below.
+///
+/// `token_max_lifetime_secs = 0` means every session expires on arrival, so the live set is empty
+/// throughout and the registry should hold nothing but the residue between sweeps. Without a sweep
+/// this is one retained entry per authorisation, for the life of the process, each pinning a
+/// fragment.
+///
+/// **The assertion is the retained count, not the sweep counters**, because the counters can be
+/// made to move by a sweep that removes nothing. `swept_total` is checked as well so that a
+/// `retained` that stayed low for some *other* reason — a registry that failed to insert at all —
+/// does not read as success.
+#[tokio::test]
+async fn expired_sessions_do_not_accumulate_in_the_registry() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let mut config = default_engine_config();
+    config.token_max_lifetime_secs = 0;
+    let server = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        config,
+    )
+    .await;
+
+    const MINTED: usize = 40;
+    let sessions = authorise_n(&server, MINTED).await;
+    assert_eq!(sessions.len(), MINTED);
+
+    let status = control_status(&server).await;
+    let retained = status["sessions"]["retained"].as_u64().unwrap();
+    let swept = status["sessions"]["swept_total"].as_u64().unwrap();
+    let sweep_at = status["sessions"]["sweep_at"].as_u64().unwrap();
+
+    // The live set is empty, so the threshold is the floor and the residue cannot exceed it.
+    assert_eq!(
+        sweep_at, 16,
+        "with no live sessions the next sweep is due at the floor"
+    );
+    assert!(
+        retained <= sweep_at,
+        "the registry must not retain past its own threshold: {retained} retained of {MINTED} \
+         minted, sweeping at {sweep_at}"
+    );
+    assert!(
+        swept > 0,
+        "a low retained count with nothing swept would mean the sessions were never inserted, \
+         not that they were reclaimed"
+    );
+    assert_eq!(
+        swept + retained,
+        MINTED as u64,
+        "every minted session must be either retained or accounted for as swept"
+    );
+}
+
+/// The mirror, and the one that stops the sweep from being written as `clear()`.
+///
+/// Every session here is live for an hour, so a correct sweep removes nothing at all and the
+/// registry grows to exactly what was minted. The sweep is asserted to have *run* — otherwise this
+/// case would pass on a build with no sweep in it and would cover nothing — and the first token
+/// minted, the one a coarse policy would evict first, must still be served.
+#[tokio::test]
+async fn the_sweep_keeps_every_live_session() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    const MINTED: usize = 40;
+    let sessions = authorise_n(&server, MINTED).await;
+
+    let status = control_status(&server).await;
+    assert_eq!(
+        status["sessions"]["retained"].as_u64().unwrap(),
+        MINTED as u64,
+        "a live session must survive every sweep"
+    );
+    assert!(
+        status["sessions"]["sweeps"].as_u64().unwrap() > 0,
+        "the sweep must have run, or this case asserts nothing about it"
+    );
+    assert_eq!(status["sessions"]["swept_total"].as_u64().unwrap(), 0);
+
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(sessions[0]["token"].as_str().unwrap())
+        .json(&serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "the oldest session is the one a sweep written as an eviction policy would take first"
+    );
+}
+
+/// **Revocation is immediate and owes nothing to the sweep.** A revoked session must not survive
+/// until some later pass notices it — that would be fail-open for the interval in between.
+///
+/// The registry here holds two sessions, well below the threshold at which a sweep runs, and the
+/// status body is asserted to confirm that no sweep has run. The revoked token is refused anyway.
+/// Routing removal through the sweep — the plausible simplification, since both delete from the
+/// same two maps — fails here.
+#[tokio::test]
+async fn revocation_takes_effect_without_waiting_for_a_sweep() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let doomed = authorise(&server, &["0"]).await;
+    let survivor = authorise(&server, &["0"]).await;
+
+    let status = control_status(&server).await;
+    assert_eq!(
+        status["sessions"]["sweeps"].as_u64().unwrap(),
+        0,
+        "two sessions is below the sweep threshold; if a sweep has run, this test no longer \
+         demonstrates that revocation is independent of it"
+    );
+
+    let resp = server
+        .client
+        .post(server.session_url("/session/revoke"))
+        .bearer_auth(SESSION_CREDENTIAL)
+        .json(&serde_json::json!({ "token_id": doomed["token_id"].as_u64().unwrap() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(doomed["token"].as_str().unwrap())
+        .json(&serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401, "a revoked session is unusable at once");
+
+    // The positive control, for the symmetric failure: a revoke that emptied the registry would
+    // satisfy the assertion above just as well.
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(survivor["token"].as_str().unwrap())
+        .json(&serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+/// **Expiry is enforced by the deadline check, not by the sweep**, and this is the case that says
+/// so: one session, minted already expired, with the registry far below its sweep threshold — so
+/// the entry is demonstrably still present — and the request is refused all the same.
+///
+/// If this ever answered 200, the sweep would have become the mechanism that expires a session,
+/// which is fail-open by exactly the interval between sweeps.
+#[tokio::test]
+async fn an_expired_session_is_refused_while_still_retained() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let mut config = default_engine_config();
+    config.token_max_lifetime_secs = 0;
+    let server = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        config,
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+
+    let status = control_status(&server).await;
+    assert_eq!(
+        status["sessions"]["retained"].as_u64().unwrap(),
+        1,
+        "the entry must still be in the registry, or this case would pass for the wrong reason"
+    );
+    assert_eq!(status["sessions"]["sweeps"].as_u64().unwrap(), 0);
+
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .json(&serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "expired-token");
+}

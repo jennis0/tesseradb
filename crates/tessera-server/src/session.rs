@@ -87,7 +87,14 @@ async fn authorise(
         token_id: session.token_id,
         expires_at: session.expires_at,
     };
-    state.sessions.lock().insert(session);
+    // Inserting is also what drives the registry's expiry sweep: authorisation is the only path
+    // that grows the registry, so it is where the growth is bounded. The clock is read here, once
+    // per request, rather than inside the lock — see `SessionRegistry`'s doc for what the sweep
+    // costs, what bounds the pause, and why it is deliberately not a timer.
+    state
+        .sessions
+        .lock()
+        .insert(session, crate::state::now_secs());
     Ok(Json(resp))
 }
 
