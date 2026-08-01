@@ -128,6 +128,18 @@ paths = [
   # reach the executor through HTTP to observe a property that is not an HTTP one. Same remedy as
   # Task 0c's `tests/pins.rs` and the gate's `http_engine_state.rs`.
   "crates/tessera-engine/tests/write.rs",
+  # Controller ruling 2026-08-01, on Task 6's charter. The SHIPPED serving runtime is built at
+  # `crates/tessera-cli/src/main.rs:640` with `Builder::new_multi_thread().enable_all()` and no
+  # `max_blocking_threads`, so the pool bound is tokio's *undeclared default* (512). Task 6's
+  # headroom arithmetic has that number as an operand; asserting a startup relation against a
+  # figure no line of this repository states is disciplinary, not structural — a tokio upgrade or
+  # an embedder's own builder invalidates it silently, which is precisely the defect class this
+  # stage kept finding. Granted so the operand can be SET rather than assumed.
+  #
+  # **Scoped to the runtime builder and its refusal path.** Every other subcommand in this file is
+  # the build pipeline's, belongs to no stage-2.1 track, and is not Track B's to touch. Safe to
+  # grant now only because A, C and T are merged and B is the sole live track.
+  "crates/tessera-cli/src/main.rs",
   "scripts/check-layers.sh",
 ]
 
