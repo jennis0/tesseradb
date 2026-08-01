@@ -252,3 +252,123 @@ never measured above 1,024. This is the regression memo's recommendation 4, minu
 - **`TILE_PAR_MIN_LEN` was not re-swept** at the new tile counts. If a tile arm lands, shapes in the
   4,096–65,536-tile range start reaching the pool for the first time, and `min_len_sweep.rs`'s
   §14.5 table covers only `full-extent` z1–z5 and `natural/z4`. Re-run it before trusting 8 there.
+- **The label axis was not varied** — all 210 cells are `categories-subclass`, one point on a
+  contiguity range `probes/results.md` §5 measures at 1.00 → 5.11. *Closed 2026-08-01: see
+  "Follow-up 4, addendum: the label axis" below. 4,096 survives.*
+
+---
+
+# Follow-up 4, addendum: the label axis
+
+*(Added 2026-08-01. Raw cells, method and the premise check:
+[probes/2026-08-01-label-contiguity/](../../probes/2026-08-01-label-contiguity/). 315 measured
+cells — 35 shapes × 9 grant/label-set configurations at 2.42M — every run under
+`scripts/bench-slot.sh`, no build concurrent with any measurement.)*
+
+## Result
+
+**4,096 survives. Adopt it as recommended.** The sweep above fitted the tile arm on 210 cells that
+were **all `categories-subclass`**, and `probes/results.md` §5 measures run ratio — contiguity, and
+therefore containers-touched, and therefore the design's own cost model — at 1.00 → 5.11 *across
+label sets*. That axis is now swept, and it does not move the predictor:
+
+**Measured, with coverage held fixed (25.0% / 27.9% / 32.5%) and only the label set varying, so
+row-space run ratio moves 1.05 → 1.89 → 4.03:**
+
+| family | `surnames` (run ratio 1.05) | `categories-subclass` (1.89) | `categories-archive` (4.03) |
+|---|---|---|---|
+| `natural` (289 tiles) | 289 → — | 289 → — | 289 → — |
+| `f01` | 4225 → 16641 | 4225 → 16641 | 4225 → 16641 |
+| `f04` | 2116 → 8281 | 2116 → 8281 | 2116 → 8281 |
+| `f12` | 4225 → 16641 | 4225 → 16641 | 4225 → 16641 |
+| `f35` | 529 → 2116 | 529 → 2116 | 529 → 2116 |
+| `f100` (whole corpus) | PAR from 16 | PAR from 16 | PAR from 16 |
+
+**Identical in every cell.** A 3.8× swing in contiguity moves no family's crossover.
+
+**Over all 315 label-axis cells the highest tile count that measured serial-favouring is 4,225 — in
+`categories-archive`, `categories-subclass` and `surnames` alike — and nothing at or above 8,281
+measured serial-favouring in any of them.** `categories-archive`, the risk case, lands in
+`[2116, 4225]`, inside the decision rule's `[2116, 8281]`. The conflict band is the same on the
+label axis as on the scale axis, so a **single universal 4,096 is right across label
+configurations**; no contiguity term and no per-deployment calibration is warranted by this
+evidence.
+
+## The predicted direction was wrong, and the confound is worth recording
+
+The hypothesis under test was that a more contiguous mask touches fewer containers per tile, so the
+per-tile floor dominates longer, so the crossover moves **up**, so 4,096 could be too low for
+`categories-archive`. **Measured, the opposite happened**, and then stopped happening once the
+experiment was made single-variable:
+
+At the sweep's own fixed grant width `w = 10`, two families do move — and `categories-archive`, the
+*most* contiguous mask, has the *lowest* crossover (`f35` at `144 → 529` against
+`categories-subclass`'s `2116 → 8281`), while `surnames`, the *least* contiguous, has the highest
+(`f100` at `4096 → 16384` where every other configuration is parallel-favouring from 16 tiles).
+Both moves vanish in the coverage-matched arm above.
+
+The reason is that **a fixed grant width is not a fixed principal across label sets**. `w = 10`
+random descriptors buys 47.8% of the corpus on `categories-archive`'s 38-term dictionary and
+0.0051% on `surnames`' 404,104-term one. What moved those two crossovers is how many visible rows
+each tile must count — coverage — not how those rows are arranged. Contiguity and coverage push in
+opposite directions and the fixed-`w` comparison confounds them; the coverage-matched arm
+(`--target-coverage`, new) separates them and shows contiguity contributing nothing at this scale.
+
+## Regret arithmetic, all 315 label-axis cells
+
+Same definition as above — how much slower the arm a rule picks is than the better of the two
+**measured** arms for that cell, arithmetic on measured medians.
+
+| rule (parallel iff …) | total regret | misclassified | worst single cell | archive | subclass | surnames |
+|---|---:|---:|---:|---:|---:|---:|
+| `rows ≥ 500M` — status quo | 632.54 ms | 123 / 315 | 4.70× | 277.47 | 237.45 | 117.62 |
+| `rows ≥ 500M OR tiles ≥ 1024` | 51.22 ms | 74 | 14.21× | **19.36** | **16.76** | 15.09 |
+| `rows ≥ 500M OR tiles ≥ 2048` | 54.58 ms | 61 | 6.87× | 23.39 | 19.15 | 12.05 |
+| **`rows ≥ 500M OR tiles ≥ 4096`** | **49.90 ms** | **55** | **3.16×** | 23.73 | 17.35 | **8.82** |
+| `rows ≥ 500M OR tiles ≥ 8192` | 93.36 ms | 42 | 3.97× | 42.66 | 35.08 | 15.62 |
+| always parallel | 115.77 ms | 192 | 65.57× | 35.36 | 36.50 | 43.92 |
+| oracle (per-cell best) | 0 | 0 | — | — | — | — |
+
+4,096 is the total-regret optimum on the label axis as it was on the scale axis — **12.7× less
+regret than the shipped predictor** — and the only candidate whose worst single cell stays under
+4×.
+
+**The one alternative worth arguing, and why not.** 1,024 is the per-label-set optimum for both
+category sets (19.36 vs 23.73 ms on `categories-archive`; 16.76 vs 17.35 on `categories-subclass`)
+and is only 2.6% worse overall (51.22 vs 49.90 ms). It is still the wrong choice: its worst cell is
+`f01/z11` — 1,089 tiles, 0 rows — sent to the pool and paying **14.21× (+1.18 ms)**, and that same
+cell errs by 11.7–14.2× in four of the nine configurations. 4,096 caps the whole 315-cell residual
+at 3.16×. The campaign's own asymmetry argument (§14.5) is exactly this: wrongly-parallel was
+measured at up to 9.9×, wrongly-serial at ~2–3×, so the rule should buy worst case with a little
+mean. **Regret of 4,096 against 1,024 is +1.32 ms total across 315 cells in exchange for reducing
+the worst cell from 14.21× to 3.16×.** Take it.
+
+**8,192 — the threshold the risk hypothesis would have implied — is strictly worse for the very
+label set it was meant to protect**: 42.66 ms of regret on `categories-archive` against 4,096's
+23.73, i.e. **+18.93 ms (1.80×)**.
+
+## What the rule still gets wrong is unchanged
+
+Every residual above 1.6× is `f100` (`full-extent`) at ≤ 1,024 tiles on the 2.42M corpus, in **all
+three label sets**: 2.44×–3.16×, +1.74 to +3.48 ms, the memo's already-isolated recommendation-1
+case. The label axis adds nothing to that residual and does not widen it. Everything the tile arm
+itself introduces stays ≤ 2.42× and ≤ 0.53 ms absolute.
+
+## What this addendum does not establish
+
+- **2.42M only** — the label axis, not the scale axis, which the sweep above covered at three
+  scales. That has one real consequence: at 2.42M the whole row space is 37 Roaring containers and
+  every non-degenerate mask spans all of them, so **containers-touched never varied here** — only
+  run structure within containers did. If contiguity is going to bite the predictor anywhere it is
+  at 1e8/1e9, where a mask spans thousands of containers and a tile range can miss most of them.
+  Untested.
+- **Coverage is matched to ±30%, not exactly** (`categories-archive`'s dictionary has 38 terms, so
+  grant width is a coarse dial). A 1.3× coverage spread against a 3.8× run-ratio spread.
+- **One corroboration worth having**, though: `probes/results.md` §5's `categories-archive`
+  head-25% run ratio of 5.11 is reproduced by the engine's own instrument — 4.03 at 32% coverage,
+  5.23 at 48%. The probes' figure transfers to the serving path.
+
+**Nothing in `crates/tessera-engine/src/viewport.rs` is changed by this work**; the threshold
+constants remain the owner's decision. `tile_axis_sweep.rs` gained the premise block,
+`--contiguity-only` and `--target-coverage`, all outside every timed region; the timing path and
+the arms are untouched, so the sweep above still reproduces.

@@ -1,0 +1,81 @@
+== premise check: the grant each sweep actually ran against (MEASURED) ==
+           label set   grant    cov %  row run_ratio  row containers  ent run_ratio
+             archive   cov25  32.4510          4.030              37         6896.3
+            subclass   cov25  27.9242          1.889              37          118.1
+            surnames   cov25  25.0001          1.050              37            2.8
+
+== crossover per family per label set (MEASURED) ==
+    family       archive/co      subclass/co      surnames/co
+   natural    SERIAL to 289    SERIAL to 289    SERIAL to 289
+       f01     4225 → 16641     4225 → 16641     4225 → 16641
+       f04      2116 → 8281      2116 → 8281      2116 → 8281
+       f12     4225 → 16641     4225 → 16641     4225 → 16641
+       f35       529 → 2116       529 → 2116       529 → 2116
+      f100      PAR from 16      PAR from 16      PAR from 16
+
+== ratio by tile count, per family (par_ns/serial_ns; <1 favours PAR) ==
+
+-- natural
+    tiles       archive/co      subclass/co      surnames/co
+      289            10.30            10.90             5.25
+
+-- f01
+    tiles       archive/co      subclass/co      surnames/co
+       25            32.69            28.04            32.28
+       81            60.28            57.46            63.36
+      289            36.52            38.66            37.92
+     1089            12.35            14.21             9.22
+     4225             1.61             1.23             1.23
+    16641             0.80             0.81             0.77
+
+-- f04
+    tiles       archive/co      subclass/co      surnames/co
+       36            49.58            56.48            56.83
+      144            62.16            60.40            62.65
+      529            21.17            16.56            24.27
+     2116             5.14             6.87             3.85
+     8281             0.78             0.93             0.93
+    32761             0.68             0.70             0.68
+
+-- f12
+    tiles       archive/co      subclass/co      surnames/co
+       25            22.21            22.41            19.49
+       81            59.33            60.28            53.73
+      289            38.74            36.88            35.74
+     1089             8.97            11.34             9.68
+     4225             1.61             1.23             1.44
+    16641             0.71             0.77             0.63
+    66049             0.61             0.61             0.60
+
+-- f35
+    tiles       archive/co      subclass/co      surnames/co
+       36             1.99             2.31             1.59
+      144             2.14             2.55             1.69
+      529             1.36             1.48             1.20
+     2116             0.72             0.76             0.62
+     8281             0.44             0.45             0.41
+    33124             0.26             0.30             0.30
+
+-- f100
+    tiles       archive/co      subclass/co      surnames/co
+       16             0.70             0.64             0.71
+       64             0.59             0.56             0.57
+      256             0.46             0.43             0.40
+     1024             0.38             0.34             0.33
+     4096             0.31             0.27             0.25
+    16384             0.26             0.28             0.23
+    65536             0.22             0.21             0.26
+
+== regret of candidate rules over these cells (MEASURED medians) ==
+                              rule  regret ms   wrong    worst   per-label-set regret ms
+                     always serial     275.30      45     4.70x   archive=85.17  subclass=91.33  surnames=98.80
+                   always parallel      35.68      60    63.36x   archive=11.90  subclass=12.44  surnames=11.34
+         rows >= 500M (status quo)     275.30      45     4.70x   archive=85.17  subclass=91.33  surnames=98.80
+     rows >= 500M OR tiles >= 1024      17.84      24    14.21x   archive=5.72  subclass=6.60  surnames=5.51
+     rows >= 500M OR tiles >= 2048      21.38      21     6.87x   archive=6.53  subclass=7.50  surnames=7.35
+     rows >= 500M OR tiles >= 4096      20.87      21     3.00x   archive=6.34  subclass=6.83  surnames=7.70
+     rows >= 500M OR tiles >= 8192      40.95      18     3.97x   archive=11.78  subclass=13.55  surnames=15.62
+    rows >= 500M OR tiles >= 16384      50.29      24     3.97x   archive=14.94  subclass=16.26  surnames=19.10
+            oracle (per-cell best)       0.00       0     1.00x
+
+cells: 105

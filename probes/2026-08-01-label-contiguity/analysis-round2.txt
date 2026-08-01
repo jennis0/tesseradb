@@ -1,0 +1,84 @@
+== premise check: the grant each sweep actually ran against (MEASURED) ==
+           label set   grant    cov %  row run_ratio  row containers  ent run_ratio
+             archive   dense  47.8428          5.230              37        16791.5
+             archive  sparse  38.3734          3.386              37         3793.9
+            subclass   dense  15.9393          1.750              37          106.7
+            subclass  sparse  24.7349          1.666              37          136.1
+            surnames   dense   0.0051          1.025              25            2.7
+            surnames  sparse   0.0033          1.000              27            1.9
+
+== crossover per family per label set (MEASURED) ==
+    family       archive/de       archive/sp      subclass/de      subclass/sp      surnames/de      surnames/sp
+   natural    SERIAL to 289    SERIAL to 289    SERIAL to 289    SERIAL to 289    SERIAL to 289    SERIAL to 289
+       f01     4225 → 16641     4225 → 16641     4225 → 16641     4225 → 16641     4225 → 16641     4225 → 16641
+       f04      2116 → 8281      2116 → 8281      2116 → 8281      2116 → 8281      2116 → 8281      2116 → 8281
+       f12     4225 → 16641     4225 → 16641     4225 → 16641     4225 → 16641     4225 → 16641     4225 → 16641
+       f35        144 → 529       529 → 2116      2116 → 8281       529 → 2116      2116 → 8281      2116 → 8281
+      f100      PAR from 16      PAR from 16      PAR from 16      PAR from 16     4096 → 16384     4096 → 16384
+
+== ratio by tile count, per family (par_ns/serial_ns; <1 favours PAR) ==
+
+-- natural
+    tiles       archive/de       archive/sp      subclass/de      subclass/sp      surnames/de      surnames/sp
+      289             5.65             8.62            18.50             5.83            23.50            30.32
+
+-- f01
+    tiles       archive/de       archive/sp      subclass/de      subclass/sp      surnames/de      surnames/sp
+       25            31.53            31.43            28.88            27.92            29.20            26.63
+       81            62.94            60.47            59.08            59.18            61.59            54.61
+      289            38.68            36.19            39.16            36.09            35.31            33.48
+     1089            10.74            11.71            13.31             7.43             9.08             8.13
+     4225             1.35             1.64             1.43             2.42             1.48             1.75
+    16641             0.68             0.77             0.68             0.65             0.67             0.70
+
+-- f04
+    tiles       archive/de       archive/sp      subclass/de      subclass/sp      surnames/de      surnames/sp
+       36            52.13            53.66            55.33            53.86            53.72            53.13
+      144            60.94            61.96            60.58            60.22            65.57            60.69
+      529            24.89            22.61            19.27            16.90            20.78            24.72
+     2116             3.16             6.35             4.04             6.01             5.11             6.57
+     8281             0.76             0.84             0.86             0.85             0.86             0.86
+    32761             0.66             0.66             0.64             0.67             0.64             0.70
+
+-- f12
+    tiles       archive/de       archive/sp      subclass/de      subclass/sp      surnames/de      surnames/sp
+       25            21.25            21.09            23.74            20.68            30.76            30.13
+       81            60.02            51.40            58.72            59.38            61.54            58.05
+      289            38.53            37.05            40.70            42.26            39.79            35.74
+     1089            10.06             8.04            11.13             7.33            11.15            10.60
+     4225             1.64             1.45             1.14             1.22             1.32             1.36
+    16641             0.65             0.79             0.66             0.82             0.64             0.65
+    66049             0.60             0.60             0.60             0.61             0.61             0.60
+
+-- f35
+    tiles       archive/de       archive/sp      subclass/de      subclass/sp      surnames/de      surnames/sp
+       36             1.36             1.84             8.27             1.66            24.40            26.09
+      144             1.44             1.94            11.36             1.69            31.22            33.82
+      529             0.92             1.26             7.46             1.03             8.43            15.06
+     2116             0.55             0.73             2.07             0.68             6.23             4.11
+     8281             0.38             0.42             0.71             0.43             0.98             0.74
+    33124             0.31             0.30             0.61             0.30             0.66             0.64
+
+-- f100
+    tiles       archive/de       archive/sp      subclass/de      subclass/sp      surnames/de      surnames/sp
+       16             0.60             0.76             0.66             0.71            11.83            11.27
+       64             0.47             0.51             0.75             0.58            18.13            19.60
+      256             0.38             0.41             0.60             0.45            14.65            14.63
+     1024             0.32             0.33             0.46             0.34             4.84             6.66
+     4096             0.28             0.27             0.34             0.27             1.30             1.20
+    16384             0.23             0.24             0.28             0.26             0.77             0.72
+    65536             0.22             0.22             0.25             0.29             0.64             0.64
+
+== regret of candidate rules over these cells (MEASURED medians) ==
+                              rule  regret ms   wrong    worst   per-label-set regret ms
+                     always serial     357.24      78     4.60x   archive=192.30  subclass=146.12  surnames=18.82
+                   always parallel      80.10     132    65.57x   archive=23.45  subclass=24.06  surnames=32.58
+         rows >= 500M (status quo)     357.24      78     4.60x   archive=192.30  subclass=146.12  surnames=18.82
+     rows >= 500M OR tiles >= 1024      33.38      50    13.31x   archive=13.64  subclass=10.16  surnames=9.58
+     rows >= 500M OR tiles >= 2048      33.21      40     6.57x   archive=16.86  subclass=11.65  surnames=4.69
+     rows >= 500M OR tiles >= 4096      29.03      34     3.16x   archive=17.39  subclass=10.51  surnames=1.13
+     rows >= 500M OR tiles >= 8192      52.41      24     3.75x   archive=30.88  subclass=21.54  surnames=0.00
+    rows >= 500M OR tiles >= 16384      64.46      36     3.75x   archive=38.56  subclass=25.34  surnames=0.56
+            oracle (per-cell best)       0.00       0     1.00x
+
+cells: 210

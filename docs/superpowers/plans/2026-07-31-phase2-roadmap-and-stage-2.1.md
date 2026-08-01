@@ -276,11 +276,13 @@ Execution here is one command at a time with today's semantics — allocate (per
 
 **Design.** `/control/ingest` and `/control/changes` submit and await instead of touching the WAL, retiring the deferred minor "blocking WAL fsync inside async handlers without `spawn_blocking`". `error.rs` gains the `SubmitError` mapping: queue-full → 429 with `retry_after_s`, dead executor → 503.
 
-**`readyz` is wired here, and this is new work, not a tweak** *(review I-5/C3: three tasks in r1 asserted readiness and no task owned it)*. Today it is a stateless `StatusCode::OK` ([health.rs:16-17](crates/tessera-server/src/health.rs#L16-L17)) whose module doc records the freshness gate as "trivially satisfied in Phase 1". It no longer is: readiness now means executor alive, WAL unpoisoned, every partition opened. Threading `AppState` into the health routes touches all three routers.
+**`readyz` is wired here, and this is new work, not a tweak** *(review I-5/C3: three tasks in r1 asserted readiness and no task owned it)*. Today it is a stateless `StatusCode::OK` ([health.rs:16-17](crates/tessera-server/src/health.rs#L16-L17)) whose module doc records the freshness gate as "trivially satisfied in Phase 1". It no longer is: readiness now means executor alive and WAL unpoisoned.
 
-*Also fold in the branch's own follow-up, which r1 missed:* `EngineError::{ProjectionBuilding, FragmentBuilding}` currently take the fail-closed **500** arm; the branch's doc says they should be **429**. This task owns `error.rs` and is where that lands.
+*Two corrections, both from the Task 3b worker and both confirmed at its gate (2026-08-01).* **"Every partition opened" is not a readiness conjunct** — an unhonourable manifest makes `Engine::open` fail, so `prepare` returns `Err` before `run` binds a listener, and the conjunct would be compile-time `true`. Track A's Task 1 discharges it at startup, not at `readyz`. Task 3b ships a table of contracts §3.1's five conditions against where each is discharged instead, which is the honest shape. And **`readyz` needed only `health.rs`** — `viewer.rs` and `session.rs` already routed it with state, so "touches all three routers" overstated it.
 
-**Tests.** `a_dead_executor_is_not_ready`. `queue_full_is_429_with_retry_after`. `projection_building_is_429_not_500`.
+~~*Also fold in the branch's own follow-up, which r1 missed:* `EngineError::{ProjectionBuilding, FragmentBuilding}` currently take the fail-closed **500** arm; the branch's doc says they should be **429**.~~ **Already done, and this line was stale when written** *(Task 3b worker, confirmed independently at its gate, 2026-08-01)*. `fa497fe` mapped both to 429 with two tests on 2026-07-30 — a strict ancestor of this plan's own gate commit. The worker wrote no third test and demonstrated the existing pair by deleting the arms. Recorded rather than deleted, because a plan that quietly loses a claim teaches nothing; the lesson is that "the branch's doc says X should happen" is not evidence that X has not happened.
+
+**Tests.** `a_dead_executor_is_not_ready`. `queue_full_is_429_with_retry_after`. ~~`projection_building_is_429_not_500`~~ (exists already — see above).
 
 ### Task 6: `tessera-server` — the admission bound and the never-shed asymmetry
 

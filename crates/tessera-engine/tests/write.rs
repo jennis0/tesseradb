@@ -41,8 +41,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, ExecutorPosture};
-use tessera_lifecycle::command::UnallocatedRow;
+use tessera_engine::{AcceptError, Engine, ExecutorPosture};
+use tessera_lifecycle::command::{SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
 use tessera_lifecycle::ChangeOp;
 use tessera_types::EntityId;
@@ -544,11 +544,34 @@ fn a_poisoned_wal_trips_the_not_ready_posture() {
     );
 }
 
-/// The drop guard. An executor that panics must report `Dead`, however it panicked.
+/// The drop guard, **and the error the in-flight caller is handed while it fires**. An executor that
+/// panics must report `Dead`, however it panicked; the submitter whose command it was holding must
+/// be told `ReceiptLost`, never `ExecutorDead`.
 ///
 /// Without a guard on the thread's own stack the posture would stay `Running` for ever and a
 /// not-ready gate built on it would be green over a dead writer — the worst available outcome,
 /// since a caller would keep being told its suppressions are in flight.
+///
+/// **The in-flight assertion is the Task 3b design gate's unanimous CRITICAL, pinned at its
+/// producer.** `write.rs`'s `submit` answers `SubmitError::ReceiptLost` when the responder is
+/// dropped, and `tessera-server`'s `map_accept_error` maps that to a fail-closed **500** rather than
+/// the **503 `not-ready`** `ExecutorDead` gets — because a command the executor died *holding* may
+/// have been appended, fsynced, applied and swapped, and 503's whole meaning is "this node did not
+/// take your write". Until this assertion existed, every `ReceiptLost` in the workspace's tests was
+/// a variant *constructed by the test*: reverting `submit`'s two `ReceiptLost` producers back to
+/// `ExecutorDead` compiled and passed `cargo test --workspace` in full, leaving the split enforced
+/// only by `error.rs`'s mapping over a variant nothing produced.
+///
+/// That matters more than an ordinary coverage gap because **Task 7a rewrites exactly this region**
+/// — a commit window performing one swap and then acking N waiters in a loop, which
+/// `SubmitError::ReceiptLost`'s own doc names as the widening. A refactor that reinstates
+/// `ExecutorDead` here reinstates a fail-open: a durable, in-force suppression answered
+/// "nothing in this request was applied".
+///
+/// Deterministic, not raced: `PauseAction::Panic` fires *inside* the executor's `AfterFsync` pause
+/// point, so the job is provably still in `Executor::execute`'s frame — the receipt channel's sender
+/// is dropped by the unwind and `rx.recv()` cannot succeed. The posture poll below is separate and
+/// is what the drop guard is asserted with.
 #[test]
 fn an_executor_panic_is_reported_dead() {
     let tmp = TempDir::new().unwrap();
@@ -557,7 +580,15 @@ fn an_executor_panic_is_reported_dead() {
     assert_eq!(engine.write_executor_posture(), ExecutorPosture::Running);
 
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Panic);
-    let _ = engine.accept_ingest(vec![row("boom")], "boom".to_string(), [5u8; 32]);
+    let in_flight = engine
+        .accept_ingest(vec![row("boom")], "boom".to_string(), [5u8; 32])
+        .expect_err("the executor panicked while holding this command, so no receipt can arrive");
+    assert!(
+        matches!(in_flight, AcceptError::Submit(SubmitError::ReceiptLost)),
+        "a command the executor died HOLDING may be fully applied and swapped in; only \
+         `ReceiptLost` maps to the fail-closed 500. `ExecutorDead` here is the 503 that reports an \
+         in-force suppression as a no-op. Got: {in_flight:?}"
+    );
 
     let deadline = std::time::Instant::now() + WAIT;
     while engine.write_executor_posture() != ExecutorPosture::Dead {

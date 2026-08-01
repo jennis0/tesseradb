@@ -155,27 +155,103 @@ impl Command {
     }
 }
 
-/// Why a command could not be **handed to** the executor. Distinct from [`ExecError`], which is
-/// why an accepted command failed while executing: this one means nothing was attempted.
+/// Why a command did not come back with a receipt. Distinct from [`ExecError`], which is why an
+/// accepted command failed *while executing*.
 ///
-/// Both variants must be surfaced. A handle that swallows a dead executor while still returning
+/// **The variants split on one question, and it is not "is the executor alive".** It is **"could
+/// this command have taken effect?"** — because that is the only thing an HTTP status can honestly
+/// report, and because a deny that took effect must never be reported as a no-op. The split is
+/// structural rather than argued: `Sender::send`/`try_send` hand the value **back** inside their
+/// error, so a failed send is a proof of non-enqueue; everything after a successful send is
+/// unknown, up to and including fully applied and swapped in.
+///
+/// *(Corrected at the Task 3b design gate, where four independent reviewers found the same defect:
+/// `ExecutorDead` was one variant covering both, its doc asserted "nothing was attempted" as fact,
+/// and the Task 3b status table was about to map the whole variant to 503 `not-ready` — a status
+/// whose meaning is "this node did not take your write". For a suppression already in force that is
+/// the fail-open the deny lane exists to prevent.)*
+///
+/// Every variant must be surfaced. A handle that swallows a dead executor while still returning
 /// 202s is the worst available outcome — the caller believes its write is in flight and it is
 /// not, which for a suppression means an item stays visible with an acknowledgement in hand.
+///
+/// **Deliberately not `#[non_exhaustive]`, and that absence is load-bearing.** `tessera-server`'s
+/// `map_accept_error` names every variant of this enum and of [`ExecError`] with no `_` arm, so a
+/// new variant is an `E0004` there rather than a silent 500 — but only because neither type permits
+/// a cross-crate wildcard. Adding `#[non_exhaustive]` later reads as ordinary API hygiene for a
+/// `pub` enum and would turn that compile error into a permitted catch-all, which is how a new
+/// outcome acquires a status nobody chose for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitError {
     /// The bounded work queue is full → HTTP 429 with `Retry-After: retry_after_s` (contracts
-    /// §3.1's 429 row).
+    /// §3.1's 429 row). Nothing was enqueued: `try_send` returned the job.
     ///
     /// **Reachable only from the ingest lane.** A command for which
     /// [`Command::is_never_shed`] holds is submitted to the unbounded queue and can never
     /// produce this variant; Task 6's `changes_never_429s` is the test that asserts it.
     QueueFull { retry_after_s: u64 },
-    /// The executor thread is gone (panicked, or shut down) → HTTP 503, and the planes report
-    /// not-ready.
+    /// The executor could not be **handed** the command — it was never started, or the queue it
+    /// belongs to is disconnected. → HTTP 503 `not-ready`, and the planes report not-ready.
+    ///
+    /// **Nothing was attempted, and that is a fact about the code rather than an expectation of
+    /// it.** The invariant every producer must satisfy is *non-enqueue is proven* — not the
+    /// syntactic test an earlier revision gave ("every producer is a `send` that failed"), which
+    /// already failed for one of the three: `WritePath::handle` produces this from
+    /// `self.handle.as_ref().ok_or(..)`, where there is no channel to send on because the executor
+    /// was never started. That conclusion is *stronger* than a failed send, so the mapping is right;
+    /// stating the weaker syntactic rule invites a future producer to be checked against a test its
+    /// own siblings fail. The two send-shaped producers are instances of the invariant:
+    /// `Sender::send`/`try_send` hand the job **back** inside their error, so a failed send is a
+    /// proof of non-enqueue.
+    ///
+    /// That invariant is what makes 503 — "this node did not take your write" — honest here and
+    /// dishonest for [`SubmitError::ReceiptLost`]. A new producer belongs here only if it can prove
+    /// the same thing; if it cannot, it is a `ReceiptLost`.
     ///
     /// Reachable from **both** lanes: a deny is never refused for *load*, which is not the same
     /// as never refused. There is no honest 200 to give when there is nothing left to apply it.
     ExecutorDead,
+    /// The command **was** enqueued and no receipt came back: the executor died holding it.
+    /// → HTTP 500 fail-closed, **never 503**.
+    ///
+    /// **Its disposition is unknown, and "unknown" includes "fully applied".** The executor's
+    /// sequence is `append → fsync → apply → swap → ack`, so a death anywhere after the swap
+    /// leaves a durable, in-force effect with no receipt — for a `Suppress`, an item that is
+    /// already hidden. Reporting that as 503 would tell an operator nothing happened and invite
+    /// them to act as though the item were still visible.
+    ///
+    /// Two producers, and both are genuinely post-enqueue: a disconnected doorbell (rung *after*
+    /// the job is in the queue, and the executor's shutdown pass drains and **executes** the deny
+    /// queue before it observes the disconnect), and a dropped responder.
+    ///
+    /// **Only the dropped responder is reachable on the panic path today, and the reason is a field
+    /// order.** `LifecycleQueues` declares `work, deny, bell`, so during the executor's unwind the
+    /// two job receivers disconnect *before* the bell does — a submitter racing that window is
+    /// refused at its `send` with [`SubmitError::ExecutorDead`] and returns before the bell is rung.
+    /// The doorbell producer is therefore a correct answer to a state nothing currently reaches, kept
+    /// because reordering those fields (or giving the bell an independent lifetime) makes it live,
+    /// and the answer it gives is the right one either way. `tessera-engine`'s
+    /// `an_executor_panic_is_reported_dead` pins the reachable one at its producer.
+    ///
+    /// Stage 2.1 makes this narrow — nothing fallible sits between the swap and the ack — but
+    /// Task 7a widens it structurally: a commit window performs one swap and then acks N waiters
+    /// in a loop, so a death partway through hands every remaining waiter this error with its
+    /// effect already in force. The variant exists now so that table is right when it arrives.
+    ReceiptLost,
+}
+
+impl SubmitError {
+    /// Whether the command may have taken effect. `false` only where non-enqueue is proven.
+    ///
+    /// The one question a batch-level answer needs (`tessera-server`'s `map_change_batch_error`),
+    /// asked here rather than by matching on variants at the call site — a caller re-deriving it
+    /// is one forgotten variant away from reporting an applied suppression as a no-op.
+    pub fn may_have_taken_effect(&self) -> bool {
+        match self {
+            SubmitError::QueueFull { .. } | SubmitError::ExecutorDead => false,
+            SubmitError::ReceiptLost => true,
+        }
+    }
 }
 
 impl std::fmt::Display for SubmitError {
@@ -192,6 +268,10 @@ impl std::fmt::Display for SubmitError {
                     "the write executor is not running; nothing was submitted"
                 )
             }
+            SubmitError::ReceiptLost => write!(
+                f,
+                "the write executor died holding this command; it may have been applied in full"
+            ),
         }
     }
 }
