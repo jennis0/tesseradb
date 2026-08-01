@@ -1,4 +1,4 @@
-//! I9 allocator property tests (task-9 brief, Step 3): monotonicity, no reuse across simulated
+//! I9 allocator property tests: monotonicity, no reuse across simulated
 //! crashes, and `assign_sorted`'s contiguous-signature grouping.
 
 use std::collections::HashSet;

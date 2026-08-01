@@ -5,8 +5,8 @@ edition = "2021"
 
 [features]
 default = []
-# Deliberate WAL/executor fault injection — see `src/faults.rs`, which argues why the hooks land
-# with Task 3a rather than with stage 2.4's conformance pause points.
+# Deliberate WAL/executor fault injection — see `src/faults.rs`, which argues why the hooks live
+# beside the executor rather than with the conformance suite's own pause points.
 #
 # Enabled ONLY through the self dev-dependency below, never as a normal dependency of anything.
 # `cargo build` does not build dev-dependencies, so nothing `cargo build` produces can carry this

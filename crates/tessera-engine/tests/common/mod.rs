@@ -1,9 +1,8 @@
 //! Shared fixtures for `tessera-engine`'s viewport-side integration tests.
 //!
-//! Task 0c (Phase 2 stage 2.1) split the pin cases out of `tests/viewport.rs` into `tests/pins.rs`
-//! so that stage 2.1's parallel tracks own disjoint files. This module holds the fixture corpus,
-//! the `EngineConfig`s and the credentials both binaries use; nothing here changed in the split
-//! beyond gaining `pub`.
+//! The viewport cases and the pin cases live in separate binaries (`tests/viewport.rs` and
+//! `tests/pins.rs`). This module holds the fixture corpus, the `EngineConfig`s and the credentials
+//! both of them use.
 //!
 //! Every item carries `ALL_TERM` ("0"); every third item (`source_id % 3 == 0`) additionally
 //! carries `SUBSET_TERM` ("1").
@@ -156,7 +155,7 @@ pub fn write_pairs_n(path: &Path, n: u64) {
     w.close().unwrap();
 }
 
-/// Build the fixture bundle at `out` (Task 8's library API — `tessera_build::build`), over an
+/// Build the fixture bundle at `out` through `tessera_build::build`, over an
 /// `n`-item synthetic corpus. See [`write_points_n`]'s doc for why this is parameterised.
 pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
     write_points_n(points_path, n);
@@ -181,7 +180,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     build(&args).expect("fixture build should succeed");
 }
 
-/// Build the fixture bundle at `out` (Task 8's library API — `tessera_build::build`).
+/// Build the fixture bundle at `out` through `tessera_build::build`.
 pub fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
     build_fixture_n(out, points_path, pairs_path, N_ITEMS)
 }

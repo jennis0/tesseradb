@@ -35,7 +35,7 @@ arrow = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
-# Task 6 (D5): `overlay_soft_limit` alarms. The counter is the operator's durable signal, but a
+# `overlay_soft_limit` alarms. The counter is the operator's durable signal, but a
 # counter nobody is told about is not an alarm, and the executor thread is the one place the
 # overlay grows at runtime — so the log line has to be emitted from this crate. `tessera-store`
 # already carries the same workspace-pinned dependency for the same reason.

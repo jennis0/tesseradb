@@ -1,11 +1,8 @@
-//! Stage attribution for the tile-loop fan-out's c=1 overhead (calibration task, following on
-//! from Task 9's measured `threads=default` c=1 p50 (1.118 ms) being 2.97x *slower* than
-//! `threads=1` (0.376 ms) — `.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/task-9-report.md`,
-//! criterion 4b).
+//! Stage attribution for the tile-loop fan-out's c=1 overhead: a measured `threads=default` c=1
+//! p50 of 1.118 ms against 0.376 ms at `threads=1` — 2.97x *slower* with more threads.
 //!
-//! Task 9 reported the number but did not attribute it: "not investigated further per the
-//! controller's do-not-tune-to-pass instruction". This does that, using the `bench-timing`
-//! feature's per-request [`tessera_engine::StageTimings`] rather than inference.
+//! The number on its own does not say where the time goes. This attributes it, using the
+//! `bench-timing` feature's per-request [`tessera_engine::StageTimings`] rather than inference.
 //!
 //! **Method.** `StageTimings`' serial-prefix fields (`generation_resolve_ns` through
 //! `tile_ranges_ns`, plus `theta_anchor_ns`) keep their wall-clock meaning at every
@@ -37,7 +34,7 @@ const ITEM_LIMIT: u64 = 2_422_486;
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const ZOOM: u8 = 8;
 /// Iterations averaged per thread config, after one discarded warm-up (the row-projection cache
-/// fill, Phase 0's 8.8s-at-69M-mask cost — excluded from every harness in this repo for the same
+/// fill, measured at 8.8 s for a 69M mask — excluded from every harness in this repo for the same
 /// reason).
 const REPS: usize = 300;
 
@@ -105,9 +102,9 @@ fn all_descriptors(bundle_root: &Path) -> Vec<String> {
     out
 }
 
-/// `w` descriptors spread evenly across the dictionary — a w=10 grant matching Task 9's own
-/// condition (`task-9-report.md`'s header: "w=10, k=30, zoom=8") rather than a single term, which
-/// turned out to select a far denser mask than the F4-memo condition Task 9 actually measured —
+/// `w` descriptors spread evenly across the dictionary — a w=10 grant matching the measured
+/// condition (w=10, k=30, zoom=8) rather than a single term, which
+/// selects a far denser mask than the condition actually measured —
 /// see this file's stage-attribution finding. Spread rather than the first `w` because the
 /// dictionary's term order is not known to be frequency-independent.
 fn spread_descriptors(all: &[String], w: usize) -> Vec<String> {
@@ -168,7 +165,7 @@ fn main() {
     let bundle_root = ensure_bundle();
     let all = all_descriptors(&bundle_root);
     let terms = spread_descriptors(&all, 10);
-    // Task 9's own condition: seed 0, zoom 8, the FIRST viewport `bench_concurrency.py`'s c=1
+    // The measured condition: seed 0, zoom 8, the FIRST viewport `bench_concurrency.py`'s c=1
     // cell draws (see `viewports`' doc).
     let bbox = viewports(1, 65536.0, 0, ZOOM)[0];
 

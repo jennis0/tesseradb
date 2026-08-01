@@ -14,7 +14,7 @@ use tessera_types::{EntityId, TermId};
 
 use crate::wal::WalRecord;
 
-/// The entity-ID space's ceiling (plan Important I-1, contracts §2.6): `bundle_format = 1`
+/// The entity-ID space's ceiling (contracts §2.6): `bundle_format = 1`
 /// narrows every entity ID to `u32`, and `IdentityKey::forward`'s checked conversion refuses
 /// any entity at or above this bound. The allocator refusing first is what makes that
 /// conversion's error unreachable in practice rather than a rare, hard-to-reach corruption
@@ -80,7 +80,7 @@ impl Allocator {
 
     /// Allocates `n` consecutive, never-before-issued entity IDs and advances the high-water
     /// mark past them. Refuses — leaving `high_water` unchanged — if any ID in the range would
-    /// be at or above [`ENTITY_ID_CEILING`] (Important I-1): a truncating allocation past
+    /// be at or above [`ENTITY_ID_CEILING`]: a truncating allocation past
     /// `u32::MAX` is exactly what would make "collision-free by construction" false.
     pub fn allocate(&mut self, n: u64) -> Result<Range<u64>, AllocError> {
         let lo = self.high_water;
@@ -167,7 +167,7 @@ fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
 /// permanent signature ordering rather than breaking it. Items with identical signatures land in
 /// a contiguous ID run, which is what makes their postings compress as runs.
 ///
-/// Fallible (Important I-1): propagates [`AllocError::Exhausted`] from the underlying
+/// Fallible: propagates [`AllocError::Exhausted`] from the underlying
 /// `Allocator::allocate` rather than swallowing it — a batch that would exhaust the entity-ID
 /// space has no effect, exactly as `allocate` leaves `high_water` unchanged on that error.
 pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result<(), AllocError> {
@@ -208,8 +208,8 @@ mod tests {
 
     #[test]
     fn the_allocator_refuses_to_issue_an_id_at_or_above_u32_max() {
-        // Plan Important I-1. `allocate` used to be `lo + n` on a u64 with no cap at all, so
-        // "collision-free by construction" rested on the corpus happening to stay small. Past
+        // Without the cap, `allocate` would be `lo + n` on a u64 and "collision-free by
+        // construction" would rest on the corpus happening to stay small. Past
         // 2^32 two entities would share a tessera_id and `invert` would return the WRONG one.
         let mut a = Allocator::new(u32::MAX as u64 - 2);
         assert!(a.allocate(1).is_ok());

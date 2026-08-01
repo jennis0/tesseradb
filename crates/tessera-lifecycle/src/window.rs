@@ -1,17 +1,17 @@
-//! The commit window: many ingest submissions, **one signature-sorted allocation run** (Phase 2
-//! stage 2.1, Task 7a).
+//! The commit window: many ingest submissions, **one signature-sorted allocation run**.
 //!
 //! ## What the window is for, and what it is not
 //!
 //! Design §11.1 spends the entity-ID ordering on posting compression, and the sort's scope is
-//! whatever set of items is allocated together. Until this task that scope was **whatever chunk a
+//! whatever set of items is allocated together. Without a window that scope is **whatever chunk a
 //! client happened to POST**. Lifecycle §5.1 moves it to the server: "hold arriving requests open in
 //! a commit window bounded by size or age; at close, signature-sort **the whole window**, allocate
 //! from the high-water, append and fsync once, swap, then acknowledge every held request with its
 //! rows' IDs." Amortising the fsync and the generation swap is a welcome side effect; the allocation
 //! scope is the point.
 //!
-//! **I9 is untouched, and this is the site that has to say so** — "the window allocates" reads like
+//! **I9 — entity IDs are issued once, monotonically, and never reused — is untouched, and this is
+//! the site that has to say so.** "The window allocates" reads like
 //! an allocator change and is not one. IDs are still issued monotonically from the high-water by one
 //! [`Allocator::allocate`] call, still never reused, still assigned in `(signature, external_id)`
 //! order by the unchanged [`assign_sorted`]. The window changes only *how many* are assigned in one
@@ -37,8 +37,9 @@
 //! rank-1,000 one — runs of order 10¹ and 1, not ~200. **The ~200 figure is the ceiling for a
 //! leading term and not a forecast for the median one**, and an operator sizing this knob from it
 //! should expect one to two orders of magnitude less at 10⁹, having paid the window latency and the
-//! resident rows in full. Re-measuring this against a per-window permutation of the probe corpus is
-//! the open item (Task 7a fix round 1, F2 — the measurement was not run, no probe exists for it).
+//! resident rows in full. **Not confirmed by measurement, and do not claim it is**: no probe runs a
+//! per-window permutation of the probe corpus, so the figure above is modelled from the measured
+//! signature distribution rather than observed.
 //!
 //! **And the cost that grows with `B`.** [`assign_sorted`] is `n log n` over the window's rows with a
 //! `Vec<u32>` sort key per item and a lexicographic compare per comparison. The per-item key
@@ -58,7 +59,8 @@
 //! ## The window carries ingest, and deny dispositions stay out of it
 //!
 //! Lifecycle §5.1 *permits* deny dispositions to share the window — "**may** share", a permission
-//! rather than a requirement. **The permission is declined**, and the reason is that it buys almost
+//! rather than a requirement. **The permission is declined**
+//! (`docs/decisions/0033-both-lanes-group-commit.md`), and the reason is that it buys almost
 //! nothing and is paid for in the machinery that keeps denies fail-closed. A reader who thinks the
 //! mixed window is the obvious next step should read this before building it.
 //!
@@ -111,10 +113,10 @@ use crate::wal::{WalRecord, WalRow};
 
 /// One admitted `/control/ingest` submission, held open until the window closes.
 ///
-/// `waiters` is a `Vec` and not one responder because **Task 8's join** ([`CommitWindow::join`])
+/// `waiters` is a `Vec` and not one responder because **the join** ([`CommitWindow::join`])
 /// appends a byte-identical retry's responder to an entry already held here, so both callers
-/// receive the same ids off one allocation. Task 8 is what makes it hold more than one; before it,
-/// a retry forced the window to close and was answered from the durable index instead.
+/// receive the same ids off one allocation. The alternative — forcing the window to close so the
+/// durable idempotency index can answer — costs a close per retry and allocates nothing extra.
 ///
 /// Generic in the waiter type, and that is forced rather than stylistic: the engine's `Responder`
 /// is `pub(crate)` inside a private module (`tessera-engine`'s `write.rs`, `mod ack`), whose private
@@ -185,7 +187,8 @@ impl<W> ClosedEntry<W> {
 /// where that ordering is decided. Immediately after [`assign_sorted`] returns, every row carries
 /// its assigned id and its resolved term list, so posting runs are fully determined *before a
 /// posting byte is written* — which matters, because nothing in the serving process writes postings
-/// at all: flush is a later capability, so there is no flush-time or fold-time statistic to take.
+/// at all. **⊘ Specified, not implemented:** there is no flush, so there is no flush-time or
+/// fold-time statistic to take instead.
 /// The build pipeline does write postings, but its sort is global by construction and would show no
 /// window effect whatever.
 ///
@@ -361,21 +364,23 @@ fn tally(pending: &[PendingItem]) -> FragmentationTally {
 /// The open commit window.
 pub struct CommitWindow<W> {
     entries: Vec<WindowEntry<W>>,
-    /// **Task 8's join index.** A `batch_id` held here cannot be evaluated against the idempotency
-    /// map, because that map is written at *apply*; [`CommitWindow::held`] is what answers for it,
-    /// and [`CommitWindow::join`] is what a byte-identical retry does with the answer. Task 7a
-    /// used this field to force a window *close* instead, so that the durable check could answer;
-    /// Task 8 answers from inside the window and the close is gone.
+    /// **The join index.** A `batch_id` held here cannot be evaluated against the idempotency map,
+    /// because that map is written at *apply*; [`CommitWindow::held`] is what answers for it, and
+    /// [`CommitWindow::join`] is what a byte-identical retry does with the answer. Answering from
+    /// inside the window is what makes a held batch id cost no window close at all.
     by_batch: FxHashMap<String, usize>,
     /// **Hashes** of the external ids held by this window — see [`CommitWindow::holds_external_id_of`]
     /// for why hashes and not ids, and why `None` is absent from it.
     external_ids: FxHashSet<u64>,
     rows: usize,
-    /// When this window opened. Read by the executor to time the window's service, and by **Task
-    /// 7b**, which owns the age bound. 7a lands no timer.
+    /// When this window opened. Read by the executor to time the window's service, and by nothing
+    /// else: **there is no age bound and no timer**. A window closes on its row bound or on the work
+    /// queue being observed empty; the age bound the specification mentions is the safety cap on a
+    /// linger, and there is no linger
+    /// (`docs/decisions/0034-the-window-does-not-linger.md`).
     opened_at: Instant,
-    /// The window's sequence number. **Task 8's `BatchState::Held { window_seq, .. }`** is what this
-    /// is for; nothing in 7a reads it beyond diagnostics.
+    /// The window's sequence number, which is what the executor's `BatchState::Held { window_seq,
+    /// .. }` names. Nothing else reads it beyond diagnostics.
     seq: u64,
 }
 
@@ -415,7 +420,7 @@ impl<W> CommitWindow<W> {
         self.opened_at
     }
 
-    /// **The `Held` half of Task 8's batch-id state machine**: is `batch_id` already an entry of
+    /// **The `Held` half of the batch-id state machine**: is `batch_id` already an entry of
     /// this open window, and if so, what body hash was it admitted under?
     ///
     /// Returns `(window_seq, body_hash)`. The caller compares the hash: equal means a byte-identical
@@ -425,28 +430,27 @@ impl<W> CommitWindow<W> {
     ///
     /// **This must be consulted before [`CommitWindow::holds_external_id_of`]**, never after. A
     /// retry names its original's external ids by construction, so an external-id-first order would
-    /// answer a retry by closing the window — Task 7a's behaviour, which this task exists to
-    /// replace — and would do it *even for the byte-identical case that has an exact answer
-    /// available*.
+    /// answer a retry by closing the window — and would do it *even for the byte-identical case
+    /// that has an exact answer available*.
     ///
     /// `window_seq` is carried because the join's correctness is a statement about **which** window
-    /// the entry sits in. In stage 2.1 that cannot be got wrong: there is exactly one open window,
-    /// a local of the executor's work pass, and it is consulted and joined in the same iteration —
-    /// so the field is read only by a `debug_assert!` at the join site. It is not decoration and it
-    /// is not a live guard either; it is the discriminator a 2.2 executor holding more than one
-    /// window would need, written down while the invariant it encodes is still obvious.
+    /// the entry sits in. That cannot be got wrong as the executor stands: there is exactly one open
+    /// window, a local of its work pass, and it is consulted and joined in the same iteration — so
+    /// the field is read only by a `debug_assert!` at the join site. It is not decoration and it is
+    /// not a live guard either; it is the discriminator an executor holding more than one window
+    /// would need, written down while the invariant it encodes is still obvious.
     pub fn held(&self, batch_id: &str) -> Option<(u64, [u8; 32])> {
         let index = *self.by_batch.get(batch_id)?;
         Some((self.seq, self.entries[index].body_hash))
     }
 
-    /// **The join** (Task 8): add `waiter` to the entry `batch_id` names, so a byte-identical retry
-    /// is answered off the original's single allocation rather than allocating again.
+    /// **The join**: add `waiter` to the entry `batch_id` names, so a byte-identical retry is
+    /// answered off the original's single allocation rather than allocating again.
     ///
     /// Nothing else about the entry changes: no rows are added, no external id is registered, the
-    /// row count does not move. That is what makes the join safe against Task 3a's security C1 —
-    /// the failure C1 describes needs **two** allocations for one external id, and a join performs
-    /// zero.
+    /// row count does not move. That is what makes the join safe against the unreachable-duplicate
+    /// failure [`CommitWindow::holds_external_id_of`] describes — it needs **two** allocations for
+    /// one external id, and a join performs zero.
     ///
     /// Returns `false` if `batch_id` is not held, which the executor treats as a programming error:
     /// it calls this only having just seen [`CommitWindow::held`] answer.
@@ -464,24 +468,25 @@ impl<W> CommitWindow<W> {
     /// # Why this exists — it is a security check, not tidiness
     ///
     /// Both of the executor's admission checks read state that is written at **apply**: the
-    /// idempotency index (`accepted_batches`) and the live external-id map (`established`). Task 3a's
-    /// security CRITICAL C1 is exactly what happens when a check and its apply are separated — a
-    /// client retry under a **fresh** `batch_id` passes the handler's duplicate check twice, gets two
-    /// entity ids for one external id, and the second insert overwrites the first, leaving a visible,
+    /// idempotency index (`accepted_batches`) and the live external-id map (`established`). What
+    /// happens when a check and its apply are separated is an unreachable duplicate: a client retry
+    /// under a **fresh** `batch_id` passes the handler's duplicate check twice, gets two entity ids
+    /// for one external id, and the second insert overwrites the first, leaving a visible,
     /// byte-identical copy of a suppressed document that **no external id names**, so no deny can
-    /// ever reach it. 3a closed it by re-checking on the one thread that also inserts. A window
-    /// re-opens it, one window wide, unless the two entries are kept out of the same window.
+    /// ever reach it. The executor closes that by re-checking on the one thread that also inserts. A
+    /// window re-opens it, one window wide, unless the two entries are kept out of the same window.
     ///
     /// The executor's remedy is to **close the window first and re-evaluate**: once the earlier entry
-    /// has applied, 3a's existing checks give exactly today's answers (byte-identical replay → the
+    /// has applied, those same checks give the per-command answers (byte-identical replay → the
     /// recorded ids; different bytes → 409; colliding external id → 409). No new failure semantics
     /// and no path only a window can reach.
     ///
     /// **Hashes, not ids.** One `u64` and no allocation per row, against a `Vec<u8>` clone per row.
     /// An admitted row is hashed twice — once here, once in [`CommitWindow::push`] — and that is left
-    /// alone deliberately: halving it means threading the digests from this call into that one, and
-    /// it is the only per-row work this task *added* against two heap allocations per row and a deep
-    /// `wal_rows.clone()` it removed. Net strongly negative; not worth the reviewability.
+    /// alone deliberately: halving it means threading the digests from this call into that one, for
+    /// a per-row cost that is already small beside the two heap allocations per row and the deep
+    /// `wal_rows.clone()` the window's move-not-clone discipline removes. Not worth the
+    /// reviewability.
     /// A hash collision costs a spurious early close — conservative, and the entry is re-evaluated
     /// against the live map either way — never a missed conflict.
     ///
@@ -494,12 +499,11 @@ impl<W> CommitWindow<W> {
     /// Rows are checked against the window, never against their own entry: an intra-batch duplicate
     /// is the handler's to refuse, and it names them to the caller who supplied them.
     ///
-    /// **Task 8 narrowed this to external ids.** It also refused a `batch_id` already held, for a
-    /// different reason — so that the *durable* idempotency check could answer once the close had
-    /// applied the original. [`CommitWindow::held`] answers that from inside the window now, so the
-    /// close is no longer the mechanism and the batch-id clause is gone. What is left is C1 and
-    /// only C1: two entries, two batch ids, one external id, **two allocations**. That one still
-    /// forces the close, because nothing but an apply can make `established` see the first insert.
+    /// **This is about external ids and nothing else.** A held `batch_id` is *not* a reason to
+    /// close: [`CommitWindow::held`] answers it from inside the window, and a byte-identical retry
+    /// joins. What forces a close is the unreachable duplicate above — two entries, two batch ids,
+    /// one external id, **two allocations** — because nothing but an apply can make `established`
+    /// see the first insert.
     pub fn holds_external_id_of(&self, rows: &[UnallocatedRow]) -> bool {
         rows.iter()
             .filter_map(|r| r.external_id.as_deref())
@@ -525,7 +529,7 @@ impl<W> CommitWindow<W> {
     /// unchanged [`assign_sorted`], and scatter the ids back by position. One
     /// [`Allocator::allocate`] call for the whole window, so ids stay strictly monotone and a window
     /// that cannot allocate has **no effect at all** — `allocate` leaves the high-water mark
-    /// unchanged on its error path (I9, plan Important I-1).
+    /// unchanged on its error path (I9).
     ///
     /// **No per-row clone.** `external_id` and `terms` are *moved* out of each row into its
     /// `PendingItem` and moved back out afterwards, rather than copied ([`UnallocatedRow::take_pending`]
@@ -713,12 +717,12 @@ mod tests {
         assert_eq!(closed[0].terms[1], vec![TermId::new(0)]);
     }
 
-    /// The C1 backstop's window half: a second entry naming a held external id conflicts — and
-    /// `None` never conflicts with `None`.
+    /// The unreachable-duplicate backstop's window half: a second entry naming a held external id
+    /// conflicts — and `None` never conflicts with `None`.
     ///
-    /// The **held batch id** leg moved to `a_held_batch_id_is_found_with_the_hash_it_was_admitted_under`
-    /// when Task 8 replaced that close with the join; it is deliberately not asserted here any
-    /// more, because asserting it here would be asserting the thing the join removed.
+    /// The **held batch id** is deliberately not asserted here: a held batch id joins rather than
+    /// forcing a close, and `a_held_batch_id_is_found_with_the_hash_it_was_admitted_under` is where
+    /// that is held.
     #[test]
     fn a_held_external_id_conflicts_and_none_never_does() {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
@@ -726,7 +730,8 @@ mod tests {
 
         assert!(
             w.holds_external_id_of(&[row(Some("zzz"), &[1]), row(Some("k"), &[1])]),
-            "a held external id conflicts however the batch id differs — Task 3a's C1"
+            "a held external id conflicts however the batch id differs — two allocations for one \
+             external id leave a copy no deny can name"
         );
         assert!(
             !w.holds_external_id_of(&[row(None, &[1]), row(None, &[2])]),
@@ -735,7 +740,7 @@ mod tests {
         assert!(!w.holds_external_id_of(&[row(Some("fresh"), &[1])]));
     }
 
-    /// Task 8's `Held` lookup: the batch id, the window's own sequence number, and **the hash the
+    /// The `Held` lookup: the batch id, the window's own sequence number, and **the hash the
     /// entry was admitted under** — which is what decides join versus 409.
     #[test]
     fn a_held_batch_id_is_found_with_the_hash_it_was_admitted_under() {
@@ -754,8 +759,8 @@ mod tests {
     }
 
     /// The join adds a waiter and **nothing else**: no rows, no external id, no row count. That is
-    /// the whole reason it is safe where a second entry would not be — C1 needs two allocations and
-    /// a join performs none.
+    /// the whole reason it is safe where a second entry would not be — the unreachable duplicate
+    /// needs two allocations, and a join performs none.
     #[test]
     fn joining_adds_a_waiter_and_changes_nothing_else() {
         let mut w = CommitWindow::new(1);

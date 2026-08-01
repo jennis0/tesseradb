@@ -1,23 +1,23 @@
-//! D-G's slot-state single-flight cache, with Task 5's byte bound, LRU and pruning.
+//! A slot-state single-flight cache, with a byte bound, LRU and pruning.
 //!
-//! The row-projection cache's original shape (`Mutex<FxHashMap<Key, Arc<RowProjection>>>`) ran
-//! `RowProjection::new` — the entity-space-to-row-space crossing, seconds at 10⁹ rows
-//! (shared-context constraint 8) — **inside** the map lock on a miss, so every distinct session's
-//! first viewport serialised behind one global mutex (F4, measured: `tessera-bench/src/arms/
-//! load.rs:34-76` — Arm A at c=1000 throughput halves and server CPU *drops* while p99 reaches
-//! 1.04 s, the signature of threads blocked on a lock, not doing work).
+//! The obvious shape (`Mutex<FxHashMap<Key, Arc<RowProjection>>>`) runs
+//! `RowProjection::new` — the entity-space-to-row-space crossing, seconds at 10⁹ rows —
+//! **inside** the map lock on a miss, so every distinct session's
+//! first viewport serialises behind one global mutex. Measured (`tessera-bench`'s load arm, Arm A
+//! at c=1000): throughput halves and server CPU *drops* while p99 reaches
+//! 1.04 s — the signature of threads blocked on a lock, not doing work.
 //!
 //! This module is the replacement: a slot per key is either [`Slot::Building`] or
 //! [`Slot::Ready`], and the map's mutex is held only for the O(1) transition between those states
 //! — never for the build itself, which always runs with the lock released. A concurrent arrival
-//! on the *same* key while a build is in flight does not wait for it: D-G's non-blocking-waiters
-//! rule is that a parked waiter would hold the server's global admission budget while consuming
+//! on the *same* key while a build is in flight does not wait for it. The non-blocking-waiters
+//! rule: a parked waiter would hold the server's global admission budget while consuming
 //! zero CPU, so a queue of waiters would starve runnable work exactly when the server is under the
 //! load that makes it worst. [`SingleFlightCache::get_or_build`] therefore returns [`Building`]
 //! immediately to a losing arrival, and the caller decides what that means (`Engine::viewport`
 //! turns it into `EngineError::ProjectionBuilding`).
 //!
-//! # Task 5: the bound, and the four rules that make eviction safe
+//! # The bound, and the four rules that make eviction safe
 //!
 //! Eviction is **not invalidation**. Lifecycle §7 requires cache entries to be immutable and
 //! "invalidation is key rotation, never mutation" — nothing here ever modifies a cached value.
@@ -76,7 +76,8 @@
 //!    lapse — `for key in doomed { slots.remove(key); }`, dropping the value in place — is a
 //!    compile error under this workspace's `-D warnings`, in both crates and in functions not yet
 //!    written. A `Deferred<V>` newtype returned out of each locked block was considered and
-//!    declined; see the Task 5 fix-round-1 report for the argument.
+//!    declined: it moves the same convention into a type whose `Drop` is still the thing that must
+//!    not run under the lock, buying a name rather than an enforcement.
 //!
 //! # What the bound bounds, and what it does not
 //!
@@ -153,8 +154,8 @@ pub(crate) trait CacheWeight {
 /// zero-cardinality projection serialises to a handful of bytes, and `Engine::authorise` mints a
 /// fresh `token_id` on every call against an already-cached fragment, so a caller can insert
 /// unbounded entries that never trip a byte bound while each costs hundreds of bytes of real
-/// memory. **This is the second appearance of that shape**: Track C's Task 4 found the same
-/// session-rotation bypass against lifecycle §2.2's per-session pin cap (see
+/// memory. **This is the second appearance of that shape**: the same
+/// session-rotation bypass defeats lifecycle §2.2's per-session pin cap (see
 /// `crate::pins::PinManager::pins_per_session_max`, which records that rotation is free because
 /// `authorise` mints a `token_id` per call against a cached fragment). A third reader meeting it
 /// should recognise it rather than rediscover it. Charging `max(weight, floor)` makes the byte
@@ -413,7 +414,7 @@ struct EvictionTally {
 
 impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// `bound_bytes` is the byte ceiling on resident entries. `u64::MAX` means "no bound", which is
-    /// the pre-Task-5 behaviour and what every non-server construction site gets; `tessera-server`
+    /// unbounded, and what every non-server construction site gets; `tessera-server`
     /// always sets a real one at startup, after validating it (`tessera_server::prepare`).
     pub(crate) fn new(bound_bytes: u64) -> Self {
         SingleFlightCache {
@@ -446,9 +447,8 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     }
 
     /// Slots currently held, `Building` and `Ready` both counted — a diagnostic, not a capacity
-    /// bound. **Semantics unchanged by Task 5**, deliberately:
-    /// `Engine::row_projection_cache_len` publishes this, and it is the observable for critical
-    /// C-5 (`Engine::item` must never construct a projection, warm or cold), which counts slots in
+    /// bound. `Engine::row_projection_cache_len` publishes this, and it is the observable behind
+    /// "`Engine::item` must never construct a projection, warm or cold", which counts slots in
     /// either state.
     pub(crate) fn len(&self) -> usize {
         self.entries.load(Ordering::Relaxed)

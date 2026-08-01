@@ -1,15 +1,12 @@
-//! Deliberate fault injection for the write executor — **test builds only** (Phase 2 stage 2.1,
-//! Task 3a).
+//! Deliberate fault injection for the write executor — **test builds only**.
 //!
-//! ## Why this exists, and why now rather than at stage 2.4
+//! ## Why this exists
 //!
-//! Four of Task 3a's named tests assert behaviour that only occurs when durability *fails*: a
-//! suppression applied despite a disk-full append, a poisoned WAL tripping the not-ready posture,
-//! an ack that must not precede its generation swap, a deny that must not queue behind work. None
-//! of those can be reached by a test that can only ask the executor to succeed. The Phase 1 ledger
-//! already carries "deny-op WAL-failure path inspection-only — fault-injectable Wal would test it"
-//! as a deferral, and stage 2.4's conformance pause points are three stages away. So the hooks
-//! land with the executor they instrument.
+//! The executor's most load-bearing behaviour only occurs when durability *fails*: a suppression
+//! applied despite a disk-full append, a poisoned WAL tripping the not-ready posture, an ack that
+//! must not precede its generation swap, a deny that must not queue behind work. None of those can
+//! be reached by a test that can only ask the executor to succeed, so the hooks live beside the
+//! executor they instrument rather than waiting for the conformance suite's own pause points.
 //!
 //! ## The compile gate, and exactly what it does and does not buy
 //!
@@ -20,8 +17,8 @@
 //! **What that buys: `cargo build` does not build dev-dependencies, so nothing `cargo build`
 //! produces can carry this code.** Measured, not assumed.
 //!
-//! **What it does not buy, stated because the first draft of this paragraph claimed otherwise and
-//! was wrong:** a `cargo test --workspace` build still unifies the feature across the workspace and
+//! **What it does not buy, stated because the obvious reading overclaims:** a `cargo test
+//! --workspace` build still unifies the feature across the workspace and
 //! into `tessera-server`, exactly as `bench-timing` does. The self dev-dependency is *not* stronger
 //! than `bench-timing` on that axis; it is stronger only on the release axis, because
 //! `tessera-bench` declares `bench-timing` as a **normal** dependency with `default =
@@ -71,18 +68,18 @@ use std::sync::{atomic::AtomicUsize, Condvar, Mutex};
 
 /// Append and fsync counts for the executor's WAL handle.
 ///
-/// **Not test-only, and deliberately so.** Task 7a's `one_fsync_per_window` is an assertion about
-/// this counter, and "how many fsyncs has this partition paid" is ordinary operator telemetry that
+/// **Not test-only, and deliberately so.** `one_fsync_per_window` is an assertion about this
+/// counter, and "how many fsyncs has this partition paid" is ordinary operator telemetry that
 /// belongs on the bearer-gated `/control/status` — not a debugging affordance to be compiled out.
 /// It is here rather than in `wal.rs` because the counting belongs to the *executor's* handle, not
 /// to the durability primitive: `Wal` should stay a file format and a positional CRC rule.
 ///
-/// **Reachable, and that had to be built rather than asserted.** The first draft of this comment
-/// made the argument above while the meter was constructed in `WritePath::start_executor` and
-/// *moved* into the `ExecutorWal` with no accessor left behind — so the only readers in the tree
-/// were this crate's own tests, and Task 7a's headline assertion was defined against a counter it
-/// could not reach. It now hangs off `ExecutorHealth`, which keeps a clone, and surfaces as
-/// `ExecutorStats::wal_appends`/`wal_fsyncs`.
+/// **Reachable from outside this crate, which is a property to keep rather than assume.** The meter
+/// is constructed in `WritePath::start_executor` and *cloned* into the `ExecutorWal`;
+/// `ExecutorHealth` keeps the other end and surfaces it as
+/// `ExecutorStats::wal_appends`/`wal_fsyncs`. Moving it instead would leave this crate's own tests
+/// as the only readers in the tree, and the group-commit assertion defined against a counter it
+/// cannot reach.
 #[derive(Debug, Default)]
 pub struct WalMeter {
     appends: AtomicU64,
@@ -101,8 +98,8 @@ impl WalMeter {
         self.appends.load(Ordering::Relaxed)
     }
 
-    /// Successful fsyncs since this handle was opened — the quantity Task 7a's group commit is
-    /// measured in, and the one the ingest baseline memo's ~3.2 ms floor is a cost per unit of.
+    /// Successful fsyncs since this handle was opened — the quantity group commit is measured in,
+    /// and the one the ingest baseline memo's ~3.2 ms floor is a cost per unit of.
     pub fn fsyncs(&self) -> u64 {
         self.fsyncs.load(Ordering::Relaxed)
     }
@@ -120,7 +117,7 @@ impl WalMeter {
 ///
 /// The sequence the executor must produce for one command is `Append, Fsync, Swap, Ack`, and the
 /// fail-open this exists to catch is an `Ack` before its `Swap` — a client observing 200 for a
-/// suppression that is not yet in force (lifecycle §4's ack ordering, plan Task 3a).
+/// suppression that is not yet in force (lifecycle §4's ack ordering).
 #[cfg(feature = "fault-injection")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -146,8 +143,8 @@ pub enum PauseSite {
     /// After fsync, before the generation swap: **durable, not yet in force**.
     ///
     /// The position lifecycle §8's crash table calls "after fsync, before swap" (at risk: none),
-    /// and where Task 8's crash test needs a process to have died so that replay reinstates the
-    /// effect rather than reallocating it.
+    /// and where a crash test needs a process to have died so that replay reinstates the effect
+    /// rather than reallocating it.
     AfterFsync,
     /// After the generation swap, before the receipt is sent: **in force, not yet acknowledged**.
     ///
@@ -156,8 +153,8 @@ pub enum PauseSite {
     /// swap and the pause point stays obediently below it. Inside `ack`, the point **travels with
     /// the ack**: a build that acks before it swaps parks here with the swap still ahead of it, so
     /// a test parked at this site sees the effect *not* in force and fails on engine state alone,
-    /// with no reference to the step log. That is the discrimination Task 7a's rewrite of this loop
-    /// will be caught by.
+    /// with no reference to the step log. Any rewrite of the executor's ack loop is caught by that
+    /// discrimination, because the point moves with the code rather than with the line.
     BeforeAck,
 }
 
@@ -174,13 +171,12 @@ impl PauseSite {
 
 /// What the executor does when it reaches an armed pause point.
 ///
-/// **One action, deliberately.** The first draft carried an `Abort` variant documented as stopping
-/// "as a killed process would"; it was a second `panic!` with a different message. A panic unwinds,
-/// runs `DeathGuard`, drops the `Job` and closes the `ExecutorWal` — a `SIGKILL` does none of those,
-/// and Task 8's crash test is about lifecycle §8's crash table, so a worker who armed `Abort`
-/// would have modelled a clean shutdown and called it a crash. Stage 2.1 therefore ships **one**
-/// kill action, the honest one; Task 8 must build a real crash (a child process the test kills),
-/// which no in-process switch can fake.
+/// **One action, deliberately, and there is no `Abort`.** An in-process "abort" can only be a
+/// second `panic!` with a different message, and a panic unwinds: it runs `DeathGuard`, drops the
+/// `Job` and closes the `ExecutorWal`. A `SIGKILL` does none of those. Offering one would let a
+/// test model a clean shutdown and call it a crash, against a crash table (lifecycle §8) that turns
+/// on exactly that difference. A test that needs a real crash builds one — a child process it kills
+/// — because no in-process switch can fake it.
 #[cfg(feature = "fault-injection")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseAction {
@@ -264,12 +260,11 @@ impl FaultSwitchboard {
 
     /// [`FaultSwitchboard::arm_pause`], but let `fire_after` arrivals through first.
     ///
-    /// **Why this exists (Task 7a).** A commit window performs one generation swap and then acks N
-    /// waiters in a loop, so a death partway through the loop leaves some waiters acked and some
-    /// not — the state `SubmitError::ReceiptLost` exists for, and the one its own doc names Task 7a
-    /// as the widening of. Firing on the *first* arrival cannot produce it: nobody has been acked
-    /// yet, so every waiter is lost and the test's subject never occurs. The count is what makes
-    /// "partially acked" constructible.
+    /// **Why this exists.** A commit window performs one generation swap and then acks N waiters in
+    /// a loop, so a death partway through the loop leaves some waiters acked and some not — the
+    /// state `SubmitError::ReceiptLost` exists for. Firing on the *first* arrival cannot produce it:
+    /// nobody has been acked yet, so every waiter is lost and the test's subject never occurs. The
+    /// count is what makes "partially acked" constructible.
     ///
     /// Arrivals are counted as they are without this, so `await_arrivals` still observes every one —
     /// including the ones let through.

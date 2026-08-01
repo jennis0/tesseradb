@@ -540,7 +540,7 @@ fn cap_decreasing_on_descent_can_drop_a_mark() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The fast path (Task 2)
+// The fast path
 // ---------------------------------------------------------------------------------------------
 
 /// **Selection matches the definition, computed independently, over both internal branches.**
@@ -848,9 +848,15 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
         NearFull,
     }
     let shapes: Vec<(Shape, Vec<u32>)> = vec![
-        (Shape::Sparse, (0..n).filter(|_| rng.gen_bool(0.07)).collect()),
+        (
+            Shape::Sparse,
+            (0..n).filter(|_| rng.gen_bool(0.07)).collect(),
+        ),
         (Shape::Dense, (0..n).filter(|_| rng.gen_bool(0.7)).collect()),
-        (Shape::Blocks, (0..n).filter(|r| (r / 256) % 2 == 0).collect()),
+        (
+            Shape::Blocks,
+            (0..n).filter(|r| (r / 256) % 2 == 0).collect(),
+        ),
         (Shape::NearFull, (0..n).filter(|r| r % 20 != 0).collect()),
     ];
 
@@ -874,7 +880,10 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
                     overlay.apply(EntityId::new(row as u64), ChangeOp::Suppress, None);
                 }
                 let vis_set: HashSet<u32> = visible_rows.iter().copied().collect();
-                for row in (0..diffs_bound).filter(|r| !vis_set.contains(r)).step_by(11) {
+                for row in (0..diffs_bound)
+                    .filter(|r| !vis_set.contains(r))
+                    .step_by(11)
+                {
                     overlay.apply(
                         EntityId::new(row as u64),
                         ChangeOp::Predicate,
@@ -984,8 +993,7 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
                             let floor = p.k_min.min(p.cap);
                             let serves_all = vis <= floor as u64
                                 || (p.threshold.is_saturated() && vis <= p.cap as u64);
-                            fired_branch[usize::from(diffs_present)]
-                                [usize::from(!serves_all)] += 1;
+                            fired_branch[usize::from(diffs_present)][usize::from(!serves_all)] += 1;
                         }
                     }
                 }

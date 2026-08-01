@@ -1,8 +1,9 @@
 //! Cache eviction and the two pruners, driven through `Engine::viewport` over the same synthetic
-//! bundle `tests/pins.rs` uses (Phase 2 stage 2.1, Task 5).
+//! bundle `tests/pins.rs` uses.
 //!
 //! **These cases go through the real request path on purpose.** The single-flight state machine,
-//! the four eviction rules and the lock accounting are unit-tested in `src/single_flight.rs`, where
+//! the four eviction rules and the lock accounting are unit-tested in
+//! `crates/tessera-engine/src/single_flight.rs`, where
 //! a synthetic `V` makes every interleaving schedulable. What cannot be tested there is the thing
 //! that matters most here: that a *rebuilt* projection is the same projection. A test that
 //! constructed two `RowProjection`s in-process and compared them would never exercise the hit path
@@ -116,8 +117,8 @@ fn tighten_to_one_entry(engine: &Engine) -> u64 {
 
 /// A revoke drops that session's projections and nobody else's.
 ///
-/// Closes the Phase 1 deferral "revoke does not prune the projection cache". The *disclosure*
-/// control for a revoked session is the registry removal in `tessera-server`, not this — see
+/// The *disclosure* control for a revoked session is the registry removal in `tessera-server`,
+/// not this — see
 /// `RowProjectionCache::prune_token`; what this asserts is that the memory is actually released,
 /// and released selectively.
 #[test]

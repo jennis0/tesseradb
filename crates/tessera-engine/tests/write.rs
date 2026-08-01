@@ -1,23 +1,19 @@
-//! Track B's engine-level test file (Phase 2 stage 2.1) — the acceptance path, asserted against
-//! `Engine` directly rather than through HTTP.
+//! The write path at engine level — the acceptance path, asserted against `Engine` directly rather
+//! than through HTTP.
 //!
-//! **Why this file exists.** Task 3a moves the WAL behind a single writer thread, which changes the
-//! shape of the acceptance API: entity IDs stop being supplied by the caller and start being
-//! assigned by the executor (that is the point of the change — Task 7a then assigns a whole
-//! window's IDs in one signature-sorted run). Every existing caller therefore has to move, and the
-//! case below lived in `tests/viewport.rs`, which Task 0c froze for **every** track because its
-//! residue spans several of them. Track B would have had nowhere to put the migration, and nowhere
-//! to put engine-level ordering assertions either — its four Task 3a tests would all have had to
-//! reach the executor through the HTTP surface to observe an ordering that is not an HTTP property.
+//! **Why an engine-level file at all.** The properties here are orderings, not HTTP behaviours: a
+//! success ack following its generation swap, a deny not queued behind work. Reaching the executor
+//! through the HTTP surface to observe them would make every one of them depend on the server's
+//! own scheduling as well as the executor's.
 //!
-//! ## What the Task 3a cases are and are not
+//! ## What these cases are and are not
 //!
 //! They assert the **ack contract** (lifecycle §4) and the **deny priority lane** (§1.3): that a
 //! success ack follows its generation swap, that a deny is never queued behind work, that a deny
 //! whose WAL append failed is applied anyway, and that a poisoned WAL trips the not-ready posture
 //! rather than being retried. Each needs a fault the engine cannot be *asked* for, which is why
-//! `tessera-lifecycle`'s `faults` module lands with this task rather than with stage 2.4's pause
-//! points — see its module doc, and in particular its fidelity rule: an injected failure must be
+//! `tessera-lifecycle`'s `faults` module exists at all — see its module doc, and in particular its
+//! fidelity rule: an injected failure must be
 //! indistinguishable from a real one, which `tessera-lifecycle/tests/wal.rs` pins independently.
 //!
 //! **No test here sleeps.** Every wait is on a condition the executor itself publishes — the
@@ -83,8 +79,8 @@ fn row(key: &str) -> UnallocatedRow {
 }
 
 /// How many items a full-coverage viewport can see. Buffered (ingested) items have no row geometry
-/// until stage 2.2's flush, so this counts the built corpus only — which is exactly what a
-/// suppression must move.
+/// at all, there being no flush (⊘), so this counts the built corpus only — which is exactly what
+/// a suppression must move.
 fn visible(engine: &Engine) -> u64 {
     let session = engine
         .authorise(&full_coverage_credential())
@@ -123,17 +119,14 @@ fn entity_of(engine: &Engine, source_id: u64) -> EntityId {
 // The migrated case, and I9
 // =================================================================================================
 
-/// IMPORTANT I-9: an entity ingested after the build has no locator slot and no extent entry — the
+/// An entity ingested after the build has no locator slot and no extent entry — the
 /// live map must answer first, or `external_id_of` would wrongly report "this item has no external
 /// id" for one that does.
 ///
-/// Moved here from `tests/viewport.rs` (controller ruling on the Task 3a report's F1) and then
-/// migrated by Task 3a itself. **The migration is the assertion.** The old form built a `WalRow`
-/// and supplied `entity_id: EntityId::new(engine.allocator_high_water())` — the caller choosing the
-/// id. It cannot any more: `Command::Ingest` carries `UnallocatedRow`, which has no id field,
-/// because Task 7a must be free to assign a whole window's ids in one signature-sorted run. So the
-/// test asserts the id it gets *back*, and that the property it was written for survives unaltered:
-/// whatever assigns the id, the live map answers for it before the build's locator does.
+/// **The test asserts the id it gets *back*, and that is the point.** A caller cannot choose an
+/// entity id: `Command::Ingest` carries `UnallocatedRow`, which has no id field, because the
+/// executor must be free to assign a whole window's ids in one signature-sorted run. Whatever
+/// assigns the id, the live map answers for it before the build's locator does.
 #[test]
 fn the_executor_assigns_the_ids_and_the_live_map_answers_for_them() {
     let tmp = TempDir::new().unwrap();
@@ -170,8 +163,8 @@ fn the_executor_assigns_the_ids_and_the_live_map_answers_for_them() {
 /// I9 across commands: ids are strictly monotone and assigned in **signature-sorted** order within
 /// each command (design §11.1).
 ///
-/// Task 7a widens that scope from the command to the commit window. Pinning it here means 7a's
-/// headline test is measuring a change of *scope* rather than the arrival of sorting at all.
+/// Pinned at command scope here so that the window-scope test below is measuring a change of
+/// *scope* rather than the arrival of sorting at all.
 #[test]
 fn per_command_assignment_is_signature_sorted_and_monotone() {
     let tmp = TempDir::new().unwrap();
@@ -362,7 +355,7 @@ fn a_deny_is_never_queued_behind_work() {
 }
 
 /// **The same property with group commit disabled** — `commit_window_max_items = 1`, which is the
-/// documented spelling for turning the window off and the one Task 10's A/B needs to exist.
+/// documented spelling for turning the window off.
 ///
 /// This leg is not a variation for its own sake. At that setting *every* entry trips the row bound,
 /// so the window's close-and-continue path runs on each one; a `run_work_pass` that closed a window
@@ -460,23 +453,21 @@ fn deny_priority_survives_the_window(window_max_rows: Option<usize>) {
     );
 }
 
-/// **The same property on the third close path — the one Task 7a's F1 fix did not reach.**
+/// **The same property on the third close path**, which the row bound does not reach.
 ///
 /// `run_work_pass` closes a window mid-drain when an entry names an external id the open window
-/// already holds (`CommitWindow::holds_external_id_of` — the mechanism that keeps Task 3a's
-/// security C1 closed). Until Task 7b that close *continued* draining, and `window.rows()` resets
-/// with the replacement, so the row bound could never trip on a conflict-heavy stream: a pass could
-/// perform an unbounded number of full `append → fsync → apply → swap` cycles without ever
+/// already holds (`CommitWindow::holds_external_id_of` — the mechanism that keeps the
+/// unreachable-duplicate hole closed). A close that *continued* draining would never trip the row
+/// bound on a conflict-heavy stream, because `window.rows()` resets with the replacement: a pass
+/// could perform an unbounded number of full `append → fsync → apply → swap` cycles without ever
 /// returning to `Executor::run`'s deny drain. That is lifecycle §1.3's prohibition verbatim — a
 /// deny queued behind work of unbounded duration — and it is reachable at the shipped defaults from
 /// a client re-ingesting an `external_id` a still-open window holds.
 ///
-/// **The workload is pairs sharing an `external_id` under different batch ids, and Task 8 is why.**
-/// It was pairs sharing a `batch_id` — until Task 8's `Held` join answered that case from inside
-/// the window and stopped it forcing a close at all. Left as it was, this test would have kept
-/// passing while asserting nothing: no close, no yield, and the property 7b's CRITICAL fix exists
-/// for would have had **no test in the tree**. (7b's report records that all twenty other tests
-/// stayed green under the mutation; this is the one.) Whichever member of a pair the drain meets
+/// **The workload is pairs sharing an `external_id` under different batch ids, and the choice
+/// matters.** Pairs sharing a *batch id* would assert nothing: a held batch id joins from inside
+/// the window and forces no close at all, so there would be no close, no yield, and no test in the
+/// tree for this property. Whichever member of an external-id pair the drain meets
 /// second conflicts, whatever order the submitting threads reach the queue in.
 ///
 /// The executor is parked at `AfterFsync` inside that first conflict-forced close, which is what
@@ -519,10 +510,10 @@ fn a_deny_is_never_queued_behind_a_conflict_forced_window_split() {
             let e = Arc::clone(&engine);
             let order = Arc::clone(&order);
             workers.push(std::thread::spawn(move || {
-                // Same **external id** within a pair, different batch ids: the conflict is Task
-                // 3a's C1 shape, and the second one 409s on `established_collisions` once the
-                // close has applied the first. (A shared *batch id* no longer forces a close —
-                // Task 8's join answers it in place — which is why this workload changed.)
+                // Same **external id** within a pair, different batch ids: the second one 409s
+                // on `established_collisions` once the close has applied the first. (A shared
+                // *batch id* would force no close at all — the join answers it in place — which is
+                // why the workload is shaped this way.)
                 let _ = e.accept_ingest(
                     vec![row(&format!("c-{i}"))],
                     format!("pair-{i}-{half}"),
@@ -746,7 +737,7 @@ fn a_deny_whose_retries_are_exhausted_is_hidden_now_and_visible_after_a_restart(
 /// The negative control for the rule above: **the apply-anyway exception is deny-scoped**.
 ///
 /// An ingest whose append failed applies nothing — applying un-fsynced ingest would make items
-/// appear and vanish across a crash, and Task 7b's rule 2 restates this per window. The extra
+/// appear and vanish across a crash, and that holds per window as it does per command. The extra
 /// assertion that the high-water *did* advance keeps "nothing applied" from being satisfied
 /// vacuously by a failure that happened before assignment: it pins that the batch reached
 /// allocation and burned its ids, which is the documented, I9-safe behaviour.
@@ -1056,8 +1047,8 @@ fn recovery_discards_the_undurable_region_rather_than_publishing_it() {
 /// not-ready gate built on it would be green over a dead writer — the worst available outcome,
 /// since a caller would keep being told its suppressions are in flight.
 ///
-/// **The in-flight assertion is the Task 3b design gate's unanimous CRITICAL, pinned at its
-/// producer.** `write.rs`'s `submit` answers `SubmitError::ReceiptLost` when the responder is
+/// **The in-flight assertion pins `ReceiptLost` at its producer.**
+/// `write.rs`'s `submit` answers `SubmitError::ReceiptLost` when the responder is
 /// dropped, and `tessera-server`'s `map_accept_error` maps that to a fail-closed **500** rather than
 /// the **503 `not-ready`** `ExecutorDead` gets — because a command the executor died *holding* may
 /// have been appended, fsynced, applied and swapped, and 503's whole meaning is "this node did not
@@ -1066,8 +1057,8 @@ fn recovery_discards_the_undurable_region_rather_than_publishing_it() {
 /// `ExecutorDead` compiled and passed `cargo test --workspace` in full, leaving the split enforced
 /// only by `error.rs`'s mapping over a variant nothing produced.
 ///
-/// That matters more than an ordinary coverage gap because **Task 7a rewrites exactly this region**
-/// — a commit window performing one swap and then acking N waiters in a loop, which
+/// That matters more than an ordinary coverage gap because **this region gets rewritten**: a commit
+/// window performs one swap and then acks N waiters in a loop, which
 /// `SubmitError::ReceiptLost`'s own doc names as the widening. A refactor that reinstates
 /// `ExecutorDead` here reinstates a fail-open: a durable, in-force suppression answered
 /// "nothing in this request was applied".
@@ -1129,7 +1120,7 @@ fn an_executor_panic_is_reported_dead() {
 
 /// An engine that never started an executor refuses writes rather than pretending.
 ///
-/// This is the state every read-only test, bench and example is in after Task 3a — starting no
+/// This is the state every read-only test, bench and example is in — starting no
 /// thread is the point of the explicit start call — so the refusal must be honest rather than a
 /// panic or a hang, and reads must be entirely unaffected.
 #[test]
@@ -1187,7 +1178,7 @@ fn a_duplicate_external_id_is_refused_on_the_executor() {
 }
 
 // =================================================================================================
-// The commit window (Task 7a)
+// The commit window
 // =================================================================================================
 
 /// A window assembled **deterministically**, with no sleep and no timing assumption.
@@ -1339,7 +1330,7 @@ fn sig_rows(
 /// whatever chunk size a client happened to pick.
 ///
 /// *If this does not hold, group commit is decoration.* The discrimination is real rather than
-/// incidental: under Task 3a's per-command allocation each submission's 25 rows are sorted among
+/// incidental: under per-command allocation each submission's 25 rows are sorted among
 /// themselves and the four blocks land in four disjoint id ranges, so the interleaved signatures
 /// stay interleaved in entity space and every posting run is 25 long instead of 50.
 ///
@@ -1428,7 +1419,8 @@ fn the_sort_scope_is_the_window_not_the_request() {
 /// The exact delta, not "did not rise": `WalMeter` counts *successes*, so an implementation that
 /// skipped the fsync entirely would satisfy "did not rise with the number of submissions" while
 /// acknowledging writes that are not durable — the one thing the ack contract forbids. The append
-/// counter is the other half: one record per entry is what preserves batch identity for Task 8.
+/// counter is the other half: one record per entry is what preserves batch identity, which is what
+/// a joined retry is answered off.
 #[test]
 fn one_fsync_per_window() {
     const N: usize = 5;
@@ -1462,7 +1454,8 @@ fn one_fsync_per_window() {
     assert_eq!(
         after.wal_appends - parked.wal_appends,
         N as u64,
-        "and exactly one record per entry: batch identity survives the window (Task 8 joins on it)"
+        "and exactly one record per entry: batch identity survives the window, which is what a \
+         joined retry is answered off"
     );
 }
 
@@ -1517,14 +1510,13 @@ fn each_waiter_gets_its_own_ids() {
     }
 }
 
-/// **The `ReceiptLost` widening** (Task 3b's split, named there as Task 7a's): a window swaps once
-/// and then acks N waiters in a loop, so a death partway through the loop leaves some waiters acked
-/// and some not.
+/// **The `ReceiptLost` widening**: a window swaps once and then acks N waiters in a loop, so a
+/// death partway through the loop leaves some waiters acked and some not.
 ///
 /// Every un-acked waiter must get `SubmitError::ReceiptLost` → **500**, never
 /// `SubmitError::ExecutorDead` → 503. Their ingest is durably in force by then — appended, fsynced,
-/// applied and swapped — and 503's meaning is "this node did not take your write". Task 3b's
-/// existing assertion covers a single command's shape only; this is the partial case.
+/// applied and swapped — and 503's meaning is "this node did not take your write".
+/// `an_executor_panic_is_reported_dead` covers a single command's shape; this is the partial case.
 ///
 /// **Both halves are asserted, and the second is why.** "Every waiter got `ReceiptLost`" is
 /// satisfied by an executor that panicked before acking *anybody* — including by a `fire_after`
@@ -1592,7 +1584,7 @@ fn every_unacked_waiter_in_a_partially_acked_window_gets_receipt_lost() {
     assert_eq!(lost, N - 1, "and every remaining waiter is `ReceiptLost`");
 }
 
-/// Task 3a's security backstop (C1) **survives the window**, which is the one place a naive
+/// The duplicate-external-id backstop **survives the window**, which is the one place a naive
 /// implementation re-opens it.
 ///
 /// Both retries reach the executor while the window is open, so neither can see the other in the
@@ -1651,7 +1643,7 @@ fn a_duplicate_external_id_across_one_window_is_still_refused() {
 /// for, and on every spurious doorbell token. A gauge armed at construction would be armed there
 /// and cleared by nothing — and `ExecutorStats::service_nanos_for_estimate` takes
 /// `max(ewma, in-flight elapsed)`, so an idle node would answer every later 429 with a
-/// `retry_after_s` that grows without bound towards the 300 s clamp. That is Task 6's F7 correction
+/// `retry_after_s` that grows without bound towards the 300 s clamp. That is the correction
 /// running backwards.
 #[test]
 fn an_idle_work_pass_arms_nothing() {
@@ -1677,7 +1669,7 @@ fn an_idle_work_pass_arms_nothing() {
 }
 
 // =================================================================================================
-// Task 8 — the batch-id state machine across a held window
+// The batch-id state machine across a held window
 // =================================================================================================
 
 /// Two anonymous rows: **no external id**, so no map can catch a double-ingest and the batch-id
@@ -1719,15 +1711,15 @@ fn enqueue(
     handle
 }
 
-/// **A byte-identical retry that lands in a held window JOINS it** (Task 8; contracts §3.4 r8's
+/// **A byte-identical retry that lands in a held window JOINS it** (contracts §3.4 r8's
 /// third state, lifecycle §5.1: "a retry must join the open window rather than allocate a second
 /// time").
 ///
-/// **What discriminates this from the pre-state, and why the obvious assertions do not.** Before
-/// Task 8 a held `batch_id` forced the window to close, and the retry was then answered from the
-/// durable index. That answer was already correct: same ids, one WAL record, high-water up by the
-/// batch's rows once. Those three assertions pass on the pre-state and prove nothing about this
-/// task. What the close cost, and the join does not, is a **second window**: the pass yields after
+/// **What discriminates the join, and why the obvious assertions do not.** The alternative — a
+/// held `batch_id` forcing the window to close, so the retry is answered from the
+/// durable index — is also correct: same ids, one WAL record, high-water up by the
+/// batch's rows once. Those three assertions pass on both and prove nothing about the
+/// join. What the close costs, and the join does not, is a **second window**: the pass yields after
 /// a conflict, so `A, A', C` committed in two windows and two fsyncs where the join commits one.
 /// The `wal_fsyncs` leg is therefore the load-bearing one, and it is `== 1` rather than "did not
 /// rise" because a build that never fsynced would satisfy the weaker form.
@@ -1805,9 +1797,9 @@ const CRASH_BODY_HASH: [u8; 32] = [5; 32];
 /// **Why a child process, and why no in-process fault can stand in.** `faults.rs`'s `PauseAction`
 /// carries exactly one kill action, `Panic`, and its own doc says why: a panic unwinds, runs
 /// `DeathGuard`, drops the `Job` and closes the `ExecutorWal`, and a `SIGKILL` does none of those.
-/// Task 3a deleted an `Abort` variant that was a second `panic!` with a different message, because
-/// arming it would have modelled a clean shutdown and called it a crash, and left this task the
-/// obligation to build the real thing.
+/// There is deliberately no `Abort` variant to arm — it could only be a second `panic!` with a
+/// different message, which would model a clean shutdown and call it a crash — so this test builds
+/// the real thing.
 ///
 /// The assembly, with no sleep anywhere: the child builds a fixture, arms `AfterFsync`/`Stall`,
 /// submits one batch from a thread and waits on the switchboard's own arrival counter — at which
@@ -1967,14 +1959,14 @@ fn crash_batch_ids(wal_path: &std::path::Path) -> Vec<EntityId> {
 
 /// **A retry of a held batch with different bytes 409s, and the held original is undisturbed.**
 ///
-/// This is the **owner-confirmable default** of Task 8 brief §3 — contracts §3.4's "the batch has
-/// no effect" reaches the refused retry and not the accepted original — and it is asserted where it
-/// has to be, on the *original's* outcome. Asserting only that the retry 409s would pass equally
-/// well on a build that threw the original away.
+/// The reading taken: contracts §3.4's "the batch has no effect" reaches the refused retry and not
+/// the accepted original — and it is asserted where it has to be, on the *original's* outcome.
+/// Asserting only that the retry 409s would pass equally well on a build that threw the original
+/// away.
 ///
-/// "In force" for a buffered ingest in stage 2.1 is the **live external-id map**: buffered rows
-/// have no geometry until 2.2's flush, so `visible()` cannot see them and `resolve_external_id` is
-/// the observable (Task 7a fix round, F5).
+/// "In force" for a buffered ingest is the **live external-id map**: buffered rows
+/// have no geometry, there being no flush (⊘), so `visible()` cannot see them and
+/// `resolve_external_id` is the observable.
 #[test]
 fn held_plus_different_bytes_409s_without_disturbing_the_original() {
     let tmp = TempDir::new().unwrap();
@@ -2101,10 +2093,10 @@ fn every_id_a_window_issues_is_in_the_wal() {
 /// the executor is parked *inside* `Executor::ack`, one statement before the send, and
 /// `resolve_external_id` answers. That reads `LiveState::established`, which `Executor::apply_window`
 /// writes *before* it calls `publish` — so what is proven is **insert-precedes-ack**, not
-/// swap-precedes-ack. A stronger witness is unavailable in stage 2.1: nothing a reader can observe
-/// distinguishes the two, because buffered rows have no geometry until stage 2.2's flush and
-/// `visible()` therefore cannot see the ingest at all under either ordering. When flush lands, this
-/// leg should read the swapped-in generation instead.
+/// swap-precedes-ack. **A stronger witness is unavailable**: nothing a reader can observe
+/// distinguishes the two, because buffered rows have no geometry without a flush (⊘) and
+/// `visible()` therefore cannot see the ingest at all under either ordering. When a flush lands,
+/// this leg should read the swapped-in generation instead.
 ///
 /// The fail-open it does catch: a window that acked its N waiters before establishing them. Every
 /// caller holds ids whose entities no `/control/changes` lookup can resolve yet, so a suppression

@@ -1,4 +1,4 @@
-//! Engine construction and session authorisation (task-11 brief).
+//! Engine construction and session authorisation.
 //!
 //! [`Engine::open`] runs the bundle read protocol, replays the WAL, seeds the I9 allocator, and
 //! assembles the first [`Generation`]. [`Engine::authorise`] turns a credential into a
@@ -34,8 +34,9 @@ use crate::pins::{self, GeometryRefused, PinManager, PinStats, Reclaimed};
 use crate::write::WritePath;
 use crate::{Generation, GenerationHandle};
 
-/// Engine-wide configuration (SA §7's `[disclosure]`/`[serve]` sections, the subset this task
-/// needs). Task 13 owns parsing `tessera.toml`; this is just the shape [`Engine::open`] consumes.
+/// Engine-wide configuration — the subset of SA §7's `[disclosure]`/`[serve]` sections the engine
+/// itself reads. `tessera-server` parses `tessera.toml`; this is the shape [`Engine::open`]
+/// consumes.
 #[derive(Debug, Clone, Copy)]
 pub struct EngineConfig {
     /// How long a freshly minted session token remains valid, in seconds.
@@ -87,7 +88,7 @@ pub struct EngineConfig {
     pub max_underlay_cells: usize,
     /// D-D: the size of `Engine::open`'s single shared `rayon::ThreadPool`, which every admitted
     /// request's tile loop `install`s onto (`Engine::viewport`, D-F). No second throttle exists
-    /// inside the engine — `tessera-server`'s admission gate (Task 4) already bounds how many
+    /// inside the engine — `tessera-server`'s admission gate already bounds how many
     /// requests are concurrently *in* the engine at all, so this is sized to fill the machine, not
     /// to further divide it.
     ///
@@ -135,10 +136,9 @@ pub fn default_compute_threads() -> usize {
 /// never recomputed per viewport).
 ///
 /// `handles` (a per-session entity-ID → wire-`Handle` table) is deliberately absent: that state
-/// is owned by `tessera-wire` (Task 12), which must not gain a dependency on this crate's
-/// `EntityId` (I10) any more than this crate should depend on `tessera-wire` — see this module's
-/// doc note in the task report. `tessera-server` (Task 13) holds a session's handle table
-/// alongside, not inside, this struct.
+/// is owned by `tessera-wire`, which must not gain a dependency on this crate's
+/// `EntityId` (I10) any more than this crate should depend on `tessera-wire`. `tessera-server`
+/// holds a session's handle table alongside, not inside, this struct.
 pub struct Session {
     /// Bearer token: 32 random bytes, hex-encoded.
     pub token: String,
@@ -174,14 +174,11 @@ pub enum EngineError {
     /// only when a pin TTLs out is not backpressure, and `Retry-After: 1` would be a lie at a
     /// five-minute TTL.
     ///
-    /// **Landed by the seam commit, constructed by nobody yet** *(Task 0 gate, C2)*. Task 4 is
-    /// where a session can first hold more than one pin, and its
-    /// `a_session_cannot_exceed_its_pin_cap` is where this variant acquires a caller. It is here
-    /// now because the alternative was worse: `tessera-server/src/error.rs` belongs to Track B, so
-    /// Track C adding the variant later would either have to edit another track's file or let the
-    /// refusal fall through `map_engine_error`'s catch-all into a fail-closed 500 — a
-    /// caller-fixable bound reported as a server fault. Both counts are the caller's own and the
-    /// configured limit; no corpus fact rides on this error.
+    /// Raised where a session would come to hold more than its configured number of pins;
+    /// `a_session_cannot_exceed_its_pin_cap` is the test. It is a named variant rather than a
+    /// fall-through so that `map_engine_error`'s catch-all cannot report a caller-fixable bound as
+    /// a fail-closed 500. Both counts are the caller's own and the configured limit; no corpus fact
+    /// rides on this error.
     PinCapExceeded {
         held: usize,
         limit: usize,
@@ -189,9 +186,9 @@ pub enum EngineError {
     /// A viewport request named a slice this bundle doesn't have.
     UnknownSlice(String),
     /// A slice with more than one segment. `tile_ranges` returns **segment-local** row indices
-    /// (Reference Sheet R1), while the slice's mask is built from one `Permutation` addressing
-    /// exactly one segment's row space (Phase 1's build always produces exactly one segment per
-    /// (partition, slice) — R4). Summing `count_range`/`iter_range` over a second segment's
+    /// (contracts §2.4), while the slice's mask is built from one `Permutation` addressing
+    /// exactly one segment's row space — the build produces exactly one segment per
+    /// (partition, slice). Summing `count_range`/`iter_range` over a second segment's
     /// ranges through that same row space would silently mis-count or mis-index rows belonging to
     /// a different segment; there is no segment-row offset table to fold them together correctly
     /// yet, so this fails closed rather than produce a wrong (not even necessarily *obviously*
@@ -204,7 +201,7 @@ pub enum EngineError {
     /// id, and θ's anchor plus every rank is then computed over **that partition alone**. Design
     /// §12.3 requires the anchor to be session-global across partitions — a per-partition anchor
     /// makes "below the cut" mean different things in different partitions, so the coordinator's
-    /// union stops computing §7.2's definition. Phase 1's build emits exactly one partition, so this
+    /// union stops computing §7.2's definition. The build emits exactly one partition, so this
     /// is unreachable today; serving a §12 bundle half-masked with no error is what it prevents.
     MultiPartitionSlice(String),
     /// A bundle-level file (`CURRENT`, a plugin hash) was not the shape this engine expects.
@@ -226,22 +223,20 @@ pub enum EngineError {
     /// depth of its own, so a silently-reduced offset would hand the client cells it cannot
     /// interpret; rejecting means the depth is always `zoom + offset` from the caller's own request.
     UnderlayRefused(String),
-    /// D-G: this session's row projection for `(token_id, slice, segments_version)` is being
-    /// built by a concurrent request right now. Non-blocking waiters (F4,
-    /// `tessera-bench/src/arms/load.rs:34-76`): a parked waiter would hold the server's admission
-    /// budget while burning zero CPU, so this call does not wait for the in-flight build — it
-    /// returns immediately and the caller is expected to retry. Maps to HTTP 429 with
-    /// `Retry-After` once the server wires that mapping (a later task); until then it takes the
-    /// server's fail-closed 500 arm, which is honest — never fail-open — but not yet the
-    /// retryable signal it should be.
+    /// This session's row projection for `(token_id, slice, segments_version)` is being
+    /// built by a concurrent request right now. **Waiters do not park** (`tessera-bench`'s load
+    /// arm measures the alternative): a parked waiter would hold the server's admission budget
+    /// while burning zero CPU, so this call returns immediately and the caller is expected to
+    /// retry.
+    /// **⊘ Specified, not implemented:** the intended mapping is HTTP 429 with `Retry-After`. What
+    /// happens instead is the server's fail-closed 500 arm — honest, never fail-open, but not the
+    /// retryable signal a client can act on.
     ProjectionBuilding,
-    /// D-G (task 2 of the concurrency workstream, lifecycle §3.3): this credential's mask fragment
-    /// (keyed by the canonical `(bundle_identity, auth_plugin_hash, satisfied terms)` key, never
-    /// `auth_data_hash` — see `tessera_authz::FragmentCache::get_or_build`'s doc) is being built by
-    /// a concurrent `authorise` call right now. Same non-blocking-waiters rule and the same
-    /// transitional mapping as [`Self::ProjectionBuilding`]: this call does not wait, the caller
-    /// retries, and the server takes the fail-closed 500 arm until a later task wires HTTP 429 +
-    /// `Retry-After`.
+    /// This credential's mask fragment (lifecycle §3.3), keyed by the canonical `(bundle_identity, auth_plugin_hash, satisfied terms)` key, never
+    /// `auth_data_hash` — see `tessera_authz::FragmentCache::get_or_build`'s doc — is being built
+    /// by a concurrent `authorise` call right now. Same non-blocking-waiters rule and the same
+    /// unbuilt mapping as [`Self::ProjectionBuilding`] (⊘): this call does not wait, the caller
+    /// retries, and the server takes the fail-closed 500 arm.
     FragmentBuilding,
     /// D-C: the caller's [`crate::cancel::CancelToken`] was observed flipped mid-request (the
     /// rapid-pan case — a client aborted a fetch it no longer needs). Whole-request abort:
@@ -335,21 +330,20 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 /// dictionary, the postings reader, the fragment cache).
 pub struct Engine {
     /// The live generation pointer. `Arc`-shared with [`WritePath`], which publishes every
-    /// generation swap through this exact pointer (Task 0a: the write path owns the swap, the
-    /// read paths own the load, and both must see one pointer or a swap would be invisible).
+    /// generation swap through this exact pointer: the write path owns the swap, the
+    /// read paths own the load, and both must see one pointer or a swap would be invisible.
     pub(crate) generation: Arc<GenerationHandle>,
     pub(crate) plugin: Arc<dyn Plugin>,
     pub(crate) dict: Arc<Dict>,
     pub(crate) postings: Arc<PostingsReader>,
     pub(crate) fragment_cache: Arc<FragmentCache>,
-    /// The row-projection cache — see [`RowProjectionCache`]'s own doc, which this field's
-    /// doc moved to when the seam was carved (Task 0a).
+    /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
     pub(crate) row_projection_cache: RowProjectionCache,
     /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
     /// onto (`Engine::viewport`). Built once, here, at open — never per request, and never a
     /// second pool anywhere else in this crate (no nested throttling). `pool.install` from more
     /// external (server-side) threads than this pool has workers only queues on rayon's injector;
-    /// it does not deadlock (D-D, verified in plan review).
+    /// it does not deadlock.
     pub(crate) pool: rayon::ThreadPool,
     pub(crate) config: EngineConfig,
     next_token_id: AtomicU64,
@@ -357,13 +351,13 @@ pub struct Engine {
     /// every request's pin through it rather than comparing fields inline.
     pub(crate) pins: PinManager,
     /// The write path: the WAL, the I9 allocator, the live external-id maps, the resolver's
-    /// extension state and the idempotency index (Task 0a). Every mutating engine method below is
+    /// extension state and the idempotency index. Every mutating engine method below is
     /// a thin delegation to this; the read paths that need write-side state (`resolve_external_id`
     /// and its two siblings) compose over its read accessors, so this crate has one owner for each
     /// mutable field rather than two.
     pub(crate) write: WritePath,
     /// External ids established by the bundle's own extent, at open — immutable for the process
-    /// lifetime (Task 11).
+    /// lifetime.
     external_index: ExternalIdIndex,
     /// The `tessera_id` blinding permutation's per-deployment key (contracts §2.6 r6, design
     /// memo `docs/evidence/memos/2026-07-30-tessera-id-construction.md`) — parsed once at open from
@@ -375,7 +369,7 @@ pub struct Engine {
     /// this type alone. `pub(crate)`: `viewport.rs`'s
     /// `Engine::item` inverts a caller-supplied `tessera_id` with it directly.
     pub(crate) identity_key: IdentityKey,
-    /// §14 fix round 1: the effective serial/parallel fan-out threshold
+    /// The effective serial/parallel fan-out threshold
     /// (`viewport::SERIAL_FALLBACK_MAX_ROWS`) this engine reads on every `viewport` call,
     /// defaulted at `open` to that constant and never otherwise written in production. Exists so
     /// `set_serial_fallback_max_rows_for_test` (below) has something per-`Engine` to override —
@@ -419,8 +413,8 @@ impl Engine {
 
         let prefix_dir = bundle_root.join(&prefix);
 
-        // Phase 1 has exactly one partition (no compartments — scope constraint 11); take
-        // whichever one is present rather than hard-coding its phash.
+        // A bundle carries exactly one partition today (no compartments); take whichever one is
+        // present rather than hard-coding its phash.
         let (phash, partition) = bundle
             .partitions
             .iter()
@@ -450,11 +444,11 @@ impl Engine {
         let postings =
             Arc::new(PostingsReader::open(&postings_path, true).map_err(EngineError::Io)?);
 
-        // The sidecar is lazy for real (Task 8): nothing here is opened, mapped or verified —
+        // The sidecar is lazy for real: nothing here is opened, mapped or verified —
         // `ExternalIdSidecar::deferred_from_manifest` only reads already-parsed JSON manifest
         // data (paths and digests), never the filesystem. No extent descriptor, digest, ordinal
         // or file path is handed to this crate — the constructor takes the manifests and the
-        // prefix directory and keeps everything else behind its own API (Ruling B).
+        // prefix directory and keeps everything else behind its own API.
         let external_index =
             ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
                 .map_err(EngineError::Store)?;
@@ -468,9 +462,9 @@ impl Engine {
 
         // Every piece of state that comes from durable storage — the WAL handle, the seeded I9
         // allocator, replay's overlay/buffer/`established` maps, the detached resolver state and
-        // the idempotency index — is rebuilt behind one call (Task 0 gate, F7). It lives with the
-        // type that owns it: Track B's Tasks 3a and 8 both rewrite that block, and this function
-        // is edited by Track C too.
+        // the idempotency index — is rebuilt behind **one** call, and it lives with the type that
+        // owns it. Spelling it out here would put write-path reconstruction in the middle of a
+        // function whose subject is the bundle.
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
             bundle.manifest.entity_id_high_water,
@@ -498,7 +492,7 @@ impl Engine {
             .build()
             .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?;
 
-        // `Arc`-wrapped from the start (Task 0a): the `Engine` and its `WritePath` share this one
+        // `Arc`-wrapped from the start: the `Engine` and its `WritePath` share this one
         // pointer, so a swap published by an acceptance is the swap every read path observes.
         let generation = Arc::new(ArcSwap::new(Arc::new(Generation {
             prefix,
@@ -518,7 +512,7 @@ impl Engine {
             fragment_cache,
             // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
             // after `open`, having validated the figure; every other embedder (tests, benches,
-            // examples) gets the pre-Task-5 behaviour, which is what they had and what they want.
+            // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: RowProjectionCache::new(u64::MAX),
             pool,
             config,
@@ -532,20 +526,20 @@ impl Engine {
     }
 
     /// Test-only override for the serial/parallel fan-out threshold
-    /// (`viewport::SERIAL_FALLBACK_MAX_ROWS`, currently 500,000,000 — see that constant's doc).
+    /// (`viewport::SERIAL_FALLBACK_MAX_ROWS`, 500,000,000 — see that constant's doc).
     /// Gated behind the `bench-timing` feature both crates' integration test suites already
     /// build with, so this does not exist at all — not even as a compiled, unreachable symbol —
     /// in a build without it, and a shipped binary never has it
     /// (`scripts/check-layers.sh` asserts the runtime gate is present and defaults closed).
     ///
-    /// **Why this exists.** `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 in §14's post-B9
-    /// re-calibration. A fixture that genuinely clears it is impractical to build inside a unit
+    /// **Why this exists.** `SERIAL_FALLBACK_MAX_ROWS` is 500,000,000, and a fixture that
+    /// genuinely clears it is impractical to build inside a unit
     /// test (real minutes even on the fast pipeline), which left the parallel branch's
     /// `pool.install` sweep — the collect-order/byte-equality claim `viewport.rs`'s module doc
     /// makes — with no test able to reach it. This is the fix: a per-`Engine` override, set once
     /// after `Engine::open` and before issuing requests, that the byte-equality tests use to force
     /// the fan-out to engage on a small, fast fixture without changing production behaviour at
-    /// all — **fix round 2 correction: only the SETTER below is `bench-timing`-gated; the
+    /// all. **Only the SETTER below is `bench-timing`-gated; the
     /// `serial_fallback_max_rows` field itself is present in every build and `Engine::viewport`
     /// always pays one `Relaxed` load of it** (deliberately not `#[cfg]`-gated too — two code
     /// paths in the hot path would cost auditability for the sake of one relaxed load of a value
@@ -637,8 +631,8 @@ impl Engine {
         })
     }
 
-    /// Delegates to `WritePath::allocator_high_water` (Task 0a moved the allocator behind the
-    /// write-path seam); see that method's doc.
+    /// Delegates to `WritePath::allocator_high_water`, which owns the allocator; see that
+    /// method's doc.
     pub fn allocator_high_water(&self) -> u64 {
         self.write.allocator_high_water()
     }
@@ -659,7 +653,7 @@ impl Engine {
     /// carried, never bumped: bumping it on a geometry-only swap would falsely signal a change on
     /// lifecycle §1.2's *security-state* axis, which §8.5's cache keys read.
     ///
-    /// **What it does NOT swap, and stage 2.2 must not assume otherwise.** `Engine`'s `postings`
+    /// **What it does NOT swap, and a flush must not assume otherwise.** `Engine`'s `postings`
     /// reader, `dict` and the `FragmentCache`'s `bundle_identity` are all bound at
     /// [`Engine::open`] for the process lifetime. This method is therefore a **compaction-shaped**
     /// publication: correct when the new prefix's term index and dictionary are the same ones (a
@@ -668,20 +662,20 @@ impl Engine {
     /// for a flush that introduces new terms or new entities**, which would leave every
     /// subsequently-authorised session building its fragment from the old prefix's postings. That
     /// direction is conservative rather than fail-open — a newly flushed entity is absent from the
-    /// stale fragment, so it goes unseen — but it is wrong, and 2.2 must widen this signature or
-    /// swap those fields alongside.
+    /// stale fragment, so it goes unseen — but it is wrong, and a flush must widen this signature
+    /// or swap those fields alongside.
     ///
-    /// **Obligation on the writer, and it is load-bearing** *(recorded here because it lands in a
-    /// file this track does not own)*: `WritePath::accept_ingest` and
-    /// `WritePath::apply_change_locked` (`crates/tessera-engine/src/write.rs`) still swap with
-    /// `load_full` + `store` under the WAL mutex, which is safe only while that mutex serialises
-    /// **every** publisher. The compare-and-swap below cannot lose a concurrent overlay swap, but
-    /// those two `store`s can lose a geometry published here — after which the live generation is
-    /// one whose identity this method has already retired, and a later `prune_generation` evicts
-    /// the live generation's own projections. Either a geometry publisher runs on the same writer
-    /// thread (as lifecycle §1.3 requires anyway), or those two swaps move to a compare-and-swap
-    /// too. The identity check below narrows the window; **nothing in this file closes it**, and it
-    /// must not be read as a defence that makes the two `store`s safe.
+    /// **This is the one publisher outside `write.rs`, and it is a genuine second publisher.**
+    /// Every other generation swap in this process happens on the executor thread, which is what
+    /// makes "one publisher" structural rather than a discipline (`write.rs`'s module doc;
+    /// `scripts/check-layers.sh` rule 1). The compare-and-swap below cannot itself *lose* a
+    /// concurrent overlay swap — but the executor's unconditional `store` can lose the geometry
+    /// published here, after which the live generation is one whose identity this method has
+    /// already retired, and a later `prune_generation` evicts the live generation's own
+    /// projections. The identity check below narrows that window; **nothing in this file closes
+    /// it**, and it must not be read as a defence that makes the executor's `store` safe. Closing
+    /// it means the geometry publisher running on the writer thread, which lifecycle §1.3 requires
+    /// of a flush anyway.
     ///
     /// `prefix`, `segments_version` and `watermark` are the values from the new prefix's own
     /// SEGMENTS manifest; they are taken separately from `bundle` rather than read out of it
@@ -714,27 +708,26 @@ impl Engine {
                 overlay: Arc::clone(&live.overlay),
                 buffer: Arc::clone(&live.buffer),
             });
-            // The one generation publication outside `write.rs`, and it is temporary. Task 3a made
-            // the executor thread the sole publisher — structurally, to close Track C's own finding
-            // S2, where a `load_full` + `store` loses a concurrent geometry publication and strands
-            // the LIVE generation on the drain list. `check-layers.sh` rule 1 enforces that, and
-            // the marker on the statement below is its single permitted exception. The rule
-            // **counts** those markers and fails on a second, so the cheap escape (add another) is
-            // exactly as visible as the honest fix.
+            // The one generation publication outside `write.rs`, and it is deliberately
+            // temporary. The executor thread is the sole publisher — structurally, because a
+            // `load_full` + `store` racing a geometry publication loses it and strands the LIVE
+            // generation on the drain list. `check-layers.sh` rule 1 enforces that, and the marker
+            // on the statement below is its single permitted exception. The rule **counts** those
+            // markers and fails on a second, so the cheap escape (add another) is exactly as
+            // visible as the honest fix.
             //
-            // **Why it is tolerable in 2.1, and only in 2.1.** Nothing in `tessera-server` calls
-            // `publish_geometry`; it exists because nothing else in this stage moves
-            // `segments_version`, so without it Task 4's drain list is untestable. It is a CAS in a
-            // retry loop, not an unconditional store, so it cannot itself *lose* a publication —
-            // but `WritePath`'s stores can still clobber it, which is S2 exactly, and is why the
-            // retire below reads the identity observed live rather than trusting this swap.
+            // **Why it is tolerable meanwhile.** Nothing in `tessera-server` calls
+            // `publish_geometry`; it exists because nothing else moves `segments_version`, so
+            // without it the drain list is untestable. It is a CAS in a retry loop, not an
+            // unconditional store, so it cannot itself *lose* a publication — but the executor's
+            // stores can still clobber it, which is why the retire below reads the identity
+            // observed live rather than trusting this swap.
             //
-            // **The 2.2 obligation.** Lifecycle §1.3 already requires the flush's swap-only
-            // publication step to run on the lifecycle thread. When flush lands, this becomes a
-            // `Command` the executor performs and the marker retires with it. Leaving a second
-            // publisher in place because "the CAS is safe" reintroduces the race against every
-            // publication the executor makes concurrently — the failure S2 named, and the one this
-            // exemption is borrowing against.
+            // **What retires it.** Lifecycle §1.3 already requires a flush's swap-only publication
+            // step to run on the lifecycle thread. When a flush lands, this becomes a `Command` the
+            // executor performs and the marker goes with it. Leaving a second publisher in place
+            // because "the CAS is safe" reintroduces the race against every publication the
+            // executor makes concurrently.
             let seen = arc_swap::Guard::into_inner(self.generation.compare_and_swap(&live, next)); // PUBLISHER-EXEMPT(2.2)
             if Arc::ptr_eq(&live, &seen) {
                 break live;
@@ -748,10 +741,9 @@ impl Engine {
         // `Arc`** (`write.rs` copies `prefix` and `segments_version` forward), and draining a live
         // identity is what `retire`'s guard refuses.
         //
-        // Pointer identity cannot express that and an earlier revision's `Arc::ptr_eq` here was a
-        // no-op: nothing ever re-`store`s `previous`'s own pointer, so the comparison was false in
-        // both the case it was meant to catch and every other. The claim that it mitigated the
-        // clobber was wrong and is withdrawn.
+        // Pointer identity cannot express that: an `Arc::ptr_eq` here is a no-op, because nothing
+        // ever re-`store`s `previous`'s own pointer, so the comparison is false both in the case it
+        // would be meant to catch and in every other. It does not mitigate the clobber.
         //
         // **This narrows the window; it does not close it.** A store landing after this load is
         // unobserved. The obligation above is therefore load-bearing, not belt-and-braces.
@@ -762,7 +754,7 @@ impl Engine {
         // Reclaim *after* retiring, so the list is self-bounding for as long as geometry keeps
         // moving. This is not a substitute for a periodic pass — see `reclaim_pins`.
         reclaimed.extend(self.pins.reclaim());
-        // Task 5: prune the projections of every geometry this call released — the trim above and
+        // Prune the projections of every geometry this call released — the trim above and
         // the reclaim pass alike. Coupled to the `Reclaimed` values, never to the swap; see
         // `Engine::prune_reclaimed`.
         self.prune_reclaimed(&reclaimed);
@@ -786,7 +778,7 @@ impl Engine {
         reclaimed
     }
 
-    /// Prune the row-projection cache for every geometry a reclaim pass released (Task 5).
+    /// Prune the row-projection cache for every geometry a reclaim pass released.
     ///
     /// **The licence to prune is a [`Reclaimed`] value, not any particular method**, and that is
     /// the whole of the coupling argument. `Reclaimed`s are produced at three sites — this
@@ -814,7 +806,7 @@ impl Engine {
         }
     }
 
-    /// Drop every cached row projection belonging to `token_id` — the revoke hook (Task 5).
+    /// Drop every cached row projection belonging to `token_id` — the revoke hook.
     ///
     /// Returns how many entries were removed, which is what
     /// `revoke_prunes_the_token` asserts on. See `RowProjectionCache::prune_token` for why this is
@@ -835,7 +827,7 @@ impl Engine {
     ///
     /// Called by `tessera_server::prepare` immediately after [`Self::open`], *after* it has
     /// validated both figures against `expected_concurrent_sessions`. An embedder that never calls
-    /// this gets unbounded caches — the pre-Task-5 behaviour — which is stated here rather than
+    /// this gets unbounded caches, which is stated here rather than
     /// silently assumed, and is the same posture `EngineConfig::k_min` documents for a constraint
     /// only the server's loader enforces.
     pub fn set_cache_bounds(&self, row_projection_bytes: u64, fragment_bytes: u64) {
@@ -844,32 +836,31 @@ impl Engine {
         self.fragment_cache.set_memory_bound(fragment_bytes);
     }
 
-    /// Task 7a: the row count at which a commit window closes (`ingest.commit_window_max_items`,
+    /// The row count at which a commit window closes (`ingest.commit_window_max_items`,
     /// which counts **rows** — see that key's doc).
     ///
-    /// **Additive, on [`Engine::set_overlay_soft_limit`]'s precedent and for the same reason**:
-    /// widening `start_write_executor` would touch `crates/tessera-engine/tests/pins.rs` — outside
-    /// Track B's allowlist — and four `tessera-bench` call sites.
+    /// **A setter rather than a `start_write_executor` argument**, on
+    /// [`Engine::set_overlay_soft_limit`]'s precedent: a knob every embedder and every test would
+    /// otherwise have to pass explicitly is a knob that gets passed wrong.
     ///
     /// An embedder that never calls this gets `write::DEFAULT_COMMIT_WINDOW_MAX_ROWS`, which is a
     /// real bound and deliberately not "unbounded": the drain that fills a window frees a
     /// bounded-queue slot per entry, so a window bounded only by "the queue is empty" is bounded by
     /// nothing under sustained load. **There is no unset value and no "off" for this knob** — unlike
-    /// the soft limit below, a `usize::MAX` here is an unbounded window, which is the failure the
-    /// design review raised as its CRITICAL 2, not a disabled feature. `0` is clamped to `1` (the
+    /// the soft limit below, a `usize::MAX` here is an unbounded window — the failure this bound
+    /// exists to prevent, not a disabled feature. `0` is clamped to `1` (the
     /// documented spelling for *no* grouping) rather than accepted as "close at zero rows", and
     /// `tessera-server`'s config refuses it outright.
     pub fn set_commit_window_max_rows(&self, rows: usize) {
         self.write.health().set_commit_window_max_rows(rows);
     }
 
-    /// Task 6 (D5): the overlay depth at which the executor raises an alarm.
+    /// The overlay depth at which the executor raises an alarm.
     ///
-    /// **Additive, on [`Engine::set_cache_bounds`]' precedent, and for the same reason.** Widening
-    /// `start_write_executor` would touch `crates/tessera-engine/tests/pins.rs` — outside Track B's
-    /// allowlist — and four `tessera-bench` call sites, for a knob that has this route.
+    /// **A setter rather than a `start_write_executor` argument**, on [`Engine::set_cache_bounds`]'
+    /// precedent and for the same reason.
     ///
-    /// **The predicate is evaluated once, here, as well as on every later `apply_change`.** The
+    /// **The predicate is evaluated once, here, as well as on every later deny apply.** The
     /// executor's check covers the only place the overlay grows *at runtime*, but a WAL replay
     /// builds an overlay before any executor exists (`WritePath::reconstruct`), so a node
     /// restarting with more suppressions than the limit would otherwise be over it from its first
@@ -881,8 +872,8 @@ impl Engine {
         self.write.health().set_overlay_soft_limit(limit);
         let depth = self.overlay_depth();
         // Same edge trigger as the executor's, through the same function: setting the limit re-arms
-        // it, so a limit landing under a live overlay alarms exactly once here and the next
-        // `apply_change` does not repeat it.
+        // it, so a limit landing under a live overlay alarms exactly once here and the next deny
+        // apply does not repeat it.
         if self.write.health().note_overlay_depth(depth) {
             tracing::warn!(
                 overlay_depth = depth,
@@ -901,11 +892,8 @@ impl Engine {
         self.generation.load().overlay.len()
     }
 
-    /// The row-projection cache's operator gauges (Task 5).
-    ///
-    /// Wiring these onto `/control/status` needs `tessera-server/src/control.rs`, which stage 2.1's
-    /// allowlist gives to another track; this track exposes them and reports the wiring. The
-    /// fragment tier's twin is `FragmentCache::stats`, reachable through [`Self::fragment_cache`].
+    /// The row-projection cache's operator gauges — what `/control/status` publishes as
+    /// `projection_cache`. The fragment tier's twin is [`Self::fragment_cache_stats`].
     pub fn row_projection_cache_stats(&self) -> crate::single_flight::CacheStats {
         self.row_projection_cache.stats()
     }
@@ -923,8 +911,8 @@ impl Engine {
     /// with them was `FragmentCache::set_memory_bound` — **a public knob that silently undoes the
     /// bound `tessera_server::prepare`'s startup refusal exists to enforce**, reachable from any
     /// holder of an `&Engine`. `crate::pins`' re-export argues exactly this discipline ("what
-    /// escapes is only what a caller outside this crate genuinely needs") and this was the one
-    /// place Task 5 did not honour it. The bound is set once, through
+    /// escapes is only what a caller outside this crate genuinely needs"). The bound is set once,
+    /// through
     /// [`Self::set_cache_bounds`], by the one caller that has validated it.
     pub fn fragment_cache_stats(&self) -> tessera_authz::fragment::CacheStats {
         self.fragment_cache.stats()
@@ -949,39 +937,37 @@ impl Engine {
     /// `FragmentCache::evict`, which carries that argument and the caveat that a live `Session`
     /// holding the fragment keeps its mapping alive regardless.
     ///
-    /// Stage 2.4's conformance command is the intended caller.
+    /// The conformance command is the intended caller.
     pub fn evict_fragment(&self, key: &[u8; 32]) -> bool {
         self.fragment_cache.evict(key)
     }
 
-    /// The pin drain-list gauges — see [`PinStats`]. Wiring these onto `/control/status` needs
-    /// `tessera-server/src/control.rs`, which stage 2.1's allowlist gives to another track.
+    /// The pin drain-list gauges — see [`PinStats`]. Published on `/control/status` as `pins`.
     pub fn pin_stats(&self) -> PinStats {
         self.pins.stats()
     }
 
     /// The number of cached row-space projection slots currently held (`Building` and `Ready`
     /// both counted) — exposed for tests confirming `Engine::item`'s entity-space visibility test
-    /// never constructs one (Critical C-5: this must stay `0` across drill-down calls, warm or
-    /// cold, unlike `Engine::viewport`'s path, which populates this cache deliberately).
+    /// never constructs one: this must stay `0` across drill-down calls, warm or
+    /// cold, unlike `Engine::viewport`'s path, which populates this cache deliberately.
     pub fn row_projection_cache_len(&self) -> usize {
         self.row_projection_cache.len()
     }
 
     /// Whether the external-id sidecar has opened any extent (or its locator) yet — exposed for
-    /// tests confirming `Engine::open` never touches it (Task 8's per-extent laziness
-    /// guarantee).
+    /// tests confirming `Engine::open` never touches it — the per-extent laziness guarantee.
     pub fn external_id_sidecar_is_open(&self) -> bool {
         self.external_index.0.is_open()
     }
 
-    /// The plugin this engine was opened with — Task 13's `/control/ingest` handler calls
+    /// The plugin this engine was opened with — the `/control/ingest` handler calls
     /// `terms_of_label` through this to turn an item's `access` bytes into descriptors.
     pub fn plugin(&self) -> &Arc<dyn Plugin> {
         &self.plugin
     }
 
-    /// The plugin's declared sizing bounds (R6) — Task 13's ingest handler consults these to
+    /// The plugin's declared sizing bounds — the ingest handler consults these to
     /// decide `over_bound`, never to exclude an item (bounds warn, never exclude — design §6.2
     /// r16).
     pub fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
@@ -1000,9 +986,9 @@ impl Engine {
     /// session, so a live/replay mismatch renumbers bookkeeping and never a visibility outcome —
     /// the full argument, and why it is not merely convenient, is at `WritePath::resolve_terms`.
     ///
-    /// *(Restated here at the Task 0 gate, F5: `WritePath` is `pub(crate)`, so rustdoc renders
-    /// none of its docs for a reader of this public API — a bare pointer to an invisible page is
-    /// not an obligation a caller can honour.)*
+    /// *(Restated here rather than only cross-referenced: `WritePath` is `pub(crate)`, so rustdoc
+    /// renders none of its docs for a reader of this public API, and a bare pointer to an invisible
+    /// page is not an obligation a caller can honour.)*
     pub fn resolve_terms(&self, descriptors: &[Descriptor]) -> Vec<TermId> {
         self.write.resolve_terms(descriptors)
     }
@@ -1011,9 +997,9 @@ impl Engine {
     /// replay's own `IngestBatch` rows, plus every `/control/ingest` batch accepted since) before
     /// falling back to the bundle's own `entities/external-ids-0.arrow` extent.
     ///
-    /// **Fallible** (closes review round 4's Critical C3): a real sidecar failure — digest
-    /// mismatch, out-of-order extent, corrupt locator — now propagates as `Err` rather than the
-    /// previous `ExternalIdIndex::resolve` panicking on it. A `/control/changes` request naming
+    /// **Fallible**, and that is the point: a real sidecar failure — digest
+    /// mismatch, out-of-order extent, corrupt locator — propagates as `Err` rather than panicking
+    /// inside `ExternalIdIndex::resolve`. A `/control/changes` request naming
     /// an external id backed by a corrupt sidecar gets a `500`, never a silent "unknown" *or* a
     /// panicked worker.
     pub fn resolve_external_id(
@@ -1107,17 +1093,15 @@ impl Engine {
     }
 
     /// Start this engine's write executor: move the WAL onto a dedicated thread and open the two
-    /// queues every write is submitted through (Phase 2 stage 2.1, Task 3a). **Exactly once.**
+    /// queues every write is submitted through. **Exactly once.**
     ///
     /// ## Why this is a separate call rather than a config field or an `open` parameter
     ///
-    /// The natural shapes are both closed. `EngineConfig` is a `Copy` struct with no `Default` and
-    /// no `#[non_exhaustive]`, and three of its exhaustive literals live in
-    /// `crates/tessera-engine/tests/viewport.rs`, which stage 2.1 freezes for **every** track;
-    /// `Engine::open` is called with a full positional argument list inside the equally-frozen
-    /// `crates/tessera-server/tests/http.rs`. Either route is a stop-and-report, not an expense.
+    /// `EngineConfig` is a `Copy` struct with no `Default` and no `#[non_exhaustive]`, so adding a
+    /// field breaks every exhaustive literal; `Engine::open` is called with a full positional
+    /// argument list. Either route makes every caller that never writes pay for the one that does.
     ///
-    /// It is also the better shape on its own merits, which is why it is not merely a workaround:
+    /// It is the better shape on its own merits, which is why it is not merely the cheaper one:
     /// **an engine that never ingests starts no thread at all**. Every test, bench, example and
     /// embedder that only reads gets exactly what it did before, and the one caller that writes
     /// says so explicitly.
@@ -1149,7 +1133,7 @@ impl Engine {
             .start_executor(generation, queue_bound, Some(faults))
     }
 
-    /// The write executor's posture — **the liveness signal Task 3b's `readyz` reads**. Ready iff
+    /// The write executor's posture — **the liveness signal `readyz` reads**. Ready iff
     /// [`crate::write::ExecutorPosture::Running`].
     ///
     /// Answerable without submitting anything, which is the point: readiness must be a question
@@ -1166,7 +1150,7 @@ impl Engine {
     }
 
     /// Submit an ingest batch and wait for its receipt. Rows arrive **unallocated**: entity ids are
-    /// assigned on the executor (per command now, per window at Task 7a).
+    /// assigned on the executor, at the close of the commit window this submission lands in.
     ///
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn accept_ingest(
@@ -1246,7 +1230,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// `tessera_types`-free type the store crate returns, and so no `ExtentDesc`, digest, ordinal or
 /// file path from the sidecar's own bookkeeping is ever named in this crate (Ruling B).
 ///
-/// The sidecar is per-extent lazy (Task 8): nothing is opened, mapped or digested until the
+/// The sidecar is per-extent lazy: nothing is opened, mapped or digested until the
 /// first resolution, and then only the one extent the key falls in — never the whole family.
 /// This is the `resolve_from_bundle` seam `tessera_lifecycle::overlay::replay` uses,
 /// authorisation-bearing because `/control/changes` denies whichever entity it resolves to — a
@@ -1312,21 +1296,20 @@ mod tests {
     /// that chain: the pool itself does not eat the panic before it ever reaches `spawn_blocking`).
     ///
     /// Deliberately **not** a full `Engine::open` + fixture-bundle test with an injection hook
-    /// into `tile_result` — the brief this task implements against says explicitly that a
-    /// `#[cfg(test)]`-visible injection point in the real per-tile path is not wanted, because it
-    /// would let a test-only branch diverge from the code every real request runs. This is rayon's
+    /// into `tile_result`: a `#[cfg(test)]`-visible injection point in the real per-tile path would
+    /// let a test-only branch diverge from the code every real request runs. This is rayon's
     /// own propagation guarantee, pinned against the identical construction `Engine::open` uses,
     /// which is what `self.pool.install(...)` in `Engine::viewport` actually relies on.
     ///
     /// **Why this builds its own pool rather than a real `Engine`'s.** `Engine::pool` is
-    /// `pub(crate)`, so an integration test in `tests/viewport.rs` cannot reach it at all — this
-    /// is precisely the case the fix-wave brief's fallback names ("if pub(crate) visibility
-    /// genuinely blocks an integration test, an engine-internal `#[cfg(test)]` test module is
-    /// acceptable"), which is why this test lives here rather than there. Going one step further
+    /// `pub(crate)`, so an integration test in `tests/viewport.rs` cannot reach it at all, which
+    /// is why this test lives here rather than there — an engine-internal `#[cfg(test)]` module is
+    /// the accepted answer where `pub(crate)` visibility genuinely blocks an integration test.
+    /// Going one step further
     /// — opening a real `Engine` from *inside* this module instead of building a look-alike pool
     /// — was considered and rejected as disproportionate for this one assertion: it would mean
     /// duplicating `tests/viewport.rs`'s ~100-line bundle-fixture harness (`tessera_build::build`
-    /// plus Arrow-writing the points/pairs extents) into `src/session.rs`, or an invasive refactor
+    /// plus Arrow-writing the points/pairs extents) into this module, or an invasive refactor
     /// to share that harness across a `tests/` integration binary and an internal `src/` module
     /// (different compilation units), for a test whose only load-bearing claim is "rayon
     /// propagates a worker panic through `install()`" — a property of rayon's own pool, not of

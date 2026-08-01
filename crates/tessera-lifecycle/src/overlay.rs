@@ -1,15 +1,19 @@
 //! The overlay: per-entity deny/evaluate state accumulated from `/control/changes` (lifecycle
-//! §3.1's three retirement rules, task-10 brief).
+//! §3.1's three retirement rules).
 //!
 //! `OverlayEntry` carries **three independent facts**, never one overwritable disposition:
-//! `deleted`, `suppressed` and `evaluate_terms` retire on entirely different triggers (deletion
-//! denies retire only via the stamp ledger, which does not exist until compaction lands;
-//! suppressions retire only on `Unsuppress`; predicate changes retire at their compaction fold —
-//! lifecycle §3). Collapsing them into a single enum ("last write wins") was caught fail-open in
-//! review twice (CLAUDE.md): the sequence `delete → suppress → unsuppress` must not re-expose a
-//! deleted item, and only three independent booleans/options — each cleared by nothing but its
-//! own opposite operation, or (for `deleted`) by nothing at all in Phase 1 — make that
-//! structurally impossible rather than merely tested-against.
+//! `deleted`, `suppressed` and `evaluate_terms` retire on entirely different triggers. Deletion
+//! denies retire via the stamp ledger; suppressions retire only on `Unsuppress`; predicate changes
+//! retire at their compaction fold (lifecycle §3).
+//! **⊘ Partially implemented:** only the `Unsuppress` rule exists. There is no stamp ledger and no
+//! compaction fold, so nothing retires a deletion or a predicate change — safe today precisely
+//! because nothing retires at all, and fail-open the moment either is built without its own rule.
+//!
+//! Collapsing the three into a single enum ("last write wins") is fail-open, and has been caught
+//! twice: the sequence `delete → suppress → unsuppress` must not re-expose a deleted item. Only
+//! three independent booleans/options — each cleared by nothing but its own opposite operation, or
+//! for `deleted` by nothing at all — make that structurally impossible rather than merely
+//! tested-against.
 
 use rustc_hash::FxHashMap;
 
@@ -23,7 +27,8 @@ use crate::wal::{ChangeOp, WalRecord};
 /// constructed as a stand-in for "not deleted", only ever the actual absence of any change.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OverlayEntry {
-    /// Set by `Delete`. Terminal in Phase 1: nothing clears it (no stamp ledger yet).
+    /// Set by `Delete`. **Terminal: nothing clears it**, because the stamp ledger that would
+    /// retire a deletion deny does not exist (⊘).
     pub deleted: bool,
     /// Set by `Suppress`; cleared **only** by `Unsuppress`. Never touched by `Delete` or
     /// `Predicate`.
@@ -36,7 +41,7 @@ pub struct OverlayEntry {
 /// Accumulated overlay state, keyed by (internal) `EntityId`. Never keyed by external id —
 /// external-id resolution happens once, at replay/accept time (see [`replay`]), so the hot
 /// composition path (`tessera_engine::compose`) never has to resolve identity.
-/// `Clone` (added for Task 13): the server's live `/control/changes` acceptance path builds the
+/// `Clone` because the live `/control/changes` acceptance path builds the
 /// next generation's overlay by cloning the current one and applying the newly-accepted change —
 /// see [`IngestBuffer`](crate::IngestBuffer)'s doc for why a clone-and-replace, not an in-place
 /// mutation, is what the `ArcSwap`-snapshot design requires.
@@ -76,16 +81,16 @@ impl Overlay {
     /// see this module's doc. `terms` (already resolved to `TermId`s) is used only for
     /// `ChangeOp::Predicate`; ignored (should be `None`) for the other three ops.
     ///
-    /// **`Predicate` always *sets* `evaluate_terms` to `Some(_)`, never `None`** — R5 makes
-    /// `access` optional on `/control/changes`, so a `predicate` change with no descriptors is a
-    /// representable, reachable request; treating it as "leave `evaluate_terms` unset" would be
+    /// **`Predicate` always *sets* `evaluate_terms` to `Some(_)`, never `None`** — `access` is
+    /// optional on `/control/changes` (contracts §3.4), so a `predicate` change with no
+    /// descriptors is a representable, reachable request; treating it as "leave `evaluate_terms` unset" would be
     /// fail-open in exactly the dangerous direction: a prior `predicate` that excluded this
     /// entity (an unsatisfied term set) would be silently undone by a later, descriptor-less
     /// `predicate`, falling back to the fragment's original verdict and potentially re-exposing
     /// it. `terms: None` here is therefore folded to `Some(Vec::new())` — a term set that can
     /// never intersect any `satisfied` set, i.e. the entity stays excluded, matching "sets
-    /// `evaluate_terms`", never "unsets" it (a case the brief never defines and this method
-    /// therefore refuses to invent a permissive answer for).
+    /// `evaluate_terms`", never "unsets" it — a case the contract does not define, and for which
+    /// this method therefore refuses to invent a permissive answer.
     pub fn apply(&mut self, entity: EntityId, op: ChangeOp, terms: Option<Vec<TermId>>) {
         let entry = self.entries.entry(entity).or_default();
         match op {
@@ -97,18 +102,18 @@ impl Overlay {
     }
 }
 
-/// Replay failures. Fail-closed (Global Constraint 3): a change naming an external id this
+/// Replay failures. Fail-closed: a change naming an external id this
 /// replay has never seen — neither via an `IngestBatch` row replayed so far, nor via
 /// `resolve_from_bundle` (the bundle's `entities/external-ids-0.arrow` extent, wired in by the
 /// caller) — must not be silently dropped or silently applied to the wrong entity.
 ///
-/// Generic over `E`, the caller's `resolve_from_bundle` error type (review round 4, Critical
-/// C3). `tessera-lifecycle` does not depend on `tessera-store`, so this cannot name
+/// Generic over `E`, the caller's `resolve_from_bundle` error type.
+/// `tessera-lifecycle` does not depend on `tessera-store`, so this cannot name
 /// `StoreError` directly — `tessera-engine`'s caller instantiates `E = StoreError` and gets a
 /// real propagated error instead of the closure panicking on a corrupt sidecar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayError<E> {
-    /// `404 unknown` (Reference Sheet R5): a `Change` record named an external id no known
+    /// `404 unknown`: a `Change` record named an external id no known
     /// entity (bundle or WAL-established) has ever claimed.
     UnknownExternalId(Vec<u8>),
     /// `resolve_from_bundle` itself failed — a real error, not "not found". Fail-closed: WAL
@@ -144,14 +149,14 @@ impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for OverlayError<
 /// - `Change` records resolve their `external_id` first against this replay's own map, then
 ///   against `resolve_from_bundle` (entities established before this WAL — i.e. present in the
 ///   bundle's `entities/external-ids-0.arrow` extent, contracts §2.1); an id found in neither is
-///   `OverlayError::UnknownExternalId` (`404 unknown`, R5) — fail-closed, never silently ignored.
+///   `OverlayError::UnknownExternalId` (`404 unknown`) — fail-closed, never silently ignored.
 ///   `Predicate`'s descriptors are resolved through the same `DescriptorResolver` as ingest rows.
 /// - `Lease` records carry no overlay/buffer information (I9 allocator bookkeeping only) and are
 ///   skipped here.
 ///
 /// Returns, alongside the overlay and buffer, the `external_id -> entity_id` map this replay
 /// established from `IngestBatch` rows, and the `DescriptorResolver` in its final state — both
-/// borrowed from `dict` for exactly as long as this call. Task 13's `Engine::open` immediately
+/// borrowed from `dict` for exactly as long as this call. `Engine::open` immediately
 /// detaches them (`.into_state()`) into owned data it keeps for the process's lifetime, so a live
 /// `/control/ingest` or `/control/changes` acceptance can keep resolving external ids and novel
 /// descriptors from exactly where replay left off, rather than restarting either sequence (see
@@ -230,7 +235,10 @@ mod tests {
         overlay.apply(e, ChangeOp::Unsuppress, None);
 
         let entry = overlay.get(e).unwrap();
-        assert!(entry.deleted, "delete must be terminal in Phase 1");
+        assert!(
+            entry.deleted,
+            "delete is terminal; unsuppress must not clear it"
+        );
         assert!(!entry.suppressed, "unsuppress clears suppressed only");
     }
 
@@ -261,7 +269,7 @@ mod tests {
         assert_eq!(entry.evaluate_terms, Some(vec![TermId::new(9)]));
     }
 
-    /// Review finding #1: a `predicate` change with no descriptors (R5's `access` is optional)
+    /// A `predicate` change with no descriptors (`access` is optional)
     /// must not silently clear a prior evaluate verdict — that would be fail-open (an entity
     /// excluded by an earlier unsatisfied predicate re-exposed by a later, descriptor-less one).
     #[test]

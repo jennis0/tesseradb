@@ -1,16 +1,15 @@
-//! `tessera-lifecycle` — the WAL and the I9 entity-ID allocator (plan §5, Task 9).
+//! `tessera-lifecycle` — the write-ahead log and the I9 entity-ID allocator.
 //!
 //! Fail-closed durability machinery: an unpersisted deny entry fails open, and the [`wal`]
 //! module's positional CRC rule is the difference between ordinary crash recovery and silent
 //! loss of acked security state. [`alloc`] is the append-only, never-reusing entity-ID allocator
 //! (I9) plus the signature-sorted assignment helper appended items go through. [`overlay`] and
-//! [`buffer`] (Task 10) are the replayed WAL's live authorisation-relevant state: the overlay's
-//! three independent deny/evaluate facts and the not-yet-built ingest buffer.
-
+//! [`buffer`] are the replayed WAL's live authorisation-relevant state: the overlay's three
+//! independent deny/evaluate facts and the ingest buffer.
 //!
-//! [`command`] is the Phase 2 write-executor vocabulary (stage 2.1, Task 0b) — landed ahead of
-//! its consumers, and **unused until Task 3a**. The executor thread that consumes it lives in
-//! `tessera-engine`, not here: only that crate can see both a `Wal` and a `Generation`.
+//! [`command`] is the write-executor vocabulary and [`window`] the commit window it is gathered
+//! into. The executor thread that consumes both lives in `tessera-engine`, not here: only that
+//! crate can see both a `Wal` and a `Generation`.
 
 pub mod alloc;
 pub mod buffer;

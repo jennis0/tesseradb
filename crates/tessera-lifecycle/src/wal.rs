@@ -1,6 +1,6 @@
 //! The write-ahead log (lifecycle design §4).
 //!
-//! Ack contract (wired in Task 13): **WAL append → fsync → in-memory apply/swap → 200.** Never
+//! Ack contract: **WAL append → fsync → in-memory apply/swap → 200.** Never
 //! ack before fsync — everything below exists to make that fsync boundary the one place acked
 //! state can be trusted from, and everything past it disposable.
 //!
@@ -72,9 +72,9 @@ use tessera_types::EntityId;
 
 /// One declared-scalar value carried by a WAL row.
 ///
-/// Mirrors `tessera_spatial::tiler::ScalarValue`'s three Phase 1 kinds. Duplicated rather than
-/// imported: the brief scopes this crate's dependencies to `tessera-types`, `postcard` and
-/// `crc32fast` only (no `tessera-spatial`), so the WAL carries its own copy of the (tiny, stable)
+/// Mirrors `tessera_spatial::tiler::ScalarValue`'s three kinds. **Duplicated deliberately** — a
+/// reader would otherwise "fix" it: this crate's dependencies are `tessera-types`, `postcard` and
+/// `crc32fast` alone (no `tessera-spatial`), so the WAL carries its own copy of the tiny, stable
 /// shape. Keep the two enums in lockstep if either changes.
 ///
 /// On-disk format: variant order is frozen and append-only (postcard encodes enum variants by
@@ -756,14 +756,13 @@ impl Wal {
 }
 
 /// The write executor's **sole** WAL handle: a [`Wal`] owned by value, plus the counters and — in
-/// test builds — the fault switches that make the ack contract observable (Phase 2 stage 2.1,
-/// Task 3a).
+/// test builds — the fault switches that make the ack contract observable.
 ///
 /// ## Why the executor holds this rather than a bare `Wal`
 ///
 /// Two things need to hang off every append and fsync, and neither belongs inside [`Wal`]:
 ///
-/// - **The counters** ([`WalMeter`]), which are production telemetry. Task 7a's group commit is
+/// - **The counters** ([`WalMeter`]), which are production telemetry. Group commit is
 ///   *defined* by "one fsync per window" and is measured in exactly this number; the ingest
 ///   baseline memo's ~3.2 ms floor is a cost per unit of it. `Wal` should stay a file format and a
 ///   positional CRC rule, so the counting lives one layer out.
@@ -777,7 +776,8 @@ impl Wal {
 /// [`Self::is_poisoned`] is `self.wal.is_poisoned() || self.injected_poison` — asked of the WAL on
 /// every call, never cached from the last error the executor happened to see. A posture derived
 /// from the executor's own bookkeeping can drift from the thing it claims to describe; one derived
-/// from the WAL cannot. This is the value stage 2.1's not-ready posture is built on (lifecycle §4).
+/// from the WAL cannot. This is the value the executor's not-ready posture is built on
+/// (lifecycle §4).
 ///
 /// An **injected** failure follows the real sequence exactly — `Io` on the failing call, `Poisoned`
 /// on every call after it — for the reason argued at length in [`crate::faults`]: the first call's
@@ -813,9 +813,9 @@ enum InjectedPoison {
 
 impl ExecutorWal {
     /// Take ownership of `wal`. There is exactly one of these per partition and it lives on the
-    /// executor thread — that single ownership *is* the ordering guarantee stage 2.1 delivers, in
-    /// place of Phase 1's `Mutex<Wal>` plus a fourteen-line comment explaining that holding it
-    /// across append→fsync→apply→swap was load-bearing.
+    /// executor thread — and that single ownership *is* the ordering guarantee. The alternative is
+    /// a `Mutex<Wal>` held across append→fsync→apply→swap, where the ordering is a discipline a
+    /// reader has to be told about rather than one the type enforces.
     pub fn new(wal: Wal, meter: std::sync::Arc<crate::faults::WalMeter>) -> Self {
         ExecutorWal {
             wal,

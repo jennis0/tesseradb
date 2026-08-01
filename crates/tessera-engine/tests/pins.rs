@@ -69,7 +69,7 @@ fn segments_version_of(bundle: &Bundle) -> u64 {
 ///
 /// **Why a hand-written WAL rather than an ingest call** — see
 /// [`a_pinned_request_composes_with_the_fragment_watermark_not_the_pinned_one`], whose fixture note
-/// carries the argument: after Task 3a no engine API can buffer a row for a *chosen* entity, and
+/// carries the argument: no engine API can buffer a row for a *chosen* entity, and
 /// replay is both the only remaining route and the faithful one. Only `tessera-lifecycle`'s ordinary
 /// public WAL API is used; nothing test-only exists in the engine to make this work.
 ///
@@ -230,7 +230,7 @@ fn a_pin_survives_a_generation_swap() {
 /// would read `before` instead of `before - 1`. `PinnedGeometry` is what makes that not compile
 /// today; this test is what notices if it ever does.
 ///
-/// **The executor is started explicitly** (Task 3a): `/control/changes` work is now submitted to the
+/// **The executor is started explicitly**: `/control/changes` work is submitted to the
 /// write executor thread, and an engine that never calls `start_write_executor` answers every
 /// `accept_change` with `SubmitError::ExecutorDead` rather than applying it. That is the correct
 /// posture — there is no honest 200 when there is nothing to apply the write to — so the fix is to
@@ -321,13 +321,13 @@ fn a_suppression_applies_to_a_pinned_request_immediately() {
 /// ([`seed_buffered_row`]). Neither is reachable from a client; both are needed to make the rule
 /// observable at all.
 ///
-/// **(b) changed at the Task 3a rebase, and how it changed is worth reading.** It used to hand
-/// `Engine::accept_ingest` a hand-framed `WalRow` naming an entity of the caller's choosing. That is
-/// gone: `Command::Ingest` carries `UnallocatedRow`, which has no id field, because Task 7a must
+/// **(b) goes through replay, and the reason is worth reading.** Handing `Engine::accept_ingest` a
+/// hand-framed `WalRow` naming an entity of the caller's choosing is not available:
+/// `Command::Ingest` carries `UnallocatedRow`, which has no id field, because the executor must
 /// assign a whole window's ids in one signature-sorted run — so a fresh ingest allocates at the I9
 /// high-water, and a newly allocated entity has no row and therefore contributes to no count (§11.2;
 /// `tests/write.rs`'s `visible` says the same). **No engine API buffers a row for a chosen entity
-/// any more**, and none should be added for this test's sake: "batch into an existing entity" is an
+/// at all**, and none should be added for this test's sake: "batch into an existing entity" is an
 /// open question (SA §6.6), not a settled capability, and inventing a test-only door into it would
 /// prejudge the owner's call.
 ///

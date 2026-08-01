@@ -1,16 +1,11 @@
 //! The lifecycle command vocabulary: what a handler submits to the write executor, and what it
-//! gets back (Phase 2 stage 2.1, Task 0b).
-//!
-//! **Nothing in this module is used yet.** It is landed by the seam commit so that Task 3a
-//! implements against a shape frozen at review rather than one invented mid-stream, and so that
-//! Task 7a can widen allocation from per-command to per-window without the vocabulary changing
-//! underneath it (stage-2.1 plan, "How the work parallelises", rule 4).
+//! gets back.
 //!
 //! ## Where the executor lives, and why the vocabulary lives here
 //!
-//! The executor thread itself is **not** in this crate — it is in `tessera-engine`'s `write.rs`
-//! (plan Decision 1). Its loop is append → fsync → **apply → swap** → ack, and apply/swap clone
-//! the `IngestBuffer`/`Overlay` out of a `Generation`, which holds a `tessera_store::Bundle`;
+//! The executor thread itself is **not** in this crate — it is in `tessera-engine`'s `write.rs`.
+//! Its loop is append → fsync → **apply → swap** → ack, and apply/swap clone the
+//! `IngestBuffer`/`Overlay` out of a `Generation`, which holds a `tessera_store::Bundle`;
 //! `tessera-engine` depends on this crate, so a thread here importing `Generation` is a cycle
 //! cargo refuses, and this crate deliberately has no `tessera-store` dependency. Everything in
 //! this module is entity-space and store-free, which is exactly the half that *can* live here.
@@ -18,15 +13,12 @@
 //! ## Why the commands carry unallocated rows
 //!
 //! [`crate::wal::WalRow`]'s `entity_id` is mandatory, so a command carrying `WalRow`s would force
-//! the **handler** to allocate before submitting. That makes Task 7a's window-scoped allocation
-//! impossible and its headline test — four 25-row submissions producing the same assignment as
-//! one 100-row submission — unpassable, because by the time the four submissions reach the window
-//! their IDs are already fixed. So allocation happens on the executor, and this type is what a
-//! handler submits: everything a `WalRow` needs *except* the ID, plus the resolved term set that
-//! is the item's sort signature.
-//!
-//! The type does not change between Task 3a (allocate per command) and Task 7a (allocate per
-//! window). That is the point of landing it now.
+//! the **handler** to allocate before submitting — and that makes window-scoped allocation
+//! impossible, because by the time several submissions reach one commit window their IDs are
+//! already fixed. The window's whole purpose is to sort and assign them together
+//! (lifecycle §5.1, and [`crate::window`] for the mechanism). So allocation happens on the
+//! executor, and this type is what a handler submits: everything a `WalRow` needs *except* the ID,
+//! plus the resolved term set that is the item's sort signature.
 
 use tessera_types::{EntityId, TermId};
 
@@ -39,9 +31,8 @@ use crate::wal::{ChangeOp, WalError, WalRow, WalScalar};
 ///
 /// - `descriptors` are the **raw descriptor bytes**, carried because that is what the WAL record
 ///   stores — term IDs are bundle-relative ordinals, and a term coined between builds has no
-///   durable ID at all, so a `WalRow` cannot be framed from `terms` alone. (The plan's sketch of
-///   this type omitted `descriptors`; without it the executor cannot build the record it is
-///   supposed to append. See the Task 0b report.)
+///   durable ID at all, so a `WalRow` cannot be framed from `terms` alone. Without this field the
+///   executor cannot build the record it is supposed to append.
 /// - `terms` are the **already-resolved** `TermId`s, and they are here because signature-sorted
 ///   assignment (I9, design §11.1) needs each item's resolved term set to compute its sort key
 ///   *before* any ID exists. Resolution therefore happens in the handler, ahead of the durability
@@ -65,13 +56,13 @@ impl UnallocatedRow {
     /// The allocator's view of this row: `(external_id, terms)`, with no ID yet — **moved out of
     /// the row, not copied**.
     ///
-    /// # Why it moves (Task 7a)
+    /// # Why it moves
     ///
     /// [`crate::assign_sorted`] needs a `PendingItem` to *own* its `external_id` (the sort's
-    /// tie-break) and its `terms` (the signature), and the previous shape of this method built one
-    /// by cloning both — two heap allocations per row, on the path that must sustain 10⁹ writes,
-    /// paid solely to leave the row intact. It does not need to be intact: the ids come back by
-    /// position and [`UnallocatedRow::into_wal_row_with`] puts both halves back.
+    /// tie-break) and its `terms` (the signature). Building one by cloning both costs two heap
+    /// allocations per row, on the path that must sustain 10⁹ writes, and buys only leaving the row
+    /// intact — which it does not need to be: the ids come back by position and
+    /// [`UnallocatedRow::into_wal_row_with`] puts both halves back.
     ///
     /// **The row is hollow between the two calls** — `external_id: None`, `terms` empty — and
     /// nothing may observe it in that state. The interval is one function's gather-to-frame in
@@ -94,7 +85,7 @@ impl UnallocatedRow {
     /// Returns the resolved `terms` alongside, because [`WalRow`] has no `terms` field — the WAL
     /// stores raw descriptors — and the buffer apply needs them. They are returned rather than
     /// dropped so the move is visible: the alternative is a `clone` at the call site, which is the
-    /// regression this pair exists to prevent (Task 3a measured its twin at +14% on the 10 000-row
+    /// regression this pair exists to prevent (its twin was measured at +14% on the 10 000-row
     /// arm).
     ///
     /// Deliberately paired with [`UnallocatedRow::take_pending`] in one place: these two are the
@@ -121,16 +112,18 @@ impl UnallocatedRow {
 
 /// One unit of work for the write executor.
 ///
-/// `Flush` and `Compact` are added **additively** in stages 2.2 and 2.3 — new variants, not a
-/// changed shape for these two.
+/// Ingest and change are the whole vocabulary. A flush and a compaction fold are specified as
+/// further commands and would arrive **additively** — new variants, not a changed shape for these
+/// two.
+/// **⊘ Specified, not implemented.** Neither exists, so nothing today submits anything but these.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     /// An accepted `/control/ingest` batch, rows not yet allocated (see [`UnallocatedRow`]).
     ///
     /// `batch_id`/`body_hash` are the idempotency key material and travel with the command
-    /// because the batch-state lookup is evaluated **on the executor, not in the handler**
-    /// (plan Task 8): between a handler check and the enqueue an open window can close, and a
-    /// retry that saw `Unknown` and then enqueued into a fresh window has double-allocated.
+    /// because the batch-state lookup is evaluated **on the executor, not in the handler**:
+    /// between a handler check and the enqueue an open window can close, and a retry that saw
+    /// `Unknown` and then enqueued into a fresh window has double-allocated.
     Ingest {
         rows: Vec<UnallocatedRow>,
         batch_id: String,
@@ -162,11 +155,11 @@ impl Command {
     /// shed for load leaves an item hidden that a caller was told to expect back, which is a
     /// different failure but not a better one.
     ///
-    /// Two consequences to choose rather than discover (plan Task 3a): a sustained deny flood
-    /// starves ingest completely, and this queue is unbounded in memory.
+    /// Two consequences, chosen rather than discovered: a sustained deny flood starves ingest
+    /// completely, and this queue is unbounded in memory.
     ///
     /// **A NEW VARIANT DEFAULTS TO THE BOUNDED, SHEDDABLE LANE.** This is a `matches!` over one
-    /// variant, so stage 2.2's `Flush` and stage 2.3's `Compact` are sheddable the moment they are
+    /// variant, so a `Flush` or a `Compact` is sheddable the moment it is
     /// added and nothing warns about it. That default is right for those two — a flush that cannot
     /// be admitted is backpressure working — but it is the wrong default for anything a caller is
     /// owed an unrefusable answer to, and adding a variant without visiting this line is how such a
@@ -187,11 +180,9 @@ impl Command {
 /// error, so a failed send is a proof of non-enqueue; everything after a successful send is
 /// unknown, up to and including fully applied and swapped in.
 ///
-/// *(Corrected at the Task 3b design gate, where four independent reviewers found the same defect:
-/// `ExecutorDead` was one variant covering both, its doc asserted "nothing was attempted" as fact,
-/// and the Task 3b status table was about to map the whole variant to 503 `not-ready` — a status
-/// whose meaning is "this node did not take your write". For a suppression already in force that is
-/// the fail-open the deny lane exists to prevent.)*
+/// *The single-variant form is the trap to avoid: one `ExecutorDead` covering both cases maps to
+/// 503 `not-ready`, whose meaning is "this node did not take your write". For a suppression already
+/// in force that is the fail-open the deny lane exists to prevent.*
 ///
 /// Every variant must be surfaced. A handle that swallows a dead executor while still returning
 /// 202s is the worst available outcome — the caller believes its write is in flight and it is
@@ -210,19 +201,19 @@ pub enum SubmitError {
     ///
     /// **Reachable only from the ingest lane.** A command for which
     /// [`Command::is_never_shed`] holds is submitted to the unbounded queue and can never
-    /// produce this variant; Task 6's `changes_never_429s` is the test that asserts it.
+    /// produce this variant; `changes_never_429s` is the test that asserts it.
     QueueFull { retry_after_s: u64 },
     /// The executor could not be **handed** the command — it was never started, or the queue it
     /// belongs to is disconnected. → HTTP 503 `not-ready`, and the planes report not-ready.
     ///
     /// **Nothing was attempted, and that is a fact about the code rather than an expectation of
-    /// it.** The invariant every producer must satisfy is *non-enqueue is proven* — not the
-    /// syntactic test an earlier revision gave ("every producer is a `send` that failed"), which
-    /// already failed for one of the three: `WritePath::handle` produces this from
+    /// it.** The invariant every producer must satisfy is *non-enqueue is proven* — deliberately
+    /// not the narrower syntactic test "every producer is a `send` that failed", which one of the
+    /// three producers does not meet: `WritePath::handle` produces this from
     /// `self.handle.as_ref().ok_or(..)`, where there is no channel to send on because the executor
     /// was never started. That conclusion is *stronger* than a failed send, so the mapping is right;
-    /// stating the weaker syntactic rule invites a future producer to be checked against a test its
-    /// own siblings fail. The two send-shaped producers are instances of the invariant:
+    /// stating the syntactic rule instead would invite a future producer to be checked against a
+    /// test its own siblings fail. The two send-shaped producers are instances of the invariant:
     /// `Sender::send`/`try_send` hand the job **back** inside their error, so a failed send is a
     /// proof of non-enqueue.
     ///
@@ -255,10 +246,10 @@ pub enum SubmitError {
     /// and the answer it gives is the right one either way. `tessera-engine`'s
     /// `an_executor_panic_is_reported_dead` pins the reachable one at its producer.
     ///
-    /// Stage 2.1 makes this narrow — nothing fallible sits between the swap and the ack — but
-    /// Task 7a widens it structurally: a commit window performs one swap and then acks N waiters
-    /// in a loop, so a death partway through hands every remaining waiter this error with its
-    /// effect already in force. The variant exists now so that table is right when it arrives.
+    /// Nothing fallible sits between the swap and the ack, but the group-commit shape widens this
+    /// structurally: a commit window performs one swap and then acks N waiters in a loop, so a
+    /// death partway through hands every remaining waiter this error with its effect already in
+    /// force.
     ReceiptLost,
 }
 
@@ -340,9 +331,9 @@ pub enum ExecError {
     Alloc(AllocError),
     /// This `batch_id` was already accepted, or is held in an open window, with **different**
     /// body bytes → HTTP 409 (contracts §3.4). The retry has no effect, and **a held original is
-    /// not disturbed by it** — Task 8 implemented that as the owner-confirmable default; the
-    /// argument, and what changes if the owner rules the other way, are at the one site that
-    /// decides it (`tessera-engine`'s `Executor::admit_ingest`, the `Held` arm).
+    /// not disturbed by it**; the argument for that reading, and what would change under the
+    /// opposite one, are at the one site that decides it (`tessera-engine`'s
+    /// `Executor::admit_ingest`, the `Held` arm).
     ///
     /// Evaluated on the executor rather than in the handler, which is why it is an [`ExecError`]
     /// and not something the handler decides before submitting.
@@ -351,13 +342,13 @@ pub enum ExecError {
     /// no effect (contracts §3.1's duplicate row).
     ///
     /// **A backstop, not the primary check.** `/control/ingest` already rejects duplicates in the
-    /// handler, with a detail naming them. But the live map is written at *apply* time, and Task 3a
-    /// moved apply behind a queue — so between a handler's check and the executor's insert there is
-    /// now a whole drain, and a client retry under a **fresh** `batch_id` can pass the handler check
+    /// handler, with a detail naming them. But the live map is written at *apply* time, and apply
+    /// happens behind a queue — so between a handler's check and the executor's insert there is
+    /// a whole drain, and a client retry under a **fresh** `batch_id` can pass the handler check
     /// twice. Without this the second insert silently overwrites the first, and the first item
     /// stays visible, byte-identical to a suppressed one, and reachable by **no external id at
     /// all** — so no deny can ever name it. Re-checked on the one thread that also performs the
-    /// insert, so check and apply cannot be separated (Task 3a security review, C1).
+    /// insert, so check and apply cannot be separated.
     ///
     /// Carries a **count, never the ids**: this reaches a response body, and an external id is
     /// caller-supplied data `tessera-server`'s `error.rs` keeps out of one. The handler's own check
@@ -405,9 +396,9 @@ impl From<AllocError> for ExecError {
 /// ack that precedes the swap, letting a client observe a 200 for a suppression that is not yet
 /// in force.
 ///
-/// A struct rather than a bare `Result` because later stages give it company — a window sequence
-/// number, the group-commit counters Task 10 emits — and widening a struct is additive where
-/// changing a type alias is not.
+/// A struct rather than a bare `Result` because it is expected to acquire company — a window
+/// sequence number, group-commit counters — and widening a struct is additive where changing a type
+/// alias is not.
 #[derive(Debug)]
 pub struct Receipt {
     /// The ack payload, or why there is none. See [`ExecError::Wal`] before assuming an error
@@ -445,13 +436,13 @@ mod tests {
         }
     }
 
-    /// The conversion Task 3a and Task 7a both perform, end to end: rows in, `PendingItem`s to the
+    /// The conversion the executor performs, end to end: rows in, `PendingItem`s to the
     /// allocator, IDs back by position, `WalRow`s out. Every `WalRow` field must come from the
     /// `UnallocatedRow` or from the allocator — if a field could only be filled in with a default,
     /// the type does not line up with `WalRow` and the conversion is not mechanical.
     ///
-    /// Task 7a made the pair a **round trip** rather than two independent reads, so this asserts the
-    /// round trip: every field must arrive on the far side, including the two that now travel
+    /// The pair is a **round trip** rather than two independent reads, so this asserts the
+    /// round trip: every field must arrive on the far side, including the two that travel
     /// *through* the `PendingItem` (`external_id`, `terms`) rather than staying in the row. The
     /// hollow interval between the two calls is asserted too — it is the price of not cloning, and a
     /// reader who does not know about it would be surprised by it exactly once.
