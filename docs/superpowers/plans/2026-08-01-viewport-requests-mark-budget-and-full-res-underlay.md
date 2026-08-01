@@ -21,6 +21,25 @@
 
 ---
 
+## Owner rulings, 2026-08-01 (after the independent review)
+
+1. **Phase 1 proceeds now; Phase 2 is replaced by a separate brainstorm.** The underlay should be
+   **split out of the viewport request**: computed once in full as a per-session density pyramid,
+   cached, and refreshed sporadically — *"the ~1s initial load is likely an easy price to pay, given
+   we can cache it and only do it once. Then we pay the cheaper costs as we pan+zoom."* Tasks 7 and
+   8 below are **superseded** and retained only as input to that brainstorm; deferred Task 6 becomes
+   likely-necessary under it, since building a pyramid is exactly the single-pass shape.
+2. The six non-Critical review findings are folded into Phase 1's tasks below rather than deferred.
+
+**Why the split is well-founded** (measured, `underlay_route.md`): the overview regime is expensive
+per-request (417 ms for one shallow tile at 1e8) and *static across pans*; the deep regime is cheap
+(11 ms) and volatile. Precompute where it is expensive and static. At 10⁹ the underlay is 244 ms of
+a 466 ms request and is currently re-paid on every pan. §6.2 already argues for exactly this
+decoupling — *"refreshing numbers eagerly and marks lazily is the honest ordering"* — and it also
+fixes review finding I8, where an underlay overshoot currently refuses the marks too.
+
+---
+
 ## Phase 0 is complete, and it changed this plan. Read this first.
 
 Both measurement tasks ran on 2026-08-01 against all three fixtures.
