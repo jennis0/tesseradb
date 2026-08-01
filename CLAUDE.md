@@ -17,6 +17,7 @@ counts are bitmap arithmetic. The differentiator is the access control, not the 
 | [docs/design/](docs/design/) | **The specification.** Start at its [README](docs/design/README.md) — reading order, precedence, and which claims are specified but not yet built |
 | [docs/decisions/](docs/decisions/) | Settled decisions, one per file, immutable. Read before re-litigating |
 | [docs/agents/](docs/agents/) | **How work is done here** — routing, the design process, the epic lifecycle, parallel work, and the house style |
+| [docs/roadmap.md](docs/roadmap.md) | What constrains the **order** of work — themes, dependencies, and the couplings that force serialisation. Never a status record |
 | [docs/evidence/](docs/evidence/) | Measurements, investigations, prior art. Never normative |
 | [probes/](probes/) | Raw measurement campaigns. Re-run before trusting a quoted figure |
 | [docs/archive/](docs/archive/) | Frozen. Never cite as authority; never execute |

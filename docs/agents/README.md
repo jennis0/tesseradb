@@ -12,6 +12,7 @@ tell you what the system is. For that, start at [`../design/README.md`](../desig
 | [`../evidence/`](../evidence/) | Measurements, investigations, prior art | Never normative. Evidence for decisions, not decisions |
 | [`../../probes/`](../../probes/) | Raw measurement campaigns | Same. Re-run before trusting a quoted figure |
 | [`../archive/`](../archive/) | Frozen and superseded | Never cite as authority. Do not execute |
+| [`../roadmap.md`](../roadmap.md) | What constrains the order of work: themes, dependencies, couplings | Non-normative, and not a status record. Read before sequencing work |
 | GitHub issues | What is being worked on now | The only authority on status |
 
 Two rules follow from that table and are worth stating plainly.
