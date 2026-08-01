@@ -14,7 +14,7 @@ A reader wants to know that deletion denies retire on an epoch ledger and suppre
 retire at all, and why those differ. They do not want to know that this was revision 3's
 correction to revision 1, that it was found in review, or which phase built it.
 
-That history is real and worth keeping — it belongs in `docs/decisions/` and in git, not
+On the rare occasions that history is worth keeping, it belongs in `docs/decisions/` and in git — not
 interleaved with the explanation. A document whose paragraphs are half archaeology forces every
 reader to separate the two, every time.
 

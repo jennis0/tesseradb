@@ -1,6 +1,6 @@
 # Tessera — System Architecture: Storage, Serving and Lifecycle
 
-**Status:** Draft r6 — rewritten against the built system: the streaming build, the write executor and its commit window, the admission gate, the current identity model, and the bundle tree the code actually writes (see Appendix R)
+**Status:** Draft r7 — r6's rewrite against the built system (the streaming build, the write executor and its commit window, the admission gate, the current identity model, the bundle tree the code actually writes), with the losses that rewrite introduced restored: the I13a/I13b split, three rules returned to `concurrency-lifecycle.md` as citations, and three obligations the rewrite dropped (see Appendix R)
 
 **Companion to** `architecture.md` (the specification, which owns the invariants and the *why*) and `implementation-plan.md` (which owns phasing). This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the architecture design; `contracts §n` to `contracts.md`; `lifecycle §n` to `concurrency-lifecycle.md`. Where this document and the design disagree, the design is right; where this document and `contracts.md` disagree, contracts §0.3's recorded deviations govern.
 
@@ -225,6 +225,8 @@ Four things this tree deliberately does **not** contain, each a recorded deviati
 
 **Rollback.** Flipping `CURRENT` backwards abandons segments streamed into the newer prefix; those batches survive in the WAL up to its retention window and replay into the restored prefix. Rollback is an operator action with a bounded data-loss-and-recovery story rather than a silent one.
 
+> **⊘ Specified, not implemented.** The retention window does not exist: there is no `wal_retention` knob, nothing retires a WAL entry, and nothing trims the log. The WAL grows until `wal_hard_limit_bytes` refuses further appends. That is safe in the rollback direction — nothing a replay would need has been discarded — but the *bound* the story rests on is an operator's disk, not a mechanism.
+
 The manifests are JSON deliberately: they are what an auditor reads first, and the cost at this frequency is nil. Hot structures are binary.
 
 ### 4.2 The service API
@@ -235,7 +237,7 @@ HTTP on every surface, Arrow IPC bodies for anything columnar, JSON for control 
 
 | Verb | Request | Response |
 |---|---|---|
-| `GET /v1/meta` | — | slices, coordinate extent, max tile depth, declared-scalar schema, contract versions, identity epoch, filter-operand *names*, and the containment-filtered label vocabulary — the one data-derived field, gated on `M_auth` (the viewer's authorised set) |
+| `GET /v1/meta` | — | slices, coordinate extent, max tile depth, declared-scalar schema, contract versions, identity epoch, filter-operand *names*, and the **C11** containment-filtered label vocabulary — the one data-derived field, gated on `M_auth` (the viewer's authorised set) |
 | `POST /v1/viewport` | slice, zoom, tile range or bbox, filter set, k (server-capped), optional pin | Arrow: per-tile exact masked counts, matched-and-visible alongside total-visible; sampled points (`tessera_id`, x, y, declared scalars); optional density-underlay stream; session pin |
 | `POST /v1/items/{tessera_id}` | drill-down; optional identity epoch | item detail |
 | `POST /v1/labels` | slice, viewport, filter set, optional pin | frontier nodes with at most one gated label each, plus tier |
@@ -366,11 +368,9 @@ Acknowledgement follows fsync of the batch rows (with the caller batch id), the 
 
 **Calibrate that win honestly, because the corpus's headline figures do not apply to it.** The probes' 8.9–36.7× posting compression was measured under a *full-corpus* sort. `run ≈ B × p` is a ceiling, not a forecast: the sort key is an item's whole signature, so a term's IDs are contiguous only across items whose *entire* signature matches, and `B × p` is attained only where the term effectively is the signature. Against the measured signature distribution — 54,791 distinct signatures over 2.42 M items — a 10,000-row window holds about 17 rows of the rank-100 group and 0.65 of the rank-1,000 one: runs of order 10¹ and 1. And the container arithmetic bounds it further. The benefit available to a term of density *p* at sort scope *B* is `max(1, 2¹⁶/(p·B))`, and `p·B < 2¹⁶` holds for every `p ≤ 1` once `B ≲ 6·10⁴` — below every window size a deployment's heap budget permits. **So the window collects the posting-storage win and none of the container-count win** — and container count is what a union costs, since bitmap operations cost O(containers touched), not O(cardinality). Raising the bound buys run length sub-linearly and costs sort work, window latency and residency; it is not a free dial.
 
-**Two retirement rules, deliberately different.** A *WAL entry* retires once its data is segment-durable, subject to the rollback-replay retention window. An *overlay entry* is governed by §6.5's rule, which is strictly later for deny dispositions. Conflating the two is fail-open, and it is stated here at the point of temptation.
+**Two retirement rules, deliberately different.** A *WAL entry* retires once its data is segment-durable, subject to the rollback-replay retention window — which does not exist, and §4.1 marks why. An *overlay entry* is governed by §6.5's rule, which is strictly later for deny dispositions. Conflating the two is fail-open, and it is stated here at the point of temptation.
 
-**The positional CRC rule.** Truncate-at-first-bad-CRC applied mid-log would silently drop acked denies. Recovery therefore treats a bad CRC by position, not by policy.
-
-**The disk-full triple**, in order of how often it is got wrong: never a 200 without fsync; never a silent drop; and **never a refusal that leaves the item visible**. The third is the one a naive fail-closed implementation breaks.
+**Two recovery rules live in lifecycle §4 and are not restated here**: how recovery treats a bad CRC by position rather than by policy (truncate-at-first-bad-CRC applied mid-log would silently drop acked denies), and what a full disk must do — the triple whose third member, *never a refusal that leaves the item visible*, is the one a naive fail-closed implementation breaks. Both are rules an implementer must read there in full; a justification without its rule is worse than either a copy or a pointer.
 
 ### 6.3 Admission, backpressure and cancellation
 
@@ -405,7 +405,7 @@ Fragments are content-addressed, shared across tokens, and served as immutable f
 
 Predicate changes, deletions and suppressions become overlay entries with *evaluate* or *deny* dispositions, term sets inline, owned per partition because they carry entity IDs. Overlay size is a first-class metric: I1's composition cost is linear in it, and its configured bound triggers fragment-refresh scheduling rather than refusal — the same asymmetry as §4.2's backpressure. Deletion additionally removes the entity from postings, enqueues affected labels for invalidation, and leaves a row tombstone for compaction. IDs are never reused (I9), and the allocator is fuzzed for exactly that.
 
-Overlay precedence is `deleted > suppressed > evaluate_terms`, single-sourced. Two transcriptions of a precedence rule is how a suppression stops suppressing. The sequence `delete → suppress → unsuppress` must not re-expose a deleted item, and three independent fields make that structurally impossible rather than merely tested.
+Overlay precedence between the dispositions is stated once, in lifecycle §3.1, and is not restated here. The sequence `delete → suppress → unsuppress` must not re-expose a deleted item, and three independent fields make that structurally impossible rather than merely tested.
 
 **The deny-retirement rule.** Because §6.5's epoch advance is a pure union, it can never *remove* an entity from a fragment: a deleted or suppressed item's invisibility rests entirely on its deny entry until every fragment predating the deletion is gone. So a deny entry may leave the overlay only when **no servable fragment epoch predates the deletion** — that is, when every cached fragment across every live token has been rebuilt from post-deletion postings. Compaction may force full rebuilds rather than monotone advance precisely to bound how long that takes.
 
@@ -417,7 +417,7 @@ Retiring a deny entry on **any** earlier trigger — segment durability, compact
 
 The merge scheduler follows the Lucene-derived shape: tiered natural merges (2 MB floor, ~10 per tier, 5 GB max merged), deletes-triggered merges at 20% tombstones, forced compaction; Morton re-ranking as a decorator above 2¹⁸ rows and always on forced merges. A compaction rewrites permutation and columns, **folds posting deltas into the base tier**, drops compaction-tombstoned entries, and publishes a new prefix. Masks, node memberships, generating sets and the entity-space term index are untouched.
 
-> **⊘ Specified, not implemented.** There is no merge scheduler and no compaction. A bundle has one segment per partition-slice, written by the build; nothing yet creates a second.
+> **⊘ Specified, not implemented.** There is no merge scheduler and no compaction. A bundle has one segment per partition-slice, written by the build; nothing yet creates a second. **A forward obligation on whoever builds it:** compaction reads and rewrites columns unmasked, which is sanctioned only because its outputs are bundle artifacts. Its rewrite must never be able to reach response data, and that must be proved by a test rather than held by convention — an unmasked reader whose output can reach a viewer is an I2 breach (every aggregate computable from inside `M_auth` alone) by any route it takes.
 
 **The carry-forward rule is compaction's entire specification.** Compaction snapshots a segments-version, rewrites that set, and at publication *carries forward verbatim* everything accepted after its snapshot: segments, deltas, **post-snapshot tombstones, the active suppression set, and unfolded overlay entries** — folding away only snapshot-covered state. A post-snapshot tombstone folded away while its entity survives in the rebuilt base is fail-open. The fold obligation extends to *evaluate* entries too: compaction rewrites affected entities' postings from the term sets those entries carry, which is what makes predicate changes eventually retirable at all. Flushes never block.
 
@@ -541,6 +541,8 @@ Failure is closed everywhere: a node that cannot verify its bundle marks itself 
 
 Recorded in the design's own style, because each will otherwise be re-proposed.
 
+*Provenance.* D1–D10 stand from r1, D6 amended at r2; D11–D16 are new at r2; D1, D2 and D4 were amended at r4 at the owner's direction; D16 was rewritten at r6 when the per-session handle model was retired, and D17 added at r6 for the single write executor and the commit window.
+
 1. **Rust-native end to end; Python is a first-class consumer, never a component.** Every surface is language-agnostic HTTP + Arrow. Rejected: PyO3 in-process serving — it forfeits process-level compartment isolation, entangles the trusted computing base with a host interpreter, and saves one process.
 2. **`authorise` on its own session plane.** Off the admin plane because the app tier should hold a credential that mints sessions, not one that ingests or deletes. Off the viewer plane: with a bare-claims plugin this is structural — an untrusted surface minting capability from unverifiable claims is a bypass — and with a verifiable-credential plugin it softens to defence-in-depth plus cost control, since mask construction is the system's most expensive operation and an openly reachable minting endpoint is a resource-exhaustion surface. A verified-client authorise profile stays possible without redesign; the door is recorded open rather than closed on principle.
 3. **HTTP + Arrow IPC on every plane; no gRPC.**
@@ -559,7 +561,7 @@ Recorded in the design's own style, because each will otherwise be re-proposed.
 16. **A point's wire identity is a stable, keyed `tessera_id`, not a per-session handle.** Stability is what lets a client bookmark, share and reconcile a point; the handle bought nothing the permutation's opacity does not, and after the entity-ID column left `columns.arrow` no request-path artifact stores an entity ID at all. Per-session handles are retained for Phase 3 node handles, where the identity genuinely is per-session. C17 records what linkability across sessions and principals costs.
 17. **One thread owns the WAL, by value; the commit window sets the signature-sort scope at the server.** Ordering stops being a discipline defended by a comment and becomes a property of there being nowhere else for the steps to happen — and the sort scope stops being whatever chunk a client happened to POST.
 
-**Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across slices (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), and how a large batch lands into a live bundle (§6.7).
+**Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across slices (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity index-ordinal split of plan §14, which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
 
 ## Appendix R — Review record
 
@@ -577,5 +579,14 @@ r1 was reviewed by two independent reviewers with no stake in the draft — one 
 - **The bundle tree (S30).** Contracts §0.3 has **eleven** deviations, not nine, and all eleven remain live; five of them target this document's §4.1, which had never been amended. The tree now matches the code: `morton.u32`, `pairs.parquet`, `terms/postings.arrow` CSR, per-partition side-manifests, the external-ID sidecar and its locator, and no tiles or candidates files. The sidecar's **transitional** status — an owner ruling mirrored verbatim in the source — enters this document for the first time.
 
 *Added because it exists and was undescribed:* the commit window and its honest sizing analysis (§6.2), the single write executor that owns the WAL by value (§6.2, D17), the two-stage admission gate and cooperative cancellation (§6.3), and executor posture (§9).
+
+**r7** applies an independent loss-detection review of r6 — a reviewer with no stake in the rewrite, reading it against the corpus and the code for what the rewrite dropped or overstated. Eight findings, none of them judgement calls:
+
+- **The I13a/I13b split.** Design r25 split I13 because one number named two properties: I13a (a failed or cancelled request yields no partial answer) is implemented and annotated throughout the code; I13b (a partition not consulted fails closed) has one hardcoded partition, no gate and no test. This document still used a bare `I13` in three places meaning two different invariants — §2.2 and §2.3 mean I13b, §5 means I13a — which re-merged the split and let I13a's coverage read as evidence for I13b.
+- **Two false or unmarked claims about the configuration.** `commit_window_max_age_ms` is inert — an age bound has no subject in an executor whose commit window never waits, and a test asserts it — but §6.2 claimed a size-or-age bound and the config example carried the key unannotated, directly above two keys marked inert. And "every section is `deny_unknown_fields`" excluded `[disclosure]`, which is hand-validated: it rejects a missing key and silently ignores an unknown one. The exposure is narrower than the false sentence implied, but it fell on the one section whose keys are disclosure controls.
+- **Three rules returned to their owner.** Overlay precedence, the positional CRC rule and the disk-full triple are stated in `concurrency-lifecycle.md`; §6.6 and §6.2 restated them, and §6.6 restated *the rule against restating them* next to the rule it governs. §6.2's copy was the worse shape — it carried each rule's justification without the rule, leaving an implementer knowing that position matters and not what to do at either position. All three are now citations. The drain-entry and pin-reclaim-ordering points stay, being statements about system shape rather than transcriptions.
+- **Three obligations the rewrite dropped.** Removing r5's sealed maintenance reader was right — it does not exist — but compaction is still specified, still rewrites columns unmasked, and the rule that its output may never reach a response left the document with it; it returns as a forward obligation inside §6.7's marker, to be proved by test. `/v1/meta`'s label vocabulary regains its **C11** citation, the leak-register row justifying the one data-derived field on the one untrusted metadata verb. The decision list regains a provenance line.
+- **A dangling dependency and a misleading example.** §4.1's rollback story and §6.2's WAL-retirement rule both rest on a retention window that has no knob and no mechanism; the config regeneration correctly dropped `wal_retention`, leaving the reliance unmarked. §4.1 now marks it and §6.2 cites that marker. The example's `max_k = 500` is labelled illustrative against a default of 1000.
+- **A deferral restored.** The mask-build tier alternative — plan §14's entity index-ordinal split — left the deferral list while §9's fragmentation metric, which exists to detect its trigger, stayed and said so.
 
 *Raised, not settled.* Three items want an owner's ruling and are deliberately left as they stand: the presence registry and the session pin's rate of change each want an Appendix C row; `README.md`'s marker table needs this document's ⊘ markers folded in, which is an edit to a file this revision did not touch.

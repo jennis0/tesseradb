@@ -71,5 +71,5 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `derived-artifact-gating.md` | Provisional — under review |  |
 | `implementation-plan.md` | — |  |
 | `slices-and-multi-table.md` | Provisional — under review |  |
-| `system-architecture.md` | Normative — r6 | 16 |
+| `system-architecture.md` | Normative — r7 | 17 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
