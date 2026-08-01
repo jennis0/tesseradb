@@ -1,7 +1,7 @@
-//! Task 8 Step 1: the end-to-end batch-build smoke test at 250-item scale.
+//! The end-to-end batch-build smoke test, at 250-item scale.
 //!
 //! Synthesises a tiny `points.parquet` + `pairs.parquet`, runs `build`, then re-reads the
-//! bundle through the Task 7 read protocol and checks the properties the build is *for*:
+//! bundle through the bundle read protocol and checks the properties the build is *for*:
 //! digest-verified manifests, signature-grouped entity IDs (I9/§11.1), postings that agree
 //! with the input relation, the `(term, entity)`-sorted `pairs.parquet`, and the external-ids
 //! extent.
@@ -91,7 +91,7 @@ fn source_morton(e: u64) -> u64 {
     tessera_spatial::interleave(cx, cy).raw() as u64
 }
 
-/// A points file in the shape the Phase 0 corpus uses: `entity_id` + `morton`, no coordinates.
+/// A points file in the shape the probe corpus uses: `entity_id` + `morton`, no coordinates.
 fn write_morton_points(path: &Path) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),

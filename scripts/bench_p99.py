@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Task 16, Step 3: the 10^9 exit-criteria measurement (plan §5).
+"""The 10^9 p99 measurement.
 
 Boots `tessera serve` against a pre-built bundle (default `/tmp/tessera-1e9`, built by
 `scripts/build_full.sh`), authorises one realistic principal (w = 10,000 random grants over the
@@ -7,9 +7,9 @@ bundle's real dictionary — the recipe in `probes/mask_probe.py`'s "random w=" 
 warm-up pass (fragment build + row-projection cache fill — reported separately, NOT counted
 against the viewport budget), then fires >= 2,000 random-pan viewports (~300 tiles each, mixed
 zooms, k=30) over HTTP and reports p50/p99/max both server-side (`x-tessera-server-us` response
-header, Task 16's added instrumentation) and end-to-end (wall-clock around the HTTP call).
+header) and end-to-end (wall-clock around the HTTP call).
 
-Exit gate (plan §5): server-side p99 < 10 ms.
+The gate this exists to test: server-side p99 < 10 ms.
 
 Usage: reference/.venv/bin/python scripts/bench_p99.py [--bundle /tmp/tessera-1e9] [-n 2000]
 """
@@ -54,8 +54,8 @@ def read_dictionary_descriptors(bundle_root: Path) -> list[str]:
 
 def spawn_with_long_boot_deadline(bundle_root: Path, tmp_dir: Path, boot_deadline_s: float):
     """Like `harness.spawn_server`, but with a boot-health deadline long enough for a 10^9-row
-    bundle (Task 7's ledger note: `verify_files` reads every bundle byte at boot, ~60 GB here —
-    this can be minutes, not the 20s `spawn_server` allows for the small fixtures)."""
+    bundle: `verify_files` reads every bundle byte at boot, ~60 GB here, which can be minutes
+    rather than the 20 s `spawn_server` allows for the small fixtures."""
     harness.ensure_cli_built()
 
     cache_dir = tmp_dir / "cache"

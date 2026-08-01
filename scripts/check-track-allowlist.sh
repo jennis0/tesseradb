@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/check-track-allowlist.sh — stage 2.1 file ownership, enforced (plan rule 3).
+# scripts/check-track-allowlist.sh — parallel-track file ownership, enforced (decision 0010).
 #
 # Four tracks work in parallel off the seam commit and must own disjoint files. This reads
 # `.claude/track-allowlist.toml`, diffs the working branch (or the index) against the merge base,
@@ -11,8 +11,8 @@
 #
 # **Two verdicts, not one.** `[frozen]` is consulted BEFORE the allowlist and refuses for every
 # track, with its own message; `[shared]` ∪ `[track.<t>]` is the allowlist proper. The distinction
-# is load-bearing: a frozen path listed under `[shared]` reads as a freeze and behaves as a
-# universal permit, which is what it did until the Task 0 gate (finding C1).
+# is load-bearing: a frozen path listed under `[shared]` reads as a freeze while behaving as a
+# universal permit, which is what it did before `[frozen]` was consulted first.
 #
 #   check-track-allowlist.sh <track>              # branch: merge base -> working tree
 #   check-track-allowlist.sh <track> --staged     # index only (pre-commit)
@@ -137,8 +137,8 @@ run_audit() {
   fi
 
   echo
-  # A pattern naming a file a task is supposed to CREATE is legitimately dead until it does
-  # (`engine/tests/cache.rs` is Task 5's). The ones worth acting on are typos and paths that moved.
+  # A pattern naming a file a track is supposed to CREATE is legitimately dead until it does.
+  # The ones worth acting on are typos and paths that moved.
   echo "== dead patterns (match no tracked file — a typo, a moved path, or a file not yet created) =="
   local -a all_files
   mapfile -t all_files < <(git -C "$repo_root" ls-files)
@@ -174,7 +174,7 @@ run_audit() {
 
 # ---------------------------------------------------------------------------- --selftest
 
-# The demonstration the Task 0 gate asks for (C1): a frozen path is refused for EVERY track,
+# The demonstration: a frozen path is refused for EVERY track,
 # including tracks whose own section is otherwise permissive, and the ordinary verdicts still hold.
 # Table-driven against `classify`, which is the same function the real run uses — a selftest over a
 # reimplementation of the matcher would prove nothing about the matcher.
@@ -283,7 +283,7 @@ violations=()
 for file in "${changed[@]}"; do
   [ -n "$file" ] || continue
   # Frozen first, and it is not an allowlist entry: no `[shared]`/`[track.*]` pattern can rescue a
-  # path named here (Task 0 gate, C1).
+  # path named here.
   if matches_any "$file" ${frozen_patterns[@]+"${frozen_patterns[@]}"}; then
     frozen_hits+=("$file")
   elif ! matches_any "$file" ${patterns[@]+"${patterns[@]}"}; then

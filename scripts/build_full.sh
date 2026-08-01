@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Task 16, Step 2: build the 10^9-item bundle — the exit-criteria measurement's fixture.
+# Build the 10^9-item bundle — the p99 measurement's fixture.
 #
 # No --limit: the full data/scaled/geometry.parquet / pairs/categories-subclass.pairs.parquet
 # corpus, onto the identity extent (geometry.parquet stores Morton-derivable grid coordinates
-# already quantised to the 0..65536 grid — Task 8's read_points Morton branch requires this exact
-# extent, shared-context constraint 7).
+# already quantised to the 0..65536 grid, and `input::read_points`'s Morton branch requires this
+# exact extent).
 #
-# Disk is tight (shared-context / handover notes): check free space first and abort rather than
+# Disk is tight on the machine this was written for: check free space first and abort rather than
 # run partway and fail with a half-written bundle. Post-r5 (morton u32) the bundle is ~45 GB, down
 # from ~60 GB; this does not delete anything — if there isn't room, stop and let the operator
 # decide what to clear.

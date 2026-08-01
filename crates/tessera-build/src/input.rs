@@ -5,15 +5,15 @@
 //! decoder's):
 //!
 //! * **points** — `entity_id` plus geometry. Geometry is accepted either as explicit `x`/`y`
-//!   columns or, when the corpus stores Morton codes instead (the Phase 0
+//!   columns or, when the corpus stores Morton codes instead (the probe corpus's
 //!   `data/scaled/geometry.parquet` does), as a `morton` column that is de-interleaved back to
 //!   grid-cell coordinates. See [`read_points`].
 //! * **pairs** — the exploded `(entity_id, term_id)` relation.
 //!
 //! Both honour a `limit`: `entity_id < limit` selects a prefix of entity space, which is a
 //! whole coherent corpus because entity IDs are append-only (I9, dataset §4.1). Row groups
-//! whose statistics prove they hold no qualifying row are skipped outright — at the Phase 0
-//! scales the pairs relation is billions of rows and the prefix is a few hundred thousand.
+//! whose statistics prove they hold no qualifying row are skipped outright — at 10⁹ items the
+//! pairs relation is billions of rows and the prefix is a few hundred thousand.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -93,7 +93,7 @@ fn decode_worker_count(row_groups: usize) -> usize {
 
 /// The streaming form of [`read_points`]: calls `visit` once per selected row, holding only a
 /// bounded number of decoded record batches. The batch build uses this so the points file —
-/// 10⁹ rows in the Phase 0 corpus — can be traversed several times without ever being
+/// 10⁹ rows in the probe corpus — can be traversed several times without ever being
 /// materialised. Row groups are decoded in parallel; rows are therefore visited in **no
 /// guaranteed order** (see [`decode_worker_count`]). `visit` returns [`ControlFlow`]:
 /// `Break(())` stops the scan promptly (remaining rows are skipped and the decode workers wind
@@ -138,7 +138,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
             });
         };
 
-    // Project: the Phase 0 corpus carries columns this build has no use for, and at 10^9 rows
+    // Project: the probe corpus carries columns this build has no use for, and at 10^9 rows
     // not decoding them is the difference between one pass and two. Each decode worker builds
     // its own `ProjectionMask` from these root indices against its own reader.
     let mut roots = Vec::with_capacity(wanted.len());
@@ -161,9 +161,8 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
         Morton(Vec<u64>, Vec<u64>),
     }
 
-    let (tx, rx) = mpsc::sync_channel::<std::result::Result<PointCols, BuildError>>(
-        DECODE_CHANNEL_BATCHES,
-    );
+    let (tx, rx) =
+        mpsc::sync_channel::<std::result::Result<PointCols, BuildError>>(DECODE_CHANNEL_BATCHES);
     std::thread::scope(|scope| {
         for shard in shards {
             let tx = tx.clone();
@@ -200,10 +199,9 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                                 read_f32_column(path, &batch, xi, "x")?,
                                 read_f32_column(path, &batch, yi, "y")?,
                             ),
-                            Geometry::Morton(mi) => PointCols::Morton(
-                                ids,
-                                read_u64_column(path, &batch, mi, "morton")?,
-                            ),
+                            Geometry::Morton(mi) => {
+                                PointCols::Morton(ids, read_u64_column(path, &batch, mi, "morton")?)
+                            }
                         };
                         if tx.send(Ok(cols)).is_err() {
                             // The consumer went away (its own error path); stop quietly.

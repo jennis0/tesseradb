@@ -1,5 +1,5 @@
-//! Task 12, Step 1: failing tests for `tessera-wire`'s handle tables and Arrow IPC payloads
-//! (I10 — the trust boundary between entity space and the wire).
+//! `tessera-wire`'s handle tables and Arrow IPC payloads (I10 — the trust boundary between
+//! entity space and the wire).
 
 use arrow::array::{Array, Float32Array, UInt64Array};
 use arrow::datatypes::DataType;
@@ -199,7 +199,8 @@ fn payload_bytes_never_contain_a_raw_entity_id_encoding() {
 }
 
 /// The points batch's identity column is `tessera_id: uint64` — the wire identity after the
-/// r6/r21 boundary change, replacing the per-session `handle: uint32` this crate used to emit.
+/// boundary changed (decision 0006), replacing the per-session `handle: uint32` this crate
+/// used to emit.
 #[test]
 fn the_points_batch_identity_column_is_tessera_id() {
     let tessera_ids = [10u64, 20, 30];

@@ -32,7 +32,7 @@ pub enum BuildError {
     /// [`tessera_types::IdentityError::EntityOutOfRange`], which the allocator cap (I-1) makes
     /// unreachable in practice. Never a truncation: see `IdentityKey::forward`'s doc comment.
     Identity(tessera_types::IdentityError),
-    /// Contracts §1 r6: an external ID longer than 64 bytes is a typed error at build, never a
+    /// Contracts §1: an external ID longer than 64 bytes is a typed error at build, never a
     /// truncation — a truncated key is a *different* key, and two callers' keys sharing a
     /// 64-byte prefix would collide into one entity.
     ExternalIdTooLong {

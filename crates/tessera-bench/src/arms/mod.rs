@@ -70,10 +70,10 @@ impl ArmRun {
         let timing = Timing::from_samples(samples);
         let normalised = crate::report::Normalised::derive(timing.min_ns, &work);
 
-        // A cell whose mask covers everything measures the absence of masking. Phase 0 flagged
-        // exactly this ("the 13.8 s row is degenerate — that principal sees 100% of the corpus,
-        // so there is nothing to mask; compare equal-coverage rows"). Mark it so a collator
-        // cannot quietly average it in with real principals.
+        // A cell whose mask covers everything measures the absence of masking. The probes
+        // flagged exactly this ("the 13.8 s row is degenerate — that principal sees 100% of the
+        // corpus, so there is nothing to mask; compare equal-coverage rows"). Mark it so a
+        // collator cannot quietly average it in with real principals.
         if work.degenerate && !flags.iter().any(|f| f == "degenerate") {
             flags.push("degenerate".to_string());
         }
@@ -81,7 +81,7 @@ impl ArmRun {
         // A Roaring container holds 2^16 entities, so a corpus of N spans at most ceil(N/65536)
         // of them: 4 at 250k, 37 at 2.42M, 382 at 25M. Below ~32 there are too few denominators
         // for `ns_per_container` to mean anything — the cost is dominated by work *within*
-        // containers, which is the regime Phase 0's model explicitly does not describe (its
+        // containers, which is the regime the probes' model explicitly does not describe (its
         // headline, 114 ns/container, was fitted across 399 -> 1.5M containers). Flag it rather
         // than let a collator gate on a ratio built from four samples.
         const MIN_CONTAINERS_FOR_NORMALISATION: u64 = 32;

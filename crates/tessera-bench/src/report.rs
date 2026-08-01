@@ -54,8 +54,8 @@ pub struct Record {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Work {
     /// Roaring containers spanned by the mask being exercised. **The primary work measure.**
-    /// Phase 0 found union cost linear in containers and only ~2x per-container drift across
-    /// 400x of scale, so this is the number that makes a latency portable.
+    /// Union cost is measured linear in containers, with only ~2x per-container drift across
+    /// 400x of scale (`probes/results.md`), so this is the number that makes a latency portable.
     pub containers: u64,
     /// Cardinality of the mask. Reported *beside* `containers`, never instead of it — two masks
     /// of equal cardinality can differ ~130x in cost through contiguity alone.
@@ -89,8 +89,9 @@ pub struct Work {
     pub degenerate: bool,
 }
 
-/// Latencies. `min` is the headline (Phase 0's convention), the full sample is kept so a
-/// distribution can be re-derived without re-running.
+/// Latencies. `min` is the headline — the probes' own convention, for the reason
+/// `metrics::repeat` gives — and the full sample is kept so a distribution can be re-derived
+/// without re-running.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Timing {
     pub n_repeats: u32,

@@ -1,5 +1,5 @@
-//! Round-trip test for CSR postings (Task 5): tagged records in a single Arrow IPC file,
-//! `posting.arrow` — record ordinal = term_id (Reference Sheet R4).
+//! Round-trip test for CSR postings: tagged records in a single Arrow IPC file,
+//! `posting.arrow` — record ordinal = term_id (contracts §2.4).
 
 use tessera_authz::{write_postings, PostingRef, PostingsReader};
 use tessera_types::TermId;

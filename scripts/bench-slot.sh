@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Run a benchmark under an exclusive, machine-wide slot.
 #
-# **Why this exists.** Phase 2 stage 2.1 runs several tracks in parallel worktrees, and a
-# criterion run is only meaningful against a quiet box. Track C's Task 4 fix round measured
-# `tile_sweep_k0` at 3.55 ms and `compose` at 99 ns — +50% and +43% — because three other tracks
-# were compiling at load average 12.1. It caught that and discarded the run, but only because it
-# happened to look; the next worker will not. An ad-hoc "check the load average" instruction is
+# **Why this exists.** Several tracks work this repo in parallel worktrees, and a benchmark is
+# only meaningful against a quiet box. One fix round measured `tile_sweep_k0` at 3.55 ms and
+# `compose` at 99 ns — +50% and +43% — because three other tracks were compiling at load average
+# 12.1. It caught that and discarded the run, but only because it happened to look; the next
+# worker will not. An ad-hoc "check the load average" instruction is
 # not a mechanism, and the viewport-bench regression memo
 # (docs/evidence/memos/2026-07-31-viewport-bench-regression.md) records how expensive a
 # misattributed measurement is to unpick afterwards.
