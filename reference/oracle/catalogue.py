@@ -668,6 +668,15 @@ def verify(bundle: Bundle) -> VerificationReport:
     # too. Resizing `filler_tail` breaks the second half silently — the block boundaries move, no
     # posting check notices, and the byte-scan's precondition assertion fires far from the cause.
     high_tail = report.blocks.get("high_tail", set())
+    if not high_tail:
+        # Checked rather than skipped. `blocks.get(..., set())` followed by `if high_tail` would
+        # make deleting or renaming the block a silent pass — and `outside_above` below would still
+        # be satisfied by `filler_tail`, so `verify()` would report green on a corpus that cannot
+        # supply the byte-scan's grant set at all.
+        report.failures.append(
+            "high_tail is absent from the corpus, so no grant set can put entity ids above "
+            f"{HIGH_ID_FLOOR} on both sides of it — see the layout note"
+        )
     if high_tail and min(high_tail) < HIGH_ID_FLOOR:
         report.failures.append(
             f"high_tail starts at {min(high_tail)}, below the byte-scan floor {HIGH_ID_FLOOR} — "

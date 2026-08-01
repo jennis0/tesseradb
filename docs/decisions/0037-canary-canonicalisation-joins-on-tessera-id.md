@@ -28,8 +28,9 @@ an equality on a column the wire already carries.
 
 Canonicalisation is then:
 
-- the points batch compared as **its own bytes, in served order** — contracts §2.6 makes selection
-  order contract, so comparing it unsorted is stronger than sorting it first;
+- the points batch compared as **its own bytes, in served order** — contracts §3.2 orders the
+  served points ascending by `tessera_id` within each tile, so comparing it unsorted is stronger
+  than sorting it first;
 - the tile batch sorted by tile id and re-serialised, because emission order under a parallel
   gather is not contract;
 - nothing stripped, because nothing session-dependent remains in the body.
@@ -37,6 +38,14 @@ Canonicalisation is then:
 That last is held by a test rather than by this paragraph: two independently-authorised sessions
 with identical visibility must be served identical bytes. If a session-dependent field is ever
 added to the body, it fails.
+
+## What this supersedes
+
+**Conformance §4.2's handle→`fx_key` rewrite, and that clause only.** §4.2's normative text still
+describes the rewrite; its r6 marker records that the column it defeats no longer exists, and this
+decision is the ruling. Nothing else in §4.2 moves — the canonicalisation *procedure* (sort what is
+not contract, compare what is, strip transport artifacts) is unchanged, and so is its requirement
+that the points batch be compared explicitly.
 
 ## Consequence
 

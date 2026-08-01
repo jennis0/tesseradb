@@ -26,9 +26,16 @@
 //! rather than quietly continuing to pass on a stale error.
 //!
 //! **This proves the conversion is absent, not that no code path derives a row id from an entity
-//! id by other means.** Arithmetic on `raw()` values would be invisible here, as it is to the type
-//! system. `scripts/check-layers.sh` carries the grep-based half of that (no cross-space
-//! conversions outside the permutation), and neither check subsumes the other.
+//! id by other means**, and the gap is wider than a first draft of this comment allowed. An
+//! explicit cast is invisible to the type system by construction — `RowId::new(e.raw() as u32)`
+//! compiles — and it is invisible to `scripts/check-layers.sh` too, whose I4 rule greps for
+//! `impl From` between the ID newtypes in this crate and nothing else. The draft deferred to that
+//! script as though it carried the other half; it does not.
+//!
+//! So I4's enforcement, stated completely: distinct newtypes with private fields, no `From` impl
+//! (checked here and by the script), no field access (checked here), and **a code review for the
+//! explicit cast**. `tessera_store::Permutation::row_of` is the only legitimate crossing, and the
+//! cast is the one spelling nothing mechanical refuses.
 //!
 //! # I8 has no row here
 //!
@@ -39,11 +46,17 @@
 //!
 //! # Toolchain sensitivity, stated because the first unexplained failure will look like a defect
 //!
-//! `.stderr` fixtures are compiler output, so a rustc upgrade can reword them. `rust-toolchain.toml`
-//! pins the version this repository builds with, which is what keeps that from being a moving
-//! target; when the pin moves and these fail on wording alone, `TRYBUILD=overwrite cargo test -p
-//! tessera-types` regenerates them, and the diff should be read rather than accepted — a changed
-//! *error* is a finding, only changed *phrasing* is noise.
+//! `.stderr` fixtures are compiler output, so a rustc release can reword them and turn this gate
+//! red on phrasing alone. **Nothing prevents that:** `rust-toolchain.toml` says `channel =
+//! "stable"`, which is a rolling channel, not a pin. An earlier version of this comment claimed
+//! the file pinned a version and therefore protected these fixtures — it does not, and believing
+//! it would make regenerating them feel like routine maintenance.
+//!
+//! `TRYBUILD=overwrite cargo test -p tessera-types` regenerates them. **Read the diff.** A changed
+//! *error code* or a row that stopped failing is a finding — the whole point of pairing each case
+//! with its `.stderr` is that "it still fails to compile" is not enough. Only changed *phrasing*
+//! is noise. That judgement is the only thing standing between a rustc upgrade and a silently
+//! weakened I4 gate.
 
 #[test]
 fn entity_space_and_row_space_do_not_convert() {

@@ -1,0 +1,5 @@
+error[E0616]: field `0` of struct `EntityId` is private
+  --> tests/ui/entity_id_field_access.rs:10:15
+   |
+10 |     let _ = e.0;
+   |               ^ private field

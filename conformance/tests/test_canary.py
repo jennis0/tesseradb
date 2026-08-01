@@ -42,9 +42,10 @@ planted-but-unserved and its strict xfail in `test_mask_catalogue.py` remains th
 
 Canonicalisation is therefore:
 
-- **the points batch: raw bytes, in served order.** Contracts §2.6 makes selection order contract,
-  so comparing it as served is strictly stronger than sorting it first — a reordering is a defect,
-  not noise, and sorting would hide it.
+- **the points batch: raw bytes, in served order.** Contracts §3.2 orders the served points
+  ascending by `tessera_id` within each tile, tiles in the order the tiles batch lists them — so
+  comparing as served is strictly stronger than sorting first: a reordering is a defect, not noise,
+  and sorting would hide it. (§2.6 is the bundle's *storage* order and is a different claim.)
 - **the tile batch: sorted by tile id, then re-serialised.** Emission order under a parallel gather
   is *not* contract (§4.2), and a byte comparison that flaked on it would get "fixed" by weakening.
 - **nothing stripped from the body**, because there is nothing session-dependent left in it. This is
@@ -92,6 +93,12 @@ ZOOM_RANGE = range(0, 7)
 # Deliberately still NOT exercised here: cap truncation and theta's threshold clause themselves.
 # Those are tested in `crates/tessera-engine/tests/selection.rs`, against fixtures built for them.
 K = 500
+# §3.3 underlay depth offset. 4^2 = 16 sub-cells per tile is enough to produce a populated third
+# stream at every zoom without tripping the server's max_underlay_cells budget — the same value the
+# byte-scan uses, and for the same reason: what matters is that the bytes exist, not that there are
+# many of them. Non-zero is the load-bearing part: at 0 no underlay is emitted and the surface
+# silently drops out of the comparison.
+UNDERLAY_OFFSET = 2
 
 # Grant sets that never include the canary's own term id — every principal tested here is exactly
 # the population the canary claims never to affect. The empty set is deliberate (R5): a
@@ -117,7 +124,15 @@ def canary_servers(tmp_path_factory, canary_bundles):
     here (decision 0030): what this depends on is determinism at *one* configuration, which it
     controls, not stability across configurations, which the engine does not promise.
     """
-    untruncated = {"max_k": 100_000, "k_max_marks": 100_000, "theta_target_marks": 1 << 40}
+    # `max_underlay_cells` is raised for the same reason as the other three: the deployment default
+    # (8192) refuses a wide bbox at a deep zoom outright, so at zoom 6 over the full extent the
+    # underlay surface would arrive as a 422 rather than as bytes to compare.
+    untruncated = {
+        "max_k": 100_000,
+        "k_max_marks": 100_000,
+        "theta_target_marks": 1 << 40,
+        "max_underlay_cells": 1 << 20,
+    }
     servers = []
     procs = []
     for bundle, name in zip(canary_bundles, ("free", "canary", "visible")):
@@ -130,16 +145,35 @@ def canary_servers(tmp_path_factory, canary_bundles):
         stop_server(proc)
 
 
-def _canonical_response(server, token, zoom, bbox) -> bytes:
-    """One viewport response, canonicalised: the tile batch sorted by tile id and re-serialised,
-    then the points batch's own bytes, unaltered and in served order.
+def _canonical_response(server, token, zoom, bbox) -> dict[str, bytes]:
+    """One viewport response, canonicalised, **as three separately-addressable surfaces**.
+
+    Returns `{"tiles": …, "points": …, "subcells": …}`. Keeping them apart rather than concatenating
+    them is what lets the positive control assert *which* surface a difference landed on — and that
+    matters more than it sounds. When this returned one concatenated blob, dropping the points batch
+    from it left every canary test green, and so did dropping the tile batch: the control fired on
+    whichever surface remained, so §4.2's "explicitly including the points batches" was enforced by
+    nothing. Split, each of the three is pinned — replacing any one with `b""` fails the control,
+    measured in all three directions.
+
+    - **tiles** — decoded, sorted by tile id, re-serialised. Emission order under a parallel gather
+      is not contract (§4.2), and a byte comparison that flaked on it would get "fixed" by weakening.
+    - **points** — the batch's own bytes, unaltered and in served order. Contracts §3.2 orders the
+      served set ascending by `tessera_id` within each tile, so comparing it as served is strictly
+      stronger than sorting it first: a reordering is a defect, not noise.
+    - **subcells** — the §3.3 underlay's appended stream, requested explicitly. This is a per-cell
+      `mask.count_range(...)`, i.e. an exact masked cardinality, and therefore the one derived
+      aggregate in the system besides tile counts. It was absent from this comparison until an
+      independent review pointed out that an I2 defect confined to the underlay path moves no tile
+      count and no point set, so every canary comparison would have passed while §4.6 called I2
+      covered.
 
     The `served == visible` assertion is the untruncated premise, checked rather than assumed. If a
     cap or a live theta ever truncated a tile, the comparison would quietly weaken from "the two
     states serve the same points" to "the two states serve the same prefix" and still pass.
     """
-    raw = server.viewport(token, SLICE, zoom, bbox, k=K)
-    tile_bytes, points_bytes = split_frames(raw)
+    raw = server.viewport(token, SLICE, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
+    tile_bytes, points_and_after = split_frames(raw)
 
     tiles, _points = decode_viewport(raw)
     for tile, visible, _matched, served in tiles:
@@ -149,6 +183,10 @@ def _canonical_response(server, token, zoom, bbox) -> bytes:
             f"spawn_server overrides"
         )
 
+    # The sub-cell stream is appended after the points stream with no length prefix (contracts §5),
+    # so the points stream is parsed to its end-of-stream marker and what follows is the underlay.
+    points_len = _points_stream_length(points_and_after)
+
     with ipc.open_stream(io.BytesIO(tile_bytes)) as reader:
         table = pa.Table.from_batches(list(reader), reader.schema)
     sorted_tiles = table.sort_by([("tile", "ascending")])
@@ -156,32 +194,53 @@ def _canonical_response(server, token, zoom, bbox) -> bytes:
     with ipc.new_stream(sink, sorted_tiles.schema) as writer:
         for batch in sorted_tiles.to_batches():
             writer.write_batch(batch)
-    return sink.getvalue() + points_bytes
+
+    return {
+        "tiles": sink.getvalue(),
+        "points": points_and_after[:points_len],
+        "subcells": points_and_after[points_len:],
+    }
 
 
-def compare_states(server_a, server_b, bbox) -> list[str]:
+def _points_stream_length(points_and_after: bytes) -> int:
+    """Byte length of the points stream inside `points-and-everything-after`."""
+    buf = io.BytesIO(points_and_after)
+    with ipc.open_stream(buf) as reader:
+        for _ in reader:
+            pass
+    return buf.tell()
+
+
+SURFACES = ("tiles", "points", "subcells")
+
+
+def compare_states(server_a, server_b, bbox) -> list[tuple[str, str]]:
     """Every difference between two states, over the same logically identical query stream.
 
-    Returns a list of human-readable differences; empty means the two states are indistinguishable
-    on every surface this compares. Both the canary state (which must produce none) and the visible
+    Returns `(surface, description)` pairs; empty means the two states are indistinguishable on
+    every surface this compares. Both the canary state (which must produce none) and the visible
     state (which must produce some) go through this function and no other.
 
     "Logically identical" rather than "byte identical" for the *requests*: the grant descriptors are
     the same strings in both states, but each state's session is authorised against its own server,
     so the tokens differ. That is the only asymmetry, and it lives in a header.
     """
-    differences: list[str] = []
+    differences: list[tuple[str, str]] = []
     for terms in GRANT_SETS:
         auth_a = server_a.authorise(terms)
         auth_b = server_b.authorise(terms)
         for zoom in ZOOM_RANGE:
-            body_a = _canonical_response(server_a, auth_a["token"], zoom, bbox)
-            body_b = _canonical_response(server_b, auth_b["token"], zoom, bbox)
-            if body_a != body_b:
-                differences.append(
-                    f"terms={terms} zoom={zoom}: canonicalised bodies differ "
-                    f"({len(body_a)} vs {len(body_b)} bytes)"
-                )
+            a = _canonical_response(server_a, auth_a["token"], zoom, bbox)
+            b = _canonical_response(server_b, auth_b["token"], zoom, bbox)
+            for surface in SURFACES:
+                if a[surface] != b[surface]:
+                    differences.append(
+                        (
+                            surface,
+                            f"terms={terms} zoom={zoom}: {surface} differ "
+                            f"({len(a[surface])} vs {len(b[surface])} bytes)",
+                        )
+                    )
     return differences
 
 
@@ -211,7 +270,8 @@ def test_an_ungranted_term_changes_no_canonicalised_response(canary_servers):
     differences = compare_states(free_srv, canary_srv, (0.0, 0.0, GRID_MAX, GRID_MAX))
     assert not differences, (
         "the canary state's responses differ from the canary-free state's, so a term no tested "
-        "principal holds influenced what one of them was served:\n  " + "\n  ".join(differences)
+        "principal holds influenced what one of them was served:\n  "
+        + "\n  ".join(d for _surface, d in differences)
     )
 
 
@@ -236,10 +296,23 @@ def test_the_comparator_rejects_a_state_whose_extra_item_is_visible(canary_serve
         "extra item that tested principals CAN see — so it cannot fail, and the canary test above "
         "is proving nothing"
     )
-    assert any("terms=['0', '1', '2']" in d for d in differences), (
+    assert any("terms=['0', '1', '2']" in d for _s, d in differences), (
         "the comparator disagreed, but not for the grant sets that hold the visible item's term "
         f"— which is a difference arising somewhere other than visibility: {differences}"
     )
+
+    # Every surface must carry the difference on its own. Without this, a canonicalisation that
+    # silently stopped comparing one of them would keep both canary tests green: the control would
+    # fire on whichever surface was left. That is not hypothetical — it was measured before
+    # `_canonical_response` returned surfaces separately, in both directions.
+    differing = {surface for surface, _d in differences}
+    for surface in SURFACES:
+        assert surface in differing, (
+            f"the visible state's extra item moved every surface except `{surface}` — so nothing "
+            f"here demonstrates that `{surface}` participates in the comparison at all, and a "
+            f"canonicalisation that dropped it would report green for ever. §4.2 requires the "
+            f"points batch explicitly; the underlay is the system's only other masked aggregate."
+        )
 
 
 def test_the_response_body_carries_nothing_session_dependent(canary_servers):

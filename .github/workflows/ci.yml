@@ -9,7 +9,7 @@
 #
 # What runs is exactly the gate CLAUDE.md defines, plus the conformance suite. Nothing here builds
 # from the Phase 0 corpus: every fixture the suite uses is synthesised from a seed, which is what
-# makes a hosted runner possible at all. `reference/tests` is NOT run here — three of its five
+# makes a hosted runner possible at all. `reference/tests` is NOT run here — two of its five
 # modules build from that corpus, and repointing them would cost the viewport differential its
 # realistic term distribution. I1 keeps CI coverage through the overlay-journal differential and
 # its two defective engines; what CI does not see is the differential against real term skew.
@@ -41,9 +41,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml pins the channel; the action reads it rather than being told twice.
-      # The `.stderr` fixtures under crates/tessera-types/tests/ui are compiler output, so that
-      # pin is what keeps them from being a moving target.
+      # `stable`, matching rust-toolchain.toml's channel. Note this is a rolling channel, not a
+      # pin: the `.stderr` fixtures under crates/tessera-types/tests/ui are compiler output, so a
+      # rustc release can turn this job red on wording alone. See that test's own doc for why
+      # regenerating them is a judgement call rather than maintenance.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -65,6 +66,12 @@ jobs:
       # which is not a gate.
       - run: bash scripts/check-layers.sh
       - run: python3 scripts/check-doc-links.py
+      # Keeps `inventory.md`'s per-document revision and ⊘-marker counts true. It regenerates the
+      # file and exits 1 when that changed anything, which is the behaviour wanted here: the
+      # regenerated copy is discarded with the runner, and the failure is the signal. Added because
+      # this branch revised a design document and left the inventory reading the old revision, and
+      # nothing noticed until a review did.
+      - run: python3 scripts/check-corpus-integrity.py
 
   conformance:
     runs-on: ubuntu-latest

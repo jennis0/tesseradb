@@ -1,7 +1,10 @@
-"""The I2 canary fixture: two bundles differing only in one item nobody can see.
+"""The I2 canary fixture: three bundles differing only in one item, and in who can see it.
 
-Synthesises a tiny points+pairs parquet pair for `test_canary.py`, and builds the canary /
-canary-free pair from them via the CLI. Deliberately independent of the 250k Phase 0 corpus: a
+Synthesises tiny points+pairs parquet sets for `test_canary.py` and builds three bundles from them
+via the CLI: **canary-free** (the corpus alone), **canary** (plus one item carrying a term nobody
+tested holds), and **visible** (plus the same item carrying a term they do). The third is the
+comparator's positive control — §4.4 — and without it the canary comparison is pass-only with no
+proof it can fail. Deliberately independent of the 250k Phase 0 corpus: a
 small, from-scratch synthetic dataset makes it easy to reason that the canary's term is genuinely
 held by *no* tested principal, and keeps both builds fast enough to run twice in one test.
 

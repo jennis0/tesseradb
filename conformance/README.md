@@ -16,7 +16,7 @@ CI runs it on every pull request and every push to `main`, alongside the rest of
 it also specifies do not exist.
 
 (`reference/.venv/bin/pytest reference/tests -v` must also stay green. It is **not** run in CI:
-three of its five modules build from the Phase 0 corpus, which is not in the repository, and
+two of its five modules build from the Phase 0 corpus, which is not in the repository, and
 repointing them would cost the viewport differential its realistic term distribution. Run it
 locally on a machine that has the corpus.)
 
@@ -36,7 +36,7 @@ deliberately *not* selected and why.
 |---|---|---|
 | `tests/test_byte_scan.py` | I10 | No encoding of any entity id — admitted or denied — appears in a viewport response's points batch, its sub-cell stream, a `/v1/items` body, or the server's `RUST_LOG=info` log, across a zoom range; nor does the deployment identity key, nor a caller external id outside the one designed exception. See the module doc for the scan widths, the `SAFE_ID_FLOOR` reasoning, and why the corpus moved. Carries **two controls**: a real transmitted `tessera_id` the byte-window mechanism must recover, and a **planted** entity id every sweep mechanism must flag — the second catches a scanner that works on real traffic but ignores the value class I10 is about. |
 | `tests/test_restart_replay.py` | WAL/deny survival; durability ordering (conformance §5) | Two tests. An ingest, two suppressions and a delete survive a `SIGKILL` and a restart on the same WAL/cache/bundle with nothing re-submitted. And, separately, they survive a **truncation of the WAL to its last-synced offset** — what a power loss would have done — which is the variant that falsifies an engine acking before it fsyncs; a SIGKILL alone loses nothing, because the page cache outlives the process. The offset comes from the WAL's own `.sync` sidecar, so no introspection command was needed. |
-| `tests/test_canary.py` | I2 | Three synthetic states (`reference/oracle/canary_fixture.py`) built under one identity key, differing in one item at the extreme corner of the extent: the base corpus; the base plus an item carrying a term no tested grant set holds; the base plus an item carrying a term they do. One comparator runs over all of them, comparing **canonicalised bytes** — the points batch as served (contracts §2.6 makes that order contract) and the tile batch sorted by tile id. The canary state must agree; the visible state must disagree, which is §4.4's positive control and what makes the first assertion mean anything. Also checks the **five allocation rules** for both extra-item states, and that nothing session-dependent remains in the response body. |
+| `tests/test_canary.py` | I2 | Three synthetic states (`reference/oracle/canary_fixture.py`) built under one identity key, differing in one item at the extreme corner of the extent: the base corpus; the base plus an item carrying a term no tested grant set holds; the base plus an item carrying a term they do. One comparator runs over all of them, comparing **canonicalised bytes** on three separately-addressable surfaces — the tile batch sorted by tile id, the points batch as served (contracts §3.2 orders it by `tessera_id` within each tile), and the §3.3 underlay's masked per-cell counts. The canary state must agree on all three; the visible state must disagree on all three, which is §4.4's positive control and what stops a canonicalisation that silently dropped a surface from reading green. Also checks the **five allocation rules** for both extra-item states, and that nothing session-dependent remains in the response body. |
 | `tests/test_mask_catalogue.py` | fixture integrity | The adversarial mask catalogue (`reference/oracle/catalogue.py`) is the shape it claims: eight cases, each named for the property it attacks, each reaching exactly its declared entity set by two independent routes (postings union, pairs semi-join). Includes the container-boundary and ~5%-crossover claims, which are the two that stop being true silently. Carries a **strict xfail** for `fx_key` in the points batch — see "Known limitations". |
 | `tests/test_i7_selection.py` | I7 | §7.2's served set, engine against the literal definition in `reference/oracle/viewport.py`, over the catalogue × depths `{0,2,4,6}` × `k` `{2,30,500}`, against both a θ-saturated and a θ-live server, compared as **ordered lists** (contracts §2.6 makes the order contract). Plus cross-zoom nesting into *the child that contains the point*; the **cap**, against a server with `k_max_marks = 128` so `cap = min(k, K_max)` actually binds; and **the negative control**: a first-`k` stub that serves §7.2's count in storage order instead of `tessera_id` order, with the assertion that the differential disagrees with it on most tiles. A differential that passes against a deliberately wrong implementation is testing nothing. |
 | `tests/test_overlay_journal.py` | I1, I7, I2 | The overlay-heavy catalogue state: acked control operations (deletes, suppressions, predicate-narrows, and predicate-widens onto entities *outside* the token's mask) composed in entity space by `oracle.journal.AckedJournal` and in row space by the engine. Counts **and served points**, the latter against a **θ-live** server — the combination that catches an engine sampling from the pre-overlay mask (which serves denied items as marks while every count stays right) and one anchoring θ on the pre-overlay projection (§7.2's own I2 leak). Its negative control builds both of those engines out of the oracle and shows the comparison rejects them. Plus the journal's rules: a refused operation enters no composition and moves nothing, and an acked ingest is not an applied one. |
@@ -99,11 +99,15 @@ cost. `reference/tests` still uses that corpus and is a separate question.
 - **The I4 compile-fail rows are in Rust, not here**: `crates/tessera-types/tests/ui/`, driven by
   `trybuild`. They assert that code does *not* compile, which no pytest module can do. `cargo test
   --workspace` runs them.
-- **Six of conformance §5's eight interleaving scripts cannot be written yet** — they test a stamp
-  ledger, a retirement floor and a compaction fold that do not exist. The seventh, the positional
-  CRC rule, is covered in substance by `crates/tessera-lifecycle/tests/wal.rs` in both directions.
-  The eighth needs a `before_fragment_acquire` pause point, and §5 is emphatic that it must be
-  built by extending the write path's existing fault switchboard rather than beside it.
+- **Five of conformance §5's eight interleaving scripts cannot be written yet** (scripts 2–6) —
+  they test a stamp ledger, a retirement floor and a compaction fold that do not exist. Script 7,
+  the positional CRC rule, is covered in substance by `crates/tessera-lifecycle/tests/wal.rs` in
+  both directions. Script 8 needs a `before_fragment_acquire` pause point, and §5 is emphatic that
+  it must be built by extending the write path's existing fault switchboard rather than beside it.
+- **Durability ordering is not established here** — see `test_restart_replay.py`'s module doc and
+  issue #71. The truncating test proves replay under discard of the unsynced tail; an engine that
+  published its sync offset without ever fsyncing passes it. The property is held in Rust by the
+  write path's `Published` token type.
 - **Wall-clock**: 24 s from deleted fixtures, including the 150,000-item catalogue build, measured
   2026-08-01. `.github/workflows/ci.yml` records it alongside the Rust gate's figure, since runner
   time is what decides whether a gate stays enabled.

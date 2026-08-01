@@ -149,7 +149,9 @@ reference/           the deliberately slow, obviously correct Python oracle — 
 
 ### The forbidden edges, and what enforces them
 
-`scripts/check-layers.sh` holds the rules. **It is not CI.** No CI exists in this repository. The script runs from an opt-in `pre-commit` hook installed by `scripts/install-hooks.sh`, and it is skipped entirely in a worktree with no `.claude/track` marker — so enforcement is advisory unless a developer ran the installer. Treat the rules below as a documented discipline with a machine check available, not as a gate a change must pass.
+`scripts/check-layers.sh` holds the rules, and **it now runs as a gate**: `.github/workflows/ci.yml` runs it on every pull request and every push to `main`, so a change that violates a forbidden edge cannot merge. Locally it also runs from an opt-in `pre-commit` hook installed by `scripts/install-hooks.sh`, which is skipped entirely in a worktree with no `.claude/track` marker — so the *local* check remains advisory, and the gate is the one in CI. Treat the rules below as enforced on the branch and advisory in the working tree.
+
+It remains **a grep-based approximation** of spec rules: passing it is necessary and nowhere near sufficient, and its I4 rule in particular checks only for `impl From` between the ID newtypes in `tessera-types` — an explicit cast between the two spaces is refused by nothing mechanical.
 
 | Rule | What it defends |
 |---|---|

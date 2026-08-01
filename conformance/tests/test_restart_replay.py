@@ -1,37 +1,61 @@
-"""Restart-replay: deny survival and WAL idempotency across a `SIGKILL`, and durability *ordering*
-across a simulated power loss (plan §10.3; conformance design §5).
+"""Restart-replay: deny survival, WAL idempotency, and replay across a simulated power loss
+(plan §10.3; conformance design §5).
 
-**Two tests, proving different things, and the difference is the point of the second.** A SIGKILL
-loses nothing: the page cache survives process death, so the bytes a process wrote are still there
-for the next process to read whether or not anyone fsynced them. A kill-and-restart test therefore
-verifies *replay logic* — and **an engine that acked before it fsynced would pass it**. Conformance
-design §5 says so in those words, and for a while this module contained only that test.
+**Two tests, and what neither of them proves.** A SIGKILL loses nothing: the page cache survives
+process death, so the bytes a process wrote are still there for the next process to read whether or
+not anyone fsynced them. A kill-and-restart test therefore verifies *replay logic* — and **an engine
+that acked before it fsynced would pass it**. Conformance design §5 says so in those words.
 
-`test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded` is the variant §5 asks for.
-After the kill it **truncates the WAL to its last-synced offset** before restarting, which is what
-a power loss would have done, and then asks the same survival questions. The offset comes from the
+`test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded` is §5's truncating variant.
+After the kill it **truncates the WAL to its last-synced offset** before restarting, which is what a
+power loss would have done, and then asks the same survival questions. The offset comes from the
 WAL's own sidecar — `wal.log` → `wal.sync`, an 8-byte little-endian offset written
 write-tmp-then-rename and fsynced together with its directory entry after every WAL fsync, because
 replay already needs it (`tessera-lifecycle/src/wal.rs`, "the durable prefix"). §5 specifies an
 `fsync_offset()` introspection command behind a `conformance` cargo feature to supply this number;
-none of that is needed, because the number is already on disk, durably, by construction.
+none of that is needed, because the number is already on disk.
 
-Because power loss is simulated by truncation rather than depended on, this may run on any
-filesystem including tmpfs — recorded here, per §5, so the first flake does not relitigate it.
+# What this module does NOT establish, stated first because it was claimed and is false
 
-**Both of its assertions were demonstrated to fail, rather than argued to be capable of it.**
-Measured against this fixture on 2026-08-01, in a scratch harness kept out of the suite because
-each control needs a deliberately damaged WAL:
+**Neither test falsifies ack-before-fsync, and `discarded == 0` in particular does not.** That
+assertion compares the engine's own published offset against the file size. It catches an engine
+that forgets to advance the sidecar. It does **not** catch one that advances the sidecar without
+syncing — which is the same code shape an early-acking implementation naturally has.
 
-- *Acked bytes past the sync point.* A correct run gives `sync == len == 233`, so `discarded == 0`.
-  Appending 64 bytes after the last ack — the shape an ack-before-fsync engine produces — gives
-  `discarded == 64` and the assertion fires. It is therefore a live check on the offset, not an
-  arithmetic identity between two names for the same number.
-- *The truncated bytes are load-bearing.* Truncating 40 bytes **below** the sync point destroys
+Measured, not reasoned: replacing `self.file.sync_data()` with `Ok(())` in `Wal::sync_and_publish`,
+so the WAL is **never fsynced** while the offset is still published and acks still return 200,
+leaves both tests in this module passing. The sidecar is the same component's bookkeeping, merely
+persisted, and a test that reads it is taking the engine's word for the very thing under test.
+Decision 0038 originally argued the opposite and has been corrected.
+
+**Nothing black-box can close this**, because fsync ordering is not observable through the API.
+Durability ordering is held where it always was: by the write path's `Published` token type, which
+makes the ack path unwritable in the wrong order, and by the fault-injection pause site inside the
+ack function (lifecycle §4, §7.3). Issue #71 tracks whether an end-to-end check is worth building.
+
+# What this module does establish
+
+- **Replay is correct when the unsynced tail is discarded.** On a green run `discarded == 0`, so the
+  truncation removes zero bytes and the remainder is byte-for-byte the SIGKILL path — but the
+  assertion is what makes that a *finding* rather than an assumption, and the test would catch a
+  regression that left acked operations beyond the published prefix.
+- **The sidecar is live.** The offset must advance across the acked denies. A sidecar written once
+  at open and never updated would make the first assertion vacuously true for ever; stubbing
+  `Wal::fsync` to leave `durable_len` alone fires it (`assert 6 > 6`).
+- **The truncated bytes are load-bearing.** Truncating 40 bytes *below* the sync point destroys
   bytes a caller was told were durable, and the server refuses to start: `refused to start: wal
   error: wal corruption before the last-fsynced offset — acked state may be damaged`. So the
-  survival assertions that follow the truncation depend on the log's content and cannot pass
-  against a log that quietly lost part of its durable prefix.
+  survival assertions cannot pass against a log that quietly lost part of its durable prefix.
+
+Because power loss is simulated by truncation rather than depended on, this may run on any
+filesystem including tmpfs — recorded per §5, so the first flake does not relitigate it.
+
+**`discarded == 0` is scoped to the whole file, and that is a workload assumption.** Nothing else
+writes this WAL between the last ack and the measurement, so on this workload the assertion is
+sound. It is *not* robust to group commit or any background WAL writer: either would leave
+legitimate unsynced bytes past the sync point, the assertion would fire, and it would read as a
+spurious failure whose natural "fix" is to weaken it. If that day comes, the right change is to
+scope the check to the acked records' own extent, not to delete it.
 
 The first test's sequence: start a server on its own (private, non-shared) WAL/cache/bundle → ingest one Arrow
 batch of new items over the control plane → suppress two built-in fixture items and delete a
@@ -176,8 +200,10 @@ def restart_paths(tmp_path):
 def sync_sidecar_of(wal_path: Path) -> Path:
     """`wal.log` → `wal.sync`, beside it — `wal.rs`'s `sync_sidecar_path`, transcribed.
 
-    Transcribed rather than derived from the server, because a harness that asked the server where
-    its durable prefix ended would be taking the engine's word for the very thing under test.
+    Transcribed rather than obtained from the server, which keeps the *path* derivation out of the
+    engine's hands. It does not keep the *offset* out of them: the sidecar's contents are the
+    engine's own bookkeeping, which is why this module cannot establish ack ordering. See the
+    module doc.
     """
     return wal_path.with_suffix(".sync")
 
@@ -195,23 +221,26 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
     """Conformance §5's crash-realism variant: kill, **truncate to the last-synced offset**,
     restart, and assert every acked operation is still there.
 
-    Two assertions do the work, and they fail for different reasons.
+    Read the module doc first for what this does not prove. In short: it does not falsify
+    ack-before-fsync, and it was claimed to. An engine whose `sync_data()` is a no-op, while it
+    still publishes the offset, passes this test.
 
-    **Nothing acked lies beyond the sync point.** After the last 200 has been received, the WAL's
-    durable prefix must already cover every byte the server wrote for the operations it acked — so
-    truncating to that prefix discards nothing. This is the ack-ordering property stated directly:
-    an engine that returned 200 and fsynced afterwards would have written bytes past the sync
-    point, and `discarded` below would be non-zero. It is checked *before* the truncation rather
-    than inferred from what survived it, because "the deny is still there" has more than one
-    possible cause and "the log was already durable to its end" has exactly one.
+    What the two assertions do establish:
 
-    **The sync point advanced across the acked operations.** A sidecar that were written once at
-    open and never updated would make the first assertion vacuously true for ever — the log would
-    always be truncated back to wherever it started and the survival checks would fail confusingly,
-    or, worse, pass on a no-op log. Recording the offset before and after the denies and requiring
-    it to move is what keeps the first assertion about the engine rather than about a dead file.
+    **Nothing acked lies beyond the published prefix.** After the last 200 has been received, the
+    offset the engine published must already cover every byte it wrote for the operations it acked,
+    so truncating to that prefix discards nothing. Checked *before* the truncation rather than
+    inferred from what survived it, because "the deny is still there" has more than one possible
+    cause and "the log was already published to its end" has exactly one. This catches a regression
+    that leaves acked operations past the prefix; it does not catch one that publishes a prefix it
+    never synced.
 
-    Then the survival questions, against a WAL that has provably lost everything unsynced.
+    **The published offset advanced across the acked operations.** A sidecar written once at open
+    and never updated would make the first assertion vacuously true for ever. Recording the offset
+    before and after the denies and requiring it to move is what keeps the first assertion about
+    the engine rather than about a dead file.
+
+    Then the survival questions, against a WAL truncated to what the engine claims is durable.
     """
     oracle_bundle = Bundle(catalogue_bundle_root)
     cache_dir = restart_paths["cache"]
@@ -266,18 +295,24 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
         wal_len = wal_path.stat().st_size
         discarded = wal_len - sync_point
         assert discarded == 0, (
-            f"{discarded} bytes were written past the last-synced offset while every operation "
-            f"that produced them had already been acked — the engine acks before it fsyncs, and a "
-            f"power loss here would lose an operation a caller was told was durable"
+            f"{discarded} bytes lie past the published durable prefix while every operation that "
+            f"produced them had already been acked — a power loss here would lose an operation a "
+            f"caller was told was durable. (Note this is scoped to the whole file: a background "
+            f"WAL writer or an open group-commit window would trip it legitimately. See the "
+            f"module doc before weakening it.)"
         )
 
         kill_server(proc)
         proc = None
 
         # --- what a power loss would have done ----------------------------------------------
+        # `discarded == 0` above means this removes nothing on a green run, so what follows is
+        # byte-for-byte the SIGKILL path. The truncation is here for the run where that assertion
+        # is about to become false. (Deliberately no `st_size == sync_point` assertion after it:
+        # `truncate(n)` sets the size to `n` whether it shrinks or grows the file, so it could
+        # never fail.)
         with wal_path.open("r+b") as fh:
             fh.truncate(sync_point)
-        assert wal_path.stat().st_size == sync_point
 
         srv2, proc2 = spawn_server(
             catalogue_bundle_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path

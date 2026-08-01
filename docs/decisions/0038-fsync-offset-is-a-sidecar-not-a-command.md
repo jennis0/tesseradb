@@ -21,21 +21,39 @@ The WAL already publishes its last-synced position durably, because replay needs
 holds an 8-byte little-endian offset, written write-tmp-then-rename and fsynced together with its
 directory entry after every WAL fsync. The harness reads that file and truncates to it.
 
-Two reasons, and the second is the stronger one:
+The reason is that **the number is already on disk**. A command would have added a feature-gated
+introspection surface — and the `conformance` feature and its two-binary split with it — to expose a
+value any process can read.
 
-1. The number is already on disk. A command would have added a feature-gated introspection surface,
-   and the `conformance` feature and its two-binary split with it, to expose a value any process can
-   read.
-2. **A command would have had the engine report on the property under test.** The question is
-   whether the engine's acks lag its fsyncs; asking the engine where its fsyncs got to answers it
-   with the same component's own bookkeeping. The sidecar is the durable artefact the engine's
-   recovery path is itself obliged to honour, so reading it is closer to reading the disk than to
-   asking the engine.
+The path derivation is transcribed into the harness rather than obtained from the server, which
+keeps that much out of the engine's hands.
 
-The path derivation is transcribed into the harness rather than obtained from the server, for the
-same reason.
+## The second reason this decision originally gave was wrong
+
+The first draft argued that a command "would have had the engine report on the property under test",
+and that the sidecar is "closer to reading the disk than to asking the engine". **That is false, and
+it was refuted by measurement rather than by argument.** Replacing `self.file.sync_data()` with
+`Ok(())` in `Wal::sync_and_publish` — so the WAL is never fsynced, while the offset is still
+published and acks still return 200 — leaves both tests in
+`conformance/tests/test_restart_replay.py` passing.
+
+The sidecar *is* the same component's bookkeeping, merely persisted. Reading it establishes what the
+engine claims is durable, not what is durable. So the choice between a sidecar and a command was
+never a choice about evidential strength: **neither can establish ack ordering**, and the decision
+rests on the first reason alone, which is a decision about machinery rather than about proof.
+
+This correction is recorded here rather than in a superseding decision because the decision itself
+— read the sidecar, do not build the command — is unchanged. What changed is one of its stated
+reasons, and leaving a refuted argument in place would let the next reader inherit it.
 
 ## Consequence
+
+**Durability ordering remains unverified end to end**, and conformance §5's crash-realism paragraph
+now says so instead of claiming otherwise. It is held by the write path's `Published` token type and
+the fault-injection pause site inside the ack function (lifecycle §4, §7.3) — real evidence, in
+Rust, of a narrower property. Issue #71 asks whether an end-to-end check is worth its cost; the
+routes that could work (syscall observation, a fault-injecting filesystem) are both outside what the
+suite can do on a hosted runner.
 
 `fsync_offset()` leaves §5's command list, which is now two: `evict_fragment(key)` and
 `ledger_state()`. Neither is reachable from the suite, and `ledger_state()` cannot be built at all

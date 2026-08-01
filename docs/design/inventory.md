@@ -68,7 +68,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `concurrency-lifecycle.md` | Normative — r5 | 21 |
-| `conformance.md` | Normative — r5 | 14 |
+| `conformance.md` | Normative — r6 | 10 |
 | `contracts.md` | Normative — r14 | 14 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
