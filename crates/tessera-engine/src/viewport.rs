@@ -428,11 +428,18 @@ impl Engine {
         let generation = self.generation.load_full();
         probe.lap(|t| &mut t.generation_resolve_ns);
 
-        // Task 0a: the I11 check itself moved verbatim into `PinManager::resolve`; what it hands
-        // back is `PinnedGeometry` — geometry ONLY. Overlay, buffer and `overlay_version` are
-        // deliberately not on that type and are read from the LIVE generation below, exactly as
-        // this loop always has: a pin fixes row-space geometry and never authorisation state
-        // (lifecycle §2.3), so a suppression accepted mid-request applies to a pinned request too.
+        // I11 is enforced in `pins`; the whole rule, and both failures it names, are stated in that
+        // module's doc and nowhere else. Three consequences land *here*, and each is checkable by
+        // reading the lines below rather than by trusting this comment:
+        //
+        // 1. `resolve` hands back `PinnedGeometry` — geometry ONLY. Overlay, buffer and
+        //    `overlay_version` are read from the LIVE `generation` below, as this loop always has,
+        //    so a suppression accepted mid-request applies to a pinned request too (R-open).
+        // 2. This call takes no lock unless `pin` names a superseded generation (`pins` module doc,
+        //    property 1). It is on the path of every admitted request at 48-way concurrency.
+        // 3. A `410` from here after a restart is correct and must stay correct: a restarted
+        //    worker's drain list is empty, and both tempting repairs are forbidden — see
+        //    `PinManager::resolve_drained`, which names them at the site that would implement them.
         let geometry = self.pins.resolve(pin, session.token_id, &generation)?;
         let effective_pin = geometry.pin_id();
 
