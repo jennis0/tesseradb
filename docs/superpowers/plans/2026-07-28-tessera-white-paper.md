@@ -12,12 +12,12 @@
 
 Every task's requirements implicitly include this section.
 
-- **Source of truth for claims:** `.ignore/*.md` for design and prior art, `probes/results.md` and `probes/phase0-memo.md` for measurements. `.ignore/` is skipped by default file-search tooling — pass the path explicitly.
+- **Source of truth for claims:** `docs/design/*.md` for design and prior art, `probes/results.md` and `probes/phase0-memo.md` for measurements. `docs/design/` is skipped by default file-search tooling — pass the path explicitly.
 - **Precedence:** the architecture design is the specification; where the contracts spec and the system architecture differ, contracts spec §0.3 governs.
 - **No claim from memory.** Every competitor claim and every performance number must trace to a fact sheet entry from Task 1, which cites document and section.
 - **Preserve demonstrated vs marketed scale.** deepscatter's billion-point artefact is a *static* star catalogue; Nomic's marketing says "billions" while its largest published map is 11M. Collapsing these distinctions is a factual error.
 - **Synthetic-policy caveat stated plainly**, not buried: Phase 0 ran synthetic policies over a real 2.42M-paper arXiv corpus, scaled to 10⁹.
-- **Invariants must match `.ignore/tessera-architecture-design.md` §4 in substance.** I2, I3, I7, I9, I10, I12 and the three retirement rules (lifecycle §3) all appear in the paper.
+- **Invariants must match `docs/design/architecture.md` §4 in substance.** I2, I3, I7, I9, I10, I12 and the three retirement rules (lifecycle §3) all appear in the paper.
 - **British spelling** throughout (authorisation, visualisation, colour).
 - **No external resources.** No CDN scripts, external stylesheets, remote fonts, remote images, `fetch`/XHR/WebSocket. Assets inlined or embedded as `data:` URIs. Prose may contain `<a href="https://...">` citation links — those are navigation, not resource loads, and are permitted.
 - **No document-level tags** in source fragments: the Artifact tool supplies `<!doctype>`, `<html>`, `<head>` and `<body>`. Fragments contain page content only, with `<style>` and `<script>` inline in that content.
@@ -66,16 +66,16 @@ mkdir -p /home/joe/code/tessera/docs/whitepaper/facts
 
 Each subagent gets this prompt shape, with `<PART>`, `<DOCS>` and `<TOPICS>` filled in from the table below:
 
-> Read `<DOCS>` (pass paths explicitly — `.ignore/` is skipped by default search tooling). Extract every fact needed to write about `<TOPICS>`. Return a markdown fact sheet. Each entry is one line: `- CLAIM — source: <file> §<section>`, plus a verbatim quote for any number or any assertion about a third-party system. Preserve the distinction between demonstrated and marketed capability wherever the source draws it. Do not write prose, do not summarise into narrative, do not include anything you cannot cite. If a claim you expect to find is absent from the sources, say so explicitly rather than supplying it.
+> Read `<DOCS>` (pass paths explicitly — `docs/design/` is skipped by default search tooling). Extract every fact needed to write about `<TOPICS>`. Return a markdown fact sheet. Each entry is one line: `- CLAIM — source: <file> §<section>`, plus a verbatim quote for any number or any assertion about a third-party system. Preserve the distinction between demonstrated and marketed capability wherever the source draws it. Do not write prose, do not summarise into narrative, do not include anything you cannot cite. If a claim you expect to find is absent from the sources, say so explicitly rather than supplying it.
 
 | Part | DOCS | TOPICS |
 |---|---|---|
-| 1 | `.ignore/prior-art-synthesis.md`, `.ignore/prior-art-2-visual-analytics.md`, `.ignore/prior-art-3-databases.md`, `.ignore/prior-art-4-authorization-disclosure.md` | Aggregate leakage in systems with per-document security; demonstrated vs marketed scale for every surveyed visualisation system; row-level access control coverage across the category; PostgreSQL RLS and DuckDB measurements |
-| 2 | `.ignore/tessera-architecture-design.md` §5, §10.3, §10.4, `probes/results.md` §4, §5, §6, `probes/optimisations.md` | Entity space vs row space and the permutation; Morton ranking and tile-to-range contiguity; Roaring container structure; the O(containers touched) cost model |
-| 3 | `.ignore/tessera-architecture-design.md` §6, §2.6, §4, `.ignore/tessera-contracts-spec.md` (plugin ABI), `probes/results.md` §3, §5, `probes/optimisations.md` | The authorisation plugin boundary; DNF terms, the term index, postings and union; mask construction; signature-sorted allocation and I9 permanence; the end-to-end request path |
-| 4 | `.ignore/tessera-architecture-design.md` §7, §8, §12, §4 | Level of detail, priority nesting, direct evaluation, I7; label gating and the containment frontier, I3/I12; the two-mask model; compartmented partitions and required-set gating |
-| 5 | `.ignore/tessera-concurrency-lifecycle.md`, `.ignore/tessera-architecture-design.md` §11 | WAL and the ack contract; buffer, watermark and overlay; segments, merging, compaction; generations and pins; the three retirement rules and why conflating them is fail-open |
-| 6 | `probes/results.md`, `probes/phase0-memo.md`, `.ignore/tessera-architecture-design.md` §13, §16, Appendix C | The 10⁹ measurements with their conditions; the 8.8 s permutation cost; what Phase 0 did and did not establish; open questions; the leak register C1–C16 |
+| 1 | `docs/evidence/prior-art/prior-art-synthesis.md`, `docs/evidence/prior-art/prior-art-2-visual-analytics.md`, `docs/evidence/prior-art/prior-art-3-databases.md`, `docs/evidence/prior-art/prior-art-4-authorization-disclosure.md` | Aggregate leakage in systems with per-document security; demonstrated vs marketed scale for every surveyed visualisation system; row-level access control coverage across the category; PostgreSQL RLS and DuckDB measurements |
+| 2 | `docs/design/architecture.md` §5, §10.3, §10.4, `probes/results.md` §4, §5, §6, `probes/optimisations.md` | Entity space vs row space and the permutation; Morton ranking and tile-to-range contiguity; Roaring container structure; the O(containers touched) cost model |
+| 3 | `docs/design/architecture.md` §6, §2.6, §4, `docs/design/contracts.md` (plugin ABI), `probes/results.md` §3, §5, `probes/optimisations.md` | The authorisation plugin boundary; DNF terms, the term index, postings and union; mask construction; signature-sorted allocation and I9 permanence; the end-to-end request path |
+| 4 | `docs/design/architecture.md` §7, §8, §12, §4 | Level of detail, priority nesting, direct evaluation, I7; label gating and the containment frontier, I3/I12; the two-mask model; compartmented partitions and required-set gating |
+| 5 | `docs/design/concurrency-lifecycle.md`, `docs/design/architecture.md` §11 | WAL and the ack contract; buffer, watermark and overlay; segments, merging, compaction; generations and pins; the three retirement rules and why conflating them is fail-open |
+| 6 | `probes/results.md`, `probes/phase0-memo.md`, `docs/design/architecture.md` §13, §16, Appendix C | The 10⁹ measurements with their conditions; the 8.8 s permutation cost; what Phase 0 did and did not establish; open questions; the leak register C1–C16 |
 
 - [ ] **Step 3: Verify each fact sheet is citable**
 
@@ -589,9 +589,9 @@ The paper makes public claims about third-party systems and about measured perfo
 
 Give each the built HTML path and no stake in the paper being right.
 
-Reviewer A — invariants: "Read `.ignore/tessera-architecture-design.md` §4 and `.ignore/tessera-concurrency-lifecycle.md` §3. Then read the built paper. Report every place where a statement about I2, I3, I7, I9, I10, I12 or the three retirement rules differs in substance from the source, and every place the paper implies a guarantee the design does not make. Quote both the paper and the source."
+Reviewer A — invariants: "Read `docs/design/architecture.md` §4 and `docs/design/concurrency-lifecycle.md` §3. Then read the built paper. Report every place where a statement about I2, I3, I7, I9, I10, I12 or the three retirement rules differs in substance from the source, and every place the paper implies a guarantee the design does not make. Quote both the paper and the source."
 
-Reviewer B — third-party claims: "Read `.ignore/prior-art-*.md`. For every claim the paper makes about a system other than Tessera, verify it against those documents and report any claim that is unsupported, overstated, or collapses the distinction between demonstrated and marketed capability. Report claims with no traceable source as failures."
+Reviewer B — third-party claims: "Read `docs/evidence/prior-art/prior-art-*.md`. For every claim the paper makes about a system other than Tessera, verify it against those documents and report any claim that is unsupported, overstated, or collapses the distinction between demonstrated and marketed capability. Report claims with no traceable source as failures."
 
 Reviewer C — measurements: "Read `probes/results.md` and `probes/phase0-memo.md`. Verify every number in the paper against them, including units and measurement conditions. Report any number that is wrong, rounded misleadingly, quoted without its conditions, or presented as more general than the source supports. Confirm the synthetic-policy caveat is stated plainly rather than buried."
 

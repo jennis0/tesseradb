@@ -16,21 +16,21 @@ Every surveyed system with per-document security permits aggregates over records
 
 ## Documents, in reading order
 
-**1. `tessera-architecture-design.md` (r23) — the specification.** What the system guarantees. Start with §2.6, which walks a request end to end and points at the section governing each step; then §4, the thirteen invariants. Appendix C is the leak register, Appendix D the prior art, Appendix E a reference authorisation plugin, Appendix H the general framing and its boundary.
+**1. `architecture.md` (r23) — the specification.** What the system guarantees. Start with §2.6, which walks a request end to end and points at the section governing each step; then §4, the thirteen invariants. Appendix C is the leak register, Appendix D the prior art, Appendix E a reference authorisation plugin, Appendix H the general framing and its boundary.
 
-**2. `tessera-implementation-plan.md` — how it gets built.** Language and runtime decisions, the dependency register, six phases ordered by risk retirement rather than by architecture, the conformance suite mapped to invariants, and effort sizing. **Phase 0 can kill the architecture and takes two to four weeks. Nothing else should start until it finishes.**
+**2. `implementation-plan.md` — how it gets built.** Language and runtime decisions, the dependency register, six phases ordered by risk retirement rather than by architecture, the conformance suite mapped to invariants, and effort sizing. **Phase 0 can kill the architecture and takes two to four weeks. Nothing else should start until it finishes.**
 
-**2a. `tessera-system-architecture.md` (r5) — the shape of the built system.** Backend component architecture: processes and planes, the crate decomposition, the five contracts, the ingest/compaction lifecycle, configuration and packaging. Sixteen recorded decisions; its Appendix R holds the review trail. Written after and governed by the specification.
+**2a. `system-architecture.md` (r5) — the shape of the built system.** Backend component architecture: processes and planes, the crate decomposition, the five contracts, the ingest/compaction lifecycle, configuration and packaging. Sixteen recorded decisions; its Appendix R holds the review trail. Written after and governed by the specification.
 
-**2b. `tessera-contracts-spec.md` (r8) — the byte level.** Schema- and byte-precise definitions of the four interchange contracts: bundle format, service API, plugin ABI, wire. Its organising rule — a contract exists only where a second reader exists — and its §0.3 deviations govern where it and the system architecture's sketches differ.
+**2b. `contracts.md` (r8) — the byte level.** Schema- and byte-precise definitions of the four interchange contracts: bundle format, service API, plugin ABI, wire. Its organising rule — a contract exists only where a second reader exists — and its §0.3 deviations govern where it and the system architecture's sketches differ.
 
-**2c. `tessera-concurrency-lifecycle.md` (r4) and `tessera-conformance-design.md` (r3) — the mechanism level.** The first: generations, pins, the three retirement rules (deletion / suppression / predicate-fold — they differ, and conflating them is fail-open), the WAL, merge-versus-snapshot, the router/worker protocol. The second: the harness that makes the invariants enforceable — the definitions-oracle, canonicalised canary comparison, the byte-scanner with positive controls, and eight scripted interleavings. Both carry Appendix R review records.
+**2c. `concurrency-lifecycle.md` (r4) and `conformance.md` (r3) — the mechanism level.** The first: generations, pins, the three retirement rules (deletion / suppression / predicate-fold — they differ, and conflating them is fail-open), the WAL, merge-versus-snapshot, the router/worker protocol. The second: the harness that makes the invariants enforceable — the definitions-oracle, canonicalised canary comparison, the byte-scanner with positive controls, and eight scripted interleavings. Both carry Appendix R review records.
 
-**3. `tessera-visualisation-architecture.md` — the client.** Two deployment profiles, GPU and thin-client, over one data contract and one interaction model. Organised around reuse: what exists, its licence, and what remains to be written. §8 records the rejected alternatives, several of which will be proposed again.
+**3. `visualisation.md` — the client.** Two deployment profiles, GPU and thin-client, over one data contract and one interaction model. Organised around reuse: what exists, its licence, and what remains to be written. §8 records the rejected alternatives, several of which will be proposed again.
 
-**4. `tessera-scaling-analysis.md` — analysis, not specification.** Residency tiers, scaling to 10¹⁰–10¹², and permission-signature partitioning. Everything in it is conditional on measurements nobody has taken; it leads with its assumptions so the numbers are arguable rather than asserted. Models in `analysis-models/`.
+**4. `scaling-analysis.md` — analysis, not specification.** Residency tiers, scaling to 10¹⁰–10¹², and permission-signature partitioning. Everything in it is conditional on measurements nobody has taken; it leads with its assumptions so the numbers are arguable rather than asserted. Lives in [../evidence/analysis/](../evidence/analysis/), with its runnable models beside it.
 
-**5. `prior-art-*.md` — the survey.** Four domain reviews plus a synthesis, with primary sources. The body of evidence behind "no existing technology can replace this build". Read the synthesis; go to the domain reviews when you want the citation.
+**5. The prior-art survey — [../evidence/prior-art/](../evidence/prior-art/).** Four domain reviews plus a synthesis, with primary sources. The body of evidence behind "no existing technology can replace this build". Read the synthesis; go to the domain reviews when you want the citation.
 
 ---
 

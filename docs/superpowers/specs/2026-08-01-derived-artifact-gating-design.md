@@ -1,7 +1,7 @@
 # Derived artifacts — one class, three gates, two axes
 
 **Date:** 2026-08-01
-**Status:** design, for review. **Candidate to graduate into the `.ignore/` design corpus once C1's owner review validates the taxonomy** — it generalises two sections of the specification, and putting an unreviewed framework where the specification defers to it would be the wrong order.
+**Status:** design, for review. **Candidate to graduate into the `docs/design/` design corpus once C1's owner review validates the taxonomy** — it generalises two sections of the specification, and putting an unreviewed framework where the specification defers to it would be the wrong order.
 **Split from** `2026-07-31-client-interaction-architecture-design.md` §9.1, which had grown to a quarter of that document while answering a question that is not a client question.
 **Touches:** design §7.5, §7.6, §8.4, §12.3, Appendix C (C1, C2, C3, C11), Appendix D, Appendix H; contracts §3.2; plan §7 (Phase 3).
 
@@ -292,7 +292,7 @@ whatever is exact, whatever its shape.
   and third; nothing is committed.
 - **Edges** remain unscoped: the rule is settled (§3), the mechanism is not (§4), and the
   sampling problem is named but unsolved (§8).
-- **Whether this document graduates into the `.ignore/` corpus**, which turns on whether the
+- **Whether this document graduates into the `docs/design/` corpus**, which turns on whether the
   taxonomy survives C1's review.
 
 ## 11. Provenance

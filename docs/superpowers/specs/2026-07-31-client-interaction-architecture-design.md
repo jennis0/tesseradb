@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-31
 **Status:** design, for review
-**Companion to** `tessera-visualisation-architecture.md`, which owns *rendering*; this document owns everything protocol-facing.
+**Companion to** `visualisation.md`, which owns *rendering*; this document owns everything protocol-facing.
 **Touches:** design §2.2–2.6, §7.1–7.5, §8, §11.2, Appendix C, Appendix H; contracts §3, §5; SA §4.2–4.5; plan §5–§9; viz architecture §1–§2, §7, §9.
 
 ---

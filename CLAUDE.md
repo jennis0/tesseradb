@@ -6,23 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Phase 1 — implementation.** Phase 0 is complete: measurements over the synthetic 10⁹ corpus are in [probes/](probes/) (`dataset.md`, `results.md`, `optimisations.md`, `phase0-memo.md`), the verdict is go, and their conclusions are folded into the design corpus. There will be **no real-label rerun** — this is a personal project with no real access-labelled corpus available; synthetic-corpus evidence is accepted as final (design r18), and the caveat survives only as deployment guidance: any future deployment with real labels should re-run the Phase 0 measurements before trusting the policy-dependent headlines (signature alignment, posting compression, union cost).
 
-Scaffolding the Cargo workspace and writing Phase 1 code is now the job. Phase 1 scope is the walking skeleton (plan §5): the tiler, the WAL and its ack contract, the entity-ID allocator **with signature-sorted assignment from day one** (permanent under I9 — cannot be retrofitted), the segment loader, term index and mask build, the viewport query, the handle allocator, and the differential oracle scaffolding. Crate layout is system architecture §3; bundle and API byte formats are the contracts spec; runnable analysis models are in [.ignore/analysis-models/](.ignore/analysis-models/) and the probe scripts in [probes/](probes/).
+Scaffolding the Cargo workspace and writing Phase 1 code is now the job. Phase 1 scope is the walking skeleton (plan §5): the tiler, the WAL and its ack contract, the entity-ID allocator **with signature-sorted assignment from day one** (permanent under I9 — cannot be retrofitted), the segment loader, term index and mask build, the viewport query, the handle allocator, and the differential oracle scaffolding. Crate layout is system architecture §3; bundle and API byte formats are the contracts spec; runnable analysis models are in [docs/evidence/analysis/](docs/evidence/analysis/) and the probe scripts in [probes/](probes/).
 
 ## The documents
 
-All design docs in [.ignore/](.ignore/), which default file-search tooling skips — pass the path explicitly when searching. **Precedence:** the architecture design is the specification; the mechanism documents implement it and defer to it; where the contracts spec and the system architecture's sketches differ, the contracts spec's §0.3 deviations govern. Every document carries its review trail in an Appendix R — read it before re-litigating a decision.
+All design docs in [docs/design/](docs/design/); supporting evidence — prior art, the scaling analysis and its models — in [docs/evidence/](docs/evidence/). **Precedence:** the architecture design is the specification; the mechanism documents implement it and defer to it; where the contracts spec and the system architecture's sketches differ, the contracts spec's §0.3 deviations govern. Every document carries its review trail in an Appendix R — read it before re-litigating a decision.
 
 | | |
 |---|---|
-| [README.md](.ignore/README.md) | Start here. Reading order, what is settled, what was measured |
-| [tessera-architecture-design.md](.ignore/tessera-architecture-design.md) | **The specification** (r23). §2.6 walks a request end to end; §4 is the thirteen invariants; Appendix C is the leak register; Appendix G the revision history |
-| [tessera-system-architecture.md](.ignore/tessera-system-architecture.md) | The built system (r5): processes and planes, crate decomposition, lifecycle, config, packaging; decisions D1–D16 |
-| [tessera-contracts-spec.md](.ignore/tessera-contracts-spec.md) | Byte level (r8): bundle format, service API, plugin ABI, wire |
-| [tessera-concurrency-lifecycle.md](.ignore/tessera-concurrency-lifecycle.md) | Mechanisms (r4): generations, pins, the **three** retirement rules, WAL, merge-vs-snapshot, router/worker protocol |
-| [tessera-conformance-design.md](.ignore/tessera-conformance-design.md) | The suite (r3): definitions-oracle, canonicalised canaries, byte-scanner, eight interleaving scripts |
-| [tessera-implementation-plan.md](.ignore/tessera-implementation-plan.md) | Phases, conformance matrix (§10), effort sizing |
-| [tessera-visualisation-architecture.md](.ignore/tessera-visualisation-architecture.md) | The client: two profiles, one data contract (deferred; backend first) |
-| [tessera-scaling-analysis.md](.ignore/tessera-scaling-analysis.md) + prior-art docs | Analysis and build-vs-buy evidence |
+| [README.md](docs/design/README.md) | Start here. Reading order, what is settled, what was measured |
+| [architecture.md](docs/design/architecture.md) | **The specification** (r24). §2.6 walks a request end to end; §4 is the thirteen invariants; Appendix C is the leak register; Appendix G the revision history |
+| [system-architecture.md](docs/design/system-architecture.md) | The built system (r5): processes and planes, crate decomposition, lifecycle, config, packaging; decisions D1–D16 |
+| [contracts.md](docs/design/contracts.md) | Byte level (r11): bundle format, service API, plugin ABI, wire |
+| [concurrency-lifecycle.md](docs/design/concurrency-lifecycle.md) | Mechanisms (r4): generations, pins, the **three** retirement rules, WAL, merge-vs-snapshot, router/worker protocol |
+| [conformance.md](docs/design/conformance.md) | The suite (r3): definitions-oracle, canonicalised canaries, byte-scanner, eight interleaving scripts |
+| [implementation-plan.md](docs/design/implementation-plan.md) | Phases, conformance matrix (§10), effort sizing |
+| [visualisation.md](docs/design/visualisation.md) | The client: two profiles, one data contract (deferred; backend first) |
+| [docs/evidence/](docs/evidence/) | Non-normative evidence: [scaling-analysis.md](docs/evidence/analysis/scaling-analysis.md) with its runnable models, and the five [prior-art](docs/evidence/prior-art/) reviews behind the build-vs-buy verdict |
 | [probes/](probes/) | Phase 0 corpus, measurements, engineering distillation — real numbers; re-run before trusting any figure quoted from them |
 
 `§n` in any document refers to the architecture design unless prefixed (SA §n, contracts §n). Read the relevant section before changing anything it governs; these documents argue their decisions, and most obvious objections are already answered in them.

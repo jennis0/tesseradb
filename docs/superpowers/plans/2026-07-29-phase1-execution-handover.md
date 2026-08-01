@@ -42,7 +42,7 @@ recorded. Your job is Tasks 10–16 plus the final whole-branch review.
   tests green; `cargo fmt --all`, `cargo clippy --workspace --all-targets --
   -D warnings`, `bash scripts/check-layers.sh` all clean at every completed
   task boundary.
-- **Documents:** design corpus in `.ignore/` (search tools skip it — pass
+- **Documents:** design corpus in `docs/design/` (search tools skip it — pass
   paths explicitly). Authority order: architecture design (r19) > contracts
   spec (r4) > system architecture (r4); lifecycle design r3 for WAL/overlay
   mechanisms. The plan cites all of these; if plan and spec disagree, STOP

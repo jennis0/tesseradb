@@ -1,6 +1,6 @@
 # Tessera — Implementation Plan
 
-**Companion to** `tessera-architecture-design.md` (r23) and `tessera-system-architecture.md` (r5), which — with the contracts spec, lifecycle design and conformance design — carries the component decomposition, contracts and mechanisms this plan's phases build. That document specifies *what* the system guarantees; this one specifies *how it gets built, in what order, and what would make us stop*.
+**Companion to** `architecture.md` (r23) and `system-architecture.md` (r5), which — with the contracts spec, lifecycle design and conformance design — carries the component decomposition, contracts and mechanisms this plan's phases build. That document specifies *what* the system guarantees; this one specifies *how it gets built, in what order, and what would make us stop*.
 
 **Chosen stack:** Rust throughout the engine — serving core *and* build pipeline, one binary with a batch mode. Python is a first-class packaged consumer (SDK, supervisor) and the language of the test-only reference oracle, never a component. (Amended from "Python build pipeline"; the argument is in 2.2.)
 

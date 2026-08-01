@@ -82,7 +82,7 @@ per-principal labels.
 
 ### Contracts amendment
 
-`.ignore/tessera-contracts-spec.md` §3.1 error table, before:
+`docs/design/contracts.md` §3.1 error table, before:
 
 ```
 | 429 | `backpressure` | ingest only — `/control/changes` is **never** load-shed (...) |
@@ -181,7 +181,7 @@ passes below.
 - `crates/tessera-server/src/control.rs` — `/control/status` compute gauges
 - `crates/tessera-server/tests/http.rs` — fixture threading (`spawn_server_with_config_and_gate`,
   `generous_test_gate`) + 4 new gate tests
-- `.ignore/tessera-contracts-spec.md` — one-line §3.1 annotation amendment
+- `docs/design/contracts.md` — one-line §3.1 annotation amendment
 - `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` — matching restatement
 
 ## Self-review

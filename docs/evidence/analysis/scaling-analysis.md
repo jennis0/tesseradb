@@ -1,8 +1,8 @@
 # Tessera — Residency, Sharding and Scale
 
-**Companion to** `tessera-architecture-design.md`. **Status: analysis, not specification.** Everything here is conditional on measurements nobody has taken. Two findings were firm enough to fold back into the design (r14, and the Phase 0 addition in the implementation plan); the rest is recorded so the reasoning is re-derivable and arguable rather than asserted.
+**Companion to** `architecture.md`. **Status: analysis, not specification.** Everything here is conditional on measurements nobody has taken. Two findings were firm enough to fold back into the design (r14, and the Phase 0 addition in the implementation plan); the rest is recorded so the reasoning is re-derivable and arguable rather than asserted.
 
-Models are in `analysis-models/`. Re-run them before trusting any number below.
+Models sit alongside this document — `residency.py`, `scale.py`, `sizing.py`, `termshard.py`. Re-run them before trusting any number below.
 
 ---
 

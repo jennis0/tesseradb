@@ -1,7 +1,7 @@
 # Tessera — System Architecture: Storage, Serving and Lifecycle
 
 **Status:** Draft r5 — r4 plus ingest-audit corrections: flush as the visibility mechanism, batch-into-live recorded as open, fragmentation metric (see Appendix R)
-**Companion to** `tessera-architecture-design.md` (r23), which owns the invariants and the *why*, and `tessera-implementation-plan.md`, which owns phasing. This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the design document. Where this document and the design disagree, the design is right.
+**Companion to** `architecture.md` (r23), which owns the invariants and the *why*, and `implementation-plan.md`, which owns phasing. This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the design document. Where this document and the design disagree, the design is right.
 
 **Scope note.** Backend only — the storage engine, the query surface and the lifecycle. The client appears only where its contract constrains the backend (the wire format). The visualisation architecture document remains the reference for everything drawn.
 

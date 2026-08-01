@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **Spec:** `docs/superpowers/specs/2026-08-01-mvp-client-and-deckgl-viewer-design.md`. Where this plan and the spec disagree, the spec governs; where the spec and `.ignore/tessera-contracts-spec.md` disagree, the contracts spec governs.
+- **Spec:** `docs/superpowers/specs/2026-08-01-mvp-client-and-deckgl-viewer-design.md`. Where this plan and the spec disagree, the spec governs; where the spec and `docs/design/contracts.md` disagree, the contracts spec governs.
 - **British spelling** in prose, comments and identifiers where a choice exists (`authorise`, `visualisation`, `colour`). The HTTP route is `/session/authorise` — spelled that way in the server already.
 - **The server is authoritative for every masked quantity.** The client renders `visible`/`matched`/`served` as received; it never computes, estimates or interpolates one. A drawn-mark count is never presented as a total.
 - **Node 22, npm workspaces.** No pnpm or yarn — `pnpm` is not installed on this machine.

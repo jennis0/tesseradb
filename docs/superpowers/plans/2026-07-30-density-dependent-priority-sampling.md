@@ -40,7 +40,7 @@ the definition rather than the placeholder.
 
 ## Global constraints
 
-- **Design corpus lives in `.ignore/`,** which default file-search tooling skips — pass the path
+- **Design corpus lives in `docs/design/`,** which default file-search tooling skips — pass the path
   explicitly. Precedence: architecture design (**r21**) > contracts spec (**r6**) > system
   architecture (r4). `§n` unprefixed means the architecture design.
 - **If plan and design disagree, STOP and report to the owner.** Do not resolve silently. Every
@@ -370,8 +370,8 @@ version bump.
   `conformance/tests/test_canary.py`
 
 **Task 5 — the design corpus**
-- Modify: `.ignore/tessera-architecture-design.md` (§7.2, §7.3, §12.3, Appendix A, Appendix C,
-  Appendix G r22), `.ignore/tessera-contracts-spec.md` (§2.6 note, §3, §0.3, revision block r7)
+- Modify: `docs/design/architecture.md` (§7.2, §7.3, §12.3, Appendix A, Appendix C,
+  Appendix G r22), `docs/design/contracts.md` (§2.6 note, §3, §0.3, revision block r7)
 
 ---
 
@@ -510,7 +510,7 @@ version bump.
 3. **The selection-route plan** is superseded in part: its Task 1 lands here; its Tasks 2+ do not.
    Its Task 3 Appendix C obligation is discharged here.
 4. **Neither the drawn-mark plan's files nor the identity plan's are edited here** except
-   `.ignore/tessera-contracts-spec.md`. **If either is in flight on that file, STOP and report**
+   `docs/design/contracts.md`. **If either is in flight on that file, STOP and report**
    rather than merging revision blocks by hand.
 
 ## What this plan deliberately does not do

@@ -22,7 +22,7 @@ crate layout, not the byte formats, not the plugin ABI — those are contracts,
 and this paper is about mechanism.
 
 **Non-goals.** It is not a specification, does not supersede any document in
-`.ignore/`, and does not document the API. It does not attempt to teach
+`docs/design/`, and does not document the API. It does not attempt to teach
 Roaring bitmaps or Morton curves in general — only as much as the argument
 needs.
 
@@ -167,7 +167,7 @@ The paper makes public claims about third-party systems and about measured
 performance. Both must be exact.
 
 - **Every competitor claim carries a citation** traceable to
-  `.ignore/prior-art-*.md`, which in turn cites primary sources. Claims about
+  `docs/evidence/prior-art/prior-art-*.md`, which in turn cites primary sources. Claims about
   demonstrated versus marketed scale must preserve that distinction — for
   example, deepscatter's billion-point artefact is a *static* star catalogue,
   and saying otherwise would be false.

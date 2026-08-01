@@ -46,7 +46,7 @@ Three consequences follow, and each is a correction to how something downstream 
 
 Every task's requirements implicitly include this section.
 
-- **Design corpus lives in `.ignore/`,** which default file-search tooling skips — always pass the path explicitly. **Precedence: architecture design (r20, `.ignore/tessera-architecture-design.md`) > contracts spec (r5, `.ignore/tessera-contracts-spec.md`) > system architecture (r4).** The contracts spec's §0.3 deviations govern **only where the contracts spec and the *system architecture* differ** — CLAUDE.md scopes them that narrowly, and they never override the design. Where this plan needs the design to change, it changes the design explicitly (Task 4), in the design, with an Appendix G entry. Lifecycle design r3 owns WAL/overlay/pin mechanisms. `§n` unprefixed means the architecture design.
+- **Design corpus lives in `docs/design/`,** which default file-search tooling skips — always pass the path explicitly. **Precedence: architecture design (r20, `docs/design/architecture.md`) > contracts spec (r5, `docs/design/contracts.md`) > system architecture (r4).** The contracts spec's §0.3 deviations govern **only where the contracts spec and the *system architecture* differ** — CLAUDE.md scopes them that narrowly, and they never override the design. Where this plan needs the design to change, it changes the design explicitly (Task 4), in the design, with an Appendix G entry. Lifecycle design r3 owns WAL/overlay/pin mechanisms. `§n` unprefixed means the architecture design.
 - **Every document carries an Appendix R review trail** (system architecture, contracts spec, lifecycle) or an Appendix G revision history (design). Read it before re-litigating a decision. **If this plan and a spec document disagree, STOP and report to the owner.** Do not resolve silently.
 - **Never `git add -A` or `git commit -am`.** The working tree carries untracked owner files (`docs/whitepaper/`, `docs/tessera-*.html`, `docs/reference/`, `docs/design-memos/`, `docs/superpowers/specs/`, `.superpowers/`) and in-flight work. **Every commit step in this plan names its paths explicitly.** Leave everything it does not name alone. **Do not commit this plan file.**
 - **Disk is at 97% — 15 GiB free on `/`.** Any step that writes at scale runs `df -h /` first. If space is short, **STOP and report to the owner**; never delete anything to make room. **One narrow exception, at one step only:** the owner has ruled (Q5, 2026-07-29) that **Task 14 Step 2 may delete `/tmp/tessera-1e9`** — and only Task 14 Step 2, and only after the Task-2-baseline precondition below is verified to hold. No other task, and no other path, deletes anything.
@@ -349,7 +349,7 @@ Under this change entity IDs still never leave, and the guarantee gets *stronger
 
 **The design text must be amended, not left to contradict the code (Critical C-3).** Three places say the mechanism is a per-session handle:
 
-- `.ignore/tessera-architecture-design.md:143` — I10: *"Clients receive per-session opaque handles instead."*
+- `docs/design/architecture.md:143` — I10: *"Clients receive per-session opaque handles instead."*
 - `:100` — §2.6 step 10: *"Row IDs to entity IDs to per-session opaque handles."*
 - `:445` — §10.6: *"Points carry per-session opaque handles rather than entity IDs."*
 
@@ -737,7 +737,7 @@ Sorted extents at 10⁹, costed as `(key bytes + 4 offset + 4 entity)` per row, 
 
 1. Drawn-mark Tasks 3–6 (the probe harness and the P1/P2/P3 measurements) may proceed in parallel with this plan's Tasks 1–13 — they touch `probes/markbudget/` (excluded from the workspace) and nothing this plan touches.
 2. **Drawn-mark Task 7's `DEFAULT_MAX_K` *value* must not be committed until this plan's Task 15 has run.** A `k` calibrated on the current bundle is calibrated against a swapping box and a 4-byte handle; both change here. The calibration *method* is unaffected — only the numbers it consumes.
-3. Neither plan edits the other's files. Drawn-mark Task 7 lists `crates/tessera-server/src/config.rs`, `.ignore/tessera-contracts-spec.md` (§3 `k` note) and `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` (Task 16 k-sweep); this plan touches the contracts spec in §0.3/§2/§3/§5 and the Phase 1 plan's Task 16 only in Task 16, after drawn-mark Task 7. **If both are in flight on the contracts spec at once, STOP and report** rather than merging revision blocks by hand.
+3. Neither plan edits the other's files. Drawn-mark Task 7 lists `crates/tessera-server/src/config.rs`, `docs/design/contracts.md` (§3 `k` note) and `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` (Task 16 k-sweep); this plan touches the contracts spec in §0.3/§2/§3/§5 and the Phase 1 plan's Task 16 only in Task 16, after drawn-mark Task 7. **If both are in flight on the contracts spec at once, STOP and report** rather than merging revision blocks by hand.
 
 **A second in-flight plan overlaps the priority fold — RESOLVED by owner ruling, 2026-07-30.** `docs/superpowers/plans/2026-07-30-selection-route-chooser.md` declares itself a companion to the priority memo and states that it *"shares Task 1's call site"* — i.e. the selection path this fold's spec text describes but does not implement.
 
@@ -761,8 +761,8 @@ Still **not** resolved here, and still not an executor's call: the priority memo
 
 **Task 4 — the documents**
 - Modify: `docs/design-memos/2026-07-30-tessera-id-construction.md` — Step 0, the four priority amendments to Task 3's committed memo (the vectors file is **not** touched)
-- Modify: `.ignore/tessera-architecture-design.md` — I10 (`:143`), §2.6 step 10 (`:100`), §10.6 (`:445`), Appendix C (C6), Appendix A, §10.3 (routing principle), §11.1, §16 (open question), **§7.2 (`:240`, `:246`, `:248`), §2.6 step 7 (`:97`), §5.2 (`:163`), `:411`, §12.3 (`:525`), §14 (`:590`) — the priority redefinition**, Appendix G (r21)
-- Modify: `.ignore/tessera-contracts-spec.md` — §0.3 (deviations 6–9), §1, §2.1, §2.2 (MANIFEST `identity`), §2.4, §2.6, §3.1, §3.2, §3.4, §5, Appendix R (r6)
+- Modify: `docs/design/architecture.md` — I10 (`:143`), §2.6 step 10 (`:100`), §10.6 (`:445`), Appendix C (C6), Appendix A, §10.3 (routing principle), §11.1, §16 (open question), **§7.2 (`:240`, `:246`, `:248`), §2.6 step 7 (`:97`), §5.2 (`:163`), `:411`, §12.3 (`:525`), §14 (`:590`) — the priority redefinition**, Appendix G (r21)
+- Modify: `docs/design/contracts.md` — §0.3 (deviations 6–9), §1, §2.1, §2.2 (MANIFEST `identity`), §2.4, §2.6, §3.1, §3.2, §3.4, §5, Appendix R (r6)
 
 **Task 5 — the bijection**
 - Create: `crates/tessera-types/src/identity.rs`
@@ -1045,7 +1045,7 @@ The bijection is the load-bearing novelty of this change and the one thing the P
 - Create: `reference/vectors/tessera_id.json`
 
 **Interfaces:**
-- Consumes: the "The identity construction — specified, not assumed" section above; `.ignore/tessera-architecture-design.md` §13.3 (row-range shards), §12 (partitions), §16 (entity-ID exhaustion); contracts §1, §2.6.
+- Consumes: the "The identity construction — specified, not assumed" section above; `docs/design/architecture.md` §13.3 (row-range shards), §12 (partitions), §16 (entity-ID exhaustion); contracts §1, §2.6.
 - Produces: the memo Task 4 lands in the spec, and the known-answer vectors Tasks 5 and 12 both test against.
 
 - [ ] **Step 1: Write the memo**
@@ -1112,8 +1112,8 @@ The format is a contract before it is code. This task lands the spec so Tasks 5�
 **Precedence note for the executor:** the design is the specification. Contracts §0.3 deviations govern only where the contracts spec and the *system architecture* differ; they do not override the design. Where the design's I10 mechanism clause, §2.6 step 10 and §10.6 conflict with this change, **the design is amended in the design** — that is Critical C-3 and it is why this task edits the design first.
 
 **Files:**
-- Modify: `.ignore/tessera-architecture-design.md`
-- Modify: `.ignore/tessera-contracts-spec.md`
+- Modify: `docs/design/architecture.md`
+- Modify: `docs/design/contracts.md`
 - Modify: `docs/design-memos/2026-07-30-tessera-id-construction.md` *(Step 0 — Task 3's committed memo, four amendments only)*
 
 **Interfaces:**
@@ -1680,7 +1680,7 @@ Append to Appendix R, above the r5 paragraph, a paragraph recording: the four de
 - [ ] **Step 12: Verify no other document contradicts the new format**
 
 ```bash
-grep -n "node_id\|entity_id\|per-session handle\|opaque handle" .ignore/tessera-system-architecture.md .ignore/tessera-conformance-design.md .ignore/tessera-implementation-plan.md .ignore/tessera-concurrency-lifecycle.md .ignore/tessera-visualisation-architecture.md
+grep -n "node_id\|entity_id\|per-session handle\|opaque handle" docs/design/system-architecture.md docs/design/conformance.md docs/design/implementation-plan.md docs/design/concurrency-lifecycle.md docs/design/visualisation.md
 ```
 
 Read each hit. SA D14 (caller-supplied external IDs as the admin-plane identity) **remains correct verbatim** and needs no edit. Hits asserting that the viewer plane carries a per-session point handle are in scope for a follow-up but are **lower-precedence documents**: if any *asserts* something this change contradicts, record it in the commit message and **report to the owner** rather than editing a document this plan did not scope.
@@ -1688,7 +1688,7 @@ Read each hit. SA D14 (caller-supplied external IDs as the admin-plane identity)
 - [ ] **Step 13: Commit**
 
 ```bash
-git add .ignore/tessera-architecture-design.md .ignore/tessera-contracts-spec.md docs/design-memos/2026-07-30-tessera-id-construction.md
+git add docs/design/architecture.md docs/design/contracts.md docs/design-memos/2026-07-30-tessera-id-construction.md
 git commit -m "docs(design,contracts): the tessera_id boundary identity — design r21, contracts r6
 
 priority becomes high16(tessera_id); the storage sort order becomes (morton, tessera_id)."

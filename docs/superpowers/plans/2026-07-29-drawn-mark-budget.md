@@ -16,9 +16,9 @@
 
 Every task's requirements implicitly include this section.
 
-- **Design corpus lives in `.ignore/`,** which default file-search tooling skips — always pass the path explicitly. Precedence: architecture design (**r19**) > contracts spec (**r4**) > system architecture (**r4**); lifecycle design r3 for WAL/overlay mechanisms. `§n` unprefixed means the architecture design.
+- **Design corpus lives in `docs/design/`,** which default file-search tooling skips — always pass the path explicitly. Precedence: architecture design (**r19**) > contracts spec (**r4**) > system architecture (**r4**); lifecycle design r3 for WAL/overlay mechanisms. `§n` unprefixed means the architecture design.
 - **If plan and spec disagree, STOP and report to the owner.** Do not resolve silently. Every design document carries an Appendix R review trail — read it before re-litigating a decision.
-- **Never `git add -A` or `git commit -am`.** The working tree carries untracked owner files (`docs/whitepaper/`, `docs/tessera-*.html`, `docs/reference/`, `docs/superpowers/specs/`, `docs/design-memos/`) and in-flight Phase 1 Task 16 work (`crates/tessera-engine/benches/`, the `x-tessera-server-us` header in `crates/tessera-server/src/viewer.rs`, `Cargo.lock`, `crates/tessera-engine/Cargo.toml`, the `probes/optimisations.md` §4 expansion, the `.ignore/tessera-implementation-plan.md` §14 expansion, the plan §5 permutation note). **Every commit step in this plan names its paths explicitly.** Leave everything it does not name alone.
+- **Never `git add -A` or `git commit -am`.** The working tree carries untracked owner files (`docs/whitepaper/`, `docs/tessera-*.html`, `docs/reference/`, `docs/superpowers/specs/`, `docs/design-memos/`) and in-flight Phase 1 Task 16 work (`crates/tessera-engine/benches/`, the `x-tessera-server-us` header in `crates/tessera-server/src/viewer.rs`, `Cargo.lock`, `crates/tessera-engine/Cargo.toml`, the `probes/optimisations.md` §4 expansion, the `docs/design/implementation-plan.md` §14 expansion, the plan §5 permutation note). **Every commit step in this plan names its paths explicitly.** Leave everything it does not name alone.
 - **Owner decisions already taken for this plan, do not re-open:**
   1. `morton` u64→u32 and the §8 doc corrections land **before** Phase 1 Task 16's 10⁹ build, so the 60 GB bundle is built once against the final format.
   2. **Handle validity is required only for as long as the client holds the tile carrying it** — not across pan-away-and-return within a session. This settles the spec §5 open question and makes representation **B** admissible. All three representations are still measured.
@@ -35,11 +35,11 @@ Every task's requirements implicitly include this section.
 ## File Structure
 
 **Task 1 — §8 corrections (docs only)**
-- Modify: `.ignore/tessera-architecture-design.md` — Appendix A (two rows), §13.2, Appendix G (r20 entry)
+- Modify: `docs/design/architecture.md` — Appendix A (two rows), §13.2, Appendix G (r20 entry)
 - Modify: `probes/optimisations.md` — §4.4 trigger
 
 **Task 2 — `morton` u64 → u32**
-- Modify: `.ignore/tessera-contracts-spec.md` — §0.3 deviation, §2.1 tree, §2.5, §2.6, revision block (r5)
+- Modify: `docs/design/contracts.md` — §0.3 deviation, §2.1 tree, §2.5, §2.6, revision block (r5)
 - Modify: `crates/tessera-spatial/src/tiler.rs` — `sort_batch` returns `Vec<u32>`
 - Modify: `crates/tessera-store/src/write.rs` — `write_morton_u32`, file renamed `morton.u32`
 - Modify: `crates/tessera-store/src/read.rs` — `MortonSlice` over `u32`, `tile_ranges` widening fix
@@ -66,11 +66,11 @@ Every task's requirements implicitly include this section.
 - Create: `probes/markbudget/src/handles.rs`, `src/bin/p3_handles.rs`, `probes/markbudget/P3-handles.md`
 
 **Task 7 — calibration: set the `k` cap**
-- Modify: `crates/tessera-server/src/config.rs` (`DEFAULT_MAX_K`), `.ignore/tessera-contracts-spec.md` (§3 `k` note), `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` (Task 16 k-sweep)
+- Modify: `crates/tessera-server/src/config.rs` (`DEFAULT_MAX_K`), `docs/design/contracts.md` (§3 `k` note), `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` (Task 16 k-sweep)
 
 **Task 8 — the §5 decision and the results record**
 - Create: `docs/design-memos/2026-07-29-handle-representation.md`, `probes/markbudget/RESULTS.md`
-- Modify: `crates/tessera-wire/src/handles.rs` (exhaustion guard + recorded decision), `.ignore/tessera-implementation-plan.md` (P4 schedule), `probes/optimisations.md` (§3.5 k range)
+- Modify: `crates/tessera-wire/src/handles.rs` (exhaustion guard + recorded decision), `docs/design/implementation-plan.md` (P4 schedule), `probes/optimisations.md` (§3.5 k range)
 
 ---
 
@@ -79,7 +79,7 @@ Every task's requirements implicitly include this section.
 Spec §8 lists four corrections owed to the corpus; spec §7 states two more ("Two corrections fall out"). All six are independent of any probe result. They land first because they are cheap, they are prerequisites for nothing, and two of them change numbers that Task 8 will quote back.
 
 **Files:**
-- Modify: `.ignore/tessera-architecture-design.md` (Appendix A ×2, §13.2 at line 559, §10.5 at line 439, Appendix G)
+- Modify: `docs/design/architecture.md` (Appendix A ×2, §13.2 at line 559, §10.5 at line 439, Appendix G)
 - Modify: `probes/optimisations.md` (§3.2 heading, §4.4 trigger)
 
 **Interfaces:**
@@ -263,11 +263,11 @@ Immediately above the existing `- **r19** —` bullet, add:
 
 Run:
 ```bash
-git -C /home/joe/code/tessera diff --stat .ignore/tessera-architecture-design.md probes/optimisations.md
-grep -n "both directions" .ignore/tessera-architecture-design.md
-grep -n "claim under test" .ignore/tessera-architecture-design.md
-grep -n "r20" .ignore/tessera-architecture-design.md
-grep -n "not a per-viewport claim\|Resident for the partition" .ignore/tessera-architecture-design.md
+git -C /home/joe/code/tessera diff --stat docs/design/architecture.md probes/optimisations.md
+grep -n "both directions" docs/design/architecture.md
+grep -n "claim under test" docs/design/architecture.md
+grep -n "r20" docs/design/architecture.md
+grep -n "not a per-viewport claim\|Resident for the partition" docs/design/architecture.md
 grep -n "projected mask\* must stay cached" probes/optimisations.md
 ```
 Expected: exactly two files changed; `grep "both directions"` returns **no hits inside Appendix A's tables** (it may still appear in the new explanatory note — that is correct); every other grep returns at least one hit.
@@ -276,7 +276,7 @@ Expected: exactly two files changed; `grep "both directions"` returns **no hits 
 
 ```bash
 cd /home/joe/code/tessera
-git add .ignore/tessera-architecture-design.md probes/optimisations.md
+git add docs/design/architecture.md probes/optimisations.md
 git commit -m "docs: four corrections owed by the drawn-mark budget spec (design r20)"
 ```
 
@@ -293,7 +293,7 @@ Spec §2: the code is 32 bits because §5.2 fixes the grid at 2¹⁶ × 2¹⁶ �
 **The trap in this task.** `Tile::code_range()` returns `(u64, u64)` and *must keep doing so*: at depth 0 the exclusive end is `(0 + 1) << 32` = 2³², which does not fit in `u32`. Narrowing `code_range` to `u32` overflows at depth 0 and silently returns an empty range in release builds. The binary search widens each stored code instead.
 
 **Files:**
-- Modify: `.ignore/tessera-contracts-spec.md`
+- Modify: `docs/design/contracts.md`
 - Modify: `crates/tessera-spatial/src/tiler.rs:47-72`
 - Modify: `crates/tessera-store/src/write.rs:1,23,29-54,188-194`
 - Modify: `crates/tessera-store/src/read.rs:1,150-190,431-490,861-868`
@@ -680,7 +680,7 @@ Expected: PASS, including `test_morton_matches_byte_for_byte`. That test is the 
 
 - [ ] **Step 11: Amend the contracts spec**
 
-In `.ignore/tessera-contracts-spec.md`:
+In `docs/design/contracts.md`:
 
 §2.1's file tree (around line 63): `morton.u64` → `morton.u32`.
 
@@ -720,13 +720,13 @@ grep -rn "morton\.u64" --include=*.rs --include=*.py crates/ reference/ conforma
 cargo test --workspace 2>&1 | tail -10
 bash scripts/check-layers.sh
 ```
-Expected: the grep returns **nothing** under `crates/`, `reference/` and `conformance/`. Hits inside `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` and `.ignore/tessera-architecture-design.md:411` are historical prose — leave the executed Phase 1 plan alone; the design's §10.3 mention is a passing reference the contracts spec now governs, so add `*(now `morton.u32` — contracts §2.5, r5)*` after it and nothing more.
+Expected: the grep returns **nothing** under `crates/`, `reference/` and `conformance/`. Hits inside `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` and `docs/design/architecture.md:411` are historical prose — leave the executed Phase 1 plan alone; the design's §10.3 mention is a passing reference the contracts spec now governs, so add `*(now `morton.u32` — contracts §2.5, r5)*` after it and nothing more.
 
 - [ ] **Step 13: Commit**
 
 ```bash
 cd /home/joe/code/tessera
-git add .ignore/tessera-contracts-spec.md .ignore/tessera-architecture-design.md \
+git add docs/design/contracts.md docs/design/architecture.md \
         crates/tessera-spatial/src/tiler.rs \
         crates/tessera-store/src/write.rs crates/tessera-store/src/read.rs \
         crates/tessera-store/src/lib.rs crates/tessera-store/src/error.rs \
@@ -2572,7 +2572,7 @@ Also fixes the coupling the spec's §6 argues about: Phase 1 Task 16's exit crit
 
 **Files:**
 - Modify: `crates/tessera-server/src/config.rs` (`DEFAULT_MAX_K` and its doc)
-- Modify: `.ignore/tessera-contracts-spec.md` (§3's `k` line)
+- Modify: `docs/design/contracts.md` (§3's `k` line)
 - Modify: `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` (Task 16 Step 3)
 
 **Interfaces:**
@@ -2681,7 +2681,7 @@ Expected: all green; the grep shows `k = 30` only inside the new exit-gate sente
 ```bash
 cd /home/joe/code/tessera
 git add crates/tessera-server/src/config.rs crates/tessera-server/tests/http.rs \
-        .ignore/tessera-contracts-spec.md \
+        docs/design/contracts.md \
         docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md
 git commit -m "feat(server): calibrate max_k from the measured P1/P2/P3 minimum"
 ```
@@ -2696,7 +2696,7 @@ Spec §9's remaining criteria: the §5 handle representation is decided and reco
 
 **Files:**
 - Create: `docs/design-memos/2026-07-29-handle-representation.md`, `probes/markbudget/RESULTS.md`
-- Modify: `crates/tessera-wire/src/handles.rs`, `.ignore/tessera-implementation-plan.md`, `probes/optimisations.md`
+- Modify: `crates/tessera-wire/src/handles.rs`, `docs/design/implementation-plan.md`, `probes/optimisations.md`
 
 **Interfaces:**
 - Consumes: all three probe reports; Task 7's calibrated `max_k`.
@@ -2704,7 +2704,7 @@ Spec §9's remaining criteria: the §5 handle representation is decided and reco
 
 - [ ] **Step 1: Get option C reviewed against I10 before writing the memo**
 
-Spec §5: option C "must not be adopted on performance grounds alone" and "needs independent review before adoption, not just measurement". Dispatch a reviewer with **no stake in the outcome** and give it exactly: `.ignore/tessera-architecture-design.md` §4 (I10) and Appendix C (the leak register), `.ignore/tessera-system-architecture.md` §4.5, `.ignore/tessera-contracts-spec.md` §3 and §6, `probes/markbudget/src/handles.rs`, `probes/markbudget/P3-handles.md`, and spec §5.
+Spec §5: option C "must not be adopted on performance grounds alone" and "needs independent review before adoption, not just measurement". Dispatch a reviewer with **no stake in the outcome** and give it exactly: `docs/design/architecture.md` §4 (I10) and Appendix C (the leak register), `docs/design/system-architecture.md` §4.5, `docs/design/contracts.md` §3 and §6, `probes/markbudget/src/handles.rs`, `probes/markbudget/P3-handles.md`, and spec §5.
 
 The question to put to it, verbatim:
 
@@ -2765,7 +2765,7 @@ Then record the decision at the definition site — extend the existing `HandleT
 
 Spec §6 puts P4 post-Phase-1, pre-Phase-2, and §9 requires it scheduled *with the k range P1–P3 established*.
 
-In `.ignore/tessera-implementation-plan.md` §14, in the "What decides it" list, replace input 2's text with a version naming the now-known k range:
+In `docs/design/implementation-plan.md` §14, in the "What decides it" list, replace input 2's text with a version naming the now-known k range:
 
 ```markdown
 2. **The gather probe** (probes, optimisations §3.5, re-scoped to large *k*). Phase 0 measured
@@ -2803,8 +2803,8 @@ ls probes/markbudget/P1-render.md probes/markbudget/P2-transport.md \
    probes/markbudget/P3-handles.md probes/markbudget/RESULTS.md \
    docs/design-memos/2026-07-29-handle-representation.md
 grep -n "DEFAULT_MAX_K" crates/tessera-server/src/config.rs
-grep -n "r20" .ignore/tessera-architecture-design.md
-grep -n "Scheduled post-Phase-1" .ignore/tessera-implementation-plan.md
+grep -n "r20" docs/design/architecture.md
+grep -n "Scheduled post-Phase-1" docs/design/implementation-plan.md
 cargo test --workspace 2>&1 | tail -10
 bash scripts/check-layers.sh
 ```
@@ -2822,7 +2822,7 @@ Any ❌ is not done. Report it rather than closing the task.
 cd /home/joe/code/tessera
 git add probes/markbudget/RESULTS.md docs/design-memos/2026-07-29-handle-representation.md \
         crates/tessera-wire/src/handles.rs \
-        .ignore/tessera-implementation-plan.md probes/optimisations.md
+        docs/design/implementation-plan.md probes/optimisations.md
 git commit -m "docs(probes): the drawn-mark budget result, the handle decision, and P4 scheduled"
 ```
 

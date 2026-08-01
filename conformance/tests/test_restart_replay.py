@@ -30,7 +30,7 @@ yet) — the "no row" branch is always taken, so a buffered item contributes not
 viewport's mask, however it is authorised. `tessera-lifecycle/src/buffer.rs`'s module doc says the
 same thing directly: "a buffered item simply has no `Permutation::row_of` entry anywhere, so it
 can never contribute [to a viewport]." This is stated as intentional design in
-`.ignore/tessera-system-architecture.md` (§6.2/§6.3: WAL/ack durably records allocator state
+`docs/design/system-architecture.md` (§6.2/§6.3: WAL/ack durably records allocator state
 immediately; spatial/viewport visibility only arrives once a flush/build produces row geometry —
 "the catch-up window is the build duration; visibility latency during it degrades gracefully
 rather than data being lost"). So there is no HTTP-observable surface where "does this ingested
