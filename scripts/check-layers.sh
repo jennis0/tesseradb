@@ -15,10 +15,10 @@ deny tessera-server tessera-store     # server sees engine API types only
 deny tessera-server tessera-authz
 deny tessera-wire tessera-store
 deny tessera-wire tessera-authz
-# lifecycle §7's sync-engine rule, made mechanical (D-D/Task 6): the engine's intra-request
-# parallelism is rayon's plain-thread pool, never tokio — an async runtime inside a supposedly
-# synchronous engine would reintroduce exactly the reactor-blocking hazard Task 3 (D-A) moved off
-# the server's own reactor. rayon itself is fine and expected (the whole point of this task).
+# lifecycle §7's sync-engine rule, made mechanical (D-D): the engine's intra-request parallelism
+# is rayon's plain-thread pool, never tokio — an async runtime inside a supposedly synchronous
+# engine would reintroduce exactly the reactor-blocking hazard D-A moved off the server's own
+# reactor. rayon itself is fine and expected.
 deny tessera-engine tokio
 deny tessera-store tokio
 # I4: no ID conversions in types
@@ -81,9 +81,9 @@ if ! grep -q "stage_timing.unwrap_or(false)" crates/tessera-server/src/config.rs
 fi
 
 # ---------------------------------------------------------------------------------------------
-# Track A, Task 2. I7 / plan §6: "This warrants a comment in the source, not just a line in a
-# document." The candidate-list route is DECLINED (Phase 2 roadmap, owner ruling 1) and the
-# reasoning lives in `select.rs`'s module doc. A comment CI cannot notice being deleted is a
+# I7. The candidate-list route is DECLINED (decision 0008) and the reasoning lives in
+# `select.rs`'s module doc, because it warrants a comment in the source and not just a line in a
+# document. A comment CI cannot notice being deleted is a
 # comment that will be deleted -- and the deletion this guards against ("simplify: drop the
 # direct path") reintroduces tippecanoe's empty-tile cliff silently, for the sparsest principals.
 if ! grep -q "NO CANDIDATE-LIST ROUTE" crates/tessera-engine/src/select.rs; then
@@ -91,17 +91,17 @@ if ! grep -q "NO CANDIDATE-LIST ROUTE" crates/tessera-engine/src/select.rs; then
   fail=1
 fi
 
-# Track B, Task 3a. Three rules, each guarding a property that is structural TODAY and stays that
-# way only while nothing new is added beside it. Each is DEMONSTRATED going red -- planted, run,
-# reverted -- because an unfalsifiable rule reads as evidence while providing none, which is how
-# rule 2 came to exempt the only two manifests it existed to police.
+# Three rules, each guarding a property that is structural TODAY and stays that way only while
+# nothing new is added beside it. Each is DEMONSTRATED going red -- planted, run, reverted --
+# because an unfalsifiable rule reads as evidence while providing none, which is how rule 2 came
+# to exempt the only two manifests it existed to police.
 
-# 1. ONE PUBLISHER. Track C's finding S2: `write.rs`'s generation swaps use `load_full` + `store`,
-#    which loses a concurrent geometry publication -- leaving the LIVE generation on the pin drain
-#    list, where Task 5's prune evicts projections still in use. Task 3a closes it structurally by
-#    moving every swap onto the single executor thread. Stage 2.2's flush is precisely a second
-#    publisher, and lifecycle §1.3 already requires it to submit a command rather than store
-#    directly ("a swap-only publication step" on the lifecycle thread).
+# 1. ONE PUBLISHER. A generation swap written as `load_full` + `store` loses a concurrent
+#    geometry publication -- leaving the LIVE generation on the pin drain list, where the cache's
+#    prune evicts projections still in use. Routing every swap through the single executor thread
+#    closes that structurally. Flush would be precisely a second publisher, and lifecycle §1.3
+#    already requires it to submit a command rather than store directly ("a swap-only publication
+#    step" on the lifecycle thread).
 #
 #    Matches the CALL FORM, and matches it BROADLY. Two narrower spellings were tried and both
 #    were vacuous: `GenerationHandle::store` appears nowhere in the tree (both real sites are

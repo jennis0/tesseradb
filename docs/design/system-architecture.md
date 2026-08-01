@@ -117,7 +117,7 @@ crates/
                      kernels; the external-ID sidecar; the persistent frozen-fragment cache.
   tessera-spatial    Morton codes, viewport decomposition, tile range derivation, per-tile
                      counting; the tiler — quantisation, priority derivation, Morton sort —
-                     one implementation, used by bulk builds and (at stage 2.2) flushes.
+                     one implementation, used by bulk builds and, when it lands, by flush.
   tessera-lifecycle  WAL; ingest buffer; overlay; entity-ID allocator (single authority,
                      durable high-water, I9); the commit window (§6.2); fault injection,
                      gated out of shipped builds.
@@ -594,7 +594,7 @@ Recorded in the design's own style, because each will otherwise be re-proposed.
 16. **A point's wire identity is a stable, keyed `tessera_id`, not a per-session handle.** Stability is what lets a client bookmark, share and reconcile a point; the handle bought nothing the permutation's opacity does not, and after the entity-ID column left `columns.arrow` no request-path artifact stores an entity ID at all. Per-session handles are retained for Phase 3 node handles, where the identity genuinely is per-session. C17 records what linkability across sessions and principals costs.
 17. **One thread owns the WAL, by value; the commit window sets the signature-sort scope at the server.** Ordering stops being a discipline defended by a comment and becomes a property of there being nowhere else for the steps to happen — and the sort scope stops being whatever chunk a client happened to POST.
 
-**Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across slices (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity index-ordinal split of plan §14, which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
+**Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across slices (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity [index-ordinal split](deferred-index-ordinal-split.md), which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
 
 ## Appendix R — Review record
 
