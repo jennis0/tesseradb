@@ -175,7 +175,7 @@ Slices sharpen the value of stable identity: the entity is the join key across c
 
 **Tier 3 — recorded as contingent:** wire-identity stability across *resharding* is achievable **iff the ι-ordinal split lands** — the only structure in which scattered permanent IDs are livable, because postings, masks and the permutation index the dense renumberable ι and never the scattered layer. The split's two named safety holes (overlay keying is fail-open under renumbering; WAL replay) are **prerequisites, not footnotes**; nothing in this design depends on them closing, and the decision point is the reshard design at §13.4's own trigger, not now.
 
-Key rotation remains the one irreducible break — invalidating identifiers is what rotation is for. `external_id` remains the durable key throughout.
+Key rotation remains the one irreducible break — invalidating identifiers is what rotation is for. **Retaining the capability was questioned and is ruled deliberate** (2026-08-01): rotation is the sole remediation for deployment-key compromise, which would otherwise permanently open I10's inversion channel (gaps count allocations; proximity discloses shared signatures) for every identifier ever issued; and forbidding it deletes nothing, since the identity-epoch machinery exists anyway for the escape-hatch reallocation. It stays what contracts §2.2 says it is — a deliberate breaking change, never scheduled hygiene. `external_id` remains the durable key throughout.
 
 ## 9. Performance analysis and the fan-out sweep
 
