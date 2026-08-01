@@ -160,6 +160,7 @@ Net: no change to the five-verb surface; one new accepted register entry; one ne
 | Contracts §2.2 | Epoch-advance rule relaxes to "reallocation or rotation" |
 | Contracts §3.1 | `x-tessera-slice` header → `slice` field in request body/query; slice discovery endpoint masked by gate |
 | Contracts §3.4 (ingest) | Coordinate map `{slice → (x, y)}`; slice-creation control operation |
+| Architecture design §10.1 / system architecture (packaging, lifecycle) | Per-table column files; manifest table entries as keyed references; generation GC note (strict prefix-copy until compaction write volume triggers reference-sharing) |
 | Lifecycle | Compaction gains promotion-set evaluation and group carve/fold; note that tables add no fourth deny-retirement case |
 | Conformance design | Single-table indistinguishability differential build; later, the rule-out canary |
 | Implementation plan §14 | Signature-major entry superseded by this design (physical tables, threshold promotion); gather probe extended to the fan-out sweep |
@@ -181,3 +182,4 @@ The layout is a per-deployment build decision, **off by default** (empty promoti
 - Whether the slice gate label participates in `V_total`/θ anchoring in any way beyond membership (believed no: the gate only decides reachability, and θ is per-slice over rows already).
 - The fan-out sweep may show the count pyramid and the merge kneeing at different N; if so, whether the cap should differ per verb.
 - Tier 3's ι-split holes (overlay keying, WAL replay) — owned by plan §14, tracked here only as prerequisites.
+- The generation-GC scheme once manifest-reference sharing is adopted (refcount vs mark-sweep across manifests), and its interaction with pinned generations — deferred with the reference-sharing switch itself (§7).
