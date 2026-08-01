@@ -1,9 +1,12 @@
-//! The plugin surface (Reference Sheet R6, contracts §4 plugin ABI).
+//! The plugin surface (contracts §4, the plugin ABI).
 //!
-//! Phase 1 ships the *trait* — mirroring the wasm ABI's four entry points — plus one native
-//! implementation, [`Passthrough`] (`builtin:passthrough`). The wasmtime host is out of scope
-//! for this phase, so nothing here loads a guest module; the trait exists so the build
-//! pipeline, the (later) session plane and the conformance oracle all speak to one surface.
+//! This crate is the *trait* — mirroring the wasm ABI's four entry points — plus one native
+//! implementation, [`Passthrough`] (`builtin:passthrough`).
+//!
+//! **⊘ Specified, not implemented.** There is no wasmtime host: nothing here loads a guest
+//! module, so the only plugin a deployment can run is the built-in one below. The trait exists
+//! regardless, so that the build pipeline, the session plane and the conformance oracle all
+//! speak to one surface when a host does arrive.
 //!
 //! Two obligations from the design carry into any implementation of [`Plugin`]:
 //!
@@ -13,7 +16,7 @@
 //! * **Fail closed.** A credential that cannot be parsed yields an error, never an empty or
 //!   partial term list that would be mistaken for "authorised for nothing in particular".
 //!   (A *validly parsed* zero-term credential is a different thing: it legitimately mints a
-//!   zero-visibility token — R5.)
+//!   zero-visibility token, per contracts §4.3.)
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -22,7 +25,7 @@ use sha2::{Digest, Sha256};
 /// dictionary. Tessera never interprets a descriptor's contents.
 pub type Descriptor = Vec<u8>;
 
-/// The identity string hashed to produce `builtin:passthrough`'s plugin hashes (R6).
+/// The identity string hashed to produce `builtin:passthrough`'s plugin hashes.
 const PASSTHROUGH_IDENTITY: &str = "builtin:passthrough:1";
 
 /// What `terms_of_auth` returns: the credential's descriptors and its optional expiry.
@@ -35,7 +38,7 @@ pub struct AuthTerms {
     pub not_after: Option<i64>,
 }
 
-/// The plugin's sizing declarations (R6). These are *declarations*, not limits: exceeding one
+/// The plugin's sizing declarations. These are *declarations*, not limits: exceeding one
 /// warns and is recorded, and never causes an item or a term to be silently excluded — a
 /// dropped term is a disclosure risk (I2/I3), so the fail-open behaviour is forbidden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +86,8 @@ pub trait Plugin: Send + Sync {
     fn auth_plugin_hash(&self) -> String;
 }
 
-/// `builtin:passthrough` (R6): the identity plugin used by Phase 1 and the conformance oracle.
+/// `builtin:passthrough`: the identity plugin, and the only one this build can run. The
+/// conformance oracle implements the same mapping.
 ///
 /// * `access` is a UTF-8 comma-separated descriptor list — split on `,`, trim, drop empties.
 /// * `auth_data` is JSON `{"terms": ["<descriptor>", …]}`.
@@ -195,7 +199,8 @@ mod tests {
 
     #[test]
     fn zero_term_credential_is_accepted_not_an_error() {
-        // R5: a valid zero-term credential mints a zero-visibility token — deliberate.
+        // A valid zero-term credential mints a zero-visibility token — deliberate
+        // (contracts §4.3), and is not the fail-closed error path above.
         let p = Passthrough::new();
         assert!(p
             .terms_of_auth(br#"{"terms": []}"#)

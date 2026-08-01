@@ -1,5 +1,4 @@
-//! Mask fragment build (the authorise path) and the directory-backed frozen fragment cache
-//! (Task 6, Reference Sheet R4, R1).
+//! Mask fragment build (the authorise path) and the directory-backed frozen fragment cache.
 //!
 //! A mask fragment *is* the authorisation decision (I2): [`build_fragment`] unions the postings
 //! of every term a viewer's credential satisfies into one bitmap, entirely from
@@ -8,7 +7,8 @@
 //! here (SA §3's crate-dependency rule; entity space only).
 //!
 //! [`FragmentCache`] persists the result as a CRoaring `Frozen`-format bitmap in an engine-local
-//! cache directory (never in the bundle — Reference Sheet R1), so that a repeated grant set
+//! cache directory — never in the bundle, whose contents are fixed by contracts §2.1 — so that a
+//! repeated grant set
 //! reuses the on-disk fragment across process restarts instead of re-unioning postings. The
 //! cache key is deliberately wider than "the set of granted terms": see [`FragmentCache::new`].
 //! Because a parseable-but-wrong fragment would be a silent disclosure (not merely a crash), the
@@ -38,21 +38,19 @@ use crate::single_flight::{CacheWeight, SingleFlightCache, SingleFlightError};
 ///
 /// `crate::single_flight` is a private module, so `tessera_authz::CacheStats` is not a public path
 /// at all: a caller could invoke `stats()` and infer the type, but could not write it in a
-/// signature, a struct field or a `use`. The round-1 review caught the Task 5 report handing Track
-/// B `Engine::fragment_cache().stats() -> tessera_authz::CacheStats`, which does not compile — and
-/// whose obvious repair, adding a `tessera-authz` dependency to `tessera-server`, is a layering
-/// violation `scripts/check-layers.sh` refuses (`deny tessera-server tessera-authz`).
+/// signature, a struct field or a `use`. So `Engine::fragment_cache().stats() ->
+/// tessera_authz::CacheStats` does not compile, and its obvious repair — adding a `tessera-authz`
+/// dependency to `tessera-server` — is a layering violation `scripts/check-layers.sh` refuses
+/// (`deny tessera-server tessera-authz`).
 ///
 /// The path a server-plane caller should use is `tessera_engine::FragmentCacheStats`, which
-/// re-exports this one. A root-level `pub use` in this crate's `lib.rs` would be tidier still;
-/// that file is outside stage 2.1's Track C allowlist, so it is a stop-and-report item rather
-/// than a silent reach.
+/// re-exports this one.
 pub use crate::single_flight::CacheStats;
 
 /// Union the postings of every term in `terms` into one bitmap: this *is* the authorisation
 /// decision (I2). Partitions the granted postings into Roaring views (unioned in bulk via
 /// [`Bitmap::fast_or`] — croaring 2.7.0's binding for `roaring_bitmap_or_many`, the bulk-union
-/// entry point the brief calls `Bitmap::or_many`) and small arrays (decoded, concatenated,
+/// entry point) and small arrays (decoded, concatenated,
 /// sorted, and folded in with `add_many`), then `run_optimize`s the result.
 ///
 /// Parametric: takes `postings` as an argument and holds no lifecycle state of its own. `RowId`
@@ -66,7 +64,7 @@ pub fn build_fragment(terms: &[TermId], postings: &PostingsReader) -> io::Result
         match postings.posting(term)? {
             PostingRef::Roaring(view) => views.push(view),
             PostingRef::Array(bytes) => {
-                // `PostingsReader::open` (Task 5) validates every tag-0 payload's length is a
+                // `PostingsReader::open` validates every tag-0 payload's length is a
                 // multiple of 4 once, at open time — this is not re-checked per lookup, so a
                 // violation here would mean that validation was bypassed, not that this call site
                 // needs its own fail-closed handling.
@@ -367,8 +365,8 @@ impl CacheWeight for FrozenFragment {
 /// — a sort, a dedup and a SHA-256 over the granted term list — and never a wrong answer. An LRU
 /// here would be a second recency structure to keep in step for no correctness gain.
 ///
-/// 4096 is sized as "comfortably more distinct credentials than any Phase 2 deployment presents
-/// between clears", not measured; at ~80 B per entry it caps this map at ~330 KB.
+/// 4096 is sized as "comfortably more distinct credentials than a single-node deployment presents
+/// between clears" — assumed, not measured; at ~80 B per entry it caps this map at ~330 KB.
 const KEY_MEMO_MAX_ENTRIES: usize = 4096;
 
 /// Directory-backed frozen fragment store.
@@ -472,20 +470,20 @@ impl From<io::Error> for FragmentCacheError {
 
 impl FragmentCache {
     /// `dir` is the engine's local cache directory for this bundle/auth-plugin pair — never a
-    /// path inside the bundle itself (Reference Sheet R1). `bundle_identity` is the generation's
-    /// MANIFEST digest; `auth_plugin_hash` is the active auth plugin's hash. Does not touch the
-    /// filesystem; `get_or_build` creates `dir` (and any missing ancestors) on first write.
-    /// **Arity deliberately unchanged by Task 5**, which added the in-memory tier's byte bound.
-    /// This constructor has fourteen call sites across `tessera-authz/tests/fragment.rs`,
-    /// `tessera-engine/tests/selection.rs` and `tests/compose.rs`, none of which any stage-2.1
-    /// track owns, so widening it here would have been a change no worker could commit. The bound
-    /// arrives instead through [`Self::set_memory_bound`], which `tessera-server` calls at startup
-    /// after validating it — the same shape `Engine::start_write_executor` uses for
-    /// `ingest_queue_bound`, and for the same reason.
+    /// path inside the bundle itself, whose contents are fixed by contracts §2.1.
+    /// `bundle_identity` is the generation's MANIFEST digest; `auth_plugin_hash` is the active auth
+    /// plugin's hash. Does not touch the filesystem; `get_or_build` creates `dir` (and any missing
+    /// ancestors) on first write.
     ///
-    /// A cache built this way is **unbounded**, which is the pre-Task-5 behaviour. That is correct
-    /// for tests, benches and embedders; it is not correct for a server, and `tessera_server::
-    /// prepare` is what makes sure a server never gets one.
+    /// **The in-memory tier's byte bound is deliberately not a constructor argument.** It arrives
+    /// through [`Self::set_memory_bound`], which `tessera-server` calls at startup after validating
+    /// it — the same shape `Engine::start_write_executor` uses for `ingest_queue_bound`, and for
+    /// the same reason: the bound is a validated deployment setting, and the constructor's many
+    /// test, bench and embedder call sites have no opinion on it.
+    ///
+    /// A cache built this way is therefore **unbounded**. That is correct for tests, benches and
+    /// embedders; it is not correct for a server, and `tessera_server::prepare` is what makes sure
+    /// a server never gets one.
     pub fn new(dir: &Path, bundle_identity: [u8; 32], auth_plugin_hash: [u8; 32]) -> Self {
         FragmentCache {
             dir: dir.to_path_buf(),
@@ -506,9 +504,9 @@ impl FragmentCache {
     /// The canonical cache key for `satisfied` under this cache's bundle and plugin identity — the
     /// only way to name an entry from outside, and therefore what [`Self::evict`] takes.
     ///
-    /// Public because stage 2.4's conformance command needs to evict a *named* entry, and the key
-    /// is otherwise computed only inside [`Self::get_or_build`]. It is a pure function of its
-    /// inputs and reveals nothing a caller did not supply: the term set is the caller's own.
+    /// Public because evicting a *named* entry is impossible without it, and the key is otherwise
+    /// computed only inside [`Self::get_or_build`]. It is a pure function of its inputs and reveals
+    /// nothing a caller did not supply: the term set is the caller's own.
     pub fn canonical_key_for(&self, satisfied: &[TermId]) -> [u8; 32] {
         canonical_key(&self.bundle_identity, &self.auth_plugin_hash, satisfied)
     }
@@ -519,8 +517,8 @@ impl FragmentCache {
     /// every reopen ([`FrozenFragment::open`]), so an in-memory eviction costs the next caller a
     /// re-open plus SHA-256 over the frozen bytes — ~60–80 ms **modelled** at the 125 MB operating
     /// point — and never correctness. A caller that wants a genuinely cold rebuild (no mmap, no
-    /// sidecar) must delete the pair itself; this method is not that, and stage 2.4's conformance
-    /// command should say which of the two it means.
+    /// sidecar) must delete the pair itself; this method is not that, and a caller that offers the
+    /// choice should say which of the two it means.
     ///
     /// Also note what eviction does *not* free: any live `Session` holding this fragment keeps its
     /// mapping alive regardless — see [`FrozenFragment`]'s [`CacheWeight`] impl.
@@ -530,8 +528,8 @@ impl FragmentCache {
 
     /// The operator gauges for the in-memory tier — see [`CacheStats`]. Lock-free.
     ///
-    /// Wiring these onto `/control/status` needs `tessera-server/src/control.rs`, which stage 2.1's
-    /// allowlist gives to another track; this track exposes them and reports the wiring.
+    /// These reach an operator as `/control/status`'s `fragment_cache` block, via
+    /// `tessera_engine::Engine::fragment_cache_stats`.
     pub fn stats(&self) -> CacheStats {
         self.slots.stats()
     }
@@ -597,8 +595,8 @@ impl FragmentCache {
     ///
     /// `postings` supplies the union inputs on a cache miss. `watermark` is the caller-supplied
     /// SEGMENTS watermark to persist alongside a freshly built fragment; it is ignored on a cache
-    /// hit (the hit's own persisted watermark, from when it was built, is what's returned —
-    /// Task 10's composition uses the fragment's own watermark).
+    /// hit: the hit's own persisted watermark, from when it was built, is what is returned, and
+    /// mask composition uses that rather than the caller's).
     ///
     /// **D-G slot-state single-flight (lifecycle §3.3).** The single-flight map is keyed by the
     /// canonical key computed just below — never by `auth_data_hash` — so two different

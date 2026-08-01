@@ -181,7 +181,7 @@ impl Permutation {
     /// viewport query budgets for. Never call this on the per-viewport path; the engine caches
     /// the result per `(token, slice, pin)` and reuses it across viewports within a session.
     ///
-    /// **Parallel (task 7), executor-agnostic.** This crate owns no `rayon::ThreadPool` of its
+    /// **Parallel, and executor-agnostic.** This crate owns no `rayon::ThreadPool` of its
     /// own — `par_chunks`/`par_sort_unstable` below run on whatever pool the caller has
     /// `install`ed (the engine wraps its cold-session build in `self.pool.install(..)`, D-D), or
     /// on rayon's own global pool if nobody has. Chunk boundaries never change the result — each

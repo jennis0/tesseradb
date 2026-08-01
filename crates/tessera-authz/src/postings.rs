@@ -1,4 +1,4 @@
-//! CSR postings writer and reader (Task 5, Reference Sheet R4).
+//! CSR postings writer and reader for `terms/postings.arrow` (contracts §2.4).
 //!
 //! `terms/postings.arrow` is one Arrow IPC FILE holding a single record batch with one
 //! `LargeBinaryArray` column named `posting`; row ordinal = term_id. Each record is
@@ -182,9 +182,8 @@ impl PostingsSpool {
             .offsets
             .last()
             .expect("offsets holds a leading 0 from create");
-        let total = usize::try_from(total).map_err(|_| {
-            invalid_data("postings spool total exceeds usize on this platform")
-        })?;
+        let total = usize::try_from(total)
+            .map_err(|_| invalid_data("postings spool total exceeds usize on this platform"))?;
 
         let values = if total == 0 {
             // memmap2 rejects zero-length maps; an empty values buffer is what the builder

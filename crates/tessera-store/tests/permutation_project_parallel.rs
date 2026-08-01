@@ -1,11 +1,11 @@
-//! Task 7: `Permutation::project` parallelisation — correctness (not gated) and the measured
+//! `Permutation::project`'s parallelisation — correctness (not gated) and the measured
 //! throughput gate (`--ignored`).
 //!
-//! [`serial_project`] is an independent reference re-implementation of the pre-parallel algorithm
+//! [`serial_project`] is an independent reference implementation of the serial algorithm
 //! (entity-by-entity through `row_of`, then sort) — deliberately *not* a second call to
-//! `Permutation::project` itself, since after this task lands that method's own internals are the
-//! thing under test and an oracle sharing its code would not catch a chunking bug (e.g. a
-//! chunk-boundary entity dropped or double-counted).
+//! `Permutation::project` itself, because that method's chunking is the thing under test and an
+//! oracle sharing its code would not catch a chunking bug (e.g. a chunk-boundary entity dropped
+//! or double-counted).
 
 use std::path::Path;
 use std::time::Instant;
@@ -98,7 +98,11 @@ fn all_entities_mask_projects_every_row() {
     assert_eq!(expected.cardinality(), n, "sanity: every entity has a row");
     for threads in [1, 2, 4, 8] {
         let got = project_with_threads(&perm, &mask, threads);
-        assert_bitmaps_equal(&got, &expected, &format!("all-entities mask, {threads} threads"));
+        assert_bitmaps_equal(
+            &got,
+            &expected,
+            &format!("all-entities mask, {threads} threads"),
+        );
     }
 }
 
@@ -107,7 +111,10 @@ fn sentinel_and_out_of_bound_entities_are_skipped_not_erred() {
     let dir = tempfile::tempdir().expect("tempdir");
     let n = 2_000u64;
     // Only every third entity gets a row; the rest keep the row-absent sentinel.
-    let assigned: Vec<EntityId> = (0..n as u32).step_by(3).map(|e| EntityId::new(e as u64)).collect();
+    let assigned: Vec<EntityId> = (0..n as u32)
+        .step_by(3)
+        .map(|e| EntityId::new(e as u64))
+        .collect();
     let perm = build_permutation(dir.path(), &assigned, n);
 
     let mut mask = Bitmap::new();
@@ -145,7 +152,11 @@ fn mask_touching_first_and_last_slot() {
     assert_eq!(expected.cardinality(), 2);
     for threads in [1, 4] {
         let got = project_with_threads(&perm, &mask, threads);
-        assert_bitmaps_equal(&got, &expected, &format!("first/last slot, {threads} threads"));
+        assert_bitmaps_equal(
+            &got,
+            &expected,
+            &format!("first/last slot, {threads} threads"),
+        );
     }
 }
 
@@ -224,8 +235,10 @@ fn project_parallel_speedup_at_8_threads() {
     let mut rng = StdRng::seed_from_u64(7);
     let mut row_order: Vec<u32> = (0..n as u32).collect();
     row_order.shuffle(&mut rng); // a genuine permutation: every entity has a row, no sentinels
-    let entities_in_row_order: Vec<EntityId> =
-        row_order.into_iter().map(|e| EntityId::new(e as u64)).collect();
+    let entities_in_row_order: Vec<EntityId> = row_order
+        .into_iter()
+        .map(|e| EntityId::new(e as u64))
+        .collect();
     let perm = build_permutation(dir.path(), &entities_in_row_order, n);
 
     let mut mask = Bitmap::new();
@@ -269,7 +282,7 @@ fn project_parallel_speedup_at_8_threads() {
     println!(
         "row_projection_ns gate: n={n} 1-thread={best1:?} 8-thread={best8:?} speedup={speedup:.2}x"
     );
-    // Not a hard assert (the brief's action on a gate failure is "revert the parallel path", a
-    // code decision, not a test failure) -- this print is what the report's gate numbers come
-    // from; the pass/fail action is taken by hand after reading the printed speedup.
+    // Deliberately not a hard assert. The action on a disappointing speedup is "revert the
+    // parallel path" — a code decision taken by hand after reading this number, not something a
+    // red test on a shared machine should force.
 }

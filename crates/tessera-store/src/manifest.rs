@@ -1,7 +1,8 @@
-//! `CURRENT` / `MANIFEST.json` / `SEGMENTS-<n>.json` serde structs (contracts §2.2/§2.3,
-//! Reference Sheet R4). Unknown JSON fields are ignored — plain `#[derive(Deserialize)]`
-//! without `deny_unknown_fields` — so a newer writer can add fields this reader doesn't yet
-//! know about without breaking it (shared-context constraint per the task brief).
+//! `CURRENT` / `MANIFEST.json` / `SEGMENTS-<n>.json` serde structs (contracts §2.2/§2.3).
+//! Unknown JSON fields are ignored — plain `#[derive(Deserialize)]` without
+//! `deny_unknown_fields` — so a newer writer can add fields this reader doesn't yet know about
+//! without breaking it. What that tolerance must *not* extend to is a field naming state the
+//! reader would have to act on; [`HONOURED_STATE`] is where that line is drawn.
 
 use std::collections::BTreeMap;
 
@@ -158,7 +159,7 @@ pub struct SliceDescriptor {
     pub display_name: String,
 }
 
-/// `partitions` entry. Phase 1 has exactly one, `phash == "default"`.
+/// `partitions` entry. This build writes exactly one, `phash == "default"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionDescriptor {
     pub phash: String,
@@ -236,10 +237,10 @@ pub struct SegmentsManifest {
 ///
 /// **Empty, and that is the accurate value.** `deltas`, `tombstones` and `deny` all parse
 /// above and no read path consults any of them: there is no delta tier, no tombstone fold and
-/// no deny application in the loader or the query path. Stage 2.2 adds each name here as, and
-/// only as, the corresponding behaviour lands — the entry is the claim "a manifest carrying
-/// this is served correctly", so adding one ahead of the code re-opens the fail-open this
-/// list exists to close.
+/// no deny application in the loader or the query path. A name is added here as, and only as,
+/// the corresponding behaviour lands — the entry is the claim "a manifest carrying this is
+/// served correctly", so adding one ahead of the code re-opens the fail-open this list exists
+/// to close.
 ///
 /// **Why an honoured list and not a forbidden list.** The default for a field this reader does
 /// not understand has to be *refuse*, not *ignore*. A forbidden list is a list someone must
@@ -501,8 +502,9 @@ mod tests {
     }
 
     /// `HONOURED_STATE` is the claim "the read path acts on this field". It is empty today, and
-    /// this test is the tripwire on an entry being added ahead of the behaviour it asserts —
-    /// stage 2.2 must delete or amend it deliberately, with the code to justify it.
+    /// this test is the tripwire on an entry being added ahead of the behaviour it asserts:
+    /// whoever adds the first honoured field must delete or amend this deliberately, with the
+    /// code to justify it.
     #[test]
     fn no_state_field_is_claimed_as_honoured_yet() {
         assert!(
