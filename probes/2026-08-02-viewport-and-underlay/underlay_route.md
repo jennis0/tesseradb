@@ -69,10 +69,11 @@ Measured, one tile, 2m4, `everything`, **zoom 6**:
 | 7 | 16,384 | 482 | 474 µs | 0.029 |
 | 9 | 262,144 | 765 | **4.9 ms** | 0.019 |
 
-Full resolution on one tile costs **4.9 ms, not 0.5 s** — the annotation was pessimistic by ~100×.
-Cost per cell falls by 18× from offset 3 to 9, because deeper sub-cells search narrower ranges and
-empty cells are nearly free. The cost is **sub-linear in cells**, which the "×4 per level" reasoning
-did not anticipate.
+Full resolution on **a deep, sparse tile** costs 4.9 ms, and cost per cell falls 18× from offset 3
+to 9 because deeper sub-cells search narrower ranges and empty cells are nearly free. The cost is
+**sub-linear in cells** here, which the "×4 per level" reasoning did not anticipate — but read this
+table with the correction above: it is the deep-zoom regime, and the shallow one behaves differently
+(3.8× at 2m4 zoom 2, and 152–417 ms rather than 4.9 ms).
 
 ### 3. What it actually costs at the operating point
 

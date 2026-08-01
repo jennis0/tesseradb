@@ -44,9 +44,11 @@ Results: `probes/2026-08-02-viewport-and-underlay/{viewport_cost,underlay_route}
   10⁶-pixel screen needs `10⁶/T` sub-cells per tile. At Phase 1's operating point (4,096 tiles)
   that is **256 — offset 4, today's cap.** The MVP looked blocky because it fetched *one* tile, not
   because the cap is wrong. **Phase 1 fixes the underlay's resolution as a side effect.**
-- **The per-sub-cell algorithm is affordable.** Full resolution on one tile is **4.9 ms, not the
-  0.5 s** the annotation extrapolated — and cost per cell *falls* 18× from offset 3 to 9, because
-  empty cells are nearly free. **No route chooser, no second algorithm, no `underlay.rs`.**
+- **The per-sub-cell algorithm is affordable at the operating point** — 179 ms (1e8) / 466 ms (1e9)
+  for a screen's worth. It is *not* cheap everywhere: a single shallow tile costs 152–417 ms at
+  offset 9, which is what the annotation actually predicted. Phase 1 stops requesting shallow
+  depths, so the route survives where it is used. **No `underlay.rs` for now — but Task 6 is
+  DEFERRED, not refuted**: the single-pass alternative was never measured.
 - **A whole-screen underlay costs 179 ms against 74 ms without, at 1e8** — in the same request.
 - **A whole-screen underlay costs 466 ms against 222 ms without, at 1e9** — it roughly doubles the
   request. Quarter resolution costs 287 ms, so resolution-versus-latency is a real trade the client
@@ -459,11 +461,13 @@ makes requests per-viewport.
 
 ### Task 5: ~~Which underlay algorithm~~ — **DONE**; see `probes/2026-08-02-viewport-and-underlay/underlay_route.md`
 
-### Task 6: ~~Implement the chosen route~~ — **WITHDRAWN**
+### Task 6: Implement a single-pass underlay route — **DEFERRED, pending evidence**
 
-Task 5 measured the existing route at full resolution and found it affordable: 4.9 ms per tile at
-offset 9, and 179 ms (1e8) / 466 ms (1e9) for a whole screen's worth. There is no second algorithm
-to write, no route chooser, and no `underlay.rs`.
+Task 5 measured the existing route at the operating point and found it affordable: 179 ms (1e8) /
+466 ms (1e9) for a whole screen's worth. **Deferred rather than withdrawn** — the single-pass
+alternative was never measured, the route is expensive at shallow zoom (152–417 ms for one tile),
+and at 1e9 the underlay doubles the request, which is the margin a chooser would be for. Nothing
+here is needed for Phase 1; revisit if the underlay's share becomes the constraint.
 
 The differential-test requirement is withdrawn with the task it guarded — but its *reasoning* moves
 to Task 7: **a density field that is subtly wrong still looks like a density field**, so any change
