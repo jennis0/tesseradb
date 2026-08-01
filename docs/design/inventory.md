@@ -30,7 +30,7 @@ the other.
 | **I13a** | a request that fails or is cancelled yields no partial answer |
 | **I13b** | a partition not consulted fails closed |
 
-## Leak register (16 rows)
+## Leak register (19 rows)
 
 Exhaustive by construction: a disclosure not in this table is a bug, not an omission.
 
@@ -52,6 +52,9 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C14** | Partition fan-out width | Low | Accepted |
 | **C15** | Session pin rate of change | Low | Accepted |
 | **C16** | Router-held label presence registry | Low | Accepted |
+| **C17** | Stable wire identity across sessions and principals | Medium | Accepted — the point of the r21 mechanism change |
+| **C18** | Mark count and sub-cell counts track the masked visible count | Low | Accepted — no new channel |
+| **C19** | Per-tile selection work varies with the viewer's own visible count | Low | Accepted — C4/C14 shape |
 
 ## Documents
 

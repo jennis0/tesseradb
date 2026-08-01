@@ -48,7 +48,7 @@ request-path artifact stores one, so the gather cannot produce one. Sampling hap
 never before, and the floor clause that keeps a sparse viewer's map from going blank cannot be
 switched off — a zero floor is refused at startup rather than clamped.
 
-**What is accepted rather than eliminated.** Sixteen residual disclosures are enumerated in the
+**What is accepted rather than eliminated.** Nineteen residual disclosures are enumerated in the
 leak register (`docs/design/architecture.md` Appendix C), with severity, mitigation and status for
 each. The register is exhaustive by construction: a disclosure not in that table is a bug, not an
 omission. That exhaustiveness depends on the query surface staying about five shapes wide, which is

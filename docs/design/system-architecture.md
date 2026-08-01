@@ -81,11 +81,11 @@ When a bundle contains compartmented partitions, the parent process is a *router
 
 **Queries fan out and merge.** Counts sum; priority samples take the global k-lowest of per-worker k-lowests; containment composes per §2.3. Control operations that address items fan out to all workers, each consulting its own external-ID sidecar, and the router aggregates acks.
 
-**Worker lifecycle.** The router spawns workers at boot from the manifest's partition list, supervises them, and enforces a per-request worker timeout. A worker that is down or times out fails the request — I13 permits *unreachable-by-authorisation* to contribute nothing satisfied; *unreachable-by-outage* is an error, never an empty contribution. A partition discovered at runtime triggers alarm, directory and side-manifest creation, and a worker spawn; it becomes queryable only for tokens authorised after it became ready, which is conservative and correct because reachable sets are fixed at authorisation.
+**Worker lifecycle.** The router spawns workers at boot from the manifest's partition list, supervises them, and enforces a per-request worker timeout. A worker that is down or times out fails the request — I13b (a partition not consulted fails closed) permits *unreachable-by-authorisation* to contribute nothing satisfied; *unreachable-by-outage* is an error, never an empty contribution. A partition discovered at runtime triggers alarm, directory and side-manifest creation, and a worker spawn; it becomes queryable only for tokens authorised after it became ready, which is conservative and correct because reachable sets are fixed at authorisation.
 
 ### 2.3 Cross-partition labels and the presence registry
 
-The natural implementation of label containment — AND the verdicts of the workers you queried — is precisely the I13 violation §12.3 warns against: a generating set with a non-empty slice in an *unreachable* partition must fail, and a router that does not know the slice exists cannot fail it. So presence is first-class metadata: a label's generating set is stored sliced per partition; every slice record carries the label's full **partition-presence set**, fixed at submission and build-enforced identical across copies; and the router admits a label only if presence ⊆ reachable **and** every partition in presence returns `G_p ⊆ M_p`. Anything else — a missing verdict, a timeout, a presence entry outside the reachable set — withholds.
+The natural implementation of label containment — AND the verdicts of the workers you queried — is precisely the I13b violation §12.3 warns against: a generating set with a non-empty slice in an *unreachable* partition must fail, and a router that does not know the slice exists cannot fail it. So presence is first-class metadata: a label's generating set is stored sliced per partition; every slice record carries the label's full **partition-presence set**, fixed at submission and build-enforced identical across copies; and the router admits a label only if presence ⊆ reachable **and** every partition in presence returns `G_p ⊆ M_p`. Anything else — a missing verdict, a timeout, a presence entry outside the reachable set — withholds.
 
 The presence registry (label id → presence set; no text, no entity IDs, no cardinalities) is the one piece of cross-partition label metadata the router holds. It reveals *that* some label draws on a compartment, to a process that already routes queries into that compartment, and contains no corpus content — the C13/C14 style of argument, and it needs its own Appendix C row when the design next revises.
 
@@ -322,7 +322,7 @@ Two properties of that path are worth stating because a reader reconstructing it
 
 **A pin is a value threaded by ownership through every call.** No ambient "current version" static exists (I11). A pin fixes row-space geometry and never authorisation state: a suppression applies to a pinned request the moment it is accepted.
 
-**Cancellation is cooperative and total.** `/v1/viewport` mints a cancel token, wired to client disconnect; the engine polls it at a few checkpoints and aborts the whole request the moment it observes the flip — never a partial response (I13).
+**Cancellation is cooperative and total.** `/v1/viewport` mints a cancel token, wired to client disconnect; the engine polls it at a few checkpoints and aborts the whole request the moment it observes the flip — never a partial response (I13a, the invariant that a failed or cancelled request yields no partial answer).
 
 ## 6. Lifecycle: build, durability, ingest, change, compaction
 
@@ -362,7 +362,7 @@ One line of this section is security-relevant rather than operational: **an unpe
 
 Acknowledgement follows fsync of the batch rows (with the caller batch id), the change entries, and the allocator's advanced high-water. **WAL rows record their allocated entity IDs**, and replay reuses them rather than re-allocating — otherwise entity-ID stability across rebuilds, and every entity-space structure referencing those IDs, would silently break. Restart replays the log: the buffer is rebuilt, the overlay reconstructed in full, and the allocator resumes past its durable high-water (I9 under crash replay). Acked-batch-id replay is idempotent, and the external-ID sidecar — also WAL-covered — is what makes duplicate detection possible at all.
 
-**The commit window makes the signature-sort scope a server decision.** Arriving ingest submissions are held open in a window bounded by size or age; at close, the whole window is signature-sorted, allocated from the high-water in one call, appended and fsynced once, published once, and every held request is acknowledged with its rows' IDs. I9 is untouched — IDs are still monotone from the high-water, still never reused, still assigned in `(signature, external_id)` order. The window changes only *how many* are assigned in one sorted run. Amortising the fsync and the publication is a welcome side effect; the allocation scope is the point.
+**The commit window makes the signature-sort scope a server decision.** Arriving ingest submissions are held open in a window bounded by size — an age bound is specified and configurable but inert, because a window that never waits has no age to bound (§7). At close, the whole window is signature-sorted, allocated from the high-water in one call, appended and fsynced once, published once, and every held request is acknowledged with its rows' IDs. I9 is untouched — IDs are still monotone from the high-water, still never reused, still assigned in `(signature, external_id)` order. The window changes only *how many* are assigned in one sorted run. Amortising the fsync and the publication is a welcome side effect; the allocation scope is the point.
 
 **Calibrate that win honestly, because the corpus's headline figures do not apply to it.** The probes' 8.9–36.7× posting compression was measured under a *full-corpus* sort. `run ≈ B × p` is a ceiling, not a forecast: the sort key is an item's whole signature, so a term's IDs are contiguous only across items whose *entire* signature matches, and `B × p` is attained only where the term effectively is the signature. Against the measured signature distribution — 54,791 distinct signatures over 2.42 M items — a 10,000-row window holds about 17 rows of the rank-100 group and 0.65 of the rank-1,000 one: runs of order 10¹ and 1. And the container arithmetic bounds it further. The benefit available to a term of density *p* at sort scope *B* is `max(1, 2¹⁶/(p·B))`, and `p·B < 2¹⁶` holds for every `p ≤ 1` once `B ≲ 6·10⁴` — below every window size a deployment's heap budget permits. **So the window collects the posting-storage win and none of the container-count win** — and container count is what a union costs, since bitmap operations cost O(containers touched), not O(cardinality). Raising the bound buys run length sub-linearly and costs sort work, window latency and residency; it is not a free dial.
 
@@ -449,7 +449,7 @@ The bundle plus the WAL is the recovery story: immutable-once-retired prefixes m
 
 One file, `tessera.toml`. The philosophy has a security edge: **performance knobs default; disclosure controls do not.** A config missing a disclosure control fails to start, naming the design section that explains the knob — the config file doubles as the deployment's disclosure-review checklist.
 
-Two properties reinforce it. Every section is `deny_unknown_fields`, so a typo'd key or section header is a startup error rather than a silent default: an operator who sets a knob and gets the default has no signal at all that they did. And every check **refuses rather than clamps** — `k_min = 0` would silently disable the I7 floor clause, a zero `theta_target_marks` would blank the density signal, a zero `compute_admission` would shed everything, and each is a typed error naming its own silent failure. The cost is that a config carrying a key from a newer build is refused rather than ignored; that is the right direction for a fail-closed config, because a downgrade that silently drops half an operator's tuning is the worse outcome.
+Two properties reinforce it. Every section but `[disclosure]` is `deny_unknown_fields`, so a typo'd key or section header is a startup error rather than a silent default: an operator who sets a knob and gets the default has no signal at all that they did. `[disclosure]` is the exception, and in the direction that costs most: it is parsed as a generic TOML value and hand-validated, so it rejects a *missing* required key and silently ignores an *unknown* one — a misspelling alongside a correct key passes. That is the one section whose keys are disclosure controls. And every check **refuses rather than clamps** — `k_min = 0` would silently disable the I7 floor clause, a zero `theta_target_marks` would blank the density signal, a zero `compute_admission` would shed everything, and each is a typed error naming its own silent failure. The cost is that a config carrying a key from a newer build is refused rather than ignored; that is the right direction for a fail-closed config, because a downgrade that silently drops half an operator's tuning is the worse outcome.
 
 ```toml
 [bundle]
@@ -473,7 +473,7 @@ control = "unix:/run/tessera/control.sock"   # loopback TCP + credential on Wind
 session_credential_file  = "/etc/tessera/session.cred"
 operator_credential_file = "/etc/tessera/operator.cred"
 # selection clause (§7.2) — refused, never clamped, if inconsistent
-max_k = 500
+max_k = 500                           # illustrative; the default is 1000
 k_min = 2
 k_max_marks = 500
 theta_target_marks = 16
@@ -496,7 +496,7 @@ stage_timing = false                  # the bench header; keep closed in a deplo
 
 [ingest]                              # every key optional; the whole section may be absent
 commit_window_max_items = 10_000
-commit_window_max_age_ms = 200
+commit_window_max_age_ms = 200         # parsed; inert — the window never waits (§6.2)
 ingest_queue_bound = 32
 ingest_admission = 64
 ingest_max_batch_rows = 10_000

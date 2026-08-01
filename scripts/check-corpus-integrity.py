@@ -35,7 +35,10 @@ INVENTORY = DESIGN / "inventory.md"
 # **I7 — Sampling happens after masking, never before.** …
 INVARIANT = re.compile(r"^\*\*(I\d+[a-z]?)\s*[—–-]\s*(.+?)\*\*", re.M)
 # | C4 | concern | what it reveals | severity | mitigation | status |
-LEAK_ROW = re.compile(r"^\|\s*(C\d+)\s*\|([^|]*)\|[^|]*\|([^|]*)\|[^|]*\|([^|]*)\|", re.M)
+# `\b[^|]*` not `\s*`: rows C17-C19 carry a revision tag between the number and the pipe
+# (`| C17 *(r21)* |`). An earlier version anchored on `\s*` and silently dropped all three —
+# including the row a rewrite had just edited. A checker that under-reports is worse than none.
+LEAK_ROW = re.compile(r"^\|\s*(C\d+)\b[^|]*\|([^|]*)\|[^|]*\|([^|]*)\|[^|]*\|([^|]*)\|", re.M)
 REVISION = re.compile(r"^\*\*Status:\*\*\s*(.+?)$", re.M)
 UNBUILT = re.compile(r"⊘")
 
