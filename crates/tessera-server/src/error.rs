@@ -174,8 +174,10 @@ impl ApiError {
                 "backpressure",
                 format!(
                     "the server is at its ingest-admission bound; retry after {retry_after_s}s. \
-                     Nothing in this request was decoded, queued or appended. Deny-disposition \
-                     changes are never shed for load and are unaffected"
+                     Nothing in this request was decoded, queued or appended — the body was, \
+                     however, buffered in full before this refusal, since the extractor runs ahead \
+                     of every check in the handler. Deny-disposition changes are never shed for \
+                     load and are unaffected"
                 ),
             ),
             ApiError::NotReady => (
@@ -258,8 +260,22 @@ impl IntoResponse for ApiError {
 /// It inherits that function's floor (`1`, when nothing has completed and there is no observation
 /// at all) and its ceiling, and it inherits its honesty: it is an estimator. See
 /// `tessera_engine::estimate_retry_after_s` for the three specific reasons.
+///
+/// **And it has a fourth, specific to this subject: the argument is stronger than its operand.** An
+/// admission permit is held across the Arrow decode, `terms_of_label`, `resolve_terms`, the
+/// external-ID sidecar IO **and** the receipt wait, whereas `work_service_nanos` measures the
+/// executor's service time alone. So "one work item's service time" systematically **under**-states
+/// how long a permit is actually held, by however long the pre-submit work took. It is the right
+/// shape and the wrong magnitude, always in the same direction. Correcting it would need a second
+/// timer around the whole handler, which is a per-request clock read on the 10⁹ path for a number a
+/// client rounds to seconds; stated here instead, which is what the honesty caveats on the estimator
+/// itself are for.
+///
+/// [`tessera_engine::ExecutorStats::service_nanos_for_estimate`], not the raw EWMA: while one long
+/// job is in flight the EWMA still reports the previous, faster regime, and that error is on the
+/// load-amplifying side. See its doc.
 pub fn admission_retry_after_s(stats: &tessera_engine::ExecutorStats) -> u64 {
-    tessera_engine::estimate_retry_after_s(1, stats.work_service_nanos_ewma)
+    tessera_engine::estimate_retry_after_s(1, stats.service_nanos_for_estimate())
 }
 
 /// Map an `EngineError` to the R5 code list. `MultiSegmentSlice`, `Store`/`Wal`/`Overlay`/
@@ -427,10 +443,13 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
 
     match e {
         AcceptError::Submit(SubmitError::QueueFull { retry_after_s }) => {
-            // Deliberately not `tracing::error!`: once the queue bound bites, this is a routine,
-            // expected shed and an ERROR per occurrence is an alarm flood, not a signal. Task 6
-            // makes it routine; the level is set here so it is right when it does.
-            tracing::warn!("the ingest work queue is full; answering 429 backpressure");
+            // Deliberately not `tracing::error!` and, since fix round 1, not `warn!` either: once
+            // the queue bound bites this is a routine, expected shed, and a formatted line per
+            // refusal is a synchronous write on the reactor at 10⁹ ingest rates. `tracing` checks
+            // interest before evaluating fields, so at any level above DEBUG this is a load and a
+            // branch. The operator's signal is `write_executor.work_depth` on `/control/status`,
+            // which is a gauge rather than a per-event line.
+            tracing::debug!("the ingest work queue is full; answering 429 backpressure");
             ApiError::WriteBackpressure { retry_after_s }
         }
         AcceptError::Submit(SubmitError::ExecutorDead) => {

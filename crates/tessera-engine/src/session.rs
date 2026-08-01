@@ -861,8 +861,10 @@ impl Engine {
     pub fn set_overlay_soft_limit(&self, limit: usize) {
         self.write.health().set_overlay_soft_limit(limit);
         let depth = self.overlay_depth();
-        if depth >= limit {
-            self.write.health().record_overlay_soft_limit_alarm();
+        // Same edge trigger as the executor's, through the same function: setting the limit re-arms
+        // it, so a limit landing under a live overlay alarms exactly once here and the next
+        // `apply_change` does not repeat it.
+        if self.write.health().note_overlay_depth(depth) {
             tracing::warn!(
                 overlay_depth = depth,
                 overlay_soft_limit = limit,

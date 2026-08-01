@@ -69,10 +69,16 @@ pub use viewport::{
 // is how to answer: `AcceptError` for the status mapping (Task 3b owns the table) and
 // `ExecutorPosture`/`ExecutorStats` for `readyz` and `/control/status`.
 pub use write::{AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats};
-// Task 6: the queue's own `retry_after_s` derivation, and its floor and ceiling. Exported because
-// `tessera-server` derives a *second* 429 subject's value from the same estimator over a different
-// depth (contracts §0.3 deviation 11: the value is per-subject), and two independent
-// implementations of one estimator is how the two subjects come to disagree about the same queue.
+// Task 6: the queue's own `retry_after_s` derivation. Exported because `tessera-server` derives a
+// *second* 429 subject's value from the same estimator over a different depth (contracts §0.3
+// deviation 11: the value is per-subject), and two independent implementations of one estimator is
+// how the two subjects come to disagree about the same queue.
+//
+// **The floor and ceiling are exported for readers, not for callers.** An earlier version of this
+// comment said `tessera-server` derives from them; it does not — it calls
+// `estimate_retry_after_s` and inherits both. They stay `pub` because `estimate_retry_after_s`'s
+// own doc names them as the bounds on its result, and a documented bound whose value is unreachable
+// from the crate that reads the doc is a dead reference.
 pub use write::{estimate_retry_after_s, RETRY_AFTER_MAX_SECS, RETRY_AFTER_MIN_SECS};
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1, slimmed for
