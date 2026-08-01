@@ -527,8 +527,9 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
 /// # Why the failures arrive **paired with their op**
 ///
 /// Because lifecycle §4's apply-anyway rule is scoped to `Delete`/`Suppress` and the executor
-/// honours that scope (`write.rs`'s `execute_change`: a `Predicate`/`Unsuppress` whose append fails
-/// is refused **without** applying). An op-blind fold over `ExecError::Wal` therefore got **both**
+/// honours that scope (`write.rs`'s `Executor::commit_denies`, whose failure fold applies the
+/// `Delete`/`Suppress` entries of a deny window and nothing else: a `Predicate`/`Unsuppress` whose
+/// append fails is refused **without** applying). An op-blind fold over `ExecError::Wal` therefore got **both**
 /// halves wrong on the same batch shape this task's own end-to-end test uses
 /// (`[suppress, predicate, suppress]`): a batch of only failed non-deny ops answered a body
 /// asserting a deletion or suppression "may be in force" when it contained neither, and
@@ -621,7 +622,7 @@ pub fn map_change_batch_error(
 /// much as about the error**.
 ///
 /// Only `Wal` can be, and only for a `Delete`/`Suppress`: lifecycle §4's apply-anyway rule is scoped
-/// to those two ops and `write.rs`'s `execute_change` applies exactly that scope — a
+/// to those two ops and `write.rs`'s `Executor::commit_denies` applies exactly that scope — a
 /// `Predicate`/`Unsuppress` whose append failed is refused **without** being applied, because an
 /// `Unsuppress` applied without durability would re-expose an item that replay still hides. This
 /// function used to return `true` for every `Wal` regardless of op while its own doc stated the
@@ -862,7 +863,7 @@ mod tests {
     }
 
     /// **Fix round 1, half one of the op-blind fold.** A batch whose only failures are *non-deny*
-    /// ops must not claim anything may be in force: `execute_change` refuses a
+    /// ops must not claim anything may be in force: `Executor::commit_denies` refuses a
     /// `Predicate`/`Unsuppress` whose WAL append failed **without** applying it (lifecycle §4's
     /// apply-anyway rule is scoped to `Delete`/`Suppress`), so the honest body says only that
     /// nothing took hold and the operator must re-submit.

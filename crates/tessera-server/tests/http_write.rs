@@ -1427,7 +1427,8 @@ async fn a_healthy_server_is_ready_on_every_listener_that_serves_the_probe() {
 /// Mutations this kills:
 /// - add a readiness gate to `changes()` → the **second** suppress answers 503 and item B stays
 ///   visible → RED. No engine-level test can see this, because the gate would live in `control.rs`.
-/// - in `execute_change`, drop the apply-anyway arm (skip the *apply*, not the WAL call — skipping
+/// - in `Executor::commit_denies`'s failure fold, drop the apply-anyway subset (skip the *apply*,
+///   not the WAL call — skipping
 ///   only `wal.append` still lands in that arm and hides the item either way) → both items stay
 ///   visible → RED.
 /// - `readyz` returning `OK` unconditionally → RED at the posture assertion.
@@ -1560,10 +1561,25 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
 /// So the caller gets **one** status for a batch in which some items took effect and one did not,
 /// and both the status and the body have to say what actually happened.
 ///
-/// Mutation this kills: restore Task 3a's `?`-abort in `run_changes` → C is never submitted and
-/// stays visible → RED. (The *status* half is exercised exhaustively in `error.rs`'s fold tests,
-/// where the dispositions can be constructed directly; here all three failures are `Exec(Wal)`, so
-/// the status alone would not discriminate a fold from first-error reporting.)
+/// **Mutations this kills, measured** — and they are not the ones this test was written for, which
+/// is why they are restated rather than inherited. `/control/changes` enqueues its whole request
+/// before collecting any receipt, so the three items are committed as one deny window:
+///
+/// - **aborting the collect loop at the first failed receipt → RED**, on the body. It is no longer
+///   the *item* half that fires: C is enqueued before A's failure is visible, so C is applied
+///   either way and stays hidden. What an abort loses now is C's disposition, so the body stops
+///   saying a third of the batch did not take hold.
+/// - **aborting the ENQUEUE loop → green, everywhere, and that is the point.** An enqueue can only
+///   fail with `ExecutorDead`/`ReceiptLost`, never on a poisoned WAL, so the failure this test
+///   induces is not observable until every item is already queued. Task 3a's "submit every item
+///   even after one fails" rule is structurally satisfied rather than merely obeyed.
+/// - **widening the failure fold's op filter → RED**, on the body's "NOT applied" half.
+///
+/// The item assertion below therefore now discriminates the **apply-anyway rule** rather than the
+/// abort: narrowing the fold to apply nothing reds it. (The *status* half is exercised exhaustively
+/// in `error.rs`'s fold tests, where the dispositions can be constructed directly; here all three
+/// failures are `Exec(Wal)`, so the status alone would not discriminate a fold from first-error
+/// reporting.)
 #[tokio::test]
 async fn a_partially_applied_change_batch_reports_one_honest_status() {
     if skip_under_root() {
@@ -1639,7 +1655,8 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
          already taken hold; got: {detail}"
     );
     // **Fix round 1: the middle item is a `predicate`, and it was NOT applied.** Lifecycle §4's
-    // apply-anyway rule covers `Delete`/`Suppress` only, and `execute_change` honours that — a
+    // apply-anyway rule covers `Delete`/`Suppress` only, and `Executor::commit_denies`'s failure
+    // fold honours that — a
     // `Predicate` whose append fails is refused without touching the overlay. The op-blind fold
     // counted it as possibly-in-force along with the two suppressions, so `some_not_applied` was
     // false and this body never told the operator that a third of their batch had not taken hold.
@@ -1650,8 +1667,10 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
          re-submit rather than assume the whole batch took hold; got: {detail}"
     );
 
-    // **The item assertion is the one that discriminates.** C is the third item; a batch that
-    // aborted at A's failure would never have submitted it.
+    // **The item assertion discriminates the apply-anyway rule.** A fold that applied nothing on a
+    // window failure leaves both suppressions un-applied; a fold scoped to entries appended before
+    // the failure leaves them un-applied too, because here it is the *fsync* that fails and no
+    // entry precedes it.
     assert_eq!(
         visible(token.to_string(), viewport_req.clone()).await,
         before - 2,
@@ -3022,5 +3041,201 @@ async fn an_unauthenticated_caller_never_gets_a_byte_of_body_buffered() {
     assert!(
         head.starts_with("HTTP/1.1 401 "),
         "the answer must be the credential refusal, reached without reading the body: {head:?}"
+    );
+}
+
+// =================================================================================================
+// Group commit on the deny lane
+// =================================================================================================
+
+/// **One request of N denies costs one fsync, not N.**
+///
+/// This is the whole of the deny lane's group commit, and it needs both halves of the mechanism to
+/// hold: `run_changes` must enqueue the request before collecting any receipt, and the executor's
+/// deny drain must gather what it finds into one window. Break either and the count goes back to N
+/// — a handler that waits per item leaves the executor one entry to gather, and an executor that
+/// commits per entry finds a full queue and ignores it.
+///
+/// **Asserted on `wal_fsyncs`, off `/control/status`, not on a proxy.** Elapsed time would pass on
+/// a fast disk with the amortisation entirely absent; the fsync count is exact and is the claim.
+///
+/// The bound is `2 × ceil(N / DENY_WINDOW_MAX_ENTRIES)` rather than `1`, and the slack is one
+/// specific, measured thing rather than tolerance: the executor can wake on the first item's
+/// doorbell and commit a window of one while the handler is still enqueueing the rest, so a chunk
+/// costs a head window plus its own. The observed value is in the message, so a regression that
+/// stays inside the bound is still visible to whoever reads a failure here.
+#[tokio::test]
+async fn a_change_batch_of_n_costs_one_fsync() {
+    const N: u64 = 200;
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let before = control_status(&server).await;
+    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
+    let items: Vec<serde_json::Value> = (0..N)
+        .map(|i| serde_json::json!({ "external_id": b64(i), "op": "suppress" }))
+        .collect();
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&items)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "every item is applicable and durable");
+
+    let after = control_status(&server).await;
+    let fsyncs = after["write_executor"]["wal_fsyncs"].as_u64().unwrap()
+        - before["write_executor"]["wal_fsyncs"].as_u64().unwrap();
+    let appends = after["write_executor"]["wal_appends"].as_u64().unwrap()
+        - before["write_executor"]["wal_appends"].as_u64().unwrap();
+
+    let chunks = N.div_ceil(tessera_engine::DENY_WINDOW_MAX_ENTRIES as u64);
+    assert!(
+        fsyncs <= 2 * chunks,
+        "{N} denies in one request must be group-committed: expected at most {} fsyncs, got \
+         {fsyncs}. At one fsync per item this would be {N}, which is the ~300 denies/second \
+         ceiling the deny window exists to remove",
+        2 * chunks
+    );
+    assert_eq!(
+        appends, N,
+        "and exactly one WAL record per item — the window amortises the fsync, never the record"
+    );
+}
+
+/// **A deny batch whose append fails applies the `Delete`/`Suppress` items and nothing else.**
+///
+/// The apply-anyway rule (lifecycle §4) is scoped to those two ops, and a window makes that a fold
+/// over a *shared* failure rather than a per-command decision — which is exactly the shape that
+/// invites a uniform answer. Both uniform answers are defects, and this test fails on each:
+///
+/// - widened to every op, the `unsuppress` applies and **B becomes visible again** while the 500
+///   body says nothing was applied, and a restart re-hides it. A suppressed item exposed, the
+///   operator told otherwise.
+/// - narrowed to nothing — which is what the *ingest* window's failure path does, and therefore the
+///   fold a reader may reach for — the two suppressions do not take hold at all, which is the one
+///   thing this lane may never do.
+///
+/// B is suppressed **durably** first, so the `unsuppress` in the failing batch has something real
+/// to expose; without that leg the widened fold would change nothing observable and the test would
+/// assert nothing.
+///
+/// **The batch is deliberately three items and carries no `predicate`, and that is not tidiness.**
+/// With a fourth `predicate` item the widened-fold mutation was **green**: the failure fold applies
+/// with no resolved terms, so a widened fold gave that item an *empty* evaluate-terms set and hid
+/// it — which cancelled the newly-visible B in an aggregate count, and 997 is 997 either way. The
+/// count has to be attributable to survive as evidence. The `predicate` leg of the same fold is
+/// covered by `a_partially_applied_change_batch_reports_one_honest_status`, where it is the only
+/// non-deny item.
+#[tokio::test]
+async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
+    if skip_under_root() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let wal_dir = tmp.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &wal_dir.join("wal.log"),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+    let viewport_req = serde_json::json!({
+        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+    });
+    let visible = |token: String, req: serde_json::Value| {
+        let client = server.client.clone();
+        let url = server.viewer_url("/v1/viewport");
+        async move {
+            let bytes = client
+                .post(url)
+                .bearer_auth(token)
+                .json(&req)
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            decode_viewport(&bytes).0[0].1
+        }
+    };
+    let before = visible(token.clone(), viewport_req.clone()).await;
+
+    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
+
+    // B, durably suppressed while the WAL still works.
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([{ "external_id": b64(9), "op": "suppress" }]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "B's suppression is durable");
+    assert_eq!(
+        visible(token.clone(), viewport_req.clone()).await,
+        before - 1,
+        "B is hidden before the failing batch runs"
+    );
+
+    let _read_only = ReadOnlyWalDir::new(&wal_dir);
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([
+            { "external_id": b64(5),  "op": "suppress" },
+            { "external_id": b64(9),  "op": "unsuppress" },
+            { "external_id": b64(11), "op": "suppress" },
+        ]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500, "not durable, so never a 2xx");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let detail = body["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("may be in force"),
+        "the two suppressions took hold and the operator must be told; got: {detail}"
+    );
+    assert!(
+        detail.contains("NOT applied"),
+        "the unsuppress and the predicate did not take hold and the operator must be told; got: \
+         {detail}"
+    );
+
+    assert_eq!(
+        visible(token.clone(), viewport_req.clone()).await,
+        before - 3,
+        "A and C must be hidden (the apply-anyway rule) and B must STAY hidden (an unsuppress \
+         whose append failed applies nothing — applying it re-exposes a suppressed item behind a \
+         response that says nothing was applied, and a restart re-hides it)"
     );
 }

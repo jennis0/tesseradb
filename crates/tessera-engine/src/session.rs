@@ -1182,6 +1182,9 @@ impl Engine {
     ///
     /// **An `Err` does not mean nothing happened**: for `Delete`/`Suppress` a WAL failure still
     /// applies the change before returning (lifecycle §4). See `ExecError::Wal`.
+    ///
+    /// A caller with a whole request's worth of changes wants [`Engine::submit_change`] instead —
+    /// waiting between items is what reduces the deny lane's group commit to one entry per window.
     pub fn accept_change(
         &self,
         external_id: Vec<u8>,
@@ -1191,6 +1194,24 @@ impl Engine {
     ) -> std::result::Result<(), crate::write::AcceptError> {
         self.write
             .accept_change(external_id, entity, op, raw_descriptors)
+    }
+
+    /// Enqueue one `/control/changes` entry **without waiting for its receipt**, so that a caller
+    /// with several can have them all in the executor's queue at once.
+    ///
+    /// That queue depth is the whole precondition for the deny lane's group commit: a caller that
+    /// waits between items leaves the executor one entry to gather, and one request of N denies
+    /// costs N fsyncs. Read `PendingChange::wait` before treating either half's `Err` as "nothing
+    /// happened".
+    pub fn submit_change(
+        &self,
+        external_id: Vec<u8>,
+        entity: EntityId,
+        op: ChangeOp,
+        raw_descriptors: Option<Vec<Vec<u8>>>,
+    ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
+        self.write
+            .submit_change(external_id, entity, op, raw_descriptors)
     }
 }
 

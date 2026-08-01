@@ -218,7 +218,7 @@ fn per_command_assignment_is_signature_sorted_and_monotone() {
 /// The first draft of this comment said "the behavioural one is the test" and called the ordering
 /// log "the corroborating diagnostic … on its own it would assert little more than the source order
 /// of four `record` calls". **Measured, that was exactly backwards.** A reviewer planted a real
-/// ack-before-swap in `execute_change`; only the log assertion failed, and with that one assertion
+/// ack-before-swap in the deny commit path; only the log assertion failed, and with that one assertion
 /// deleted the test was green five runs out of five with the fail-open live. The cause was
 /// structural rather than luck: there was one pause site and it sat **before both** the ack and the
 /// swap, so parking there said nothing about their relative order, and after `join()` the main
@@ -660,8 +660,8 @@ fn an_ingest_append_failure_applies_nothing() {
 /// `an_ingest_append_failure_applies_nothing` is the ingest control — a different lane, a different
 /// rule. Neither constrains which **ops** the exception covers, and the only other `Unsuppress`
 /// assertions in the tree are pure-function tests over the response body, which stay green while the
-/// engine does the opposite of what they report. Deleting the `matches!` guard in `execute_change`'s
-/// error arm was a green mutation across the whole suite before this test existed.
+/// engine does the opposite of what they report. Widening the op filter in `Executor::commit_denies`'s
+/// failure fold was a green mutation across the whole suite before this test existed.
 ///
 /// The suppression is established **durably** first, with no fault armed. Without that the test
 /// would be asserting that an item nothing ever hid stayed hidden — and it also fixes the order the
@@ -1823,4 +1823,67 @@ fn a_windows_acks_follow_its_swap() {
 
     faults.release();
     submit.join().unwrap().expect("the ingest is accepted");
+}
+
+/// **The deny window closes at its bound**, so the drain cannot run forever.
+///
+/// [`tessera_engine::DENY_WINDOW_MAX_ENTRIES`] is what stops a window growing for as long as denies
+/// keep arriving — and the failure it prevents is not "a large window" but a drain that never
+/// returns, so no deny is ever acked at all. The executor is parked inside a priming submission so
+/// the whole batch is provably queued before anything drains; the drain then has to produce two
+/// windows for `bound + 1` entries and one for a bound that is not enforced.
+///
+/// **What this pins and what it does not.** It pins the *close*: the bound fires and splits the
+/// window. It does **not** pin the live-lock the bound exists for, which needs sustained concurrent
+/// enqueueing against a draining executor — a race, not a test. Same distinction as
+/// `ingest_429s_when_the_queue_is_full`, which pins its mapping rather than the transition into
+/// fullness.
+///
+/// One entity is suppressed `bound + 1` times rather than `bound + 1` entities being suppressed
+/// once. The subject is the window's size, and each submission is its own command and its own WAL
+/// record either way; using one entity keeps the fixture from having to be `bound + 1` items wide.
+#[test]
+fn the_deny_window_closes_at_its_bound() {
+    let bound = tessera_engine::DENY_WINDOW_MAX_ENTRIES;
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 64);
+    let entity = entity_of(&engine, 3);
+
+    // Park the executor after the priming submission's fsync: nothing can drain the deny lane
+    // while it is stalled there, so every enqueue below is provably still queued.
+    faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
+    let engine = Arc::new(engine);
+    let e = Arc::clone(&engine);
+    let prime =
+        std::thread::spawn(move || e.accept_ingest(vec![row("prime")], "prime".into(), [0xEE; 32]));
+    faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
+
+    let parked = engine.write_executor_stats();
+    let pending: Vec<_> = (0..bound + 1)
+        .map(|_| {
+            engine
+                .submit_change(b"k3".to_vec(), entity, ChangeOp::Suppress, None)
+                .expect("the deny lane is unbounded and never refuses for load")
+        })
+        .collect();
+
+    faults.release();
+    for p in pending {
+        p.wait().expect("every deny is applied and durable");
+    }
+    prime.join().unwrap().expect("the priming submission");
+
+    let after = engine.write_executor_stats();
+    assert_eq!(
+        after.wal_appends - parked.wal_appends,
+        (bound + 1) as u64,
+        "one record per deny, whatever the window count"
+    );
+    assert_eq!(
+        after.wal_fsyncs - parked.wal_fsyncs,
+        2,
+        "{} queued denies must close TWO windows — one at the bound and one for the remainder. \
+         One fsync means the bound is not enforced and the drain's length is the arrival rate",
+        bound + 1
+    );
 }

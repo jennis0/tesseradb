@@ -129,7 +129,7 @@ pub enum Step {
 /// [`PauseSite::AfterFsync`], parking proves nothing about the *relative* order of the swap and
 /// the ack: both are still ahead of the parked executor, so a build that acked first and swapped
 /// second parks in exactly the same place and presents exactly the same engine state. Measured,
-/// not reasoned: with a real ack-before-swap planted in `execute_change`, every behavioural
+/// not reasoned: with a real ack-before-swap planted in the deny commit path, every behavioural
 /// assertion in `ack_follows_fsync_then_swap` passed and only the step-log assertion failed.
 /// [`PauseSite::BeforeAck`] is what closes that — see its own doc for why its *position inside
 /// `ack`* rather than at a call site is the load-bearing part.
