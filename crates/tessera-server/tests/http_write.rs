@@ -3239,3 +3239,313 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
          response that says nothing was applied, and a restart re-hides it)"
     );
 }
+
+// =================================================================================================
+// The fragmentation figure on /control/status, and admin-plane hygiene
+// =================================================================================================
+
+/// Contracts §3.4's `fragmentation` block: absent-not-zero before the first window closes, present
+/// after it.
+///
+/// The arithmetic lives where it is computed (`tessera-lifecycle`'s `window_props.rs`) and the
+/// executor wiring in `tessera-engine`'s `tests/write.rs`. What this asserts is the **endpoint**:
+/// that the two contract fields exist under the specified names, that they are `null` rather than
+/// `0` when nothing has been measured, and that the body says what scope it is reporting — because
+/// a JSON consumer reads the body and never the specification's ⊘ marker.
+#[tokio::test]
+async fn control_status_publishes_the_fragmentation_figure_once_a_window_has_closed() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let before = control_status(&server).await;
+    let frag = &before["fragmentation"];
+    assert_eq!(
+        frag["scope"], "commit-window-allocation",
+        "the body must say which scope it reports — §3.4 defines these over base plus deltas, and \
+         this is the ingest stream's allocation"
+    );
+    assert!(
+        frag["run_ratio"].is_null() && frag["postings_per_container"].is_null(),
+        "both must be null, not 0, before any window has closed: 0 is not a reachable value of \
+         either quantity, so publishing one would read as a measurement. Got {frag}"
+    );
+    assert_eq!(frag["windows"], 0);
+
+    let body = build_ingest_batch(&[
+        (N_ITEMS + 1, 10.0, 10.0, "0"),
+        (N_ITEMS + 2, 11.0, 11.0, "0"),
+        (N_ITEMS + 3, 12.0, 12.0, "1"),
+    ]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "frag-1")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let after = control_status(&server).await;
+    let frag = &after["fragmentation"];
+    assert_eq!(frag["windows"], 1, "one submission closed one window");
+    assert_eq!(frag["rows"], 3);
+    assert!(
+        frag["run_ratio"].as_f64().is_some() && frag["postings_per_container"].as_f64().is_some(),
+        "both contract fields must carry a number once a window has closed. Got {frag}"
+    );
+    assert!(
+        frag["postings"].as_u64().unwrap() > 0 && frag["runs"].as_u64().unwrap() > 0,
+        "the raw counters are the un-normalised halves and must move with the ratios. Got {frag}"
+    );
+}
+
+/// A batch column the manifest does not declare is **422 naming the column**, never a silent drop.
+///
+/// Scalars are stored positionally against `MANIFEST.declared_scalars`, so a column that is not in
+/// the declaration cannot be read back — and the old behaviour, dropping any column whose type was
+/// not one of the three `WalScalar` carries, shortened the vector and shifted every later scalar by
+/// one while answering 200. The column **name** must reach the caller: "your batch was rejected" is
+/// not actionable against a wide schema.
+///
+/// The fixture bundle declares no scalars at all (`tessera-build` writes the array empty —
+/// contracts §2.2), so here every non-reserved column is undeclared.
+#[tokio::test]
+async fn an_undeclared_ingest_column_is_422_naming_the_column() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    // Two extra columns: one of a type the old code would have stored, one of a type it dropped in
+    // silence. Both are undeclared, so both are refused — and the refusal is about the declaration,
+    // not about the type.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, false),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("access", DataType::Utf8, false),
+        Field::new("priority_score", DataType::UInt64, false),
+        Field::new("shelf_date", DataType::Date32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values([external_id_of(N_ITEMS + 1)])),
+            Arc::new(Float32Array::from_iter_values([10.0])),
+            Arc::new(Float32Array::from_iter_values([10.0])),
+            Arc::new(StringArray::from_iter_values(["0"])),
+            Arc::new(arrow::array::UInt64Array::from_iter_values([7u64])),
+            Arc::new(arrow::array::Date32Array::from_iter_values([19_000i32])),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    let body = writer.into_inner().unwrap();
+
+    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "undeclared-1")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "contract");
+    let detail = json["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("priority_score"),
+        "the offending COLUMN NAME must reach the caller, not just a refusal: {detail}"
+    );
+    assert!(
+        detail.contains("declared_scalars"),
+        "and it must say what the column failed against: {detail}"
+    );
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water_before,
+        "a refused batch has no effect: no entity id was spent"
+    );
+}
+
+/// `x-tessera-slice` (contracts §3.4): a known slice is accepted, an unknown one is `404`.
+///
+/// **404, not 422**, because §3.1's code list is closed and its 404 row says "unknown `tessera_id`,
+/// node, external ID **or slice**" — which is already what the viewer plane answers. §3.4's 422 is
+/// for *ambiguity*: a bundle with two or more slices and no header. This fixture has one slice, so
+/// the ambiguous case is unreachable here and the omitted header is accepted.
+#[tokio::test]
+async fn an_unknown_ingest_slice_is_404_and_a_known_one_is_accepted() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "slice-bad")
+        .header("x-tessera-slice", "no-such-slice")
+        .header("content-type", "application/octet-stream")
+        .body(build_ingest_batch(&[(N_ITEMS + 1, 10.0, 10.0, "0")]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "contracts §3.1's 404 row names 'slice'");
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "unknown");
+    assert!(
+        json["detail"].as_str().unwrap().contains("no-such-slice"),
+        "the offending slice id must reach the caller: {}",
+        json["detail"]
+    );
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water_before,
+        "a refused batch has no effect"
+    );
+
+    // The slice the fixture actually has, and then no header at all: both accepted.
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "slice-good")
+        .header("x-tessera-slice", "s0")
+        .header("content-type", "application/octet-stream")
+        .body(build_ingest_batch(&[(N_ITEMS + 1, 10.0, 10.0, "0")]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "the bundle's own slice is accepted");
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "slice-absent")
+        .header("content-type", "application/octet-stream")
+        .body(build_ingest_batch(&[(N_ITEMS + 2, 10.0, 10.0, "0")]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "the header is optional when the bundle has one slice"
+    );
+}
+
+/// `over_bound_ids` is **base64**, like every other external-ID surface on this plane.
+///
+/// External ids are arbitrary bytes (contracts §1) and JSON has no binary type. `from_utf8_lossy`
+/// replaces every byte that is not valid UTF-8 with U+FFFD, so an operator investigating a
+/// data-quality warning was handed replacement characters instead of an id they could look up —
+/// and identity is the whole of what makes bounds-warn-never-exclude (§6.2 r16) usable.
+///
+/// The id here contains `0xFF`, which is not valid UTF-8 in any position, so the lossy encoding is
+/// demonstrably lossy rather than merely differently spelled.
+#[tokio::test]
+async fn over_bound_ids_are_base64_not_lossy_utf8() {
+    use base64::Engine as _;
+
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    // Passthrough declares `max_terms_per_item = 4096`; one more descriptor than that is the warn.
+    let access = (0..4_097)
+        .map(|i| format!("t{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let external_id: &[u8] = &[0xFF, 0x01, 0xFE, 0x02, 0x00, 0x00, 0x00, 0x00];
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "over-bound-1")
+        .header("content-type", "application/octet-stream")
+        .body(build_ingest_batch_raw(&[(
+            external_id,
+            10.0,
+            10.0,
+            access.as_str(),
+        )]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "bounds warn, never exclude — the item is indexed regardless (§6.2 r16)"
+    );
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["over_bound"], 1);
+
+    let listed = json["over_bound_ids"][0].as_str().unwrap();
+    assert_eq!(
+        listed,
+        base64::engine::general_purpose::STANDARD.encode(external_id),
+        "the id must round-trip: an operator has to be able to decode it back to the bytes they \
+         sent. Got {listed}"
+    );
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(listed)
+            .unwrap(),
+        external_id,
+        "and it must decode to exactly those bytes — 0xFF has no lossy encoding that survives"
+    );
+}

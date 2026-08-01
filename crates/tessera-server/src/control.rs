@@ -28,8 +28,9 @@ use base64::Engine as _;
 use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
-use tessera_engine::{AcceptError, DENY_WINDOW_MAX_ENTRIES};
+use tessera_engine::{AcceptError, DeclaredScalar, DENY_WINDOW_MAX_ENTRIES};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow, WalScalar};
+
 use tessera_types::{EntityId, TermId};
 
 use crate::error::{
@@ -405,12 +406,57 @@ struct RawIngestItem {
     scalars: Vec<WalScalar>,
 }
 
+/// The column names this schema gives a meaning of their own; everything else in a batch is a
+/// caller-declared scalar.
+const RESERVED_COLUMNS: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];
+
+/// The arrow type spelling `MANIFEST.declared_scalars` uses for each type this path accepts.
+///
+/// Three types, because three are what `WalScalar` can carry. A declared scalar of any other type
+/// is a manifest this build cannot ingest against, and it is refused by name rather than by
+/// dropping the column.
+fn scalar_of(col: &dyn Array, row: usize) -> Option<(WalScalar, &'static str)> {
+    if let Some(a) = col.as_any().downcast_ref::<arrow::array::UInt64Array>() {
+        Some((WalScalar::U64(a.value(row)), "uint64"))
+    } else if let Some(a) = col.as_any().downcast_ref::<arrow::array::Float32Array>() {
+        Some((WalScalar::F32(a.value(row)), "float32"))
+    } else if let Some(a) = col.as_any().downcast_ref::<arrow::array::StringArray>() {
+        Some((WalScalar::Utf8(a.value(row).to_string()), "utf8"))
+    } else {
+        None
+    }
+}
+
 /// Parse `/control/ingest`'s body: one Arrow IPC stream, schema
 /// `(external_id: binary, x: float32, y: float32, access: utf8, node_id: utf8?, ...scalars)`
 /// (R5). `node_id` is accepted (so a well-formed client request is never rejected for including
 /// it) but not stored: `WalRow` has no `node_id` field in Phase 1 — buffered items have no row
 /// geometry until the next `tessera build`, and `node_id` is a segment-column concept.
-fn parse_ingest_batch(body: &[u8]) -> Result<Vec<RawIngestItem>, ApiError> {
+///
+/// # The scalar tail is validated against `MANIFEST.declared_scalars`, and misalignment is a 422
+///
+/// A row's scalars are stored **positionally**, against the manifest's declared order — nothing
+/// downstream carries a name. So a batch whose scalar columns are not exactly the declared set, in
+/// no matter what order, cannot be read back correctly, and three defects are the same defect:
+///
+/// * a column the manifest does not declare;
+/// * a declared column the batch omits;
+/// * a declared column present at the wrong arrow type.
+///
+/// Each is refused with **422 naming the column** (contracts §3.1's "malformed request"), and the
+/// scalar vector is built in **declared** order rather than schema order, which is what makes the
+/// positional read safe. Silently dropping a column — which is what an unrecognised *type* used to
+/// do here — shortens the vector and shifts every later scalar by one: positional misalignment
+/// wearing a success's clothes, acknowledged with a 200.
+///
+/// **⊘ Partially implemented at the other end.** `tessera-build` writes `declared_scalars` as an
+/// empty array unconditionally (contracts §2.2), so in every bundle that exists this rule reads
+/// "an ingest batch may carry no scalar column at all". The validation is real and runs on every
+/// batch; what has never been exercised is a non-empty declaration.
+fn parse_ingest_batch(
+    body: &[u8],
+    declared: &[DeclaredScalar],
+) -> Result<Vec<RawIngestItem>, ApiError> {
     let cursor = std::io::Cursor::new(body);
     let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
         ApiError::Contract(format!("ingest body is not a valid Arrow IPC stream: {e}"))
@@ -427,24 +473,68 @@ fn parse_ingest_batch(body: &[u8]) -> Result<Vec<RawIngestItem>, ApiError> {
         let y = f32_col(&batch, "y")?;
         let access = utf8_col(&batch, "access")?;
 
+        // Whole-batch schema validation, before a single row is read: a batch whose scalar tail
+        // does not match the declaration has no effect at all, exactly as a duplicate 409 does.
+        for field in schema.fields() {
+            let name = field.name().as_str();
+            if RESERVED_COLUMNS.contains(&name) {
+                continue;
+            }
+            if !declared.iter().any(|d| d.name == name) {
+                return Err(ApiError::Contract(format!(
+                    "ingest body: column '{name}' is not in MANIFEST.declared_scalars \
+                     (contracts §2.2). Scalars are stored positionally against the declared \
+                     order, so an undeclared column is refused rather than dropped — dropping \
+                     it would shift every later scalar by one and acknowledge that with a 200"
+                )));
+            }
+        }
+        for d in declared {
+            let Some(col) = batch.column_by_name(&d.name) else {
+                return Err(ApiError::Contract(format!(
+                    "ingest body: declared scalar '{}' is missing from this batch \
+                     (contracts §2.2). Every declared column must be present: the scalar tail is \
+                     read back by position, so an omission misaligns it exactly as a spurious \
+                     column does",
+                    d.name
+                )));
+            };
+            // One row's worth is enough to identify the column's type, and a batch with no rows has
+            // no scalar to mistype.
+            if batch.num_rows() > 0 {
+                match scalar_of(col.as_ref(), 0) {
+                    Some((_, actual)) if actual == d.arrow_type => {}
+                    Some((_, actual)) => {
+                        return Err(ApiError::Contract(format!(
+                            "ingest body: column '{}' is {actual}, but MANIFEST.declared_scalars \
+                             declares it {}",
+                            d.name, d.arrow_type
+                        )));
+                    }
+                    None => {
+                        return Err(ApiError::Contract(format!(
+                            "ingest body: column '{}' is of a type this build cannot store \
+                             (uint64, float32 and utf8 are the three `WalScalar` carries); \
+                             refused rather than dropped",
+                            d.name
+                        )));
+                    }
+                }
+            }
+        }
+
         for i in 0..batch.num_rows() {
-            let mut scalars = Vec::new();
-            for field in schema.fields() {
-                let name = field.name().as_str();
-                if matches!(name, "external_id" | "x" | "y" | "access" | "node_id") {
-                    continue;
-                }
+            // Built in DECLARED order, not schema order — the vector is read back by position and
+            // nothing downstream carries a name. Every column is present and correctly typed by the
+            // validation above, so neither `expect` here can fire on a caller's input.
+            let mut scalars = Vec::with_capacity(declared.len());
+            for d in declared {
                 let col = batch
-                    .column_by_name(name)
-                    .expect("field name came from this batch's own schema");
-                if let Some(arr) = col.as_any().downcast_ref::<arrow::array::UInt64Array>() {
-                    scalars.push(WalScalar::U64(arr.value(i)));
-                } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Float32Array>()
-                {
-                    scalars.push(WalScalar::F32(arr.value(i)));
-                } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::StringArray>() {
-                    scalars.push(WalScalar::Utf8(arr.value(i).to_string()));
-                }
+                    .column_by_name(&d.name)
+                    .expect("every declared column was found by the validation above");
+                let (value, _) = scalar_of(col.as_ref(), i)
+                    .expect("every declared column's type was checked by the validation above");
+                scalars.push(value);
             }
             // Contracts §3.4 (r6): `external_id` is optional. Neither a missing column nor a null
             // within the column is an error -- both simply mean this item has no caller-supplied
@@ -477,6 +567,50 @@ fn parse_ingest_batch(body: &[u8]) -> Result<Vec<RawIngestItem>, ApiError> {
         }
     }
     Ok(items)
+}
+
+/// `x-tessera-slice` (contracts §3.4): optional when the bundle has one slice, `422` if ambiguous.
+///
+/// | header | slices | answer |
+/// |---|---|---|
+/// | absent | 0 or 1 | accepted — there is nothing to be ambiguous about |
+/// | absent | ≥ 2 | **422**, naming what it could have meant |
+/// | present, unknown | any | **404** |
+/// | present, known | any | accepted |
+///
+/// **Unknown is 404, not 422**, and the difference is not cosmetic: contracts §3.1's code list is
+/// **closed**, and its 404 row reads "unknown `tessera_id`, node, external ID **or slice**". The
+/// viewer plane already answers exactly that (`map_engine_error` maps `EngineError::UnknownSlice`
+/// to `ApiError::Unknown`), and two planes disagreeing about what an unknown slice id is would be a
+/// contradiction inside a closed list. §3.4's 422 is licensed for *ambiguity*, which is the second
+/// row, not the third.
+///
+/// **⊘ Partially implemented: the header is validated and not stored.** There is no
+/// slice-partitioned ingest buffer for a named slice to route a row into, so naming a slice
+/// currently selects nothing — a reader must not assume otherwise. Validating it anyway is what
+/// stops a client's slice-aware batch from being accepted today and silently misrouted the day
+/// partitioning lands. This is `node_id`'s situation one function over, and the same disposition:
+/// accepted so a well-formed request is never refused for including it, stored nowhere.
+///
+/// No build path emits a multi-slice bundle (`tessera-build` writes exactly one `SliceDescriptor`),
+/// so the second row is unreachable today. It is implemented rather than asserted-away because it
+/// is a contract clause and it costs one comparison.
+fn validate_slice(slice: Option<&str>, slices: &[(String, String)]) -> Result<(), ApiError> {
+    match slice {
+        None if slices.len() > 1 => Err(ApiError::Contract(format!(
+            "this bundle has {} slices ({}), so x-tessera-slice is required — which one a batch \
+             belongs to is not inferable (contracts §3.4)",
+            slices.len(),
+            slices
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+        None => Ok(()),
+        Some(id) if slices.iter().any(|(known, _)| known == id) => Ok(()),
+        Some(id) => Err(ApiError::Unknown(format!("unknown slice '{id}'"))),
+    }
 }
 
 /// A binary column that may be null-within (any row) or absent entirely (contracts §3.4 r6:
@@ -545,10 +679,22 @@ struct IngestResp {
 /// consumes, and more importantly a suppression on `/control/changes` must reach its own
 /// `spawn_blocking` call (and thus the WAL mutex) without first queueing behind N ingest
 /// *handlers* occupying reactor threads (lifecycle §1.3's deny priority lane).
-fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestResp, ApiError> {
+fn run_ingest(
+    state: &AppState,
+    body: &[u8],
+    batch_id: String,
+    slice: Option<&str>,
+) -> Result<IngestResp, ApiError> {
     let body_hash: [u8; 32] = Sha256::digest(body).into();
 
-    let items = parse_ingest_batch(body)?;
+    // One `Engine::meta()` call per batch — not per row — for the two things the manifest decides
+    // about a batch: which slices exist, and what scalar tail is declared. `meta()` rather than a
+    // narrower accessor on purpose: it is the one definition of what this bundle declares, the one
+    // `/v1/meta` publishes, and a second accessor is a second definition that can drift from it.
+    let meta = state.engine.meta();
+    validate_slice(slice, &meta.slices)?;
+
+    let items = parse_ingest_batch(body, &meta.declared_scalars)?;
 
     // Task 6 (D1): the row cap. 422 per contracts §3.1's "bounds exceeded" row, naming the bound
     // and the batch's own size.
@@ -598,7 +744,15 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
             // `over_bound` above (bounds warn, never exclude -- §6.2 r16), just not listed here.
             if over_bound_ids.len() < 100 {
                 if let Some(external_id) = &item.external_id {
-                    over_bound_ids.push(String::from_utf8_lossy(external_id).to_string());
+                    // **base64, like every other external-id surface here** — both duplicate lists
+                    // below, and `/control/changes`' input. External ids are arbitrary bytes
+                    // (contracts §1) and JSON has no binary type, so this is the only lossless
+                    // encoding available. `String::from_utf8_lossy` turned every non-UTF-8 byte
+                    // into U+FFFD, which destroys an 8-byte little-endian id outright — and
+                    // identity is the whole of what makes an over-bound warn a usable data-quality
+                    // signal rather than a count (§6.2 r16).
+                    over_bound_ids
+                        .push(base64::engine::general_purpose::STANDARD.encode(external_id));
                 }
             }
         }
@@ -831,6 +985,24 @@ async fn ingest(
         .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
         .to_string();
 
+    // Read here rather than inside `run_ingest` because a `HeaderMap` is the handler's, not the
+    // blocking closure's. A header whose bytes are not valid UTF-8 names no slice any manifest can
+    // hold, so it is refused rather than lossily decoded — the same rule this handler applies to
+    // external ids one function over.
+    let slice = match headers.get("x-tessera-slice") {
+        None => None,
+        Some(value) => Some(
+            value
+                .to_str()
+                .map_err(|_| {
+                    ApiError::Contract(
+                        "x-tessera-slice is not valid UTF-8, so it names no slice".to_string(),
+                    )
+                })?
+                .to_string(),
+        ),
+    };
+
     // Task 6 (D2): the admission bound, **before** `spawn_blocking`. See `IngestAdmission`.
     let Some(permit) = state.ingest_admission.try_admit() else {
         // `debug!`, not `warn!` and certainly not `error!`. This was a `warn!`, which is a
@@ -861,7 +1033,7 @@ async fn ingest(
     // handler-drop would under-count exactly when the pool is under pressure.
     let resp = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        run_ingest(&state, &body, batch_id)
+        run_ingest(&state, &body, batch_id, slice.as_deref())
     })
     .await
     .map_err(map_join_error)??;
