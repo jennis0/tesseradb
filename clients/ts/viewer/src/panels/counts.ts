@@ -14,10 +14,24 @@ const fmt = (n: bigint | number) => n.toLocaleString('en-GB');
  * Nothing here is derived from the drawn marks. `served` is what was drawn; `visible` is what
  * exists inside the mask. Both are shown, always, because a sample must never read as a set (P2).
  */
+/** A failure within this window is treated as describing the current display. */
+const RECENT_FAILURE_MS = 10_000;
+
 export function renderCounts(state: AppState): string {
   const tiles = [...state.tiles.values()];
   if (tiles.length === 0) {
-    return panel('Counts', '<div class="muted">no tiles loaded</div>');
+    // Zero and unknown are not the same answer, and this is the one place the difference is
+    // cheapest to lose: with nothing loaded, "no tiles" reads as an empty region when what
+    // actually happened may be that every request was refused.
+    const recentlyFailed = state.failures.some(
+      (f) => Date.now() - f.at < RECENT_FAILURE_MS
+    );
+    return panel(
+      'Counts',
+      recentlyFailed
+        ? '<div class="bad">counts unavailable — requests failed, see below. This is not an empty region.</div>'
+        : '<div class="muted">no tiles loaded yet</div>'
+    );
   }
   const depth = Math.max(...tiles.map((t) => t.z));
   const current = tiles.filter((t) => t.z === depth);

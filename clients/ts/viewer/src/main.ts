@@ -5,8 +5,10 @@ import {readConfig} from './config.js';
 import {esc} from './html.js';
 import {INITIAL_VIEW_STATE, VIEW, buildLayers} from './map.js';
 import {renderCounts} from './panels/counts.js';
+import {renderErrors} from './panels/errors.js';
 import {renderPrincipal, type Preset} from './panels/principal.js';
-import {coalesce, createStore} from './state.js';
+import {renderK, renderStats, renderUnderlay} from './panels/stats.js';
+import {coalesce, createStore, type Store} from './state.js';
 
 const config = readConfig();
 const client = new TesseraClient({
@@ -45,8 +47,32 @@ const deck = new Deck({
 
 const panels = document.getElementById('panels')!;
 
+/** Record a failure the same way a failed tile is recorded, so nothing fails silently. */
+function recordFailure(store: Store, what: string, error: unknown) {
+  const e = error as {code?: string; detail?: string; message?: string};
+  store.update((s) => {
+    s.failures.push({
+      tileId: what,
+      code: e.code ?? 'fetch-failed',
+      detail: e.detail ?? e.message ?? String(error),
+      at: Date.now()
+    });
+  });
+}
+
 function render() {
-  panels.innerHTML = renderPrincipal(store.state, presets) + renderCounts(store.state);
+  // The panels are rebuilt wholesale, which destroys whichever control has focus. Skip the
+  // rebuild while the user is inside them — a slider being dragged emits a state change per
+  // frame, and re-rendering under the pointer would drop the drag.
+  if (panels.contains(document.activeElement)) return;
+
+  panels.innerHTML =
+    renderPrincipal(store.state, presets) +
+    renderCounts(store.state) +
+    renderK(store.state) +
+    renderUnderlay(store.state) +
+    renderStats(store.state) +
+    renderErrors(store.state);
 
   const select = document.getElementById('principal') as HTMLSelectElement | null;
   select?.addEventListener('change', () => {
@@ -65,17 +91,23 @@ function render() {
           s.selectedWorldXY = null;
         });
       })
-      .catch((error) => {
-        const e = error as {code?: string; detail?: string};
-        store.update((s) => {
-          s.failures.push({
-            tileId: `authorise ${preset.label}`,
-            code: e.code ?? 'fetch-failed',
-            detail: e.detail ?? String(error),
-            at: Date.now()
-          });
-        });
-      });
+      .catch((error) => recordFailure(store, `authorise ${preset.label}`, error));
+  });
+
+  const kInput = document.getElementById('k') as HTMLInputElement | null;
+  kInput?.addEventListener('change', () => {
+    store.update((s) => {
+      s.k = Number(kInput.value);
+      s.tiles.clear();
+    });
+  });
+
+  const underlayInput = document.getElementById('underlay') as HTMLInputElement | null;
+  underlayInput?.addEventListener('change', () => {
+    store.update((s) => {
+      s.underlayOffset = Number(underlayInput.value);
+      s.tiles.clear();
+    });
   });
 }
 
@@ -86,6 +118,8 @@ store.subscribe(
   })
 );
 store.subscribe(rerender);
+// A control that was skipped above must still get its panel back once the user leaves it.
+panels.addEventListener('focusout', () => setTimeout(rerender, 0));
 
 async function start() {
   const session = await client.authorise(store.state.terms);
