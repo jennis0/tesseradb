@@ -58,7 +58,7 @@ bundle/
                                 # namespace, bundle-level (SA D11), never per partition
     partitions/<phash>/
       SEGMENTS-<n>.json         # per-partition side-manifests; n decimal — see the
-                                # filename-grammar note below, which is UNRESOLVED
+                                # unpadded; see the filename-grammar note below
       terms/postings.arrow      # CSR: one tagged record per term (2.4)
       terms/deltas-<n>.arrow
       terms/pairs.parquet       # r4; was pairs.arrow — see 2.4
@@ -118,7 +118,7 @@ reconstructing canonically is the combination that hides it.
 | `small_term_threshold` | int | cardinality at or below which a posting is stored as a sorted array rather than Roaring (2.4); default 32 pending Phase 1 calibration |
 | `quantisation` | object | `{x_min, x_max, y_min, y_max}` (f64) — see 2.5 |
 | `entity_id_high_water` | u64 | first unallocated entity ID at build; seeds the allocator. A JSON counter value, not an entity-space array, so §1's `u32` narrowing does not apply to its declared width; the allocator nonetheless refuses a seed at or above `u32::MAX` (§2.6) |
-| `identity` | object | `{construction, rounds, key, shard_id, epoch}` — the `tessera_id` permutation (§2.6). **Required**; absent is a typed reader error, not a default. `key` is **exactly 32 lowercase hex characters**, per *deployment*, carried across rebuilds; any other case is rejected rather than folded, so MANIFEST has one canonical form under its digest, and degenerate keys (`k1 == 0`, all-zero) are refused. **⊘ Partially implemented — which reader rejects matters.** Both checks live in one place, the key parser, and it is reached from `tessera build`'s verify pass and from the engine's open. The **store's** `open_bundle` — the entry point §2.3's reader protocol actually names — validates only the descriptor's `construction`, `rounds` and `epoch != 0`, and never parses the key, so a bundle carrying an uppercase or degenerate key opens through it without complaint. A reader that wants the guarantee must go through the engine, or parse the key itself. `epoch` is a `u32` advanced whenever the partitioning or sharding changes — see the transport-identity note below. **The key's home outside the bundle is a per-deployment configuration file named explicitly on the command line** (`tessera build --id-key-file <path>`), so a deployment rebuilt from source keeps its lineage; there is **no default search path and no environment variable**, and a build given none of `--carry-id-key-from` / `--id-key-file` / `--id-key` / `--mint-id-key` **refuses before doing any work**. The file's wider schema is not specified here |
+| `identity` | object | `{construction, rounds, key, shard_id, epoch}` — the `tessera_id` permutation (§2.6). **Required**; absent is a typed reader error, not a default. `key` is **exactly 32 lowercase hex characters**, per *deployment*, carried across rebuilds; any other case is rejected rather than folded, so MANIFEST has one canonical form under its digest, and degenerate keys (`k1 == 0`, all-zero) are refused at write, and at read by the engine. **⊘ Partially implemented — which reader rejects matters.** Both checks live in one place, the key parser, and it is reached from `tessera build`'s verify pass and from the engine's open. The **store's** `open_bundle` — the entry point §2.3's reader protocol actually names — validates only the descriptor's `construction`, `rounds` and `epoch != 0`, and never parses the key, so a bundle carrying an uppercase or degenerate key opens through it without complaint. A reader that wants the guarantee must go through the engine, or parse the key itself. `epoch` is a `u32` advanced whenever the partitioning or sharding changes — see the transport-identity note below. **The key's home outside the bundle is a per-deployment configuration file named explicitly on the command line** (`tessera build --id-key-file <path>`), so a deployment rebuilt from source keeps its lineage; there is **no default search path and no environment variable**, and a build given none of `--carry-id-key-from` / `--id-key-file` / `--id-key` / `--mint-id-key` **refuses before doing any work**. The file's wider schema is not specified here |
 | `slices` | array | `[{id, display_name}]` |
 | `partitions` | array | `[{phash, required_terms: [hex…]}]`; exactly one `"default"` entry |
 | `provenance` | object | free-form; includes the recorded §7.8 generating-set choice |
@@ -167,6 +167,19 @@ flowchart TD
 **The honourability check runs before file verification, deliberately.** A `SEGMENTS-<n>.json` carries no digest of its own — only the files it *names* are verified — so its `deny` list is exactly as trustworthy whether or not those files check out. The most likely way to meet a deny-carrying manifest whose files fail is a mid-sync replica that has the new manifest and not yet its data, and verifying first would step that case down and re-expose the suppressed item. "Verify the bytes before interpreting them" is the right instinct everywhere else in this loop and is wrong here.
 
 **The two dispositions do not collapse into one.** A manifest carrying only `deltas` is stepped past: items are *missing*, never re-exposed, and the availability argument for a mid-sync replica holds. A manifest carrying `tombstones` or `deny` makes the partition **unready** — stepping down would serve an older manifest that predates the deny, undoing an accepted suppression indefinitely with no operator signal. The step-down's safety rests on every intervening candidate being read and classified rather than skipped; a reader that examines only the top few candidates lets a deny-carrying manifest pass unseen, which is the same fail-open from the other end.
+
+> **⊘ Three residuals, none closed.** A deny-carrying manifest is still stepped past whenever the
+> walk cannot tell that it carries one — when it does not **parse**, when it cannot be **read** (an
+> I/O or permission fault), or when it is present under a **non-canonical name**. All three are the
+> same shape, and none should be closed by guessing: an ordinary torn write must not become a hard
+> partition failure, and a manifest whose bytes are unavailable tells the reader nothing about what
+> it held. **The bound on all three is time, and that bound does not exist** — it is §2.3's
+> freshness gate, which is itself unbuilt, so a replica in this state serves the older manifest
+> indefinitely with no operator signal.
+>
+> This is acceptable *only* because nothing writes `deny` yet. The deny writer and the freshness
+> gate must ship as one unit; separating them reintroduces exactly the fail-open the disposition
+> split exists to prevent.
 
 Readiness requires a verifying manifest per partition **and** a freshness gate: `readyz` fails if the newest verifying `n` is older than the deployment's configured lag bound — unbounded step-down would let a badly synced replica serve long-deleted items as live.
 
@@ -312,7 +325,7 @@ JSON requests carry `application/json`. Bodies marked **Arrow** in this section 
 
 | Header | When | Value |
 |---|---|---|
-| `x-tessera-server-us` | unconditional | whole-request server time, microseconds |
+| `x-tessera-server-us` | unconditional | server time **after compute admission**, microseconds. The admission wait is not in this figure; it is in the next header and only there |
 | `x-tessera-admission-us` | unconditional | time spent in the compute-admission gate, microseconds |
 | `x-tessera-stage-ns` | only when the server is both **built** with its timing feature and **configured** for stage timing | comma-separated per-stage durations and row counters |
 

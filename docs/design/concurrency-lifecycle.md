@@ -1,9 +1,14 @@
 # Tessera — Concurrency and Lifecycle Design
 
-**Status:** Draft r4 — r3 plus group-commit allocation, flush's standing as the ingest-visibility mechanism, and the write-latency budget extended to deny dispositions (Appendix R)
-**Owns:** the mechanism level of the lifecycle: thread and state ownership, the generation/pin machinery, the fragment-epoch and deny-retirement ledgers, merge-versus-snapshot interaction, the WAL, and the router/worker protocol. This is the area the plan singles out ("the bugs will be in merge-versus-snapshot races"). Everything here is engine-internal — none of it is contract (contracts §6) — but it is *invariant-bearing* internal, so it gets design-and-review treatment.
+**Status:** Draft r5 — audited against the built system; every claim about absent machinery is now marked at the claim (Appendix R)
 
-**The simplicity rule applied here:** one mutation discipline — **immutable artifacts, atomic pointer swaps, refcounted pins, and a single writer thread per partition** — with every surviving subtlety given a named ledger and an explicit rule. r1's review found four fail-open paths in the first draft of those rules; r2's rules are the corrected ones, and each carries a conformance test.
+**Owns:** the mechanism level of the lifecycle — thread and state ownership, the generation/pin machinery, the fragment-epoch and deny-retirement ledgers, merge-versus-snapshot interaction, the WAL, caching, and the router/worker protocol. Everything here is engine-internal — none of it is contract (contracts §6) — but it is *invariant-bearing* internal, so it gets design-and-review treatment.
+
+**The simplicity rule applied here:** one mutation discipline — **immutable artifacts, atomic pointer swaps, refcounted pins, and a single writer thread per partition** — with every surviving subtlety given a named ledger and an explicit rule.
+
+**How to read the markers.** This document specifies a target; parts of it are not built. Wherever that is true it is marked **⊘** at the claim, with what happens instead. The three that matter most, because a reader could otherwise take them as assurances about a security property, are the deletion-retirement ledger (§3.2), the evaluate-entry fold (§3.4), and flush (§5.1).
+
+`§n` alone refers to the architecture design; sections of this document are named "this document's §n" or given by number in context. `M_auth` is a viewer's authorised visible set as a Roaring bitmap; `I1`, `I9`, `I11`, `I13` are invariants from design §4.
 
 ---
 
@@ -16,44 +21,87 @@ All of a partition's serving state hangs off a single atomically-swappable point
 ```
 Generation {
   prefix, segments_version: n, watermark: W,
-  segments: Arc<[SegmentRef]>,   // each SegmentRef holds per-FILE Arc<Mmap>s
-  postings: PostingsView,        // base + delta tiers + tombstones
+  bundle: Arc<Bundle>,           // the loaded bundle: segments, permutation, postings, dictionary
   overlay_version: v,
-  overlay: Arc<Overlay>,         // evaluate + deny entries (§3)
+  overlay: Arc<Overlay>,         // deny + evaluate entries (§3)
+  buffer: Arc<IngestBuffer>,     // WAL-durable rows not yet in any segment (§5.1)
 }
 ```
 
-**The request ordering invariant (load-bearing, tested):** a request thread loads the generation pointer **exactly once, at request start, before acquiring any fragment or cache entry**, and works from that `Arc` throughout. Overlay resolution *happens-before* fragment acquisition. This ordering is what makes fragment eviction safe while a request still holds a fragment `Arc` — the request's own overlay still carries any deny the ledger has since retired — and an implementation that refreshes a fragment mid-request or fetches one before resolving the generation leaks in the eviction→retire window. It is an invariant, not folklore: the conformance suite drives the interleaving explicitly.
+The specified shape carried a `segments: Arc<[SegmentRef]>` with per-file `Arc<Mmap>`s, and a `PostingsView` of base plus delta tiers plus tombstones.
+
+> **⊘ Partially implemented.** A generation holds one `Arc<Bundle>`, not a segment list: there is one segment per partition, no delta tiers and no tombstone tier, because nothing yet writes them (§5.1–§5.3). The per-file `Arc<Mmap>` sharing that §2.1 relies on to let a file outlive either generation referencing it is provided by the shared `Arc<Bundle>` instead. Nothing in the ordering rules below depends on which of the two shapes is in place.
+
+**The request ordering invariant (load-bearing, tested):** a request thread loads the generation pointer **exactly once, at request start, before acquiring any fragment or cache entry**, and works from that `Arc` throughout. Overlay resolution *happens-before* fragment acquisition. This ordering is what makes fragment eviction safe while a request still holds a fragment `Arc` — the request's own overlay still carries any deny the ledger has since retired — and an implementation that refreshes a fragment mid-request or fetches one before resolving the generation leaks in the eviction→retire window. It is an invariant, not folklore.
 
 ### 1.2 Two version axes, deliberately not one
 
-`segments_version` moves on flush and compaction (row-space and postings shape); `overlay_version` moves on every accepted change batch (security state). They match §8.5's cache keys and have opposite pinning semantics (§2.3). Every mutation builds a new Generation sharing unchanged parts by `Arc` and swaps the pointer; a change-only generation is two small allocations.
+`segments_version` moves with row-space and postings shape; `overlay_version` moves on every accepted change batch (security state). They match design §8.5's cache keys and have opposite pinning semantics (§2.3). Every mutation builds a new Generation sharing unchanged parts by `Arc` and swaps the pointer; a change-only generation is two small allocations.
+
+`segments_version` is specified to move on flush and compaction.
+
+> **⊘ Specified, not implemented.** With neither built, `segments_version` is read from the manifest when a bundle is opened and then moves only across the geometry-publication seam that swaps in a newly built bundle (§1.3). It is never bumped by an overlay or buffer update — which is what makes it a correct cache key today, not a coincidence.
 
 ### 1.3 The single writer, minimally loaded
 
-One **lifecycle thread** per partition owns all *mutation decisions*, but performs only cheap operations itself: command-queue drain, WAL append and fsync (group commit permitted), and pointer swaps. **All file and object IO — segment writes, digests, side-manifest and object-store publication, merge execution — runs on a background pool**, submitting a completed, immutable result back to the lifecycle thread for a swap-only publication step. The command queue has a **priority lane for deny-disposition changes**, so a compaction publish or a stalled object-store PUT can never queue a suppression behind unbounded IO — deny visibility latency is bounded by (queue-front + fsync), nothing else. *(r4: with the write-latency budget of design §3 extended to deny dispositions, a deny may share §5.1's commit window, so the lane's guarantee is best read as **never starved beyond one window** rather than as a millisecond target. What it still forbids is exactly what it always forbade: a deny queued behind work of unbounded duration.)*
+One **lifecycle thread** per partition owns all *mutation decisions*, but performs only cheap operations itself: command-queue drain, WAL append and fsync (group commit permitted), and pointer swaps. **All file and object IO — segment writes, digests, side-manifest and object-store publication, merge execution — runs on a background pool**, submitting a completed, immutable result back to the lifecycle thread for a swap-only publication step.
+
+> **⊘ Partially implemented — and this is the document's central simplicity claim, so the gap is the property most at risk.** There are **two** publishers, not one. The write executor is the single writer for overlay and buffer state. Geometry publication swaps the pointer from *any* caller, and the executor's two overlay swaps are a `load_full` + `store` pair whose safety rests entirely on the WAL mutex serialising every publisher. An identity check on the geometry side narrows the window between the two; nothing in the engine closes it. A rewriter must not read "one lifecycle thread owns all mutation decisions" as a description of what is enforced. The residual race is recorded at the publication site and is a liveness-and-correctness obligation on whichever stage introduces a periodic publisher.
+
+The command queue has a **priority lane for deny-disposition changes**, so a compaction publish or a stalled object-store PUT can never queue a suppression behind unbounded IO. Ingest work is bounded (`ingest_queue_bound`, full → 429); the deny lane is **unbounded and can never be refused for load**, and the loop drains it to empty before touching ingest work. The lane's guarantee is best read as **never starved beyond one window** (§5.1) rather than as a millisecond target. What it forbids is what it always forbade: a deny queued behind work of unbounded duration.
+
+**The deny lane's two costs, measured.** Unboundedness is a real exposure in the other direction: a sustained deny flood starves ingest completely, and nothing bounds the lane's memory. And the latency framing that reads naturally from §4 — "deny visibility is bounded by fsync" — is wrong under load. Quiescent, a deny acks in ~3.2 ms and that *is* fsync. Under sustained ingest at 1 M buffered items a deny acks in **165 ms p50, 346 ms max**, and the wait is dominated not by fsync but by the `O(buffered)` buffer clone the in-flight ingest command is performing when the deny arrives. The deny's own apply is `O(overlay)` — 1.33 µs at that buffer depth. *(Measured; `docs/evidence/memos/2026-08-01-deny-ack-baseline.md`. The memo's bound under sustained ingest is 0.2–0.7 s; figures at 10 M buffered are modelled, not measured.)*
 
 Publication-by-rebase resolves the merge-versus-flush race by construction: whatever completed work arrives, the lifecycle thread rebases it on the then-current generation, so concurrently flushed segments are carried forward automatically (§5).
 
 ## 2. Pins and retirement
 
+```mermaid
+flowchart TD
+  A["accepted change, or a newly built bundle"] --> B["build the next Generation<br/>(unchanged parts shared by Arc)"]
+  B --> C["WAL append + fsync"]
+  C --> D["atomic pointer swap"]
+  D --> E["200 to the caller (§4)"]
+  D --> F["superseded geometry recorded<br/>as a slimmed DrainEntry (§2.1)"]
+  F --> G{"a session pin names it?"}
+  G -- "yes" --> H["pin resolves: pinned geometry served,<br/>current overlay applied (§2.3)"]
+  G -- "no, or TTL expired" --> I["remove → verify → drop"]
+  H -- "TTL expires, or depth trim" --> I
+  I --> J["bundle Arc released;<br/>local retired-prefix files deletable"]
+```
+*The generation and pin lifecycle. The swap is the only publication event; everything downstream of it is reclamation.*
+
 ### 2.1 The pin manager is Arc plus a drain list — with one ordering rule
 
-A pin is an `Arc<Generation>`. Superseded generations sit on a drain list. **Reclaim ordering:** the lifecycle thread first *removes* the entry from the drain list, then verifies the strong count is one, then reclaims (closes exclusive mmaps, deletes retired-prefix files past their retention). A racing session-pin resolution that misses the removed entry gets `410 pin-expired` — correct — rather than cloning an Arc mid-reclaim. Verify-then-remove is the use-after-free the review caught; remove-then-verify is the fix, and it costs nothing. File handles are per-file `Arc<Mmap>`s held by every `SegmentRef` referencing them, so a file shared across generations survives either generation's reclaim (the case Lucene's `SnapshotDeletionPolicy` exists for; read it and `SearcherLifetimeManager` before writing this module regardless).
+A pin names a superseded generation's **geometry**, recorded on a drain list as a slimmed entry: the prefix, its `segments_version`, an advisory watermark, the `Arc<Bundle>` that geometry lives in, a retirement instant, and the sessions holding it.
+
+**A drain entry is deliberately not an `Arc<Generation>`.** Holding a whole generation would also retain the superseded *overlay* and *buffer* — which is exactly the R-open failure I11 names: a pinned request would then compose against stale authorisation state instead of current. Slimming the entry makes that structural rather than a rule policed by whoever next writes the resolve path.
+
+**Reclaim ordering:** the lifecycle thread first *removes* the entry from the drain list, then verifies no holder remains, then reclaims. A racing session-pin resolution that misses the removed entry gets `410 pin-expired` — correct — rather than cloning an `Arc` mid-reclaim. **Verify-then-remove is the use-after-free the review caught; remove-then-verify is the fix, and it costs nothing.** Files shared across generations survive either generation's reclaim, because the geometry they belong to is an `Arc` every referencing entry holds. (Lucene's `SnapshotDeletionPolicy` and `SearcherLifetimeManager` exist for this case; read them before writing this module regardless.)
+
+**Reclaim has no periodic caller.** It runs as a side effect of the next geometry publication, and from an explicit engine method nothing but tests calls. Memory held by drained generations is therefore released only when something else is published — a liveness gap, not a safety one, and one the stage that introduces a periodic publisher must close.
 
 ### 2.2 Session pins, worker restart, and durable retention
 
 The router holds session pin id → per-partition `(n, W)` vector with TTL and a per-session cap. Presenting a pin resolves each partition's entry against that worker's drain list; absent → `410` for the whole request.
 
-**A restarted worker serves no pre-restart pins.** Its drain list is empty and every pin touching it fails `410` — safe under I11 and now *stated*: the tempting alternatives (reloading old side-manifests to reconstruct `(n_old, W)`, or silently reinterpreting to current) are **forbidden**, because half-reconstruction mixes old rows with a fresh fragment cache and replayed overlay in combinations only the §3.3 build-epoch rule keeps safe, and a restart is exactly when that rule's state is coldest.
+**Two bounds and their sizing obligation.** The drain list is capped at `DRAIN_DEPTH_MAX = 4` superseded generations, alarming from `DRAIN_DEPTH_ALARM = 1`. Beyond the cap, pins are dropped by the trim rather than by their TTL, and the alarm saturates — stopping signalling exactly when depth matters. Whichever stage introduces a periodic publisher must therefore keep **`pin_ttl_secs < DRAIN_DEPTH_MAX × publication_period`**. At the 300 s default TTL that is a publication no more often than every 75 s.
+
+**The per-session pin cap is politeness, not the page-cache defence.** It bounds one *well-behaved* session's use of superseded geometry and makes it visible. It does not bound an adversary: authorisation mints a fresh token per call against an already-cached fragment, so session rotation is free and the cap is bypassable by rotating. The same shape recurs on the cache byte bound (§7.2); a reader meeting it twice should recognise it rather than rediscover it.
+
+**A restarted worker serves no pre-restart pins.** Its drain list is empty and every pin touching it fails `410` — safe under I11. The tempting alternatives — reloading old side-manifests to reconstruct `(n_old, W)`, or silently reinterpreting to current — are **forbidden**, because half-reconstruction mixes old rows with a fresh fragment cache and replayed overlay in combinations only §3.3's build rule keeps safe, and a restart is exactly when that rule's state is coldest. Both look like helpfulness; that is why they are named.
 
 **Prefix retention is recorded durably — in the local cache, not the bundle.** Deciding a prefix is retired is router-level knowledge (session pins span partitions), so the **router** writes `retired/<prefix>-<timestamp>` under the engine's local cache directory when the last generation referencing a prefix drains; local copies of a non-current prefix are deletable only after (marker + session-pin TTL). The marker deliberately does not live in the bundle: the bundle layout is contract, `CURRENT` is its only mutable file, and node-local retention is a serving concern the contracts spec's out-of-contract list already covers. Deletion of retired prefixes from the *bundle* itself is operator or object-store lifecycle policy, out of scope here. Without the marker, alternating crashes either leak local prefix copies forever or delete one a live pin still references.
 
+> **⊘ Specified, not implemented.** There is no router, so no `RETIRED` marker is written and no local prefix copy is ever deleted. That is safe *only* while nothing deletes a file — the moment a stage adds prefix deletion, the marker must land in the same change.
+
 ### 2.3 Pins fix geometry, never authorisation
 
-A pinned request uses the pinned `segments_version` for tiles, columns and permutation, but composes `M_auth` against the **current** overlay — deny entries apply the moment they are accepted, pinned or not. The composition is coherent under mixed versions: `M_auth` is computed entirely in entity space with the *fragment's* watermark defining the live set, so every entity falls in exactly one of `fragment \ L` or `direct_eval(L)`; projection through the pinned permutation then drops row-absent entities via the sentinel — no gap, no double count. The observable consequence — a pinned drill-down can return fewer items than the viewport before it — is correct behaviour.
+A pinned request uses the pinned `segments_version` for tiles, columns and permutation, but composes `M_auth` against the **current** overlay — deny entries apply the moment they are accepted, pinned or not.
 
-**This is a recorded refinement, not a silent divergence** (review finding 12): design §11.2's "a request pins its watermark alongside the segment-set version" and SA §6.4's "binds the triple to the fragment epoch at load" both read as if the pinned `W` participates in composition, when under this rule the effective watermark is the fragment's own and the pin-vector's `W` is advisory (status/debugging). Appendix R raises the amendment against both documents and the contracts' pin-vector description.
+The composition is coherent under mixed versions: `M_auth` is computed entirely in entity space with the *fragment's* watermark defining the live set, so every entity falls in exactly one of `fragment \ L` or `direct_eval(L)`; projection through the pinned permutation then drops row-absent entities via the sentinel — no gap, no double count. **The observable consequence — a pinned drill-down can return fewer items than the viewport before it — is correct behaviour**, not a bug to be fixed.
+
+The effective watermark in composition is always the fragment's own; a pin vector's `W` is advisory, carried for status and debugging. Design §11.2's "a request pins its watermark alongside the segment-set version" and SA §6.4's "binds the triple to the fragment epoch at load" are to be read that way.
 
 ## 3. The overlay, fragment epochs, and the two retirement ledgers
 
@@ -63,81 +111,176 @@ A pinned request uses the pinned `segments_version` for tiles, columns and permu
 |---|---|---|---|
 | **deny/deletion** | tombstone epoch *d* | yes — delta-tier tombstone at *d*; folded at compaction | ledger rule, §3.2 |
 | **deny/suppression** | — | **never** — suppression does not touch postings | **only by unsuppress.** Non-retirable while active, by construction: no fragment rebuild ever excludes a suppressed entity, so its invisibility rests on the overlay entry for as long as the suppression stands |
-| **evaluate** (predicate change) | current term set, inline (§11.2) | **not until compaction folds it** — deltas cover newly flushed entities only, so a change to an existing entity's terms is invisible to postings in both directions | fold epoch rule, §3.4 |
+| **evaluate** (predicate change) | current term set, inline (design §11.2) | **not until compaction folds it** — deltas cover newly flushed entities only, so a change to an existing entity's terms is invisible to postings in both directions | fold epoch rule, §3.4 |
 
-r1 assigned every deny a retirement epoch; for suppressions that is fail-open (any epoch eventually retires the entry and re-exposes the item) and the split above is the fix. Suppression count is a metric — a monotonically growing active-suppression set is a policy signal, not a leak — and `unsuppress` removes the entry and publishes a side-manifest immediately, as all deny-state changes do.
+**The three-way answer in the middle column is the structural cause of the three rules.** Yes / never / not-until-compaction are three different relationships between an overlay entry and the postings that would otherwise carry the same fact, and each admits a different safe moment to drop the entry. A reader who sees three rules and one mechanism will unify them.
+
+The rejected alternative is a single rule: **r1 assigned every deny a retirement epoch; for suppressions that is fail-open** — any epoch eventually retires the entry and re-exposes the item. The counterexample is what makes the split non-negotiable.
+
+Suppression count is a metric — a monotonically growing active-suppression set is a policy signal, not a leak — and `unsuppress` removes the entry and publishes a side-manifest immediately, as all deny-state changes do.
+
+**The overlay entry is three independent fields, not one overwritable disposition.** `deleted`, `suppressed` and `evaluate_terms` are stored separately and each is cleared by nothing but its own opposite operation. This is what makes the sequence `delete → suppress → unsuppress` **structurally incapable** of re-exposing a deleted item, rather than merely tested against it: the unsuppress clears the suppression bit and cannot reach the deletion bit. Collapsing the three into one enum with last-write-wins semantics was caught fail-open in review twice.
+
+The precedence over the three fields is `deleted > suppressed > evaluate_terms`, single-sourced in one function. Two transcriptions of a precedence rule is how a suppression stops suppressing.
+
+```mermaid
+flowchart TD
+  subgraph deletion["deny / deletion — ⊘ ledger not built"]
+    D0["Delete accepted"] --> D1["postings: tombstone at d,<br/>folded at compaction"]
+    D1 --> D2["retires when no servable<br/>fragment epoch predates d"]
+  end
+  subgraph suppression["deny / suppression — built"]
+    S0["Suppress accepted"] --> S1["postings: never touched"]
+    S1 --> S2["retires only on Unsuppress"]
+  end
+  subgraph evaluate["evaluate / predicate change — ⊘ fold not built"]
+    E0["Predicate accepted"] --> E1["postings: not until<br/>compaction folds it"]
+    E1 --> E2["retires at fold epoch f,<br/>under the same floor as d"]
+  end
+```
+*The three retirement rules and the postings relationship each one follows from. Only the middle lane exists in code; the other two currently never retire at all.*
 
 ### 3.2 The deletion-retirement ledger
 
 A deletion's deny entry (tombstone epoch *d*) may leave the overlay only when **no servable fragment epoch predates *d***:
 
-- **Scope: all of this is per partition, per worker, in memory.** Epochs are per-partition segments-versions, denies live in their partition's overlay, and fragments never leave their worker — so `epoch_counts` and the floor are worker-local structures, and losing them on restart is safe by construction: the cache restarts cold and §3.3 forces every rebuild from current postings.
+- **Scope: all of this is per partition, per worker, in memory.** Epochs are per-partition segments-versions, denies live in their partition's overlay, and fragments never leave their worker — so the epoch counts and the floor are worker-local structures, and losing them on restart is safe by construction: the cache restarts cold and §3.3 forces every rebuild from current postings.
 - The fragment cache maintains `epoch_counts: BTreeMap<postings_epoch, usize>`; `min_live_epoch()` is its first key (+∞ when empty).
-- The cache additionally tracks `retirement_floor` = **the highest epoch of *any* retired overlay entry — a deletion's tombstone epoch *d* or an evaluate entry's fold epoch *f* alike** — and **refuses insertion of any fragment with epoch < retirement_floor**. Without this, a pinned or slow request could rebuild an old-epoch fragment *after* the entries predating it were retired and resurrect a deleted item or a revoked term (finding 2, and the fold-variant of the same race). The floor is deliberately defined over both retirement kinds: a floor raised only on deletion retirements passes the deletion test and still fails open through a pre-fold fragment. Refusal is cheap: the builder retries against current postings (§3.3).
+- The cache additionally tracks `retirement_floor` = **the highest epoch of *any* retired overlay entry — a deletion's tombstone epoch *d* or an evaluate entry's fold epoch *f* alike** — and **refuses insertion of any fragment with epoch < retirement_floor**. Without this, a pinned or slow request could rebuild an old-epoch fragment *after* the entries predating it were retired and resurrect a deleted item or a revoked term. The floor is deliberately defined over both retirement kinds: **a floor raised only on deletion retirements passes the deletion test and still fails open through a pre-fold fragment.** That is the only sentence explaining why deletion and evaluate share a floor while suppression touches neither. Refusal is cheap: the builder retries against current postings (§3.3).
 - The lifecycle thread retires the retirable-entry prefix below `min_live_epoch()` after evictions and periodically.
 - Compaction may force-refresh all fragments to advance the floor; overlay size is the pressure gauge.
 
+> **⊘ Specified, not implemented — none of this ledger exists.** There is no `retirement_floor`, no `epoch_counts`, no `min_live_epoch` and no tombstone epoch anywhere in the engine. A deletion sets a terminal `deleted` flag that nothing clears. **What happens instead: deletion denies never retire, and the overlay grows monotonically under deletion.** That is safe — fail-closed, since an entry that never retires can never stop denying — but it is not the mechanism above, and it is safe *only* because nothing retires. The retirement floor is the guard the review record calls "the one that could have reintroduced a fail-open path": **when the epoch ledger lands, the floor must land in the same change.** A ledger without a floor is the fail-open, not a smaller version of the feature.
+
+An overlay soft limit exists as the pressure gauge this section describes, and it alarms on overlay depth. **It does not act — there is no fold to schedule.**
+
 ### 3.3 Fragment builds always read current postings
 
-Fragments are built by request threads on miss (single-flight per key) **from the current generation's postings view, never from a pinned one** — consistent with §2.3: pins fix geometry, and a fragment is authorisation state. Together with the insertion floor in §3.2 this closes the epoch-regression path, and the conformance suite carries the interleaving test: delete → retire → pinned request misses cache → assert the rebuilt fragment excludes the item.
+Fragments are built by request threads on miss (single-flight per key, §7.2) **from the current generation's postings view, never from a pinned one** — consistent with §2.3: pins fix geometry, and a fragment is authorisation state. Together with the insertion floor in §3.2 this closes the epoch-regression path.
+
+This half *is* built: a fragment is always constructed against the live bundle's postings. Only the floor that backstops it (§3.2) is absent.
 
 ### 3.4 Evaluate entries retire at the fold
 
-A predicate change is invisible to postings until **compaction folds it**: compaction rewrites affected entities' postings from the term sets carried in their evaluate entries (an obligation now recorded in SA §6.6). After the fold, the entry carries its fold epoch *f* and retires under §3.2's rule — with *f* participating in the retirement floor exactly as a deletion's *d* does — a fragment predating the fold misreads the entity in both directions (a revoked term still present: fail-open; a granted term absent: wrong counts), so the same min-live-epoch machinery governs it. Before any fold, evaluate entries are immortal, which is why overlay growth under predicate churn schedules compaction, not just fragment refresh.
+A predicate change is invisible to postings until **compaction folds it**: compaction rewrites affected entities' postings from the term sets carried in their evaluate entries. After the fold, the entry carries its fold epoch *f* and retires under §3.2's rule — with *f* participating in the retirement floor exactly as a deletion's *d* does.
+
+The reason the same machinery must govern it is that **a fragment predating the fold misreads the entity in both directions: a revoked term still present is fail-open; a granted term absent is wrong counts.** Before any fold, evaluate entries are immortal, which is why overlay growth under predicate churn schedules compaction, not just fragment refresh.
+
+> **⊘ Specified, not implemented.** Compaction does not exist (§5.3), so there is no fold and no fold epoch. **What happens instead: evaluate entries are permanently immortal, and the composition consults the overlay entry on every request.** Fail-closed and correct in both directions today — the overlay entry, not the postings, is the answer — at the cost of an overlay that only grows. The bidirectional misread above is the reason this cannot be retrofitted as "retire evaluate entries when they look stale": staleness in the second direction is a counting error, not a refusal, and produces no symptom that fails safe.
 
 ## 4. The WAL
 
-Per partition, single appender (the lifecycle thread), append-only records (postcard, length-prefixed, CRC per record): `IngestBatch{batch_id, body_hash, rows, allocated entity IDs}`, `Change{external_id, op, term_set | tombstone_epoch}`, `Lease{lo, hi}`, `Flush{n, wal_pos}`.
+Per partition, single appender, append-only records (postcard, length-prefixed, CRC per record). Three record types: `IngestBatch{batch_id, body_hash, rows}` carrying every row with its allocated entity ID, `Change{external_id, op, descriptors}`, and `Lease{lo, hi}`.
+
+A `Flush{n, wal_pos}` record is specified as the recovery start point.
+
+> **⊘ Specified, not implemented.** There is no flush (§5.1) and therefore no `Flush` record and no checkpoint of any kind. **Recovery replays the whole log, every time.** Correct, and unbounded in time: replay cost grows with total accepted writes rather than with writes since the last checkpoint. The stage that builds flush owns the record and the truncation policy that goes with it.
 
 **Ack ordering, stated fully: WAL fsync → overlay/generation swap → 200.** The swap is nanoseconds and sits *before* the ack so a caller's own next request always observes its accepted change; the crash window "after fsync, before swap" recovers by replay and was never acked — harmless.
 
-**Recovery:** replay from the last `Flush`. **CRC failures distinguish position**: in the unsynced tail (past the last fsync point), truncate — those records were never acked. At or below the last fsync point, a CRC failure is corruption of *acked* state — including possibly denies — and recovery **fails closed**: the worker stays unready and the operator restores from bundle + object store. Truncate-at-first-bad-CRC applied mid-log would silently drop acked denies; the position rule is the difference between crash recovery and data loss.
+**The ack contract is enforced by type, not by convention.** A successful receipt cannot be constructed without a `&Published` token, and a `Published` is mintable only by the function that performs the generation swap (or, on the idempotent-replay path, by proof that the effect is already in force). A failure receipt cannot carry a success payload at all. The type is not the whole guarantee — the minting functions are callable from anywhere in the write path — but it makes ack-before-swap something a writer has to work around rather than something a writer can reach by reordering two lines.
 
-**Disk-full vs never-429:** the ingest 429 threshold is set strictly below the WAL's hard bound, reserving headroom so change records always have room. If an append genuinely fails, the deny is applied to the in-memory overlay and swapped (visible immediately), the response is **500 with an alarm** — durability is owed and the caller must retry — never a 200 without fsync, never a silent drop, and never a refusal that leaves the item visible. **Side-manifest publication is gated on WAL durability**: the 500 path publishes nothing durable, so a replica can never observe a suppression that a subsequent crash-replay would silently remove — the appear-then-vanish-without-unsuppress state the contracts forbid replicas to reconstruct.
+**Recovery.** **CRC failures distinguish position**: in the unsynced tail (past the last fsync point), truncate — those records were never acked. At or below the last fsync point, a CRC failure is corruption of *acked* state — including possibly denies — and recovery **fails closed**: the worker stays unready and the operator restores from bundle + object store. **Truncate-at-first-bad-CRC applied mid-log would silently drop acked denies**; the position rule is the difference between crash recovery and data loss.
+
+The last-synced offset is held in an 8-byte sidecar, and the positional rule needs two guards that follow from it rather than from the CRC:
+
+- **A WAL shorter than the sidecar's sync offset must fail closed.** A clean end of log is only an ackable state if the replay position actually reached the last-fsynced offset. A log that is simply *shorter* than what the sidecar claims was durable is exactly as dangerous as a corrupt record before that offset, and refuses to open the same way.
+- **A missing or malformed sidecar defaults to "everything present is acked"** — the whole file length. Defaulting the other way would make corruption anywhere in a non-empty WAL look like an untouched tail and truncate it silently.
+
+**Disk-full vs never-429:** the ingest 429 threshold is set strictly below the WAL's hard bound, reserving headroom so change records always have room. If an append genuinely fails, the deny is applied to the in-memory overlay and swapped (visible immediately), the response is **500 with an alarm** — durability is owed and the caller must retry — **never a 200 without fsync, never a silent drop, and never a refusal that leaves the item visible.** The third is what a naive fail-closed implementation breaks: refusing the operation outright is the reflex, and it leaves the item exactly as visible as before. **Side-manifest publication is gated on WAL durability**: the 500 path publishes nothing durable, so a replica can never observe a suppression that a subsequent crash-replay would silently remove.
+
+**`ExecutorPosture` is this rule's operator-visible face.** The write executor publishes a four-state, monotone readiness signal — `NotStarted`, `Running`, `WalPoisoned`, `Dead` — which `/readyz` reduces to ready-if-`Running`. `WalPoisoned` is the interesting one, and it encodes a deliberate choice between two fail-closed answers: **the executor stays alive and goes on applying denies** while the WAL refuses every further operation. Exiting instead would also be fail-closed, and would be the worse of the two, because it would stop denies being applied at the moment durability is already lost. The posture is monotone so a node cannot flap back to ready without a restart, and `/readyz` returns bare status with no body — the readiness of a node is not a place to leak state.
 
 ## 5. Flush, merge, compaction
 
-### 5.1 Flush
+### 5.1 Flush and group-commit allocation
 
-Lifecycle thread decides; the pool executes: tiler → segment files under temp names → rename → delta files → side-manifest write; the lifecycle thread then swaps. A crash before the manifest write leaves orphans no reader references; replay re-flushes deterministically.
+Flush is specified as: lifecycle thread decides; the pool executes: tiler → segment files under temp names → rename → delta files → side-manifest write; the lifecycle thread then swaps. A crash before the manifest write leaves orphans no reader references; replay re-flushes deterministically.
 
-**Flush is what makes ingested items visible at all, not merely what bounds segment count** *(r4; design §11.2 and SA §6.4 carry the same correction)*. A buffered item has no row in any segment, and every viewer verb asks a row-space question, so the composition resolves its verdict and has nowhere to put it. Whoever implements this section is implementing ingest visibility; the flush policy's size-or-age knobs are therefore a *visibility-latency* control as much as a segment-count one, and `flush_max_age` in particular is the bound on how stale an acknowledged item's absence may be.
+**Flush is what makes ingested items visible at all, not merely what bounds segment count.** A buffered item has no row in any segment, and every viewer verb asks a row-space question, so the composition resolves its verdict and has nowhere to put it. Whoever implements this section is implementing ingest visibility; the flush policy's size-or-age knobs are therefore a *visibility-latency* control as much as a segment-count one, and `flush_max_age_secs` in particular is the bound on how stale an acknowledged item's absence may be.
 
-**Group-commit allocation** *(r4; owner decision on the write-latency budget, 2026-07-30 — design §3)*. Design §11.1 spends the entity-ID ordering on posting compression, and the sort's scope is whatever set of items is allocated together. Contracts §3.4 acknowledges `/control/ingest` with a per-row `tessera_id`, a bijection of the entity ID, so allocation must **precede the acknowledgement** — but §3's budget permits the acknowledgement itself to wait seconds. That is the whole latitude needed, and this document already permits the mechanism that uses it: §1.3's lifecycle thread does "WAL append and fsync (**group commit permitted**)".
+> **⊘ Specified, not implemented, and this marker needs reading carefully — the sentence above is misleading in the fail-*closed* direction, which is why it survives so easily.** There is no flush. An acknowledged ingested item is WAL-durable and it *does* participate in authorisation state — the composition's fourth rule resolves a verdict for every buffered entity at or past the fragment's watermark — but it has no row anywhere, so that branch always takes the no-row path and the item contributes to nothing a viewer can observe. **The specified sentence is therefore true of the current system too; what is absent is the mechanism that would end the condition.** Ingest visibility latency is not bounded by a knob at all: a buffered item becomes visible only when the next offline `tessera build` folds it into a bundle. `flush_max_items` and `flush_max_age_secs` parse and validate, and a test asserts they are **inert** — nothing reads them. A phase that ships the buffer without the flush has built durability, not queryable ingest.
+
+**Group-commit allocation.** Design §11.1 spends the entity-ID ordering on posting compression, and the sort's scope is whatever set of items is allocated together. Contracts §3.4 acknowledges `/control/ingest` with a per-row `tessera_id`, a bijection of the entity ID, so allocation must **precede the acknowledgement** — but design §3's write-latency budget permits the acknowledgement itself to wait seconds. That is the whole latitude needed, and §1.3 already permits the mechanism that uses it.
 
 So: hold arriving requests open in a commit window bounded by size or age; at close, signature-sort **the whole window**, allocate from the high-water, append and fsync once, swap, then acknowledge every held request with its rows' IDs.
 
 - **The effective sort scope becomes the commit window**, across every request in it, regardless of how the client chose to chunk its upload — which closes at the server the failure mode design §11.1 warns about, rather than delegating it to a client convention.
-- **Nothing about the ordering rules moves.** §1.3's ack ordering (fsync → swap → 200) holds per window instead of per request, so a caller still observes its own accepted change on its next request, and the crash window "after fsync, before swap" still recovers by replay having never been acknowledged.
-- **I9 is untouched** — IDs are issued monotonically from the high-water exactly as now; the window changes only *how many* are assigned in one sorted run.
+- **Nothing about the ordering rules moves.** §4's ack ordering (fsync → swap → 200) holds per window instead of per request, so a caller still observes its own accepted change on its next request, and the crash window "after fsync, before swap" still recovers by replay having never been acknowledged.
+- **I9 is untouched** — IDs are issued monotonically from the high-water exactly as before; the window changes only *how many* are assigned in one sorted run. A window that cannot allocate has no effect at all: the high-water mark does not move.
 - **Nothing crosses the boundary.** The caller receives the same per-row `tessera_id` in the same 200, later.
 - **Replay is unaffected**: WAL rows carry their allocated IDs (§4), so replay reuses them and never re-derives placement.
 
-This supersedes an arena-based sketch carried earlier in r4's drafting, which bought the same scope by leasing a contiguous range and abandoning unfilled positions as never-issued holes. Group commit dominates it on every axis and is recorded in its place: **no ID slack** against design §16's thin `u32` budget (it issues precisely what it allocates), **no sub-chunk sizing problem** (the window's signature mix is known before a single ID is assigned, where the arena had to guess at lease time and degenerated under the near-singleton signature policies the probes measure), and **no conflict with §6's allocator arbitration** (the maximum ID actually written stays authoritative, because nothing is consumed without being written).
+This is built. Three things about it are not what a reader of design §11.1 would expect, and all three are properties of the mechanism rather than of its implementation.
 
-**Deny dispositions may share the window** *(owner decision; design §3)*. The write budget covers them, and a bounded configured delay is not the fail-open the deny rules exist to prevent. Two rules keep it that way and neither is negotiable. **The acknowledgement stays coupled to the application** — a deny's 200 is held until its entry is fsync'd and swapped, so nothing is ever acknowledged that is not yet in force; §4's "never a 200 without fsync" survives verbatim, and the priority lane's guarantee changes from *fast* to *never starved beyond one window*, which is what it should be measured on. And **changes are still never load-shed** (§4, contracts §3.1): batching a security operation for latency is acceptable, refusing one for load is not, and those are different things.
+**The win is one to two orders of magnitude smaller than the headline, and the shortfall is structural.** The probes' 8.9–36.7× posting compression was measured under a *full-corpus* signature sort. `run ≈ B × p` — window size times term density — is an **upper bound, not a forecast**: allocation sorts on an item's whole deduplicated term list, its **signature**, so a term's IDs are contiguous only across items whose *entire* signature matches. `B × p` is attained only where the term effectively *is* the signature, i.e. one term per item. Against the measured corpus — 54,791 distinct signatures over 2.42 M items, mean group 44, the rank-1,000 group at 158 items — a 10,000-row window holds ≈ 17 rows of the rank-100 group and ≈ 0.65 of the rank-1,000 one. **Runs of order 10¹, not ~200.** Raising the bound buys run length sub-linearly (the groups it reaches are smaller) while sort work grows `n log n`; it is not a free dial. *(Modelled from measured probe distributions; the per-window measurement has not been run.)*
 
-What remains ordinary design work: the window's size-and-age policy and its relation to `flush_max_items`; and **idempotency across a held window** — contracts §3.4's batch-id-to-body-hash check currently distinguishes *accepted* from *unknown*, and a window introduces a third state, *held but not yet acknowledged*, which a client retry can land in. A retry must join the open window rather than allocate a second time.
+**And the half it cannot reach at all.** Design §11.1's container model gives a term of density *p* at sort scope *B* a benefit of `max(1, 2¹⁶/(p·B))`, which is 1 — no benefit — whenever `p·B < 2¹⁶`. That holds for every `p ≤ 1` once `B ≲ 6·10⁴`, and every window size this deployment's heap budget permits is below it. **A commit window collects the posting-storage win and none of the container-count win** — and container count is what a union costs, since bitmap operations cost O(containers touched), not O(cardinality). Nothing about the container argument is wrong; it is simply not what this lever reaches.
+
+**Idempotency across a held window is built.** A window introduces a third state between contracts §3.4's *accepted* and *unknown*: **held but not yet acknowledged**, which a client retry can land in. Both of the executor's admission checks — the idempotency index and the live external-id map — read state written at *apply*, so a window one entry wide re-opens the separation between a check and its apply: a retry under a **fresh** batch ID would pass the duplicate check twice, take two entity IDs for one external ID, and leave a visible byte-identical copy of a suppressed document that no external ID names, so no deny could ever reach it. The window therefore refuses to admit a submission naming a batch ID or an external ID it already holds, and the executor closes the window and re-evaluates against live state — which gives exactly the unwindowed answers (byte-identical replay → the recorded IDs; different bytes → 409; colliding external ID → 409) and introduces no failure semantics only a window can reach.
+
+**Deny dispositions may share the window** — the write budget covers them, and a bounded configured delay is not the fail-open the deny rules exist to prevent. Two rules keep it that way and neither is negotiable. **The acknowledgement stays coupled to the application** — a deny's 200 is held until its entry is fsync'd and swapped, so nothing is ever acknowledged that is not yet in force; §4's "never a 200 without fsync" survives verbatim, and the priority lane's guarantee changes from *fast* to *never starved beyond one window*, which is what it should be measured on. And **changes are still never load-shed**: batching a security operation for latency is acceptable, refusing one for load is not, and those are different things.
+
+> **⊘ Specified, not implemented — deliberately, and the refusal carries a reason.** The commit window holds ingest submissions only. Denies keep their own lane, drained to empty before each window is filled, so a deny still waits at most one window. Mixing the two requires a partial-failure split first: **a failed mixed window applies its denies and drops its ingest** — two dispositions, one swap — and there is no way to acknowledge that honestly without it. The window's entry type is deliberately not an enum yet: an unconstructed second variant would assert in the type that denies are windowed when they are not.
 
 ### 5.2 Merge
 
-Tiered policy (§11.3 parameters), Morton re-rank decorator above 2¹⁸ rows and on forced merges. Selection on the lifecycle thread; execution on the pool over immutable inputs; publication rebases. Abandonment check at publication: all input segments still present in the current generation — ABA-safe because **`seg_id`s are never reused**, across compactions or prefixes (now stated in contracts §2.1).
+Tiered policy (design §11.3 parameters), Morton re-rank decorator above 2¹⁸ rows and on forced merges. Selection on the lifecycle thread; execution on the pool over immutable inputs; publication rebases. Abandonment check at publication: all input segments still present in the current generation — ABA-safe because **`seg_id`s are never reused**, across compactions or prefixes.
+
+> **⊘ Specified, not implemented.** No merge exists, and there is nothing to merge: one segment per partition, no delta tiers. The `seg_id` non-reuse rule is a contract obligation on the build (contracts §2.1) and holds independently of this section.
 
 ### 5.3 Compaction, with the full carry-forward rule
 
-Compaction snapshots a generation, emits the partition-slice's single segment, folds **snapshot-covered** posting deltas, tombstones and evaluate entries into base postings, rewrites the permutation, and publishes a new prefix. **Carried forward verbatim, not folded:** segments and deltas flushed after the snapshot, **tombstones accepted after the snapshot** (r1's rule covered only segments/deltas — folding away a post-snapshot tombstone while the entity survives in the folded base is fail-open, finding 5), the active suppression set, and all unfolded overlay entries. The new prefix's first side-manifest lists all of it; `n` continues; old prefix retention per §2.2.
+Compaction snapshots a generation, emits the partition-slice's single segment, folds **snapshot-covered** posting deltas, tombstones and evaluate entries into base postings, rewrites the permutation, and publishes a new prefix.
+
+**Carried forward verbatim, not folded:** segments and deltas flushed after the snapshot, **tombstones accepted after the snapshot** — folding away a post-snapshot tombstone while the entity survives in the folded base is fail-open — the active suppression set, and all unfolded overlay entries. The new prefix's first side-manifest lists all of it; `n` continues; old prefix retention per §2.2.
+
+> **⊘ Specified, not implemented.** No compaction exists. Its absence is what makes §3.2's and §3.4's retirement rules unreachable, and what makes the overlay grow without bound under deletion and predicate churn. The carry-forward rule is the first thing to get right when it is built: three of the four carried categories were added after the rule as originally written proved fail-open on each.
 
 ## 6. The router/worker protocol
 
-Internal, versioned by the binary; postcard frames over unix socketpairs; per-request deadlines; heartbeats. Messages as r1 (`Hello/Ready`, `BuildFragment`, `Query`, `Changes/IngestRows`, `Publish`, `Heartbeat`) with one addition from review:
+Internal, versioned by the binary; postcard frames over unix socketpairs; per-request deadlines; heartbeats. Messages: `Hello/Ready`, `BuildFragment`, `Query`, `Changes/IngestRows`, `Publish`, `Heartbeat`.
 
 **`Hello` carries the worker's allocation high-water, and the worker's WAL always wins.** On (re)connect the router advances its allocator journal to max(journal, every reported high-water) before granting any lease. This arbitrates divergent replay — a router journal restored from an older backup would otherwise re-grant ranges workers already consumed, an I9 violation with I5-scale blast radius. The worker's WAL is authoritative because it records IDs actually written.
 
-Failure semantics: worker timeout fails the request (I13's outage asymmetry — never empty); respawn with backoff, rebuild from bundle + WAL, fragment cache cold and rebuilt on demand from router-retained auth data; pre-restart session pins fail `410` (§2.2); router exit kills workers via the supervision-pipe watchdog.
+Failure semantics: worker timeout fails the request (I13's outage asymmetry — never empty); respawn with backoff, rebuild from bundle + WAL, fragment cache cold and rebuilt on demand; pre-restart session pins fail `410` (§2.2); router exit kills workers via the supervision-pipe watchdog.
 
-## 7. Threading model
+> **⊘ Specified, not implemented — none of this section exists.** The system is a single process serving a single partition. There is no router, no worker, no socketpair, no `Hello`, no `BuildFragment`, no heartbeat and no lease arbitration; nothing spawns anything. **What holds instead:** the write executor is in-process, the allocator's high-water lives in the one WAL that writes it, and the arbitration problem the `Hello` rule solves cannot arise because there is exactly one journal. The rule is nonetheless the constraint the multi-process stage inherits — a router journal is never authoritative over a worker's WAL — and I13's partition half has no implementation and no test, so a reader must not take a partition-related `I13` annotation in the code as covering it.
 
-tokio for HTTP and sockets; one lifecycle thread per partition (the single writer, minimally loaded per §1.3); rayon for CPU-heavy request work (unions, gathers, selection); the engine's public API is sync and owns no executor (embeddability, SA §1). Caches are concurrent maps with single-flight build; entries immutable, keyed by §8.5's keys verbatim; invalidation is key rotation, never mutation.
+## 7. Threading, caching, and fault injection
+
+### 7.1 Threading
+
+tokio for HTTP and sockets; one lifecycle thread per partition (the single writer, minimally loaded per §1.3 — with that section's marker); rayon for CPU-heavy request work (unions, gathers, selection); the engine's public API is sync and owns no executor (embeddability, SA §1).
+
+### 7.2 Single-flight caching, and the client-visible outcome it produces
+
+Caches are concurrent maps of immutable entries, keyed by design §8.5's keys verbatim; **invalidation is key rotation, never mutation**, and nothing here ever modifies a cached value. What the cache adds beyond that is capacity management and single-flight build, and both have consequences a one-clause description hides.
+
+**Waiters do not block, and this is visible to clients.** A miss makes the arriving caller the builder: it publishes a `Building` slot, releases the map lock, runs the build with no lock held, then re-acquires to publish. A *concurrent* arrival on a key already building **does not wait** — it is handed `Building` back immediately, which the engine turns into a projection-building error and the server into a **429**. A parked waiter would hold the server's global admission budget while consuming zero CPU, so a queue of waiters would starve runnable work exactly under the load that makes it worst. The refusal rate is bounded by *same-key* concurrency; a working set that does not fit produces rebuilds, never refusals.
+
+The motivation is measured, not aesthetic. The original row-projection cache ran the entity-space-to-row-space crossing — seconds at 10⁹ rows — **inside** the map lock on a miss, so every distinct session's first viewport serialised behind one global mutex. The signature at c=1000: throughput halves, server CPU *drops*, p99 reaches 1.04 s. Threads blocked on a lock, not doing work.
+
+**Eviction is not invalidation.** It removes a still-correct entry to stay under a byte bound; the miss path rebuilds from the same inputs the key names, so a removal can never widen a mask. Four rules make it safe:
+
+1. **A `Building` slot is never evicted, weighs nothing, and is absent from the recency index.** Evicting one frees nothing — the value is on the builder's stack — and loses the single-flight property. Breaking it was not a bookkeeping error but a **livelock**: the eviction loop selected a victim without removing its index entry, so a victim whose slot was not ready was re-selected for ever, **spinning with the request-path mutex held**. The bijection check that would have caught it is debug-only, so in a `--release` build the test named for exactly this *hangs* rather than fails. The loop now pops the index entry unconditionally, making termination a property of the loop rather than of the rule.
+2. **A build publishes only into its own slot**, identified by a sequence number rather than by state. Without it, a prune landing mid-build is silently undone by the publish that follows, and — the sharper failure — a build that unwinds after a prune-and-reinsert deletes a *different* builder's slot.
+3. **The building caller always receives what it built**, retained or not. This is what makes forward progress structural: a bound below the working set costs rebuilds, never a refusal.
+4. **Evicted values are collected under the lock and dropped after it is released.** Dropping a ~125 MB bitmap frees ~15 k containers; doing that inside a lock whose O(1) hold time is load-bearing convoys every admitted request. Every removal path returns the value rather than dropping it, and the removal function is `#[must_use]` so the natural lapse is a compile error.
+
+**What the byte bound bounds.** It bounds bytes resident *in the map*, not process memory: every in-flight caller holds its value for the duration of its request whether or not the map still contains it, so the peak is `bound + admission_width × per_entry`. A per-entry floor turns the byte bound into an entry ceiling as well — without it, a caller can insert unbounded near-empty entries that never trip a byte bound while each costs hundreds of bytes, the same session-rotation bypass §2.2's pin cap has.
+
+**The duplication is deliberate and must not be removed.** A near-identical single-flight cache exists in the authorisation layer, which sits *below* the engine in the crate graph; `scripts/check-layers.sh` enforces that direction, so reuse is forbidden, and the two use sites need different signatures anyway (one build is fallible). The consequence to respect: **every rule above can be right in one crate and wrong in the other, and a test written once covers only the crate it lives in.** Both modules carry a table naming, per rule, the test in each crate, so a missing twin shows up by reading. This is exactly the shape a reviewer deletes as redundancy.
+
+### 7.3 Fault injection
+
+Four properties of §4 occur only when durability *fails*: a suppression applied despite a disk-full append, a poisoned WAL tripping the not-ready posture, an ack that must not precede its swap, a deny that must not queue behind work. None is reachable by a test that can only ask the executor to succeed. The write path therefore carries a fault switchboard — WAL append and fsync failures, and two pause sites — behind a feature enabled only through a self dev-dependency, so nothing `cargo build` produces can carry it.
+
+**The fidelity rule: an injected failure must be indistinguishable from a real one, in variant and in order.** A real WAL returns an IO error on the failing call and a poisoned error on every call after it, so an injected failure does the same. Returning "poisoned" on the *first* call would diverge on precisely the error that the 500 mapping, the operator alarm and the deny-apply-anyway branch all switch on — the one call whose variant matters most. The real sequence is pinned independently by a test that provokes a genuine IO error; if the two ever disagree, everything depending on injection is measuring the harness.
+
+Two pause sites, not one, because one cannot discriminate the ordering it exists to protect. *After-fsync* proves nothing about the relative order of swap and ack — both are still ahead of the parked thread. *Before-ack* is armed **inside** the ack function rather than at its call site, so it travels with the ack: a build that acks before it swaps parks there with the swap still ahead of it and fails on engine state alone. There is deliberately no "abort" action: a panic unwinds and runs the drop guards, which a `SIGKILL` does not, so a harness offering it would let a worker model a clean shutdown and call it a crash.
+
+**This pre-empts the conformance design's pause points by three stages, with different vocabulary and a different home** (conformance §5, which specifies eight differently-named pause points behind a `conformance` cargo feature). They are the same mechanism. Whichever stage builds the conformance harness must extend this one rather than build a second beside it.
 
 ## 8. Crash matrix
 
@@ -146,34 +289,43 @@ tokio for HTTP and sockets; one lifecycle thread per partition (the single write
 | Before ingest/change ack | caller retries; idempotent | none |
 | After fsync, before swap | replay rebuilds; un-acked | none |
 | After ack (fsync + swap done) | replay rebuilds identically | none |
-| Mid-flush (files, no manifest) | orphans unreferenced; replay re-flushes | none |
-| Mid-merge / mid-compaction (no flip) | outputs orphaned / old prefix authoritative | none |
-| Worker crash | respawn; bundle + WAL; pins on it `410` | pins (by design) |
-| Router crash | watchdog kills workers; supervisor restarts; allocator re-arbitrated from worker high-waters (§6) | sessions (by design) |
+| Mid-flush (files, no manifest) ⊘ | orphans unreferenced; replay re-flushes | none |
+| Mid-merge / mid-compaction (no flip) ⊘ | outputs orphaned / old prefix authoritative | none |
+| Worker crash ⊘ | respawn; bundle + WAL; pins on it `410` | pins (by design) |
+| Router crash ⊘ | watchdog kills workers; supervisor restarts; allocator re-arbitrated from worker high-waters (§6) | sessions (by design) |
 | Mid-log WAL corruption (below fsync point) | **fail closed**; restore from bundle + object store | availability, never denies |
 
-The row that must never exist: any path that loses or re-exposes an acked deny. §4's ordering, §3.1's suppression rule, §3.2's insertion floor and §5.3's tombstone carry-forward each close one such path found in review; all four carry conformance tests.
+> **⊘ Specified, not implemented — the four marked rows describe machinery that does not exist.** There is no flush, merge or compaction to crash during, and no router or worker to crash. The rows are the obligations those stages inherit, not a description of tested behaviour. The four unmarked rows are the whole of the current crash surface, and process death today is replay of the entire log under the positional CRC rule.
+
+**The row that must never exist: any path that loses or re-exposes an acked deny.** §4's ordering, §3.1's suppression rule, §3.2's insertion floor and §5.3's tombstone carry-forward each close one such path. Of those four, one is built.
 
 ## 9. Decisions
 
-1. **Single lifecycle writer, minimally loaded** *(amended r2)*: decisions and swaps on the thread, all IO on the pool, deny priority lane — deny visibility latency bounded by fsync, not by compaction IO.
-2. **Generations immutable and Arc-shared; drain-list reclaim is remove → verify → reclaim** *(amended r2)*.
-3. **Pins fix geometry, never authorisation** — now with the I11/§11.2/SA §6.4 amendment raised rather than implied.
-4. **Two version axes** matching §8.5.
-5. **Three retirement rules, not one** *(amended r2)*: deletion denies by the epoch ledger with an insertion floor; suppressions only by unsuppress; evaluate entries at their compaction fold. r1's single rule was fail-open for two of the three.
-6. **Fragments build from current postings only**, with the cache refusing epochs below the retirement floor *(new r2)*.
-7. **Protocol postcard over socketpairs; worker WAL wins lease arbitration** *(amended r2)*.
+1. **Single lifecycle writer, minimally loaded**: decisions and swaps on the thread, all IO on the pool, deny priority lane. *Two publishers exist in the built system — §1.3.*
+2. **Generations immutable and Arc-shared; drain-list reclaim is remove → verify → reclaim.** A drain entry is slimmed geometry, never an `Arc<Generation>` — §2.1.
+3. **Pins fix geometry, never authorisation.** The effective watermark in composition is the fragment's own; a pin vector's `W` is advisory.
+4. **Two version axes** matching design §8.5.
+5. **Three retirement rules, not one**: deletion denies by the epoch ledger with an insertion floor; suppressions only by unsuppress; evaluate entries at their compaction fold. A single rule is fail-open for two of the three. *One of the three is built — §3.*
+6. **Fragments build from current postings only**, with the cache refusing epochs below the retirement floor. *The build rule is built; the floor is not — §3.2, §3.3.*
+7. **Protocol postcard over socketpairs; worker WAL wins lease arbitration.** *Unbuilt — §6.*
+8. **Single-flight waiters do not block**; a concurrent arrival on a building key is refused with a 429 rather than parked. A caching decision with a client-visible outcome — §7.2.
+9. **The ack contract is carried by a type**, not by call ordering: a success receipt requires proof that the generation carrying its effect is live — §4.
+10. **Injected failures are indistinguishable from real ones in variant and order**, and the conformance harness extends this mechanism rather than adding a second — §7.3.
 
 ## Appendix R — Review record
 
-r1 was reviewed independently (verdict: needs-rework — the generation/single-writer/ledger architecture survives; four fail-open paths in the retirement rules did not). r2 closes all fifteen findings: suppression non-retirability (§3.1 — the blocker), the fragment insertion floor and current-postings build rule (§3.2–3.3), the request ordering invariant (§1.1), evaluate-entry fold retirement (§3.4), the extended compaction carry-forward (§5.3), the minimally-loaded lifecycle thread with deny priority lane (§1.3), the fsync→swap→ack order and its crash row (§4, §8), WAL headroom and append-failure semantics (§4), remove-then-verify reclaim (§2.1), lease arbitration by worker high-water (§6), worker-restart pin semantics and durable prefix retention (§2.2), the positional CRC rule (§4), and seg-id non-reuse (§5.2).
+r1 was reviewed independently (verdict: needs-rework — the generation/single-writer/ledger architecture survives; four fail-open paths in the retirement rules did not). r2 closed all fifteen findings; r3 generalised the retirement floor over both retirement kinds, scoped the ledger structures worker-locally, gated side-manifest publication on WAL durability, and gave the `RETIRED` marker a writer and a home. r4 named flush as the ingest-visibility mechanism and added group-commit allocation, superseding an arena-based sketch that bought the same sort scope by leasing a range and abandoning unfilled positions — group commit needs no ID slack, sizes itself after the window's signature mix is known rather than guessing at lease time, and does not make the maximum ID *written* understate the range *consumed*.
 
-**r4** adds to §5.1 from the ingest audit that produced design r23, SA r5 and contracts r8. Two additions, no rule changed. First, **flush is named as the ingest-visibility mechanism**, not merely the bound on segment count: a buffered item has no row, every viewer verb asks a row-space question, so nothing about it reaches an answer until this section runs — which makes the size-and-age knobs a visibility-latency control and makes a phase that ships the buffer without the flush one that has built durability rather than queryable ingest. Second, §5.1 gains **group-commit allocation** for design §11.1's per-batch limit, following the owner's 2026-07-30 decision that the write-latency budget of design §3 is seconds or more **including deny dispositions**. Since contracts §3.4 requires the entity ID only *before the acknowledgement*, and the acknowledgement may wait, requests are held in a commit window and the whole window is signature-sorted, allocated, fsync'd once and acknowledged together — making the sort scope the window rather than the request, at the server rather than by client convention. §1.3 already permitted group commit; the ack ordering, I9, replay and the wire contract are all untouched. **This replaced an arena-based sketch drafted earlier in this revision** (lease a range, place into signature-keyed sub-chunks, seal abandoning holes), which an adversarial review found to carry two unresolved holes — sub-chunk boundaries fixed blind at lease time, degenerating under the near-singleton signature policies the probes measure, which left its 1.3–1.5× slack cap asserted rather than derived; and a conflict with §6's allocator arbitration, since sealing makes the maximum ID *written* understate the range *consumed*. Group commit has neither, needs no slack at all, and is therefore recorded in its place rather than alongside it. §1.3's deny priority lane is re-read as a starvation bound rather than a latency target, and §4's never-a-200-without-fsync and never-load-shed rules are preserved verbatim — a deny's acknowledgement stays coupled to its application, so nothing is acknowledged that is not yet in force.
+**r5** is the audit pass against the built system. No rule changed and no argument was withdrawn; what changed is that every claim about absent machinery now says so at the claim.
 
-**Actions raised against companions — all applied 2026-07-28** (design §11.2/§2.6/I11, SA §6.4/§6.6, contracts §2.1/§2.3, plan §10.3); retained as the record:
-1. *SA §6.6*: compaction's fold obligation extends to evaluate entries and the carry-forward rule to post-snapshot tombstones and the suppression set. ✔
-2. *Design §11.2 + SA §6.4 + contracts §2.3*: the effective watermark in I1 composition is always the fragment's own; the pin-vector `W` is advisory. The verification pass found two further phrasings in the design (§2.6 step 1, I11) still implying the pinned `W` participates; both amended. ✔
-3. *Contracts §2.1*: `seg_id`s never reused. ✔
-4. *Plan §10*: five lifecycle conformance tests from this document — suppression persistence; the eviction→retire→pinned-miss rebuild excluding deleted items; **its fold-variant** (evaluate entry folds, retires, pre-fold-epoch fragment insertion must be refused — the r3 floor generalisation); post-snapshot tombstone survival; positional CRC fail-closed. ✔
+Marked **⊘** in this revision: the `Generation` shape (§1.1); `segments_version`'s movement (§1.2); the single-writer claim (§1.3, partial — two publishers); the `RETIRED` marker (§2.2); the deletion-retirement ledger and its floor (§3.2); the evaluate-entry fold (§3.4); the `Flush` WAL record (§4); flush (§5.1); denies sharing the commit window (§5.1); merge (§5.2); compaction (§5.3); the router/worker protocol in its entirety (§6); four rows of the crash matrix (§8).
 
-A third-party verification pass confirmed all fifteen r2 resolutions and surfaced the four r3 fixes: the floor generalised over both retirement kinds (§3.2 — the one that could have reintroduced a fail-open path), worker-local scope of the ledger structures stated (§3.2), side-manifest publication gated on WAL durability (§4), and the `RETIRED` marker given a writer (the router) and a home (the local cache, keeping the bundle contract intact) (§2.2).
+Corrected in this revision, against the built system:
+
+1. **§2.1's "a pin is an `Arc<Generation>`"** described the fail-open the code refuses. A drain entry is slimmed geometry precisely because holding a generation would retain the superseded overlay and buffer — the R-open failure. The document's own sentence was the bug.
+2. **§5.1's flush sentence** is true of the current system as well as the end state, and its marker says so explicitly: it misleads in the fail-*closed* direction, which is why it survived unchallenged.
+3. **§1.3's latency framing** ("bounded by fsync") is corrected by measurement: under sustained ingest a deny acks in 165 ms p50 at 1 M buffered, dominated by an `O(buffered)` clone, not by fsync. The lane's unboundedness in memory, and ingest starvation under a deny flood, are stated.
+
+Added in this revision, from mechanisms the corpus did not describe: single-flight caching's non-blocking waiters, its 429, its four eviction rules and its deliberate cross-crate duplication (§7.2); fault injection and its fidelity rule, with the note that it pre-empts conformance §5 (§7.3); `ExecutorPosture` (§4); the pin drain bounds and their sizing obligation, and the pin cap's stated non-defence (§2.2); the WAL's type-enforced ack contract and the two positional-CRC guards (§4); reclaim's missing periodic caller (§2.1); the commit window's honest calibration, its closed idempotency item, and its refusal to carry denies (§5.1); the overlay's three-field representation as the structural reason `delete → suppress → unsuppress` cannot re-expose (§3.1).
+
+**Actions raised against companions, all applied**: compaction's fold obligation extends to evaluate entries and the carry-forward rule to post-snapshot tombstones and the suppression set (SA §6.6); the effective watermark in I1 composition is always the fragment's own (design §11.2, §2.6, I11; SA §6.4; contracts §2.3); `seg_id`s never reused (contracts §2.1); five lifecycle conformance tests raised against the plan — suppression persistence; the eviction→retire→pinned-miss rebuild excluding deleted items; its fold variant; post-snapshot tombstone survival; positional CRC fail-closed. **Four of those five test the machinery §3.2, §3.4 and §5.3 mark as unbuilt**; conformance's own audit (conformance r4 §F) records which are written.

@@ -64,7 +64,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `client-interaction.md` | Provisional — under review |  |
 | `concurrency-lifecycle.md` | Normative — r5 | 21 |
 | `conformance.md` | Normative — r4 | 14 |
-| `contracts.md` | Normative — r12 | 13 |
+| `contracts.md` | Normative — r12 | 14 |
 | `derived-artifact-gating.md` | Provisional — under review |  |
 | `implementation-plan.md` | — |  |
 | `slices-and-multi-table.md` | Provisional — under review |  |

@@ -1,63 +1,162 @@
-# Tessera
+# The Tessera design corpus
 
-A permission-masked point service: an interactive, pannable and zoomable map over a large document corpus, where **what a viewer may see determines not just which items they retrieve, but every count, density, cluster and summary they are shown**.
+A permission-masked point service: an interactive, pannable and zoomable map over a large document
+corpus, where **what a viewer may see determines not just which items they retrieve, but every
+count, density, cluster and summary they are shown**.
 
-*A tessera is a single tile of a mosaic, and — in Rome — a token presented to be recognised and admitted. Both readings apply: the unit of storage is a tile, the unit of access is a token, and every viewer assembles a different mosaic from the same tiles without any of them seeing the whole picture.*
+*A tessera is a single tile of a mosaic, and — in Rome — a token presented to be recognised and
+admitted. Both readings apply: the unit of storage is a tile, the unit of access is a token, and
+every viewer assembles a different mosaic from the same tiles without any of them seeing the whole
+picture.*
 
----
+## The problem, and the claim
 
-## The one-paragraph version
+Every surveyed system with per-document security permits aggregates over records the viewer cannot
+read — documented as a limitation by one vendor, shipped as a feature by another, and demonstrable
+through query plans in a third. The field draws its line at *retrieval* and lets everything derived
+leak past it.
 
-Every surveyed system with per-document security permits aggregates over records the viewer cannot read — documented as a limitation by one vendor, shipped as a feature by another, and demonstrable through query plans in a third. The field draws its line at retrieval and lets everything derived leak past it. Tessera moves the line: a viewer's visible set is materialised once per session as a Roaring bitmap, and every spatial query, count, density, sample and label decision is computed from that set alone. Geometry is stored in Morton order so a quadtree tile is a contiguous row-ID range, which makes exact masked counts bitmap arithmetic rather than a scan. The cost of a query scales with screen area, not corpus size.
+Tessera moves the line. A viewer's visible set is materialised once per session as a Roaring
+bitmap, and every spatial query, count, density, sample and label decision is computed from that
+set alone. Geometry is stored in Morton order, so a quadtree tile is a contiguous range of row IDs
+— which makes an exact masked count bitmap arithmetic rather than a scan.
 
-**It answers how many, where, whether, and which examples — over exactly what a given viewer may see.** It is a counting engine, not a general aggregation engine, and it is an index rather than a database.
+**It answers how many, where, whether, and which examples — over exactly what a given viewer may
+see.** It is a counting engine, not a general aggregation engine, and an index rather than a
+database.
 
----
+```mermaid
+flowchart LR
+  A["auth data<br/>(from the token)"] --> B["term set"]
+  B --> C["mask fragment<br/>Roaring bitmap over entity IDs"]
+  C --> D["compose with the overlay<br/>denies, suppressions, in-flux items"]
+  D --> E["project once per session<br/>entity space → row space"]
+  E --> F["tile = contiguous row range<br/>(Morton order)"]
+  F --> G["count, sample, label<br/>— from the mask alone"]
+```
 
-## Documents, in reading order
+The two ID spaces are the load-bearing idea. Permissions live in **entity space**; geometry lives
+in **row space**; they are related only by an explicit permutation. Nothing derives an aggregate by
+any other route, which is what makes the guarantee structural rather than a matter of discipline.
 
-**1. `architecture.md` (r23) — the specification.** What the system guarantees. Start with §2.6, which walks a request end to end and points at the section governing each step; then §4, the thirteen invariants. Appendix C is the leak register, Appendix D the prior art, Appendix E a reference authorisation plugin, Appendix H the general framing and its boundary.
+## Reading order
 
-**2. `implementation-plan.md` — how it gets built.** Language and runtime decisions, the dependency register, six phases ordered by risk retirement rather than by architecture, the conformance suite mapped to invariants, and effort sizing. **Phase 0 can kill the architecture and takes two to four weeks. Nothing else should start until it finishes.**
+**Start with [`architecture.md`](architecture.md) §2.6**, which walks one request end to end and
+points at the section governing each step. Then §4, the thirteen invariants — they are the
+specification, and most of the rest exists to uphold them.
 
-**2a. `system-architecture.md` (r5) — the shape of the built system.** Backend component architecture: processes and planes, the crate decomposition, the five contracts, the ingest/compaction lifecycle, configuration and packaging. Sixteen recorded decisions; its Appendix R holds the review trail. Written after and governed by the specification.
+Then, depending on what you are after:
 
-**2b. `contracts.md` (r8) — the byte level.** Schema- and byte-precise definitions of the four interchange contracts: bundle format, service API, plugin ABI, wire. Its organising rule — a contract exists only where a second reader exists — and its §0.3 deviations govern where it and the system architecture's sketches differ.
+- **What may leak, and what is accepted.** `architecture.md` Appendix C. It is exhaustive by
+  construction: a disclosure not in that table is a bug, not an omission. That exhaustiveness
+  depends on the query surface staying small, which is why it does.
+- **How it is built.** [`system-architecture.md`](system-architecture.md) — processes, planes,
+  crate decomposition, the operational lifecycle, configuration and packaging.
+- **What the bytes are.** [`contracts.md`](contracts.md) — bundle format, service API, plugin ABI,
+  wire format. A contract exists here only where a second reader exists.
+- **How concurrency and deletion work.** [`concurrency-lifecycle.md`](concurrency-lifecycle.md) —
+  generations, pins, the **three** retirement rules, the write-ahead log.
+- **How any of it is checked.** [`conformance.md`](conformance.md).
+- **How a client talks to it.** [`client-interaction.md`](client-interaction.md) and its children.
 
-**2c. `concurrency-lifecycle.md` (r4) and `conformance.md` (r3) — the mechanism level.** The first: generations, pins, the three retirement rules (deletion / suppression / predicate-fold — they differ, and conflating them is fail-open), the WAL, merge-versus-snapshot, the router/worker protocol. The second: the harness that makes the invariants enforceable — the definitions-oracle, canonicalised canary comparison, the byte-scanner with positive controls, and eight scripted interleavings. Both carry Appendix R review records.
+Supporting evidence — the prior-art survey behind "no existing technology can replace this build",
+and the scaling analysis with its runnable models — is in [`../evidence/`](../evidence/).
+Measurements are in [`../../probes/`](../../probes/). Settled decisions are in
+[`../decisions/`](../decisions/).
 
-**3. `visualisation.md` — the client.** Two deployment profiles, GPU and thin-client, over one data contract and one interaction model. Organised around reuse: what exists, its licence, and what remains to be written. §8 records the rejected alternatives, several of which will be proposed again.
+## The documents
 
-**4. `scaling-analysis.md` — analysis, not specification.** Residency tiers, scaling to 10¹⁰–10¹², and permission-signature partitioning. Everything in it is conditional on measurements nobody has taken; it leads with its assumptions so the numbers are arguable rather than asserted. Lives in [../evidence/analysis/](../evidence/analysis/), with its runnable models beside it.
+**Precedence.** `architecture.md` is the specification and wins every conflict.
+`system-architecture.md` and the mechanism documents implement it and defer to it. Where
+`contracts.md` and `system-architecture.md` differ, the eleven recorded deviations in contracts
+§0.3 govern. A provisional document loses to a normative one. `§n` unprefixed means the
+architecture design.
 
-**5. The prior-art survey — [../evidence/prior-art/](../evidence/prior-art/).** Four domain reviews plus a synthesis, with primary sources. The body of evidence behind "no existing technology can replace this build". Read the synthesis; go to the domain reviews when you want the citation.
+| Document | Status | What it owns |
+|---|---|---|
+| [`architecture.md`](architecture.md) | **Normative — r25** | The specification: data model, the thirteen invariants, the leak register |
+| [`system-architecture.md`](system-architecture.md) | **Normative — r6** | The built system: processes, planes, crates, lifecycle, config, packaging |
+| [`contracts.md`](contracts.md) | **Normative — r12** | Byte level: bundle format, service API, plugin ABI, wire |
+| [`concurrency-lifecycle.md`](concurrency-lifecycle.md) | **Normative — r5** | Generations, pins, the three retirement rules, the WAL, merge versus snapshot |
+| [`conformance.md`](conformance.md) | **Normative — r4** | The suite: the definitions-oracle, canaries, the byte-scanner, interleavings |
+| [`client-interaction.md`](client-interaction.md) | Provisional | What a client is: holdings, version coordinates, display obligations, protocol |
+| [`caching.md`](caching.md) | Provisional | Where data rests and what that costs — caching as feasibility, not optimisation |
+| [`derived-artifact-gating.md`](derived-artifact-gating.md) | Provisional | Non-point artifacts: clusters, labels, hulls, cells — one class, three gates |
+| [`slices-and-multi-table.md`](slices-and-multi-table.md) | Provisional | Named orthogonal coordinate systems, and physical table shards |
+| [`tile-addressed-integration.md`](tile-addressed-integration.md) | Provisional | Serving MapLibre, OpenLayers and QGIS by tile addressing |
+| [`inventory.md`](inventory.md) | Generated | Every invariant and leak-register row, so a change to either is a one-line diff |
 
----
+**Provisional** means code is already written against the document but it is not yet normative.
+Each says in its first lines what remains before it becomes so. Read the `Status:` line before
+trusting any document — location does not tell you standing.
 
-## What is settled and what is not
+Every document carries its review trail in an Appendix R. Read it before re-opening a decision;
+most obvious objections have been raised and answered there, and the trail records which of them
+were wrong.
 
-**Settled.** The core data model: entity space for permissions, row space for geometry, related by an explicit permutation. Morton ranking so tiles are contiguous ranges. Roaring masks built once per authorisation and reused. Priority-based level of detail that nests across zoom and composes across partitions. Containment-gated label serving. The two-mask split so filters narrow points without dissolving the map. Compartmented partitions with required-set gating. Rust serving core **and Rust build pipeline — one engine, two modes** (system architecture D4; this line read "Python build pipeline", which D4 superseded: Python is a first-class *consumer* — SDK, supervisor, the test-only reference oracle — and never a component).
+## Specified, not implemented
 
-**Measured on the synthetic 10⁹ corpus** (`probes/` — dataset, results, optimisations, memo; verdict **go**, including the lower-scale runs). The real-label rerun is retired by owner decision (design r18) — no real corpus is available to this project — with its caveat converted to deployment guidance: re-run Phase 0 against real labels before trusting the policy-dependent headlines in any deployment that has them. The DNF-expansion risk is retired twice over: plugin-side minting keeps terms-per-item linear at any nesting depth, and the term cap's exclusion behaviour is dropped entirely (design r16) — bounds warn, never exclude, and authorise cost is unchanged in shape at ~130 terms/item. Masks do **not** cluster under Morton order (run ratio 1.03–1.15 realistic): direct evaluation is the main selection route, with measured duty cycles, and there is no hidden spatial upside. Permission signatures collapse gradually, not cliff-wise — top 500 groups cover 82% on category-like policy, none of it on author-like — so signature-aligned layout stays a per-deployment decision. The headline mechanism throughout: bitmap cost is O(containers touched), not O(cardinality), and signature-sorted entity allocation (8.9–36.7× compression measured under both orderings; the ~130× on union is a ceiling on what contiguity is worth, measured *between label configurations* rather than between orderings) must ship in the Phase 1 allocator because I9 makes it permanent. **Read design §11.1 (r23) before quoting either figure**: the sort's scope is one batch and nothing repairs it, so the win is collected only in proportion to how much of the corpus arrives in large batches; and because the probe corpus assigns entity IDs in created order, every published union *timing* is already an un-banked measurement — multiplying one by a decay factor double-counts.
+The corpus specifies a target. The implementation is behind it in places, and **claims about
+machinery that does not exist are marked ⊘ at the point they are made** — never only in a preamble.
+[`inventory.md`](inventory.md) counts them per document.
 
-**Open.** Sharded index placement. Retroactive revocation across temporal slices. Whether label gating uses the prompt sample or full cluster membership — a security decision, not an implementation detail. The full list is §16 of the design.
+Three of those gaps matter more than the rest, because a reader could otherwise take a security
+property as delivered:
 
----
+- **Two of the three deny-retirement rules are unbuilt.** A suppression retires only when lifted,
+  as specified. Deletion's epoch ledger and the predicate-change fold have no code — they are safe
+  today only because nothing retires at all, which is fail-closed but is not the mechanism.
+- **The conformance suite covers three of thirteen invariants as designed.** Two more are covered
+  in substance but in Rust rather than the suite. None of the eight scripted interleavings exist,
+  and there is no CI.
+- **I13b — a partition not consulted fails closed — is unimplemented.** There is one partition, no
+  required-set gate, and no test. It is lettered separately from I13a precisely so that confirming
+  one cannot be read as covering the other.
 
-## Day one
+## What is settled
 
-Phase 0, and it is deliberately not code. Two measurements plus one histogram, all in Python, all against **real** predicates and real grant sets rather than synthetic data, because all three are questions about the distribution of your actual labels:
+The core data model: entity space for permissions, row space for geometry, related by an explicit
+permutation. Morton ranking, so tiles are contiguous ranges. Roaring masks built once per
+authorisation and reused. Priority-based level of detail that nests across zoom and composes across
+partitions. Containment-gated label serving. The two-mask split, so filters narrow points without
+dissolving the map. Compartmented partitions with required-set gating. Rust throughout — serving
+core and build pipeline, one binary.
 
-1. **DNF expansion factor** — terms per item after normalisation; median, p99, max, and the fraction overflowing the cap.
-2. **Mask characteristics** — build time for a 10⁴-grant authorisation over the exploded pair relation, mask cardinality and size, and the spatial autocorrelation of the mask under Morton order.
-3. **Permission-signature histogram** — hash each item's term set, count distinct, plot the group sizes. Nearly free, and it decides whether the largest available optimisation is on the table.
+## What was measured
 
-The deliverable is a short memo with the numbers and an explicit go / rework / stop. If it says rework, the design changes before Phase 1 starts.
+Measurements are over a synthetic 10⁹ corpus; the verdict was go. The full records are in
+[`../../probes/`](../../probes/), and any figure quoted from them should be re-run before it is
+relied on.
 
----
+The headline is the cost model everything else is designed against: **bitmap operations cost
+O(containers touched), not O(cardinality)** — so contiguity in entity space is the highest-leverage
+property in the index, which is why entity IDs are assigned in term-signature order and why that
+assignment is permanent.
+
+Three results are worth knowing because they are negative:
+
+- **Masks do not cluster under Morton order** (run ratio 1.7–5.1). There is no hidden spatial
+  upside; direct evaluation is the only selection route, and the precomputed alternative was
+  declined.
+- **A viewport costs 135–164 ms at 10⁹**, not the single-digit milliseconds first claimed, and
+  selection is 83–89% of it. Cost tracks the number of *visible rows*, not the number of points
+  returned.
+- **Permission signatures collapse gradually, not cliff-wise** — the top 500 groups cover 82% on
+  category-like policy and none of it on author-like — so signature-aligned layout stays a
+  per-deployment decision rather than a general win.
+
+Three of these depend on how a deployment's labels are actually distributed. Any deployment with
+real labels should re-measure before relying on them.
 
 ## Two things not to lose
 
-**The conformance suite is the deliverable.** The performance architecture is attractive and separable, and a partial implementation that keeps the Morton and Roaring machinery while quietly dropping I2, I7 or I13 passes every functional test while leaking through cluster existence and density. Section 10.2 of the plan maps each invariant to how it is enforced or tested; two of those tests are enforced by the type system and two are byte-level assertions rather than behavioural checks.
+**The conformance suite is the deliverable.** The performance architecture is attractive and
+separable, and a partial implementation that keeps the Morton and Roaring machinery while quietly
+dropping I2, I7 or I13 passes every functional test while leaking through cluster existence and
+density.
 
-**The narrow query surface is a safety property, not a stage to grow out of.** Appendix C can be exhaustive because the retrieval surface is about five shapes. A general expression endpoint cannot be enumerated that way, and the prior-art survey is a catalogue of systems whose generality is precisely where they leak. New capability enters through the filter contract in §8.2 — order-independent set producers composed by intersection — so that expressiveness never reaches the authorisation layer.
+**The narrow query surface is a safety property, not a stage to grow out of.** Appendix C can be
+exhaustive because the retrieval surface is about five shapes. A general expression endpoint cannot
+be enumerated that way, and the prior-art survey is a catalogue of systems whose generality is
+precisely where they leak. New capability enters through the filter contract in §8.2 — order-independent
+set producers composed by intersection — so that expressiveness never reaches the authorisation layer.
