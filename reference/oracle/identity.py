@@ -1,6 +1,6 @@
 """The `tessera_id` keyed bijection — Reference Sheet independent re-derivation.
 
-Written from `docs/design-memos/2026-07-30-tessera-id-construction.md` §1 alone, **without
+Written from `docs/evidence/memos/2026-07-30-tessera-id-construction.md` §1 alone, **without
 reading `crates/tessera-types/src/identity.rs`**. The oracle's independence from the Rust
 implementation is the only thing that makes their agreement over
 `reference/vectors/tessera_id.json` evidence of anything (memo, "Why this document exists at
@@ -14,7 +14,7 @@ and the defended property is narrower than confidentiality (memo §3, §8).
 
 `priority` is the high 16 bits of `tessera_id` — a *prefix* of the identity, not an
 independent function (the 2026-07-30 fold recorded in
-`docs/design-memos/2026-07-30-priority-as-identity-prefix.md` and landed in the plan at
+`docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md` and landed in the plan at
 commit `199a6b3`). The construction memo's own §6 still describes the pre-fold
 `(morton, priority, entity_id)` tiebreak and an unkeyed `splitmix64(entity_id)` priority;
 both are superseded by the fold for any bundle built after it, which is the only kind this
@@ -237,7 +237,7 @@ def row_sort_key(
     key: IdentityKey, shard_id: int, entity_id: int, morton_code: int
 ) -> tuple[int, int]:
     """The post-fold row order: `(morton, tessera_id)` ascending, no further tiebreak
-    (`docs/design-memos/2026-07-30-priority-as-identity-prefix.md`, "The decision"). Row
+    (`docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md`, "The decision"). Row
     order is therefore key-dependent, where it previously was not -- this is what makes
     `identity.key`/`identity.shard_id` (read from MANIFEST) a dependency of row-order
     re-derivation rather than an artefact of it.

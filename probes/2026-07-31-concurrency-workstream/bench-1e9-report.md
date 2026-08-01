@@ -161,7 +161,7 @@ the actual build wall-clock at 1e9.
 
 ## 5. Comparison against the pre-branch 1e9 k-sweep baseline
 
-`docs/superpowers/plans/bench-baselines/2026-07-29-1e9-k-sweep.json`: server
+`docs/archive/plans/bench-baselines/2026-07-29-1e9-k-sweep.json`: server
 p50/p99 = **5.30 / 52.71 ms at k=50** (old `/tmp/tessera-1e9` bundle, pre-branch,
 `n_viewports=500`, points_returned mean 11,850 — a very different request shape
 from this report's default z8 viewport, and a different sampling methodology —

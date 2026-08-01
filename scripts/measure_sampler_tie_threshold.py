@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Confirmation probe (2026-07-30) for
-docs/design-memos/2026-07-30-priority-as-identity-prefix.md.
+docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md.
 
 **HISTORICAL — the defect this probe quantifies has been fixed.** The memo's redefinition landed
 (contracts §2.6 r6: `priority = high16(tessera_id)`), and design §7.2's selection now compares the
@@ -16,7 +16,7 @@ than 2*10^6 -- the point above which every candidate in a tile shares the same 1
 is permanently signature-sorted under I9) decides the sample instead of priority.
 
 Prior baselines were checked first and do NOT carry the needed granularity:
-  - docs/superpowers/plans/bench-baselines/2026-07-29-1e9-k-sweep.json: only
+  - docs/archive/plans/bench-baselines/2026-07-29-1e9-k-sweep.json: only
     percentile latency/points-returned stats, no visible counts at all, single w=10^4.
   - probes/work-correlation.json: has `sigma_visible` (summed over a whole viewport's
     tiles) per request, but never a per-tile breakdown, and again only w=10^4.

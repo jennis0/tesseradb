@@ -2,13 +2,13 @@
 """Collate a run's JSONL into a committed baseline, and apply the gates.
 
 Reads every `*.jsonl` under a run directory, emits one baseline JSON per arm in the shape
-`docs/superpowers/plans/bench-baselines/2m4-criterion-baseline.json` already uses (`note`,
+`docs/archive/plans/bench-baselines/2m4-criterion-baseline.json` already uses (`note`,
 `generated_at`, `history`, `benchmarks{name: {..., delta_vs_baseline_pct}}`), and returns a
 non-zero exit if a gate fails.
 
 # Why the gates are in this order
 
-`docs/design-memos/2026-07-30-tail-attribution.md` showed the exit criterion in use at the time --
+`docs/evidence/memos/2026-07-30-tail-attribution.md` showed the exit criterion in use at the time --
 "p99 over uniformly-random viewports < 10 ms" -- is mostly a measurement of the *input
 distribution*: repeating one fixed viewport collapsed p99-p50 from 47.4 ms to 5.1 ms, and
 Sigma-visible spans six orders of magnitude across random bboxes. Its recommendation was a fixed

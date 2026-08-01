@@ -210,4 +210,4 @@ a future task in this workstream.
   standing note for whoever runs the next task in this worktree.
 
 ## Provenance correction (controller, post-review)
-The review flagged the "pre-branch F4" B c=5 baseline (15,277 rps) as unsourced: it comes from the PRE-BRANCH `load.rs` module doc at the merge base — `git show 6052af2:crates/tessera-bench/src/arms/load.rs` lines 40-46 carried a c=5 row (15,277 / 0.25 ms / 1.09 ms / 315%) that Task 9's headline re-measurement later trimmed from the current file. Verified against that commit directly; the current `docs/design-memos/` F4 memo never had the row.
+The review flagged the "pre-branch F4" B c=5 baseline (15,277 rps) as unsourced: it comes from the PRE-BRANCH `load.rs` module doc at the merge base — `git show 6052af2:crates/tessera-bench/src/arms/load.rs` lines 40-46 carried a c=5 row (15,277 / 0.25 ms / 1.09 ms / 315%) that Task 9's headline re-measurement later trimmed from the current file. Verified against that commit directly; the current `docs/evidence/memos/` F4 memo never had the row.

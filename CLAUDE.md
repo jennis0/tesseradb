@@ -21,7 +21,7 @@ All design docs in [docs/design/](docs/design/); supporting evidence — prior a
 | [concurrency-lifecycle.md](docs/design/concurrency-lifecycle.md) | Mechanisms (r4): generations, pins, the **three** retirement rules, WAL, merge-vs-snapshot, router/worker protocol |
 | [conformance.md](docs/design/conformance.md) | The suite (r3): definitions-oracle, canonicalised canaries, byte-scanner, eight interleaving scripts |
 | [implementation-plan.md](docs/design/implementation-plan.md) | Phases, conformance matrix (§10), effort sizing |
-| [visualisation.md](docs/design/visualisation.md) | The client: two profiles, one data contract (deferred; backend first) |
+| [visualisation.md](docs/archive/visualisation.md) | The client: two profiles, one data contract (deferred; backend first) |
 | [docs/evidence/](docs/evidence/) | Non-normative evidence: [scaling-analysis.md](docs/evidence/analysis/scaling-analysis.md) with its runnable models, and the five [prior-art](docs/evidence/prior-art/) reviews behind the build-vs-buy verdict |
 | [probes/](probes/) | Phase 0 corpus, measurements, engineering distillation — real numbers; re-run before trusting any figure quoted from them |
 

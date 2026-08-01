@@ -1,6 +1,6 @@
 //! Per-stage timing for the viewport path, behind the `bench-timing` feature.
 //!
-//! Discharges "Experiment 2" from `docs/design-memos/2026-07-30-tail-attribution.md`: that memo
+//! Discharges "Experiment 2" from `docs/evidence/memos/2026-07-30-tail-attribution.md`: that memo
 //! narrowed the residual k-scaling stall to "gather/serialise/scheduling, not the count loop" by
 //! *inference* (correlating externally-observable work against `x-tessera-server-us`), and said
 //! outright that attributing it to a phase needs instrumentation that did not exist. This is that

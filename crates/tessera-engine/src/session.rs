@@ -366,7 +366,7 @@ pub struct Engine {
     /// lifetime (Task 11).
     external_index: ExternalIdIndex,
     /// The `tessera_id` blinding permutation's per-deployment key (contracts §2.6 r6, design
-    /// memo `docs/design-memos/2026-07-30-tessera-id-construction.md`) — parsed once at open from
+    /// memo `docs/evidence/memos/2026-07-30-tessera-id-construction.md`) — parsed once at open from
     /// MANIFEST's `identity.key` and held for the process lifetime. Never leaves the server (I10).
     /// `IdentityKey`'s `Debug` is redacted and it has no hex accessor, so *this* field cannot be
     /// logged; the plaintext hex carried beside it in MANIFEST is redacted at its own carriers

@@ -30,7 +30,7 @@ PERMUTATION_ABSENT = 0xFFFF_FFFF
 
 # Finding 6 (task-5 review): an absent MANIFEST `identity` object is, per the memo, "a
 # typed reader error, not a default... it does not acquire a minted key, a zero key or a
-# legacy path" (docs/design-memos/2026-07-30-tessera-id-construction.md §2). The fallback
+# legacy path" (docs/evidence/memos/2026-07-30-tessera-id-construction.md §2). The fallback
 # below violates that rule on purpose, as a temporary scaffold: no bundle in this checkout
 # carries an `identity` object yet, because tessera-build/tessera-store have not been
 # repointed at the tessera_id column (only tessera-types/identity.rs has landed as of
@@ -52,7 +52,7 @@ class Segment:
     """One (partition, slice, seg_id)'s row-space geometry.
 
     Contracts r6 replaced the `entity_id` column in `columns.arrow` with `tessera_id`
-    (`docs/design-memos/2026-07-30-tessera-id-construction.md`): `tessera_id` is now read
+    (`docs/evidence/memos/2026-07-30-tessera-id-construction.md`): `tessera_id` is now read
     directly off the row, and `entity_id` is *derived* -- either by inverting it through
     `identity.invert` (pure, no file I/O) when the bundle carries an `identity` key, or, for
     a pre-r6 bundle that still stores `entity_id` directly, read as before. Exactly one of
@@ -115,7 +115,7 @@ class Bundle:
             self.quantisation["y_max"],
         )
 
-        # `identity` (contracts r6, docs/design-memos/2026-07-30-tessera-id-construction.md
+        # `identity` (contracts r6, docs/evidence/memos/2026-07-30-tessera-id-construction.md
         # §2): the per-deployment key and the §13.3 shard prefix `tessera_id` is built
         # under. A bundle that *does* carry `identity` is read strictly, per the memo's
         # fail-closed rule: bad construction/rounds/key/shard_id/epoch all refuse, none

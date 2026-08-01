@@ -116,7 +116,7 @@ listed below with `[pre-existing, verified]`.
     `docs/design/contracts.md:237` — trimmed to the endpoint list (`/v1/viewport`,
     `/v1/items`, `/session/authorise`, plus "per-key cold-build admission on those same endpoints")
     and `Retry-After: 1`, with `EngineError::ProjectionBuilding`/`FragmentBuilding` and the `D-B`
-    label removed. Checked `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md`'s matching
+    label removed. Checked `docs/archive/plans/2026-07-28-phase1-walking-skeleton.md`'s matching
     restatement (line 99 area) — it already says "Task 4" (not "D-B") and carries no Rust
     identifiers, so it needed no edit. Covering: none (prose-only spec change); read back after
     editing to confirm it still parses as a normal markdown table row.

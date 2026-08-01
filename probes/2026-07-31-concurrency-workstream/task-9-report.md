@@ -387,7 +387,7 @@ because they affected timing and could otherwise look like silent gaps in the ru
 
 None of deliverables 1-2 change wire bytes (confirmed by criterion 7). Run outputs
 (`concurrency-summary.json`, `load.jsonl`, token files) are transcribed into this report and were
-not committed, per the brief's guidance and `docs/superpowers/plans/bench-baselines/`'s convention
+not committed, per the brief's guidance and `docs/archive/plans/bench-baselines/`'s convention
 being specific to `cargo bench` regression-gate baselines, a different harness path this task did
 not touch.
 

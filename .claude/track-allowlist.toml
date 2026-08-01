@@ -1,7 +1,7 @@
 # Stage 2.1 file ownership — the allowlist behind `scripts/check-track-allowlist.sh`.
 #
 # Transcribed from the stage-2.1 plan's "How the work parallelises" table
-# (docs/superpowers/plans/2026-07-31-phase2-roadmap-and-stage-2.1.md), including the two
+# (docs/archive/plans/2026-07-31-phase2-roadmap-and-stage-2.1.md), including the two
 # corrections that revision makes to r1's map: `check_bearer` lives in `state.rs`, so its fix is
 # Track C's, and `error.rs`/`health.rs` are Track B's (Task 3b needs both).
 #
@@ -78,8 +78,8 @@ paths = [
   "Cargo.toml",
   "crates/*/Cargo.toml",
   # Prose (Task 0 gate, F8). Track A's Task 2 is *required* to edit
-  # `docs/design-memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md`, and the controller
-  # revises `docs/superpowers/plans/**` on whichever branch is in hand — both were violations while
+  # `docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md`, and the controller
+  # revises `docs/archive/plans/**` on whichever branch is in hand — both were violations while
   # `docs/**` went unlisted. Documents are reviewed by reading them, so mechanical ownership buys
   # nothing here; a track rewriting another track's memo is a review matter, not a check failure.
   "docs/**",

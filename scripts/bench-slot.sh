@@ -7,7 +7,7 @@
 # were compiling at load average 12.1. It caught that and discarded the run, but only because it
 # happened to look; the next worker will not. An ad-hoc "check the load average" instruction is
 # not a mechanism, and the viewport-bench regression memo
-# (docs/design-memos/2026-07-31-viewport-bench-regression.md) records how expensive a
+# (docs/evidence/memos/2026-07-31-viewport-bench-regression.md) records how expensive a
 # misattributed measurement is to unpick afterwards.
 #
 # Two guarantees, in order:

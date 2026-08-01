@@ -94,7 +94,7 @@ after:
 | 429 | `backpressure` | ingest, and the viewer/session planes' compute-admission gate *(r7 amendment, concurrency workstream: D-B's two-stage semaphore in front of `/v1/viewport`, `/v1/items`, `/session/authorise`, plus `EngineError::ProjectionBuilding`/`FragmentBuilding`; `Retry-After: 1`, fixed)* — `/control/changes` is **never** load-shed (...) |
 ```
 
-`docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` line 99 updated to match (its
+`docs/archive/plans/2026-07-28-phase1-walking-skeleton.md` line 99 updated to match (its
 "ingest only, never `/control/changes`" parenthetical amended the same way, `/control/changes`
 still explicitly exempt).
 
@@ -182,7 +182,7 @@ passes below.
 - `crates/tessera-server/tests/http.rs` — fixture threading (`spawn_server_with_config_and_gate`,
   `generous_test_gate`) + 4 new gate tests
 - `docs/design/contracts.md` — one-line §3.1 annotation amendment
-- `docs/superpowers/plans/2026-07-28-phase1-walking-skeleton.md` — matching restatement
+- `docs/archive/plans/2026-07-28-phase1-walking-skeleton.md` — matching restatement
 
 ## Self-review
 

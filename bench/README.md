@@ -4,7 +4,7 @@ How to run the suite at whatever scales and label sets you want, and how to read
 
 Findings and methodology live elsewhere: each arm's module doc in
 [`crates/tessera-bench/src/arms/`](../crates/tessera-bench/src/arms/) records what it measured and
-what it means, and the design memos in [`docs/design-memos/`](../docs/design-memos/) carry the
+what it means, and the design memos in [`docs/evidence/memos/`](../docs/evidence/memos/) carry the
 individual findings. This file is operational.
 
 ---
@@ -219,7 +219,7 @@ reference/.venv/bin/python scripts/bench_collate.py --run-dir /tmp/run1 --tag ti
 ```
 
 Exit codes: `0` pass, `1` a gate failed, `2` the run itself is invalid (G0/G0b). Baselines land in
-`docs/superpowers/plans/bench-baselines/`.
+`docs/archive/plans/bench-baselines/`.
 
 Gates, most authoritative first:
 
@@ -232,7 +232,7 @@ Gates, most authoritative first:
 | **G3** | each stage's share of total within 10 points | one stage got slower while another got faster |
 
 Raw random-sweep p99 is emitted for a dashboard but is **never** a gate: the
-[tail-attribution memo](../docs/design-memos/2026-07-30-tail-attribution.md) showed it mostly
+[tail-attribution memo](../docs/evidence/memos/2026-07-30-tail-attribution.md) showed it mostly
 measures the input distribution, not the system.
 
 ---

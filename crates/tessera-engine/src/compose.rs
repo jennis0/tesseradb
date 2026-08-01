@@ -136,7 +136,7 @@ impl EffectiveMask {
     /// the break saved the *gather*, never the materialisation, so the cost did not show up in the
     /// shape of the code. Selection now consumes every visible row by design — `C_θ` is a count over
     /// the whole tile — so the allocation was pure waste either way. This is Win 1 of
-    /// `docs/design-memos/2026-07-30-f1-selection-overdraw.md`.
+    /// `docs/evidence/memos/2026-07-30-f1-selection-overdraw.md`.
     ///
     /// **Where that memo's row counter went.** It asked for `iter_range`'s `ExactSizeIterator` so
     /// the row counter could be incremented by a free `.len()`. Returning a bitmap loses
