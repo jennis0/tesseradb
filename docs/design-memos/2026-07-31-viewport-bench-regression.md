@@ -149,3 +149,30 @@ criterion's CIs are ±1–3%; and both of the originally reported endpoints repr
 The A/B is single-variable at a single commit, so no bisect ambiguity remains. Figures labelled
 *modelled* above (the 290 ns/tile serial cost, the 2,048-tile threshold) are derived, not
 directly measured, and are flagged where used.
+
+---
+
+## Closed 2026-08-01 — the regression is recovered, measured
+
+The two-axis sweep this memo asked for was run, the owner adopted a tile-count arm
+(`TILE_PAR_MIN_TILES = 4_096`, landed `1089b1a`), and the benched shape — 8,281 tiles — now takes
+the fan-out. Track C's Task 5 took a fresh criterion baseline at that commit for its own gate, which
+independently closes this investigation:
+
+| bench | pre-§14 (`9f2424a`) | after §14 (`2f1b31b`) | after the tile arm (`1089b1a`) |
+|---|---:|---:|---:|
+| `viewport/tile_sweep_k0` | 1.2210 ms | 2.2843 ms | **1.2180 ms** |
+| `viewport/gather_k30` | 1.6637 ms | 3.2244 ms | **1.7268 ms** |
+| `viewport/gather_k500` | 2.1652 ms | 3.8097 ms | **2.1016 ms** |
+
+**All three are back to their pre-§14 values**, two of them within 0.3% and the third within 3.8% —
+inside this box's documented ±1–3% criterion CIs and its 1–9% cross-session reproduction band. The
+recovery figures this memo originally quoted were *modelled* (they combined a measured stock run
+with a forced-parallel run from a different session); these are measured, in one session, on the
+shipped predicate.
+
+Nothing here was a defect in the §14 work. The threshold was correct for every shape the campaign
+measured; it simply never varied tile count, and this bench sat 8× above the highest tile count the
+campaign ever reached. The follow-ups that came out of it are in
+[the calibration memo](2026-07-31-tile-parallelism-calibration.md): the label axis was tested too
+and does not move the crossover, and contiguity at 1e8/1e9 remains the one untested region.

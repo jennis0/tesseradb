@@ -386,6 +386,11 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
 ///    may be refused. **Scope limit: this exercises the engine's lane split only.** Task 6, which
 ///    owns `/control/ingest`'s 429 and the startup headroom arithmetic, has not landed, so the
 ///    HTTP-level asymmetry (`changes_never_429s`) is not exercisable here and is not claimed.
+// Eight parameters, one over clippy's default. A bench arm's signature IS its knob surface --
+// ops, buffered depths, submitters, repeats and seed are each independently swept from the CLI,
+// and folding them into a params struct would put a second name on every one of them for no
+// reader's benefit. The sibling arms in this crate take the same shape.
+#[allow(clippy::too_many_arguments)]
 pub fn run_deny_ack(
     ctx: &Context,
     ops: &[String],
