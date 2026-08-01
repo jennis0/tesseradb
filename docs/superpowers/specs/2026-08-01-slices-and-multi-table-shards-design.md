@@ -100,6 +100,10 @@ The corpus's storage model (§10.1: one file per column per segment, raw fixed-w
 
 Per-table files are the recommendation. Page alignment and container alignment both hold trivially per file, since each file starts a table.
 
+**Pre-compaction tables: no change from today.** The corpus's model is already one file per column per *segment* (§10.1), and an epoch table is a segment — flush writes exactly the files it writes now, and minor merges are the file-count consolidator, exactly as they bound segment count today. One refinement: **pending epoch tables use a single combined file per table** (all columns, one small Arrow IPC file) rather than per-column files — they are tiny, short-lived and rewritten at the next minor merge, so per-column granularity buys nothing there. Per-column files are the *base* layout, where selective column reads at 10⁹ are the point. This cuts the flush-cadence file spray by the column count at zero read-path cost.
+
+**File-count bound.** Live files ≈ slices × columns × (N_promoted + live epochs + 1), plus one metadata sidecar per table (tile table and candidate lists bundled, not separate files). At 4 slices × 6 columns × (64 promoted + 8 epochs + 1 residual) ≈ 1,800 column files per generation — trivial for the object store, NVMe sync, file descriptors and VMAs alike. Both terms are bounded by existing knobs: the hard cap bounds promoted tables, compaction cadence bounds epochs.
+
 **The write path, itemised:**
 
 - **WAL: untouched.** Entity-space; tables are row-space artifacts downstream of flush.
