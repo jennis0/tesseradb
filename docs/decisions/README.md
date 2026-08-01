@@ -52,3 +52,5 @@ prevent.
 | [0032](0032-delete-the-dead-handle-table.md) | 2026-08-01 | The per-session handle allocation goes; the type stays |
 | [0033](0033-both-lanes-group-commit.md) | 2026-08-01 | Both write lanes group-commit, in separate windows |
 | [0034](0034-the-window-does-not-linger.md) | 2026-08-01 | A commit window closes when its queue drains; it does not linger |
+| [0035](0035-session-sweep-runs-on-growth-not-on-a-timer.md) | 2026-08-01 | The session registry sheds on growth, not on a timer |
+| [0036](0036-per-connection-body-ceiling-not-a-connection-cap.md) | 2026-08-01 | The buffered-body window gets a per-connection ceiling, not a connection cap |

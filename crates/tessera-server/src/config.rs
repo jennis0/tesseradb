@@ -188,6 +188,16 @@ pub enum ConfigError {
         ingest_admission: usize,
         ingest_max_batch_bytes: usize,
     },
+    /// `ingest.ingest_max_batch_bytes` above [`INGEST_MAX_BATCH_BYTES_CEILING`].
+    ///
+    /// This is the only relation that bounds **one connection's** cost rather than a product over
+    /// the configured bounds, and it exists because that is the term nothing else in this file can
+    /// reach: an ingest body is buffered in full before the handler runs, and the number of
+    /// connections doing so is bounded by neither this process nor `axum::serve`. See the constant
+    /// for what that does and does not close.
+    IngestBatchBytesCeiling {
+        ingest_max_batch_bytes: usize,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -365,6 +375,22 @@ impl std::fmt::Display for ConfigError {
                  overflows u64. Refusing to start rather than wrapping: a wrap produces a SMALL \
                  worst case, i.e. it would silently admit exactly the configuration this check \
                  exists to refuse"
+            ),
+            ConfigError::IngestBatchBytesCeiling {
+                ingest_max_batch_bytes,
+            } => write!(
+                f,
+                "ingest.ingest_max_batch_bytes = {ingest_max_batch_bytes} B exceeds the \
+                 {INGEST_MAX_BATCH_BYTES_CEILING} B per-connection ceiling. Refusing to start: an \
+                 ingest body is buffered in full before any handler runs, so this key is what ONE \
+                 credentialed connection costs, and nothing bounds how many there are — \
+                 axum::serve applies no connection cap. The resident relation over \
+                 ingest_queue_bound and ingest_admission bounds the admitted window, not the \
+                 arrivals in front of it, so without this ceiling a configuration with small \
+                 bounds and a gigabyte batch cap passes every other check and dies on the second \
+                 concurrent upload. This ceiling does NOT bound the total: N connections still \
+                 cost N times this number, and a deployment exposing the control plane beyond a \
+                 trusted admin network needs a reverse proxy to bound N"
             ),
         }
     }
@@ -957,16 +983,80 @@ const DEFAULT_INGEST_ADMISSION: usize = 64;
 ///    the narrowest (x/y-only) rows. 16 GiB of *this* arithmetic is therefore a good deal more than
 ///    16 GiB of RSS. The ceiling is set well under a target machine's RAM for that reason rather
 ///    than by folding in a multiplier nobody has measured.
-/// 2. **It bounds the configuration, not the process.** Nothing here bounds the pre-authentication
-///    buffered body window (`control::router`'s `DefaultBodyLimit`, N unauthenticated connections ×
-///    `ingest_max_batch_bytes`, with no connection cap on `axum::serve`) — see `control::ingest`'s
-///    doc and the stage ledger's open item.
+/// 2. **It bounds the configuration, not the process.** It weighs the *admitted* window — queued
+///    commands and admitted handlers. Requests that have not been admitted yet are in front of it
+///    and are not counted: an ingest body is buffered in full before the handler runs, so every
+///    credentialed connection costs `ingest_max_batch_bytes` whether or not it ever gets a permit,
+///    and `axum::serve` applies no connection cap. That per-connection term is bounded separately
+///    by [`INGEST_MAX_BATCH_BYTES_CEILING`]; the *count* of connections is bounded by neither, and
+///    that constant says what stands in its place.
 ///
 /// It is also what closes `ingest_queue_bound = 1, ingest_max_batch_bytes = 1 GiB`, which every
 /// other relation admitted: `(1 + 64) × 1 GiB = 65 GiB` is refused here. At the default bounds the
-/// effective cap on `ingest_max_batch_bytes` is `16 GiB / 96` ≈ 170 MiB, which is why no separate
-/// ceiling key was added for it.
+/// effective cap this relation puts on `ingest_max_batch_bytes` is `16 GiB / 96` ≈ 170 MiB — but
+/// that is a *derived* cap that moves with the other two knobs, which is why the per-connection
+/// ceiling is stated independently rather than left to fall out of this one.
 const INGEST_RESIDENT_CEILING_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+/// The ceiling on `ingest.ingest_max_batch_bytes`, and the only startup relation about **one
+/// connection** rather than about a product over the configured bounds.
+///
+/// # The window it bounds, and the half of it that stays open
+///
+/// `/control/ingest` is buffer-the-whole-body shaped: `DefaultBodyLimit` is set to
+/// `ingest_max_batch_bytes` and the `Bytes` extractor holds the whole request before `ingest` runs.
+/// The router's credential layer runs outside the extractors, so an *unauthenticated* caller is
+/// refused with the body still an unconsumed stream and nothing is buffered on their behalf. A
+/// caller holding the operator credential is a different matter: each of its in-flight requests
+/// pins up to this many bytes, before `ingest_admission` is consulted and therefore outside every
+/// bound that gate provides.
+///
+/// **What the count is bounded by is a deployment property, not a mechanism in this process.** The
+/// control plane is a unix socket by default (SA §4.2) and is meant to be reachable only by admin
+/// systems; where it is exposed more widely, the connection bound is the reverse proxy's, and SA §8
+/// says so. Two in-process mechanisms were assessed and declined, and neither should be revisited
+/// without new information:
+///
+/// - a `tower` concurrency limit **queues rather than sheds**, so on the ingest route it swallows
+///   the prompt 429 the admission bound exists to produce, and on the whole control router it puts
+///   `/control/changes` behind an in-flight bound shared with receipt-blocking ingest handlers —
+///   lifecycle §1.3's forbidden shape, reintroduced at the router;
+/// - a **listener-level connection cap** fails the same test one layer lower, and worse. Declining
+///   to accept does not refuse a caller; it leaves them in the kernel's accept backlog with no
+///   status code at all. Trading a 429 for a stall is the defect that disqualified the first
+///   option, spelled without an error path.
+///
+/// So the honest close for the *count* is deployment posture, and what this constant closes is the
+/// *multiplier*: without it, `ingest_admission = 1, ingest_queue_bound = 1, ingest_max_batch_bytes
+/// = 8 GiB` satisfies every other relation — the admitted window is `2 × 8 GiB = 16 GiB`, exactly
+/// at the resident ceiling — and then dies on the *second* concurrent upload, before either of
+/// those bounds has anything to say. A configuration whose per-connection cost is unbounded makes
+/// an unbounded count catastrophic rather than merely unbounded.
+///
+/// # The number
+///
+/// 64 MiB is four times [`DEFAULT_INGEST_MAX_BATCH_BYTES`], so an operator with unusually wide rows
+/// has room to raise it without meeting this, and the shipped default is nowhere near it. At the
+/// ceiling
+/// a hundred concurrent uploads is 6.4 GB of buffered bodies — survivable on a machine this system
+/// targets, and observable long before it is fatal; at the 8 GiB the other relations admit, one is
+/// fatal. **It is a machine-scale refusal, not a memory budget**, the same shape as
+/// [`INGEST_RESIDENT_CEILING_BYTES`] and [`SERVING_BLOCKING_THREAD_CEILING`], and it under-states
+/// the truth for the same reason: it counts wire bytes, and the decoded `Vec<IngestItem>` the
+/// handler goes on to hold is several times larger.
+///
+/// **Streaming the upload would close this properly and is deliberately not attempted here.** The
+/// per-connection cost is a consequence of the endpoint's shape — the whole Arrow body is decoded
+/// at once — and making it incremental is a change to the write path that belongs with flush, not
+/// a bound bolted onto configuration.
+const INGEST_MAX_BATCH_BYTES_CEILING: usize = 64 * 1024 * 1024;
+
+/// The ceiling is **headroom over the shipped default**, not a value in its own right: a default
+/// configuration that could not start is not a default, and at exactly the default an operator would
+/// have no room to raise the cap for unusually wide rows. Checked at compile time rather than in a
+/// test, on [`DEFAULT_MAX_K`]'s reasoning: it is a property of two literals, so it should fail the
+/// build.
+const _: () = assert!(INGEST_MAX_BATCH_BYTES_CEILING == 4 * DEFAULT_INGEST_MAX_BATCH_BYTES);
 
 /// Task 6: the WAL bytes reserved for change records above the ingest queue's own worst case.
 ///
@@ -1470,6 +1560,15 @@ fn parse(text: &str) -> Result<Config> {
         "every ingest batch would be refused with 422, and the queue's headroom arithmetic would \
          conclude that an arbitrarily deep queue fits in any WAL",
     )?;
+    // The per-connection ceiling, checked here beside the key rather than with the three relations
+    // below, because it is not a relation: it is a bound on this one value, and it is the only
+    // check in this file that concerns a request the admission gate has not seen yet. See
+    // [`INGEST_MAX_BATCH_BYTES_CEILING`] for what it closes and what it explicitly does not.
+    if ingest_max_batch_bytes > INGEST_MAX_BATCH_BYTES_CEILING {
+        return Err(ConfigError::IngestBatchBytesCeiling {
+            ingest_max_batch_bytes,
+        });
+    }
     let wal_hard_limit_bytes = non_zero_u64(
         "ingest.wal_hard_limit_bytes",
         raw.ingest
@@ -2378,6 +2477,57 @@ mod tests {
         );
     }
 
+    /// **The per-connection ceiling refuses at its own boundary, and admits below it.**
+    ///
+    /// Both legs, because a ceiling tested only from above is satisfied just as well by a check that
+    /// refuses everything — and this key's default is the one every deployment uses.
+    #[test]
+    fn the_per_connection_batch_ceiling_is_enforced_at_startup() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+
+        let at_ceiling = parse(&valid_toml_with(
+            "",
+            &format!("ingest_max_batch_bytes = {INGEST_MAX_BATCH_BYTES_CEILING}"),
+        ))
+        .expect("exactly at the ceiling must start");
+        assert_eq!(
+            at_ceiling.ingest_max_batch_bytes,
+            INGEST_MAX_BATCH_BYTES_CEILING
+        );
+
+        let over = parse(&valid_toml_with(
+            "",
+            &format!(
+                "ingest_max_batch_bytes = {}",
+                INGEST_MAX_BATCH_BYTES_CEILING + 1
+            ),
+        ))
+        .unwrap_err();
+        let ConfigError::IngestBatchBytesCeiling {
+            ingest_max_batch_bytes,
+        } = over
+        else {
+            panic!("one byte over the per-connection ceiling must refuse to start: {over}");
+        };
+        assert_eq!(
+            ingest_max_batch_bytes,
+            INGEST_MAX_BATCH_BYTES_CEILING + 1,
+            "the refusal must carry the value it refused, so the message can name it"
+        );
+
+        // The message has to carry the two facts an operator cannot get from the key's name: that
+        // the cost is per connection, and that nothing in this process bounds how many there are.
+        let text = over.to_string();
+        for phrase in ["buffered in full", "no connection cap", "reverse proxy"] {
+            assert!(
+                text.contains(phrase),
+                "the refusal must say why a per-connection ceiling exists ({phrase:?} missing): \
+                 {text}"
+            );
+        }
+    }
+
     /// The third relation's defaults, for the same reason as the other two: a default configuration
     /// that could not start is not a default.
     #[test]
@@ -2402,7 +2552,13 @@ mod tests {
     /// The second leg is the configuration every other relation admitted:
     /// `ingest_queue_bound = 1, ingest_max_batch_bytes = 1 GiB` started fine, because the WAL
     /// relation's product is small when the queue is shallow and nothing else looked at the byte cap
-    /// at all.
+    /// at all. It is now refused **one check earlier**, by
+    /// [`INGEST_MAX_BATCH_BYTES_CEILING`] — and the leg asserts that rather than the resident
+    /// ceiling, because the narrower refusal is the true one: a gigabyte batch cap is a
+    /// per-*connection* cost, and a caller does not need to be admitted to pay it. The consequence
+    /// worth knowing is that with a per-connection ceiling in place, relation 3 is reachable only
+    /// through the two count knobs — no legal `ingest_max_batch_bytes` can trip it against a shallow
+    /// queue any more.
     ///
     /// **Mutation:** drop `ingest_admission` from `resident_worst_case` and leg 1 goes green — the
     /// queue term alone (32 × 16 MiB) is nowhere near the ceiling, which is precisely the hole.
@@ -2448,8 +2604,13 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            matches!(err, ConfigError::IngestResidentCeiling { .. }),
-            "a 1 GiB batch cap against 64 admitted handlers is 65 GiB resident; the WAL relation \
+            matches!(
+                err,
+                ConfigError::IngestBatchBytesCeiling {
+                    ingest_max_batch_bytes: 1073741824
+                }
+            ),
+            "a 1 GiB batch cap is a per-connection cost paid before admission; the WAL relation \
              sees only the 1-deep queue and admits it: {err}"
         );
     }
