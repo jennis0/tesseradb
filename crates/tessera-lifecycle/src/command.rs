@@ -62,38 +62,60 @@ pub struct UnallocatedRow {
 }
 
 impl UnallocatedRow {
-    /// The allocator's view of this row: `(external_id, terms)`, with no ID yet.
+    /// The allocator's view of this row: `(external_id, terms)`, with no ID yet — **moved out of
+    /// the row, not copied**.
     ///
-    /// Borrowing rather than consuming, because the rows must survive the allocation that
-    /// [`crate::assign_sorted`] performs over the `PendingItem`s — the IDs come back by position
-    /// and are then zipped onto the rows by [`UnallocatedRow::into_wal_row`].
-    pub fn to_pending(&self) -> PendingItem {
+    /// # Why it moves (Task 7a)
+    ///
+    /// [`crate::assign_sorted`] needs a `PendingItem` to *own* its `external_id` (the sort's
+    /// tie-break) and its `terms` (the signature), and the previous shape of this method built one
+    /// by cloning both — two heap allocations per row, on the path that must sustain 10⁹ writes,
+    /// paid solely to leave the row intact. It does not need to be intact: the ids come back by
+    /// position and [`UnallocatedRow::into_wal_row_with`] puts both halves back.
+    ///
+    /// **The row is hollow between the two calls** — `external_id: None`, `terms` empty — and
+    /// nothing may observe it in that state. The interval is one function's gather-to-frame in
+    /// `crate::window::CommitWindow::allocate`; the window's conflict check runs at admission,
+    /// before it, and the allocation error path drops the entries rather than returning them.
+    pub fn take_pending(&mut self) -> PendingItem {
         PendingItem {
-            external_id: self.external_id.clone(),
-            terms: self.terms.clone(),
+            external_id: self.external_id.take(),
+            terms: std::mem::take(&mut self.terms),
             entity_id: None,
         }
     }
 
-    /// The WAL's view of this row, once the executor has assigned `entity_id`.
+    /// The WAL's view of this row, reunited with the `PendingItem` [`UnallocatedRow::take_pending`]
+    /// took out of it — the exact inverse of that call, and the assigned id.
     ///
-    /// Consuming, so the row's heap (`descriptors`, `scalars`, `external_id`) moves into the
-    /// record rather than being cloned into it — the framing step is per row per window and the
-    /// window is sized in the thousands.
+    /// Consuming, so the row's heap (`descriptors`, `scalars`) moves into the record rather than
+    /// being cloned into it, and `external_id` moves **back** from the `PendingItem`.
     ///
-    /// Deliberately paired with [`UnallocatedRow::to_pending`] in one place: these two are the
+    /// Returns the resolved `terms` alongside, because [`WalRow`] has no `terms` field — the WAL
+    /// stores raw descriptors — and the buffer apply needs them. They are returned rather than
+    /// dropped so the move is visible: the alternative is a `clone` at the call site, which is the
+    /// regression this pair exists to prevent (Task 3a measured its twin at +14% on the 10 000-row
+    /// arm).
+    ///
+    /// Deliberately paired with [`UnallocatedRow::take_pending`] in one place: these two are the
     /// whole of the "mechanical conversion" this type exists to make mechanical, and a field
     /// added to [`WalRow`] without a matching field here is a compile error at exactly this
     /// method rather than a silently-dropped column somewhere downstream.
-    pub fn into_wal_row(self, entity_id: EntityId) -> WalRow {
-        WalRow {
-            external_id: self.external_id,
-            entity_id,
-            descriptors: self.descriptors,
-            x: self.x,
-            y: self.y,
-            scalars: self.scalars,
-        }
+    pub fn into_wal_row_with(self, pending: PendingItem) -> (WalRow, Vec<TermId>) {
+        let entity_id = pending
+            .entity_id
+            .expect("assign_sorted assigns every item it is given");
+        (
+            WalRow {
+                external_id: pending.external_id,
+                entity_id,
+                descriptors: self.descriptors,
+                x: self.x,
+                y: self.y,
+                scalars: self.scalars,
+            },
+            pending.terms,
+        )
     }
 }
 
@@ -425,25 +447,43 @@ mod tests {
     /// allocator, IDs back by position, `WalRow`s out. Every `WalRow` field must come from the
     /// `UnallocatedRow` or from the allocator — if a field could only be filled in with a default,
     /// the type does not line up with `WalRow` and the conversion is not mechanical.
+    ///
+    /// Task 7a made the pair a **round trip** rather than two independent reads, so this asserts the
+    /// round trip: every field must arrive on the far side, including the two that now travel
+    /// *through* the `PendingItem` (`external_id`, `terms`) rather than staying in the row. The
+    /// hollow interval between the two calls is asserted too — it is the price of not cloning, and a
+    /// reader who does not know about it would be surprised by it exactly once.
     #[test]
     fn an_unallocated_row_carries_everything_a_wal_row_needs_except_the_id() {
         let original = row();
+        let mut row = original.clone();
 
-        let pending = original.to_pending();
+        let mut pending = row.take_pending();
         assert_eq!(pending.external_id, original.external_id);
         assert_eq!(pending.terms, original.terms);
         assert!(
             pending.entity_id.is_none(),
             "the whole point: no id until the executor assigns one"
         );
+        assert!(
+            row.external_id.is_none() && row.terms.is_empty(),
+            "the two fields MOVED: the row is hollow until `into_wal_row_with` reunites them"
+        );
 
-        let wal_row = original.clone().into_wal_row(EntityId::new(41));
+        // What `assign_sorted` does, at one item's scale.
+        pending.entity_id = Some(EntityId::new(41));
+
+        let (wal_row, terms) = row.into_wal_row_with(pending);
         assert_eq!(wal_row.entity_id, EntityId::new(41));
         assert_eq!(wal_row.external_id, original.external_id);
         assert_eq!(wal_row.descriptors, original.descriptors);
         assert_eq!(wal_row.x, original.x);
         assert_eq!(wal_row.y, original.y);
         assert_eq!(wal_row.scalars, original.scalars);
+        assert_eq!(
+            terms, original.terms,
+            "and the resolved terms come back too"
+        );
     }
 
     /// The lane asymmetry, asserted on the vocabulary itself: every `/control/changes` command

@@ -342,16 +342,35 @@ fn ack_follows_fsync_then_swap() {
 /// The discrimination is real rather than incidental: with one FIFO queue the deny's receipt would
 /// arrive after *all* `BOUND` work items; with deny-first it arrives after **at most one** — the
 /// item already executing when it landed.
+#[test]
+fn a_deny_is_never_queued_behind_work() {
+    deny_priority_survives_the_window(None);
+}
+
+/// **The same property with group commit disabled** — `commit_window_max_items = 1`, which is the
+/// documented spelling for turning the window off and the one Task 10's A/B needs to exist.
 ///
+/// This leg is not a variation for its own sake. At that setting *every* entry trips the row bound,
+/// so the window's close-and-continue path runs on each one; a `run_work_pass` that closed a window
+/// and then kept draining the work queue would never return to `Executor::run`'s deny drain while
+/// submissions keep arriving, and the deny would land last however the lanes are ordered. It is red
+/// on exactly that defect and green on nothing else, which is why it takes a config no default sets.
+#[test]
+fn a_deny_is_never_queued_behind_work_with_group_commit_disabled() {
+    deny_priority_survives_the_window(Some(1));
+}
+
 /// Sequencing is deterministic, not raced. The executor is stalled inside its first work item, the
 /// work queue is filled to its bound behind it, and the deny is released only once the engine's own
 /// `deny_submitted` counter proves it is *queued* — that counter is bumped after the enqueue and
 /// before the blocking wait for exactly this purpose.
-#[test]
-fn a_deny_is_never_queued_behind_work() {
+fn deny_priority_survives_the_window(window_max_rows: Option<usize>) {
     const BOUND: usize = 4;
     let tmp = TempDir::new().unwrap();
     let (engine, faults) = engine_with_faults(&tmp, BOUND);
+    if let Some(rows) = window_max_rows {
+        engine.set_commit_window_max_rows(rows);
+    }
     let engine = Arc::new(engine);
 
     let entity = entity_of(&engine, 3);
@@ -665,4 +684,648 @@ fn a_duplicate_external_id_is_refused_on_the_executor() {
         "the original must still own the key — an overwrite is what would make the first item \
          unreachable by any deny"
     );
+}
+
+// =================================================================================================
+// The commit window (Task 7a)
+// =================================================================================================
+
+/// A window assembled **deterministically**, with no sleep and no timing assumption.
+///
+/// The problem it solves: "these N submissions landed in one window" is a race unless the executor
+/// is held still while they queue. So it is held still — parked inside a priming submission's own
+/// window, at the `AfterFsync` site — and released only once the engine's own `work_submitted`
+/// counter proves all N are *enqueued*. Both waits are on conditions the executor publishes (the
+/// switchboard's arrival count; the submission counter bumped after `try_send`), exactly as
+/// `a_deny_is_never_queued_behind_work` does.
+///
+/// Returns each submission's result **in submission order**, and the priming submission's id.
+type Accepted = Result<Vec<EntityId>, AcceptError>;
+type Submissions = Arc<std::sync::Mutex<Vec<Option<Result<Vec<EntityId>, String>>>>>;
+/// One row's sort key material: `(submission, row, signature, external_id)`.
+type SortKey = (usize, usize, Vec<u32>, Option<Vec<u8>>);
+
+struct Window {
+    engine: Arc<Engine>,
+    faults: Arc<FaultSwitchboard>,
+    prime: std::sync::Mutex<Option<std::thread::JoinHandle<Accepted>>>,
+    /// The allocator's high-water mark with the priming submission's ids already issued — the id
+    /// the window's own first assignment starts from. Read while the executor is parked *after*
+    /// its fsync, and allocation precedes the append, so the priming row is already counted.
+    high_water_before: u64,
+}
+
+impl Window {
+    /// Park the executor inside a priming submission, so a window can be assembled behind it.
+    fn park(engine: Arc<Engine>, faults: Arc<FaultSwitchboard>) -> Self {
+        faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
+        let e = Arc::clone(&engine);
+        let prime = std::thread::spawn(move || {
+            e.accept_ingest(vec![row("prime")], "prime".to_string(), [0xEE; 32])
+        });
+        faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
+        let high_water_before = engine.allocator_high_water();
+        Window {
+            engine,
+            faults,
+            prime: std::sync::Mutex::new(Some(prime)),
+            high_water_before,
+        }
+    }
+
+    /// Join the priming submission. Called after a release; it must have succeeded, or the fixture
+    /// itself is what failed.
+    fn join_prime(&self) {
+        if let Some(h) = self.prime.lock().unwrap().take() {
+            h.join()
+                .unwrap()
+                .expect("the priming submission is accepted");
+        }
+    }
+
+    /// Submit `batches` concurrently, wait until every one is *enqueued*, then release the executor
+    /// so they are drained into one window.
+    fn run(
+        &self,
+        batches: Vec<(String, Vec<UnallocatedRow>)>,
+    ) -> Vec<Result<Vec<EntityId>, String>> {
+        let n = batches.len();
+        let results: Submissions = Arc::new(std::sync::Mutex::new((0..n).map(|_| None).collect()));
+        let mut handles = Vec::new();
+        for (i, (batch_id, rows)) in batches.into_iter().enumerate() {
+            let e = Arc::clone(&self.engine);
+            let out = Arc::clone(&results);
+            handles.push(std::thread::spawn(move || {
+                let hash = [i as u8; 32];
+                let r = e
+                    .accept_ingest(rows, batch_id, hash)
+                    .map_err(|err| format!("{err:?}"));
+                out.lock().unwrap()[i] = Some(r);
+            }));
+        }
+
+        // Every submission enqueued: +1 for the priming one already in flight.
+        let deadline = std::time::Instant::now() + WAIT;
+        while self.engine.write_executor_stats().work_submitted < (n + 1) as u64 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "submissions never reached the queue: {:?}",
+                self.engine.write_executor_stats()
+            );
+            std::thread::yield_now();
+        }
+
+        self.faults.release();
+        for h in handles {
+            h.join().unwrap();
+        }
+        self.join_prime();
+        let mut out = results.lock().unwrap().clone();
+        out.drain(..)
+            .map(|r| r.expect("every thread ran"))
+            .collect()
+    }
+}
+
+/// Signature-sorted assignment over the whole window, recomputed in the test: the rows in
+/// `(submission, row)` order, ordered by `(sorted-deduplicated terms, external_id)`, assigned
+/// `lo + rank`. §11.1's rule, independently of the implementation of it.
+fn expected_assignment(batches: &[(String, Vec<UnallocatedRow>)], lo: u64) -> Vec<Vec<u64>> {
+    let mut flat: Vec<SortKey> = Vec::new();
+    for (b, (_, rows)) in batches.iter().enumerate() {
+        for (i, r) in rows.iter().enumerate() {
+            let mut key: Vec<u32> = r.terms.iter().map(|t| t.raw()).collect();
+            key.sort_unstable();
+            key.dedup();
+            flat.push((b, i, key, r.external_id.clone()));
+        }
+    }
+    let mut order: Vec<usize> = (0..flat.len()).collect();
+    order.sort_by(|a, b| {
+        flat[*a]
+            .2
+            .cmp(&flat[*b].2)
+            .then_with(|| flat[*a].3.cmp(&flat[*b].3))
+    });
+    let mut out: Vec<Vec<u64>> = batches.iter().map(|(_, r)| vec![0; r.len()]).collect();
+    for (rank, idx) in order.into_iter().enumerate() {
+        let (b, i, _, _) = &flat[idx];
+        out[*b][*i] = lo + rank as u64;
+    }
+    out
+}
+
+fn sig_rows(
+    prefix: &str,
+    n: usize,
+    low: &[tessera_types::TermId],
+    high: &[tessera_types::TermId],
+) -> Vec<UnallocatedRow> {
+    (0..n)
+        .map(|i| {
+            let mut r = row(&format!("{prefix}-{i}"));
+            r.terms = if i % 2 == 0 {
+                high.to_vec()
+            } else {
+                low.to_vec()
+            };
+            r
+        })
+        .collect()
+}
+
+/// **THE HEADLINE.** Four 25-row submissions produce an assignment *identical* to one 100-row
+/// submission of the same rows — design §11.1's sort scope is the **window, at the server**, not
+/// whatever chunk size a client happened to pick.
+///
+/// *If this does not hold, group commit is decoration.* The discrimination is real rather than
+/// incidental: under Task 3a's per-command allocation each submission's 25 rows are sorted among
+/// themselves and the four blocks land in four disjoint id ranges, so the interleaved signatures
+/// stay interleaved in entity space and every posting run is 25 long instead of 50.
+///
+/// Two engines, because the comparison is between two *worlds*: both are primed identically, so
+/// both allocators are at the same high-water when the compared assignment begins.
+#[test]
+fn the_sort_scope_is_the_window_not_the_request() {
+    let tmp_a = TempDir::new().unwrap();
+    let (engine_a, faults_a) = engine_with_faults(&tmp_a, 64);
+    let engine_a = Arc::new(engine_a);
+    let low = engine_a.resolve_terms(&[b"0".to_vec()]);
+    let high = engine_a.resolve_terms(&[b"1".to_vec()]);
+    assert_ne!(low, high, "the fixture must offer two real signatures");
+
+    let split: Vec<(String, Vec<UnallocatedRow>)> = (0..4)
+        .map(|s| (format!("s{s}"), sig_rows(&format!("k{s}"), 25, &low, &high)))
+        .collect();
+
+    let window = Window::park(Arc::clone(&engine_a), faults_a);
+    let lo = window.high_water_before;
+    let got = window.run(split.clone());
+    let split_ids: Vec<Vec<u64>> = got
+        .iter()
+        .map(|r| {
+            r.as_ref()
+                .expect("every submission in the window is accepted")
+                .iter()
+                .map(|e| e.raw())
+                .collect()
+        })
+        .collect();
+
+    // The same rows, submitted as one batch, on a fresh engine primed the same way.
+    let tmp_b = TempDir::new().unwrap();
+    let (engine_b, faults_b) = engine_with_faults(&tmp_b, 64);
+    let engine_b = Arc::new(engine_b);
+    let whole_rows: Vec<UnallocatedRow> = split.iter().flat_map(|(_, r)| r.clone()).collect();
+    let window_b = Window::park(Arc::clone(&engine_b), faults_b);
+    assert_eq!(
+        window_b.high_water_before, lo,
+        "both worlds start from one id"
+    );
+    let whole = window_b.run(vec![("whole".to_string(), whole_rows)]);
+    let whole_ids: Vec<u64> = whole[0]
+        .as_ref()
+        .expect("the single submission is accepted")
+        .iter()
+        .map(|e| e.raw())
+        .collect();
+
+    let flat_split: Vec<u64> = split_ids.iter().flatten().copied().collect();
+    assert_eq!(
+        flat_split, whole_ids,
+        "four submissions in one window must be allocated exactly as one submission of the same \
+         rows. Per-request scope gives four disjoint sorted blocks instead — group commit's whole \
+         subject (design §11.1, lifecycle §5.1)"
+    );
+
+    // And the sort is doing something: every low-signature row precedes every high one. Taken from
+    // the rows' own terms rather than from an index parity — the submissions hold an odd number of
+    // rows each, so parity in the flattened list is not parity within a submission.
+    let mut low_ids = Vec::new();
+    let mut high_ids = Vec::new();
+    for (b, (_, rows)) in split.iter().enumerate() {
+        for (i, r) in rows.iter().enumerate() {
+            if r.terms == low {
+                low_ids.push(split_ids[b][i]);
+            } else {
+                high_ids.push(split_ids[b][i]);
+            }
+        }
+    }
+    assert!(
+        low_ids.iter().max() < high_ids.iter().min(),
+        "items sharing a signature must land in one contiguous run ACROSS submissions: \
+         low={low_ids:?} high={high_ids:?}"
+    );
+
+    // The independent recomputation of §11.1's rule, which also pins each submission's ids to its
+    // own rows in its own order.
+    assert_eq!(split_ids, expected_assignment(&split, lo));
+}
+
+/// **One fsync per window**, asserted on the counter rather than on a proxy.
+///
+/// The exact delta, not "did not rise": `WalMeter` counts *successes*, so an implementation that
+/// skipped the fsync entirely would satisfy "did not rise with the number of submissions" while
+/// acknowledging writes that are not durable — the one thing the ack contract forbids. The append
+/// counter is the other half: one record per entry is what preserves batch identity for Task 8.
+#[test]
+fn one_fsync_per_window() {
+    const N: usize = 5;
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 64);
+    let engine = Arc::new(engine);
+
+    let window = Window::park(Arc::clone(&engine), faults);
+    let parked = engine.write_executor_stats();
+    assert_eq!(
+        (parked.wal_appends, parked.wal_fsyncs),
+        (1, 1),
+        "the priming submission has appended and fsynced exactly once"
+    );
+
+    let batches: Vec<(String, Vec<UnallocatedRow>)> = (0..N)
+        .map(|i| (format!("b{i}"), vec![row(&format!("f{i}"))]))
+        .collect();
+    for r in window.run(batches) {
+        r.expect("every submission is accepted");
+    }
+
+    let after = engine.write_executor_stats();
+    assert_eq!(
+        after.wal_fsyncs - parked.wal_fsyncs,
+        1,
+        "{N} submissions in one window must cost exactly ONE fsync — that is the amortisation. \
+         Got {} fsyncs for {N} submissions",
+        after.wal_fsyncs - parked.wal_fsyncs
+    );
+    assert_eq!(
+        after.wal_appends - parked.wal_appends,
+        N as u64,
+        "and exactly one record per entry: batch identity survives the window (Task 8 joins on it)"
+    );
+}
+
+/// Each waiter receives **its own** rows' ids, in **its own** submitted row order.
+///
+/// A window that returned the right multiset in the wrong order is a silent misattribution: the
+/// handler turns each id into the `tessera_id` it hands back per row (contracts §3.4), so a
+/// permuted answer tells a client that row 3 is the entity that is really row 7 — and every later
+/// deny it issues names the wrong item.
+#[test]
+fn each_waiter_gets_its_own_ids() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 64);
+    let engine = Arc::new(engine);
+    let low = engine.resolve_terms(&[b"0".to_vec()]);
+    let high = engine.resolve_terms(&[b"1".to_vec()]);
+
+    // Deliberately ragged: different row counts, so a implementation that scattered by a fixed
+    // stride rather than by (entry, row) position cannot pass by coincidence.
+    let batches: Vec<(String, Vec<UnallocatedRow>)> = vec![
+        ("a".to_string(), sig_rows("a", 3, &low, &high)),
+        ("b".to_string(), sig_rows("b", 1, &low, &high)),
+        ("c".to_string(), sig_rows("c", 4, &low, &high)),
+    ];
+
+    let window = Window::park(Arc::clone(&engine), faults);
+    let lo = window.high_water_before;
+    let got = window.run(batches.clone());
+    let ids: Vec<Vec<u64>> = got
+        .iter()
+        .map(|r| r.as_ref().unwrap().iter().map(|e| e.raw()).collect())
+        .collect();
+
+    assert_eq!(
+        ids,
+        expected_assignment(&batches, lo),
+        "each waiter's ids must be its own rows', in its own row order"
+    );
+
+    // And the live map agrees, which is what a later deny resolves through.
+    for (b, (_, rows)) in batches.iter().enumerate() {
+        for (i, r) in rows.iter().enumerate() {
+            assert_eq!(
+                engine
+                    .resolve_external_id(r.external_id.as_ref().unwrap())
+                    .unwrap()
+                    .map(|e| e.raw()),
+                Some(ids[b][i]),
+                "the external id must resolve to the id its own caller was told"
+            );
+        }
+    }
+}
+
+/// **The `ReceiptLost` widening** (Task 3b's split, named there as Task 7a's): a window swaps once
+/// and then acks N waiters in a loop, so a death partway through the loop leaves some waiters acked
+/// and some not.
+///
+/// Every un-acked waiter must get `SubmitError::ReceiptLost` → **500**, never
+/// `SubmitError::ExecutorDead` → 503. Their ingest is durably in force by then — appended, fsynced,
+/// applied and swapped — and 503's meaning is "this node did not take your write". Task 3b's
+/// existing assertion covers a single command's shape only; this is the partial case.
+///
+/// **Both halves are asserted, and the second is why.** "Every waiter got `ReceiptLost`" is
+/// satisfied by an executor that panicked before acking *anybody* — including by a `fire_after`
+/// that does not work — so the test would pass while its own subject never occurred. At least one
+/// waiter must have been acked for this to be a partially-acked window at all.
+///
+/// Deterministic: arrival 1 at `BeforeAck` is the priming submission's own ack, arrival 2 is the
+/// window's first waiter, and `fire_after = 2` panics on the second. `release_site` releases the
+/// `AfterFsync` park **without** disarming `BeforeAck`, which a release-all would.
+#[test]
+fn every_unacked_waiter_in_a_partially_acked_window_gets_receipt_lost() {
+    const N: usize = 3;
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 64);
+    let engine = Arc::new(engine);
+
+    faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
+    let e = Arc::clone(&engine);
+    let prime = std::thread::spawn(move || {
+        e.accept_ingest(vec![row("prime")], "prime".to_string(), [0xEE; 32])
+    });
+    faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
+
+    let mut handles = Vec::new();
+    for i in 0..N {
+        let e = Arc::clone(&engine);
+        handles.push(std::thread::spawn(move || {
+            e.accept_ingest(
+                vec![row(&format!("lost-{i}"))],
+                format!("lost-{i}"),
+                [i as u8; 32],
+            )
+        }));
+    }
+    let deadline = std::time::Instant::now() + WAIT;
+    while engine.write_executor_stats().work_submitted < (N + 1) as u64 {
+        assert!(std::time::Instant::now() < deadline, "never enqueued");
+        std::thread::yield_now();
+    }
+
+    // Armed BEFORE the release, or the window's first ack races the arming.
+    faults.arm_pause_after(PauseSite::BeforeAck, PauseAction::Panic, 2);
+    faults.release_site(PauseSite::AfterFsync);
+
+    prime.join().unwrap().expect("the priming submission acks");
+
+    let mut acked = 0;
+    let mut lost = 0;
+    for h in handles {
+        match h.join().unwrap() {
+            Ok(_) => acked += 1,
+            Err(AcceptError::Submit(SubmitError::ReceiptLost)) => lost += 1,
+            other => panic!(
+                "a waiter in a window that swapped must be acked or told its receipt was LOST — \
+                 `ExecutorDead` would report a durable, in-force ingest as 'nothing happened'. \
+                 Got: {other:?}"
+            ),
+        }
+    }
+    assert_eq!(
+        acked, 1,
+        "the window must have been PARTIALLY acked — otherwise this test has not constructed its \
+         own subject and would pass against an executor that acked nobody"
+    );
+    assert_eq!(lost, N - 1, "and every remaining waiter is `ReceiptLost`");
+}
+
+/// Task 3a's security backstop (C1) **survives the window**, which is the one place a naive
+/// implementation re-opens it.
+///
+/// Both retries reach the executor while the window is open, so neither can see the other in the
+/// live map — that map is written at *apply*. Without the window's own conflict check they would
+/// both be admitted, both allocate, and the second `established.insert` would overwrite the first:
+/// the first item stays visible, byte-identical to the second, and reachable by **no external id at
+/// all**, so no deny could ever name it. The remedy is a forced close, after which the ordinary
+/// check answers.
+#[test]
+fn a_duplicate_external_id_across_one_window_is_still_refused() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 64);
+    let engine = Arc::new(engine);
+
+    let window = Window::park(Arc::clone(&engine), faults);
+    let got = window.run(vec![
+        ("first".to_string(), vec![row("same-key")]),
+        // A *fresh* batch id, as a client retry after a timeout produces — the idempotency index
+        // cannot catch it, so only the external-id backstop can.
+        ("retry".to_string(), vec![row("same-key")]),
+    ]);
+
+    let accepted = got.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(
+        accepted, 1,
+        "exactly one of two submissions naming one external id may be accepted, however they are \
+         batched: got {got:?}"
+    );
+    let refused = got
+        .iter()
+        .find(|r| r.is_err())
+        .unwrap()
+        .as_ref()
+        .unwrap_err();
+    assert!(
+        refused.contains("DuplicateExternalId"),
+        "and the refusal must be the duplicate, not something incidental: {refused}"
+    );
+
+    // A refused entry still occupied a queue slot, so it must be counted as completed. Otherwise
+    // `work_depth` — the operand of every ingest 429's `retry_after_s` — drifts upward by one per
+    // refusal and never comes back down.
+    let stats = engine.write_executor_stats();
+    assert_eq!(
+        (stats.work_submitted, stats.work_completed),
+        (3, 3),
+        "every job taken off the work queue must be counted completed, refusals included: {stats:?}"
+    );
+    assert_eq!(stats.work_depth, 0);
+}
+
+/// **An empty window is never opened**, and the in-flight gauge is armed at the first entry rather
+/// than at window construction.
+///
+/// The executor reaches its work pass with an empty queue on every iteration that a deny woke it
+/// for, and on every spurious doorbell token. A gauge armed at construction would be armed there
+/// and cleared by nothing — and `ExecutorStats::service_nanos_for_estimate` takes
+/// `max(ewma, in-flight elapsed)`, so an idle node would answer every later 429 with a
+/// `retry_after_s` that grows without bound towards the 300 s clamp. That is Task 6's F7 correction
+/// running backwards.
+#[test]
+fn an_idle_work_pass_arms_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, _faults) = engine_with_faults(&tmp, 8);
+
+    // A deny wakes the executor; its work pass then finds an empty queue.
+    let entity = entity_of(&engine, 3);
+    engine
+        .accept_change(source_id_key(3), entity, ChangeOp::Suppress, None)
+        .expect("the suppression is applied");
+
+    let stats = engine.write_executor_stats();
+    assert_eq!(
+        stats.work_in_flight_nanos, 0,
+        "the executor is idle and no work item is in flight: {stats:?}"
+    );
+    assert_eq!(stats.work_depth, 0);
+    assert_eq!(
+        stats.wal_fsyncs, 1,
+        "and an empty window costs no fsync of its own"
+    );
+}
+
+/// A byte-identical retry that lands in the **same open window** does not allocate a second time.
+///
+/// Rows with **no external id** are used deliberately: they are established in no map, so the
+/// duplicate-external-id backstop above cannot catch this and the batch-id path is the only thing
+/// under test. Task 8 replaces the forced close with the `Held` join, which answers both callers off
+/// one allocation; until then the close is what keeps the answer honest.
+#[test]
+fn a_byte_identical_retry_inside_an_open_window_does_not_double_allocate() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 64);
+    let engine = Arc::new(engine);
+
+    let anonymous = || {
+        let mut r = row("ignored");
+        r.external_id = None;
+        vec![r, {
+            let mut r = row("ignored");
+            r.external_id = None;
+            r
+        }]
+    };
+
+    let window = Window::park(Arc::clone(&engine), faults);
+    let before = window.high_water_before;
+    // Both submissions carry the same batch id AND the same body hash — `Window::run` derives the
+    // hash from the submission index, so this test submits them by hand.
+    let a = Arc::clone(&engine);
+    let b = Arc::clone(&engine);
+    let h1 =
+        std::thread::spawn(move || a.accept_ingest(anonymous(), "same-batch".to_string(), [9; 32]));
+    let h2 =
+        std::thread::spawn(move || b.accept_ingest(anonymous(), "same-batch".to_string(), [9; 32]));
+    let deadline = std::time::Instant::now() + WAIT;
+    while engine.write_executor_stats().work_submitted < 3 {
+        assert!(std::time::Instant::now() < deadline, "never enqueued");
+        std::thread::yield_now();
+    }
+    window.faults.release();
+    let first = h1.join().unwrap().expect("accepted");
+    let second = h2
+        .join()
+        .unwrap()
+        .expect("the replay is answered, not refused");
+
+    assert_eq!(
+        first, second,
+        "a byte-identical replay must answer with the SAME ids (contracts §3.4), not a second \
+         allocation"
+    );
+    assert_eq!(
+        engine.allocator_high_water(),
+        before + 2,
+        "and the id space must have advanced by the batch's rows ONCE, not twice"
+    );
+}
+
+/// Every id a window hands out is in the WAL — read back from the file, not from the executor.
+///
+/// Replay reuses the ids the records carry (lifecycle §5.1, SA §6.2), so an id acked but never
+/// framed is an entity that exists for exactly as long as the process does, and whose id is handed
+/// out again after a restart.
+#[test]
+fn every_id_a_window_issues_is_in_the_wal() {
+    let tmp = TempDir::new().unwrap();
+    let wal_path = tmp.path().join("wal.log");
+    let acked: Vec<u64> = {
+        let bundle_root = tmp.path().join("bundle");
+        build_fixture(
+            &bundle_root,
+            &tmp.path().join("points.parquet"),
+            &tmp.path().join("pairs.parquet"),
+        );
+        let mut engine = open_engine(&bundle_root, &tmp.path().join("cache"), &wal_path);
+        let faults = Arc::new(FaultSwitchboard::new());
+        engine
+            .start_write_executor_with_faults(64, Arc::clone(&faults))
+            .unwrap();
+        let engine = Arc::new(engine);
+
+        let window = Window::park(Arc::clone(&engine), faults);
+        let batches: Vec<(String, Vec<UnallocatedRow>)> = (0..4)
+            .map(|i| {
+                (
+                    format!("w{i}"),
+                    vec![row(&format!("x{i}")), row(&format!("y{i}"))],
+                )
+            })
+            .collect();
+        let mut ids: Vec<u64> = window
+            .run(batches)
+            .into_iter()
+            .flat_map(|r| r.expect("accepted").into_iter().map(|e| e.raw()))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }; // the engine is dropped, which joins the executor and closes the WAL
+
+    let (_wal, records) = tessera_lifecycle::Wal::open(&wal_path).expect("the WAL reopens");
+    let mut framed: Vec<u64> = Vec::new();
+    for record in &records {
+        if let tessera_lifecycle::WalRecord::IngestBatch { rows, .. } = record {
+            framed.extend(rows.iter().map(|r| r.entity_id.raw()));
+        }
+    }
+    framed.sort_unstable();
+    for id in &acked {
+        assert!(
+            framed.contains(id),
+            "id {id} was acknowledged to a caller and is in no WAL record: replay would hand it \
+             out again. Framed: {framed:?}"
+        );
+    }
+}
+
+/// **A window's acks follow its established-map insert** — the ingest half of
+/// `ack_follows_fsync_then_swap`, which covers a change.
+///
+/// **What it asserts, exactly, and what it does not.** The witness is engine state, not a step log:
+/// the executor is parked *inside* `Executor::ack`, one statement before the send, and
+/// `resolve_external_id` answers. That reads `LiveState::established`, which `Executor::apply_window`
+/// writes *before* it calls `publish` — so what is proven is **insert-precedes-ack**, not
+/// swap-precedes-ack. A stronger witness is unavailable in stage 2.1: nothing a reader can observe
+/// distinguishes the two, because buffered rows have no geometry until stage 2.2's flush and
+/// `visible()` therefore cannot see the ingest at all under either ordering. When flush lands, this
+/// leg should read the swapped-in generation instead.
+///
+/// The fail-open it does catch: a window that acked its N waiters before establishing them. Every
+/// caller holds ids whose entities no `/control/changes` lookup can resolve yet, so a suppression
+/// issued immediately after a 200 is answered 404 for an item that exists. It is the first test in
+/// the tree to assert ingest ack-ordering at all.
+#[test]
+fn a_windows_acks_follow_its_swap() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+    let engine = Arc::new(engine);
+
+    faults.arm_pause(PauseSite::BeforeAck, PauseAction::Stall);
+    let e = Arc::clone(&engine);
+    let submit = std::thread::spawn(move || {
+        e.accept_ingest(vec![row("in-force")], "in-force".to_string(), [3; 32])
+    });
+    faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
+
+    assert!(
+        engine.resolve_external_id(b"in-force").unwrap().is_some(),
+        "the executor is parked one statement before the ack: the window it is about to \
+         acknowledge MUST already be established. Seeing nothing here means the acks ran with the \
+         apply still ahead of them — lifecycle §4's ack-ordering fail-open, one window wide"
+    );
+
+    faults.release();
+    submit.join().unwrap().expect("the ingest is accepted");
 }

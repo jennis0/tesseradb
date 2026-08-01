@@ -564,7 +564,8 @@ pub struct Config {
     // ---- Phase 2 stage 2.1 (Task 0b). Landed here ahead of their consumers so no track has to
     // edit this file mid-stream. Each field names the task that reads it; the argument for each
     // default is on its `DEFAULT_*` constant.
-    /// **Task 7a** — the entry count at which a commit window closes.
+    /// **Task 7a** — the **row** count at which a commit window closes (an *item* is a row; entries
+    /// are admitted whole, so a window closes at or just past this).
     /// See [`DEFAULT_COMMIT_WINDOW_MAX_ITEMS`]. `1` is the honest way to disable group commit.
     pub commit_window_max_items: usize,
     /// **Task 7b** — the age at which a commit window closes. See
@@ -746,18 +747,61 @@ const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;
 // default config refuse to start once those assertions land.
 // ---------------------------------------------------------------------------------------------
 
-/// Task 7a: the entry count at which a commit window closes.
+/// Task 7a: the **row** count at which a commit window closes.
 ///
-/// **Sized from the compression arithmetic, which is the window's whole purpose.** The probes'
-/// 8.9–36.7× posting compression was measured under a *full-corpus* signature sort; a window
-/// realises run lengths ≈ `commit_window_max_items × term_density`, so 10 k entries at the 2%
-/// density the corpus shows gives runs of ~200 against a ~1.0 scattered baseline (plan Task 7a,
-/// review M1). That is a large win and openly a fraction of the ceiling, and it scales linearly
-/// with this number — raising it buys compression and costs window latency and the heap the
-/// held rows occupy.
+/// **Rows, not submissions, and the arithmetic below is why** *(Task 7a; the stage-2.1 plan's
+/// sketch says `entries.len() >= commit_window_max_items` and is the thing that is wrong)*. Every
+/// quantity this number is sized from — the run length, the heap the window holds, the latency it
+/// costs — scales in rows. Read as submissions it would admit 10 000 × `ingest_max_batch_rows` =
+/// 10⁸ rows in one window, four orders of magnitude past the resident ceiling
+/// [`INGEST_RESIDENT_CEILING_BYTES`] allows, and the run-length figure below would be 2 000 000
+/// rather than ~200. Entries are admitted whole (a submission is never split across two windows),
+/// so a window closes at or just past this count.
+///
+/// **Sized from the compression arithmetic, which is the window's whole purpose — but do not size a
+/// deployment from the headline.** The probes' 8.9–36.7× posting compression was measured under a
+/// *full-corpus* signature sort. `run ≈ commit_window_max_items × term_density` — 10 k rows at the
+/// corpus's 2% giving ~200 (plan Task 7a, review M1) — is an **upper bound**, not an expectation:
+/// entity ids are sorted by an item's whole term *signature*, so a term's ids run contiguously only
+/// where that term is effectively the signature. The measured corpus is not shaped that way (probes
+/// results §3: 54,791 signatures over 2.42 M items, mean group 44, rank-100 group 4,213 and
+/// rank-1,000 group 158), so a 10 k window holds ~17 rows of the hundredth-largest group and under
+/// one of the thousandth — **runs of order 10¹, one to two orders of magnitude below the 200**. Size
+/// from that, and re-measure before trusting either figure (CLAUDE.md's standing caveat on
+/// policy-dependent headlines; the per-window re-permutation was not run — Task 7a fix round 1, F2).
+///
+/// Raising this buys run length **sub-linearly** — the extra rows come from progressively smaller
+/// signature groups — and costs window latency, the heap the held rows occupy, and sort work:
+/// `assign_sorted` is `n log n` in the window's rows, so 100 → 10 000 is twice the comparison work
+/// per row. It is not a free dial in the compression direction.
+///
+/// **Which half of the win that is, stated because the multiplier alone hides it.** Design §11.1's
+/// container model gives the benefit available to a term of density `p` at sort scope `B` as
+/// `max(1, 2¹⁶/(p·B))`, and `p·B < 2¹⁶` for every `p ≤ 1` once `B ≲ 6·10⁴`. So at this value — and
+/// at any value the resident ceiling permits — a window collects the **posting-storage**
+/// (run-encoding) win and **none of the container-count** win, and container count is what a union
+/// costs.
+///
+/// **The window adds no residency term, and the argument is worth writing down because it reads the
+/// other way round.** Task 6's relation 3 bounds resident ingest bytes by `ingest_admission ×
+/// ingest_max_batch_rows`, and a window looks like a fourth term outside it — a reviewer of this task
+/// concluded exactly that. It is not: every entry in an open window has a handler blocked on its
+/// receipt, and `control.rs`'s ingest path takes the `IngestAdmission` permit **before**
+/// `spawn_blocking` and moves it *into* the closure, so the permit is held until the ack. In-window
+/// entries are therefore ≤ `ingest_admission`, and their bytes are the ones relation 3 already
+/// counts. This key is the **tighter** bound in the common case, not the load-bearing one; the
+/// worst-case window is `commit_window_max_items − 1 + ingest_max_batch_rows` ≈ 20 000 rows, which is
+/// what "at or just past this count" above means.
+///
+/// **It equals [`DEFAULT_INGEST_MAX_BATCH_ROWS`] deliberately** (that constant's own doc makes the
+/// same point from the other side): one maximal batch is one maximal window, so no client can
+/// define the window's size by picking a chunk size. The consequence to know: at the defaults a
+/// maximal batch commits alone and gains nothing from grouping — it is the *small* batches the
+/// window collects — and an operator who raises `ingest_max_batch_rows` without raising this gets
+/// one-entry windows.
 ///
 /// **`1` is how you disable group commit**, and Task 10's A/B (one large window versus a hundred
-/// small ones) needs that spelling to exist. `0` is refused: a window that closes at zero entries
+/// small ones) needs that spelling to exist. `0` is refused: a window that closes at zero rows
 /// is not "off", it is group commit silently doing nothing while the code that implements it
 /// still runs.
 const DEFAULT_COMMIT_WINDOW_MAX_ITEMS: usize = 10_000;
@@ -953,7 +997,7 @@ pub fn serving_blocking_threads(config: &Config) -> usize {
 /// Task 6: per-request row cap on `/control/ingest`; over is 422 (contracts §3.1).
 ///
 /// Matched to [`DEFAULT_COMMIT_WINDOW_MAX_ITEMS`] deliberately — one maximal batch is one maximal
-/// window's worth of entries, so a single client cannot define the window's size by picking a
+/// window's worth of rows, so a single client cannot define the window's size by picking a
 /// chunk size, which is exactly the property design §11.1 r23 wants when it moves the sort scope
 /// to the server. The `rows` cap is the one that binds for ordinary point data; the byte cap
 /// below catches unusually wide rows.
@@ -1332,7 +1376,7 @@ fn parse(text: &str) -> Result<Config> {
         raw.ingest
             .commit_window_max_items
             .unwrap_or(DEFAULT_COMMIT_WINDOW_MAX_ITEMS),
-        "a window that closes at zero entries is not group commit switched off, it is group \
+        "a window that closes at zero rows is not group commit switched off, it is group \
          commit silently doing nothing — set it to 1 to disable batching honestly",
     )?;
     let commit_window_max_age_ms = non_zero_u64(

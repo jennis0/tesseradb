@@ -66,13 +66,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use rustc_hash::FxHashMap;
 
 use tessera_authz::Dict;
-use tessera_lifecycle::alloc::{high_water_from, AllocError, Allocator, PendingItem};
+use tessera_lifecycle::alloc::{high_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::WalMeter;
 use tessera_lifecycle::overlay::replay;
-use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalRecord, WalRow};
-use tessera_lifecycle::{assign_sorted, IngestBuffer, Overlay};
+use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord};
+use tessera_lifecycle::window::{ClosedEntry, CommitWindow, WindowEntry};
+use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_plugin::Descriptor;
 use tessera_store::StoreError;
 use tessera_types::{EntityId, TermId};
@@ -248,6 +249,20 @@ pub struct ExecutorHealth {
     /// trigger's memory. Set when [`Self::note_overlay_depth`] observes a crossing, cleared when it
     /// observes a depth below the limit or when the limit itself is re-set.
     overlay_soft_limit_latched: AtomicBool,
+    /// Task 7a: the row count at which a commit window closes — `ingest.commit_window_max_items`,
+    /// which counts **rows** (see that key's doc: its default is sized from `window rows ×
+    /// term_density`, and both the heap and the latency a window costs scale in rows).
+    ///
+    /// Reaches the executor by [`Engine::set_commit_window_max_rows`] on `set_overlay_soft_limit`'s
+    /// precedent, because widening `start_write_executor`'s argument list would touch
+    /// `engine/tests/pins.rs` and four `tessera-bench` sites, outside Track B's allowlist.
+    ///
+    /// **Defaulted to a real number, not `usize::MAX`.** An embedder that sets nothing must still
+    /// get a bounded window: the drain that fills a window frees a queue slot per entry, which a
+    /// concurrent submitter immediately refills, so "close when the queue is empty" is not a bound
+    /// under sustained load — it is an invitation to hold the entire load in memory. See
+    /// [`DEFAULT_COMMIT_WINDOW_MAX_ROWS`].
+    commit_window_max_rows: AtomicUsize,
     /// The executor's WAL counters. A **clone** of the meter the [`ExecutorWal`] holds, kept here
     /// so the numbers have a reader: `/control/status` (Task 3b) and Task 7a's
     /// `one_fsync_per_window`, whose whole subject is `wal_fsyncs` not rising with the number of
@@ -270,6 +285,18 @@ pub struct ExecutorStats {
     /// Successful WAL fsyncs since the executor started — the unit Task 7a's group commit is
     /// defined in ("one fsync per window") and the one the ingest baseline memo's ~3.2 ms floor is
     /// a cost per.
+    ///
+    /// **`wal_appends / wal_fsyncs` is the production measurement of Task 7a's amortisation**, and
+    /// the reason no window-size gauge was added: one append per entry and one fsync per window make
+    /// that ratio the mean entries per window, over the whole life of the executor. Both are already
+    /// on `/control/status`. It is the *ingest* mean only where ingest dominates: every `Change`
+    /// contributes one of each and pulls the ratio towards 1, since a deny is appended and fsynced
+    /// alone (`execute_change`) and stays out of the window until Task 9. Read it when diagnosing
+    /// ingest throughput — a ratio pinned at ~1.0 under
+    /// concurrent load means every window is closing with one entry in it, which is what a workload
+    /// that re-ingests the same `external_id`s does (`CommitWindow::conflicts_with` closes the window
+    /// on nearly every entry), and it is the difference between group commit working and group commit
+    /// running.
     pub wal_fsyncs: u64,
     /// Work-lane jobs whose `execute` has returned (Task 6).
     pub work_completed: u64,
@@ -325,6 +352,7 @@ impl ExecutorHealth {
             overlay_soft_limit: AtomicUsize::new(usize::MAX),
             overlay_soft_limit_alarms: AtomicU64::new(0),
             overlay_soft_limit_latched: AtomicBool::new(false),
+            commit_window_max_rows: AtomicUsize::new(DEFAULT_COMMIT_WINDOW_MAX_ROWS),
             wal: Arc::new(WalMeter::new()),
         }
     }
@@ -393,13 +421,45 @@ impl ExecutorHealth {
         self.apply_nanos_max.fetch_max(nanos, Ordering::Relaxed);
     }
 
-    /// One work-lane job finished. Called from [`Executor::run`], on the executor thread and
-    /// nowhere else, which is what lets the EWMA be a plain load/store rather than a CAS loop.
+    /// One commit window finished: `entries` work-lane jobs completed, in `elapsed_nanos` between
+    /// them.
     ///
-    /// `sample` is the **whole** `execute` call — append, fsync, apply, swap and ack — because that
-    /// is what a queued job waits for. `apply_nanos_total` is the wrong operand for a drain
-    /// estimate and its own doc says why: it sums both lanes and excludes the fsync, and the fsync
-    /// is the term the drain is paced by.
+    /// **The EWMA sample is `elapsed / entries`, not the whole window**, because the estimator it
+    /// feeds multiplies it by [`ExecutorStats::work_depth`], which counts *commands*. A whole-window
+    /// sample would tell every shed caller to wait the window factor longer than the drain takes —
+    /// wrong in the same direction the cumulative-mean form was, just not as far.
+    ///
+    /// `entries` is never zero: an empty window is never opened (see [`Executor::run_work_pass`]).
+    ///
+    /// `elapsed_nanos` must be measured from the window's `opened_at`, which is stamped when the
+    /// window is *constructed* — so a replacement window is constructed only after the previous
+    /// one's `close_window` returns, or every window after the first in a pass charges its
+    /// predecessor's append, fsync, apply and swap to itself.
+    fn record_window_service(&self, entries: u64, elapsed_nanos: u64) {
+        debug_assert!(entries > 0, "an empty window is never closed");
+        let entries = entries.max(1);
+        // `entries - 1` here and one more inside `record_work_service`: one completion per entry.
+        self.work_completed
+            .fetch_add(entries - 1, Ordering::Relaxed);
+        self.record_work_service(elapsed_nanos / entries);
+    }
+
+    /// A work-lane job that was answered without being executed — an idempotent replay, a 409. It
+    /// occupied a queue slot and was counted at submission, so it must be counted here too or
+    /// [`ExecutorStats::work_depth`] drifts upward forever and every 429 inherits the drift.
+    fn note_work_refused(&self) {
+        self.work_completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One work-lane job finished, and the EWMA observation for it. Called on the executor thread
+    /// and nowhere else, which is what lets the EWMA be a plain load/store rather than a CAS loop.
+    ///
+    /// `sample_nanos` is the **per-job** service — the whole of what a queued job waits for: append,
+    /// fsync, apply, swap and ack. A window divides its elapsed by its entry count before calling
+    /// here (see [`ExecutorHealth::record_window_service`]), because the estimator this feeds
+    /// multiplies the EWMA by a depth counted in *commands*. `apply_nanos_total` is the wrong
+    /// operand for a drain estimate and its own doc says why: it sums both lanes and excludes the
+    /// fsync, and the fsync is the term the drain is paced by.
     fn record_work_service(&self, sample_nanos: u64) {
         // Cleared **first**: between this and the EWMA store, a concurrent `stats()` should see the
         // stale (smaller) EWMA rather than an in-flight elapsed for a job that has finished. Both
@@ -433,6 +493,18 @@ impl ExecutorHealth {
 
     pub fn overlay_soft_limit(&self) -> usize {
         self.overlay_soft_limit.load(Ordering::Relaxed)
+    }
+
+    /// Task 7a: set the row count at which a commit window closes. See
+    /// [`Self::commit_window_max_rows`] for the field, and [`Engine::set_commit_window_max_rows`]
+    /// for why it arrives this way rather than through `start_write_executor`.
+    pub fn set_commit_window_max_rows(&self, rows: usize) {
+        self.commit_window_max_rows
+            .store(rows.max(1), Ordering::Relaxed);
+    }
+
+    pub fn commit_window_max_rows(&self) -> usize {
+        self.commit_window_max_rows.load(Ordering::Relaxed)
     }
 
     /// Evaluate an overlay depth against the soft limit, **edge-triggered**, and report whether this
@@ -519,6 +591,18 @@ pub const RETRY_AFTER_MIN_SECS: u64 = 1;
 /// is not clamped.
 pub const RETRY_AFTER_MAX_SECS: u64 = 300;
 
+/// Task 7a: the commit window's row bound for an engine whose embedder sets none.
+///
+/// The same figure `tessera-server`'s `ingest.commit_window_max_items` defaults to, restated here
+/// because this crate cannot see that crate's config and **must not** default to "unbounded". The
+/// drain that fills a window frees a bounded-queue slot per entry, and a concurrent submitter
+/// refills it immediately, so under sustained load `work.try_recv()` never returns `Err` and a
+/// window bounded only by the drain is bounded by nothing: the executor would hold the entire load
+/// in memory, through allocation, framing and apply, having appended nothing. `ingest_queue_bound`
+/// is deliberately small for exactly that reason (`config.rs`: "backpressure that arrives at the
+/// OOM killer is not [a working queue]") and a window must not undo it.
+pub const DEFAULT_COMMIT_WINDOW_MAX_ROWS: usize = 10_000;
+
 // =================================================================================================
 // The ack channel, and the proof it demands
 // =================================================================================================
@@ -547,11 +631,21 @@ pub const RETRY_AFTER_MAX_SECS: u64 = 300;
 /// `write.rs`. A worker who *wants* to ack early can still mint a token — the replay path's
 /// `already_in_force()` is the obvious thing to reach for, and is exactly what the reviewer's
 /// mutation used. Two things catch that rather than the type system: `check-layers.sh` rule 3 pins
-/// every `Published::` construction to this file, and there are exactly two (`publish`, and
-/// `execute_ingest`'s replay arm); and `ack_follows_fsync_then_swap`'s `BeforeAck` leg fails on
-/// engine state — the effect is not in force at the moment the ack is being sent — with no
+/// every `Published::` construction to this file, and there are exactly two ([`Executor::publish`],
+/// and the replay arm of [`Executor::admit`]); and `ack_follows_fsync_then_swap`'s `BeforeAck` leg
+/// fails on engine state — the effect is not in force at the moment the ack is being sent — with no
 /// reference to the step log. Type, rule, test: the claim is that no *one* of them is the
 /// guarantee.
+///
+/// **Task 7a weakened this, and the weakening is deliberate.** [`Responder::ack`] takes `&Published`
+/// rather than a `Published` by value. Before 7a, N acks needed N tokens, so an ack *loop* had to
+/// mint inside itself — at a site with no swap adjacent, which is grep-visible and which a reader of
+/// this file would query. Now one token acks unboundedly many waiters, so acking window *k+1*'s
+/// waiters with window *k*'s token type-checks. That is the right trade — by-value would have forced
+/// exactly the mint-in-a-loop this comment warns about, and `check-layers.sh`'s rule is a *location*
+/// rule that would not have seen it — but it is a real reduction in what the type carries, and it is
+/// written down here rather than left to be rediscovered. What still holds it: one window swaps
+/// once, and [`Executor::close_window`] is the only place a window's waiters are reached.
 mod ack {
     use std::sync::mpsc::SyncSender;
 
@@ -602,7 +696,15 @@ mod ack {
         ///
         /// A dropped receiver is not an error: the caller's connection went away, and by then the
         /// effect is already in force.
-        pub(super) fn ack(&self, ack: Ack, _proof: Published) {
+        ///
+        /// **By reference, since Task 7a** — one generation swap now acknowledges N waiters, and
+        /// `Published` is deliberately neither `Clone` nor constructible outside `write.rs`. Taking
+        /// it by value would have forced the ack loop to mint a token per waiter, which is precisely
+        /// the residual hole this module's doc names: a `Published::by_swap()` at a site with no
+        /// swap adjacent, which `check-layers.sh` rule 3 (a *location* rule) would not see. A borrow
+        /// keeps "you must hold proof" as a precondition of the call while letting one swap answer
+        /// the window it published.
+        pub(super) fn ack(&self, ack: Ack, _proof: &Published) {
             let _ = self.0.send(Receipt::ok(ack));
         }
 
@@ -731,9 +833,11 @@ impl LiveState {
             .count()
     }
 
-    fn allocate_sorted(&self, items: &mut [PendingItem]) -> Result<(), AllocError> {
+    /// Run `f` with the I9 allocator held. The window's whole allocation is one call to this, so
+    /// the sorted run and the high-water advance cannot be separated.
+    fn with_allocator<R>(&self, f: impl FnOnce(&mut Allocator) -> R) -> R {
         let mut alloc = lock_recover(&self.allocator);
-        assign_sorted(items, &mut alloc)
+        f(&mut alloc)
     }
 
     fn record_accepted_batch(&self, batch_id: String, body_hash: [u8; 32], ids: Vec<EntityId>) {
@@ -998,6 +1102,7 @@ impl WritePath {
                         bell: bell_rx,
                     },
                     health: Arc::clone(&health),
+                    window_seq: 0,
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
                 };
@@ -1301,8 +1406,10 @@ impl LifecycleHandle {
 /// The executor's end of the queues.
 ///
 /// Named as a pair so the ordering rule is visible from the handle: `deny` is drained to empty
-/// before `work` is touched, which is what makes the starvation bound "the work item currently
-/// executing" rather than "the work queue's depth".
+/// before `work` is touched, which is what makes the starvation bound "the work in front of this
+/// deny" rather than "the work queue's depth". Since Task 7a that unit is **one commit window** —
+/// [`Executor::run_work_pass`] returns to `run`'s deny drain whenever it closes one, which is what
+/// keeps the bound finite while ingest keeps arriving.
 pub(crate) struct LifecycleQueues {
     work: Receiver<Job>,
     deny: Receiver<Job>,
@@ -1323,6 +1430,9 @@ struct Executor {
     generation: Arc<GenerationHandle>,
     queues: LifecycleQueues,
     health: Arc<ExecutorHealth>,
+    /// Task 7a: the last window's sequence number. **Task 8's `BatchState::Held { window_seq, .. }`**
+    /// is what it is for; 7a only needs it to be distinct per window.
+    window_seq: u64,
     #[cfg(feature = "fault-injection")]
     faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }
@@ -1337,8 +1447,9 @@ impl Executor {
     /// below, so no job can be left asleep.
     ///
     /// **Deny priority** (lifecycle §1.3): deny is drained to empty at the top of every iteration
-    /// and a work item runs at most once per drain, so a deny's wait is bounded by the work item
-    /// currently executing rather than by queue depth. The consequences are chosen: a sustained
+    /// and [`Executor::run_work_pass`] returns as soon as it closes a window, so a deny's wait is
+    /// bounded by the window in front of it rather than by queue depth. The consequences are
+    /// chosen: a sustained
     /// deny flood starves ingest completely, and the deny queue is unbounded in memory.
     ///
     /// **Why a deny may safely overtake a queued ingest.** Reordering execution relative to
@@ -1356,28 +1467,16 @@ impl Executor {
     /// `Err` while any submit is in flight, since the three senders live in one struct and
     /// disconnect together.
     ///
-    /// *At-most-one-work-item is Task 3a's shape, not the executor's permanent one*: Task 7a drains
-    /// work into a commit window. Leftover tokens stay harmless under that change.
+    /// *At-most-one-work-item was Task 3a's shape, not the executor's permanent one*: **Task 7a
+    /// drains work into a commit window** ([`Executor::run_work_pass`]). Leftover doorbell tokens
+    /// stay harmless under that change, for the reason above — the drain takes every job visible to
+    /// its `try_recv`, so a token is still only ever discarded while a job is still visible.
     fn run(&mut self) {
         loop {
             while let Ok(job) = self.queues.deny.try_recv() {
                 self.execute(job);
             }
-            if let Ok(job) = self.queues.work.try_recv() {
-                // Timed **around the whole `execute`**, not around the apply: a queued job waits
-                // for append, fsync, apply, swap and ack, and Task 6 derives `retry_after_s` from
-                // this. The deny lane above is deliberately not timed — it has no bounded queue,
-                // so it has no depth to drain and no 429 to derive.
-                let started = std::time::Instant::now();
-                // Published **before** the job runs, which is the whole of F7: `record_work_service`
-                // below writes the EWMA only when `execute` returns, so without this the estimator
-                // reports the previous, faster regime for the entire duration of the one long job
-                // that is filling the queue. Derived from the `Instant` already taken, so no extra
-                // clock read on the write path.
-                self.health.mark_work_started(started);
-                self.execute(job);
-                self.health
-                    .record_work_service(started.elapsed().as_nanos() as u64);
+            if self.run_work_pass() {
                 continue;
             }
             if self.queues.bell.recv().is_err() {
@@ -1386,14 +1485,366 @@ impl Executor {
         }
     }
 
+    /// **The commit window** (Task 7a; lifecycle §5.1): drain the work queue into one window and
+    /// close it. Returns whether anything was done, which is what tells [`Executor::run`] to
+    /// re-drain the deny lane rather than block.
+    ///
+    /// ## The two close triggers, and why only one of them is a policy
+    ///
+    /// - **The row bound** (`commit_window_max_rows`) — a policy, and the one this task lands.
+    ///   Checked **inside** the drain, not after it: every entry pulled frees a bounded-queue slot
+    ///   that a concurrent submitter refills at once, so under sustained load the `try_recv` below
+    ///   never returns `Err` and "close when the queue is empty" bounds nothing at all. Tripping it
+    ///   **returns**, for the same reason read the other way round: a pass that closed and carried
+    ///   on draining would not come back here — or to the deny lane — until the load stopped.
+    /// - **The queue observed empty** — *structural, not a policy*. The alternative is not a
+    ///   different trigger; it is a window of un-appended, un-acked ingest surviving `bell.recv()`
+    ///   indefinitely. **Task 7b owns the age bound** and the racing-deny arithmetic that comes with
+    ///   it; 7a lands no timer, so no window here outlives one pass of this function.
+    ///
+    /// A third close is forced by a **conflicting entry** — see `CommitWindow::conflicts_with`.
+    /// That one is a correctness mechanism (it is what keeps Task 3a's security C1 closed across a
+    /// window), not a policy.
+    ///
+    /// ## Deny priority is unchanged
+    ///
+    /// The deny lane is drained to empty before this is called and again as soon as it returns, and
+    /// **stage 2.1's window holds ingest only** (see `tessera_lifecycle::window`): lifecycle §5.1
+    /// permits denies to share the window, the plan assigns that to **Task 9**, and it cannot land
+    /// before Task 7b's partial-failure split, since a failed mixed window must apply its denies and
+    /// drop its ingest.
+    ///
+    /// So a deny waits at most for the window in front of it — but only because **closing a window
+    /// returns**. The bound is not "the deny lane is drained around this call": this function is
+    /// what decides how long "around" is, and while work keeps arriving it decides that by returning
+    /// at each close. `a_deny_is_never_queued_behind_work_with_group_commit_disabled` is the leg
+    /// that holds it, and it is red the moment the row-bound arm loops instead. Note that this is a
+    /// **starvation** bound and deliberately not a latency target (owner principle 3, Task 7a brief
+    /// §0): the window in front may be arbitrarily slow, and nothing here is sized to make it fast.
+    fn run_work_pass(&mut self) -> bool {
+        let max_rows = self.health.commit_window_max_rows();
+        let mut window: CommitWindow<Responder> = CommitWindow::new(self.next_window_seq());
+        let mut did_work = false;
+
+        loop {
+            if window.rows() >= max_rows {
+                // **Return rather than keep draining.** The drain frees a bounded-queue slot per
+                // entry and a concurrent submitter refills it at once, so `try_recv` below never
+                // returns `Err` under sustained load: a pass that closed a window and carried on
+                // draining would never yield to `Executor::run`'s deny drain for as long as ingest
+                // kept arriving, and the deny lane's bound would be the *load*, not the window in
+                // front of it (lifecycle §1.3's prohibition is on a deny queued behind work of
+                // unbounded duration). Returning costs one `try_recv` per window and restores the
+                // bound this function's doc claims.
+                // `a_deny_is_never_queued_behind_work_with_group_commit_disabled` is red on
+                // `continue` here and green on `return`.
+                self.close_window(window);
+                return true;
+            }
+            let Ok(job) = self.queues.work.try_recv() else {
+                break;
+            };
+            let Job { command, respond } = job;
+            let Command::Ingest {
+                rows,
+                batch_id,
+                body_hash,
+            } = command
+            else {
+                // Unreachable while the lane follows the command (`Command::is_never_shed`): a
+                // `Change` rides the deny queue. Executed rather than dropped, so a future variant
+                // that lands here is answered instead of silently losing its waiter.
+                //
+                // **This arm is order-unsafe as written, and must close the window first if it is
+                // ever made reachable.** It applies immediately while a window holding
+                // earlier-arriving ingest is still open, so WAL append order stops equalling
+                // submission order — and for a deny-shaped variant that is the out-of-order apply
+                // lifecycle §4 is written against. Do not make it reachable to save a close.
+                self.execute(Job { command, respond });
+                // This job was counted at submission on the work lane and `execute` counts nothing,
+                // so it is counted here or `work_depth` drifts up one per occurrence forever — the
+                // drift `note_work_refused` exists to prevent.
+                self.health.note_work_refused();
+                did_work = true;
+                continue;
+            };
+
+            // A conflicting entry closes the window **first**, and is then evaluated against the
+            // state that close just published — which is what makes the checks below the same
+            // checks Task 3a wrote, with the same answers.
+            if window.conflicts_with(&batch_id, &rows) {
+                // The replacement is constructed **after** `close_window` returns, never before:
+                // `CommitWindow::new` stamps `opened_at`, and the close it would be stamped ahead of
+                // is the append, the fsync, the apply and the swap of the *previous* window. Stamped
+                // first, every window after the first in a pass charges the previous window's
+                // service to itself — `record_window_service` doubles, and with it the
+                // `retry_after_s` a shed client is told. It is also what `opened_at` has to mean for
+                // Task 7b's age bound.
+                self.close_window(window);
+                window = CommitWindow::new(self.next_window_seq());
+                // No `did_work` here: this job is still being handled, and the tail of this loop
+                // body sets it unconditionally.
+            }
+
+            if let Some(entry) = self.admit(rows, batch_id, body_hash, respond) {
+                if window.is_empty() {
+                    // The in-flight gauge is armed at the **first entry**, never at window
+                    // construction: an empty window is never closed, so a gauge armed there would
+                    // never be cleared and `service_nanos_for_estimate` would grow without bound on
+                    // an idle node (Task 6's F7, inverted).
+                    self.health.mark_work_started(window.opened_at());
+                }
+                window.push(entry);
+            }
+            did_work = true;
+        }
+
+        if !window.is_empty() {
+            self.close_window(window);
+            did_work = true;
+        }
+        did_work
+    }
+
+    fn next_window_seq(&mut self) -> u64 {
+        self.window_seq += 1;
+        self.window_seq
+    }
+
+    /// The admission checks, unchanged from Task 3a's per-command versions and still on the one
+    /// thread that also performs the inserts. `None` means the caller has already been answered.
+    ///
+    /// Both checks read state written at **apply**, which is why an entry that conflicts with the
+    /// *open window* must close it before reaching here (`run_work_pass`).
+    fn admit(
+        &mut self,
+        rows: Vec<UnallocatedRow>,
+        batch_id: String,
+        body_hash: [u8; 32],
+        respond: Responder,
+    ) -> Option<WindowEntry<Responder>> {
+        // Idempotency, evaluated **on the executor**: between a handler check and the enqueue an
+        // open window can close (Task 8), and a retry that saw "unknown" and then enqueued into a
+        // fresh window has double-allocated. Checked before allocation, so a conflicting retry
+        // burns no entity ids.
+        if let Some((prev_hash, prev_ids)) = self.live.accepted_batch(&batch_id) {
+            if prev_hash == body_hash {
+                let proof = Published::already_in_force(&prev_ids);
+                self.ack(
+                    &respond,
+                    Ack::Ingested {
+                        entity_ids: prev_ids,
+                    },
+                    &proof,
+                );
+            } else {
+                self.ack_failed(&respond, ExecError::BatchConflict { batch_id });
+            }
+            self.health.note_work_refused();
+            return None;
+        }
+
+        // The fail-closed backstop for the widened check-to-apply race — see
+        // `LiveState::established_collisions`.
+        let collisions = self.live.established_collisions(&rows);
+        if collisions > 0 {
+            self.ack_failed(
+                &respond,
+                ExecError::DuplicateExternalId { count: collisions },
+            );
+            self.health.note_work_refused();
+            return None;
+        }
+
+        Some(WindowEntry {
+            rows,
+            batch_id,
+            body_hash,
+            waiters: vec![respond],
+        })
+    }
+
+    /// **Close a commit window**: one signature-sorted allocation run, one WAL record per entry, one
+    /// fsync, one generation swap, then every waiter is acked.
+    ///
+    /// ## I9 is untouched
+    ///
+    /// "The window allocates" reads like an allocator change and is not one (lifecycle §5.1). IDs
+    /// are still issued monotonically from the high-water by one `Allocator::allocate`, still never
+    /// reused, still ordered by `(signature, external_id)` through the unchanged `assign_sorted`.
+    /// What widens is the **input set**: design §11.1's sort scope becomes the window, at the
+    /// server, instead of whatever chunk a client happened to POST.
+    ///
+    /// **A failed window burns entity ids**, exactly as a failed batch did: assignment precedes the
+    /// append, so ids given to a window whose append then fails are never issued again. I9-safe —
+    /// ids stay strictly monotone and each is issued once.
+    ///
+    /// ## The failure rule
+    ///
+    /// An append or fsync failure **applies nothing**, in deliberate contrast to the deny path:
+    /// applying un-fsynced ingest would make items appear and vanish across a crash, and lifecycle
+    /// §4's apply-anyway rule is written for `Delete`/`Suppress` only. Task 7b's rule 2 restates it
+    /// per window; the window here is ingest-only, so the rule is uniform over it and 7b's
+    /// *split* — denies apply, ingest does not — has no subject until Task 9 puts denies in the
+    /// window.
+    ///
+    /// *One pre-existing property this widens and does not fix:* `wal::replay` replays every
+    /// well-framed record, including records written **past** the last-fsynced offset — it does not
+    /// truncate to the sync point. So an un-fsynced, un-acked ingest record whose bytes reached the
+    /// file is reinstated on restart. That is already true per command (append succeeds, fsync
+    /// fails, caller gets 500, nothing is applied, replay applies it); a window makes it k records
+    /// instead of one. Task 8's `crash_between_fsync_and_swap_replays_rather_than_reallocates` owns
+    /// it.
+    fn close_window(&mut self, window: CommitWindow<Responder>) {
+        let entries = window.len() as u64;
+        let started = window.opened_at();
+
+        let closed = match self.live.with_allocator(|a| window.allocate(a)) {
+            Ok(closed) => closed,
+            Err((e, waiters)) => {
+                // `allocate` leaves the high-water mark unchanged on this path, so the window has no
+                // effect at all — the same statement `ExecError::Alloc` already makes per batch.
+                self.fail_window_alloc(e, waiters, entries, started);
+                return;
+            }
+        };
+
+        // One record per entry — batch identity is preserved through the window (Task 8 joins on
+        // it) — appended in entries order, which is also apply order (Task 7b rule 1).
+        let mut failed_at: Option<(usize, WalError)> = None;
+        for (i, entry) in closed.iter().enumerate() {
+            if let Err(e) = self.wal.append(&entry.record) {
+                failed_at = Some((i, e));
+                break;
+            }
+        }
+        // **One fsync for the whole window.** This is the amortisation half of group commit; the
+        // allocation scope above is the point of it.
+        if failed_at.is_none() {
+            if let Err(e) = self.wal.fsync() {
+                // Every entry appended cleanly, so there is no "the entry whose append failed" here
+                // — the first waiter gets the real error arbitrarily and the rest `Poisoned`. No
+                // wire behaviour distinguishes them (`map_accept_error` folds `ExecError::Wal(_)`
+                // variant-blind to 500); the distinction is for whoever reads the two messages.
+                failed_at = Some((0, e));
+            }
+        }
+        self.observe_wal();
+        if let Some((index, error)) = failed_at {
+            self.fail_window_wal(closed, index, error, entries, started);
+            return;
+        }
+
+        // Durable, not yet in force. See `pause_point`.
+        self.pause_point(PauseSiteArg::AfterFsync);
+        // One buffer clone, one generation, **one swap** for every entry in the window.
+        let mut closed = closed;
+        let published = self.apply_window(&mut closed);
+
+        // Recorded after the swap, so a concurrent replay of a batch id can never observe a window
+        // where the generation has swapped but the idempotency index has not caught up.
+        for entry in &closed {
+            let (batch_id, body_hash) = entry.batch_key();
+            self.live.record_accepted_batch(
+                batch_id.to_string(),
+                body_hash,
+                entry.entity_ids.clone(),
+            );
+        }
+        self.observe_wal();
+
+        // **N waiters, one proof.** A death partway through this loop leaves some waiters acked and
+        // some not; every un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead`
+        // → 503, because its ingest is durably in force. That is the widening `ReceiptLost`'s own
+        // doc predicts for this task.
+        for entry in closed {
+            let ClosedEntry {
+                entity_ids,
+                mut waiters,
+                ..
+            } = entry;
+            // The last waiter takes the ids; only Task 8's join ever puts a second one here, and it
+            // clones. Popping rather than an `Option` dance: `waiters` is never empty (an entry is
+            // built with one), and a `Vec<EntityId>` per entry is up to `ingest_max_batch_rows`
+            // long, so cloning it unconditionally would be a real per-row cost for a case that
+            // cannot occur before Task 8.
+            let last = waiters
+                .pop()
+                .expect("an entry always has at least one waiter");
+            for waiter in waiters {
+                let entity_ids = entity_ids.clone();
+                self.ack(&waiter, Ack::Ingested { entity_ids }, &published);
+            }
+            self.ack(&last, Ack::Ingested { entity_ids }, &published);
+        }
+
+        self.health
+            .record_window_service(entries, started.elapsed().as_nanos() as u64);
+    }
+
+    /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
+    /// mark did not move. `AllocError` is `Copy`, so every waiter gets the real one.
+    fn fail_window_alloc(
+        &self,
+        error: AllocError,
+        waiters: Vec<Vec<Responder>>,
+        entries: u64,
+        started: std::time::Instant,
+    ) {
+        for entry in waiters {
+            for waiter in entry {
+                self.ack_failed(&waiter, ExecError::Alloc(error));
+            }
+        }
+        self.health
+            .record_window_service(entries, started.elapsed().as_nanos() as u64);
+    }
+
+    /// The window's append or fsync failed: **apply nothing**, and answer every waiter.
+    fn fail_window_wal(
+        &self,
+        closed: Vec<ClosedEntry<Responder>>,
+        index: usize,
+        error: WalError,
+        entries: u64,
+        started: std::time::Instant,
+    ) {
+        let mut real = Some(error);
+        for (i, entry) in closed.into_iter().enumerate() {
+            for (k, waiter) in entry.waiters.into_iter().enumerate() {
+                // The real error goes to the entry the failure belongs to; every other waiter gets
+                // `Poisoned`, which is precisely what its own append would have returned had it been
+                // attempted after the failure (`Wal::append`'s error arm poisons the handle), and
+                // what the WAL will in fact return for every subsequent call.
+                let e = if i == index && k == 0 {
+                    real.take().unwrap_or(WalError::Poisoned)
+                } else {
+                    WalError::Poisoned
+                };
+                self.ack_failed(&waiter, ExecError::Wal(e));
+            }
+        }
+        self.health
+            .record_window_service(entries, started.elapsed().as_nanos() as u64);
+    }
+
     fn execute(&mut self, job: Job) {
         let Job { command, respond } = job;
         match command {
+            // Unreachable on the deny lane while the lane follows the command; handled so the
+            // executor stays total over `Command`. A window of one entry is exactly Task 3a's
+            // per-command semantics, which is why there is no second ingest implementation.
             Command::Ingest {
                 rows,
                 batch_id,
                 body_hash,
-            } => self.execute_ingest(&respond, rows, batch_id, body_hash),
+            } => {
+                if let Some(entry) = self.admit(rows, batch_id, body_hash, respond) {
+                    let mut window = CommitWindow::new(self.next_window_seq());
+                    window.push(entry);
+                    self.close_window(window);
+                }
+            }
             Command::Change {
                 external_id,
                 entity,
@@ -1401,94 +1852,6 @@ impl Executor {
                 descriptors,
             } => self.execute_change(&respond, external_id, entity, op, descriptors),
         }
-    }
-
-    /// `allocate → append → fsync → apply → swap → ack`, with today's per-command semantics.
-    ///
-    /// **An append failure applies nothing here**, in deliberate contrast to the deny path below.
-    /// Applying un-fsynced ingest would make items appear and vanish across a crash, and lifecycle
-    /// §4's apply-anyway rule is written for `Delete`/`Suppress` only. Task 7b's rule 2 restates
-    /// this per window; getting it wrong here would pre-break it.
-    fn execute_ingest(
-        &mut self,
-        respond: &Responder,
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-    ) {
-        // Idempotency, evaluated **on the executor**: between a handler check and the enqueue an
-        // open window can close (Task 8), and a retry that saw "unknown" and then enqueued into a
-        // fresh window has double-allocated. Checked before `assign_sorted`, so a conflicting retry
-        // burns no entity ids.
-        if let Some((prev_hash, prev_ids)) = self.live.accepted_batch(&batch_id) {
-            return if prev_hash == body_hash {
-                let proof = Published::already_in_force(&prev_ids);
-                self.ack(
-                    respond,
-                    Ack::Ingested {
-                        entity_ids: prev_ids,
-                    },
-                    proof,
-                )
-            } else {
-                self.ack_failed(respond, ExecError::BatchConflict { batch_id })
-            };
-        }
-
-        // The fail-closed backstop for the widened check-to-apply race — see
-        // `LiveState::established_collisions`.
-        let collisions = self.live.established_collisions(&rows);
-        if collisions > 0 {
-            return self.ack_failed(
-                respond,
-                ExecError::DuplicateExternalId { count: collisions },
-            );
-        }
-
-        // I9/§11.1: signature-sorted assignment, on the executor, from day one and permanent.
-        let mut pending: Vec<PendingItem> = rows.iter().map(UnallocatedRow::to_pending).collect();
-        if let Err(e) = self.live.allocate_sorted(&mut pending) {
-            return self.ack_failed(respond, ExecError::Alloc(e));
-        }
-
-        // `terms` is **moved** out of each row, not cloned. `WalRow` has no `terms` field — the WAL
-        // stores raw descriptors — so the resolved set has to be carried separately to the buffer
-        // apply, and the obvious `rows.iter().map(|r| r.terms.clone())` costs one heap allocation
-        // per row. That showed up as +14% on the 10,000-row bench arm, the only batch size at which
-        // real work overtakes the fsync floor at all, and it was a regression this change
-        // introduced rather than a cost the previous shape paid.
-        let mut terms: Vec<Vec<TermId>> = Vec::with_capacity(rows.len());
-        let mut wal_rows: Vec<WalRow> = Vec::with_capacity(rows.len());
-        for (mut row, p) in rows.into_iter().zip(&pending) {
-            terms.push(std::mem::take(&mut row.terms));
-            wal_rows.push(row.into_wal_row(p.entity_id.expect("assign_sorted assigns every item")));
-        }
-        let entity_ids: Vec<EntityId> = wal_rows.iter().map(|r| r.entity_id).collect();
-
-        // **A failed batch burns entity ids.** Assignment happens before the append, so ids given
-        // to a batch whose append then fails are never issued again. That is I9-safe — ids stay
-        // strictly monotone and each is issued once — and it is Phase 1's behaviour too, since the
-        // handler allocated before appending. It is stated here because it is now visible in one
-        // place instead of split across two files.
-        let record = WalRecord::IngestBatch {
-            batch_id: batch_id.clone(),
-            body_hash,
-            rows: wal_rows.clone(),
-        };
-        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
-            self.observe_wal();
-            return self.ack_failed(respond, ExecError::Wal(e));
-        }
-
-        // Durable, not yet in force. See `pause_point`.
-        self.pause_point(PauseSiteArg::AfterFsync);
-        let published = self.apply_ingest(&wal_rows, terms);
-        // Recorded after the swap, so a concurrent replay of the same batch id can never observe a
-        // window where the generation has swapped but the idempotency index has not caught up.
-        self.live
-            .record_accepted_batch(batch_id, body_hash, entity_ids.clone());
-        self.observe_wal();
-        self.ack(respond, Ack::Ingested { entity_ids }, published);
     }
 
     /// `append → fsync → apply → swap → ack`, with lifecycle §4's deny-op exception.
@@ -1521,7 +1884,7 @@ impl Executor {
                 // Durable, not yet in force. See `pause_point`.
                 self.pause_point(PauseSiteArg::AfterFsync);
                 let published = self.apply_change(entity, op, terms);
-                self.ack(respond, Ack::Changed, published);
+                self.ack(respond, Ack::Changed, &published);
             }
             Err(e) => {
                 // Lifecycle §4, and the rule most easily broken by a plausible tidy-up: a
@@ -1540,8 +1903,19 @@ impl Executor {
         }
     }
 
-    /// Clone the buffer, insert the batch, publish.
-    fn apply_ingest(&self, rows: &[WalRow], terms: Vec<Vec<TermId>>) -> Published {
+    /// Clone the buffer **once**, insert every entry in the window, publish **once**.
+    ///
+    /// The amortisation this buys is the one that grows: the clone is O(total buffered items) and
+    /// the buffer only grows while flush is inert (stage 2.2), so a window of k entries pays it once
+    /// instead of k times — and the same clone is the deny-ack latency floor
+    /// (`ExecutorHealth::apply_nanos_total`).
+    ///
+    /// `terms` is **taken** out of each entry rather than borrowed: each row's resolved set is
+    /// *moved* into the buffer, where borrowing would force one `Vec<TermId>` clone per row on the
+    /// one thread every write is serialised through (Task 3a measured that clone at +14% on the
+    /// 10 000-row arm). `&mut` is what buys it; an entry's `terms` is empty after this and nothing
+    /// downstream reads it — the ack needs `entity_ids`, not terms.
+    fn apply_window(&self, closed: &mut [ClosedEntry<Responder>]) -> Published {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let mut buffer = (*generation.buffer).clone();
@@ -1550,17 +1924,20 @@ impl Executor {
         // Updated together in one critical section, so a `/control/changes` lookup and a
         // `/v1/items` drill-down can never disagree about the same item.
         let mut established_inverse = lock_recover(&self.live.established_inverse);
-        // `terms` is consumed, not borrowed: each row's resolved set is *moved* into the buffer.
-        // Borrowing would force `row_terms.clone()` here, one heap allocation per row on the one
-        // thread every write is serialised through.
-        for (row, row_terms) in rows.iter().zip(terms) {
-            // Contracts §3.4: no external id means nothing to establish. `None` must never collide
-            // with `None`, so this skips rather than inserting under a shared empty key.
-            if let Some(external_id) = &row.external_id {
-                established.insert(external_id.clone(), row.entity_id);
-                established_inverse.insert(row.entity_id, external_id.clone());
+        // Entries in vec order = append order = apply order (Task 7b rule 1): a mixed window must
+        // not replay in a different order than it applied, and the single vec is what makes that
+        // true by construction rather than by discipline.
+        for entry in closed.iter_mut() {
+            let terms = std::mem::take(&mut entry.terms);
+            for (row, row_terms) in entry.rows().iter().zip(terms) {
+                // Contracts §3.4: no external id means nothing to establish. `None` must never
+                // collide with `None`, so this skips rather than inserting under a shared empty key.
+                if let Some(external_id) = &row.external_id {
+                    established.insert(external_id.clone(), row.entity_id);
+                    established_inverse.insert(row.entity_id, external_id.clone());
+                }
+                buffer.insert_row_with_terms(row, row_terms);
             }
-            buffer.insert_row_with_terms(row, row_terms);
         }
         drop(established);
         drop(established_inverse);
@@ -1673,7 +2050,7 @@ impl Executor {
     /// a line number: whichever rewrite 7a, 7b or 9 performs, an ack that has moved above the swap
     /// takes this pause point with it, and a test parked here then observes the effect *not* in
     /// force.
-    fn ack(&self, respond: &Responder, ack: Ack, proof: Published) {
+    fn ack(&self, respond: &Responder, ack: Ack, proof: &Published) {
         self.pause_point(PauseSiteArg::BeforeAck);
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
