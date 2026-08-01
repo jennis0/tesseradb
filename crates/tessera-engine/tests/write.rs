@@ -643,6 +643,70 @@ fn an_ingest_append_failure_applies_nothing() {
     );
 }
 
+/// **The apply-anyway exception is scoped to the two deny ops, and this is the control that pins
+/// the scope.** An `Unsuppress` whose durability write failed applies **nothing**.
+///
+/// Lifecycle §4 makes a `Delete` or a `Suppress` whose WAL write failed apply anyway: an
+/// under-durable deny beats a refused one, because the alternative is a refusal that leaves an item
+/// visible. The exception cannot extend to `Unsuppress`. Applying one without durability re-exposes
+/// an item that replay still hides — the item is visible now, invisible again after a restart, and
+/// the caller's own 500 body reports the change as *not* applied, because
+/// `exec_failure_may_be_in_force` scopes "may be in force" to the deny ops as well. So an operator
+/// is told the item is still suppressed while every viewer can see it. That is the fail-open the
+/// deny rules exist to prevent, reached by widening a rule written to prevent a different one.
+///
+/// **Why this test and not the two beside it.** `deny_append_failure_still_applies` exercises
+/// `Suppress` only and asserts the *applies* half, so widening the scope leaves it green.
+/// `an_ingest_append_failure_applies_nothing` is the ingest control — a different lane, a different
+/// rule. Neither constrains which **ops** the exception covers, and the only other `Unsuppress`
+/// assertions in the tree are pure-function tests over the response body, which stay green while the
+/// engine does the opposite of what they report. Deleting the `matches!` guard in `execute_change`'s
+/// error arm was a green mutation across the whole suite before this test existed.
+///
+/// The suppression is established **durably** first, with no fault armed. Without that the test
+/// would be asserting that an item nothing ever hid stayed hidden — and it also fixes the order the
+/// mechanism requires: `Wal::fsync` poisons the handle on failure and `Wal::append` refuses every
+/// later write, so the fault must be armed after the state this test needs is already on disk.
+#[test]
+fn an_unsuppress_append_failure_applies_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+
+    let entity = entity_of(&engine, 3);
+    let before = visible(&engine);
+    assert_eq!(
+        before, N_ITEMS,
+        "the item is visible before it is suppressed"
+    );
+
+    engine
+        .accept_change(source_id_key(3), entity, ChangeOp::Suppress, None)
+        .expect("the suppression is durable: no fault is armed yet");
+    let suppressed = visible(&engine);
+    assert_eq!(
+        suppressed,
+        before - 1,
+        "the item must be hidden before the unsuppress, or this test asserts nothing"
+    );
+
+    faults.fail_next_fsyncs(1);
+    let err = engine
+        .accept_change(source_id_key(3), entity, ChangeOp::Unsuppress, None)
+        .expect_err("a failed durability write must be reported, never silently swallowed");
+
+    assert_eq!(
+        visible(&engine),
+        suppressed,
+        "the item must STAY hidden: an unsuppress that is not durable must not be applied, or a \
+         restart re-hides an item the operator was told was still suppressed anyway ({err})"
+    );
+    assert_eq!(
+        engine.write_executor_posture(),
+        ExecutorPosture::WalPoisoned,
+        "durability is owed, so the node must stop claiming it is ready"
+    );
+}
+
 /// **A poisoned WAL trips the posture rather than being retried** (lifecycle §4).
 ///
 /// The second half is what stops an obvious optimisation from being fail-open. "The posture is
