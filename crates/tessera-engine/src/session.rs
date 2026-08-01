@@ -853,9 +853,48 @@ impl Engine {
         self.row_projection_cache.stats()
     }
 
-    /// The fragment cache, for its `stats`/`evict`/`canonical_key_for` surface.
-    pub fn fragment_cache(&self) -> &Arc<FragmentCache> {
-        &self.fragment_cache
+    /// The fragment cache's operator gauges — the authz-tier twin of
+    /// [`Self::row_projection_cache_stats`]. `tessera_engine::FragmentCacheStats` is the name a
+    /// caller outside this crate should use for the return type: `tessera-server` may not depend on
+    /// `tessera-authz` (SA §3, enforced by `scripts/check-layers.sh`), and the type is not a public
+    /// path at that crate's root anyway.
+    ///
+    /// # Four narrow methods, not one `&Arc<FragmentCache>`
+    ///
+    /// This and the three below replace a `fragment_cache()` accessor that handed out the whole
+    /// cache. The needs are `stats`, `evict`, `canonical_key_for` and `rebuild_count`; what came
+    /// with them was `FragmentCache::set_memory_bound` — **a public knob that silently undoes the
+    /// bound `tessera_server::prepare`'s startup refusal exists to enforce**, reachable from any
+    /// holder of an `&Engine`. `crate::pins`' re-export argues exactly this discipline ("what
+    /// escapes is only what a caller outside this crate genuinely needs") and this was the one
+    /// place Task 5 did not honour it. The bound is set once, through
+    /// [`Self::set_cache_bounds`], by the one caller that has validated it.
+    pub fn fragment_cache_stats(&self) -> tessera_authz::fragment::CacheStats {
+        self.fragment_cache.stats()
+    }
+
+    /// Times the fragment cache has actually re-unioned postings (rather than reopening a
+    /// digest-verified `.frag` sidecar or hitting the in-memory tier). The observable that
+    /// separates an in-memory eviction from a genuinely cold rebuild.
+    pub fn fragment_cache_rebuilds(&self) -> u64 {
+        self.fragment_cache.rebuild_count()
+    }
+
+    /// The canonical cache key for `satisfied` under this engine's bundle and plugin identity — the
+    /// only way to name a fragment entry from outside, and therefore what [`Self::evict_fragment`]
+    /// takes. Pure; reveals nothing the caller did not supply.
+    pub fn fragment_canonical_key(&self, satisfied: &[TermId]) -> [u8; 32] {
+        self.fragment_cache.canonical_key_for(satisfied)
+    }
+
+    /// Drop one entry from the fragment cache's **in-memory** tier; returns whether it was there.
+    /// The digest-verified `.frag`/`.meta` pair is deliberately left on disk — see
+    /// `FragmentCache::evict`, which carries that argument and the caveat that a live `Session`
+    /// holding the fragment keeps its mapping alive regardless.
+    ///
+    /// Stage 2.4's conformance command is the intended caller.
+    pub fn evict_fragment(&self, key: &[u8; 32]) -> bool {
+        self.fragment_cache.evict(key)
     }
 
     /// The pin drain-list gauges — see [`PinStats`]. Wiring these onto `/control/status` needs

@@ -35,7 +35,20 @@
 //!    the index's bijection compose: an eviction pass that had to pop-then-skip a `Building` key
 //!    would leave a slot holding a tick with no index entry, permanently unevictable while still
 //!    charged, until `bytes` sits at the bound made entirely of entries none of which can be
-//!    chosen as a victim — **the bound stops holding and the counters say it is holding.**
+//!    chosen as a victim.
+//!
+//!    **The consequence of breaking it is a hang, and an earlier draft of this doc understated
+//!    it.** That draft said only "the bound stops holding and the counters say it is holding". The
+//!    truth is worse: the eviction loop below used to select its victim with
+//!    `recency.values().next()` and rely on [`Slots::remove`] to unlink it, so a victim whose slot
+//!    was not `Ready` was re-selected for ever — **spinning with the request-path mutex held**.
+//!    [`Slots::check`] is `#[cfg(debug_assertions)]`, so a `--release` build has no assertion to
+//!    trip: `an_undersized_bound_does_not_livelock`, the test named for exactly this, *hangs*
+//!    rather than fails. The loop now takes its victim with `BTreeMap::pop_first`, which removes
+//!    the index entry unconditionally, so every iteration shrinks `recency` by one and termination
+//!    is a property of the loop rather than of rule 1. Rule 1 still holds and is still tested; it
+//!    is no longer load-bearing for liveness, which is where a rule that can only be *stated* in a
+//!    shipped build should not be left.
 //! 2. **A build publishes only into its own slot,** identified by [`Slot::Building`]'s `seq` and
 //!    not merely by its state. Without the sequence number, a prune landing mid-build is silently
 //!    undone by the publish that follows it, and — the sharper failure — a build that unwinds
@@ -53,7 +66,17 @@
 //!    load-bearing convoys the branch's 48 admitted requests. Every removal path funnels into
 //!    [`Slots::remove`], which hands the value back rather than dropping it, and the caller drops
 //!    the collected `Vec` after the guard. [`SingleFlightCache::is_locked_now`] makes this
-//!    testable rather than merely stated.
+//!    testable rather than merely stated — and it is asserted on **both** removal paths: the
+//!    eviction pass inside a publish, and [`SingleFlightCache::retain_keys`], which is the path the
+//!    request-path pruners take and which frees whole sessions' worth of bitmaps at once.
+//!
+//!    This is the one rule with no type behind it: the `let mut dead` declared before the guard is
+//!    a convention, replicated in three functions here and three more in the authz twin. What
+//!    enforces it beyond the tests is that [`Slots::remove`] is `#[must_use]`, so the natural
+//!    lapse — `for key in doomed { slots.remove(key); }`, dropping the value in place — is a
+//!    compile error under this workspace's `-D warnings`, in both crates and in functions not yet
+//!    written. A `Deferred<V>` newtype returned out of each locked block was considered and
+//!    declined; see the Task 5 fix-round-1 report for the argument.
 //!
 //! # What the bound bounds, and what it does not
 //!
@@ -63,6 +86,40 @@
 //! `bound_bytes + admission_width × per_entry`. An operator sizing a box from the config key alone
 //! will under-provision; the arithmetic is stated with its measured per-entry figure on
 //! [`crate::cache::RowProjectionCache`].
+//!
+//! # The duplicated twin, and which test covers which rule in which crate
+//!
+//! `tessera_authz::single_flight` is a near-copy of this module. It cannot reuse it: `tessera-authz`
+//! sits *below* this crate in the graph and `scripts/check-layers.sh` enforces that direction, and
+//! the two use sites need different signatures anyway (that copy's build is `io::Result`, so it
+//! carries `get_or_try_build`). Every one of the rules below can therefore be right in one crate and
+//! wrong in the other, and **a test written once covers only the crate it lives in** — the round-1
+//! review found the authz guard's `seq` comparison could be reverted with that crate's suite still
+//! green, precisely because its twin test was missing.
+//!
+//! This table is the cheap durable fix: it names, per rule, the test in each crate, so a missing
+//! twin shows up by reading rather than by mutation testing. The authz copy carries the same table.
+//!
+//! | Rule / property | this crate | `tessera-authz` |
+//! |---|---|---|
+//! | 1 — `Building` is never a victim | `a_building_slot_is_never_evicted` | same name |
+//! | 1 — the eviction loop terminates regardless | `an_undersized_bound_does_not_livelock` | same name |
+//! | 2 — the publish compares `seq` | `a_prune_during_a_build_is_not_undone_by_the_publish` | `an_evict_during_a_build_is_not_undone_by_the_publish` |
+//! | 2 — the unwind guard compares `seq` | `an_unwinding_build_does_not_delete_a_later_builders_slot` | `a_failed_build_does_not_delete_a_later_builders_slot` |
+//! | 3 — the builder receives what it built | `an_entry_larger_than_the_bound_is_served_but_not_retained`, `an_undersized_bound_does_not_livelock` | same two names |
+//! | 4 — evicted values drop outside the lock | `evicted_arcs_are_dropped_outside_the_lock` | same name |
+//! | 4 — on the bulk-removal path too | `pruned_arcs_are_dropped_outside_the_lock` | `evicted_arcs_from_evict_are_dropped_outside_the_lock` |
+//! | the floor turns a byte bound into an entry bound | `tiny_entries_are_charged_the_floor`, the `const _` below | same name, the `const _` there |
+//! | the counted choke point | `a_hit_takes_exactly_one_lock`, `a_miss_takes_exactly_two_locks` | `a_hit_takes_one_lock_and_a_miss_takes_two` |
+//! | LRU order, not insertion order | `eviction_takes_the_least_recently_used` | same name |
+//! | `young_evictions` is the thrash alarm | `young_evictions_counts_only_never_reused_entries` | same name |
+//! | single-flight, non-blocking waiters, panic safety | `a_ready_hit_never_calls_build_again`, `concurrent_miss_…`, `distinct_keys_…`, `a_panicking_build_…` | same four names |
+//!
+//! **Three deliberate asymmetries**, listed so they are not read as gaps: bulk pruning
+//! ([`SingleFlightCache::retain_keys`], `retain_keys_removes_only_rejected_keys_in_one_acquisition`)
+//! exists only here, single-key `evict` (`evict_removes_exactly_one_key`) only there, and the `Err`
+//! form of a failed build (`a_failed_build_leaves_the_key_absent_so_a_retry_rebuilds`) only there,
+//! because this cache's build is infallible.
 //!
 //! Generic over `K`/`V` and free of any `RowProjection`/`Engine` knowledge, so the state machine
 //! itself is unit-testable here with a trivial `V` and a controllable `build` closure, without
@@ -131,10 +188,19 @@ enum Slot<K, V> {
     Building { seq: u64 },
     Ready {
         value: Arc<V>,
-        /// The map's own key, held here so a hit can re-index without a second hash lookup: a
-        /// touch needs both the `Arc<K>` (to re-insert into the recency index) and `&mut Slot` (to
-        /// store the new tick), and `get_key_value` + `get_mut` would be two lookups on the hot
-        /// path. One extra word per entry buys the hit path back.
+        /// The map's own key, held here for two distinct reasons that an earlier draft of this
+        /// comment ran together — it claimed only the second, and the code did not deliver it until
+        /// the round-1 fixes.
+        ///
+        /// 1. **No `K: Clone` on the hot path.** Re-inserting into the recency index needs an owned
+        ///    key; without this field a hit would clone `K` itself (a `String` allocation for
+        ///    `RowProjectionKey`'s slice name) on every warm request. Cloning the `Arc` is a
+        ///    refcount bump. This is what the field really buys, and it is worth its one word.
+        /// 2. **One hash lookup per hit.** A touch needs both the `Arc<K>` and `&mut Slot`, and
+        ///    `get_key_value` + `get_mut` would be two. This *is* now true — [`Slot::Ready`]'s
+        ///    `tick` is stamped inside the same `get_mut` arm that reads the value — but it was not
+        ///    while the new tick was written through a second `get_mut` after the first borrow
+        ///    ended, which is exactly what the code did when this comment first asserted it.
         key: Arc<K>,
         /// `max(weight, PER_ENTRY_FLOOR_BYTES)` — what this entry contributes to `bytes`. Stored
         /// rather than recomputed, so removal can never disagree with insertion about how much to
@@ -243,17 +309,29 @@ struct Slots<K, V> {
 }
 
 impl<K: Eq + Hash, V> Slots<K, V> {
-    /// **The one place a slot is removed**, and therefore the one place the map, the recency index
-    /// and `bytes` could go out of step. Every removal path funnels here: eviction, pruning, the
+    /// **The one place a slot is removed.** Every removal path funnels here: eviction, pruning, the
     /// publish's oversized arm, and the unwind guard.
+    ///
+    /// **It is not the only place all three structures are written** — an earlier draft of this doc
+    /// claimed it was "the one place the map, the recency index and `bytes` could go out of step",
+    /// and [`SingleFlightCache::publish`] disproves it by updating all three by hand on the
+    /// insertion side. The honest claim is narrower and is the one that matters: removal is the
+    /// direction with four callers, insertion has exactly one, and this is the same "one choke
+    /// point" argument [`SingleFlightCache::lock_slots`] makes for locking, applied to the
+    /// direction that most needs it.
     ///
     /// Returns the removed value **rather than dropping it**, so the caller can drop it after
     /// releasing the lock (this module's doc, rule 4). A `Building` slot has no value and returns
     /// `None` while still being removed.
     ///
-    /// This is the same "one choke point" argument [`SingleFlightCache::lock_slots`] makes for
-    /// locking, applied to the mutation that most needs it: three structures updated together, in
-    /// one function, so that a fourth caller cannot update two of them.
+    /// `#[must_use]` is rule 4's only compile-time enforcement. The lapse it refuses is
+    /// `for key in doomed { slots.remove(key); }` — the natural shape for a pruner someone adds
+    /// later — which drops n × ~125 MB of bitmaps, ~15 k containers each, inside the request-path
+    /// critical section. A caller that genuinely means to discard the value must say so with a
+    /// binding and a reason; the two that do are in the oversized-publish arm and the unwind guard,
+    /// and both remove a `Building` slot, which carries no value at all.
+    #[must_use = "rule 4: the removed value must be carried out of the critical section and dropped \
+                  after the lock is released, never dropped in place"]
     fn remove(&mut self, key: &K) -> Option<Arc<V>> {
         match self.map.remove(key) {
             None | Some(Slot::Building { .. }) => None,
@@ -431,6 +509,11 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
 
         let (owned_key, seq) = {
             let mut slots = self.lock_slots();
+            // Read before the `get_mut` borrow opens, so the whole touch — bumping `uses`, stamping
+            // the new tick — happens inside the one lookup. Consumed only on the hit branch; a
+            // tick read and not used costs nothing, because only uniqueness and monotonicity
+            // matter, never density.
+            let new_tick = slots.next_tick;
             let hit = match slots.map.get_mut(&key) {
                 None => None,
                 Some(Slot::Building { .. }) => {
@@ -445,17 +528,14 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
                     ..
                 }) => {
                     *uses = uses.saturating_add(1);
-                    Some((Arc::clone(value), Arc::clone(slot_key), *tick))
+                    let old_tick = std::mem::replace(tick, new_tick);
+                    Some((Arc::clone(value), Arc::clone(slot_key), old_tick))
                 }
             };
             if let Some((value, slot_key, old_tick)) = hit {
-                // The touch, inside this same acquisition: a fresh tick at the young end, and the
-                // index moved to match. Both halves of the bijection updated together.
-                let new_tick = slots.next_tick;
+                // The rest of the touch, inside the same acquisition: the index moved to match the
+                // tick already stamped above. Both halves of the bijection updated together.
                 slots.next_tick += 1;
-                if let Some(Slot::Ready { tick, .. }) = slots.map.get_mut(&key) {
-                    *tick = new_tick;
-                }
                 slots.recency.remove(&old_tick);
                 slots.recency.insert(new_tick, slot_key);
                 slots.check();
@@ -543,7 +623,9 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
         }
 
         if charged > bound {
-            slots.remove(key);
+            // A `Building` slot: no value, so nothing to carry out of the critical section.
+            let no_value = slots.remove(key);
+            debug_assert!(no_value.is_none(), "a Building slot carries no value");
             self.oversized_admissions.fetch_add(1, Ordering::Relaxed);
             return EvictionTally::default();
         }
@@ -551,9 +633,17 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
         // Evict BEFORE inserting, so the candidate cannot evict itself: rule 1 keeps `Building` out
         // of the recency index, so it is not a candidate victim, and the loop targets a bound that
         // already leaves room for it.
+        //
+        // **`pop_first`, not `values().next()` — this is what makes the loop terminate.** Taking the
+        // front entry *out* of the index here means every iteration shrinks `recency` by exactly
+        // one, whatever the map says about that key, so the loop is bounded by `recency.len()`
+        // unconditionally. Selecting without removing, and relying on `Slots::remove` to unlink,
+        // makes termination depend on the bijection holding — and `Slots::check` is
+        // `debug_assertions`-only, so in a `--release` build a broken bijection is a spin under the
+        // request-path mutex rather than an assertion. See rule 1 in this module's doc.
         let mut tally = EvictionTally::default();
         while slots.bytes + charged > bound {
-            let Some(victim) = slots.recency.values().next().map(Arc::clone) else {
+            let Some((_, victim)) = slots.recency.pop_first() else {
                 // Nothing left to evict: every remaining slot is `Building`. The candidate is
                 // admitted anyway rather than refused — rule 3 — and the transient overshoot is
                 // bounded by the in-flight builds, which hold their memory regardless of this map.
@@ -563,12 +653,23 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
                 Some(Slot::Ready { uses, charged, .. }) => (*uses == 0, *charged),
                 _ => (false, 0),
             };
-            if let Some(evicted) = slots.remove(&victim) {
-                dead.push(evicted);
+            // Counted only when a value actually came back. The `None` arm means the index named a
+            // key the map does not hold as `Ready` — a broken bijection — and counting it would put
+            // the operator's `evictions`/`evicted_bytes` gauges permanently ahead of the bytes
+            // actually freed, i.e. exactly the reading that would say the bound is being enforced
+            // while it is not.
+            match slots.remove(&victim) {
+                Some(evicted) => {
+                    dead.push(evicted);
+                    tally.count += 1;
+                    tally.bytes += freed;
+                    tally.young += u64::from(young);
+                }
+                None => debug_assert!(
+                    false,
+                    "the recency index named a key the slot map does not hold as Ready"
+                ),
             }
-            tally.count += 1;
-            tally.bytes += freed;
-            tally.young += u64::from(young);
         }
 
         let tick = slots.next_tick;
@@ -600,6 +701,14 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// **This is an O(n) pass under the request-path lock.** [`CacheStats::prune_scanned`] makes
     /// its cost observable; see `RowProjectionCache::prune_token` for the arithmetic and the threat
     /// model.
+    ///
+    /// **`keep` runs with the slot lock held**, unlike [`Self::get_or_build`]'s `build`, which goes
+    /// out of its way to run with no lock held at all. Stated because the asymmetry is the exact
+    /// shape a reader will get wrong: a predicate that consults the engine — or anything that could
+    /// re-enter this cache — self-deadlocks on a non-reentrant `Mutex`. Keep it a pure function of
+    /// the key, which is all either pruner needs. There is no cheap way to relax this: releasing
+    /// the lock to evaluate the predicate would mean re-checking every key on re-acquisition, and
+    /// the predicate is a couple of integer comparisons, so the constraint costs nothing to honour.
     pub(crate) fn retain_keys(&self, keep: impl Fn(&K) -> bool) -> usize {
         let mut dead: Vec<Arc<V>> = Vec::new();
         let removed = {
@@ -688,8 +797,10 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> Drop for RemoveOnUnwind<'_, K, V> {
             // A `Building` slot carries no value and no charged bytes, so this removal frees
             // nothing that could convoy — rule 4 is satisfied vacuously here rather than by
             // deferral. If this guard ever becomes able to remove a `Ready` slot, that stops being
-            // true and the value must be carried out of the critical section like every other path.
-            slots.remove(&self.key);
+            // true and the value must be carried out of the critical section like every other path;
+            // the binding and the assertion are what make that change loud rather than silent.
+            let no_value = slots.remove(&self.key);
+            debug_assert!(no_value.is_none(), "a Building slot carries no value");
             self.cache.entries.store(slots.map.len(), Ordering::Relaxed);
             slots.check();
         }
@@ -929,6 +1040,69 @@ mod tests {
             !VIOLATION.with(Cell::get),
             "an evicted value was dropped while the slot lock was held (rule 4): dropping a \
              ~125 MB bitmap frees ~15k containers and convoys every admitted request"
+        );
+    }
+
+    /// **Rule 4 on the pruning path** — the half `evicted_arcs_are_dropped_outside_the_lock` does
+    /// not reach, and the one that matters more.
+    ///
+    /// The eviction pass frees one entry at a time on a *miss*, which is already a multi-second
+    /// build. A prune frees a whole session's entries at once, on `/session/revoke`, which is
+    /// deliberately **outside** the admission gate (D13) — so `dead.clear()` inside `retain_keys`'s
+    /// critical section is n × ~125 MB of bitmaps, ~15 k containers each, freed while all 48
+    /// admitted requests block on the same mutex. That mutation left the whole workspace green
+    /// before this test existed (round-1 review, MX2).
+    #[test]
+    fn pruned_arcs_are_dropped_outside_the_lock() {
+        use std::cell::{Cell, RefCell};
+
+        thread_local! {
+            static PROBE: RefCell<Option<*const SingleFlightCache<u32, Tattle>>> =
+                const { RefCell::new(None) };
+            static VIOLATION: Cell<bool> = const { Cell::new(false) };
+        }
+
+        struct Tattle(u64);
+        impl CacheWeight for Tattle {
+            fn cache_weight_bytes(&self) -> u64 {
+                self.0
+            }
+        }
+        impl Drop for Tattle {
+            fn drop(&mut self) {
+                PROBE.with(|probe| {
+                    if let Some(cache) = *probe.borrow() {
+                        // SAFETY: the pointer is set and cleared inside the test body below, and
+                        // the cache outlives every value it holds.
+                        if unsafe { &*cache }.is_locked_now() {
+                            VIOLATION.with(|v| v.set(true));
+                        }
+                    }
+                });
+            }
+        }
+
+        let cache = SingleFlightCache::<u32, Tattle>::new(u64::MAX);
+        PROBE.with(|probe| *probe.borrow_mut() = Some(&cache as *const _));
+
+        // The returned `Arc`s are dropped at the end of each statement, so the cache is the unique
+        // owner and the prune below really does drop these values.
+        for key in 0..4u32 {
+            cache.get_or_build(key, || Tattle(BIG)).unwrap();
+        }
+
+        assert_eq!(
+            cache.retain_keys(|_| false),
+            4,
+            "the prune must remove all four"
+        );
+
+        PROBE.with(|probe| *probe.borrow_mut() = None);
+        assert_eq!(cache.len(), 0);
+        assert!(
+            !VIOLATION.with(Cell::get),
+            "a pruned value was dropped while the slot lock was held (rule 4): /session/revoke is \
+             outside the admission gate, so this convoys every admitted request"
         );
     }
 

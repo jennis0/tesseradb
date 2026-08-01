@@ -182,6 +182,17 @@ async fn g2_pins_survive_overlay_swaps() {
 /// The revoked session is unusable either way (the registry removal is what does that, and
 /// `c_revoke_then_viewport_is_rejected` above covers it), so the observable here is memory: the
 /// projection is gone from the cache.
+///
+/// **The observable is `row_projection_cache_stats().entries`, read through `TestServer::state`,
+/// and that is the whole point of this test.** Its first version asserted a 204 and that a survivor
+/// still got 200 — neither of which touches the cache — so deleting
+/// `state.engine.prune_token(req.token_id)` from the revoke handler left all 38 tests in this crate
+/// green while the doc above claimed the opposite (round-1 review, MX1). A test doc that asserts
+/// what the test does not is worse than no test: the next worker to refactor this handler sees
+/// green and reopens the Phase 1 deferral with a test standing over it.
+///
+/// The survivor's entry is asserted to *remain* for the symmetric reason: a `prune_token` that
+/// cleared the whole cache would satisfy "the doomed entry is gone" just as well.
 #[tokio::test]
 async fn revoke_prunes_the_token() {
     let tmp = TempDir::new().unwrap();
@@ -214,6 +225,13 @@ async fn revoke_prunes_the_token() {
         assert_eq!(resp.status(), 200);
     }
 
+    // Two sessions, two distinct `token_id`s, so two distinct cache keys.
+    assert_eq!(
+        server.state.engine.row_projection_cache_stats().entries,
+        2,
+        "each session's first viewport must have published its own projection"
+    );
+
     let resp = server
         .client
         .post(server.session_url("/session/revoke"))
@@ -223,6 +241,15 @@ async fn revoke_prunes_the_token() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 204);
+
+    // **The assertion the name promises.** Deleting `prune_token` from the handler fails here and
+    // nowhere else in this crate.
+    assert_eq!(
+        server.state.engine.row_projection_cache_stats().entries,
+        1,
+        "the revoke handler must prune the revoked token's projections — a 204 alone says nothing \
+         about whether it did"
+    );
 
     // The survivor must still be served — a prune that dropped everything would satisfy a
     // "the doomed entry is gone" check just as well.

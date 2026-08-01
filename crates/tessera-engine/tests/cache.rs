@@ -434,31 +434,35 @@ fn fragment_evict_drops_the_memory_tier_not_the_sidecar() {
     let engine = open_with(config(), &tmp, &bundle_root);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let cache = engine.fragment_cache();
     assert_eq!(
-        cache.rebuild_count(),
+        engine.fragment_cache_rebuilds(),
         1,
         "the first authorise unions postings"
     );
-    assert_eq!(cache.stats().entries, 1);
+    assert_eq!(engine.fragment_cache_stats().entries, 1);
 
-    let mut satisfied: Vec<_> = session.satisfied.iter().copied().collect();
-    satisfied.sort_unstable();
-    let key = cache.canonical_key_for(&satisfied);
+    // No sort: `canonical_key_for` sorts and dedups internally (see `canonical_key`'s doc — the key
+    // must not depend on the caller's term order), and a sort here reads as if it did.
+    let satisfied: Vec<_> = session.satisfied.iter().copied().collect();
+    let key = engine.fragment_canonical_key(&satisfied);
 
-    assert!(cache.evict(&key), "the entry was resident");
-    assert_eq!(cache.stats().entries, 0, "the in-memory tier is dropped");
+    assert!(engine.evict_fragment(&key), "the entry was resident");
+    assert_eq!(
+        engine.fragment_cache_stats().entries,
+        0,
+        "the in-memory tier is dropped"
+    );
     assert!(
-        !cache.evict(&key),
+        !engine.evict_fragment(&key),
         "a second evict of the same key removes nothing"
     );
 
     // Re-authorising the same credential repopulates the tier from the sidecar: an entry again,
     // but NOT a rebuild.
     let again = engine.authorise(&full_coverage_credential()).unwrap();
-    assert_eq!(cache.stats().entries, 1);
+    assert_eq!(engine.fragment_cache_stats().entries, 1);
     assert_eq!(
-        cache.rebuild_count(),
+        engine.fragment_cache_rebuilds(),
         1,
         "the .frag sidecar must survive an in-memory eviction — a re-open plus SHA-256, never a \
          re-union of postings"

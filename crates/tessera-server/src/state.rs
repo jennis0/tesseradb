@@ -25,6 +25,27 @@ pub struct SessionEntry {
 
 /// Every live session, indexed both by bearer token (the viewer plane's lookup) and by
 /// `token_id` (`/session/revoke`'s request shape, R5).
+///
+/// # This registry is a third attacker-driven memory path, and nothing here bounds it
+///
+/// Recorded because Task 5 closed the other two (the projection cache's byte bound and entry
+/// floor, and `FragmentCache`'s `key_memo` clear) and this one is not Track C's to close — the
+/// expiry sweep is the owner's/Track B's. **An expired session is 403'd but never removed**:
+/// [`AppState::authenticated_session`] checks the deadline and refuses, and nothing ever calls
+/// [`Self::revoke`] for it, so both maps grow for the life of the process at one entry per
+/// `/session/authorise` call. `/session/authorise` is behind the shared session credential, so this
+/// is not a viewer-plane exposure; a holder of that secret already has cheaper things to do.
+///
+/// **The consequence that is not obvious: it defeats the fragment cache's byte bound.** Each
+/// retained [`SessionEntry`] holds a `Session`, which holds an `Arc<FrozenFragment>` — a live
+/// mapping. `FragmentCache`'s bound governs *its own map*; evicting an entry frees nothing while
+/// any session still references it (see `FrozenFragment`'s `CacheWeight` impl). So dead-but-
+/// retained sessions pin exactly the memory the new bound was added to release. Each also holds a
+/// `HandleTable`, which grows with the session's own drill-downs.
+///
+/// [`Self::len`] is the gauge; `/control/status` publishing it is Track B's wiring, alongside
+/// `CacheStats`. A sweep — on a timer, or opportunistically on insert — is the fix, and it is a
+/// controller decision, not this track's.
 #[derive(Default)]
 pub struct SessionRegistry {
     by_token: FxHashMap<String, std::sync::Arc<SessionEntry>>,
@@ -55,6 +76,21 @@ impl SessionRegistry {
         if let Some(token) = self.token_id_to_token.remove(&token_id) {
             self.by_token.remove(&token);
         }
+    }
+
+    /// Sessions currently retained — **live and expired-but-not-swept alike**, which is the whole
+    /// reason it is worth publishing. See this type's doc: nothing removes an expired session, so a
+    /// number here that only ever rises, while `young_evictions` stays quiet, is the signature of
+    /// the retention path rather than of cache pressure. The two gauges answer different questions
+    /// and an operator needs both.
+    pub fn len(&self) -> usize {
+        self.by_token.len()
+    }
+
+    /// Whether any session is retained. Present because clippy asks for it beside [`Self::len`];
+    /// `len() == 0` is the meaningful reading, not this.
+    pub fn is_empty(&self) -> bool {
+        self.by_token.is_empty()
     }
 }
 

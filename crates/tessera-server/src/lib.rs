@@ -35,9 +35,6 @@ pub struct Prepared {
     pub config: Config,
 }
 
-/// Load config and open the engine. Fails closed: a missing `[disclosure]` section, an
-/// unreadable bundle, or a WAL that fails the positional CRC rule all return `Err` here, before
-/// any socket is ever bound.
 /// Task 5: refuse to start unless each cache bound admits at least `expected_concurrent_sessions`
 /// entries at the measured per-entry size.
 ///
@@ -46,9 +43,28 @@ pub struct Prepared {
 /// ≥25%-coverage mask at 10⁹ serialises to a *measured* 125.12 MB. A bound below the working set
 /// does not degrade the hit rate gently — under a cyclic access pattern LRU's hit rate is exactly
 /// zero, every request pays a rebuild, and because misses hold an admission permit for their whole
-/// multi-second build the gate saturates and *warm* requests are shed too. There is no policy that
-/// fixes that (random replacement gets ≈ C/N and nothing gets more), so the bound has to be right,
-/// and the only place to insist on it is before the listener binds.
+/// multi-second build the gate saturates and *warm* requests are shed too. So the bound has to be
+/// right, and the only place to insist on it is before the listener binds.
+///
+/// **A policy correction, because the earlier version of this comment was written to be cited and
+/// was wrong.** It claimed "there is no policy that fixes that (random replacement gets ≈ C/N and
+/// nothing gets more)" — i.e. that no policy which caches each miss beats zero under a pure cycle.
+/// That is false. LRU (and FIFO) get exactly zero because the victim is always the very next key to
+/// be requested; but **MRU**, and the cold-end/midpoint insertion the Task 5 design considered and
+/// declined, both cache each miss and still retain a *fixed* resident set of about `C − 1` of the
+/// `N` keys, because the entries at the protected end are never chosen as victims. Simulate cold-
+/// end insertion at `C = 3`, `N = 5`: keys 1 and 2 survive every cycle and the hit rate settles at
+/// 2/5, against LRU's exactly 0.
+///
+/// **The refusal still stands, on grounds that do not depend on the wrong claim.** `(C − 1)/N` is
+/// not a rescue at this cost ratio: the unlucky `N − C + 1` keys pay the full multi-second rebuild
+/// on *every* pan, holding an admission permit while they do it, so the gate saturation this
+/// refusal exists to prevent happens anyway — it merely spares some sessions. A configuration whose
+/// defence is "most sessions are fine" is one to refuse at startup, not to soften with a policy,
+/// and `CacheStats::young_evictions` alarms if the regime is entered another way. The correction is
+/// recorded rather than dropped because the design records this as a deliberate non-choice "with
+/// its arithmetic, so it is not rediscovered as an oversight", and arithmetic that is wrong is
+/// worse than none.
 ///
 /// The relation is asserted in two places for two different reasons, which is deliberate rather
 /// than duplication: `config::defaults_satisfy_task_5s_cache_relation` pins it for the *defaults*
@@ -66,11 +82,36 @@ pub struct Prepared {
 /// check at exactly 1× is admissible but leaves none. And neither bound is a memory *budget*: peak
 /// is `bound + compute_admission × per_entry`, which at 48-way admission is another ~6 GB — see
 /// `tessera_engine`'s `RowProjectionCache` doc, where that arithmetic lives with its operand.
+///
+/// **The per-entry figure is the 10⁹ one whatever the corpus is**, deliberately, and the message
+/// says so: this constant is not read from the bundle, so an operator serving a 10⁶-row corpus
+/// whose real projections are a few tens of megabytes in total is still asked for a bound in the
+/// gigabytes. That is a *ceiling*, not an allocation — the cache holds what it holds and the bound
+/// is only a refusal threshold, so an over-large bound costs nothing until the entries exist. It is
+/// left conservative rather than scaled because the figure that matters is the one this deployment
+/// could reach after a growth, and because scaling it would mean deriving a per-entry size from a
+/// manifest that does not carry one.
 fn validate_cache_bounds(config: &Config) -> Result<(), BoxError> {
     let per_entry = config::MEASURED_PROJECTION_BYTES_AT_1E9;
-    let working_set = config.expected_concurrent_sessions as u64 * per_entry;
+    // `checked_mul`, because this product is `u64 × u64` from an operator's file: at the parse-time
+    // ceiling on `expected_concurrent_sessions` it cannot overflow today, but a wrap would produce
+    // a *small* working set, i.e. it would silently admit exactly the collapsing configuration this
+    // function exists to refuse. A refusal is the only safe answer to an unrepresentable one.
+    let Some(working_set) = (config.expected_concurrent_sessions as u64).checked_mul(per_entry)
+    else {
+        return Err(format!(
+            "serve.expected_concurrent_sessions = {} × the measured {per_entry} B per entry \
+             overflows a u64, so no cache bound could satisfy it. Refusing to start: lower \
+             serve.expected_concurrent_sessions to the concurrency you actually expect.",
+            config.expected_concurrent_sessions
+        )
+        .into());
+    };
     for (key, value) in [
-        ("serve.row_projection_cache_bytes", config.row_projection_cache_bytes),
+        (
+            "serve.row_projection_cache_bytes",
+            config.row_projection_cache_bytes,
+        ),
         ("serve.fragment_cache_bytes", config.fragment_cache_bytes),
     ] {
         if value < working_set {
@@ -81,7 +122,12 @@ fn validate_cache_bounds(config: &Config) -> Result<(), BoxError> {
                  rate, it collapses it — every request pays a multi-second rebuild while holding \
                  an admission permit, so the gate saturates and warm requests are shed too. Raise \
                  {key} to at least {working_set}, or lower serve.expected_concurrent_sessions if \
-                 that is genuinely the concurrency you expect.",
+                 that is genuinely the concurrency you expect. Note that {key} is a CEILING, not \
+                 an allocation: nothing is reserved, and a bound larger than the corpus can fill \
+                 costs nothing. The {per_entry} B figure is measured at 10⁹ rows and is not scaled \
+                 to this bundle, so a small corpus is asked for a bound far above its real working \
+                 set — deliberately, because the number that matters is the one this deployment \
+                 could reach.",
                 config.expected_concurrent_sessions
             )
             .into());
@@ -90,6 +136,12 @@ fn validate_cache_bounds(config: &Config) -> Result<(), BoxError> {
     Ok(())
 }
 
+/// Load config and open the engine. Fails closed: a missing `[disclosure]` section, an
+/// unreadable bundle, or a WAL that fails the positional CRC rule all return `Err` here, before
+/// any socket is ever bound.
+///
+/// (This doc belongs to `prepare`. Task 5 inserted [`validate_cache_bounds`] between the two and
+/// left it heading that private function, so the crate's entry point had no doc at all.)
 pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     let config = config::load(config_path)?;
     validate_cache_bounds(&config)?;
@@ -142,7 +194,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     // exhaustive `EngineConfig` literals live in `crates/tessera-engine/tests/viewport.rs`, which
     // this stage's allowlist freezes for every track, so a new field would make the workspace
     // uncompilable with no in-allowlist repair. See `Engine::set_cache_bounds`.
-    engine.set_cache_bounds(config.row_projection_cache_bytes, config.fragment_cache_bytes);
+    engine.set_cache_bounds(
+        config.row_projection_cache_bytes,
+        config.fragment_cache_bytes,
+    );
     let engine = engine;
 
     // Phase 2 stage 2.1, Task 3b: the deny lane's own blocking runtime, built here so a runtime

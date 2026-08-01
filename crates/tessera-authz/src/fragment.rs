@@ -31,7 +31,23 @@ use sha2::{Digest, Sha256};
 use tessera_types::TermId;
 
 use crate::postings::{PostingRef, PostingsReader};
-use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache, SingleFlightError};
+use crate::single_flight::{CacheWeight, SingleFlightCache, SingleFlightError};
+
+/// The in-memory tier's operator gauges, re-exported here so that [`FragmentCache::stats`]'s
+/// return type is **nameable** by a caller outside this crate.
+///
+/// `crate::single_flight` is a private module, so `tessera_authz::CacheStats` is not a public path
+/// at all: a caller could invoke `stats()` and infer the type, but could not write it in a
+/// signature, a struct field or a `use`. The round-1 review caught the Task 5 report handing Track
+/// B `Engine::fragment_cache().stats() -> tessera_authz::CacheStats`, which does not compile — and
+/// whose obvious repair, adding a `tessera-authz` dependency to `tessera-server`, is a layering
+/// violation `scripts/check-layers.sh` refuses (`deny tessera-server tessera-authz`).
+///
+/// The path a server-plane caller should use is `tessera_engine::FragmentCacheStats`, which
+/// re-exports this one. A root-level `pub use` in this crate's `lib.rs` would be tidier still;
+/// that file is outside stage 2.1's Track C allowlist, so it is a stop-and-report item rather
+/// than a silent reach.
+pub use crate::single_flight::CacheStats;
 
 /// Union the postings of every term in `terms` into one bitmap: this *is* the authorisation
 /// decision (I2). Partitions the granted postings into Roaring views (unioned in bulk via
@@ -537,6 +553,23 @@ impl FragmentCache {
         self.slots.len()
     }
 
+    /// Entries currently memoised in `key_memo` — the observable that makes
+    /// [`KEY_MEMO_MAX_ENTRIES`] a tested bound rather than a stated one.
+    ///
+    /// It exists because the round-1 review found that deleting the `memo.clear()` was caught by
+    /// nothing **and could not have been**: there was no accessor, so no test could be written
+    /// against the bound on one of the two attacker-driven allocation paths this task closes.
+    ///
+    /// `cfg(test)` rather than `pub`: this is a memoisation detail with no operator meaning — its
+    /// size says how many distinct *credentials* have been presented since the last clear, not
+    /// anything about the cache's memory or hit rate — and the surface an operator needs is
+    /// [`Self::stats`]. Widening the public API to test an internal bound is the trade
+    /// `crate::single_flight::SingleFlightCache::is_locked_now` refuses for the same reason.
+    #[cfg(test)]
+    fn key_memo_len(&self) -> usize {
+        self.key_memo.lock().unwrap().len()
+    }
+
     fn frag_path(&self, key: &[u8; 32]) -> PathBuf {
         self.dir.join(format!("{}.frag", hex_encode(key)))
     }
@@ -643,5 +676,69 @@ impl FragmentCache {
                 SingleFlightError::Building => FragmentCacheError::Building,
                 SingleFlightError::Build(io_err) => FragmentCacheError::Io(io_err),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The `key_memo` bound, closed against its attacker.** `key_memo` is keyed by
+    /// `SHA-256(auth_data)`, so a caller holding the session credential grows it by one entry per
+    /// call with random `auth_data` whose descriptors the dictionary does not know: `satisfied` is
+    /// empty, the canonical key is identical every time, [`FragmentCache::slots`] takes a `Ready`
+    /// hit, **nothing in the byte accounting moves**, and the map grows for ever.
+    ///
+    /// This is one of the two allocation paths the byte bound does not reach, and deleting the
+    /// `memo.clear()` was caught by nothing before this test existed (round-1 review, MX3).
+    ///
+    /// The assertion is on the bound, not on the clear's exact schedule: what must hold is that the
+    /// map never exceeds [`KEY_MEMO_MAX_ENTRIES`] however many distinct credentials are presented.
+    /// Asserting "it is exactly 1 after the (n+1)th call" would pin the *policy* (clear-all rather
+    /// than evict-one), which this type's doc deliberately leaves free to change.
+    #[test]
+    fn key_memo_is_bounded_however_many_distinct_credentials_arrive() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let postings_path = temp.path().join("postings.arrow");
+        crate::postings::write_postings(&postings_path, &[vec![1u32, 2, 3]], 32).unwrap();
+        let reader = PostingsReader::open(&postings_path, false).unwrap();
+
+        let cache = FragmentCache::new(&temp.path().join("frag"), [7u8; 32], [9u8; 32]);
+
+        // Every call presents a *distinct* credential digest and an empty grant set — the exact
+        // shape the doc describes: one canonical key, one build, unbounded distinct hashes.
+        let calls = KEY_MEMO_MAX_ENTRIES + KEY_MEMO_MAX_ENTRIES / 2;
+        let mut high_water = 0usize;
+        for n in 0..calls {
+            let mut auth_data_hash = [0u8; 32];
+            auth_data_hash[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            cache
+                .get_or_build(&[], auth_data_hash, &reader, 0)
+                .expect("an empty grant set builds once and hits thereafter");
+            high_water = high_water.max(cache.key_memo_len());
+            assert!(
+                cache.key_memo_len() <= KEY_MEMO_MAX_ENTRIES,
+                "key_memo exceeded its bound after {} calls: {} > {KEY_MEMO_MAX_ENTRIES}",
+                n + 1,
+                cache.key_memo_len()
+            );
+        }
+
+        assert_eq!(
+            cache.rebuild_count(),
+            1,
+            "the attack costs the server no fragment builds at all — which is why the byte bound \
+             never sees it"
+        );
+        assert!(
+            high_water > KEY_MEMO_MAX_ENTRIES / 2,
+            "the test must actually have driven the map up to its bound, not merely stayed small"
+        );
+        assert!(
+            cache.key_memo_len() < calls,
+            "the map must have been cleared at least once: {} entries after {calls} distinct \
+             credentials",
+            cache.key_memo_len()
+        );
     }
 }
