@@ -37,6 +37,19 @@ pub use pins::{
     GeometryRefused, GeometryRefusedReason, PinStats, Reclaimed, DRAIN_DEPTH_ALARM, DRAIN_DEPTH_MAX,
 };
 pub use session::{default_compute_threads, Engine, EngineConfig, EngineError, Session};
+// Task 5's cache gauges. `single_flight` itself stays private — the cache, its slot state
+// machine and its four eviction rules are engine-internal — but the numbers `/control/status`
+// publishes have to cross the crate boundary, exactly as `PinStats` does above.
+pub use single_flight::CacheStats;
+// The fragment tier's gauges, under a distinguishing name because the two are the same shape and a
+// bare second `CacheStats` in one namespace would be a coin toss at every call site.
+//
+// **This re-export is what makes `Engine::fragment_cache_stats`'s return type nameable at all.**
+// `tessera-server` may not depend on `tessera-authz` (SA §3; `scripts/check-layers.sh` has
+// `deny tessera-server tessera-authz`), and `tessera_authz::CacheStats` is not a public path even
+// for a crate that could — its module is private there. A Track B worker wiring `/control/status`
+// writes `use tessera_engine::FragmentCacheStats;` and nothing else.
+pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
     EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,

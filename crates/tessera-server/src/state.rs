@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
+use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use tessera_engine::{Engine, Session};
@@ -24,6 +25,27 @@ pub struct SessionEntry {
 
 /// Every live session, indexed both by bearer token (the viewer plane's lookup) and by
 /// `token_id` (`/session/revoke`'s request shape, R5).
+///
+/// # This registry is a third attacker-driven memory path, and nothing here bounds it
+///
+/// Recorded because Task 5 closed the other two (the projection cache's byte bound and entry
+/// floor, and `FragmentCache`'s `key_memo` clear) and this one is not Track C's to close — the
+/// expiry sweep is the owner's/Track B's. **An expired session is 403'd but never removed**:
+/// [`AppState::authenticated_session`] checks the deadline and refuses, and nothing ever calls
+/// [`Self::revoke`] for it, so both maps grow for the life of the process at one entry per
+/// `/session/authorise` call. `/session/authorise` is behind the shared session credential, so this
+/// is not a viewer-plane exposure; a holder of that secret already has cheaper things to do.
+///
+/// **The consequence that is not obvious: it defeats the fragment cache's byte bound.** Each
+/// retained [`SessionEntry`] holds a `Session`, which holds an `Arc<FrozenFragment>` — a live
+/// mapping. `FragmentCache`'s bound governs *its own map*; evicting an entry frees nothing while
+/// any session still references it (see `FrozenFragment`'s `CacheWeight` impl). So dead-but-
+/// retained sessions pin exactly the memory the new bound was added to release. Each also holds a
+/// `HandleTable`, which grows with the session's own drill-downs.
+///
+/// [`Self::len`] is the gauge; `/control/status` publishing it is Track B's wiring, alongside
+/// `CacheStats`. A sweep — on a timer, or opportunistically on insert — is the fix, and it is a
+/// controller decision, not this track's.
 #[derive(Default)]
 pub struct SessionRegistry {
     by_token: FxHashMap<String, std::sync::Arc<SessionEntry>>,
@@ -54,6 +76,21 @@ impl SessionRegistry {
         if let Some(token) = self.token_id_to_token.remove(&token_id) {
             self.by_token.remove(&token);
         }
+    }
+
+    /// Sessions currently retained — **live and expired-but-not-swept alike**, which is the whole
+    /// reason it is worth publishing. See this type's doc: nothing removes an expired session, so a
+    /// number here that only ever rises, while `young_evictions` stays quiet, is the signature of
+    /// the retention path rather than of cache pressure. The two gauges answer different questions
+    /// and an operator needs both.
+    pub fn len(&self) -> usize {
+        self.by_token.len()
+    }
+
+    /// Whether any session is retained. Present because clippy asks for it beside [`Self::len`];
+    /// `len() == 0` is the meaningful reading, not this.
+    pub fn is_empty(&self) -> bool {
+        self.by_token.is_empty()
     }
 }
 
@@ -235,13 +272,44 @@ impl AppState {
         Ok(entry)
     }
 
-    /// Constant-time-ish (string equality; Phase 1 does not harden against timing side channels —
-    /// out of this phase's scope) bearer check for the session/control planes' shared-secret
-    /// credentials.
+    /// Bearer check for the session and control planes' shared-secret credentials, in time
+    /// independent of *where* a wrong guess diverges.
+    ///
+    /// **The previous implementation was `token == expected`, and its doc called that
+    /// "constant-time-ish". That claim was false** (Task 5): `str` equality short-circuits on the
+    /// first differing byte *and* on a length mismatch, which is a prefix oracle over the operator
+    /// and session credentials — an attacker who can time this recovers the secret byte by byte in
+    /// linear rather than exponential guesses. The scoping excuse ("Phase 1 does not harden against
+    /// timing side channels") did not survive contact with the fact that these two secrets are the
+    /// whole of the admin and session planes' authentication.
+    ///
+    /// **How this is fixed, and what it still does not claim.** Both sides are hashed to 32 bytes
+    /// and the digests compared with a fixed-length XOR-accumulate that has no early exit. Hashing
+    /// first is what makes the comparison independent of the credential's *length* as well as its
+    /// content — a fold over two byte strings of unequal length cannot be. It is not a defence
+    /// against an attacker who can measure the hash itself, and it does not pretend to be; what it
+    /// removes is the prefix oracle, which is the part that turns guessing into searching.
+    ///
+    /// **The viewer plane is deliberately not changed and is fine as it is.** A viewer token is
+    /// looked up in a `HashMap` by value ([`Self::authenticated_session`]) rather than compared
+    /// against a known secret, and it is 256 bits of `OsRng`, so there is no gradient for a
+    /// prefix-prober to climb. Stated here so the next reader does not "fix" it by symmetry.
     pub fn check_bearer(&self, presented: Option<&str>, expected: &str) -> Result<(), ApiError> {
-        match presented {
-            Some(token) if token == expected => Ok(()),
-            _ => Err(ApiError::BadCredential),
+        let Some(token) = presented else {
+            return Err(ApiError::BadCredential);
+        };
+        let presented_digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let expected_digest: [u8; 32] = Sha256::digest(expected.as_bytes()).into();
+        // No early exit, and no short-circuiting operator: every one of the 32 bytes is folded in
+        // before the single comparison. `|=` rather than `&&` is the whole point.
+        let mut diff = 0u8;
+        for (a, b) in presented_digest.iter().zip(expected_digest.iter()) {
+            diff |= a ^ b;
+        }
+        if diff == 0 {
+            Ok(())
+        } else {
+            Err(ApiError::BadCredential)
         }
     }
 }
@@ -301,7 +369,10 @@ mod compute_gate_tests {
         // The shed attempt above must not have left the slots semaphore permanently short a
         // permit -- a third admit, after the only holder releases, must succeed.
         let third = gate.admit().await;
-        assert!(third.is_ok(), "a permit leak would make this admit shed too");
+        assert!(
+            third.is_ok(),
+            "a permit leak would make this admit shed too"
+        );
     }
 
     /// No permit leak on the timeout path specifically: `try_acquire_owned` on the outer

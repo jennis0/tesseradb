@@ -158,6 +158,19 @@ pub struct TestServer {
     pub session_addr: SocketAddr,
     pub control_addr: SocketAddr,
     pub client: reqwest::Client,
+    /// The same `AppState` the three routers are serving, so a test can assert on an engine-side
+    /// observable a handler was supposed to move — not just on the status code it returned.
+    ///
+    /// Added by the Task 5 fix round for `revoke_prunes_the_token`, which asserted a 204 and a
+    /// survivor's 200 and therefore covered nothing its name claimed: deleting
+    /// `state.engine.prune_token(...)` from the revoke handler left all 38 `tessera-server` tests
+    /// green (round-1 review, MX1). `/control/status` will publish these gauges once Track B wires
+    /// it; until then this is the only route from an HTTP test to a cache observable.
+    ///
+    /// **Not a licence to bypass HTTP.** A test that drives the engine through this field instead
+    /// of through a request has stopped being a server test; the point is to *observe* after
+    /// driving the request normally.
+    pub state: Arc<AppState>,
 }
 
 impl TestServer {
@@ -309,6 +322,7 @@ pub async fn mount_server(engine: Engine, max_k: usize, compute_gate: ComputeGat
         session_addr,
         control_addr,
         client: reqwest::Client::new(),
+        state,
     }
 }
 

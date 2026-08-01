@@ -31,7 +31,23 @@ use sha2::{Digest, Sha256};
 use tessera_types::TermId;
 
 use crate::postings::{PostingRef, PostingsReader};
-use crate::single_flight::{SingleFlightCache, SingleFlightError};
+use crate::single_flight::{CacheWeight, SingleFlightCache, SingleFlightError};
+
+/// The in-memory tier's operator gauges, re-exported here so that [`FragmentCache::stats`]'s
+/// return type is **nameable** by a caller outside this crate.
+///
+/// `crate::single_flight` is a private module, so `tessera_authz::CacheStats` is not a public path
+/// at all: a caller could invoke `stats()` and infer the type, but could not write it in a
+/// signature, a struct field or a `use`. The round-1 review caught the Task 5 report handing Track
+/// B `Engine::fragment_cache().stats() -> tessera_authz::CacheStats`, which does not compile — and
+/// whose obvious repair, adding a `tessera-authz` dependency to `tessera-server`, is a layering
+/// violation `scripts/check-layers.sh` refuses (`deny tessera-server tessera-authz`).
+///
+/// The path a server-plane caller should use is `tessera_engine::FragmentCacheStats`, which
+/// re-exports this one. A root-level `pub use` in this crate's `lib.rs` would be tidier still;
+/// that file is outside stage 2.1's Track C allowlist, so it is a stop-and-report item rather
+/// than a silent reach.
+pub use crate::single_flight::CacheStats;
 
 /// Union the postings of every term in `terms` into one bitmap: this *is* the authorisation
 /// decision (I2). Partitions the granted postings into Roaring views (unioned in bulk via
@@ -316,6 +332,45 @@ impl FrozenFragment {
 /// `watermark: u64 LE (8) ‖ frozen_len: u64 LE (8) ‖ sha256(frozen_bytes) (32)`.
 const META_LEN: usize = 48;
 
+impl CacheWeight for FrozenFragment {
+    /// The mapped file's length — exact, free, and it *is* the frozen buffer's own length (see
+    /// [`FrozenFragment::open`], which refuses any mapping whose length disagrees with the
+    /// sidecar).
+    ///
+    /// **This bounds address space, not resident memory, and the difference is bigger here than
+    /// for the row-projection cache.** These are file mappings, so a fragment is resident only in
+    /// the pages actually touched, and — the part that matters operationally — **evicting a
+    /// fragment frees nothing while any live `Session` still holds it.** `Engine::authorise` hands
+    /// each session an `Arc<FrozenFragment>` that it keeps for `token_max_lifetime_secs`, so N
+    /// sessions sharing one grant set keep that mapping alive through any number of evictions of
+    /// the cache's own reference. The bound therefore governs *this map*; it is not a ceiling on
+    /// the process's mapped fragments, and an eviction of a hot fragment costs the next authorise a
+    /// re-open and a SHA-256 while freeing nothing at all.
+    fn cache_weight_bytes(&self) -> u64 {
+        self.mmap.len() as u64
+    }
+}
+
+/// The most `auth_data_hash → canonical_key` memoisations kept before the map is cleared.
+///
+/// **This bound closes an unbounded, attacker-driven allocation that the byte bound does not
+/// reach.** `key_memo` is keyed by `SHA-256(auth_data)`, so its growth is driven by the number of
+/// distinct *credentials* presented, not by the number of distinct grant sets. A caller holding the
+/// session credential can POST `/session/authorise` with random `auth_data` whose descriptors are
+/// all unknown to the dictionary: `Engine::authorise` drops unknown descriptors silently, so
+/// `satisfied` is empty, the canonical key is identical every time, [`Self::slots`] takes a `Ready`
+/// hit and builds nothing — while this map grows by a fresh 64-byte entry plus overhead on every
+/// call, for ever. No fragment build, no disk IO, and nothing in the byte accounting moves.
+///
+/// **Clearing the whole map rather than evicting one entry is deliberate and cheap.** This map is
+/// *pure memoisation* of [`canonical_key`] (see this type's doc): discarding it costs one re-derive
+/// — a sort, a dedup and a SHA-256 over the granted term list — and never a wrong answer. An LRU
+/// here would be a second recency structure to keep in step for no correctness gain.
+///
+/// 4096 is sized as "comfortably more distinct credentials than any Phase 2 deployment presents
+/// between clears", not measured; at ~80 B per entry it caps this map at ~330 KB.
+const KEY_MEMO_MAX_ENTRIES: usize = 4096;
+
 /// Directory-backed frozen fragment store.
 ///
 /// Cache key: SHA-256 over `bundle_identity ‖ auth_plugin_hash ‖ sorted term_id u32 LEs`
@@ -420,15 +475,65 @@ impl FragmentCache {
     /// path inside the bundle itself (Reference Sheet R1). `bundle_identity` is the generation's
     /// MANIFEST digest; `auth_plugin_hash` is the active auth plugin's hash. Does not touch the
     /// filesystem; `get_or_build` creates `dir` (and any missing ancestors) on first write.
+    /// **Arity deliberately unchanged by Task 5**, which added the in-memory tier's byte bound.
+    /// This constructor has fourteen call sites across `tessera-authz/tests/fragment.rs`,
+    /// `tessera-engine/tests/selection.rs` and `tests/compose.rs`, none of which any stage-2.1
+    /// track owns, so widening it here would have been a change no worker could commit. The bound
+    /// arrives instead through [`Self::set_memory_bound`], which `tessera-server` calls at startup
+    /// after validating it — the same shape `Engine::start_write_executor` uses for
+    /// `ingest_queue_bound`, and for the same reason.
+    ///
+    /// A cache built this way is **unbounded**, which is the pre-Task-5 behaviour. That is correct
+    /// for tests, benches and embedders; it is not correct for a server, and `tessera_server::
+    /// prepare` is what makes sure a server never gets one.
     pub fn new(dir: &Path, bundle_identity: [u8; 32], auth_plugin_hash: [u8; 32]) -> Self {
         FragmentCache {
             dir: dir.to_path_buf(),
             bundle_identity,
             auth_plugin_hash,
             key_memo: Mutex::new(FxHashMap::default()),
-            slots: SingleFlightCache::new(),
+            slots: SingleFlightCache::new(u64::MAX),
             rebuilds: AtomicU64::new(0),
         }
+    }
+
+    /// Bound the **in-memory** tier at `bytes`. The digest-verified `.frag` sidecar tier is
+    /// untouched by it — see [`Self::evict`].
+    pub fn set_memory_bound(&self, bytes: u64) {
+        self.slots.set_bound_bytes(bytes);
+    }
+
+    /// The canonical cache key for `satisfied` under this cache's bundle and plugin identity — the
+    /// only way to name an entry from outside, and therefore what [`Self::evict`] takes.
+    ///
+    /// Public because stage 2.4's conformance command needs to evict a *named* entry, and the key
+    /// is otherwise computed only inside [`Self::get_or_build`]. It is a pure function of its
+    /// inputs and reveals nothing a caller did not supply: the term set is the caller's own.
+    pub fn canonical_key_for(&self, satisfied: &[TermId]) -> [u8; 32] {
+        canonical_key(&self.bundle_identity, &self.auth_plugin_hash, satisfied)
+    }
+
+    /// Drop one entry from the **in-memory** tier. Returns whether anything was there.
+    ///
+    /// **The `.frag`/`.meta` sidecar pair is deliberately left on disk.** It is digest-verified on
+    /// every reopen ([`FrozenFragment::open`]), so an in-memory eviction costs the next caller a
+    /// re-open plus SHA-256 over the frozen bytes — ~60–80 ms **modelled** at the 125 MB operating
+    /// point — and never correctness. A caller that wants a genuinely cold rebuild (no mmap, no
+    /// sidecar) must delete the pair itself; this method is not that, and stage 2.4's conformance
+    /// command should say which of the two it means.
+    ///
+    /// Also note what eviction does *not* free: any live `Session` holding this fragment keeps its
+    /// mapping alive regardless — see [`FrozenFragment`]'s [`CacheWeight`] impl.
+    pub fn evict(&self, key: &[u8; 32]) -> bool {
+        self.slots.evict(key)
+    }
+
+    /// The operator gauges for the in-memory tier — see [`CacheStats`]. Lock-free.
+    ///
+    /// Wiring these onto `/control/status` needs `tessera-server/src/control.rs`, which stage 2.1's
+    /// allowlist gives to another track; this track exposes them and reports the wiring.
+    pub fn stats(&self) -> CacheStats {
+        self.slots.stats()
     }
 
     /// Number of times [`get_or_build`](Self::get_or_build) has actually called
@@ -446,6 +551,23 @@ impl FragmentCache {
     /// `tessera_engine::Engine::row_projection_cache_len`.
     pub fn slot_count(&self) -> usize {
         self.slots.len()
+    }
+
+    /// Entries currently memoised in `key_memo` — the observable that makes
+    /// [`KEY_MEMO_MAX_ENTRIES`] a tested bound rather than a stated one.
+    ///
+    /// It exists because the round-1 review found that deleting the `memo.clear()` was caught by
+    /// nothing **and could not have been**: there was no accessor, so no test could be written
+    /// against the bound on one of the two attacker-driven allocation paths this task closes.
+    ///
+    /// `cfg(test)` rather than `pub`: this is a memoisation detail with no operator meaning — its
+    /// size says how many distinct *credentials* have been presented since the last clear, not
+    /// anything about the cache's memory or hit rate — and the surface an operator needs is
+    /// [`Self::stats`]. Widening the public API to test an internal bound is the trade
+    /// `crate::single_flight::SingleFlightCache::is_locked_now` refuses for the same reason.
+    #[cfg(test)]
+    fn key_memo_len(&self) -> usize {
+        self.key_memo.lock().unwrap().len()
     }
 
     fn frag_path(&self, key: &[u8; 32]) -> PathBuf {
@@ -515,7 +637,16 @@ impl FragmentCache {
                 None => {
                     let key =
                         canonical_key(&self.bundle_identity, &self.auth_plugin_hash, satisfied);
-                    self.key_memo.lock().unwrap().insert(auth_data_hash, key);
+                    let mut memo = self.key_memo.lock().unwrap();
+                    // Bounded by clearing rather than by evicting: this map is pure memoisation, so
+                    // discarding it costs a re-derive and never an answer. See
+                    // `KEY_MEMO_MAX_ENTRIES` for the unbounded-growth path this closes — it is
+                    // driven by distinct *credentials*, which the byte bound below does not see at
+                    // all, because a credential granting nothing still produces a `Ready` hit.
+                    if memo.len() >= KEY_MEMO_MAX_ENTRIES {
+                        memo.clear();
+                    }
+                    memo.insert(auth_data_hash, key);
                     key
                 }
             }
@@ -545,5 +676,69 @@ impl FragmentCache {
                 SingleFlightError::Building => FragmentCacheError::Building,
                 SingleFlightError::Build(io_err) => FragmentCacheError::Io(io_err),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The `key_memo` bound, closed against its attacker.** `key_memo` is keyed by
+    /// `SHA-256(auth_data)`, so a caller holding the session credential grows it by one entry per
+    /// call with random `auth_data` whose descriptors the dictionary does not know: `satisfied` is
+    /// empty, the canonical key is identical every time, [`FragmentCache::slots`] takes a `Ready`
+    /// hit, **nothing in the byte accounting moves**, and the map grows for ever.
+    ///
+    /// This is one of the two allocation paths the byte bound does not reach, and deleting the
+    /// `memo.clear()` was caught by nothing before this test existed (round-1 review, MX3).
+    ///
+    /// The assertion is on the bound, not on the clear's exact schedule: what must hold is that the
+    /// map never exceeds [`KEY_MEMO_MAX_ENTRIES`] however many distinct credentials are presented.
+    /// Asserting "it is exactly 1 after the (n+1)th call" would pin the *policy* (clear-all rather
+    /// than evict-one), which this type's doc deliberately leaves free to change.
+    #[test]
+    fn key_memo_is_bounded_however_many_distinct_credentials_arrive() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let postings_path = temp.path().join("postings.arrow");
+        crate::postings::write_postings(&postings_path, &[vec![1u32, 2, 3]], 32).unwrap();
+        let reader = PostingsReader::open(&postings_path, false).unwrap();
+
+        let cache = FragmentCache::new(&temp.path().join("frag"), [7u8; 32], [9u8; 32]);
+
+        // Every call presents a *distinct* credential digest and an empty grant set — the exact
+        // shape the doc describes: one canonical key, one build, unbounded distinct hashes.
+        let calls = KEY_MEMO_MAX_ENTRIES + KEY_MEMO_MAX_ENTRIES / 2;
+        let mut high_water = 0usize;
+        for n in 0..calls {
+            let mut auth_data_hash = [0u8; 32];
+            auth_data_hash[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            cache
+                .get_or_build(&[], auth_data_hash, &reader, 0)
+                .expect("an empty grant set builds once and hits thereafter");
+            high_water = high_water.max(cache.key_memo_len());
+            assert!(
+                cache.key_memo_len() <= KEY_MEMO_MAX_ENTRIES,
+                "key_memo exceeded its bound after {} calls: {} > {KEY_MEMO_MAX_ENTRIES}",
+                n + 1,
+                cache.key_memo_len()
+            );
+        }
+
+        assert_eq!(
+            cache.rebuild_count(),
+            1,
+            "the attack costs the server no fragment builds at all — which is why the byte bound \
+             never sees it"
+        );
+        assert!(
+            high_water > KEY_MEMO_MAX_ENTRIES / 2,
+            "the test must actually have driven the map up to its bound, not merely stayed small"
+        );
+        assert!(
+            cache.key_memo_len() < calls,
+            "the map must have been cleared at least once: {} entries after {calls} distinct \
+             credentials",
+            cache.key_memo_len()
+        );
     }
 }
