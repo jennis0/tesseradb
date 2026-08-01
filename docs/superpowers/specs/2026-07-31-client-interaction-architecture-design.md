@@ -674,6 +674,41 @@ core is load-bearing for conformance and consistency, and merely convenient for
 everything else** — which argues for shipping the obligations list and conformance kit
 as first-class artifacts in their own right, not as documentation of the core.
 
+**Annotated 2026-08-01 — the paragraph above is wrong at scale, and the correction is
+structural rather than a caveat** *(measured by building it: the MVP viewer, `TileLayer` over
+`getTileData`, against the 10⁹ fixture)*. Request coalescing is listed as something a stranger
+*"silently lacks"* — a quality they forgo. At 10⁹ they do not forgo it, they fall over: **12 of 23
+viewport requests were shed with `429 backpressure` from a single browser tab with one user.** A
+depth-0 tile over a 5.2 × 10⁸-item visible set takes ~1.3 s, `TileLayer` issues six concurrently
+by default, and the compute-admission gate does what it is built to do. That is not degradation;
+it is one client denying itself service.
+
+**The cause is a seam mismatch this section did not notice, because it reads `TileLayer` as a
+convenience rather than as a request multiplier.** `POST /v1/viewport` is **viewport**-addressed:
+one call takes a bbox spanning many tiles and returns every tile's counts plus a flat points batch
+that `served` exists to let a reader split. `TileLayer` is **tile**-addressed: one fetch per tile.
+Adapting the former to the latter multiplies the request count by the tile count and re-pays the
+per-request cost — including, at shallow depths, the expensive part — once per tile. The wire
+format already anticipates the correct shape; the adapter throws it away.
+
+Three corrections follow, in descending order of how much they change:
+
+1. **Coalescing is an availability-correctness property, not a nicety.** §8.6's tile-addressed GET
+   alias makes a stranger's `getTileData` a five-line function — and this measurement says *the
+   alias is the shape that fails*, so shipping it without a coalescing story hands strangers the
+   self-DoS as the documented path. Either the alias carries a scale caveat, or the recommended
+   path becomes one request per viewport with client-side splitting by `served`.
+2. **The claim itself should be scoped**: a stranger gets a working map *at notebook and
+   mid-corpus scale*. §8.1's resident/streaming partition has a sibling nobody drew — a
+   **naive/coalescing** partition on the same axis, crossed where a shallow tile's cost exceeds
+   the admission timeout.
+3. **`Retry-After` is on the wire and nothing reads it.** The server sends `Retry-After: 1` with
+   every 429; the MVP client does not retry, so a shed tile is lost until the next pan. A naive
+   client treating 429 as fatal renders holes; one retrying without backoff amplifies the
+   saturation. Neither is obvious, and P6 says a correctness-affecting obligation a naive client
+   gets wrong is a defect to design out — so retry policy belongs in the replica store, not in the
+   obligations list.
+
 ### 8.3 XYZ/MVT — the URL-template seam *(verdict: achievable now; the exemplar)*
 
 One adapter opens MapLibre, OpenLayers and QGIS. Server-side, inside the trust
@@ -926,7 +961,36 @@ quadkey independently reinvented; Foursquare ships H3), and mark-count-as-densit
 novel part — the field's history says it should not carry the load alone. Adopt
 **histogram-equalisation** (datashader's `eq_hist`) as the recommended count→colour
 transfer, computed client-side from served counts; it is their hard-won answer to
-multi-decade distributions and beats a fixed log transfer. **Selection should become a
+multi-decade distributions and beats a fixed log transfer.
+
+**Annotated 2026-08-01 — "expected default" is right and unreachable at the resolution the
+mechanism currently offers** *(MVP viewer; owner observation: "waaaay too low resolution —
+ideally we want it full res from day one")*. The argument above says mark-count-as-density must
+not carry the load alone. It cannot be relieved by an underlay that is *blockier than the thing it
+is relieving*: at `serve.max_underlay_offset = 4` a 512-px tile carries 16 × 16 sub-cells — **32-px
+blocks** — which reads as a mosaic rather than as a density field, while the marks it sits beneath
+are individually placed. Full resolution means offset 9 (512 × 512 = 262,144 sub-cells per tile),
+and two things break before it:
+
+- **The evaluation is per sub-cell.** The engine issues one `count_range` per cell and evaluates
+  `4^offset` of them per tile (`underlay_cells_evaluated` exists to measure exactly this). Measured
+  cost at offset 3 was ~0.12 ms per tile; scaled naively to offset 9 that is ~0.5 s per tile, which
+  is not serveable. The alternative — one pass over the mask's set bits in the tile's range,
+  bucketed by Morton prefix — is O(cardinality) rather than O(cells), so it wins where the tile is
+  dense and loses badly at low zoom where the visible set is 5 × 10⁸. **Neither dominates**, which
+  makes this a route-chooser question of the same shape as the selection-route chooser this
+  repository already carries, and it wants measurement before a route is picked.
+- **The wire encoding is sparse.** `(cell u64, count u64)` is 16 B per non-empty cell, chosen when
+  cells were few and most were empty. At full resolution the density inverts: a dense raster with
+  implied geometry — the offset and the parent prefix already name the grid — is both smaller and
+  simpler, and it is what a `BitmapLayer` or a WebGL texture wants anyway. That is an **additive**
+  wire change, and it should be decided on the same numbers as the route.
+
+Note the second-order effect on §8.6's alias and on the annotation at §8.2: a full-resolution
+underlay is per-*viewport* raster-shaped, not per-tile pair-shaped, which pulls in the same
+direction as viewport-addressed requests. The three findings of this date are one workstream.
+
+**Selection should become a
 content-addressed filter operand** rather than a one-shot verb, so it composes with
 other filters, caches per §8.5, and gets §8.1's matched-versus-visible highlight
 affordance for free. And **per-scalar histograms are the one new verb mode 1 needs** —
@@ -992,7 +1056,41 @@ this design has not written: **how a client spends one budget across tiles that 
 it.** Note the boundary carefully — this is a *client-side rendering* budget, and it must
 not become a second selection rule: the served set is the server's answer, and a client
 that drops marks to fit a budget is choosing what to draw, not what is visible. Which
-marks a client declines to *draw* is presentation; which marks it is *served* is I7. Viz architecture §1 already
+marks a client declines to *draw* is presentation; which marks it is *served* is I7.
+
+**Annotated 2026-08-01 — measured, and the gap is wider than "spending a budget across
+competing tiles"** *(MVP viewer against the 2.4 × 10⁶ and 10⁹ fixtures; owner observation)*. The
+paragraph above frames the budget as an *allocation* problem: given the tiles a viewport wants,
+how is one budget divided among them. The measurement says the binding decision comes one step
+earlier — **which depth to request at all** — and that without it the budget cannot be spent at
+low zoom no matter how it is allocated.
+
+Marks drawn across the whole viewport, principal granted every term: **17 at depth 0, 50 at depth
+1, 242 at depth 2, 456 at depth 3.** Per tile that is 12–57 throughout, so §7.2 is behaving
+exactly as specified and the swing is entirely the tile count. **A viewport at depth 0 contains
+one tile**, and one tile's `m(T)` is the entire budget available to it — there is nothing to
+allocate. Design §7.2 carries the matching annotation and refuses the obvious alternative
+(making `m_target` depend on tiles-on-screen) on its own grounds: θ is viewport-invariant so that
+it does not move on a pan, and coupling it to the viewport reintroduces precisely that churn.
+
+So the scheduler's first job is **decoupling requested depth from viewport zoom**. Because
+priority prefixes nest, requesting depth *d* under a shallow view is a superset of the natural
+tile and pops nothing — the same nesting property §8.2 credits for making `best-available`
+refinement look right, doing work in a third place. The arithmetic is `marks ≈ m_target · 4^d`.
+
+**Two constraints this exposes, neither of which the Potree/Cesium prior art carries**, because
+their budgets are spent against a static local octree rather than a per-request server:
+
+- **`serve.max_tiles_per_request`.** A 5 × 10⁴ mark budget at `m_target = 16` wants depth 6 —
+  **4,096 tiles** over a full-extent view. That guard is sized for a viewport's worth of tiles,
+  not a budget's worth, and the two numbers have never been reconciled. Whichever way it is
+  resolved, it is a serving-availability decision and not the client's to make quietly.
+- **Depth choice and request coalescing are the same mechanism.** Asking for depth 6 at zoom 0 is
+  only affordable as *one* viewport-addressed request; as 4,096 tile-addressed fetches it is the
+  §8.2 self-DoS multiplied. The budget scheduler and the coalescing fix are therefore one
+  workstream, not two.
+
+Viz architecture §1 already
 fixes this boundary; this document fills in its protocol half.
 
 **The core is a first-class distributable, not a reference implementation.** It is the
@@ -1262,6 +1360,16 @@ archive is forbidden.*
 
 Brainstormed with the owner 2026-07-31. Reviewed by independent agents with no stake in
 the plan being right, per CLAUDE.md's working method.
+
+*Reviewed by construction, 2026-08-01.* The MVP client and deck.gl viewer
+(`2026-08-01-mvp-client-and-deckgl-viewer-design.md`) was built and run against the 2.4 × 10⁶,
+10⁸ and 10⁹ fixtures. Four annotations of that date come from that exercise rather than from
+reading: §8.2's "a stranger gets a working map" claim, falsified at 10⁹ by one tab shedding 12 of
+23 requests; §10's budget gap, which is a depth-choice problem before it is an allocation one;
+§9's underlay resolution, which cannot relieve mark-count-as-density while it is blockier than the
+marks; and design §7.2's knobs, none of which expresses marks-on-screen. **The method is worth
+recording as much as the findings: none of the four was visible in the document, and three of them
+were invisible below 10⁸.**
 
 *Draft reviews (one agent, four passes).* A conformance pass against the design
 documents and invariants, which corrected the secrecy/truthfulness division, the
