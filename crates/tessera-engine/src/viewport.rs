@@ -753,7 +753,7 @@ impl Engine {
         // here too: that would cost more to audit than the load itself costs to run.
         let serial_fallback_max_rows = self.serial_fallback_max_rows.load(Ordering::Relaxed);
         let tile_outcomes: Vec<Result<Option<TileResult>>> =
-            if should_fold_serially(total_rows_in_ranges, serial_fallback_max_rows) {
+            if should_fold_serially(total_rows_in_ranges, serial_fallback_max_rows, tiles.len()) {
                 tiles
                     .iter()
                     .zip(ranges)
@@ -893,10 +893,56 @@ pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 500_000_000;
 /// directly, so the one call site (`Engine::viewport`) can supply either the production constant
 /// or a test's override — see `Engine::set_serial_fallback_max_rows_for_test`'s doc for why an
 /// override exists at all and why it lives on `Engine`, not here.
+/// **Two terms since 2026-08-01** (owner decision, on the two-axis sweep —
+/// `docs/design-memos/2026-07-31-tile-parallelism-calibration.md`, "Follow-up 4, answered", and
+/// `probes/2026-08-01-two-axis-sweep/`). The row term is unchanged; [`TILE_PAR_MIN_TILES`] is new,
+/// and the fan-out runs when **either** fires.
 #[inline]
-fn should_fold_serially(total_rows_in_ranges: u64, threshold: u64) -> bool {
-    total_rows_in_ranges < threshold
+fn should_fold_serially(total_rows_in_ranges: u64, threshold: u64, tiles: usize) -> bool {
+    total_rows_in_ranges < threshold && tiles < TILE_PAR_MIN_TILES
 }
+
+/// The tile-count arm: at or above this many tiles, take the fan-out whatever the row count says.
+///
+/// **Why a second term exists.** §14's campaign proved no row-count constant and no
+/// fraction-of-corpus formula can classify correctly, and named "row count, tile count" as the
+/// disproved quantities — but it never varied tile count independently. The `natural` family holds
+/// it near-constant (81 at z4, 289 from z5 up, at every scale, because its span formula is exactly
+/// 16 cells wide at every depth) and `full-extent` tops out at 1,024, so **no measurement in that
+/// campaign exceeded 1,024 tiles**. The 2026-08-01 sweep varied it — constant bbox, varying depth,
+/// 210 cells over 35 shapes x 3 scales x 2 grant densities, each cell a single-variable A/B of this
+/// very branch — and found the axis the campaign could not see.
+///
+/// **Measured.** Total regret against the per-cell best arm falls **244.47 ms -> 18.38 ms (13.3x)**;
+/// worst single cell 4.09x -> 2.81x; misclassified cells 73/210 -> 27/210. Both terms earn their
+/// place: dropping the row term costs 56% more regret (it catches `full-extent` at 10^9, which has
+/// only 16-1,024 tiles), and dropping this one is the status quo. 4,096 is an optimum on that data
+/// rather than a round number — 2,048 measures 20.37 ms, 8,192 measures 34.55 ms.
+///
+/// **Why tile count is the stable axis and row count is not.** The per-tile *floor* — range setup,
+/// `count_range` entry, probe overhead — measures **85 -> 141 ns across a 400x change in corpus
+/// size and both grant densities**, mask-independent by construction. The row coefficient has no
+/// such stability: **0.46 ns/row** for a whole-corpus z2 shape at 2.42M against **0.0019 ns/row**
+/// for a natural z4 shape at 10^9 — a 240x spread in the same coefficient. That is B9's tiered
+/// decode stated as a mechanism: rows stopped measuring work, tiles did not.
+///
+/// **This cannot reopen the 10^9 regression the row term protects.** The 354,900,645-row shape that
+/// sized [`SERIAL_FALLBACK_MAX_ROWS`] is `natural/z4/s6`, which resolves **81 tiles** — this
+/// threshold sits 14-50x above the entire `natural` family, and all eighteen of its cells
+/// re-measured serial-favouring. `the_natural_family_cannot_reach_the_tile_arm` pins the arithmetic.
+///
+/// **What it does not fix**, recorded so nobody reads it as complete: every residual above 1.6x is
+/// `full-extent` at <= 1,024 tiles — a whole-corpus sweep at low zoom, where this axis has nothing
+/// to say and the row term is below threshold because the corpus is. That is §14.4's tension,
+/// undiminished; the calibration memo's recommendation 1 (a corpus-size-aware row threshold) is
+/// what addresses it. Everything this arm itself introduces is <= 1.57x and <= 0.21 ms absolute, in
+/// six cells, all at exactly 4,225 tiles.
+///
+/// **Calibrated on one label configuration** (`categories-subclass`). Contiguity — `probes/`
+/// measures run ratio spanning 1.00-5.11 across label sets at equal coverage — feeds per-tile work
+/// directly and was sampled at one value. A materially more contiguous deployment wants this
+/// re-derived; see the plan's per-deployment-calibration item.
+pub const TILE_PAR_MIN_TILES: usize = 4_096;
 
 /// D-F's per-tile scheduling grain: the number of tiles rayon hands to one worker before it will
 /// split the range again. Only reachable once `total_rows_in_ranges >= SERIAL_FALLBACK_MAX_ROWS`
@@ -1111,11 +1157,11 @@ mod tests {
     #[test]
     fn should_fold_serially_is_a_strict_less_than_at_the_calibrated_boundary() {
         let t = SERIAL_FALLBACK_MAX_ROWS;
-        assert!(should_fold_serially(0, t));
-        assert!(should_fold_serially(t - 1, t));
-        assert!(!should_fold_serially(t, t));
-        assert!(!should_fold_serially(t + 1, t));
-        assert!(!should_fold_serially(u64::MAX, t));
+        assert!(should_fold_serially(0, t, 1));
+        assert!(should_fold_serially(t - 1, t, 1));
+        assert!(!should_fold_serially(t, t, 1));
+        assert!(!should_fold_serially(t + 1, t, 1));
+        assert!(!should_fold_serially(u64::MAX, t, 1));
     }
 
     /// §14 fix round 1: `should_fold_serially` takes its threshold as a parameter now (so
@@ -1124,12 +1170,68 @@ mod tests {
     /// production value.
     #[test]
     fn should_fold_serially_honours_an_arbitrary_threshold_not_just_the_constant() {
-        assert!(should_fold_serially(5, 10));
-        assert!(!should_fold_serially(10, 10));
-        assert!(!should_fold_serially(15, 10));
+        assert!(should_fold_serially(5, 10, 1));
+        assert!(!should_fold_serially(10, 10, 1));
+        assert!(!should_fold_serially(15, 10, 1));
         // The override this task added forces parallel unconditionally by setting the threshold
         // to 0 (`total_rows_in_ranges < 0` is never true for a `u64`) — pin that too.
-        assert!(!should_fold_serially(0, 0));
+        assert!(!should_fold_serially(0, 0, 1));
+    }
+
+    /// The tile arm at its exact boundary (owner decision 2026-08-01; [`TILE_PAR_MIN_TILES`] carries
+    /// the 210-cell evidence).
+    ///
+    /// **The row count is held far below its threshold in every case**, so reverting to the
+    /// one-term predictor fails here and nowhere else. That is the mutation this test exists to
+    /// kill, and it was verified to do so.
+    #[test]
+    fn the_tile_arm_takes_the_fan_out_at_its_boundary_whatever_the_row_count_says() {
+        let rows_far_below = 1_u64;
+        let t = SERIAL_FALLBACK_MAX_ROWS;
+
+        assert!(
+            should_fold_serially(rows_far_below, t, TILE_PAR_MIN_TILES - 1),
+            "one tile below the arm, rows far below their threshold: serial"
+        );
+        assert!(
+            !should_fold_serially(rows_far_below, t, TILE_PAR_MIN_TILES),
+            "AT the arm the fan-out runs though the row term alone would fold serially -- this is \
+             the whole of the 2026-08-01 change"
+        );
+        assert!(!should_fold_serially(rows_far_below, t, TILE_PAR_MIN_TILES + 1));
+    }
+
+    /// The rule is a disjunction: either term alone suffices and neither is necessary. A mutation
+    /// making it a conjunction must fail.
+    #[test]
+    fn the_two_terms_are_a_disjunction_not_a_conjunction() {
+        let t = SERIAL_FALLBACK_MAX_ROWS;
+        assert!(!should_fold_serially(t, t, 1), "rows fire alone");
+        assert!(!should_fold_serially(1, t, TILE_PAR_MIN_TILES), "tiles fire alone");
+        assert!(
+            should_fold_serially(t - 1, t, TILE_PAR_MIN_TILES - 1),
+            "neither fires -- the only serial case"
+        );
+        assert!(!should_fold_serially(t, t, TILE_PAR_MIN_TILES), "both fire");
+    }
+
+    /// The `natural` viewport family cannot reach the tile arm, which is what makes the 2026-08-01
+    /// change unable to reopen the 10^9 regression [`SERIAL_FALLBACK_MAX_ROWS`] exists to protect.
+    ///
+    /// Its span is exactly 16 cells wide at every depth, giving 81 tiles at z4 and 289 from z5 up at
+    /// every scale — including `natural/z4/s6`, the 354,900,645-row shape that sized the row
+    /// threshold. Pinning the arithmetic tells a future worker who widens that span, or lowers the
+    /// arm, which guarantee they are spending.
+    #[test]
+    fn the_natural_family_cannot_reach_the_tile_arm() {
+        const NATURAL_MAX_TILES: usize = 289;
+        assert!(
+            NATURAL_MAX_TILES < TILE_PAR_MIN_TILES,
+            "the natural family tops out at {NATURAL_MAX_TILES} tiles and the arm is at \
+             {TILE_PAR_MIN_TILES}. If this fails, the tile arm can fire on ordinary client \
+             viewports at 10^9 -- the regression the row threshold was raised to fix."
+        );
+        assert!(should_fold_serially(354_900_645, SERIAL_FALLBACK_MAX_ROWS, 81));
     }
 
     /// §14: `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 (see its doc). A fixture that genuinely
