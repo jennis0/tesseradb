@@ -163,6 +163,32 @@ request cover every tile the view touches.
 `[serve] stage_timing = true`. Absence is a configuration fact, not an error, and the stats panel
 says so.
 
+## Why the points sit on a grid
+
+They are on a lattice at high zoom, and it is the fixtures, not the renderer.
+
+`data/scaled/geometry.parquet` carries `entity_id` and **`morton`** — no x/y. Given Morton codes,
+the build reconstructs positions by de-interleaving (`tessera-build/src/input.rs`'s
+`PointCols::Morton` arm), so stored x/y are **integer cell coordinates**, 0…65535. These fixtures
+use an extent of exactly `0…65536`, so one data unit is one cell and every point lands on an
+integer. Probed: 65,532 distinct x values across ~1 M served points.
+
+This is faithful rather than broken — **a Morton code does not contain the sub-cell residual**
+(design §15: *"what Morton cannot recover is only the residual within a cell"*). A bundle built
+from genuine x/y goes down the `PointCols::Xy` path, which passes floats through untouched.
+
+**It became visible only once the mark budget landed.** A cell is `512/65536` world units, i.e.
+`2^zoom / 128` pixels — sub-pixel below deck zoom 7, about 8 px at zoom 10. The tile-addressed MVP
+never went past depth 3; the budget-driven client reaches depth 10 routinely.
+
+Nothing masked is affected: counts, tile selection and θ all work on Morton codes. Display position
+only.
+
+*Open, and deliberately not changed here:* the reconstruction uses `cx as f32`, the cell's
+lower-left **origin**, so marks hug cell corners rather than sitting centred — a systematic
+half-cell bias. `cx as f32 + 0.5` is the unbiased choice, but it changes stored bytes and the
+reference oracle would have to agree.
+
 ## A free positional ground-truth check
 
 The synthetic corpus carries **deliberate structures** (`probes/dataset.md` §"Replicas 0–4 pin
