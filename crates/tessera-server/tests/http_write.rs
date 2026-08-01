@@ -1961,9 +1961,20 @@ fn ingest_admission_sheds_before_the_blocking_pool_fills() {
 /// property of the fixture, not of the deny lane, and it is stated here so a later reader does not
 /// mistake it for part of what is being proved.
 ///
-/// **Mutations this kills:** an admission bound applied to `changes` as well as `ingest` (429
-/// instead of 200); routing `changes` through `tokio::task::spawn_blocking` instead of
-/// `spawn_on_deny_lane` (the pool is full, so it hangs and the bounded await fails).
+/// **The mutation this kills:** an admission bound applied to `changes` as well as `ingest` —
+/// planted, and it answers 429 where this asserts 200.
+///
+/// **The mutation it does NOT kill, stated rather than claimed.** An earlier version of this doc
+/// also claimed it would catch `changes` being routed through `tokio::task::spawn_blocking` instead
+/// of `spawn_on_deny_lane`. Planting that left this test **green**, and the reason is arithmetic:
+/// two parked handlers against a four-thread pool leave two free, so the suppression finds a shared
+/// thread and completes. Making it bite would need the pool sized to exactly the admission bound,
+/// which would then starve the very requests that set the fixture up. That property is pinned where
+/// it belongs — `control::tests::a_deny_does_not_queue_behind_a_saturated_blocking_pool`, which
+/// saturates the ambient pool completely and whose mutation is `spawn_on_deny_lane`'s whole body.
+/// (That mutation must replace the whole function: patching only its `Some(rt)` fast-path arm
+/// leaves the lazy `None` arm still reaching the deny runtime, and the test stays green for a
+/// reason that has nothing to do with the property.)
 #[test]
 fn changes_never_429s() {
     let runtime = tokio::runtime::Builder::new_multi_thread()

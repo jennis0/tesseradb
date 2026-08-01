@@ -2041,8 +2041,30 @@ mod tests {
              'the queue fits'; it must be named: {text}"
         );
 
+        // **Leg 1b — the reserved deny headroom is load-bearing, and the leg above does not show
+        // it.** Planting "drop the `RESERVED_DENY_HEADROOM_BYTES` term" left the leg above GREEN:
+        // its queue worst case (16 GiB) exceeds the ceiling on its own, so the reserve never
+        // decided anything. This leg is the one where the reserve is the *only* reason the
+        // configuration is refused — the queue fits, and it fits with nothing left over for the
+        // denies that are never shed for load. That is precisely lifecycle §4's headroom rule, and
+        // without this leg the term could be deleted with every test still passing.
+        let snug = 16 * 1024 * 1024 + RESERVED_DENY_HEADROOM_BYTES / 2;
+        let err = parse(&valid_toml_with(
+            "",
+            &format!(
+                "ingest_queue_bound = 1\ningest_max_batch_bytes = 16777216\n\
+                 wal_hard_limit_bytes = {snug}"
+            ),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(err, ConfigError::WalHeadroom { .. }),
+            "the queue alone fits under this ceiling; it is the reserved deny headroom that must \
+             not, and dropping that term from the relation must not go unnoticed: {err}"
+        );
+
         // The same configuration one byte of ceiling above the requirement loads, which is what
-        // makes the leg above a statement about the relation rather than about the numbers.
+        // makes the legs above a statement about the relation rather than about the numbers.
         let ok_ceiling = 1024u64 * 16 * 1024 * 1024 + RESERVED_DENY_HEADROOM_BYTES + 1;
         let config = parse(&valid_toml_with(
             "",
