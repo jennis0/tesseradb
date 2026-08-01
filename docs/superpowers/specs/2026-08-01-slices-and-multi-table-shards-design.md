@@ -1,7 +1,7 @@
 # Slices and multi-table shards — design
 
 **Date:** 2026-08-01
-**Status:** Brainstormed design, pending independent review. Positioned like the client-interaction spec: a forward design that feeds later amendments into the corpus, not an edit to the architecture design today. Where this document and the corpus disagree, the corpus governs until the amendments in §10 are folded in by owner decision.
+**Status:** Brainstormed design, pending independent review. Positioned like the client-interaction spec: a forward design that feeds later amendments into the corpus, not an edit to the architecture design today. Where this document and the corpus disagree, the corpus governs until the amendments in §11 are folded in by owner decision.
 **Reads against:** architecture design §5.1, §7.2, §9, §11–§13, §16, Appendix C; contracts §2.2, §2.6, §3.1; lifecycle §3, §5; implementation plan §14; probes/optimisations §4.
 
 ---
@@ -62,7 +62,7 @@ count(group) ≥ max(abs_min, p × corpus_size)
 - The **absolute floor `abs_min`** stops small deployments from promoting noise.
 - A **hard cap** on promoted-table count exists as independent config, so an operator can clamp fan-out below ⌊1/p⌋ regardless of the histogram.
 - **Hysteresis**: promote at ≥ the threshold, demote below half of it, so groups oscillating around the floor don't thrash rows at every compaction.
-- All four parameters are **config with measured defaults, never constants in code**. `p` in particular is a measured parameter — §8's fan-out sweep is what sets it, because the high-coverage principal pays the fan-out (§8).
+- All four parameters are **config with measured defaults, never constants in code**. `p` in particular is a measured parameter — §9's fan-out sweep is what sets it, because the high-coverage principal pays the fan-out (§9).
 
 Evaluated at each build/compaction from the current histogram. On the synthetic corpus (top 500 groups = 82.4% coverage) a modest `p` captures most of the coverage with far fewer than 500 tables; on the author-like histogram nothing promotes and the layout degrades to today's, which is the correct behaviour for that shape.
 
@@ -89,7 +89,27 @@ Two directions, sharply different:
 
 **Specified as optional, not built:** a per-session **table visibility vector** — one gate evaluation per promoted group yielding satisfied / unsatisfied / dirty — used for rule-out only, dirty-bit-guarded, adoptable only after the conformance suite grows a canary for it. The layout earns its keep through contiguity alone.
 
-## 7. Identity stability
+## 7. On-disk layout, mmap and the write path
+
+The corpus's storage model (§10.1: one file per column per segment, raw fixed-width Arrow IPC buffers, page-aligned, synced to NVMe, mmap'd zero-copy, immutable versioned prefixes) survives intact; multi-table forces exactly one decision inside it.
+
+**Per-table column files, not slice-wide files.** Two candidate serialisations of a slice's row space:
+
+- *Slice-wide*: one file per column per slice, tables as extents at their base offsets, alignment gaps as sparse-file holes. Preserves today's mmap count and pure-arithmetic gather (`row × width`), but carving one group out of the residual at compaction rewrites the whole slice's columns — ~8 GB per column at 10⁹ — a write-amplification cliff attached to the most routine compaction event.
+- *Per-table*: one file per column per table. Compaction rewrites only the tables it touches, and — the substantive win — **an untouched table is carried into the next generation by manifest reference, not by copy**. A stable promoted group is precisely what compaction rarely touches, so the tables that pay the layout's rent are the ones that stop costing anything to carry. Costs: the gather goes through a table directory (row ID → (file, local offset), a small sorted lookup over base offsets — cacheable, and the fan-out cost is already priced in §9); and mmap count rises to tables × columns × slices — thousands at the hard-capped counts, well inside VMA and fd limits.
+
+Per-table files are the recommendation. Page alignment and container alignment both hold trivially per file, since each file starts a table.
+
+**The write path, itemised:**
+
+- **WAL: untouched.** Entity-space; tables are row-space artifacts downstream of flush.
+- **Flush: untouched in shape.** §5's group-agnostic epoch tables mean flush writes one small table per touched slice — no per-group file spray at the flush cadence, which is the §5 choice paying a second dividend.
+- **New, priced:** a point belonging to *k* slices writes coordinates into *k* epoch tables — write amplification proportional to slice membership. Inherent to independent coordinates, bounded by the ingest map, and visible at flush rather than on the request path.
+- **Compaction:** carve/fold writes only the residual and the promoted tables whose membership changed; untouched tables carry by reference.
+
+**The honest price: generation GC.** Manifest-reference sharing breaks "delete the old prefix" — unreferenced table files need refcounted or mark-sweep collection across manifests. This is deferrable: below ~10⁸ items, strict prefix-copy (rewrite everything, delete old prefix) remains simple and affordable, and the switch to reference-sharing is a serving-node and build concern invisible to the wire. The trigger for adopting it is compaction write volume, observable operationally; it needs no format change if the manifest's table entries are keyed references from day one — which is therefore on §12's foreclosure list.
+
+## 8. Identity stability
 
 Slices sharpen the value of stable identity: the entity is the join key across coordinate systems, and `tessera_id` is already identical for an entity in every slice (the slice is not an input to the keyed bijection) — cross-slice join on the wire works today. The remaining instabilities are the three break events, and the honest position is tiered, because stability, dense machinery and placement freedom cannot all live in one integer — *permanent identity, dense machinery, placement freedom: pick two per integer* — which is precisely what plan §14's ι-ordinal split answers with two.
 
@@ -105,7 +125,7 @@ Slices sharpen the value of stable identity: the entity is the join key across c
 
 Key rotation remains the one irreducible break — invalidating identifiers is what rotation is for. `external_id` remains the durable key throughout.
 
-## 8. Performance analysis and the fan-out sweep
+## 9. Performance analysis and the fan-out sweep
 
 **Where the win comes from.** Grants align with signature groups, so a grant-aligned viewer's visible rows in a promoted table are dense and contiguous: gathers become sequential reads, bitmap merges touch ~2 containers instead of scattered hundreds (the measured ~7,500× container-visit difference), and `entity_to_row` becomes near-monotone within groups — plan §14's permutation-compressibility consequence, unlocking Elias-Fano-class encoding behind the contracts reader interface.
 
@@ -113,7 +133,7 @@ Key rotation remains the one irreducible break — invalidating identifiers is w
 
 **The fan-out sweep (extends plan §14's gather probe).** Synthetic corpus; promoted-table count swept N ∈ {1, 8, 32, 64, 128, 256}; three principal shapes — grant-aligned narrow, mixed, full-coverage; measuring the count pyramid, the bottom-*m* merge and the column gather at overview zoom. The knee of the full-coverage curve sets the hard cap; the crossover against the grant-aligned win sets the default `p`.
 
-## 9. Leak analysis
+## 10. Leak analysis
 
 **The framing precedent: row-space layout is already a full-corpus function.** Morton rank depends on every item's geometry, and it has never been a leak because row IDs never cross the trust boundary. The promotion set is the same class of artifact — derived from the full histogram, invisible from outside. What needs checking is whether tables *escape* row space. Three channels:
 
@@ -129,7 +149,7 @@ Payload ordering is deliberately *outside* the property: the mark set is what §
 
 Net: no change to the five-verb surface; one new accepted register entry; one new conformance property that is among the strongest tests in the suite.
 
-## 10. Proposed corpus amendments (on fold-in, owner decision each)
+## 11. Proposed corpus amendments (on fold-in, owner decision each)
 
 | Document | Change |
 |---|---|
@@ -144,18 +164,18 @@ Net: no change to the five-verb surface; one new accepted register entry; one ne
 | Conformance design | Single-table indistinguishability differential build; later, the rule-out canary |
 | Implementation plan §14 | Signature-major entry superseded by this design (physical tables, threshold promotion); gather probe extended to the fan-out sweep |
 
-## 11. Adoption gates
+## 12. Adoption gates
 
 The layout is a per-deployment build decision, **off by default** (empty promotion set = today's layout, same code path). Gates for turning it on:
 
 1. Working conformance suite (Phase 2), including the canonicalised single-vs-multi-table differential build.
-2. The fan-out sweep (§8) run and the knee found; `p`, `abs_min`, hard cap and hysteresis set from it as config defaults.
+2. The fan-out sweep (§9) run and the knee found; `p`, `abs_min`, hard cap and hysteresis set from it as config defaults.
 3. A real signature histogram showing the knee — per design r18, deployment guidance, not producible by this project.
 4. Rule-out skipping stays out until the suite has its canary; rule-in stays out, full stop.
 
 **What Phase 1/2 must not foreclose (payable now, all cheap):** tile lookups typed against a set of tables (already true via segments); the permutation's representation stays behind the contracts reader interface; table base offsets container-aligned from the first multi-segment implementation; the manifest's segment entry gains a `group` key, always `residual` until promotion exists; the slice addressed in the request body from the start.
 
-## 12. Open questions
+## 13. Open questions
 
 - Removing an entity from a single slice: API shape and whether it is a deletion variant or an ingest-map update. Deferred with coordinate updates.
 - Whether the slice gate label participates in `V_total`/θ anchoring in any way beyond membership (believed no: the gate only decides reachability, and θ is per-slice over rows already).
