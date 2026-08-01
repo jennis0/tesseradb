@@ -15,6 +15,8 @@ export type Meta = {
     thetaTargetMarks: number;
     maxUnderlayOffset: number;
   };
+  /** `serve.max_tiles_per_request` — the client's own bound when it chooses a request depth. */
+  maxTilesPerRequest: number;
 };
 
 export type ViewportRequest = {

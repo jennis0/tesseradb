@@ -95,7 +95,10 @@ export class TesseraClient {
         maxK: m.selection.max_k,
         thetaTargetMarks: m.selection.theta_target_marks,
         maxUnderlayOffset: m.selection.max_underlay_offset
-      }
+      },
+      // Older servers do not publish it; fall back to the documented default rather than
+      // refusing to run against them.
+      maxTilesPerRequest: m.selection.max_tiles_per_request ?? 262_144
     };
   }
 
@@ -159,5 +162,6 @@ type RawMeta = {
     max_k: number;
     theta_target_marks: number;
     max_underlay_offset: number;
+    max_tiles_per_request?: number;
   };
 };

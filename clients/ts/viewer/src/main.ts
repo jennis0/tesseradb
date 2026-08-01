@@ -3,13 +3,19 @@ import {TesseraClient} from '@tessera/client';
 import presetsJson from '../presets.json';
 import {readConfig} from './config.js';
 import {esc} from './html.js';
-import {INITIAL_VIEW_STATE, VIEW, buildLayers} from './map.js';
-import {renderCounts} from './panels/counts.js';
 import {renderErrors} from './panels/errors.js';
 import {renderItem, renderItemError} from './panels/item.js';
 import {renderPrincipal, type Preset} from './panels/principal.js';
-import {renderK, renderStats, renderUnderlay} from './panels/stats.js';
+import {renderStats} from './panels/stats.js';
+import {renderBudget, renderCounts} from './panels/view.js';
 import {coalesce, createStore, type Store} from './state.js';
+import {
+  INITIAL_VIEW_STATE,
+  VIEW,
+  ViewportController,
+  buildViewportLayers,
+  type ViewState
+} from './viewportLayer.js';
 
 const config = readConfig();
 const client = new TesseraClient({
@@ -29,7 +35,14 @@ const store = createStore({
   terms: first.terms,
   k: undefined,
   underlayOffset: 0,
-  tiles: new Map(),
+  result: null,
+  worldPositions: null,
+  status: 'idle',
+  lastError: null,
+  view: null,
+  budget: 50_000,
+  mTarget: 16,
+  lastVisibleInView: null,
   lastTimings: null,
   lastBytes: 0,
   inFlight: 0,
@@ -39,19 +52,26 @@ const store = createStore({
   itemError: null
 });
 
+const controller = new ViewportController(store, client);
+const mapEl = document.getElementById('map') as HTMLDivElement;
+const panels = document.getElementById('panels')!;
+
+let currentView: ViewState = {target: INITIAL_VIEW_STATE.target, zoom: INITIAL_VIEW_STATE.zoom};
+
 const deck = new Deck({
-  parent: document.getElementById('map') as HTMLDivElement,
+  parent: mapEl,
   views: VIEW,
   initialViewState: INITIAL_VIEW_STATE,
   controller: true,
-  // Marks are ~1.6 px: without a picking radius a click almost never lands on one, and the item
-  // panel would look broken rather than unaimed.
   pickingRadius: 8,
   layers: [],
+  onViewStateChange: ({viewState}) => {
+    const v = viewState as {target: number[]; zoom: number};
+    currentView = {target: [v.target[0]!, v.target[1]!, 0], zoom: v.zoom};
+    controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+    return viewState;
+  },
   onClick: (info) => {
-    // Picking returns a positional index into the tile's own buffers; identity is resolved
-    // app-side from the u64 column the sublayer carries, so `tessera_id` never enters the render
-    // path (client-interaction §8.2).
     const ids = (info.sourceLayer?.props as {tesseraIds?: BigUint64Array} | undefined)?.tesseraIds;
     const id = ids && info.index >= 0 ? ids[info.index] : undefined;
     if (id === undefined || !store.state.session) {
@@ -65,9 +85,8 @@ const deck = new Deck({
     const worldXY = info.coordinate
       ? ([info.coordinate[0]!, info.coordinate[1]!] as [number, number])
       : null;
-    const token = store.state.session.token;
     client
-      .item(token, id)
+      .item(store.state.session.token, id)
       .then((detail) => {
         store.update((s) => {
           s.selected = {id, scalars: detail.scalars, externalId: detail.externalId};
@@ -76,8 +95,6 @@ const deck = new Deck({
         });
       })
       .catch((error) => {
-        // A refused item is shown as refused. Silently clearing the panel would present "no such
-        // item" and "not yours to see" as the same blank, which is the collapse §5 forbids.
         const e = error as {code?: string; detail?: string; message?: string};
         store.update((s) => {
           s.selected = null;
@@ -91,9 +108,6 @@ const deck = new Deck({
   }
 });
 
-const panels = document.getElementById('panels')!;
-
-/** Record a failure the same way a failed tile is recorded, so nothing fails silently. */
 function recordFailure(store: Store, what: string, error: unknown) {
   const e = error as {code?: string; detail?: string; message?: string};
   store.update((s) => {
@@ -107,27 +121,24 @@ function recordFailure(store: Store, what: string, error: unknown) {
 }
 
 function render() {
-  // The panels are rebuilt wholesale, which destroys whichever control has focus. Skip the
-  // rebuild while the user is inside them — a slider being dragged emits a state change per
-  // frame, and re-rendering under the pointer would drop the drag.
   if (panels.contains(document.activeElement)) return;
 
   panels.innerHTML =
     renderPrincipal(store.state, presets) +
     renderCounts(store.state) +
+    renderBudget(store.state) +
     (store.state.itemError
       ? renderItemError(store.state.itemError.code, store.state.itemError.detail)
       : renderItem(store.state)) +
-    renderK(store.state) +
-    renderUnderlay(store.state) +
     renderStats(store.state) +
     renderErrors(store.state);
 
   const select = document.getElementById('principal') as HTMLSelectElement | null;
   select?.addEventListener('change', () => {
     const preset = presets[Number(select.value)]!;
-    // Re-authorise rather than reuse the token: a different principal is a different mask, and
-    // the session is where that lives.
+    // A different principal is a different mask: abort anything in flight for the old token, and
+    // drop the calibration, which was measured against a different visible set.
+    controller.cancel();
     client
       .authorise(preset.terms)
       .then((session) => {
@@ -135,40 +146,36 @@ function render() {
           s.session = session;
           s.terms = preset.terms;
           s.termsLabel = preset.label;
-          s.tiles.clear();
+          s.result = null;
+          s.worldPositions = null;
+          s.status = 'idle';
+          s.lastVisibleInView = null;
+          s.mTarget = s.meta?.selection.thetaTargetMarks ?? 16;
           s.selected = null;
           s.selectedWorldXY = null;
           s.itemError = null;
         });
+        controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
       })
       .catch((error) => recordFailure(store, `authorise ${preset.label}`, error));
   });
 
-  const kInput = document.getElementById('k') as HTMLInputElement | null;
-  kInput?.addEventListener('change', () => {
+  const budgetInput = document.getElementById('budget') as HTMLInputElement | null;
+  budgetInput?.addEventListener('change', () => {
     store.update((s) => {
-      s.k = Number(kInput.value);
-      s.tiles.clear();
+      s.budget = Number(budgetInput.value);
     });
-  });
-
-  const underlayInput = document.getElementById('underlay') as HTMLInputElement | null;
-  underlayInput?.addEventListener('change', () => {
-    store.update((s) => {
-      s.underlayOffset = Number(underlayInput.value);
-      s.tiles.clear();
-    });
+    controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
   });
 }
 
 const rerender = coalesce(render);
 store.subscribe(
   coalesce(() => {
-    deck.setProps({layers: buildLayers(store, client)});
+    deck.setProps({layers: buildViewportLayers(store)});
   })
 );
 store.subscribe(rerender);
-// A control that was skipped above must still get its panel back once the user leaves it.
 panels.addEventListener('focusout', () => setTimeout(rerender, 0));
 
 async function start() {
@@ -178,12 +185,12 @@ async function start() {
     s.session = session;
     s.meta = meta;
     s.slice = meta.slices[0]!.id;
+    s.mTarget = meta.selection.thetaTargetMarks;
   });
+  controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
 }
 
 start().catch((error) => {
-  // Startup failure is never a blank map: an empty viewport and a failed one are opposites, and
-  // the whole point of this instrument is that it does not misreport what it could not fetch.
   panels.innerHTML = `<section class="panel"><h2>Startup failed</h2>
     <div class="bad">${esc(error)}</div>
     <div class="muted">Is <code>tessera serve</code> running, and is this origin listed in

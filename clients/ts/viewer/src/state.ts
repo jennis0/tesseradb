@@ -1,4 +1,4 @@
-import type {Meta, Session, TileCounts, Timings} from '@tessera/client';
+import type {DepthChoice, Meta, Session, TileCounts, Timings, ViewportResult} from '@tessera/client';
 
 /** What one loaded tile contributes. Counts come from the server; nothing here is derived. */
 export type LoadedTile = {
@@ -6,6 +6,15 @@ export type LoadedTile = {
   counts: TileCounts[];
   pointCount: number;
 };
+
+/**
+ * The display states, kept distinct because collapsing them is how a fail-closed server becomes a
+ * fail-misleading picture (client-interaction §9 — a named conformance item).
+ *
+ * `empty` (the principal sees nothing here) and `refused` (we do not know) are semantic opposites;
+ * `loading` and `retrying` are neither; `shown` is the only one that may display counts.
+ */
+export type DisplayStatus = 'idle' | 'loading' | 'retrying' | 'shown' | 'empty' | 'refused';
 
 export type RequestFailure = {tileId: string; code: string; detail: string; at: number};
 
@@ -18,8 +27,19 @@ export type AppState = {
   /** Undefined means "do not send k", so the deployment's own ceiling applies (contracts §3.2). */
   k: number | undefined;
   underlayOffset: number;
-  /** Keyed by deck tile id, replaced wholesale each time the viewport finishes loading. */
-  tiles: Map<string, LoadedTile>;
+  /** The whole current view's response — one request, not one per tile. */
+  result: ViewportResult | null;
+  worldPositions: Float32Array | null;
+  status: DisplayStatus;
+  lastError: {code: string; detail: string} | null;
+  /** The depth the budget chose for the current view. */
+  view: (DepthChoice & {requestedAt: number}) | null;
+  /** Target marks on screen. */
+  budget: number;
+  /** Calibrated marks-per-tile; seeded from `theta_target_marks` and corrected downward only. */
+  mTarget: number;
+  /** The previous response's visible count over the view — the saturation term for depth choice. */
+  lastVisibleInView: number | null;
   lastTimings: Timings | null;
   lastBytes: number;
   inFlight: number;

@@ -164,6 +164,12 @@ async fn meta(
             "max_k": state.max_k,
             "theta_target_marks": selection.theta_target_marks,
             "max_underlay_offset": selection.max_underlay_offset,
+            // Published for exactly the reason `max_k` was (owner decision, 2026-08-01): a client
+            // that chooses its own request *depth* — the mark-budget work — is choosing a tile
+            // count, and without this it cannot tell whether a refusal was its own arithmetic or
+            // the deployment's ceiling. It discloses nothing: a deployment constant, identical for
+            // every principal, and the tile grid is public.
+            "max_tiles_per_request": selection.max_tiles_per_request,
         },
     })))
 }
