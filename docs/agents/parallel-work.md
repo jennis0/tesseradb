@@ -36,8 +36,9 @@ All tracks branch from a single **seam commit** so their diffs compose.
 
 `.claude/track-allowlist.toml` declares who owns what. `scripts/check-track-allowlist.sh` diffs
 the branch (or the index) against the merge base and fails naming every changed file the track
-does not own. `scripts/install-hooks.sh` wires it into `pre-commit`. Run the installer once per
-clone.
+does not own. `scripts/install-hooks.sh` wires it into `pre-commit`, alongside the stray-reformat
+check below. Run the installer once per clone, and again whenever either check changes — the hook
+is a copy of them, not a link to them.
 
 Three sections, and the order they are consulted in is the point:
 
@@ -76,6 +77,20 @@ the wire payload). It is a grep-based approximation of spec rules — passing it
 nowhere near sufficient.
 
 Evidence before assertion. Run the commands and read the output before saying anything passed.
+
+## Formatting one file
+
+This tree is not `cargo fmt`-clean, so a change formats the files it touches. **Use
+`scripts/fmt-file.sh <file>`, not `rustfmt <file>`**: given a file that declares modules, rustfmt
+follows every `mod` declaration and rewrites the whole subtree in place — running it on a crate's
+`lib.rs` reformats the crate, including files another track owns. It reports nothing and exits 0.
+`fmt-file.sh` suppresses the recursion and then proves it did, by comparing every Rust file in the
+tree before and after and restoring anything it should not have moved.
+
+`scripts/check-stray-reformat.sh` is the backstop in `pre-commit`: it refuses a commit in which
+two or more staged Rust files changed in formatting only. One such file is a worker following the
+convention; several is the recursion. A deliberate bulk reformat passes with
+`ALLOW_BULK_REFORMAT=1`, which — unlike `--no-verify` — leaves file ownership still enforced.
 
 ## Stop-and-report
 
