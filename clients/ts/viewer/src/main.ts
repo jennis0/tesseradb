@@ -44,6 +44,7 @@ const store = createStore({
   mTarget: 16,
   lastVisibleInView: null,
   lastTimings: null,
+  latency: null,
   lastBytes: 0,
   inFlight: 0,
   failures: [],

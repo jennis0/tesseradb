@@ -47,9 +47,18 @@ export function renderStats(state: AppState): string {
         <code>bench-timing</code> feature, or <code>[serve] stage_timing</code> is false. Not an
         error.</div>`;
 
+  const l = state.latency;
+  const lag = l
+    ? `${row('— waited (debounce)', `${l.waited} ms`)}
+       ${row('— fetch + decode', `${l.fetch} ms`)}
+       ${row('— of which server', `${l.server} ms`)}
+       <div class="headline">pan to paint: ${l.total} ms</div>`
+    : '';
+
   return panel(
     'Last request',
-    `${row('server', t ? `${(t.serverUs / 1000).toFixed(1)} ms` : '—')}
+    `${lag}
+     ${row('server', t ? `${(t.serverUs / 1000).toFixed(1)} ms` : '—')}
      ${row('admission', t ? `${(t.admissionUs / 1000).toFixed(1)} ms` : '—')}
      ${row('bytes', state.lastBytes.toLocaleString('en-GB'))}
      ${row('in flight', String(state.inFlight))}

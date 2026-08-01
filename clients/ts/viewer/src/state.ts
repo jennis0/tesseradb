@@ -41,6 +41,8 @@ export type AppState = {
   /** The previous response's visible count over the view — the saturation term for depth choice. */
   lastVisibleInView: number | null;
   lastTimings: Timings | null;
+  /** Pan-to-paint breakdown, in ms. */
+  latency: {waited: number; fetch: number; server: number; total: number} | null;
   lastBytes: number;
   inFlight: number;
   failures: RequestFailure[];

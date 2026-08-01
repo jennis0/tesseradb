@@ -58,7 +58,10 @@ export function renderCounts(state: AppState): string {
      ${row('visible (in mask)', fmt(visible))}
      ${row('matched', fmt(matched))}
      ${row('non-empty tiles', fmt(result.tiles.length))}
-     <div class="headline">${fmt(served)} of ${fmt(visible)} shown</div>`
+     <div class="headline">${fmt(served)} of ${fmt(visible)} shown</div>
+     <div class="muted">counts cover the fetched region, which is ~30% wider than the viewport —
+       the prefetch margin that lets small pans cost no request. They are exact masked figures for
+       that region, not for the visible rectangle.</div>`
   );
 }
 
