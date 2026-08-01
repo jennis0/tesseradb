@@ -109,6 +109,22 @@ pub enum ExecutorPosture {
 }
 
 impl ExecutorPosture {
+    /// The stable wire spelling for `/control/status`.
+    ///
+    /// **Not `Debug`.** These strings are read by operators and by whatever scrapes the admin
+    /// plane, so a rename of a Rust variant must not silently change an operator-facing field;
+    /// `posture_spellings_are_stable` is what makes that a test rather than an intention. Kebab
+    /// case to match the error `code` vocabulary (`not-ready`, `fail-closed`, `bad-credential`)
+    /// that shares the same surfaces.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExecutorPosture::NotStarted => "not-started",
+            ExecutorPosture::Running => "running",
+            ExecutorPosture::WalPoisoned => "wal-poisoned",
+            ExecutorPosture::Dead => "dead",
+        }
+    }
+
     fn from_u8(v: u8) -> Self {
         match v {
             1 => ExecutorPosture::Running,
@@ -689,9 +705,20 @@ impl WritePath {
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
                 };
-                // Declared LAST so it drops FIRST during unwind: the posture must reach `Dead`
-                // before the receivers disconnect, or there is a window in which a submitter
-                // correctly sees `ExecutorDead` while `readyz` still reports ready.
+                // Declared LAST so it drops FIRST during unwind: the posture reaches `Dead` before
+                // the receivers disconnect, so a **subsequent** submitter cannot see
+                // `ExecutorDead` while `readyz` still reports ready.
+                //
+                // **It does not order the posture against the IN-FLIGHT submitter, and an earlier
+                // revision of this comment claimed it did** (found at the Task 3b design gate).
+                // `Job { command, respond }` is destructured into `Executor::execute`'s frame, so
+                // the in-flight `Responder` drops *earlier* in the unwind than this guard: that
+                // caller's `rx.recv()` can return before the posture moves. Two consequences, both
+                // load-bearing. The caller's error is `SubmitError::ReceiptLost`, mapped to a
+                // fail-closed 500 rather than 503 — which is correct regardless of the posture,
+                // because the command may be fully applied. And an HTTP-level test of "panic, then
+                // probe `/readyz`" is a **race**, which is why `tessera-server`'s readiness table
+                // is asserted over `is_ready` directly rather than through the socket.
                 let _guard = DeathGuard(health);
                 executor.run();
             })
@@ -936,14 +963,24 @@ impl LifecycleHandle {
 
         // Ring **after** the enqueue: a token may be spurious, but it can never be missing.
         // A full bell means one is already pending, which says everything this one would.
+        //
+        // `ReceiptLost`, not `ExecutorDead`, and the two lines above are why: the job is **already
+        // in a queue** by the time the bell is rung, and `Executor::run`'s shutdown pass drains the
+        // deny lane and *executes* it before it observes the disconnect. So a dead bell does not
+        // prove the command did nothing.
         if let Err(TrySendError::Disconnected(())) = self.bell.try_send(()) {
-            return Err(SubmitError::ExecutorDead);
+            return Err(SubmitError::ReceiptLost);
         }
 
-        // A dropped responder means the executor died holding this job — never `Ok`. Answering
+        // A dropped responder means the executor died **holding this job** — never `Ok`. Answering
         // anything else here is the false-202 `SubmitError`'s own doc calls the worst available
         // outcome.
-        rx.recv().map_err(|_| SubmitError::ExecutorDead)
+        //
+        // `ReceiptLost` because the ack is the **last** step: `append → fsync → apply → swap → ack`
+        // (`execute_change`), so a death after the swap leaves a durable, in-force suppression with
+        // no receipt. Reporting that as "nothing was submitted" is how an operator comes to believe
+        // an item is still visible when it is not — the Task 3b design gate's unanimous CRITICAL.
+        rx.recv().map_err(|_| SubmitError::ReceiptLost)
     }
 }
 
