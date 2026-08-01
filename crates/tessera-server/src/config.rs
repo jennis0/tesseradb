@@ -786,6 +786,15 @@ const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;
 /// from that, and re-measure before trusting either figure (CLAUDE.md's standing caveat on
 /// policy-dependent headlines; the per-window re-permutation was not run — Task 7a fix round 1, F2).
 ///
+/// **The instrument that settles it is on `/control/status`.** `fragmentation.run_ratio`
+/// (contracts §3.4) is measured at every window close, over the windows a deployment actually
+/// produced, so an operator can compare what this value collects in production against the `run ≈
+/// rows × term_density` bound above rather than against a corpus nobody ran. Read it with
+/// `fragmentation.windows` and `wal_appends / wal_fsyncs` beside it: a run ratio near `1.0` with a
+/// fsync ratio near `1.0` means the windows are closing with one entry in them and this key is not
+/// the thing to change. Read its own caveats first — it is within-window sort quality against a
+/// within-window baseline, not a stream-scope figure.
+///
 /// Raising this buys run length **sub-linearly** — the extra rows come from progressively smaller
 /// signature groups — and costs window latency, the heap the held rows occupy, and sort work:
 /// `assign_sorted` is `n log n` in the window's rows, so 100 → 10 000 is twice the comparison work

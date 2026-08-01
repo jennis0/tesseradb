@@ -187,4 +187,27 @@ if grep -rn 'Published::' --include=*.rs crates/ | grep -v '^crates/tessera-engi
   fail=1
 fi
 
+# 4. THE FRAGMENTATION COUNTERS STAY OFF THE VIEWPORT PATH. They are an operator gauge and nothing
+#    else: contracts 3.4 says outright that no request-path behaviour depends on them. Both
+#    accessors take an `ExecutorStats` snapshot, which reads a mutex the write executor holds at
+#    every window close -- so a viewport that consulted one would put a read request behind the
+#    write path for a number it has no business having. The rule polices NAMING, not cost: a
+#    request path that wants one of these numbers has to make it reachable under this name, and the
+#    grep is what makes that visible in review.
+#
+#    Demonstrated red by planting `self.write_executor_stats().run_ratio()` in `viewport.rs` --
+#    which compiles, because both are public and `viewport.rs` is in the same crate -- running,
+#    and reverting.
+if grep -n 'run_ratio\|postings_per_container\|fragmentation' \
+     crates/tessera-engine/src/viewport.rs \
+     crates/tessera-engine/src/select.rs \
+     crates/tessera-engine/src/compose.rs \
+     crates/tessera-server/src/viewer.rs \
+     crates/tessera-server/src/session.rs; then
+  echo "FAIL: a fragmentation counter is named on the viewport/session path (lines above)."
+  echo "      Contracts 3.4: no request-path behaviour depends on this figure. It is emitted on"
+  echo "      the bearer-gated /control/status and read there only."
+  fail=1
+fi
+
 exit $fail

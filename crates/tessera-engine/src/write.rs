@@ -72,7 +72,7 @@ use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, 
 use tessera_lifecycle::faults::WalMeter;
 use tessera_lifecycle::overlay::replay;
 use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord};
-use tessera_lifecycle::window::{ClosedEntry, CommitWindow, WindowEntry};
+use tessera_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_plugin::Descriptor;
 use tessera_store::StoreError;
@@ -263,6 +263,29 @@ pub struct ExecutorHealth {
     /// under sustained load — it is an invitation to hold the entire load in memory. See
     /// [`DEFAULT_COMMIT_WINDOW_MAX_ROWS`].
     commit_window_max_rows: AtomicUsize,
+    /// What every closed commit window's allocation collected, in entity space — the counters
+    /// behind `/control/status`'s `fragmentation` (contracts §3.4).
+    ///
+    /// Folded here rather than measured here, because the measurement needs the window's ids and
+    /// term lists together and that pairing exists only inside `CommitWindow::allocate`. See
+    /// [`tessera_lifecycle::window::FragmentationTally`] for what the numbers mean, what they
+    /// deliberately do not, and why the per-term state it needs is bounded by one window rather
+    /// than by the corpus.
+    ///
+    /// **The deny lane contributes nothing**, and not because deny windows are empty: the deny lane
+    /// never constructs a `CommitWindow` at all. `Executor::commit_denies` is a separate path over
+    /// `DenyEntry`, and denies assign no entity ids.
+    ///
+    /// Five counters under one mutex rather than five atomics, because they are only ever written
+    /// together (once per window close, by the executor thread) and only ever read together (one
+    /// `/control/status` snapshot). Five independent atomics would let a reader see a `runs` from
+    /// one window against a `baseline` from the next, and publish a ratio that never existed.
+    /// Read through [`lock_recover`] on the same argument every other lock in this module makes:
+    /// an operator gauge must not turn one writer fault into a panicking admin plane.
+    fragmentation: Mutex<FragmentationTally>,
+    /// Commit windows whose allocation has been tallied. The denominator an operator needs to read
+    /// the rest: the ratios are means over windows, and a mean over three windows is not a trend.
+    fragmentation_windows: AtomicU64,
     /// The executor's WAL counters. A **clone** of the meter the [`ExecutorWal`] holds, kept here
     /// so the numbers have a reader: `/control/status` (Task 3b) and Task 7a's
     /// `one_fsync_per_window`, whose whole subject is `wal_fsyncs` not rising with the number of
@@ -320,6 +343,43 @@ pub struct ExecutorStats {
     /// it does not act**, and it counts **crossings**, not publications above the limit — see
     /// [`ExecutorHealth::overlay_soft_limit_alarms`].
     pub overlay_soft_limit_alarms: u64,
+    /// What every closed commit window's allocation collected (contracts §3.4's `fragmentation`).
+    /// See [`ExecutorHealth::fragmentation`] and, for the meaning of the numbers,
+    /// [`tessera_lifecycle::window::FragmentationTally`].
+    pub fragmentation: FragmentationTally,
+    /// Commit windows behind [`Self::fragmentation`].
+    pub fragmentation_windows: u64,
+}
+
+impl ExecutorStats {
+    /// Total postings over containers touched (contracts §3.4). `None` before any window has closed
+    /// — a zero would read as a measurement rather than as an absence.
+    ///
+    /// **Reduces to mean postings per term per window at every reachable window size**, because a
+    /// window spans one 2¹⁶ container or two; [`tessera_lifecycle::window::FragmentationTally`] has
+    /// the arithmetic. Emitted because contracts §3.4 specifies it, not because a window collects
+    /// the container-count win — it collects none of it.
+    pub fn postings_per_container(&self) -> Option<f64> {
+        let f = self.fragmentation;
+        (f.containers > 0).then(|| f.postings as f64 / f.containers as f64)
+    }
+
+    /// Measured mean posting run length over the random baseline at the same density (contracts
+    /// §3.4). `1.0` is fully scattered, larger is better; `None` before any window has closed.
+    ///
+    /// **Within-window sort quality, not stream-scope fragmentation.** Both the measurement and its
+    /// baseline are taken at window scope, so this reports what one allocation run collected
+    /// relative to a random assignment of that same window — at a one-row window it is identically
+    /// `1.0` for every corpus. Fragmentation *between* windows is invisible to it by construction,
+    /// which is the part design §11.1 records as permanent. The raw counters are published beside
+    /// it so `postings / runs` is available without the window-local normalisation.
+    ///
+    /// And it is the **entity**-space quantity — posting run length — never the row-space mask run
+    /// ratio, which normalises the same way over a different set and is not comparable.
+    pub fn run_ratio(&self) -> Option<f64> {
+        let f = self.fragmentation;
+        (f.runs > 0).then(|| f.baseline_runs_milli as f64 / 1000.0 / f.runs as f64)
+    }
 }
 
 impl ExecutorStats {
@@ -355,6 +415,8 @@ impl ExecutorHealth {
             overlay_soft_limit_alarms: AtomicU64::new(0),
             overlay_soft_limit_latched: AtomicBool::new(false),
             commit_window_max_rows: AtomicUsize::new(DEFAULT_COMMIT_WINDOW_MAX_ROWS),
+            fragmentation: Mutex::new(FragmentationTally::default()),
+            fragmentation_windows: AtomicU64::new(0),
             wal: Arc::new(WalMeter::new()),
         }
     }
@@ -383,7 +445,15 @@ impl ExecutorHealth {
             work_service_nanos_ewma: self.work_service_nanos_ewma.load(Ordering::Relaxed),
             work_in_flight_nanos: self.work_in_flight_nanos(),
             overlay_soft_limit_alarms: self.overlay_soft_limit_alarms.load(Ordering::Relaxed),
+            fragmentation: *lock_recover(&self.fragmentation),
+            fragmentation_windows: self.fragmentation_windows.load(Ordering::Relaxed),
         }
+    }
+
+    /// Fold one closed window's tally in. Executor thread only, once per window close.
+    fn record_fragmentation(&self, tally: FragmentationTally) {
+        lock_recover(&self.fragmentation).merge(tally);
+        self.fragmentation_windows.fetch_add(1, Ordering::Relaxed);
     }
 
     /// How long the work item currently executing has been running; `0` when idle.
@@ -2321,7 +2391,14 @@ impl Executor {
         let started = window.opened_at();
 
         let closed = match self.live.with_allocator(|a| window.allocate(a)) {
-            Ok(closed) => closed,
+            Ok((closed, tally)) => {
+                // Recorded here, at the allocation, rather than after the append: the figure
+                // describes the ASSIGNMENT, which is made and complete by this point. A window that
+                // allocates and then fails its append has still fragmented the entity axis exactly
+                // this much, because the ids are issued and `Allocator` never reuses one (I9).
+                self.health.record_fragmentation(tally);
+                closed
+            }
             Err((e, waiters)) => {
                 // `allocate` leaves the high-water mark unchanged on this path, so the window has no
                 // effect at all — the same statement `ExecError::Alloc` already makes per batch.

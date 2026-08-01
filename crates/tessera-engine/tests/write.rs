@@ -1887,3 +1887,119 @@ fn the_deny_window_closes_at_its_bound() {
         bound + 1
     );
 }
+
+// =================================================================================================
+// The fragmentation figure — the executor's half
+// =================================================================================================
+
+/// **The counters `/control/status` publishes are fed by real window closes, and they move with the
+/// window size.**
+///
+/// The arithmetic itself is proved at window scope in `tessera-lifecycle`'s `window_props.rs`,
+/// where a corpus can be assigned three ways with no WAL in the loop. What only this level can show
+/// is the **wiring**: that `Executor::close_window` folds each allocation's tally into
+/// `ExecutorHealth`, and that the numbers a reader gets off `ExecutorStats` therefore describe the
+/// windows this executor actually closed.
+///
+/// Two engines over the same rows. One takes them as a single submission — one window of `ROWS`
+/// rows. The other has `set_commit_window_max_rows(1)`, the documented way to turn group commit off
+/// (`ingest.commit_window_max_items = 1`), and submits them one at a time, so every window holds
+/// one row.
+///
+/// **Two terms per row, and `k < W`, deliberately.** With one term per row a term's `k` equals its
+/// window's `W`, where the baseline `k·(W − k + 1)/W` is 1 and a perfect run is 1 — so both arms
+/// would report exactly 1.0 and every assertion here would hold while measuring nothing.
+///
+/// `ROWS` is small because the one-row arm pays a WAL fsync per submission; the magnitudes are the
+/// other file's subject, and what is asserted here is direction and provenance.
+#[test]
+fn the_fragmentation_counters_are_fed_by_window_closes_and_move_with_the_window() {
+    const ROWS: usize = 40;
+
+    fn corpus() -> Vec<UnallocatedRow> {
+        (0..ROWS)
+            .map(|i| {
+                let s = (i as u32 * 7) % 8;
+                let mut r = row(&format!("frag-{i:03}"));
+                r.terms = vec![
+                    tessera_types::TermId::new(s),
+                    tessera_types::TermId::new((s + 1) % 8),
+                ];
+                r
+            })
+            .collect()
+    }
+
+    // --- One window of ROWS rows ------------------------------------------------------------
+    let tmp_one = TempDir::new().expect("tempdir");
+    let (engine_one, _) = engine_with_faults(&tmp_one, 64);
+    let before = engine_one.write_executor_stats();
+    assert_eq!(
+        before.fragmentation_windows, 0,
+        "nothing has been ingested yet"
+    );
+    assert!(
+        before.run_ratio().is_none() && before.postings_per_container().is_none(),
+        "both ratios must be absent, not zero, before any window has closed — a zero is a value \
+         of this quantity and would read as a measurement"
+    );
+
+    engine_one
+        .accept_ingest(corpus(), "one".to_string(), [1u8; 32])
+        .expect("the batch is accepted");
+    let one = engine_one.write_executor_stats();
+
+    // --- ROWS windows of one row each -------------------------------------------------------
+    let tmp_many = TempDir::new().expect("tempdir");
+    let (engine_many, _) = engine_with_faults(&tmp_many, 64);
+    engine_many.set_commit_window_max_rows(1);
+    for (i, r) in corpus().into_iter().enumerate() {
+        engine_many
+            .accept_ingest(vec![r], format!("many-{i}"), [i as u8; 32])
+            .expect("the batch is accepted");
+    }
+    let many = engine_many.write_executor_stats();
+
+    // Provenance: the counters came from window closes, and the two arms closed different numbers
+    // of windows over the same rows.
+    assert_eq!(one.fragmentation_windows, 1, "one submission, one window");
+    assert_eq!(
+        many.fragmentation_windows, ROWS as u64,
+        "grouping disabled closes one window per row"
+    );
+    assert_eq!(
+        one.fragmentation.rows, ROWS as u64,
+        "every row is counted exactly once"
+    );
+    assert_eq!(many.fragmentation.rows, ROWS as u64);
+    assert_eq!(
+        one.fragmentation.postings, many.fragmentation.postings,
+        "the same rows carry the same postings however they were windowed — only the RUNS differ"
+    );
+
+    // And the figure itself.
+    let (one_ratio, many_ratio) = (
+        one.run_ratio().expect("a window has closed"),
+        many.run_ratio().expect("windows have closed"),
+    );
+    println!(
+        "executor-level run_ratio: one {ROWS}-row window {one_ratio:.2} ({} runs), \
+         {ROWS} one-row windows {many_ratio:.2} ({} runs)",
+        one.fragmentation.runs, many.fragmentation.runs
+    );
+    assert_eq!(
+        many_ratio, 1.0,
+        "a one-row window has baseline 1 and one run, for every corpus — the reading is 'group \
+         commit disabled collects nothing', not a measurement"
+    );
+    assert!(
+        one_ratio > 4.0,
+        "one window over the whole corpus must collect materially more run length: {one_ratio}"
+    );
+    assert!(
+        one.fragmentation.runs < many.fragmentation.runs,
+        "the un-normalised half of the same statement: {} vs {}",
+        one.fragmentation.runs,
+        many.fragmentation.runs
+    );
+}

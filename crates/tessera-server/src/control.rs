@@ -1274,6 +1274,36 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "drain_depth": pins.drain_depth,
             "oldest_retired_secs": pins.oldest_retired_secs,
         },
+        // Contracts §3.4's `fragmentation`. Design §11.1 assigns entity ids in term-signature order
+        // within one allocation run and nothing repairs the ordering afterwards, so the posting
+        // compression a deployment collects erodes with the fraction of its corpus that arrived in
+        // small runs — invisibly, because segment counts, watermark and overlay size all stay
+        // healthy while union cost climbs. These two numbers are what make it observable, and they
+        // are what lets the deferred index-ordinal split trigger on evidence rather than suspicion.
+        //
+        // **`scope` is in the body deliberately.** §3.4 defines these quantities over base plus
+        // delta tiers at flush or fold. Nothing in this process writes postings — flush is a later
+        // capability — so what is measured is the **commit-window allocation**: the ingest stream
+        // this process has served, with no bundle postings in it. A consumer reads JSON, never a
+        // document, so the narrowing is stated where the consumer is.
+        //
+        // **`null`, not `0.0`, before the first window closes.** Zero is a value of this quantity
+        // (`run_ratio = 1.0` is fully scattered; `0` is not reachable at all), so publishing one for
+        // "nothing measured yet" would be a reading rather than an absence.
+        //
+        // The raw counters ride along under §0.1's out-of-contract clause: `postings / runs` is mean
+        // run length with none of `run_ratio`'s window-local normalisation, and `windows` is the
+        // denominator that says whether the ratios are a trend or an anecdote.
+        "fragmentation": {
+            "scope": "commit-window-allocation",
+            "postings_per_container": executor.postings_per_container(),
+            "run_ratio": executor.run_ratio(),
+            "postings": executor.fragmentation.postings,
+            "runs": executor.fragmentation.runs,
+            "containers": executor.fragmentation.containers,
+            "rows": executor.fragmentation.rows,
+            "windows": executor.fragmentation_windows,
+        },
         // Task 5's two caches (Task 3b deferred this to here by name, because Task 5 was not
         // merged on that branch).
         //

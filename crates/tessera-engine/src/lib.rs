@@ -54,6 +54,12 @@ pub use timing::{Probe, StageTimings};
 pub use viewport::{
     EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,
 };
+// `EngineMeta::declared_scalars`' element type, re-exported for the same layering reason
+// `FragmentCacheStats` is: `check-layers.sh` denies a `tessera-server → tessera-store` edge
+// (SA §3), and `/control/ingest` validates a batch's scalar tail against this declaration, so the
+// type needs to be nameable from the crate that reads it. `/v1/meta` gets away without naming it
+// only because it reads the two fields straight into JSON.
+pub use tessera_store::manifest::DeclaredScalar;
 // The write path's **outcome** vocabulary, and nothing else.
 //
 // An earlier draft also re-exported `LifecycleHandle`, `LifecycleQueues`, `Job` and `Responder`,
