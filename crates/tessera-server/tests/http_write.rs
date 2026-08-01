@@ -1324,11 +1324,7 @@ async fn an_engine_without_a_write_executor_is_not_ready() {
     .unwrap();
     let server = mount_server(engine, 200, generous_test_gate()).await;
 
-    for url in [
-        server.control_url("/readyz"),
-        server.viewer_url("/readyz"),
-        server.session_url("/readyz"),
-    ] {
+    for url in [server.viewer_url("/readyz"), server.session_url("/readyz")] {
         assert_eq!(
             readyz_status(&server, url.clone()).await,
             503,
@@ -1338,16 +1334,49 @@ async fn an_engine_without_a_write_executor_is_not_ready() {
 
     // Liveness is a different question and must stay green: the process is up and answering.
     assert_eq!(
-        readyz_status(&server, server.control_url("/healthz")).await,
+        readyz_status(&server, server.viewer_url("/healthz")).await,
         200,
         "healthz is liveness, not readiness — a writer fault must not make the process look dead"
     );
+
+    // And the control listener serves neither probe, ready or not (owner decision, 2026-08-01):
+    // it is uniformly authenticated, so both spellings meet the credential layer.
+    for url in [
+        server.control_url("/readyz"),
+        server.control_url("/healthz"),
+    ] {
+        assert_eq!(
+            readyz_status(&server, url.clone()).await,
+            401,
+            "the control plane must not answer a health probe unauthenticated, even a red one: \
+             {url}"
+        );
+    }
 }
 
-/// A healthy server is ready on every listener. The anti-vacuity control for the two tests above
-/// and below: without it, a `readyz` that returned 503 unconditionally would pass both.
+/// A healthy server is ready on **the two listeners that serve the probe**, and the control listener
+/// refuses it. The anti-vacuity control for the two tests above and below: without it, a `readyz`
+/// that returned 503 unconditionally would pass both.
+///
+/// **The 401 leg is the deliberate half, not a consequence tolerated.** With no exemption on the
+/// control plane's credential layer, an *unrouted* control path meets the layer before the router's
+/// 404 — so `/readyz` there answers 401, the same answer `/no-such-route` gives. The plane therefore
+/// discloses nothing about its own surface, and a future change that mounted the probes back (or
+/// moved the layer to a per-route `route_layer`, letting the 404 through) turns this red.
+///
+/// **Mutations this kills:** re-introducing an exemption in `require_operator_credential` → 404 at
+/// the 401 legs (measured); the pre-2026-08-01 state, i.e. that exemption *plus* the two `.route`
+/// lines back on `control::router` → 200 at the 401 legs (measured); `readyz` returning 503
+/// unconditionally → red at the viewer/session legs.
+///
+/// **A mutation this deliberately does NOT kill, recorded because the obvious claim is false and was
+/// measured to be false.** Re-adding `.route("/healthz", ..)` / `.route("/readyz", ..)` to
+/// `control::router` *without* an exemption leaves this test green — the routes answer 401, because
+/// the credential layer is unconditional and wraps them. That is not a gap: the mount was never the
+/// disclosure, the exemption was. The layer is what this test is really pinned to, and the routes'
+/// absence is a simplification of `control::router`, not a security property in its own right.
 #[tokio::test]
-async fn a_healthy_server_is_ready_on_every_listener() {
+async fn a_healthy_server_is_ready_on_every_listener_that_serves_the_probe() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -1363,11 +1392,25 @@ async fn a_healthy_server_is_ready_on_every_listener() {
     .await;
 
     for url in [
-        server.control_url("/readyz"),
         server.viewer_url("/readyz"),
         server.session_url("/readyz"),
+        server.viewer_url("/healthz"),
+        server.session_url("/healthz"),
     ] {
         assert_eq!(readyz_status(&server, url.clone()).await, 200, "at {url}");
+    }
+
+    for url in [
+        server.control_url("/readyz"),
+        server.control_url("/healthz"),
+    ] {
+        assert_eq!(
+            readyz_status(&server, url.clone()).await,
+            401,
+            "the control plane carries no health probe and is uniformly authenticated, so {url} \
+             must answer 401 — and 401 rather than 404, so the plane discloses nothing about its \
+             own surface"
+        );
     }
 }
 
@@ -1436,7 +1479,7 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
 
     let before = visible(token.to_string(), viewport_req.clone()).await;
     assert_eq!(
-        readyz_status(&server, server.control_url("/readyz")).await,
+        readyz_status(&server, server.viewer_url("/readyz")).await,
         200,
         "the node must start ready, or every assertion below passes vacuously"
     );
@@ -1474,7 +1517,7 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
 
     // (2) The node is now not-ready — on every listener, and the operator plane says why.
     assert_eq!(
-        readyz_status(&server, server.control_url("/readyz")).await,
+        readyz_status(&server, server.viewer_url("/readyz")).await,
         503,
         "a poisoned WAL must trip the readiness posture"
     );
@@ -2755,31 +2798,36 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
 
 // --- The control plane's credential gate, at the router (owner decision, 2026-08-01) ---
 
-/// **Every route on the control plane that is not on the exemption list answers 401 without a
-/// credential — asserted over the route list, not over three hand-written cases.**
+/// **Every route on the control plane answers 401 without a credential — asserted over the route
+/// list, not over three hand-written cases, and now with no exceptions at all.**
 ///
 /// This is the inverse of the usual auth test. `control_status_requires_bearer` names one endpoint
 /// and would stay green forever while a fourth control route shipped wide open; that is exactly how
 /// `/control/status` itself shipped returning `entity_id_high_water` unauthenticated. This iterates
-/// [`CONTROL_PLANE_ROUTES`] and requires each non-exempt entry to refuse.
+/// [`CONTROL_PLANE_ROUTES`] and requires **every** entry to refuse. Until 2026-08-01 the loop
+/// skipped an exemption list holding `/healthz` and `/readyz`; those routes are gone from this plane
+/// and the exemption with them, so the skip is gone too — the rule under test is now the stronger
+/// unconditional one.
 ///
 /// **What it does and does not guarantee, stated because the difference is the whole design.** The
 /// list is hard-coded: axum 0.8 exposes no route enumeration, so a route added to `control::router`
 /// and not added to `CONTROL_PLANE_ROUTES` is invisible here. What covers *that* case is not this
 /// test but the layer's shape — `require_operator_credential` wraps the whole router, so an
-/// unlisted route is authenticated anyway. This test's job is the other half: it goes red if the
-/// layer is removed, narrowed, or if a path is added to `UNAUTHENTICATED_CONTROL_PATHS`.
+/// unlisted route is authenticated anyway (and `every_path_on_the_control_listener_needs_the_credential`
+/// demonstrates that directly, on paths the router does not serve at all). This test's job is the
+/// other half: it goes red if the layer is removed or narrowed.
 ///
 /// **The 401 must be `ApiError::BadCredential`'s existing shape**, byte for byte — contracts §3.1's
 /// code list is closed, and a layer that invented its own body would be a wire change dressed as a
 /// refactor. Asserted here on `error`, `detail` and the absence of `retry_after_s`.
 ///
 /// **Mutations this kills:** deleting the `.layer(from_fn_with_state(..))` call from
-/// `control::router`; adding any `/control/*` path to `UNAUTHENTICATED_CONTROL_PATHS`; returning a
-/// bare `StatusCode::UNAUTHORIZED` from the layer instead of `ApiError::BadCredential`.
+/// `control::router`; re-introducing any exemption in `require_operator_credential`; returning a
+/// bare `StatusCode::UNAUTHORIZED` from the layer instead of `ApiError::BadCredential`; emptying or
+/// shrinking `CONTROL_PLANE_ROUTES` (the count floor below).
 #[tokio::test]
-async fn every_control_route_not_exempt_requires_the_operator_credential() {
-    use tessera_server::control::{CONTROL_PLANE_ROUTES, UNAUTHENTICATED_CONTROL_PATHS};
+async fn every_control_route_requires_the_operator_credential() {
+    use tessera_server::control::CONTROL_PLANE_ROUTES;
 
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
@@ -2797,9 +2845,6 @@ async fn every_control_route_not_exempt_requires_the_operator_credential() {
 
     let mut checked = 0usize;
     for (method, path) in CONTROL_PLANE_ROUTES {
-        if UNAUTHENTICATED_CONTROL_PATHS.contains(path) {
-            continue;
-        }
         checked += 1;
         let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
         for credential in [None, Some("not-the-operator-credential")] {
@@ -2813,8 +2858,8 @@ async fn every_control_route_not_exempt_requires_the_operator_credential() {
             assert_eq!(
                 resp.status(),
                 401,
-                "{method} {path} answered {} for credential {credential:?}; every control route \
-                 not on UNAUTHENTICATED_CONTROL_PATHS must be refused at the router",
+                "{method} {path} answered {} for credential {credential:?}; every control route, \
+                 without exception, must be refused at the router",
                 resp.status()
             );
             let body: serde_json::Value = resp.json().await.unwrap();
@@ -2829,77 +2874,39 @@ async fn every_control_route_not_exempt_requires_the_operator_credential() {
             );
         }
     }
+    assert_eq!(
+        checked,
+        CONTROL_PLANE_ROUTES.len(),
+        "the loop must visit every entry — there is no exemption left to skip one"
+    );
     assert!(
         checked >= 3,
         "the route list has lost its /control/* entries; it is the only thing this test enumerates"
     );
 }
 
-/// **`/healthz` and `/readyz` stay unauthenticated on the control listener** — the exemption, and
-/// the reason the layer needs one at all.
+/// **No path on the control listener answers without the credential — routed, unrouted, or a health
+/// probe.** The successor to `near_misses_of_the_exemption_are_authenticated`, which lost its
+/// subject when the exemption was deleted (owner decision, 2026-08-01).
 ///
-/// They are mounted on the *same* router as `/control/*` (SA §9; `health.rs`), and `/readyz` being a
-/// bare unauthenticated boolean is deliberate: the posture *string* is what lives behind the bearer,
-/// on `/control/status`. A credential layer over the whole router without this exemption would break
-/// every orchestrator probe on every listener.
+/// The old test pinned a weaker property: that paths *nearly* spelled `/healthz` fell through to the
+/// credential check rather than out of it. There is no exemption left to be nearly-matched, so what
+/// is asserted now is the stronger rule directly — an arbitrary path answers 401. The near-miss
+/// spellings are kept in the list anyway, not because matching is still a risk but because they are
+/// the exact strings a reintroduced exemption would be written against; and `/healthz` and `/readyz`
+/// themselves are now *in* the list, where they used to be the two exceptions to it.
 ///
-/// **The exemption list is pinned by value first, and that is not belt-and-braces.** Iterating the
-/// constant alone passes *vacuously* when the list is empty — demonstrated: emptying
-/// `UNAUTHENTICATED_CONTROL_PATHS` left this test green while three readiness tests went red, so the
-/// only thing that noticed was a test about something else. The equality assertion is what makes a
-/// shrunk list fail here, where the reason is written down.
+/// The unrouted paths carry the second half: the layer sits ahead of the router's 404, so probing
+/// the plane's surface unauthenticated yields nothing — an unauthenticated caller cannot even
+/// discover that `/healthz` was removed. That is a consequence of `Router::layer` rather than a
+/// goal, and it is pinned here so a future change to how the layer is mounted cannot flip it to 404
+/// unnoticed.
 ///
-/// **Mutations this kills:** emptying `UNAUTHENTICATED_CONTROL_PATHS`, dropping either entry, or
-/// adding a third without an argument for it.
+/// **Mutations this kills:** re-introducing an exemption list of any shape in
+/// `require_operator_credential` (the `/healthz`, `/readyz` legs go 200 or 404); moving the layer to
+/// a per-route `route_layer` (every unrouted leg goes 404); deleting the layer (401 → 404/405).
 #[tokio::test]
-async fn the_health_probes_stay_unauthenticated_on_the_control_listener() {
-    assert_eq!(
-        tessera_server::control::UNAUTHENTICATED_CONTROL_PATHS,
-        &["/healthz", "/readyz"],
-        "these two, and only these two, are exempt from the control plane's credential layer \
-         (SA §9). A third entry is an owner decision, not a convenience"
-    );
-
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    for path in tessera_server::control::UNAUTHENTICATED_CONTROL_PATHS {
-        let resp = server
-            .client
-            .get(server.control_url(path))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            200,
-            "{path} must answer without a credential on the control listener"
-        );
-    }
-}
-
-/// **Every way of being *nearly* an exempt path is authenticated.** The layer compares the request's
-/// raw path for exact equality, so a prefix, a trailing slash or a traversal that ends up spelled
-/// differently falls through to the credential check rather than out of it. Written as a test
-/// because "exact equality" is a one-word claim whose failure mode is silent.
-///
-/// The unrouted path is the same assertion from the other side: the layer sits ahead of the router's
-/// 404, so probing the plane's surface unauthenticated yields nothing. That is a consequence of
-/// `Router::layer` rather than a goal, and it is pinned here so a future change to how the layer is
-/// mounted cannot flip it to 404 unnoticed.
-#[tokio::test]
-async fn near_misses_of_the_exemption_are_authenticated() {
+async fn every_path_on_the_control_listener_needs_the_credential() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -2915,6 +2922,8 @@ async fn near_misses_of_the_exemption_are_authenticated() {
     .await;
 
     for path in [
+        "/healthz",
+        "/readyz",
         "/healthz/",
         "/healthzz",
         "/readyz/x",
@@ -2930,7 +2939,8 @@ async fn near_misses_of_the_exemption_are_authenticated() {
         assert_eq!(
             resp.status(),
             401,
-            "{path} is not an exempt path and must meet the credential check, not the router's 404"
+            "{path} must meet the credential check, not the router's 404 — the control plane is \
+             uniformly authenticated and exempts nothing"
         );
     }
 }

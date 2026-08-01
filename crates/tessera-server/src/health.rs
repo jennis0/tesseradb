@@ -1,4 +1,14 @@
-//! `/healthz` (liveness) and `/readyz` (readiness), present on every listener (R5, contracts §3.1).
+//! `/healthz` (liveness) and `/readyz` (readiness), on the **viewer and session** listeners
+//! (R5, contracts §3.1 r11).
+//!
+//! **Not on the control listener** (owner decision, 2026-08-01). Contracts §3.1 previously said "on
+//! every plane's listener"; it no longer does. The control plane is now uniformly authenticated —
+//! every route on it requires the operator credential, with no exemption — which is what lets the
+//! control listener be firewalled to admin-only with no health-probe hole. Nothing is lost from the
+//! probe itself: both handlers below are identical on every listener they are mounted on, so a third
+//! mount was a third copy of one bit. What an unauthenticated caller can no longer observe is "the
+//! control listener is accepting connections"; the argument for accepting that, and the
+//! `/control/status` call that replaces it, is in `control::require_operator_credential`'s doc.
 //!
 //! # What `/readyz` answers, and where each half of the answer is discharged
 //!
@@ -49,9 +59,9 @@
 //!
 //! # Why this stays a bare status with no body
 //!
-//! `/readyz` is unauthenticated on all three listeners and the control listener may be loopback TCP
-//! (`config::ControlListen::Tcp`). Publishing the posture *variant* would hand internal write-path
-//! state to anyone who can reach a socket (SA §9), so the response is a bare `StatusCode` — no
+//! `/readyz` is unauthenticated on both listeners that serve it, and the viewer listener is the
+//! public one. Publishing the posture *variant* would hand internal write-path state to anyone who
+//! can reach a socket (SA §9), so the response is a bare `StatusCode` — no
 //! `ApiError`, hence no `detail` string, and `ApiError::NotReady` deliberately carries no
 //! `Retry-After` either, since a posture-varying number is the same disclosure by another route.
 //!
