@@ -22,7 +22,7 @@ use tempfile::TempDir;
 
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig, EngineError, GeometryRefusedReason, DRAIN_DEPTH_MAX};
-use tessera_lifecycle::wal::WalRow;
+use tessera_lifecycle::wal::{Wal, WalRecord, WalRow};
 use tessera_lifecycle::ChangeOp;
 use tessera_store::read::open_bundle;
 use tessera_store::Bundle;
@@ -61,6 +61,40 @@ fn segments_version_of(bundle: &Bundle) -> u64 {
         .expect("the fixture bundle has one partition")
         .manifest
         .segments_version
+}
+
+/// Write a WAL at `path` holding one `IngestBatch` record whose single row names `entity` and
+/// carries **no descriptors**, then close it. A subsequent `Engine::open` over `path` replays it,
+/// so the engine starts with `entity` in its ingest buffer with an empty term set.
+///
+/// **Why a hand-written WAL rather than an ingest call** — see
+/// [`a_pinned_request_composes_with_the_fragment_watermark_not_the_pinned_one`], whose fixture note
+/// carries the argument: after Task 3a no engine API can buffer a row for a *chosen* entity, and
+/// replay is both the only remaining route and the faithful one. Only `tessera-lifecycle`'s ordinary
+/// public WAL API is used; nothing test-only exists in the engine to make this work.
+///
+/// `external_id: None` on purpose (contracts §3.4 r6): the row establishes no live-map entry, so it
+/// cannot shadow the bundle's own external id for the same entity and cannot perturb any other case.
+fn seed_buffered_row(path: &Path, entity: u64) {
+    let (mut wal, recovered) = Wal::open(path).expect("a fresh WAL opens");
+    assert!(
+        recovered.is_empty(),
+        "seed_buffered_row expects a WAL that does not exist yet"
+    );
+    wal.append(&WalRecord::IngestBatch {
+        batch_id: "watermark-control".to_string(),
+        body_hash: [0u8; 32],
+        rows: vec![WalRow {
+            external_id: None,
+            entity_id: EntityId::new(entity),
+            descriptors: Vec::new(),
+            x: 0.0,
+            y: 0.0,
+            scalars: Vec::new(),
+        }],
+    })
+    .expect("the record appends");
+    wal.fsync().expect("the record is made durable");
 }
 
 fn watermark_of(bundle: &Bundle) -> u64 {
@@ -195,6 +229,12 @@ fn a_pin_survives_a_generation_swap() {
 /// pre-suppression overlay and the suppressed item would still be counted, so the last assertion
 /// would read `before` instead of `before - 1`. `PinnedGeometry` is what makes that not compile
 /// today; this test is what notices if it ever does.
+///
+/// **The executor is started explicitly** (Task 3a): `/control/changes` work is now submitted to the
+/// write executor thread, and an engine that never calls `start_write_executor` answers every
+/// `accept_change` with `SubmitError::ExecutorDead` rather than applying it. That is the correct
+/// posture — there is no honest 200 when there is nothing to apply the write to — so the fix is to
+/// start the thread, never to relax the `expect` below.
 #[test]
 fn a_suppression_applies_to_a_pinned_request_immediately() {
     let tmp = TempDir::new().unwrap();
@@ -204,11 +244,14 @@ fn a_suppression_applies_to_a_pinned_request_immediately() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    let engine = open_engine(
+    let mut engine = open_engine(
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
     );
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
     let before = engine.viewport(&session, whole_extent()).unwrap();
@@ -269,14 +312,33 @@ fn a_suppression_applies_to_a_pinned_request_immediately() {
 /// composition is always the mask fragment's own, and the pin vector's `W` is advisory (lifecycle
 /// §2.3 and its Appendix R action 2, which amended five separate phrasings implying otherwise).
 ///
-/// **The fixture is synthetic in two named ways, and it has to be.** Phase 1 gives buffered items
-/// no rows at all, so the watermark's only observable effect — whether a buffered entity enters
-/// `L` — cannot be seen through a viewport using the ordinary ingest path. The two liberties are
-/// (a) generations whose declared watermark contradicts their own bundle manifest, published
-/// through `Engine::publish_geometry`, and (b) an entity that is simultaneously **buffered and
-/// row-bearing**, reached by handing `accept_ingest` a hand-framed `WalRow` naming an entity the
-/// bundle already has. Neither is reachable from a client; both are needed to make the rule
-/// observable at all. With them:
+/// **The fixture is synthetic in two named ways, and it has to be.** The watermark's only
+/// observable effect is whether a *buffered* entity enters `L` (`compose`'s rule 4), and that moves
+/// a count only for an entity that is simultaneously buffered and **row-bearing**. The two liberties
+/// are (a) generations whose declared watermark contradicts their own bundle manifest, published
+/// through `Engine::publish_geometry`, and (b) that row-bearing buffered entity, reached by
+/// **replaying a WAL that already holds an `IngestBatch` row naming a bundle entity**
+/// ([`seed_buffered_row`]). Neither is reachable from a client; both are needed to make the rule
+/// observable at all.
+///
+/// **(b) changed at the Task 3a rebase, and how it changed is worth reading.** It used to hand
+/// `Engine::accept_ingest` a hand-framed `WalRow` naming an entity of the caller's choosing. That is
+/// gone: `Command::Ingest` carries `UnallocatedRow`, which has no id field, because Task 7a must
+/// assign a whole window's ids in one signature-sorted run — so a fresh ingest allocates at the I9
+/// high-water, and a newly allocated entity has no row and therefore contributes to no count (§11.2;
+/// `tests/write.rs`'s `visible` says the same). **No engine API buffers a row for a chosen entity
+/// any more**, and none should be added for this test's sake: "batch into an existing entity" is an
+/// open question (SA §6.6), not a settled capability, and inventing a test-only door into it would
+/// prejudge the owner's call.
+///
+/// Replay is the remaining route and it is the *faithful* one, not a workaround. A WAL still holding
+/// the ingest rows of entities a flush has since folded into the bundle — with the watermark now
+/// above them — is precisely the state rule 4's watermark clause exists for (`compose`: "a buffered
+/// entity below it would mean a bundle/WAL inconsistency and is excluded from `L` defensively").
+/// Only `tessera-lifecycle`'s ordinary public WAL API is used; nothing in the production path was
+/// widened to make this test possible.
+///
+/// With the two liberties:
 ///
 /// - the session's fragment is built while the live watermark is `LOW`, so `fragment.watermark` is
 ///   `LOW`;
@@ -288,12 +350,20 @@ fn a_suppression_applies_to_a_pinned_request_immediately() {
 /// Composing with the fragment's `LOW` puts `e` in `L` and drops one row. Composing with the
 /// pinned `HIGH` skips `e` and drops none. The assertion is the difference.
 ///
+/// **Why the baseline comes from a second engine.** The buffered row now arrives at *open*, via
+/// replay, so there is no instant in the engine under test at which the buffer is empty and a
+/// "before" count could be taken. The baseline is therefore read from a second engine over the same
+/// bundle with the same credential and an **empty** WAL — its own cache directory, so it cannot seed
+/// the fragment the engine under test builds. With an empty buffer the watermark is irrelevant to
+/// that count, which is why the baseline engine publishes no generation.
+///
 /// **The vacuity trap this test has to dodge** (found by the plan review): `FragmentCache` is keyed
 /// on `(bundle_identity, auth_plugin_hash, satisfied)` and **not** on the watermark, and it
-/// persists to disk. Any earlier `authorise` with this credential would freeze `fragment.watermark`
-/// at the *bundle's* value and silently collapse `LOW < HIGH` — so this test authorises exactly
-/// once, after the `LOW` generation is live, reads no `segments_version` through a session, and
-/// asserts the fragment's watermark before relying on it.
+/// persists to disk. Any earlier `authorise` with this credential *against this cache directory*
+/// would freeze `fragment.watermark` at the *bundle's* value and silently collapse `LOW < HIGH` —
+/// so this test authorises exactly once against `cache/`, after the `LOW` generation is live, reads
+/// no `segments_version` through a session, and asserts the fragment's watermark before relying on
+/// it. The baseline engine's `authorise` is safe only because it writes to `cache-baseline/`.
 ///
 /// Finally, note what this can and cannot catch. `compose` takes `&FrozenFragment` and no watermark
 /// argument at all (`compose.rs`), so the mistake it guards is a *future* edit that widens that
@@ -315,18 +385,30 @@ fn a_pinned_request_composes_with_the_fragment_watermark_not_the_pinned_one() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
+    assert!((LOW..HIGH).contains(&BUFFERED_ENTITY));
+
+    // 0. The buffer-free baseline: same bundle, same credential, empty WAL, its OWN cache dir.
+    let baseline = {
+        let clean = open_engine(
+            &bundle_root,
+            &tmp.path().join("cache-baseline"),
+            &tmp.path().join("wal-baseline.log"),
+        );
+        let session = clean.authorise(&full_coverage_credential()).unwrap();
+        clean.viewport(&session, whole_extent()).unwrap().tiles[0].visible
+    };
+
+    // 1. The engine under test replays a WAL that already buffers an entity the bundle has a row
+    //    for, carrying no terms.
+    let wal_path = tmp.path().join("wal.log");
+    seed_buffered_row(&wal_path, BUFFERED_ENTITY);
+    let engine = open_engine(&bundle_root, &tmp.path().join("cache"), &wal_path);
     // Read the base version off the bundle, NOT through a viewport — a viewport needs a session,
     // and authorising here is exactly the vacuity trap described above.
     let base_version = segments_version_of(&reopen(&bundle_root));
-    assert!((LOW..HIGH).contains(&BUFFERED_ENTITY));
 
-    // 1. A generation declaring the LOW watermark, and the ONLY `authorise` in this test — this is
-    //    what fixes `fragment.watermark`.
+    // 2. A generation declaring the LOW watermark, and the ONLY `authorise` against this engine —
+    //    this is what fixes `fragment.watermark`.
     engine
         .publish_geometry(
             "v_low".to_string(),
@@ -341,27 +423,20 @@ fn a_pinned_request_composes_with_the_fragment_watermark_not_the_pinned_one() {
         "the fragment must have been built against the LOW generation, or the two watermarks are \
          equal and this test asserts nothing"
     );
-    let baseline = engine.viewport(&session, whole_extent()).unwrap().tiles[0].visible;
 
-    // 2. Buffer an existing entity — one that has a row — carrying no terms.
-    let entity = BUFFERED_ENTITY;
-    engine
-        .accept_ingest(
-            vec![WalRow {
-                external_id: None,
-                entity_id: EntityId::new(entity),
-                descriptors: Vec::new(),
-                x: 0.0,
-                y: 0.0,
-                scalars: Vec::new(),
-            }],
-            vec![Vec::new()],
-            "watermark-control".to_string(),
-            [0u8; 32],
-        )
-        .expect("the synthetic buffered row is accepted");
+    // 3. The buffered entity is really in play, and the mask really moves for it. Without this the
+    //    whole case is vacuous: a replay that dropped the row, or an entity with no row, would
+    //    leave every count below equal to `baseline` and the final assertion would pass for the
+    //    wrong reason.
+    let live = engine.viewport(&session, whole_extent()).unwrap();
+    assert_eq!(
+        live.tiles[0].visible,
+        baseline - 1,
+        "the replayed buffered entity ({BUFFERED_ENTITY}) is >= the fragment watermark ({LOW}), so \
+         it enters L, fails on an empty term set, and its row leaves the mask"
+    );
 
-    // 3. A generation declaring the HIGH watermark; its pin is what the request presents.
+    // 4. A generation declaring the HIGH watermark; its pin is what the request presents.
     engine
         .publish_geometry(
             "v_high".to_string(),
@@ -374,7 +449,7 @@ fn a_pinned_request_composes_with_the_fragment_watermark_not_the_pinned_one() {
         prefix: "v_high".to_string(),
         segments_version: base_version + 2,
     };
-    // 4. Supersede it, so the pin resolves off the drain list carrying HIGH.
+    // 5. Supersede it, so the pin resolves off the drain list carrying HIGH.
     engine
         .publish_geometry(
             "v_low2".to_string(),
