@@ -1,7 +1,12 @@
 //! The control (admin) plane (R5): `POST /control/ingest`, `POST /control/changes`,
-//! `GET /control/status`, plus `/healthz`/`/readyz`. Bearer auth is the operator credential, applied
-//! **once, at the router** by [`require_operator_credential`] rather than by each handler — see its
-//! doc for what that buys and for the two-path exemption the health probes need.
+//! `GET /control/status`. Bearer auth is the operator credential, applied **once, at the router**
+//! by [`require_operator_credential`] rather than by each handler — see its doc for what that buys.
+//!
+//! **This plane is uniformly authenticated: every route on it requires the credential, with no
+//! exemption.** `/healthz` and `/readyz` are *not* mounted here — they are on the viewer and session
+//! listeners only (owner decision, 2026-08-01; contracts §3.1 r11). See
+//! [`require_operator_credential`]'s "Why there is no exemption" for what that buys and the one
+//! signal it gives up.
 //!
 //! This module owns the **ack contract**: parse -> allocate ids (`assign_sorted`) -> WAL append
 //! -> fsync -> apply to buffer/overlay + generation swap -> 200. Never a 200 without fsync. For
@@ -30,7 +35,7 @@ use tessera_types::{EntityId, TermId};
 use crate::error::{
     map_accept_error, map_change_batch_error, map_join_error, map_store_error, ApiError,
 };
-use crate::health::{healthz, is_ready, readyz};
+use crate::health::is_ready;
 use crate::state::AppState;
 
 /// The deny lane's own blocking execution resource (lifecycle §1.3).
@@ -239,8 +244,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/control/ingest", ingest_route)
         .route("/control/changes", changes_route)
         .route("/control/status", get(status))
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
         // **The whole plane's credential check, in one place** — see
         // [`require_operator_credential`]. `Router::layer` rather than a `route_layer` per route:
         // the point of this construction is that a route added below inherits the check without
@@ -280,28 +283,41 @@ pub fn router(state: Arc<AppState>) -> Router {
 ///    there are. That residue is unchanged by this layer and remains an owner item.
 /// 2. **A control route cannot be added unauthenticated by omission.** The layer wraps the whole
 ///    router, so a `.route(..)` added to [`router`] tomorrow is behind the credential the moment it
-///    exists. Opting *out* requires editing [`UNAUTHENTICATED_CONTROL_PATHS`], which is a deliberate
-///    act with a test over it.
+///    exists. There is no opt-out to reach for and no list to be added to by accident.
 /// 3. **401 ahead of every 422 and 429 is now a property of the router.** `control::ingest`'s doc
 ///    enumerates that ordering and `backpressure_is_invisible_before_auth` exercised it one handler
 ///    at a time; the ordering no longer depends on where each handler happens to put its check.
 ///
-/// # The exemption, and why matching is exact
+/// # Why there is no exemption
 ///
-/// `/healthz` and `/readyz` are mounted on this same router and **must stay unauthenticated on every
-/// listener** (SA §9; `health.rs`). `/readyz` being a bare unauthenticated boolean is the deliberate
-/// half of a pair: the posture *string* lives behind the bearer on `/control/status`, which is why
-/// this layer must not simply cover everything it is mounted over.
+/// Until 2026-08-01 this layer carried an exempt-path list holding exactly `/healthz` and `/readyz`,
+/// because [`router`] mounted them. **It no longer does** (owner decision; contracts §3.1 r11): the
+/// probes live on the viewer and session listeners, and the control plane carries neither. So the
+/// rule this layer enforces is now *every route on this plane requires the credential* — strictly
+/// stronger than *every route except these two*, and with no carve-out a later route can fall into.
+/// The operational reason is that the control listener can now be firewalled to admin-only with no
+/// health-probe hole in the rule.
 ///
-/// The comparison is exact equality against the request's raw path. Not a prefix match, not a
-/// normalising one: `/healthz/../control/status` and `/healthz/` are not `/healthz`, so they fall
-/// through to the credential check. Every way of being *nearly* an exempt path is therefore
-/// authenticated, which is the direction a mistake here has to fail in.
+/// **Nothing is lost by not serving the probes here.** `healthz` is a constant and `readyz` is a
+/// bare `StatusCode` with no body (`health.rs`), so all three listeners answered identically —
+/// mounting it three times was three copies of one bit. The richer operator view (posture *string*,
+/// executor counters, WAL appends and fsyncs, pin drain depth, cache stats, ingest admission gauges)
+/// is on the bearer-gated `/control/status` and is untouched; the boolean/string split is SA §9's.
 ///
-/// The layer also sits ahead of the router's 404, so an unrouted path on the control listener
-/// answers 401 rather than 404 — `near_misses_of_the_exemption_are_authenticated` pins that
-/// alongside the near-miss spellings. It is not the reason for this design, but it is the right way
-/// round: an unauthenticated caller cannot map the plane's surface by probing.
+/// **The one bit that IS lost, written down so it is not rediscovered as a surprise.** An
+/// unauthenticated probe can no longer observe "the control listener is accepting connections". A
+/// control listener that failed *independently* of the other two — its socket path removed, its
+/// accept task panicked — would leave ingest and denies unable to land with no unauthenticated
+/// signal of it. The answer is that anything that cares about the control plane is an admin system
+/// that holds the operator credential, and one authenticated `/control/status` call answers the same
+/// question *and* says why. A public liveness probe on this listener would answer only the first
+/// half, at the cost of a permanent hole in the plane's firewall rule.
+///
+/// The layer sits ahead of the router's 404, so an unrouted path on the control listener answers 401
+/// rather than 404 — `every_path_on_the_control_listener_needs_the_credential` pins that, including
+/// for `/healthz` and `/readyz` themselves. With no exemption there is nothing left for a path to
+/// match *nearly*, and an unauthenticated caller cannot map the plane's surface by probing: the
+/// plane discloses nothing about itself, its removed routes included.
 ///
 /// # Scope: this plane only
 ///
@@ -317,23 +333,13 @@ async fn require_operator_credential(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
-    if !UNAUTHENTICATED_CONTROL_PATHS.contains(&request.uri().path()) {
-        state.check_bearer(bearer_token(request.headers()), &state.operator_credential)?;
-    }
+    // Unconditional: no path, routed or not, is exempt. See "Why there is no exemption" above.
+    state.check_bearer(bearer_token(request.headers()), &state.operator_credential)?;
     Ok(next.run(request).await)
 }
 
-/// The **only** paths on the control router that [`require_operator_credential`] lets through
-/// without a credential. Adding to this list is how a route becomes public, and it is meant to be a
-/// visible, arguable act rather than an omission.
-///
-/// Both entries are required to be here by SA §9 and by `health.rs`'s doc: a liveness and a
-/// readiness probe are consumed by orchestration that holds no operator secret, on all three
-/// listeners. `readyz` is a bare boolean precisely *so* that it can be public.
-pub const UNAUTHENTICATED_CONTROL_PATHS: &[&str] = &["/healthz", "/readyz"];
-
 /// Every route [`router`] mounts, as `(method, path)` — the subject of
-/// `every_control_route_not_exempt_requires_the_operator_credential`.
+/// `every_control_route_requires_the_operator_credential`.
 ///
 /// **This list is the test's mechanism, and it is weaker than the layer it tests. Say so rather than
 /// claim otherwise.** axum 0.8's `Router` exposes no route enumeration — there is no public iterator
@@ -350,8 +356,6 @@ pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/control/ingest"),
     ("POST", "/control/changes"),
     ("GET", "/control/status"),
-    ("GET", "/healthz"),
-    ("GET", "/readyz"),
 ];
 
 /// `/control/changes`'s request-body limit.
@@ -1098,8 +1102,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     // `ComputeGate::shed_total`'s doc).
     let gate = state.compute_gate.status();
     // The write executor's posture and counters. **This is where the posture string lives** — the
-    // bearer-gated plane — because `/readyz` is unauthenticated on every listener and must stay a
-    // bare boolean (SA §9; see `health.rs`). `ready` is computed by the *same* `is_ready` the probe
+    // bearer-gated plane — because `/readyz`, on the viewer and session listeners, is
+    // unauthenticated and must stay a bare boolean (SA §9; see `health.rs`). It is deliberately not
+    // served here at all, so on this listener the posture has exactly one door and it needs the
+    // credential. `ready` is computed by the *same* `is_ready` the probe
     // calls, not a second predicate, so the two can never drift.
     //
     // Contracts §3.4 specifies `readiness` as a **per-partition** field, beside `segments_version`

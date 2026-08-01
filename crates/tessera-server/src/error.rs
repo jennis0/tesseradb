@@ -110,7 +110,8 @@ pub enum ApiError {
     /// A unit variant with a fixed detail, like [`ApiError::PinExpired`]: there is one thing to
     /// say, and a parameterised detail would invite a future handler into distinguishing executor
     /// postures for a caller. The posture belongs on the bearer-gated `/control/status` (SA §9);
-    /// `/readyz`, which answers the same question unauthenticated, is a bare status with no body.
+    /// `/readyz`, which answers the same question unauthenticated on the viewer and session
+    /// listeners, is a bare status with no body.
     NotReady,
 }
 
