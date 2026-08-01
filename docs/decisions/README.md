@@ -34,3 +34,7 @@ prevent.
 | [0014](0014-i10-weakened-to-construction.md) | 2026-08-01 | I10 is weakened to what the construction defends |
 | [0015](0015-plans-retired-for-epics.md) | 2026-08-01 | Plans are retired; work is tracked as capability epics in GitHub issues |
 | [0016](0016-segments-filename-unpadded.md) | 2026-08-01 | The `SEGMENTS-<n>.json` filename grammar is unpadded, and a reader must refuse other forms |
+| [0017](0017-c4-covers-published-timing.md) | 2026-08-01 | C4 covers published timing as well as inferable timing |
+| [0018](0018-manifest-disposition-split-is-contract.md) | 2026-08-01 | The side-manifest disposition split is interchange contract |
+| [0019](0019-i13-lettered-properties.md) | 2026-08-01 | I13 names three lettered properties, and I13a is an addition |
+| [0020](0020-no-auth-data-retained-beside-a-mask.md) | 2026-08-01 | No authorisation data is retained beside a mask |
