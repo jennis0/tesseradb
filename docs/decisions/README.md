@@ -50,3 +50,5 @@ prevent.
 | [0030](0030-determinism-is-not-a-guarantee.md) | 2026-08-01 | Response determinism is an implementation detail, not a guarantee |
 | [0031](0031-decode-tiers-are-specified-not-promised.md) | 2026-08-01 | The decode tiers are described where selection is specified |
 | [0032](0032-delete-the-dead-handle-table.md) | 2026-08-01 | The per-session handle allocation goes; the type stays |
+| [0033](0033-both-lanes-group-commit.md) | 2026-08-01 | Both write lanes group-commit, in separate windows |
+| [0034](0034-the-window-does-not-linger.md) | 2026-08-01 | A commit window closes when its queue drains; it does not linger |
