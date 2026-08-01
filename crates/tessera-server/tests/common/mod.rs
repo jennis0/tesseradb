@@ -1,10 +1,9 @@
 //! Shared fixtures for `tessera-server`'s integration tests.
 //!
-//! Task 0c (Phase 2 stage 2.1) split the former single `tests/http.rs` into two binaries by
-//! subject — `http.rs` (viewer plane, session plane, config, byte shape, the compute-admission
-//! gate) and `http_write.rs` (the control plane's write path) — so that stage 2.1's parallel
-//! tracks own disjoint files. This module holds every fixture both of them use; nothing here
-//! changed in the split beyond gaining `pub`.
+//! The integration tests are split by subject across several binaries — `http.rs` (viewer plane,
+//! session plane, config, byte shape, the compute-admission gate), `http_write.rs` (the control
+//! plane's write path) and `http_engine_state.rs` (pins and session revocation). This module holds
+//! every fixture they share, so the split does not become drift.
 
 // Each integration-test binary compiles this module separately, so a fixture used by only one of
 // them is genuinely dead code in the other. Allowing it here is what keeps the two halves from
@@ -161,11 +160,11 @@ pub struct TestServer {
     /// The same `AppState` the three routers are serving, so a test can assert on an engine-side
     /// observable a handler was supposed to move — not just on the status code it returned.
     ///
-    /// Added by the Task 5 fix round for `revoke_prunes_the_token`, which asserted a 204 and a
-    /// survivor's 200 and therefore covered nothing its name claimed: deleting
-    /// `state.engine.prune_token(...)` from the revoke handler left all 38 `tessera-server` tests
-    /// green (round-1 review, MX1). `/control/status` will publish these gauges once Track B wires
-    /// it; until then this is the only route from an HTTP test to a cache observable.
+    /// Without it, `revoke_prunes_the_token` could assert only a 204 and a survivor's 200 — which
+    /// covers nothing its name claims: deleting `state.engine.prune_token(...)` from the revoke
+    /// handler leaves every status code in this crate's tests unchanged. `/control/status` does
+    /// publish the cache gauges, but reading them costs the operator credential and a JSON parse;
+    /// this is the direct route from an HTTP test to a cache observable.
     ///
     /// **Not a licence to bypass HTTP.** A test that drives the engine through this field instead
     /// of through a request has stopped being a server test; the point is to *observe* after
@@ -185,7 +184,7 @@ impl TestServer {
     }
 }
 
-/// The `EngineConfig` every test but the Task 3 concurrency tests uses.
+/// The `EngineConfig` every test but the concurrency ones uses.
 pub fn default_engine_config() -> EngineConfig {
     EngineConfig {
         token_max_lifetime_secs: 3600,
@@ -200,7 +199,7 @@ pub fn default_engine_config() -> EngineConfig {
         max_tiles_per_request: 262_144,
         compute_threads: tessera_engine::default_compute_threads(),
         // The shipped defaults for lifecycle §2.2's two pin bounds — see the same two lines in
-        // tessera-engine's `tests/common/mod.rs`. Inert until Task 4 (Task 0 gate, F3).
+        // tessera-engine's `tests/common/mod.rs`.
         pin_ttl_secs: 300,
         pins_per_session_max: 4,
     }
@@ -210,15 +209,14 @@ pub async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path)
     spawn_server_with_config(bundle_root, cache_dir, wal_path, default_engine_config()).await
 }
 
-/// Task 4's default test gate: generous enough that no test written before this task's admission
-/// gate existed can ever observe it (every one of those tests issues at most a handful of
-/// sequential requests) — only the gate-specific tests below construct a deliberately tiny
+/// The default test gate: generous enough that no test which issues a handful of sequential
+/// requests can ever observe it. Only the gate-specific tests construct a deliberately tiny
 /// [`ComputeGate`] to exercise shedding.
 pub fn generous_test_gate() -> ComputeGate {
     ComputeGate::new(64, 64, 250)
 }
 
-/// Like [`spawn_server`], but with a caller-supplied `EngineConfig` — Task 3's concurrency tests
+/// Like [`spawn_server`], but with a caller-supplied `EngineConfig` — the concurrency tests
 /// need a much wider underlay budget than every other test in this file to engineer a
 /// deterministic slow request (see `healthz_stays_prompt_while_a_long_viewport_runs`'s doc), and
 /// duplicating the whole engine-open-plus-three-listeners dance per test would be worse than one
@@ -239,7 +237,7 @@ pub async fn spawn_server_with_config(
     .await
 }
 
-/// Like [`spawn_server_with_config`], but also with a caller-supplied [`ComputeGate`] — Task 4's
+/// Like [`spawn_server_with_config`], but also with a caller-supplied [`ComputeGate`] — the
 /// admission-gate tests need a deliberately tiny gate (`compute_admission=1, compute_queue=0`) to
 /// hold saturated deterministically, which every other test in this file must not be affected by.
 pub async fn spawn_server_with_config_and_gate(
@@ -255,8 +253,8 @@ pub async fn spawn_server_with_config_and_gate(
     spawn_server_from_engine(engine, max_k, compute_gate).await
 }
 
-/// §14 fix round 1: the "wrap an already-constructed `Engine` into a running three-listener
-/// server" half of [`spawn_server_with_config_and_gate`], factored out so the byte-equality tests
+/// The "wrap an already-constructed `Engine` into a running three-listener server" half of
+/// [`spawn_server_with_config_and_gate`], factored out so the byte-equality tests
 /// can construct their own `Engine` (to call `set_serial_fallback_max_rows_for_test` on it, which
 /// needs the owned `Engine` before it is moved into `AppState`) while still reusing the router/
 /// listener plumbing every other test goes through.
@@ -265,14 +263,13 @@ pub async fn spawn_server_from_engine(
     max_k: usize,
     compute_gate: ComputeGate,
 ) -> TestServer {
-    // Phase 2 stage 2.1 (Task 3a): the WAL now lives on its own executor thread, and `prepare`
-    // starts it for a real server. Every server test reaches its engine through this one function,
-    // so starting it here is what keeps `/control/ingest` and `/control/changes` working in the
-    // test harness — including in files this track may not edit.
+    // The WAL lives on its own executor thread, and `prepare` starts it for a real server. Every
+    // server test reaches its engine through this one function, so starting it here is what keeps
+    // `/control/ingest` and `/control/changes` working in the test harness.
     //
-    // The bound is generous on purpose: no test here means to exercise queue-full backpressure
-    // (that is Task 6's `ingest_429s_when_the_queue_is_full`, which will set its own), and a small
-    // bound would turn an unrelated timing wobble into a spurious 429.
+    // The bound is generous on purpose: no test reaching this helper means to exercise queue-full
+    // backpressure (`ingest_429s_when_the_queue_is_full` sets its own), and a small bound would turn
+    // an unrelated timing wobble into a spurious 429.
     let mut engine = engine;
     engine
         .start_write_executor(1024)
@@ -284,10 +281,9 @@ pub async fn spawn_server_from_engine(
 /// executor the caller has already dealt with — started with its own bound, started with faults, or
 /// **deliberately not started at all**.
 ///
-/// Split out by Task 3b, whose readiness tests need the last of those: `/readyz` must answer 503 for
-/// an engine with no executor, and `spawn_server_from_engine` starts one unconditionally (and would
-/// panic on `AlreadyStarted` if a test started its own first). Purely additive — that function keeps
-/// its name, its bound and its behaviour, so the frozen `tests/http.rs` is untouched by this split.
+/// Split out for the readiness tests, which need the last of those: `/readyz` must answer 503 for an
+/// engine with no executor, and `spawn_server_from_engine` starts one unconditionally (and would
+/// panic on `AlreadyStarted` if a test started its own first).
 pub async fn mount_server(engine: Engine, max_k: usize, compute_gate: ComputeGate) -> TestServer {
     mount_server_with(
         engine,
@@ -299,7 +295,7 @@ pub async fn mount_server(engine: Engine, max_k: usize, compute_gate: ComputeGat
     .await
 }
 
-/// Task 6's control-plane bounds, as a caller-supplied set.
+/// The control-plane bounds, as a caller-supplied set.
 ///
 /// `admission` bounds concurrent `/control/ingest` handlers (and therefore the blocking-pool
 /// threads ingest can hold); `max_batch_rows` and `max_batch_bytes` are the two 422 caps. They are
@@ -312,23 +308,21 @@ pub struct IngestLimits {
     pub max_batch_bytes: usize,
 }
 
-/// Generous enough that no test written before Task 6's bounds existed can observe them — the same
+/// Generous enough that no test which is not about these bounds can observe them — the same
 /// principle as [`generous_test_gate`]. Only the bound-specific tests set their own.
 pub fn generous_ingest_limits() -> IngestLimits {
     IngestLimits {
         admission: 64,
         // Above the *production* default of 10 000, deliberately:
         // `concurrent_ingests_do_not_delay_a_control_changes_suppress` posts 40 000-row batches to
-        // make the ingest side genuinely heavy, and it was written before this cap existed. A
-        // harness default that silently turned that test's premise into a 422 would be measuring
-        // the harness.
+        // make the ingest side genuinely heavy. A harness default that silently turned that test's
+        // premise into a 422 would be measuring the harness.
         max_batch_rows: 200_000,
         max_batch_bytes: 64 * 1024 * 1024,
     }
 }
 
-/// As [`mount_server`], with Task 6's control-plane bounds chosen by the caller. Purely additive:
-/// `mount_server` keeps its name, its signature and its behaviour.
+/// As [`mount_server`], with the control-plane bounds chosen by the caller.
 pub async fn mount_server_with_ingest_limits(
     engine: Engine,
     max_k: usize,
@@ -366,10 +360,9 @@ pub async fn spawn_server_with_cors(
 
 /// The shared body of the three entry points above, with **both** parameter sets explicit.
 ///
-/// Task 6 (ingest bounds) and the MVP client work (`serve.dev_cors_origins`) each added a
-/// parameterised variant of `mount_server` on their own branch, and they conflicted here. Rather
-/// than nest one inside the other, both delegate to this: each named entry point stays additive
-/// and keeps its own defaults, and a test that needs both can call this directly.
+/// The ingest bounds and `serve.dev_cors_origins` each have a parameterised variant of
+/// `mount_server`. Rather than nest one inside the other, both delegate to this: each named entry
+/// point keeps its own defaults, and a test that needs both calls this directly.
 async fn mount_server_with(
     engine: Engine,
     max_k: usize,
