@@ -1452,20 +1452,6 @@ mod tests {
         assert!(matches!(err, ConfigError::ThetaTargetZero), "{err}");
     }
 
-    // ---- Phase 2 stage 2.1 (Task 0b) --------------------------------------------------------
-
-    /// **SA §7's rule, pinned as a test.** "Performance knobs default; disclosure controls do
-    /// not" — and not one of the fourteen stage-2.1 knobs is a disclosure control: they size
-    /// queues, windows, caches and pin lifetimes, and none of them changes what any principal may
-    /// see. So a `tessera.toml` that mentions **none** of them — no `[ingest]` section at all —
-    /// must load, with the documented defaults.
-    ///
-    /// The reading matters because the opposite reading is also plausible and is wrong: several
-    /// of these knobs *bound* memory, and a reviewer who classes "bounds memory" as "must be
-    /// stated explicitly" would make every deployment carry fourteen lines of boilerplate that
-    /// SA §7 exists to prevent. If a later stage decides one of these really is a disclosure
-    /// control, it must fail this test on the way to moving it — which is the point.
-    #[test]
     /// MVP client spec §3: the browser seam is off unless typed.
     ///
     /// This is the one knob in this file that is **not** a performance knob, so SA §7's "knobs
@@ -1494,6 +1480,19 @@ mod tests {
         assert_eq!(config.dev_cors_origins, vec!["http://localhost:5173"]);
     }
 
+    // ---- Phase 2 stage 2.1 (Task 0b) --------------------------------------------------------
+
+    /// **SA §7's rule, pinned as a test.** "Performance knobs default; disclosure controls do
+    /// not" — and not one of the fourteen stage-2.1 knobs is a disclosure control: they size
+    /// queues, windows, caches and pin lifetimes, and none of them changes what any principal may
+    /// see. So a `tessera.toml` that mentions **none** of them — no `[ingest]` section at all —
+    /// must load, with the documented defaults.
+    ///
+    /// The reading matters because the opposite reading is also plausible and is wrong: several
+    /// of these knobs *bound* memory, and a reviewer who classes "bounds memory" as "must be
+    /// stated explicitly" would make every deployment carry fourteen lines of boilerplate that
+    /// SA §7 exists to prevent. If a later stage decides one of these really is a disclosure
+    /// control, it must fail this test on the way to moving it — which is the point.
     #[test]
     fn every_stage_2_1_knob_defaults() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
