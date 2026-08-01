@@ -1,0 +1,9 @@
+{
+  "name": "tessera-clients",
+  "private": true,
+  "workspaces": ["spike", "core", "viewer"],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present"
+  }
+}
