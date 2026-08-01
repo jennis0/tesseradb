@@ -46,3 +46,4 @@ prevent.
 | [0026](0026-idset-stamp-version.md) | 2026-08-01 | Three concepts that shared the word "epoch" get three words |
 | [0027](0027-i5-is-unverified.md) | 2026-08-01 | I5 is unverified, and the specification says so |
 | [0028](0028-postings-requirement-and-the-pair-relation.md) | 2026-08-01 | What the postings build requires, and who needs the pair relation |
+| [0029](0029-view-key.md) | 2026-08-01 | A fourth concept called "epoch": the view key |
