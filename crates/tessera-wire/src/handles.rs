@@ -8,10 +8,10 @@
 //! identity that was always safe to show, and a point's identity is stable across
 //! sessions, which is what lets a client bookmark, share and reconcile it. I10 is not
 //! weakened by the retirement: it is what made the retirement possible, since after
-//! contracts r6 no request-path artifact stores an entity ID at all (see
+//! the boundary identity changed, no request-path artifact stores an entity ID at all (see
 //! `tessera_engine::viewport::row_to_point`).
 //!
-//! Kept, not deleted, because Phase 3's node handles (`/v1/labels` returns
+//! Kept, not deleted, because node handles (`/v1/labels` returns
 //! `node_handle`) are genuinely per-session and need exactly this machinery — a
 //! frontier node is a query-time object rather than a corpus object, so there is no
 //! stable identity to permute — and because deleting the type would delete the
@@ -28,7 +28,7 @@
 //! described below sits on top of it rather than replacing it.
 //!
 //! **Sequential-mint leak rationale** (preserved from the viewer-plane design this module
-//! originally served, and still the rationale a future Phase 3 caller inherits). `handle_for`
+//! originally served, and still the rationale a future node-handle caller inherits). `handle_for`
 //! mints handles `0, 1, 2, …` in first-visit order within a session. That order is not free of
 //! information: it discloses the sequence in which distinct entities were first returned to
 //! *this* viewer across *their own* requests. But the viewer already observes that order
@@ -41,7 +41,7 @@
 //! permutation** encoding, which additionally hides within-session visit order from a viewer
 //! correlating handles across their own requests over time (e.g. to infer whether two viewport
 //! calls re-surfaced the same entity without it being obviously "the same handle again"); that
-//! hardening arrives with router/worker fan-out, not Phase 1's single-process walking skeleton.
+//! hardening belongs with router/worker fan-out, which this single-process build does not have.
 
 use std::collections::HashMap;
 
@@ -52,8 +52,8 @@ use tessera_types::{EntityId, Handle};
 /// Handles are minted sequentially on first sight of an entity within *this* table and are
 /// stable for the table's lifetime; a fresh `HandleTable` (e.g. a new session) starts its
 /// numbering over, so the same entity gets an independent handle in each session (I10).
-// Phase 3: node handles (`/v1/labels`'s `node_handle`) are genuinely per-session and will
-// consume this type; until then nothing on the viewer plane constructs one.
+// Node handles (`/v1/labels`'s `node_handle`) are genuinely per-session and will consume this
+// type; until then nothing on the viewer plane constructs one (decision 0032).
 #[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct HandleTable {

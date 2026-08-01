@@ -433,7 +433,11 @@ fn batched_build_is_byte_identical_to_the_batched_reference() {
     let streaming_out = temp.path().join("streaming");
     build_in_memory(&make_args(reference_out.clone())).unwrap();
     build(&make_args(streaming_out.clone())).unwrap();
-    assert_bundles_identical(&reference_out, &streaming_out, "batched, forced spill+bands");
+    assert_bundles_identical(
+        &reference_out,
+        &streaming_out,
+        "batched, forced spill+bands",
+    );
 
     // Determinism of the batched path.
     let again = temp.path().join("again");
@@ -442,10 +446,9 @@ fn batched_build_is_byte_identical_to_the_batched_reference() {
 
     // The batch size is identity-bearing and must be recorded (and the single-batch builds
     // above must NOT record one — checked in the conformant test's manifest assertions).
-    let manifest: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(streaming_out.join("v00000/MANIFEST.json")).unwrap(),
-    )
-    .unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(streaming_out.join("v00000/MANIFEST.json")).unwrap())
+            .unwrap();
     assert_eq!(
         manifest["provenance"]["batch_items"].as_u64(),
         Some(2_100),
@@ -587,7 +590,7 @@ fn entity_ids_follow_signature_order() {
         );
     }
     // The point of the ordering: identical signatures form runs, which is what compresses the
-    // postings (Phase 0 measured 8.9-36.7x).
+    // postings — measured at 8.9-36.7x (`probes/results.md`).
     let distinct = signatures.windows(2).filter(|w| w[0] != w[1]).count() + 1;
     assert!(
         distinct < n / 4,
@@ -595,12 +598,12 @@ fn entity_ids_follow_signature_order() {
     );
 }
 
-/// A manual scale check, ignored by default: builds the Phase 0 corpus prefix through the
+/// A manual scale check, ignored by default: builds the probe corpus prefix through the
 /// **reference** path so its peak RSS can be compared against the streaming one under
 /// `/usr/bin/time -v`. Run as
 /// `cargo test --release -p tessera-build --test build_equivalence -- --ignored reference_build_at_scale`.
 #[test]
-#[ignore = "reads the Phase 0 corpus; run manually for a memory comparison"]
+#[ignore = "reads the probe corpus; run manually for a memory comparison"]
 fn reference_build_at_scale() {
     let limit: u64 = std::env::var("TESSERA_SCALE_LIMIT")
         .ok()
