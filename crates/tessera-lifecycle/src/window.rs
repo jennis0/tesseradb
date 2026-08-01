@@ -19,10 +19,33 @@
 //!
 //! ## Calibrate the win honestly
 //!
-//! The probes' 8.9–36.7× posting compression was measured under a **full-corpus** signature sort. A
-//! window realises run lengths ≈ `window_rows × term_density`, so 10 000 rows at the corpus's 2%
-//! density gives runs of ~200 against a ~1.0 scattered baseline: a large win and openly a fraction
-//! of the ceiling.
+//! The probes' 8.9–36.7× posting compression was measured under a **full-corpus** signature sort.
+//!
+//! **`run ≈ B × p` is an upper bound, not the expected run length**, and the distinction is worth one
+//! to two orders of magnitude. [`assign_sorted`] sorts on an item's whole sorted, deduplicated term
+//! list — its **signature** — not on any single term. A term's ids are contiguous only across items
+//! whose *entire* signature is equal, so `B × p` is attained only where the term is effectively the
+//! signature: a corpus of one term per item, which is exactly how this crate's
+//! `the_window_run_ratio_against_the_full_sort_ceiling` builds its corpus, so that test cannot fail
+//! the bound and must not be read as evidence for it. Where a term co-occurs with others, its
+//! postings split across every signature carrying it.
+//!
+//! **What the measured corpus implies.** Probes results §3, categories-subclass at ε=0: **54,791
+//! distinct signatures over 2.42 M items**, mean group 44, group size by rank 4,213 (rank 100) → 444
+//! (rank 500) → 158 (rank 1,000) → 42 (rank 2,500), top 500 groups covering 82.4%. A 10 000-row
+//! window drawn from that distribution holds ≈ 17 rows of the rank-100 group and ≈ 0.65 of the
+//! rank-1,000 one — runs of order 10¹ and 1, not ~200. **The ~200 figure is the ceiling for a
+//! leading term and not a forecast for the median one**, and an operator sizing this knob from it
+//! should expect one to two orders of magnitude less at 10⁹, having paid the window latency and the
+//! resident rows in full. Re-measuring this against a per-window permutation of the probe corpus is
+//! the open item (Task 7a fix round 1, F2 — the measurement was not run, no probe exists for it).
+//!
+//! **And the cost that grows with `B`.** [`assign_sorted`] is `n log n` over the window's rows with a
+//! `Vec<u32>` sort key per item and a lexicographic compare per comparison. The per-item key
+//! allocation is per-row either way, but the comparison count is not: 100 rows to 10 000 is
+//! log₂ 10⁴ / log₂ 10² = **twice the comparison work per row**. Raising the bound buys run length
+//! sub-linearly (the groups it reaches are smaller) and costs sort work, window latency and
+//! residency; it is not a free dial.
 //!
 //! And it is a fraction in a specific, nameable way. Design §11.1's container model gives the
 //! benefit available to a term of density *p* at sort scope *B* as `max(1, 2¹⁶/(p·B))`, and notes
@@ -185,6 +208,10 @@ impl<W> CommitWindow<W> {
     /// and no path only a window can reach.
     ///
     /// **Hashes, not ids.** One `u64` and no allocation per row, against a `Vec<u8>` clone per row.
+    /// An admitted row is hashed twice — once here, once in [`CommitWindow::push`] — and that is left
+    /// alone deliberately: halving it means threading the digests from this call into that one, and
+    /// it is the only per-row work this task *added* against two heap allocations per row and a deep
+    /// `wal_rows.clone()` it removed. Net strongly negative; not worth the reviewability.
     /// A hash collision costs a spurious early close — conservative, and the entry is re-evaluated
     /// against the live map either way — never a missed conflict.
     ///

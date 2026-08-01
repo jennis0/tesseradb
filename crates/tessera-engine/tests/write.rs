@@ -342,16 +342,35 @@ fn ack_follows_fsync_then_swap() {
 /// The discrimination is real rather than incidental: with one FIFO queue the deny's receipt would
 /// arrive after *all* `BOUND` work items; with deny-first it arrives after **at most one** — the
 /// item already executing when it landed.
+#[test]
+fn a_deny_is_never_queued_behind_work() {
+    deny_priority_survives_the_window(None);
+}
+
+/// **The same property with group commit disabled** — `commit_window_max_items = 1`, which is the
+/// documented spelling for turning the window off and the one Task 10's A/B needs to exist.
 ///
+/// This leg is not a variation for its own sake. At that setting *every* entry trips the row bound,
+/// so the window's close-and-continue path runs on each one; a `run_work_pass` that closed a window
+/// and then kept draining the work queue would never return to `Executor::run`'s deny drain while
+/// submissions keep arriving, and the deny would land last however the lanes are ordered. It is red
+/// on exactly that defect and green on nothing else, which is why it takes a config no default sets.
+#[test]
+fn a_deny_is_never_queued_behind_work_with_group_commit_disabled() {
+    deny_priority_survives_the_window(Some(1));
+}
+
 /// Sequencing is deterministic, not raced. The executor is stalled inside its first work item, the
 /// work queue is filled to its bound behind it, and the deny is released only once the engine's own
 /// `deny_submitted` counter proves it is *queued* — that counter is bumped after the enqueue and
 /// before the blocking wait for exactly this purpose.
-#[test]
-fn a_deny_is_never_queued_behind_work() {
+fn deny_priority_survives_the_window(window_max_rows: Option<usize>) {
     const BOUND: usize = 4;
     let tmp = TempDir::new().unwrap();
     let (engine, faults) = engine_with_faults(&tmp, BOUND);
+    if let Some(rows) = window_max_rows {
+        engine.set_commit_window_max_rows(rows);
+    }
     let engine = Arc::new(engine);
 
     let entity = entity_of(&engine, 3);
@@ -1271,18 +1290,22 @@ fn every_id_a_window_issues_is_in_the_wal() {
     }
 }
 
-/// **A window's acks follow its swap** — the ingest half of `ack_follows_fsync_then_swap`, which
-/// covers a change.
+/// **A window's acks follow its established-map insert** — the ingest half of
+/// `ack_follows_fsync_then_swap`, which covers a change.
 ///
-/// The witness is engine state, not a step log: the executor is parked *inside* `Executor::ack`, one
-/// statement before the send, so the effect it is about to acknowledge must already be in force. For
-/// an ingest "in force" is the live external-id map (buffered rows have no geometry until stage
-/// 2.2's flush, so `visible()` cannot see them — which is precisely why this leg reads
-/// `resolve_external_id` instead).
+/// **What it asserts, exactly, and what it does not.** The witness is engine state, not a step log:
+/// the executor is parked *inside* `Executor::ack`, one statement before the send, and
+/// `resolve_external_id` answers. That reads `LiveState::established`, which `Executor::apply_window`
+/// writes *before* it calls `publish` — so what is proven is **insert-precedes-ack**, not
+/// swap-precedes-ack. A stronger witness is unavailable in stage 2.1: nothing a reader can observe
+/// distinguishes the two, because buffered rows have no geometry until stage 2.2's flush and
+/// `visible()` therefore cannot see the ingest at all under either ordering. When flush lands, this
+/// leg should read the swapped-in generation instead.
 ///
-/// The fail-open it catches: a window that acked its N waiters and then swapped. Every caller holds
-/// ids whose entities no `/control/changes` lookup can resolve yet, so a suppression issued
-/// immediately after a 200 is answered 404 for an item that exists.
+/// The fail-open it does catch: a window that acked its N waiters before establishing them. Every
+/// caller holds ids whose entities no `/control/changes` lookup can resolve yet, so a suppression
+/// issued immediately after a 200 is answered 404 for an item that exists. It is the first test in
+/// the tree to assert ingest ack-ordering at all.
 #[test]
 fn a_windows_acks_follow_its_swap() {
     let tmp = TempDir::new().unwrap();
@@ -1299,8 +1322,8 @@ fn a_windows_acks_follow_its_swap() {
     assert!(
         engine.resolve_external_id(b"in-force").unwrap().is_some(),
         "the executor is parked one statement before the ack: the window it is about to \
-         acknowledge MUST already be swapped in. Seeing nothing here means the acks ran with the \
-         swap still ahead of them — lifecycle §4's ack-ordering fail-open, one window wide"
+         acknowledge MUST already be established. Seeing nothing here means the acks ran with the \
+         apply still ahead of them — lifecycle §4's ack-ordering fail-open, one window wide"
     );
 
     faults.release();

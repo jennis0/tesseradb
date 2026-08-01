@@ -758,13 +758,22 @@ const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;
 /// rather than ~200. Entries are admitted whole (a submission is never split across two windows),
 /// so a window closes at or just past this count.
 ///
-/// **Sized from the compression arithmetic, which is the window's whole purpose.** The probes'
-/// 8.9–36.7× posting compression was measured under a *full-corpus* signature sort; a window
-/// realises run lengths ≈ `commit_window_max_items × term_density`, so 10 k rows at the 2%
-/// density the corpus shows gives runs of ~200 against a ~1.0 scattered baseline (plan Task 7a,
-/// review M1). That is a large win and openly a fraction of the ceiling, and it scales linearly
-/// with this number — raising it buys compression and costs window latency and the heap the
-/// held rows occupy.
+/// **Sized from the compression arithmetic, which is the window's whole purpose — but do not size a
+/// deployment from the headline.** The probes' 8.9–36.7× posting compression was measured under a
+/// *full-corpus* signature sort. `run ≈ commit_window_max_items × term_density` — 10 k rows at the
+/// corpus's 2% giving ~200 (plan Task 7a, review M1) — is an **upper bound**, not an expectation:
+/// entity ids are sorted by an item's whole term *signature*, so a term's ids run contiguously only
+/// where that term is effectively the signature. The measured corpus is not shaped that way (probes
+/// results §3: 54,791 signatures over 2.42 M items, mean group 44, rank-100 group 4,213 and
+/// rank-1,000 group 158), so a 10 k window holds ~17 rows of the hundredth-largest group and under
+/// one of the thousandth — **runs of order 10¹, one to two orders of magnitude below the 200**. Size
+/// from that, and re-measure before trusting either figure (CLAUDE.md's standing caveat on
+/// policy-dependent headlines; the per-window re-permutation was not run — Task 7a fix round 1, F2).
+///
+/// Raising this buys run length **sub-linearly** — the extra rows come from progressively smaller
+/// signature groups — and costs window latency, the heap the held rows occupy, and sort work:
+/// `assign_sorted` is `n log n` in the window's rows, so 100 → 10 000 is twice the comparison work
+/// per row. It is not a free dial in the compression direction.
 ///
 /// **Which half of the win that is, stated because the multiplier alone hides it.** Design §11.1's
 /// container model gives the benefit available to a term of density `p` at sort scope `B` as
@@ -772,6 +781,17 @@ const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;
 /// at any value the resident ceiling permits — a window collects the **posting-storage**
 /// (run-encoding) win and **none of the container-count** win, and container count is what a union
 /// costs.
+///
+/// **The window adds no residency term, and the argument is worth writing down because it reads the
+/// other way round.** Task 6's relation 3 bounds resident ingest bytes by `ingest_admission ×
+/// ingest_max_batch_rows`, and a window looks like a fourth term outside it — a reviewer of this task
+/// concluded exactly that. It is not: every entry in an open window has a handler blocked on its
+/// receipt, and `control.rs`'s ingest path takes the `IngestAdmission` permit **before**
+/// `spawn_blocking` and moves it *into* the closure, so the permit is held until the ack. In-window
+/// entries are therefore ≤ `ingest_admission`, and their bytes are the ones relation 3 already
+/// counts. This key is the **tighter** bound in the common case, not the load-bearing one; the
+/// worst-case window is `commit_window_max_items − 1 + ingest_max_batch_rows` ≈ 20 000 rows, which is
+/// what "at or just past this count" above means.
 ///
 /// **It equals [`DEFAULT_INGEST_MAX_BATCH_ROWS`] deliberately** (that constant's own doc makes the
 /// same point from the other side): one maximal batch is one maximal window, so no client can

@@ -844,6 +844,25 @@ impl Engine {
         self.fragment_cache.set_memory_bound(fragment_bytes);
     }
 
+    /// Task 7a: the row count at which a commit window closes (`ingest.commit_window_max_items`,
+    /// which counts **rows** — see that key's doc).
+    ///
+    /// **Additive, on [`Engine::set_overlay_soft_limit`]'s precedent and for the same reason**:
+    /// widening `start_write_executor` would touch `crates/tessera-engine/tests/pins.rs` — outside
+    /// Track B's allowlist — and four `tessera-bench` call sites.
+    ///
+    /// An embedder that never calls this gets `write::DEFAULT_COMMIT_WINDOW_MAX_ROWS`, which is a
+    /// real bound and deliberately not "unbounded": the drain that fills a window frees a
+    /// bounded-queue slot per entry, so a window bounded only by "the queue is empty" is bounded by
+    /// nothing under sustained load. **There is no unset value and no "off" for this knob** — unlike
+    /// the soft limit below, a `usize::MAX` here is an unbounded window, which is the failure the
+    /// design review raised as its CRITICAL 2, not a disabled feature. `0` is clamped to `1` (the
+    /// documented spelling for *no* grouping) rather than accepted as "close at zero rows", and
+    /// `tessera-server`'s config refuses it outright.
+    pub fn set_commit_window_max_rows(&self, rows: usize) {
+        self.write.health().set_commit_window_max_rows(rows);
+    }
+
     /// Task 6 (D5): the overlay depth at which the executor raises an alarm.
     ///
     /// **Additive, on [`Engine::set_cache_bounds`]' precedent, and for the same reason.** Widening
@@ -858,21 +877,6 @@ impl Engine {
     ///
     /// `usize::MAX` is the unset value and disables the alarm; `tessera-server`'s config refuses
     /// `0`, so the two sides of the boundary never disagree about what "off" means.
-    /// Task 7a: the row count at which a commit window closes (`ingest.commit_window_max_items`,
-    /// which counts **rows** — see that key's doc).
-    ///
-    /// **Additive, on [`Engine::set_overlay_soft_limit`]'s precedent and for the same reason**:
-    /// widening `start_write_executor` would touch `crates/tessera-engine/tests/pins.rs` — outside
-    /// Track B's allowlist — and four `tessera-bench` call sites.
-    ///
-    /// An embedder that never calls this gets `write::DEFAULT_COMMIT_WINDOW_MAX_ROWS`, which is a
-    /// real bound and deliberately not "unbounded": the drain that fills a window frees a
-    /// bounded-queue slot per entry, so a window bounded only by "the queue is empty" is bounded by
-    /// nothing under sustained load.
-    pub fn set_commit_window_max_rows(&self, rows: usize) {
-        self.write.health().set_commit_window_max_rows(rows);
-    }
-
     pub fn set_overlay_soft_limit(&self, limit: usize) {
         self.write.health().set_overlay_soft_limit(limit);
         let depth = self.overlay_depth();

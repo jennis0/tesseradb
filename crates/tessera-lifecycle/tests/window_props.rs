@@ -161,8 +161,16 @@ fn framed_ids_of<W>(entry: &tessera_lifecycle::window::ClosedEntry<W>) -> Vec<u6
 /// higher is better, `1.0` is fully scattered.
 ///
 /// It is arithmetic over the assignment, not a measurement of the engine: no I/O, no timing, and no
-/// claim about latency. It exists so the ratio this task achieves is *recorded* rather than quoted
-/// from the probes, and so a later change that quietly narrows the sort scope shows up here.
+/// claim about latency. It exists so the sort scope is *pinned* — a later change that quietly
+/// narrows it shows up here.
+///
+/// **What this corpus cannot tell you** (fix round 1, F2). Every row carries exactly one term, so an
+/// item's signature **is** its term and `run = chunk × density` holds by construction. That makes
+/// the ordering property below robust and the *magnitudes* meaningless as a forecast: on a real
+/// corpus `assign_sorted` sorts on the whole term signature, so a term's postings split across every
+/// signature carrying it and the runs are far shorter (module docs of `tessera_lifecycle::window`
+/// have the measured distribution). For the same reason the "window achieves X% of the ceiling"
+/// printed below is `chunk / corpus` — 2 000/4 000 — and carries no information about a deployment.
 #[test]
 fn the_window_run_ratio_against_the_full_sort_ceiling() {
     // 4 000 rows, 20 terms, each row carrying one term: a 5% density per term, in the region the
@@ -213,8 +221,9 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
     // loosely, since they are a function of the constructed corpus rather than of the corpus.
     println!(
         "run ratio (postings per run, mean over terms): request-scoped {request_scoped:.1}, \
-         window-scoped {window_scoped:.1}, full-sort ceiling {full_sort:.1} \
-         — window achieves {:.0}% of the ceiling",
+         window-scoped {window_scoped:.1}, full-sort ceiling {full_sort:.1}. The last ratio is \
+         {:.0}% — which is the ratio of the two SORT SCOPES (2000/4000) and not a result: in a \
+         one-term-per-row corpus run length is chunk x density by construction.",
         100.0 * window_scoped / full_sort
     );
     assert!(

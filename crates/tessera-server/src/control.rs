@@ -615,7 +615,8 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
     }
 
     // Validate-first (contracts §3.1 r6): duplicate external ids are 409, detail lists them, and
-    // the batch has NO effect -- so this runs entirely before `allocate_sorted`/WAL append below,
+    // the batch has NO effect -- so this runs entirely before the executor's allocation and WAL
+    // append,
     // and after the batch-id replay check above, which stays first (an idempotent replay of an
     // already-acked batch must still be a 200 no-op, not get caught here as "already known").
     // Contracts §3.4 r6: duplicate detection applies only *where an external id is supplied* --
@@ -679,7 +680,8 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
     // Task 3a and happens on the single writer thread, per command now and per commit window at
     // Task 7a. That is what makes design §11.1's signature-sort scope the *server's* window rather
     // than whatever chunk size a client happened to pick — and it is why this handler no longer
-    // calls `allocate_sorted` at all. Calling it here after this change would double-allocate.
+    // allocates at all (the assignment run is `CommitWindow::allocate`, reached through
+    // `LiveState::with_allocator` on the executor thread). Allocating here would double-allocate.
     //
     // **The three decoded intermediates are CONSUMED here, not cloned** (fix round 1, F2). This was
     // `items.iter().zip(&terms_per_item).zip(descriptor_lists.iter())` cloning `external_id`,

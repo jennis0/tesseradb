@@ -285,6 +285,18 @@ pub struct ExecutorStats {
     /// Successful WAL fsyncs since the executor started — the unit Task 7a's group commit is
     /// defined in ("one fsync per window") and the one the ingest baseline memo's ~3.2 ms floor is
     /// a cost per.
+    ///
+    /// **`wal_appends / wal_fsyncs` is the production measurement of Task 7a's amortisation**, and
+    /// the reason no window-size gauge was added: one append per entry and one fsync per window make
+    /// that ratio the mean entries per window, over the whole life of the executor. Both are already
+    /// on `/control/status`. It is the *ingest* mean only where ingest dominates: every `Change`
+    /// contributes one of each and pulls the ratio towards 1, since a deny is appended and fsynced
+    /// alone (`execute_change`) and stays out of the window until Task 9. Read it when diagnosing
+    /// ingest throughput — a ratio pinned at ~1.0 under
+    /// concurrent load means every window is closing with one entry in it, which is what a workload
+    /// that re-ingests the same `external_id`s does (`CommitWindow::conflicts_with` closes the window
+    /// on nearly every entry), and it is the difference between group commit working and group commit
+    /// running.
     pub wal_fsyncs: u64,
     /// Work-lane jobs whose `execute` has returned (Task 6).
     pub work_completed: u64,
@@ -409,13 +421,6 @@ impl ExecutorHealth {
         self.apply_nanos_max.fetch_max(nanos, Ordering::Relaxed);
     }
 
-    /// One work-lane job finished. Called from [`Executor::run`], on the executor thread and
-    /// nowhere else, which is what lets the EWMA be a plain load/store rather than a CAS loop.
-    ///
-    /// `sample` is the **whole** `execute` call — append, fsync, apply, swap and ack — because that
-    /// is what a queued job waits for. `apply_nanos_total` is the wrong operand for a drain
-    /// estimate and its own doc says why: it sums both lanes and excludes the fsync, and the fsync
-    /// is the term the drain is paced by.
     /// One commit window finished: `entries` work-lane jobs completed, in `elapsed_nanos` between
     /// them.
     ///
@@ -425,12 +430,17 @@ impl ExecutorHealth {
     /// wrong in the same direction the cumulative-mean form was, just not as far.
     ///
     /// `entries` is never zero: an empty window is never opened (see [`Executor::run_work_pass`]).
+    ///
+    /// `elapsed_nanos` must be measured from the window's `opened_at`, which is stamped when the
+    /// window is *constructed* — so a replacement window is constructed only after the previous
+    /// one's `close_window` returns, or every window after the first in a pass charges its
+    /// predecessor's append, fsync, apply and swap to itself.
     fn record_window_service(&self, entries: u64, elapsed_nanos: u64) {
         debug_assert!(entries > 0, "an empty window is never closed");
         let entries = entries.max(1);
-        for _ in 1..entries {
-            self.work_completed.fetch_add(1, Ordering::Relaxed);
-        }
+        // `entries - 1` here and one more inside `record_work_service`: one completion per entry.
+        self.work_completed
+            .fetch_add(entries - 1, Ordering::Relaxed);
         self.record_work_service(elapsed_nanos / entries);
     }
 
@@ -441,6 +451,15 @@ impl ExecutorHealth {
         self.work_completed.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// One work-lane job finished, and the EWMA observation for it. Called on the executor thread
+    /// and nowhere else, which is what lets the EWMA be a plain load/store rather than a CAS loop.
+    ///
+    /// `sample_nanos` is the **per-job** service — the whole of what a queued job waits for: append,
+    /// fsync, apply, swap and ack. A window divides its elapsed by its entry count before calling
+    /// here (see [`ExecutorHealth::record_window_service`]), because the estimator this feeds
+    /// multiplies the EWMA by a depth counted in *commands*. `apply_nanos_total` is the wrong
+    /// operand for a drain estimate and its own doc says why: it sums both lanes and excludes the
+    /// fsync, and the fsync is the term the drain is paced by.
     fn record_work_service(&self, sample_nanos: u64) {
         // Cleared **first**: between this and the EWMA store, a concurrent `stats()` should see the
         // stale (smaller) EWMA rather than an in-flight elapsed for a job that has finished. Both
@@ -612,11 +631,21 @@ pub const DEFAULT_COMMIT_WINDOW_MAX_ROWS: usize = 10_000;
 /// `write.rs`. A worker who *wants* to ack early can still mint a token — the replay path's
 /// `already_in_force()` is the obvious thing to reach for, and is exactly what the reviewer's
 /// mutation used. Two things catch that rather than the type system: `check-layers.sh` rule 3 pins
-/// every `Published::` construction to this file, and there are exactly two (`publish`, and
-/// `execute_ingest`'s replay arm); and `ack_follows_fsync_then_swap`'s `BeforeAck` leg fails on
-/// engine state — the effect is not in force at the moment the ack is being sent — with no
+/// every `Published::` construction to this file, and there are exactly two ([`Executor::publish`],
+/// and the replay arm of [`Executor::admit`]); and `ack_follows_fsync_then_swap`'s `BeforeAck` leg
+/// fails on engine state — the effect is not in force at the moment the ack is being sent — with no
 /// reference to the step log. Type, rule, test: the claim is that no *one* of them is the
 /// guarantee.
+///
+/// **Task 7a weakened this, and the weakening is deliberate.** [`Responder::ack`] takes `&Published`
+/// rather than a `Published` by value. Before 7a, N acks needed N tokens, so an ack *loop* had to
+/// mint inside itself — at a site with no swap adjacent, which is grep-visible and which a reader of
+/// this file would query. Now one token acks unboundedly many waiters, so acking window *k+1*'s
+/// waiters with window *k*'s token type-checks. That is the right trade — by-value would have forced
+/// exactly the mint-in-a-loop this comment warns about, and `check-layers.sh`'s rule is a *location*
+/// rule that would not have seen it — but it is a real reduction in what the type carries, and it is
+/// written down here rather than left to be rediscovered. What still holds it: one window swaps
+/// once, and [`Executor::close_window`] is the only place a window's waiters are reached.
 mod ack {
     use std::sync::mpsc::SyncSender;
 
@@ -1377,8 +1406,10 @@ impl LifecycleHandle {
 /// The executor's end of the queues.
 ///
 /// Named as a pair so the ordering rule is visible from the handle: `deny` is drained to empty
-/// before `work` is touched, which is what makes the starvation bound "the work item currently
-/// executing" rather than "the work queue's depth".
+/// before `work` is touched, which is what makes the starvation bound "the work in front of this
+/// deny" rather than "the work queue's depth". Since Task 7a that unit is **one commit window** —
+/// [`Executor::run_work_pass`] returns to `run`'s deny drain whenever it closes one, which is what
+/// keeps the bound finite while ingest keeps arriving.
 pub(crate) struct LifecycleQueues {
     work: Receiver<Job>,
     deny: Receiver<Job>,
@@ -1416,8 +1447,9 @@ impl Executor {
     /// below, so no job can be left asleep.
     ///
     /// **Deny priority** (lifecycle §1.3): deny is drained to empty at the top of every iteration
-    /// and a work item runs at most once per drain, so a deny's wait is bounded by the work item
-    /// currently executing rather than by queue depth. The consequences are chosen: a sustained
+    /// and [`Executor::run_work_pass`] returns as soon as it closes a window, so a deny's wait is
+    /// bounded by the window in front of it rather than by queue depth. The consequences are
+    /// chosen: a sustained
     /// deny flood starves ingest completely, and the deny queue is unbounded in memory.
     ///
     /// **Why a deny may safely overtake a queued ingest.** Reordering execution relative to
@@ -1462,7 +1494,9 @@ impl Executor {
     /// - **The row bound** (`commit_window_max_rows`) — a policy, and the one this task lands.
     ///   Checked **inside** the drain, not after it: every entry pulled frees a bounded-queue slot
     ///   that a concurrent submitter refills at once, so under sustained load the `try_recv` below
-    ///   never returns `Err` and "close when the queue is empty" bounds nothing at all.
+    ///   never returns `Err` and "close when the queue is empty" bounds nothing at all. Tripping it
+    ///   **returns**, for the same reason read the other way round: a pass that closed and carried
+    ///   on draining would not come back here — or to the deny lane — until the load stopped.
     /// - **The queue observed empty** — *structural, not a policy*. The alternative is not a
     ///   different trigger; it is a window of un-appended, un-acked ingest surviving `bell.recv()`
     ///   indefinitely. **Task 7b owns the age bound** and the racing-deny arithmetic that comes with
@@ -1478,7 +1512,15 @@ impl Executor {
     /// **stage 2.1's window holds ingest only** (see `tessera_lifecycle::window`): lifecycle §5.1
     /// permits denies to share the window, the plan assigns that to **Task 9**, and it cannot land
     /// before Task 7b's partial-failure split, since a failed mixed window must apply its denies and
-    /// drop its ingest. So a deny still waits at most for the window in front of it.
+    /// drop its ingest.
+    ///
+    /// So a deny waits at most for the window in front of it — but only because **closing a window
+    /// returns**. The bound is not "the deny lane is drained around this call": this function is
+    /// what decides how long "around" is, and while work keeps arriving it decides that by returning
+    /// at each close. `a_deny_is_never_queued_behind_work_with_group_commit_disabled` is the leg
+    /// that holds it, and it is red the moment the row-bound arm loops instead. Note that this is a
+    /// **starvation** bound and deliberately not a latency target (owner principle 3, Task 7a brief
+    /// §0): the window in front may be arbitrarily slow, and nothing here is sized to make it fast.
     fn run_work_pass(&mut self) -> bool {
         let max_rows = self.health.commit_window_max_rows();
         let mut window: CommitWindow<Responder> = CommitWindow::new(self.next_window_seq());
@@ -1486,10 +1528,18 @@ impl Executor {
 
         loop {
             if window.rows() >= max_rows {
-                let next = CommitWindow::new(self.next_window_seq());
-                self.close_window(std::mem::replace(&mut window, next));
-                did_work = true;
-                continue;
+                // **Return rather than keep draining.** The drain frees a bounded-queue slot per
+                // entry and a concurrent submitter refills it at once, so `try_recv` below never
+                // returns `Err` under sustained load: a pass that closed a window and carried on
+                // draining would never yield to `Executor::run`'s deny drain for as long as ingest
+                // kept arriving, and the deny lane's bound would be the *load*, not the window in
+                // front of it (lifecycle §1.3's prohibition is on a deny queued behind work of
+                // unbounded duration). Returning costs one `try_recv` per window and restores the
+                // bound this function's doc claims.
+                // `a_deny_is_never_queued_behind_work_with_group_commit_disabled` is red on
+                // `continue` here and green on `return`.
+                self.close_window(window);
+                return true;
             }
             let Ok(job) = self.queues.work.try_recv() else {
                 break;
@@ -1504,7 +1554,17 @@ impl Executor {
                 // Unreachable while the lane follows the command (`Command::is_never_shed`): a
                 // `Change` rides the deny queue. Executed rather than dropped, so a future variant
                 // that lands here is answered instead of silently losing its waiter.
+                //
+                // **This arm is order-unsafe as written, and must close the window first if it is
+                // ever made reachable.** It applies immediately while a window holding
+                // earlier-arriving ingest is still open, so WAL append order stops equalling
+                // submission order — and for a deny-shaped variant that is the out-of-order apply
+                // lifecycle §4 is written against. Do not make it reachable to save a close.
                 self.execute(Job { command, respond });
+                // This job was counted at submission on the work lane and `execute` counts nothing,
+                // so it is counted here or `work_depth` drifts up one per occurrence forever — the
+                // drift `note_work_refused` exists to prevent.
+                self.health.note_work_refused();
                 did_work = true;
                 continue;
             };
@@ -1513,8 +1573,15 @@ impl Executor {
             // state that close just published — which is what makes the checks below the same
             // checks Task 3a wrote, with the same answers.
             if window.conflicts_with(&batch_id, &rows) {
-                let next = CommitWindow::new(self.next_window_seq());
-                self.close_window(std::mem::replace(&mut window, next));
+                // The replacement is constructed **after** `close_window` returns, never before:
+                // `CommitWindow::new` stamps `opened_at`, and the close it would be stamped ahead of
+                // is the append, the fsync, the apply and the swap of the *previous* window. Stamped
+                // first, every window after the first in a pass charges the previous window's
+                // service to itself — `record_window_service` doubles, and with it the
+                // `retry_after_s` a shed client is told. It is also what `opened_at` has to mean for
+                // Task 7b's age bound.
+                self.close_window(window);
+                window = CommitWindow::new(self.next_window_seq());
                 // No `did_work` here: this job is still being handled, and the tail of this loop
                 // body sets it unconditionally.
             }
@@ -1693,19 +1760,22 @@ impl Executor {
         for entry in closed {
             let ClosedEntry {
                 entity_ids,
-                waiters,
+                mut waiters,
                 ..
             } = entry;
-            let n = waiters.len();
-            let mut ids = Some(entity_ids);
-            for (k, waiter) in waiters.into_iter().enumerate() {
-                let entity_ids = if k + 1 == n {
-                    ids.take().expect("the last waiter takes the ids")
-                } else {
-                    ids.as_ref().expect("earlier waiters clone them").clone()
-                };
+            // The last waiter takes the ids; only Task 8's join ever puts a second one here, and it
+            // clones. Popping rather than an `Option` dance: `waiters` is never empty (an entry is
+            // built with one), and a `Vec<EntityId>` per entry is up to `ingest_max_batch_rows`
+            // long, so cloning it unconditionally would be a real per-row cost for a case that
+            // cannot occur before Task 8.
+            let last = waiters
+                .pop()
+                .expect("an entry always has at least one waiter");
+            for waiter in waiters {
+                let entity_ids = entity_ids.clone();
                 self.ack(&waiter, Ack::Ingested { entity_ids }, &published);
             }
+            self.ack(&last, Ack::Ingested { entity_ids }, &published);
         }
 
         self.health
