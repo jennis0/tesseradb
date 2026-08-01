@@ -6,7 +6,7 @@ import {
   TILE_SIZE,
   WORLD_SIZE,
   positionsToWorld,
-  tileToDataBbox,
+  tileToRequestBbox,
   type TesseraClient,
   type ViewportResult
 } from '@tessera/client';
@@ -57,7 +57,7 @@ export function buildLayers(store: Store, client: TesseraClient): Layer[] {
             {
               slice,
               zoom: index.z,
-              bbox: tileToDataBbox(index, meta.quantisation),
+              bbox: tileToRequestBbox(index, meta.quantisation),
               k,
               underlayOffset
             },

@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
-import {tileToDataBbox} from '../src/coords.js';
+import {tileToRequestBbox} from '../src/coords.js';
 
 /**
  * The four verbs against a live `tessera serve`.
@@ -29,7 +29,7 @@ describe.skipIf(!live)('TesseraClient against a live server', () => {
     expect(meta.slices.length).toBeGreaterThan(0);
     expect(meta.selection.maxK).toBeGreaterThan(0);
 
-    const bbox = tileToDataBbox({x: 0, y: 0, z: 0}, meta.quantisation);
+    const bbox = tileToRequestBbox({x: 0, y: 0, z: 0}, meta.quantisation);
     const response = await client.viewport(session.token, {
       slice: meta.slices[0]!.id,
       zoom: 2,
@@ -49,7 +49,7 @@ describe.skipIf(!live)('TesseraClient against a live server', () => {
     const response = await client.viewport(session.token, {
       slice: meta.slices[0]!.id,
       zoom: 2,
-      bbox: tileToDataBbox({x: 0, y: 0, z: 0}, meta.quantisation),
+      bbox: tileToRequestBbox({x: 0, y: 0, z: 0}, meta.quantisation),
       k: 10
     });
     const id = response.result.ids[0]!;

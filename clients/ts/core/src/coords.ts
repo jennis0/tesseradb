@@ -28,7 +28,13 @@ export function tileToCellBox({x, y, z}: TileIndex): CellBox {
   return {cx0: x * span, cy0: y * span, cx1: (x + 1) * span, cy1: (y + 1) * span};
 }
 
-/** The data-space bbox `[x0, y0, x1, y1]` a tile covers, for `POST /v1/viewport`. */
+/**
+ * The exact data-space bbox `[x0, y0, x1, y1]` a tile covers — half-open, matching
+ * {@link tileToCellBox}.
+ *
+ * This is the honest geometry of the tile. It is **not** what to send to `/v1/viewport`; see
+ * {@link tileToRequestBbox} for why.
+ */
 export function tileToDataBbox(
   index: TileIndex,
   q: Quantisation
@@ -41,6 +47,40 @@ export function tileToDataBbox(
     q.yMin + (cells.cy0 / CELL_GRID) * spanY,
     q.xMin + (cells.cx1 / CELL_GRID) * spanX,
     q.yMin + (cells.cy1 / CELL_GRID) * spanY
+  ];
+}
+
+/**
+ * The bbox to actually request for a tile: the tile's own cell block, inset to the **centres** of
+ * its first and last cells.
+ *
+ * **The server's bbox is closed, not half-open.** `tessera-spatial`'s `tile_corners` quantises
+ * both corners to cells and iterates `lo..=hi` inclusively, so a bbox whose upper corner lands on
+ * the tile boundary — which is exactly what {@link tileToDataBbox} returns — selects the
+ * neighbouring row and column of tiles as well. One request then answers for up to four tiles.
+ *
+ * That is not a cosmetic overlap. It was measured: summing the returned counts across loaded tiles
+ * reported a `visible` of 5,128,867 against a corpus of 2,422,486, because every interior tile was
+ * counted by itself and by three neighbours — and the neighbours' points were gathered, shipped
+ * and drawn too, so the map over-plotted at the same time.
+ *
+ * Insetting to cell centres makes the request name exactly one tile at its own depth. At depth 16
+ * a tile is a single cell and both corners collapse onto that cell's centre, which is a legal
+ * degenerate bbox and still names one tile.
+ */
+export function tileToRequestBbox(
+  index: TileIndex,
+  q: Quantisation
+): [number, number, number, number] {
+  const cells = tileToCellBox(index);
+  const spanX = q.xMax - q.xMin;
+  const spanY = q.yMax - q.yMin;
+  const centre = (cell: number) => cell + 0.5;
+  return [
+    q.xMin + (centre(cells.cx0) / CELL_GRID) * spanX,
+    q.yMin + (centre(cells.cy0) / CELL_GRID) * spanY,
+    q.xMin + (centre(cells.cx1 - 1) / CELL_GRID) * spanX,
+    q.yMin + (centre(cells.cy1 - 1) / CELL_GRID) * spanY
   ];
 }
 

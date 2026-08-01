@@ -1,8 +1,11 @@
 import {Deck} from '@deck.gl/core';
 import {TesseraClient} from '@tessera/client';
+import presetsJson from '../presets.json';
 import {readConfig} from './config.js';
 import {esc} from './html.js';
 import {INITIAL_VIEW_STATE, VIEW, buildLayers} from './map.js';
+import {renderCounts} from './panels/counts.js';
+import {renderPrincipal, type Preset} from './panels/principal.js';
 import {coalesce, createStore} from './state.js';
 
 const config = readConfig();
@@ -12,12 +15,15 @@ const client = new TesseraClient({
   sessionCredential: config.sessionCredential
 });
 
+const presets = presetsJson as Preset[];
+const first = presets[0]!;
+
 const store = createStore({
   meta: null,
   session: null,
   slice: '',
-  termsLabel: 'term 0',
-  terms: ['0'],
+  termsLabel: first.label,
+  terms: first.terms,
   k: undefined,
   underlayOffset: 0,
   tiles: new Map(),
@@ -39,11 +45,47 @@ const deck = new Deck({
 
 const panels = document.getElementById('panels')!;
 
+function render() {
+  panels.innerHTML = renderPrincipal(store.state, presets) + renderCounts(store.state);
+
+  const select = document.getElementById('principal') as HTMLSelectElement | null;
+  select?.addEventListener('change', () => {
+    const preset = presets[Number(select.value)]!;
+    // Re-authorise rather than reuse the token: a different principal is a different mask, and
+    // the session is where that lives.
+    client
+      .authorise(preset.terms)
+      .then((session) => {
+        store.update((s) => {
+          s.session = session;
+          s.terms = preset.terms;
+          s.termsLabel = preset.label;
+          s.tiles.clear();
+          s.selected = null;
+          s.selectedWorldXY = null;
+        });
+      })
+      .catch((error) => {
+        const e = error as {code?: string; detail?: string};
+        store.update((s) => {
+          s.failures.push({
+            tileId: `authorise ${preset.label}`,
+            code: e.code ?? 'fetch-failed',
+            detail: e.detail ?? String(error),
+            at: Date.now()
+          });
+        });
+      });
+  });
+}
+
+const rerender = coalesce(render);
 store.subscribe(
   coalesce(() => {
     deck.setProps({layers: buildLayers(store, client)});
   })
 );
+store.subscribe(rerender);
 
 async function start() {
   const session = await client.authorise(store.state.terms);
