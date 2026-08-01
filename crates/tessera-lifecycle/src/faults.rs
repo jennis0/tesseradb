@@ -194,6 +194,9 @@ struct Pause {
     /// sleeping: "the executor is demonstrably parked" is a condition to observe, not a duration
     /// to guess at.
     arrivals: u64,
+    /// Arrivals to let **through** before `action` fires. `0` — [`FaultSwitchboard::arm_pause`]'s
+    /// value — means "fire on the first arrival". See [`FaultSwitchboard::arm_pause_after`].
+    fire_after: u64,
     released: bool,
 }
 
@@ -244,10 +247,26 @@ impl FaultSwitchboard {
     /// Arm one [`PauseSite`]. Arming resets that site's arrival count, so a test that arms twice
     /// counts arrivals for the leg it is on rather than for the whole run.
     pub fn arm_pause(&self, site: PauseSite, action: PauseAction) {
+        self.arm_pause_after(site, action, 0);
+    }
+
+    /// [`FaultSwitchboard::arm_pause`], but let `fire_after` arrivals through first.
+    ///
+    /// **Why this exists (Task 7a).** A commit window performs one generation swap and then acks N
+    /// waiters in a loop, so a death partway through the loop leaves some waiters acked and some
+    /// not — the state `SubmitError::ReceiptLost` exists for, and the one its own doc names Task 7a
+    /// as the widening of. Firing on the *first* arrival cannot produce it: nobody has been acked
+    /// yet, so every waiter is lost and the test's subject never occurs. The count is what makes
+    /// "partially acked" constructible.
+    ///
+    /// Arrivals are counted as they are without this, so `await_arrivals` still observes every one —
+    /// including the ones let through.
+    pub fn arm_pause_after(&self, site: PauseSite, action: PauseAction, fire_after: u64) {
         let mut pause = self.pause.lock().unwrap_or_else(|e| e.into_inner());
         pause[site.index()] = Pause {
             action: Some(action),
             arrivals: 0,
+            fire_after,
             released: false,
         };
     }
@@ -263,6 +282,20 @@ impl FaultSwitchboard {
             p.action = None;
             p.released = true;
         }
+        self.pause_cv.notify_all();
+    }
+
+    /// Release and disarm **one** site, leaving the others armed.
+    ///
+    /// [`FaultSwitchboard::release`] stays the release-all that `WritePath::drop` depends on; this
+    /// is strictly narrower and exists for one shape: a test that parks the executor at one site to
+    /// assemble a state, and needs a *second* site to stay armed across the release that lets the
+    /// executor run into it. Arming the second site after a release-all would race the very
+    /// execution the release starts.
+    pub fn release_site(&self, site: PauseSite) {
+        let mut pause = self.pause.lock().unwrap_or_else(|e| e.into_inner());
+        pause[site.index()].action = None;
+        pause[site.index()].released = true;
         self.pause_cv.notify_all();
     }
 
@@ -296,6 +329,11 @@ impl FaultSwitchboard {
         let action = pause[site.index()].action?;
         pause[site.index()].arrivals += 1;
         self.pause_cv.notify_all();
+        // Counted, then let through: `await_arrivals` must see the arrivals a `fire_after` skips,
+        // or a test cannot wait on the state it is assembling.
+        if pause[site.index()].arrivals <= pause[site.index()].fire_after {
+            return None;
+        }
         if action == PauseAction::Stall {
             while !pause[site.index()].released {
                 pause = self.pause_cv.wait(pause).unwrap_or_else(|e| e.into_inner());
