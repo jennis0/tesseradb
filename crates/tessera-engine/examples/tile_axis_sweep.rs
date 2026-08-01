@@ -325,7 +325,7 @@ fn main() {
         &tmp1.path().join("cache"),
         &tmp1.path().join("wal.log"),
         Passthrough::new(),
-        cfg.clone(),
+        cfg,
     )
     .expect("engine (forced serial) should open");
     let tmp2 = tempfile::tempdir().unwrap();
