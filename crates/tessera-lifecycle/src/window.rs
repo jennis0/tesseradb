@@ -78,9 +78,10 @@ use crate::wal::{WalRecord, WalRow};
 
 /// One admitted `/control/ingest` submission, held open until the window closes.
 ///
-/// `waiters` is a `Vec` and not one responder because **Task 8's join** appends a byte-identical
-/// retry's responder to an entry already held here, so both callers receive the same ids off one
-/// allocation. In stage 2.1 it always holds exactly one.
+/// `waiters` is a `Vec` and not one responder because **Task 8's join** ([`CommitWindow::join`])
+/// appends a byte-identical retry's responder to an entry already held here, so both callers
+/// receive the same ids off one allocation. Task 8 is what makes it hold more than one; before it,
+/// a retry forced the window to close and was answered from the durable index instead.
 ///
 /// Generic in the waiter type, and that is forced rather than stylistic: the engine's `Responder`
 /// is `pub(crate)` inside a private module (`tessera-engine`'s `write.rs`, `mod ack`), whose private
@@ -135,13 +136,14 @@ impl<W> ClosedEntry<W> {
 /// The open commit window.
 pub struct CommitWindow<W> {
     entries: Vec<WindowEntry<W>>,
-    /// **Task 8's join index**, live here for the narrower purpose argued at
-    /// [`CommitWindow::conflicts_with`]: a `batch_id` already held cannot be evaluated against the
-    /// idempotency map, because that map is written at *apply*. Task 8 replaces the forced close
-    /// with the join and the `Held` state.
+    /// **Task 8's join index.** A `batch_id` held here cannot be evaluated against the idempotency
+    /// map, because that map is written at *apply*; [`CommitWindow::held`] is what answers for it,
+    /// and [`CommitWindow::join`] is what a byte-identical retry does with the answer. Task 7a
+    /// used this field to force a window *close* instead, so that the durable check could answer;
+    /// Task 8 answers from inside the window and the close is gone.
     by_batch: FxHashMap<String, usize>,
-    /// **Hashes** of the external ids held by this window — see [`CommitWindow::conflicts_with`] for
-    /// why hashes and not ids, and why `None` is absent from it.
+    /// **Hashes** of the external ids held by this window — see [`CommitWindow::holds_external_id_of`]
+    /// for why hashes and not ids, and why `None` is absent from it.
     external_ids: FxHashSet<u64>,
     rows: usize,
     /// When this window opened. Read by the executor to time the window's service, and by **Task
@@ -188,8 +190,51 @@ impl<W> CommitWindow<W> {
         self.opened_at
     }
 
-    /// Whether admitting this submission to the **open** window would put two entries in it that
-    /// name the same batch id or the same external id.
+    /// **The `Held` half of Task 8's batch-id state machine**: is `batch_id` already an entry of
+    /// this open window, and if so, what body hash was it admitted under?
+    ///
+    /// Returns `(window_seq, body_hash)`. The caller compares the hash: equal means a byte-identical
+    /// retry, which [`CommitWindow::join`] adds to the held entry's waiters; unequal is a `409` for
+    /// the retry alone (contracts §3.4, and see the engine's `BatchState` for the reading of "the
+    /// batch has no effect" that is taken there).
+    ///
+    /// **This must be consulted before [`CommitWindow::holds_external_id_of`]**, never after. A
+    /// retry names its original's external ids by construction, so an external-id-first order would
+    /// answer a retry by closing the window — Task 7a's behaviour, which this task exists to
+    /// replace — and would do it *even for the byte-identical case that has an exact answer
+    /// available*.
+    ///
+    /// `window_seq` is carried because the join's correctness is a statement about **which** window
+    /// the entry sits in. In stage 2.1 that cannot be got wrong: there is exactly one open window,
+    /// a local of the executor's work pass, and it is consulted and joined in the same iteration —
+    /// so the field is read only by a `debug_assert!` at the join site. It is not decoration and it
+    /// is not a live guard either; it is the discriminator a 2.2 executor holding more than one
+    /// window would need, written down while the invariant it encodes is still obvious.
+    pub fn held(&self, batch_id: &str) -> Option<(u64, [u8; 32])> {
+        let index = *self.by_batch.get(batch_id)?;
+        Some((self.seq, self.entries[index].body_hash))
+    }
+
+    /// **The join** (Task 8): add `waiter` to the entry `batch_id` names, so a byte-identical retry
+    /// is answered off the original's single allocation rather than allocating again.
+    ///
+    /// Nothing else about the entry changes: no rows are added, no external id is registered, the
+    /// row count does not move. That is what makes the join safe against Task 3a's security C1 —
+    /// the failure C1 describes needs **two** allocations for one external id, and a join performs
+    /// zero.
+    ///
+    /// Returns `false` if `batch_id` is not held, which the executor treats as a programming error:
+    /// it calls this only having just seen [`CommitWindow::held`] answer.
+    pub fn join(&mut self, batch_id: &str, waiter: W) -> bool {
+        let Some(&index) = self.by_batch.get(batch_id) else {
+            return false;
+        };
+        self.entries[index].waiters.push(waiter);
+        true
+    }
+
+    /// Whether admitting this submission to the **open** window would put two entries in it naming
+    /// the same external id.
     ///
     /// # Why this exists — it is a security check, not tidiness
     ///
@@ -223,10 +268,14 @@ impl<W> CommitWindow<W> {
     ///
     /// Rows are checked against the window, never against their own entry: an intra-batch duplicate
     /// is the handler's to refuse, and it names them to the caller who supplied them.
-    pub fn conflicts_with(&self, batch_id: &str, rows: &[UnallocatedRow]) -> bool {
-        if self.by_batch.contains_key(batch_id) {
-            return true;
-        }
+    ///
+    /// **Task 8 narrowed this to external ids.** It also refused a `batch_id` already held, for a
+    /// different reason — so that the *durable* idempotency check could answer once the close had
+    /// applied the original. [`CommitWindow::held`] answers that from inside the window now, so the
+    /// close is no longer the mechanism and the batch-id clause is gone. What is left is C1 and
+    /// only C1: two entries, two batch ids, one external id, **two allocations**. That one still
+    /// forces the close, because nothing but an apply can make `established` see the first insert.
+    pub fn holds_external_id_of(&self, rows: &[UnallocatedRow]) -> bool {
         rows.iter()
             .filter_map(|r| r.external_id.as_deref())
             .any(|id| self.external_ids.contains(&digest(id)))
@@ -430,26 +479,74 @@ mod tests {
         assert_eq!(closed[0].terms[1], vec![TermId::new(0)]);
     }
 
-    /// The C1 backstop's window half: a second entry naming a held external id, or a held batch id,
-    /// conflicts — and `None` never conflicts with `None`.
+    /// The C1 backstop's window half: a second entry naming a held external id conflicts — and
+    /// `None` never conflicts with `None`.
+    ///
+    /// The **held batch id** leg moved to `a_held_batch_id_is_found_with_the_hash_it_was_admitted_under`
+    /// when Task 8 replaced that close with the join; it is deliberately not asserted here any
+    /// more, because asserting it here would be asserting the thing the join removed.
     #[test]
-    fn a_held_batch_id_or_external_id_conflicts_and_none_never_does() {
+    fn a_held_external_id_conflicts_and_none_never_does() {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
         w.push(entry("b1", vec![row(Some("k"), &[1]), row(None, &[1])]));
 
         assert!(
-            w.conflicts_with("b1", &[row(Some("other"), &[1])]),
-            "a held batch id conflicts however the rows differ"
-        );
-        assert!(
-            w.conflicts_with("b2", &[row(Some("zzz"), &[1]), row(Some("k"), &[1])]),
+            w.holds_external_id_of(&[row(Some("zzz"), &[1]), row(Some("k"), &[1])]),
             "a held external id conflicts however the batch id differs — Task 3a's C1"
         );
         assert!(
-            !w.conflicts_with("b2", &[row(None, &[1]), row(None, &[2])]),
+            !w.holds_external_id_of(&[row(None, &[1]), row(None, &[2])]),
             "rows with no external id are duplicates of nothing (contracts §3.4 r6)"
         );
-        assert!(!w.conflicts_with("b2", &[row(Some("fresh"), &[1])]));
+        assert!(!w.holds_external_id_of(&[row(Some("fresh"), &[1])]));
+    }
+
+    /// Task 8's `Held` lookup: the batch id, the window's own sequence number, and **the hash the
+    /// entry was admitted under** — which is what decides join versus 409.
+    #[test]
+    fn a_held_batch_id_is_found_with_the_hash_it_was_admitted_under() {
+        let mut w: CommitWindow<&'static str> = CommitWindow::new(7);
+        w.push(WindowEntry {
+            rows: vec![row(Some("k"), &[1])],
+            batch_id: "b1".to_string(),
+            body_hash: [3u8; 32],
+            waiters: vec!["w"],
+        });
+
+        assert_eq!(w.held("b1"), Some((7, [3u8; 32])));
+        assert_eq!(w.held("b2"), None, "an unheld batch id is not held");
+        // And it is found however the retry's rows differ: the hash decides, not the rows.
+        assert_eq!(w.held("b1").map(|(_, h)| h), Some([3u8; 32]));
+    }
+
+    /// The join adds a waiter and **nothing else**: no rows, no external id, no row count. That is
+    /// the whole reason it is safe where a second entry would not be — C1 needs two allocations and
+    /// a join performs none.
+    #[test]
+    fn joining_adds_a_waiter_and_changes_nothing_else() {
+        let mut w = CommitWindow::new(1);
+        w.push(entry("b1", vec![row(Some("k"), &[1])]));
+        let rows_before = w.rows();
+        let entries_before = w.len();
+
+        assert!(w.join("b1", "retry"), "a held batch id joins");
+        assert!(!w.join("nope", "retry"), "an unheld one does not");
+
+        assert_eq!(w.rows(), rows_before, "a join adds no rows");
+        assert_eq!(w.len(), entries_before, "a join adds no entry");
+        assert!(
+            !w.holds_external_id_of(&[row(Some("fresh"), &[1])]),
+            "a join registers no external id"
+        );
+
+        let closed = w.allocate(&mut Allocator::new(0)).unwrap();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(
+            closed[0].waiters,
+            vec!["w", "retry"],
+            "both callers are owed the same ids off the one allocation"
+        );
+        assert_eq!(closed[0].entity_ids.len(), 1, "one row, one id — not two");
     }
 
     /// A window that cannot allocate has no effect: the high-water mark does not move (I9).

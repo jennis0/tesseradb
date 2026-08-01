@@ -294,7 +294,7 @@ pub struct ExecutorStats {
     /// alone (`execute_change`) and stays out of the window until Task 9. Read it when diagnosing
     /// ingest throughput — a ratio pinned at ~1.0 under
     /// concurrent load means every window is closing with one entry in it, which is what a workload
-    /// that re-ingests the same `external_id`s does (`CommitWindow::conflicts_with` closes the window
+    /// that re-ingests the same `external_id`s does (`CommitWindow::holds_external_id_of` closes the window
     /// on nearly every entry), and it is the difference between group commit working and group commit
     /// running.
     pub wal_fsyncs: u64,
@@ -1423,6 +1423,90 @@ pub(crate) struct LifecycleQueues {
 // The executor
 // =================================================================================================
 
+/// What `/control/ingest`'s batch id already means to this executor — **the three states, in the
+/// order they are looked up** (Task 8; contracts §3.4, whose Appendix R r8 names the third:
+/// *"the batch-id idempotency rule acquires a third state in practice — held but not yet
+/// acknowledged — which a retry must join rather than treat as new"*).
+///
+/// Computed by [`BatchState::of`] on the executor thread, never in a handler. `tessera-lifecycle`
+/// deliberately does not know this type: the durable half lives on [`LiveState`], and the window
+/// stays a container that knows nothing about idempotency policy.
+enum BatchState {
+    /// Durably accepted: the WAL record is fsynced, the rows are applied and the ids are recorded.
+    /// Same bytes replays these ids; different bytes is a `409`.
+    ///
+    /// The ids are carried rather than re-derived because **re-deriving is impossible** for a row
+    /// that supplied no `external_id`: it is addressable only by its `tessera_id` (contracts §3.4
+    /// r6) and appears in no map keyed by anything the retry sends.
+    Accepted {
+        body_hash: [u8; 32],
+        entity_ids: Vec<EntityId>,
+    },
+    /// **Held but not yet acknowledged**: an entry of the *open* commit window. Its ids exist —
+    /// allocation happens at the close — so there is nothing to replay yet; what a byte-identical
+    /// retry gets is a place in the queue of waiters that entry will ack.
+    ///
+    /// `window_seq` identifies the window the entry was found in. In stage 2.1 there is exactly one
+    /// open window and it is consulted and joined in the same statement, so this is read by a
+    /// `debug_assert!` and nothing else; it is the discriminator a later executor holding more than
+    /// one window would need.
+    Held {
+        window_seq: u64,
+        body_hash: [u8; 32],
+    },
+    /// Never seen. A new entry.
+    ///
+    /// **This state is reachable for a batch that was in fact accepted, and that is a live
+    /// caveat.** `accepted_batches` is rebuilt from WAL replay ([`WritePath::reconstruct`]), so
+    /// once a WAL segment is retired an old `batch_id` regresses to `Unknown` and a retry is
+    /// re-ingested. Rows carrying an `external_id` are then caught by the duplicate check and the
+    /// batch 409s; **rows without one are re-ingested silently as new entities**, leaving a second
+    /// copy that no external id names and no deny can reach — Task 3a's C1 shape, arrived at by
+    /// retention rather than by a race. Nothing prunes the WAL today (there is **no
+    /// `wal_retention` config key** — the absence was recorded as a defect at Task 0b), so the
+    /// caveat is latent rather than live; whoever adds retention inherits it, and the bound on
+    /// the exposure is the idempotency window an operator's clients actually retry within.
+    Unknown,
+}
+
+impl BatchState {
+    /// Look `batch_id` up: **durable index first, then the open window, then unknown**.
+    ///
+    /// The two sets are disjoint in this build — a batch id enters `accepted_batches` only at
+    /// `close_window`, which consumes the window holding it, and a durably-accepted batch is
+    /// refused before it can be pushed — so the order changes no answer today. It is still written
+    /// durable-first, because the durable record is the one that survives a restart and an
+    /// implementation that preferred the volatile half would answer differently on either side of
+    /// one.
+    fn of<W>(live: &LiveState, window: &CommitWindow<W>, batch_id: &str) -> BatchState {
+        if let Some((body_hash, entity_ids)) = live.accepted_batch(batch_id) {
+            return BatchState::Accepted {
+                body_hash,
+                entity_ids,
+            };
+        }
+        match window.held(batch_id) {
+            Some((window_seq, body_hash)) => BatchState::Held {
+                window_seq,
+                body_hash,
+            },
+            None => BatchState::Unknown,
+        }
+    }
+}
+
+/// What [`Executor::admit_ingest`] did with a submission, as far as the drain loop needs to know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// It is in the window (or its waiters).
+    Admitted,
+    /// It was answered outright — a replay, a join or a 409 — and nothing was added to the window.
+    Answered,
+    /// A conflicting external id forced the open window to close. The pass must **yield** to
+    /// `Executor::run`'s deny drain (lifecycle §1.3; Task 7b's CRITICAL).
+    YieldedAfterClose,
+}
+
 /// The single writer. One per partition, on its own thread, owning the WAL by value.
 struct Executor {
     wal: ExecutorWal,
@@ -1504,7 +1588,8 @@ impl Executor {
     ///   deny lane is not consulted here at all.) The alternative is not a different trigger; it is
     ///   a window of un-appended, un-acked ingest surviving `bell.recv()` indefinitely.
     ///
-    /// A third close is forced by a **conflicting entry** — see `CommitWindow::conflicts_with`.
+    /// A third close is forced by an entry naming an **external id the window already holds** —
+    /// see `CommitWindow::holds_external_id_of`.
     /// That one is a correctness mechanism (it is what keeps Task 3a's security C1 closed across a
     /// window), not a policy; it also yields, for the reason written at the site.
     ///
@@ -1525,6 +1610,16 @@ impl Executor {
     /// are bounded by `max_rows` above (worst case `max_rows - 1 + ingest_max_batch_rows`, ≈ 20 000
     /// at the shipped defaults) and, for HTTP submitters, by `ingest_admission` as well — an
     /// admission permit is held to the receipt, and nothing in an open window has been acked.
+    ///
+    /// **Task 8 qualifies the row bound and the qualification belongs here.** A joined retry
+    /// (`admit_ingest`'s `Held` arm) consumes a work-queue slot and adds **zero rows**, so on a
+    /// stream of nothing but byte-identical retries the row bound cannot trip and this loop
+    /// terminates only on an empty queue. What still bounds it is the structural fact — one entry,
+    /// or one joined waiter, per concurrently-blocked submitting thread, since every submitter
+    /// blocks on its receipt. That is a bound on *waiters*, not on rows or bytes, and it costs one
+    /// `Responder` each; the residency terms Task 6's relation 3 counts are unaffected, because a
+    /// join carries no rows into the window. Deny latency is *better* on this path than before,
+    /// not worse: one close for N retries where Task 7a took N.
     ///
     /// The interval where the queue momentarily empties while more work is imminent **is** real (a
     /// handler holds its permit across decode, term resolution and sidecar IO before it submits).
@@ -1569,11 +1664,6 @@ impl Executor {
         let max_rows = self.health.commit_window_max_rows();
         let mut window: CommitWindow<Responder> = CommitWindow::new(self.next_window_seq());
         let mut did_work = false;
-        // Set by the conflict-forced close, and read at the tail of the loop body. A conflict
-        // closes a window *inside* the drain, so without this the pass would carry on draining —
-        // the Task 7a F1 defect, on the one close path F1's fix did not reach. See the conflict
-        // arm below.
-        let mut yield_after_this_entry = false;
 
         loop {
             if window.rows() >= max_rows {
@@ -1618,58 +1708,10 @@ impl Executor {
                 continue;
             };
 
-            // A conflicting entry closes the window **first**, and is then evaluated against the
-            // state that close just published — which is what makes the checks below the same
-            // checks Task 3a wrote, with the same answers.
-            if window.conflicts_with(&batch_id, &rows) {
-                window = self.close_and_reopen(window);
-                // **And yield once this entry is handled** (Task 7b). This close is a full
-                // `append → fsync → apply → swap → ack` inside the drain loop, and `window.rows()`
-                // resets with the replacement — so the row bound above can never trip on a
-                // conflict-heavy stream and, before this line, a pass could close unboundedly many
-                // windows without ever returning to `Executor::run`'s deny drain. That is the Task
-                // 7a F1 defect exactly (`continue` where the code's own docs claimed a return), on
-                // the one close path F1's fix did not reach, and it is what lifecycle §1.3 forbids
-                // verbatim: a deny queued behind work of unbounded duration. Reachable at the
-                // shipped defaults from a client retrying a `batch_id` while the original is still
-                // in the open window — Task 8's `Held` case.
-                //
-                // The entry is handled first rather than yielding here, because it has already been
-                // taken off the queue and its waiter must be answered.
-                // `a_deny_is_never_queued_behind_a_conflict_forced_window_split` is the leg that
-                // holds it.
-                //
-                // **What the replacement window can hold, which is almost nothing in stage 2.1.**
-                // Every route by which an entry conflicts with the open window also refuses it in
-                // `admit` once that window has been closed and applied: a held `batch_id` is in
-                // `accepted_batch` (replay or 409), and a held external id is in
-                // `established_collisions`. So on every path where the close *succeeded*, the
-                // replacement is closed empty and discarded, and a pass commits exactly one window.
-                // The two exceptions, stated because they are the only reason the replacement is
-                // constructed at all: a close that **failed** records no accepted batch and
-                // establishes nothing, so the entry is admitted into the replacement (which then
-                // fails too, on the poisoned handle); and a 64-bit `digest` collision on an external
-                // id makes `conflicts_with` true where `established_collisions` is zero. **Task 8
-                // makes this live** — its `Held` join is what puts a real entry in a replacement
-                // window — and that is when the `opened_at` ordering below acquires an observable
-                // consequence again.
-                yield_after_this_entry = true;
-                // No `did_work` here: this job is still being handled, and the tail of this loop
-                // body sets it unconditionally.
-            }
-
-            if let Some(entry) = self.admit(rows, batch_id, body_hash, respond) {
-                if window.is_empty() {
-                    // The in-flight gauge is armed at the **first entry**, never at window
-                    // construction: an empty window is never closed, so a gauge armed there would
-                    // never be cleared and `service_nanos_for_estimate` would grow without bound on
-                    // an idle node (Task 6's F7, inverted).
-                    self.health.mark_work_started(window.opened_at());
-                }
-                window.push(entry);
-            }
+            let admitted;
+            (window, admitted) = self.admit_ingest(window, rows, batch_id, body_hash, respond);
             did_work = true;
-            if yield_after_this_entry {
+            if admitted == Admission::YieldedAfterClose {
                 break;
             }
         }
@@ -1689,11 +1731,30 @@ impl Executor {
     /// acks. Stamped first, a replacement charges its predecessor's whole service to itself —
     /// `record_window_service` doubles, and with it the `retry_after_s` a shed client is told. The
     /// two lines below must stay in this order, and this doc is the only warning a future editor
-    /// gets, because **the defect currently has no observable consequence**: after 7b's
-    /// yield-on-conflict the replacement is closed empty on every path where the close succeeded
-    /// (see `run_work_pass`'s conflict arm), so no test in the tree can distinguish the orders.
-    /// Task 8's `Held` join is what makes a replacement window hold an entry, and it must bring the
-    /// test with it.
+    /// gets, because **the defect has no observable consequence and Task 8 did not change that** —
+    /// it narrowed it further. The enumeration, which is the whole of the argument:
+    ///
+    /// 1. This is the only construction site of a replacement window, and its only caller is the
+    ///    external-id conflict arm of [`Executor::admit_ingest`].
+    /// 2. That arm returns [`Admission::YieldedAfterClose`] and the drain loop **breaks in the same
+    ///    iteration** (Task 7b's CRITICAL fix), so no *later* entry can ever enter a replacement.
+    ///    The only candidate is the conflicting entry itself.
+    /// 3. And that entry is refused: `apply_window` inserts its predecessor's external ids into
+    ///    `established` before this function returns, so `established_collisions` sees them.
+    ///
+    /// Task 8 removed the *other* route into this function — a held `batch_id` no longer forces a
+    /// close, it joins or 409s in place — so the replacement is reached less often than before, not
+    /// more. The two remaining exceptions, both of which leave the ordering unobservable anyway:
+    /// a close that **failed** (its `fail_window_wal`/`fail_window_alloc` paths record no accepted
+    /// batch and establish nothing, so the entry *is* admitted into the replacement — but both
+    /// return before the `AfterFsync` pause point and `ack_failed` carries no pause point, so
+    /// nothing can park inside the mis-stamped interval to measure it, and the node's WAL is
+    /// poisoned by then); and a 64-bit `digest` collision on an external id, which is not
+    /// constructible.
+    ///
+    /// Task 7b's report handed this test to Task 8 on the expectation that the join would make a
+    /// replacement window hold an entry. It does the opposite. Recorded here rather than left as a
+    /// promissory note, because a promissory note reads as coverage.
     fn close_and_reopen(&mut self, window: CommitWindow<Responder>) -> CommitWindow<Responder> {
         self.close_window(window);
         CommitWindow::new(self.next_window_seq())
@@ -1704,11 +1765,141 @@ impl Executor {
         self.window_seq
     }
 
-    /// The admission checks, unchanged from Task 3a's per-command versions and still on the one
-    /// thread that also performs the inserts. `None` means the caller has already been answered.
+    /// **The batch-id state machine, evaluated on the executor** (Task 8; contracts §3.4 and its
+    /// Appendix R r8, lifecycle §5.1's "idempotency across a held window").
     ///
-    /// Both checks read state written at **apply**, which is why an entry that conflicts with the
-    /// *open window* must close it before reaching here (`run_work_pass`).
+    /// Takes the open window by value and hands it back, possibly replaced. **By value
+    /// deliberately**: a `&mut` signature would force a `mem::replace` on the conflict path, which
+    /// constructs the replacement *before* the close it replaces — Task 7a gate F3 exactly, see
+    /// [`Executor::close_and_reopen`].
+    ///
+    /// Lookup order is **durable index → open window → unknown**, and the whole reason it runs here
+    /// rather than in the handler is that the two are not the same question at two different times:
+    /// between a handler check and the enqueue the window can close, so a retry that saw *unknown*
+    /// and then enqueued into a fresh window would have double-allocated. `control.rs` keeps its
+    /// pre-submit check as the early, well-messaged path; it is advisory and this is the decision.
+    ///
+    /// | State | What happens |
+    /// |---|---|
+    /// | [`BatchState::Unknown`] | the ordinary path: external-id conflict check against the window, then `established_collisions`, then a new entry |
+    /// | [`BatchState::Accepted`], same bytes | the recorded ids are replayed — re-deriving them is *impossible* for a row that supplied no external id |
+    /// | [`BatchState::Accepted`], different bytes | `409`, no effect (Task 3a's behaviour, unmoved) |
+    /// | [`BatchState::Held`], same bytes | **join**: the caller's responder is appended to the held entry, and both receive the same ids off one allocation |
+    /// | [`BatchState::Held`], different bytes | `409` **to the retry only** — see the arm |
+    fn admit_ingest(
+        &mut self,
+        mut window: CommitWindow<Responder>,
+        rows: Vec<UnallocatedRow>,
+        batch_id: String,
+        body_hash: [u8; 32],
+        respond: Responder,
+    ) -> (CommitWindow<Responder>, Admission) {
+        match BatchState::of(&self.live, &window, &batch_id) {
+            BatchState::Accepted {
+                body_hash: prev_hash,
+                entity_ids,
+            } => {
+                if prev_hash == body_hash {
+                    let proof = Published::already_in_force(&entity_ids);
+                    self.ack(&respond, Ack::Ingested { entity_ids }, &proof);
+                } else {
+                    self.ack_failed(&respond, ExecError::BatchConflict { batch_id });
+                }
+                self.health.note_work_refused();
+                (window, Admission::Answered)
+            }
+            BatchState::Held {
+                window_seq,
+                body_hash: prev_hash,
+            } => {
+                debug_assert_eq!(
+                    window_seq,
+                    window.seq(),
+                    "the entry must be joined to the window it was found in"
+                );
+                if prev_hash == body_hash {
+                    let joined = window.join(&batch_id, respond);
+                    debug_assert!(joined, "`held` just answered for this batch id");
+                } else {
+                    // **The 409 reaches the retry and NOT the held original — an owner-confirmable
+                    // default, and this is the one site that decides it** (Task 8 brief §3; the
+                    // controller has escalated the question).
+                    //
+                    // The reading taken. Contracts §3.4's "the batch has no effect" is attached to
+                    // the *duplicate-external-id* 409 and means the refused submission, not some
+                    // other batch; Appendix R r8 and lifecycle §5.1 then describe the held state
+                    // and say only that a retry must **join** rather than treat the batch as new —
+                    // neither gives a retry the power to cancel an accepted batch. And the
+                    // consequences run one way: the original was accepted, its waiters are blocked
+                    // on the acknowledgement it is owed, and discarding it because a *different*
+                    // submission arrived with different bytes breaks the durability promise for a
+                    // caller who did nothing wrong — while handing any client that can guess a
+                    // batch id a cancellation primitive for someone else's in-flight write.
+                    //
+                    // **If the owner rules the other way**, the change is here and in
+                    // `tessera-lifecycle`: mark the held entry discarded (a `bool` on `WindowEntry`,
+                    // skipped by `CommitWindow::allocate` and by `held`) and fail its waiters. Not
+                    // an entry *removal* — `by_batch` stores indices into `entries` and the
+                    // external-id set has no refcounts, so removing one entry means repairing both.
+                    self.ack_failed(&respond, ExecError::BatchConflict { batch_id });
+                }
+                // Either way this job occupied a work-queue slot and was counted at submission,
+                // while `record_window_service` counts one completion per *entry* and a join adds
+                // no entry. Without this, `work_depth` drifts up by one per retry forever and every
+                // 429's `retry_after_s` inherits the drift (Task 7a's mutation 7, in a new place).
+                self.health.note_work_refused();
+                (window, Admission::Answered)
+            }
+            BatchState::Unknown => {
+                let mut admission = Admission::Admitted;
+                // A conflicting entry closes the window **first**, and is then evaluated against
+                // the state that close just published — which is what makes the checks below the
+                // same checks Task 3a wrote, with the same answers. **Only external ids reach
+                // here**: a held batch id was answered above, without closing anything.
+                if window.holds_external_id_of(&rows) {
+                    window = self.close_and_reopen(window);
+                    // **And yield once this entry is handled** (Task 7b). This close is a full
+                    // `append → fsync → apply → swap → ack` inside the drain loop, and
+                    // `window.rows()` resets with the replacement — so the row bound can never trip
+                    // on a conflict-heavy stream and, before this line, a pass could close
+                    // unboundedly many windows without ever returning to `Executor::run`'s deny
+                    // drain. That is the Task 7a F1 defect exactly (`continue` where the code's own
+                    // docs claimed a return), on the one close path F1's fix did not reach, and it
+                    // is what lifecycle §1.3 forbids verbatim: a deny queued behind work of
+                    // unbounded duration. Reachable at the shipped defaults from a client
+                    // re-ingesting an `external_id` that a still-open window already holds.
+                    //
+                    // The entry is handled first rather than yielding here, because it has already
+                    // been taken off the queue and its waiter must be answered.
+                    // `a_deny_is_never_queued_behind_a_conflict_forced_window_split` is the leg
+                    // that holds it, and it drives this path — **not** the batch-id one, which
+                    // Task 8 removed.
+                    admission = Admission::YieldedAfterClose;
+                }
+                if let Some(entry) = self.admit(rows, batch_id, body_hash, respond) {
+                    if window.is_empty() {
+                        // The in-flight gauge is armed at the **first entry**, never at window
+                        // construction: an empty window is never closed, so a gauge armed there
+                        // would never be cleared and `service_nanos_for_estimate` would grow
+                        // without bound on an idle node (Task 6's F7, inverted).
+                        self.health.mark_work_started(window.opened_at());
+                    }
+                    window.push(entry);
+                }
+                (window, admission)
+            }
+        }
+    }
+
+    /// The external-id admission check, unchanged from Task 3a's per-command version and still on
+    /// the one thread that also performs the inserts. `None` means the caller has already been
+    /// answered.
+    ///
+    /// The batch-id half moved to [`Executor::admit_ingest`] when Task 8 gave it a third state; the
+    /// check itself is the same one and answers the same way.
+    ///
+    /// This check reads state written at **apply**, which is why an entry naming an external id the
+    /// *open window* holds must close it before reaching here (see the caller).
     fn admit(
         &mut self,
         rows: Vec<UnallocatedRow>,
@@ -1716,27 +1907,6 @@ impl Executor {
         body_hash: [u8; 32],
         respond: Responder,
     ) -> Option<WindowEntry<Responder>> {
-        // Idempotency, evaluated **on the executor**: between a handler check and the enqueue an
-        // open window can close (Task 8), and a retry that saw "unknown" and then enqueued into a
-        // fresh window has double-allocated. Checked before allocation, so a conflicting retry
-        // burns no entity ids.
-        if let Some((prev_hash, prev_ids)) = self.live.accepted_batch(&batch_id) {
-            if prev_hash == body_hash {
-                let proof = Published::already_in_force(&prev_ids);
-                self.ack(
-                    &respond,
-                    Ack::Ingested {
-                        entity_ids: prev_ids,
-                    },
-                    &proof,
-                );
-            } else {
-                self.ack_failed(&respond, ExecError::BatchConflict { batch_id });
-            }
-            self.health.note_work_refused();
-            return None;
-        }
-
         // The fail-closed backstop for the widened check-to-apply race — see
         // `LiveState::established_collisions`.
         let collisions = self.live.established_collisions(&rows);
@@ -1786,8 +1956,18 @@ impl Executor {
     /// truncate to the sync point. So an un-fsynced, un-acked ingest record whose bytes reached the
     /// file is reinstated on restart. That is already true per command (append succeeds, fsync
     /// fails, caller gets 500, nothing is applied, replay applies it); a window makes it k records
-    /// instead of one. Task 8's `crash_between_fsync_and_swap_replays_rather_than_reallocates` owns
-    /// it.
+    /// instead of one.
+    ///
+    /// **Task 8 owned this and is handing it back with the disposition, not a test.** Task 8's
+    /// `crash_between_fsync_and_swap_replays_rather_than_reallocates` covers the *fsynced* half —
+    /// a real killed process between fsync and swap — which is lifecycle §8's crash row and the
+    /// case a client can retry into. The un-fsynced half is a different property and is **not**
+    /// under test, but it is also not the C1 shape it looks like: `Wal::fsync` poisons the handle
+    /// on failure and `Wal::append` refuses every later append, so exactly one record for that
+    /// batch reaches the file and replay establishes one entity, not two. What a restart actually
+    /// produces is an item the caller was told (correctly, at the time) it did not have — visible,
+    /// named by its own `external_id`, and therefore reachable by a deny. Fail-closed; recorded so
+    /// the next reader does not spend the effort re-deriving it.
     fn close_window(&mut self, window: CommitWindow<Responder>) {
         let entries = window.len() as u64;
         let started = window.opened_at();
@@ -1856,11 +2036,11 @@ impl Executor {
                 mut waiters,
                 ..
             } = entry;
-            // The last waiter takes the ids; only Task 8's join ever puts a second one here, and it
-            // clones. Popping rather than an `Option` dance: `waiters` is never empty (an entry is
-            // built with one), and a `Vec<EntityId>` per entry is up to `ingest_max_batch_rows`
-            // long, so cloning it unconditionally would be a real per-row cost for a case that
-            // cannot occur before Task 8.
+            // The last waiter takes the ids; **Task 8's join is what puts a second one here**, and
+            // it clones. Popping rather than an `Option` dance: `waiters` is never empty (an entry
+            // is built with one), and a `Vec<EntityId>` per entry is up to `ingest_max_batch_rows`
+            // long, so cloning it unconditionally would be a real per-row cost for the common case
+            // of one waiter. The clone is per *retry*, not per row of the original.
             let last = waiters
                 .pop()
                 .expect("an entry always has at least one waiter");
@@ -1926,15 +2106,19 @@ impl Executor {
         match command {
             // Unreachable on the deny lane while the lane follows the command; handled so the
             // executor stays total over `Command`. A window of one entry is exactly Task 3a's
-            // per-command semantics, which is why there is no second ingest implementation.
+            // per-command semantics, which is why there is no second ingest implementation — and
+            // why this goes through `admit_ingest` rather than around it: if this arm ever becomes
+            // reachable it must not be the one ingest path with no idempotency. The window it is
+            // given is empty, so `BatchState::Held` is unconstructible here and the answers are
+            // exactly `admit`'s.
             Command::Ingest {
                 rows,
                 batch_id,
                 body_hash,
             } => {
-                if let Some(entry) = self.admit(rows, batch_id, body_hash, respond) {
-                    let mut window = CommitWindow::new(self.next_window_seq());
-                    window.push(entry);
+                let window = CommitWindow::new(self.next_window_seq());
+                let (window, _) = self.admit_ingest(window, rows, batch_id, body_hash, respond);
+                if !window.is_empty() {
                     self.close_window(window);
                 }
             }
