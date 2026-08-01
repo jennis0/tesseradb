@@ -46,7 +46,7 @@ Rules for the marker:
   the system they actually have.
 - Where the unbuilt thing is a **guarantee**, it also says what the current behaviour is instead,
   and whether that is safe. "Safe today only because nothing retires at all" is the useful form.
-- Every marker appears in the summary table in `docs/design/README.md`, so the set is countable.
+- Every marker is counted per document in `docs/design/inventory.md`, which is generated, so the set is countable without anyone maintaining a list by hand.
 
 Use **⊘ Partially implemented** where some of a mechanism exists, and name which part.
 
