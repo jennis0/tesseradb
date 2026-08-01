@@ -136,14 +136,25 @@ async fn meta(
         // where the floor and the cap sit, so these are a genuine client need rather than test
         // convenience -- and the reference oracle cannot reproduce the definition without them.
         //
-        // They disclose nothing. All three are deployment constants, identical for every principal.
-        // Publishing `theta_target_marks` lets a client solve for theta's anchor, which is the
-        // composed cardinality of its OWN mask over the whole slice -- precisely what a `zoom = 0`,
-        // full-bbox request already returns as `visible` in a single call (§7.1). Already
-        // obtainable, exactly.
+        // They disclose nothing. All of them are deployment constants, identical for every
+        // principal. Publishing `theta_target_marks` lets a client solve for theta's anchor, which
+        // is the composed cardinality of its OWN mask over the whole slice -- precisely what a
+        // `zoom = 0`, full-bbox request already returns as `visible` in a single call (§7.1).
+        // Already obtainable, exactly.
+        //
+        // `max_k` is published for the same reason and was missing *(owner decision, 2026-08-01,
+        // on a finding from the conformance track)*. Contracts §3.2 tells the client the effective
+        // cap is `min(k, max_k, k_max_marks)` and then handed it only one of the two ceilings, so a
+        // client could not learn its own request bound, and an independent implementation could not
+        // tell a **cap-clause** refusal from a **machine-ceiling** one. That distinction is exactly
+        // the one §7.2 insists on keeping -- the overplot ceiling and the machine ceiling are
+        // deliberately not the same knob, because raising the machine ceiling on transport evidence
+        // must not silently dissolve §7.2's cap clause. A client that cannot see both cannot honour
+        // it either.
         "selection": {
             "k_min": selection.k_min,
             "k_max_marks": selection.k_max_marks,
+            "max_k": state.max_k,
             "theta_target_marks": selection.theta_target_marks,
             "max_underlay_offset": selection.max_underlay_offset,
         },
