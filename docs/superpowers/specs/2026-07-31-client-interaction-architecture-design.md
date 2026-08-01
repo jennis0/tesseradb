@@ -811,6 +811,47 @@ mechanism (a fixed global order determines coarse-zoom membership) and has no
    Mosaic was only ever the most demanding thing reachable through it.
 5. **Count-blindness**, which is what §2 is built on.
 
+**Annotated 2026-08-01 — two additive contract changes, owner-approved, that move the hardest
+integrator obligations to the server side** *(from building the client and measuring it; the
+byte-level statement belongs in the contracts spec, which governs)*.
+
+The exercise that produced this section asked what four seams demand. Having now *been* the
+integrator, two further demands are clear, and both follow from **P6** — the naive path must be
+correct, so an obligation a naive client gets wrong is a defect to design out rather than a line in
+the obligations list.
+
+**(1) The request should carry a mark budget, not a zoom.** `{slice, bbox, budget, k}` with the
+server choosing the depth, alongside the existing `zoom` form.
+
+*Why it is the highest-leverage change available.* Depth choice is the single hardest thing the
+client does and the least obvious: §7.2 fixes marks **per tile**, so marks **on screen** is
+`m_target × tiles-in-view`, and at depth 0 a viewport holds one tile — which is why the
+tile-addressed MVP drew 17 marks at full extent. Getting it right took a measurement campaign
+(`probes/2026-08-02-viewport-and-underlay/`), produced a formula that needs a `min(·, V_total)`
+saturation term to avoid being wrong by three orders of magnitude for sparse principals, and needs
+a one-directional calibration loop to avoid serving a subset of what is already drawn. **No
+integrator will derive that from an OpenAPI description.** The server already holds every input:
+tile arithmetic, `m_target`, and `V_total`.
+
+*Why it looks safe, stated as a starting point for the register pass rather than as a conclusion.*
+The server choosing what to serve is entirely within its remit — this removes a client decision
+rather than adding a client capability. Nesting is untouched. `served` stays a pure function of
+(mask, corpus, k, viewport) with `budget` joining the tuple, so §11's determinism survives. And the
+chosen depth is derivable from quantities the client can already request, which is C18's argument.
+**It still needs its own I2 pass and possibly an Appendix C entry before it is built.**
+
+**(2) Length-prefix every stream in the frame, not only the first.** Today only the tile stream
+carries a `u32` prefix; a reader that wants the points or sub-cell streams must walk Arrow's
+encapsulated messages to find the boundary. `tessera-wire`'s `payload` doc argues that relaxation
+deliberately, and the argument holds for *today's* readers — but it is a per-language porting cost
+for every non-JS consumer, and it is where this client's one genuinely subtle bug lived: Arrow
+folds padding into the metadata and body lengths it reports, so the obvious alignment arithmetic
+over-advances by four bytes and desynchronises on the second message. Prefixing all three is
+additive, costs 8 bytes, and deletes that class of failure from every port.
+
+**Both are additive and neither breaks an existing caller.** Neither is built; both want the
+contracts spec's treatment first.
+
 ## 9. The primitive inventory
 
 The test, corrected after an owner ruling on 2026-07-31, is **not** "is this an
