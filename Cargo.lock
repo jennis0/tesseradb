@@ -2389,6 +2389,7 @@ dependencies = [
  "tessera-wire",
  "tokio",
  "toml",
+ "tower-http",
  "tracing",
 ]
 

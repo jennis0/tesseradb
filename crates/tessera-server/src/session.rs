@@ -17,12 +17,19 @@ use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    // MVP client spec §3. The browser calls `/session/authorise` before it can call anything on
+    // the viewer plane, so the seam has to cover this plane too or it covers nothing.
+    let dev_cors = crate::cors::dev_layer(&state.dev_cors_origins);
+    let router = Router::new()
         .route("/session/authorise", post(authorise))
         .route("/session/revoke", post(revoke))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .with_state(state)
+        .with_state(state);
+    match dev_cors {
+        Some(layer) => router.layer(layer),
+        None => router,
+    }
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {

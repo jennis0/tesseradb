@@ -9,6 +9,7 @@
 
 pub mod config;
 pub mod control;
+pub mod cors;
 pub mod error;
 pub mod health;
 pub mod session;
@@ -222,7 +223,21 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         min_visible_members: config.min_visible_members,
         session_credential: config.session_credential.clone(),
         operator_credential: config.operator_credential.clone(),
+        dev_cors_origins: config.dev_cors_origins.clone(),
     });
+
+    // MVP client spec §3. Loud, and at `warn`, because the key's effect is to let a page from
+    // another origin present a session token and the session credential to this process. It is a
+    // development affordance; T2 with verified assertions remains the documented integration
+    // topology (client-interaction §7).
+    if !config.dev_cors_origins.is_empty() {
+        tracing::warn!(
+            origins = ?config.dev_cors_origins,
+            "serve.dev_cors_origins is set: these browser origins may present session tokens and \
+             the session credential to this process. This is a DEVELOPMENT affordance — do not \
+             enable it in a deployment."
+        );
+    }
 
     Ok(Prepared { state, config })
 }

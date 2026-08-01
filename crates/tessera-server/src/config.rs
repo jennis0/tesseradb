@@ -359,6 +359,15 @@ struct RawServe {
     pin_ttl_secs: Option<u64>,
     #[serde(default)]
     pins_per_session_max: Option<usize>,
+    /// Browser origins permitted to call the viewer and session planes (MVP client spec §3).
+    ///
+    /// **Absent means no CORS layer at all**, which is the only sensible default for a key whose
+    /// effect is to let a page from another origin present a session token and the session
+    /// credential. There is deliberately no environment variable and no wildcard: this is a
+    /// development affordance, and the enumerated list is what keeps it from becoming an
+    /// integration pattern. See [`crate::cors`].
+    #[serde(default)]
+    dev_cors_origins: Option<Vec<String>>,
 }
 
 /// The control plane's listen target: a real unix socket, or (tests, and the documented Windows
@@ -398,6 +407,10 @@ pub struct Config {
     /// carries only durations and row counts — no identifier, no per-principal label (SA §9) —
     /// but it quantifies the C4 timing channel, so it stays off unless a measurement asked for it.
     pub stage_timing: bool,
+    /// `serve.dev_cors_origins`. Empty is the default and means no CORS layer is mounted at all —
+    /// not a layer that allows nothing. See [`crate::cors`] for why this is a development
+    /// affordance rather than an integration feature.
+    pub dev_cors_origins: Vec<String>,
     pub session_credential: String,
     pub operator_credential: String,
     /// D-B: the pool this sizes should fill the machine. This task adds the knob and its
@@ -1126,6 +1139,7 @@ fn parse(text: &str) -> Result<Config> {
             .max_tiles_per_request
             .unwrap_or(DEFAULT_MAX_TILES_PER_REQUEST),
         stage_timing: raw.serve.stage_timing.unwrap_or(false),
+        dev_cors_origins: raw.serve.dev_cors_origins.unwrap_or_default(),
         session_credential,
         operator_credential,
         compute_threads,
@@ -1451,6 +1465,35 @@ mod tests {
     /// stated explicitly" would make every deployment carry fourteen lines of boilerplate that
     /// SA §7 exists to prevent. If a later stage decides one of these really is a disclosure
     /// control, it must fail this test on the way to moving it — which is the point.
+    #[test]
+    /// MVP client spec §3: the browser seam is off unless typed.
+    ///
+    /// This is the one knob in this file that is **not** a performance knob, so SA §7's "knobs
+    /// default, disclosure controls do not" would ordinarily require it to be stated. It defaults
+    /// anyway — to *empty*, which is the fail-closed value: absent means the layer is never
+    /// mounted. Making it required would force every existing `tessera.toml` to name a
+    /// development-only key.
+    #[test]
+    fn dev_cors_origins_defaults_to_empty() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("")).expect("a config naming no CORS origins must load");
+        assert!(
+            config.dev_cors_origins.is_empty(),
+            "absent serve.dev_cors_origins must mean no CORS at all — a non-empty default would \
+             let a dev affordance ride into a deployment"
+        );
+    }
+
+    #[test]
+    fn dev_cors_origins_round_trips_when_named() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let toml = valid_toml("dev_cors_origins = [\"http://localhost:5173\"]");
+        let config = parse(&toml).expect("a config naming a CORS origin must load");
+        assert_eq!(config.dev_cors_origins, vec!["http://localhost:5173"]);
+    }
+
     #[test]
     fn every_stage_2_1_knob_defaults() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");

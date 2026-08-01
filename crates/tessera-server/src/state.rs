@@ -246,6 +246,10 @@ pub struct AppState {
     pub min_visible_members: u64,
     pub session_credential: String,
     pub operator_credential: String,
+    /// `serve.dev_cors_origins`. Empty — the default — means the viewer and session routers mount
+    /// no CORS layer at all. See [`crate::cors`] for why this is a development affordance and why
+    /// the control plane never consults it.
+    pub dev_cors_origins: Vec<String>,
 }
 
 impl AppState {

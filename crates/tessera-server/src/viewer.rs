@@ -23,13 +23,20 @@ use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    // MVP client spec §3: absent `serve.dev_cors_origins` mounts nothing, so the seam is
+    // structurally absent from this router rather than present and configured empty.
+    let dev_cors = crate::cors::dev_layer(&state.dev_cors_origins);
+    let router = Router::new()
         .route("/v1/meta", get(meta))
         .route("/v1/viewport", post(viewport))
         .route("/v1/items/{tessera_id}", post(item))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .with_state(state)
+        .with_state(state);
+    match dev_cors {
+        Some(layer) => router.layer(layer),
+        None => router,
+    }
 }
 
 /// The wire shape of a pin, both in `POST /v1/viewport`'s request body and the `x-tessera-pin`
