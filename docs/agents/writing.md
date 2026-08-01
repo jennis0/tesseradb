@@ -1,99 +1,127 @@
-# House style
+# How to write here
 
-This repo has a consistent and unusual voice. It was never written down, so it has been
-learnable only by reading a lot of it, and it drifts every time someone new contributes. This
-document is that voice, stated once, with real examples from the tree.
+This governs everything in `docs/` and every code comment. The audience for the design corpus is
+a competent technical reader who has not worked on Tessera: an assurer checking the security
+argument, an engineer evaluating the approach, a contributor arriving cold. Write for them.
 
-It applies to design documents, memos, commit messages and code comments alike. The medium
-changes; the standard does not.
+## The six rules
 
-## The standard
+### 1. Describe the system, not its construction
 
-**Argue the decision; do not assert it.** A reader who disagrees should be able to find the
-reason and attack it. The best example in the tree is `crates/tessera-engine/src/select.rs`,
-whose module doc opens a section titled *"Why there is no candidate-list route"* and then spends
-fifty lines making the case with evidence — because the alternative is specified in §7.2, looks
-obviously better, and will be proposed again by the next reader who has not seen the numbers.
+Write what the system **is** and **why it is that way**. Not how it came to be that way.
 
-**Record what was rejected.** Rejected alternatives are the most-reread part of a design and the
-first thing lost in a rewrite. Someone will propose them again; the document's job is to answer
-before they spend a week on it.
+A reader wants to know that deletion denies retire on an epoch ledger and suppressions never
+retire at all, and why those differ. They do not want to know that this was revision 3's
+correction to revision 1, that it was found in review, or which phase built it.
 
-**Distinguish measured from modelled, and say which.** Write "measured" only where something was
-measured. `clients/ts/core/src/coords.ts` says *"Measured, not assumed"* and names the test that
-did it, with the instruction to change the constants only with that test. That is the form.
+That history is real and worth keeping — it belongs in `docs/decisions/` and in git, not
+interleaved with the explanation. A document whose paragraphs are half archaeology forces every
+reader to separate the two, every time.
 
-**State negative results plainly.** `crates/tessera-bench/src/arms/ingest.rs` says
-*"F3: NOT confirmed by measurement — do not claim it is."* A refuted hypothesis is a result. This
-repo has several optimisations that looked certain and were killed by measurement, and the
-record of the killing is what stops them coming back.
+> ✗ "r3 replaced r1's blanket retirement epoch, because for suppressions that was fail-open. §5.1
+> was then amended in r4 once flush became the visibility mechanism."
+>
+> ✓ "A suppression retires only when it is lifted. Assigning it a retirement epoch — as deletion
+> denies have — would eventually expire the entry and make the item visible again."
 
-**Say what a thing does not do, wherever the scope is contestable.**
-`crates/tessera-lifecycle/src/faults.rs` states what its compile gate buys, then states what it
-does not buy — *"stated because the first draft of this paragraph claimed otherwise and was
-wrong"*. Correcting yourself in the document is not an embarrassment; it is the most useful
-sentence on the page, because the wrong version was plausible.
+The second sentence keeps the whole reason. It just does not narrate.
 
-**Lead with the result.** Then the choices, then the reasoning. History goes last, or becomes a
-pointer. A memo that opens with a narrative of how the investigation proceeded has buried its
-own conclusion.
+Corollary: avoid phase numbers, task numbers, and "currently"/"for now" in the corpus. If
+something is not built yet, say *what is specified and what is implemented* explicitly — see
+rule 6 — rather than writing in a present tense that quietly means "eventually".
 
-**Write so a decision can be made.** If you are escalating, the reader must be able to rule
-without opening a source file: what is true now, what would change, what the code does in one
-sentence, the options with their consequences, and a recommendation with what it costs if wrong.
+### 2. A paragraph should be readable on its own
 
-**British spelling** — authorisation, visualisation, licence, behaviour.
+A reader should not need three other documents open to parse one paragraph.
 
-**Use the established security vocabulary**, not invented terms: *conservative label join*,
-*boolean expression indexing*, *partial evaluation*, *Non-Truman model*, *compartmented MAC*.
-Each brings a literature with it, and a reviewer will find the lineage anyway.
+- **Expand an acronym or a project term on first use in each document.** Not once across the
+  corpus — once per document. `M_auth`, `I7`, `C4`, DNF, LOD, *conservative label join*: each
+  gets a clause the first time it appears, even though it is defined properly elsewhere.
+- **Say what a cross-reference is for.** "See §7.2" tells the reader nothing about whether they
+  need to go. "The alternative route, and why it was rejected, is in §7.2" tells them.
+- Cross-references support the text; they do not substitute for it.
 
-## Code comments specifically
+### 3. Calibrate density
 
-**Module docs carry the design argument, and they are long here on purpose.** Sixty to a hundred
-and thirty lines of `//!` is normal in this tree where it is warranted. It is warranted when:
+Two failures, equally common. **Padding**: restating the heading, narrating the structure
+("in this section we will…"), or three sentences where the second was the point. **Compression**:
+a paragraph so dense the reader has to decompress it — clauses stacked with em-dashes, three
+distinct claims sharing one sentence.
 
-- the module upholds an invariant, and the reasoning for *how* is not visible in the code;
-- an obvious construction was rejected for a non-obvious reason;
-- a measurement drove the shape, and the shape looks arbitrary without it;
-- the module is one of a pair, or duplicates something deliberately, and a reader will otherwise
-  "fix" the duplication.
+The test is whether a competent reader gets it at reading speed, once.
 
-It is not warranted for restating what the code says. Length is a consequence of having
-something to say, not a target.
+### 4. Proportion
 
-**Comments record settled decisions and evidence — not backlog.** There are essentially no
-`TODO`, `FIXME` or `XXX` markers in this repo and that is deliberate. Open work is an issue,
-where it can be found, labelled and closed. A `TODO` in a source file is a note to nobody.
+Emphasis is a budget. If everything is load-bearing, critical and non-negotiable, the reader
+cannot tell which things actually are — and this corpus has a small number of things that
+genuinely are.
 
-**State the rule once, in the place that owns it.** `crates/tessera-engine/src/pins.rs` has a
-heading *"The rule, stated once"* and then annotates every guard in the file with which half of
-that rule it defends. Repeating a rule in five places means five places to update and four
-chances to disagree with yourself.
+- Reserve **bold** for the sentence a skimming reader must not miss. A paragraph with four bold
+  phrases has none.
+- Do not call a reasonable design choice groundbreaking, novel, or the key insight. Say what it
+  does and let it be judged.
+- Scale the space to the importance. A mechanism that took a week to get right but is
+  three lines of consequence gets three lines.
 
-**Cite the governing section, and prefer stable citations.** `§4`, `contracts §2.5`,
-`lifecycle §3` are stable. `file.rs:184` is not — it drifts on any edit above the cited line, and
-this repo has already had line references go stale across a merge and strand a worker mid-task.
-Use `file:line` only when nothing else identifies the thing, and expect it to rot.
+### 5. Use a diagram when it beats prose
 
-**State load-bearing assumptions at the site.** Not in your head, not in the commit message. If
-the assumption is load-bearing, make it a test; if it cannot be a test, make it an assertion; if
-it can be neither, say so and say why.
+Reach for one when the subject is a **structure, a flow, or a state machine** — anything the
+reader would otherwise reconstruct in their head from a paragraph. Data layout, request paths,
+the generation/pin lifecycle, mask composition, the retirement rules: all clearer drawn.
 
-**Admit when a previous claim was wrong.** `crates/tessera-authz/src/single_flight.rs` says
-*"That claim was made before it was true, which is why the table below exists"* and then gives
-the coverage table that makes it true. That is worth more than a silent correction, because the
-next reader would otherwise trust the original claim for the same reasons you did.
+Mermaid, in a fenced ```mermaid block, so it stays diffable and renders on GitHub. Give it a
+caption saying what it shows. A diagram that duplicates an adjacent paragraph is padding; a
+diagram that replaces one is the point.
 
-## Commit messages
+Tables count. A three-way comparison is a table, not three paragraphs.
 
-Say what changed and why it was worth changing. Where a change is invariant-bearing, say which
-invariant and how you know it still holds. Where you deliberately did not do something, say so —
-the reader's next question is usually "why didn't you also…".
+### 6. Say what is true, precisely
+
+- **Distinguish measured from modelled from assumed**, and say which. `clients/ts/core/src/coords.ts`
+  writes "Measured, not assumed" and names the test that measured it. That is the form.
+- **Record negative results.** `crates/tessera-bench/src/arms/ingest.rs` says
+  *"F3: NOT confirmed by measurement — do not claim it is."* A refuted hypothesis is a result,
+  and it stops the idea coming back.
+- **Distinguish specified from implemented.** Where the corpus describes something not yet built,
+  it must say so at that point — not in a preamble the reader has forgotten by §5. Present tense
+  about absent machinery is the most damaging error available here, because it reads as an
+  assurance.
+- **Argue, do not assert.** A reader who disagrees should be able to find the reason and attack
+  it. `crates/tessera-engine/src/select.rs` spends fifty lines on "why there is no candidate-list
+  route" because the rejected alternative looks obviously better and will be proposed again.
+- **Say what something deliberately does not do**, wherever the scope is contestable.
+- **British spelling**: authorisation, visualisation, licence, behaviour.
+- **Use the established security vocabulary** rather than inventing terms: *conservative label
+  join*, *boolean expression indexing*, *partial evaluation*, *Non-Truman model*,
+  *compartmented MAC*. Each carries a literature a reviewer will find anyway.
+
+## Code comments
+
+The same rules, plus:
+
+**Module docs carry the design argument, and are long here where that is warranted.** Sixty-plus
+lines of `//!` is normal in this tree when the module upholds an invariant in a way the code does
+not show, when an obvious construction was rejected for a non-obvious reason, when a measurement
+drove a shape that otherwise looks arbitrary, or when something is duplicated deliberately and a
+reader would otherwise "fix" it. Length follows from having something to say; it is not a target,
+and restating the code is never warranted.
+
+**Comments record decisions and evidence, not backlog.** There are essentially no `TODO` or
+`FIXME` markers here, deliberately. Open work is an issue, where it can be found and closed.
+
+**State each rule once, where it belongs.** `crates/tessera-engine/src/pins.rs` states its rule
+under a heading saying so, then annotates each guard with which half it defends. A rule repeated
+in five places is four chances to disagree with yourself.
+
+**Prefer stable citations.** `§4`, `contracts §2.5` survive edits. `file.rs:184` does not — it
+drifts on any change above the cited line, and a stale one has already stranded a worker
+mid-task. `scripts/check-doc-links.py` warns on the ones that have visibly rotted.
+
+**State load-bearing assumptions at the site.** If the assumption is load-bearing, prefer a test;
+failing that an assertion; failing that, say so and say why neither was possible.
 
 ## The test
 
-Before you commit prose, ask: **could a competent reader who disagrees with this find the
-argument and attack it?** If not, you have asserted rather than argued, and the next person to
-touch this will either obey it without understanding or ignore it without knowing what they
-broke.
+Before committing prose, ask two questions. **Could a reader who disagrees find the argument and
+attack it?** If not, you asserted. **Could a reader who has never seen this system follow the
+paragraph without opening another document?** If not, you wrote for yourself.
