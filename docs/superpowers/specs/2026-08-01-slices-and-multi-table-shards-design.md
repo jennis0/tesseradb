@@ -60,11 +60,22 @@ What the corpus calls a *segment* becomes the table `(slice, residual, epoch)` �
 - A row naming only new slices is accepted and lands in each named slice's current epoch table.
 - **Trust assumption, stated:** entity resolution by `external_id` across slices is sound only under a single, mutually-trusting ingest authority — the accepted/created distinction lets an ingest caller probe which `external_id`s exist corpus-wide. The admin plane is single-authority today (SA §2); if that ever changes, this is the sentence to revisit.
 
-**Slice creation is a runtime control-plane operation.** A WAL'd registry entry creates an empty slice; points join by ordinary ingest carrying coordinates for it; flush gives rows. Entity space is untouched; the cost is row-space artifacts, which spec §3's budget paragraph prices rather than waves at.
+**Lifecycle: create, populate, drop.**
+
+*Create* is a control-plane operation: `{name, gate label, projection provenance}`. Validation at accept: name unused (including tombstoned names — below), gate label evaluable by the plugin. The record is WAL'd; the *served* registry is the manifest's registry plus WAL-overlay additions, materialised into the manifest at the next flush — the overlay-then-fold shape the write path already uses everywhere. Ordering rule: **a slice must be acknowledged before any ingest row referencing it is accepted** — no same-batch creation, no auto-create on first reference; slices are deliberate objects that carry gates. An empty created slice is visible in discovery (gate permitting) with zero counts; creation is deliberate, so there is nothing to hide. Entity space is untouched; the cost is row-space artifacts, which the budget paragraph above prices rather than waves at.
+
+*Populate* has two routes:
+
+1. **Incremental** — the ingest map, exactly as above. New points carry coordinates for whichever slices they join; existing points join a new slice via the amended duplicate rule. Lands in the slice's epoch tables; seconds-to-minutes visibility; group-commit untouched.
+2. **Bulk backfill is a build-plane operation, not a stream of ingests.** Creating an embedding-space slice over an existing 10⁹-item corpus means 10⁹ coordinate rows — a batch job that must not ride the trickle path. `tessera build --attach-slice` consumes a Parquet of `(external_id, x, y)`, resolves IDs, builds the new slice's row-space artifacts *only* — Morton sort, tables, tile tables, candidate lists, permutation — and flips the generation pointer. Entity space is untouched by construction, and spec §7's prefix-qualified manifest references pay off a second time: the new manifest **references every other slice's tables verbatim** — a slice attach copies nothing it did not build. Rows for the new slice arriving during the attach build land in epoch tables against the old generation and survive the flip as pending tables, exactly like any build-concurrent ingest.
+
+*Drop* is the inverse control operation: a WAL'd registry tombstone. The slice vanishes from discovery on ack — acknowledgement coupled to application, deny-style; its row-space artifacts are garbage, collected at the next compaction; no entity is deleted by dropping a coordinate system it appeared in. A dropped slice's **name stays tombstoned against reuse** — a recreated "2024-Q1" with different membership would silently repoint every bookmark and cached θ that named it; a fresh name costs nothing. Dropped-versus-never-existed is indistinguishable by construction: both are simply absent from the session's visible-slice set.
+
+*A consequence worth owning:* `--attach-slice` is also the **coordinate-migration escape hatch** — re-attach the slice under a new name (new projection fit, same members), then drop the old one. Callers get projection migration without in-place coordinate-update machinery, at the cost of the slice name changing — which is honest, since the geometry did too.
 
 **Caller obligations (extends §2.4).** Projection stability within a slice; entity identity *across* slices is by `external_id` — "the same point in two embedding spaces" is exactly the caller saying so at ingest.
 
-**Deliberately out of scope.** Coordinate updates within a slice (a row move; same rarity class as predicate changes, deferred to the same compaction machinery). Removing an entity from a single slice is a caller-facing API question deferred with it.
+**Deliberately out of scope.** In-place coordinate updates within a slice (a row move; same rarity class as predicate changes, deferred to the same compaction machinery — and the attach-under-new-name path above covers whole-slice migration meanwhile). Removing an entity from a single slice is a caller-facing API question deferred with it.
 
 ## 4. Promotion policy
 
@@ -209,9 +220,9 @@ Net: no change to the five-verb surface; one new accepted register entry; one st
 | Contracts §2.3 | `segments` array gains `group` and base-offset fields (`group` always `residual` until promotion exists) |
 | Contracts §2.6 | "Row IDs are segment-local" → slice-global row IDs with container-aligned table base offsets |
 | Contracts §3.2 | **Ordering rule explicitly unchanged** (affirmed against the multi-table merge); `slices` array in `/v1/meta` gate-filtered — meta becomes per-principal in a second field, C11 precedent; discovery shape stated |
-| Contracts §3.4 | Coordinate map `{slice → (x, y)}`; duplicate-`external_id` rule amended per spec §3 (byte-match labels, same-slice 409, new-slice accept); slice-creation control operation; header addressing retired with it |
+| Contracts §3.4 | Coordinate map `{slice → (x, y)}`; duplicate-`external_id` rule amended per spec §3 (byte-match labels, same-slice 409, new-slice accept); slice create and drop control operations (create-before-reference ordering, tombstoned names, ack coupled to application); header addressing retired with it |
 | Lifecycle §3/§5 | Compaction gains promotion-set evaluation, dwell, and group carve/fold with its cost participating in §11.3's budgeting; **the §12.5 move deny gets its named retirement rule** (source-compaction-coupled, rule-3 shape); note that tables themselves add no fourth deny-retirement case |
-| System architecture §3, §7 | Promotion-set evaluation assigned in the crate decomposition (build/compaction side); `p`, `abs_min`, cap, dwell in the §7 config schema; per-deployment layout switch |
+| System architecture §3, §7 | Promotion-set evaluation assigned in the crate decomposition (build/compaction side); `p`, `abs_min`, cap, dwell in the §7 config schema; per-deployment layout switch; `tessera build --attach-slice` as a build mode (slice-scoped row-space build, generation flip by reference) |
 | Conformance design | Byte-level single-vs-multi-table differential build (no order canonicalisation); later, the rule-out canary and the fold-status dirty-bit checks |
 | Implementation plan §14 | Signature-major entry superseded by this design (physical tables, threshold promotion); gather probe extended to the spec §9 sweep |
 
