@@ -65,7 +65,7 @@ def build() -> str:
 
     docs = []
     for p in sorted(DESIGN.glob("*.md")):
-        if p.name in ("inventory.md", "DIVERGENCE-REGISTER.md", "README.md"):
+        if p.name in ("inventory.md", "README.md"):
             continue
         t = p.read_text()
         m = REVISION.search(t)

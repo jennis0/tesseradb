@@ -35,5 +35,5 @@ general — and the whole problem is that the reader could not tell.
 
 ## Evidence
 
-[`../design/DIVERGENCE-REGISTER.md`](../design/DIVERGENCE-REGISTER.md).
+the divergence register — a working document closed on 2026-08-01 once every row had landed, and removed as it was designed to be. It is in git history; its rulings are the decisions in this directory.
 Convention in [`../agents/writing.md`](../agents/writing.md).

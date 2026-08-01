@@ -27,7 +27,7 @@
 
 **Python (SDK and reference oracle).** `pyarrow` for the SDK's Table returns; `pyroaring`, `numpy` and `polars` in the reference oracle and test fixtures; `hypothesis` for plugin property tests. The clustering pipeline — UMAP, HDBSCAN, Toponymy — is the caller's and out of scope per §2.1; the engine's batch mode consumes its Parquet outputs (2.2).
 
-**Frontend.** deck.gl (MIT) for the GPU profile, Leaflet or OpenLayers (BSD-2) for the thin-client profile, `apache-arrow` for decode, over a shared headless core carrying opaque handles rather than entity IDs. See the visualisation architecture document.
+**Frontend.** deck.gl (MIT) for the GPU profile, Leaflet or OpenLayers (BSD-2) for the thin-client profile, `apache-arrow` for decode, over a shared headless core. *(Written before the client work: the thin-client profile was never built, and the wire identity is now a keyed `tessera_id` rather than a per-session handle — decision 0006. See `client-interaction.md`.)* rather than entity IDs. See the visualisation architecture document.
 
 ## Appendix B — Repository layout
 

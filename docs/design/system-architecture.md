@@ -2,7 +2,7 @@
 
 **Status:** Draft r10 — r9's rotation ruling plus decision 0026's vocabulary rename and the S3 composition-order ruling (see Appendix R)
 
-**Companion to** `architecture.md` (the specification, which owns the invariants and the *why*) and `../archive/implementation-plan.md` (which owns phasing). This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the architecture design; `contracts §n` to `contracts.md`; `lifecycle §n` to `concurrency-lifecycle.md`. Where this document and the design disagree, the design is right; where this document and `contracts.md` disagree, contracts §0.3's recorded deviations govern.
+**Companion to** `architecture.md` (the specification, which owns the invariants and the *why*) and the capability epics in this repository's issues (which own sequencing — the phase model they replaced is archived). This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the architecture design; `contracts §n` to `contracts.md`; `lifecycle §n` to `concurrency-lifecycle.md`. Where this document and the design disagree, the design is right; where this document and `contracts.md` disagree, contracts §0.3's recorded deviations govern.
 
 **Scope.** Backend only — the storage engine, the query surface and the lifecycle. The client appears where its contract constrains the backend: `clients/ts/` is a live second reader of the wire format, and a second reader is what makes a contract a contract (contracts §0.1).
 
