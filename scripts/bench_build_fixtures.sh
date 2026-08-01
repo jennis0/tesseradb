@@ -6,7 +6,26 @@
 # only the pairs file changes per label set. Any scale is therefore buildable: 5000000 works as
 # well as the defaults, bounded only by the source (geometry.parquet holds 10^9 rows).
 #
-# Idempotent: a bundle whose CURRENT exists is skipped, so a killed run resumes by re-invocation.
+# Idempotent: a bundle the current reader can open is skipped, so a killed run resumes by
+# re-invocation.
+#
+# ## Stale bundles rebuild themselves
+#
+# Fixtures outlive the code that wrote them. A bundle built before a manifest field was added or
+# renamed still has its `CURRENT`, still looks complete, and fails to load with a bare serde
+# complaint — `missing field 'idset'` — from whichever tool next opens it, hours into a campaign
+# and nowhere near this script.
+#
+# So "already built" is decided by asking the reader, not by looking for `CURRENT`: `tessera
+# verify` opens the bundle exactly as the engine and the bench harness do. A bundle it refuses is
+# reported with the reader's own words and **rebuilt**, not skipped. The alternative — a list of
+# required fields kept here in shell — would be a second copy of the reader's contract, and would
+# be stale the next time the first copy moved, which is the failure being fixed.
+#
+# The gate costs a full read-protocol check on a bundle that opens, and a manifest parse on one
+# that does not — a stale bundle is refused before any data is read. Measured on this corpus:
+# 17 ms at 250,000 items, 145 ms at 2,422,486, and 3 ms to refuse a stale 2,422,486-item bundle.
+# Set against a build of several seconds at the same scale, the gate is not worth an opt-out.
 
 set -uo pipefail
 
@@ -30,6 +49,11 @@ Usage: ${BASH_SOURCE[0]##*/} [options]
   --log-dir DIR       per-build logs                (default: /tmp/tessera-bench/logs)
   --list              print the plan and exit, building nothing
   -h, --help          this
+
+Each existing bundle is opened with \`tessera verify\` before being skipped. One the current
+reader refuses — a fixture older than a change to the bundle format — is reported as STALE and
+rebuilt. \`--list\` names them without rebuilding, so this doubles as the answer to a loader
+error like "missing field \`idset\`" from any tool that reads a fixture.
 
 Examples:
   ${BASH_SOURCE[0]##*/} --scales 2422486 --label-sets categories-archive,hash-flat
@@ -86,8 +110,19 @@ mkdir -p "$FIXTURES" "$LOG_DIR"
 [[ -x "$TESSERA" ]] || { echo "missing $TESSERA — run: cargo build --release -p tessera-cli" >&2; exit 1; }
 [[ -f "$GEOMETRY" ]] || { echo "missing $GEOMETRY" >&2; exit 1; }
 
-built=0; skipped=0; failed=0
+built=0; skipped=0; failed=0; stale=0
 started_all=$(date +%s)
+
+# What the reader says when it cannot open the bundle, with its "FAILED <path>: " prefix stripped
+# so the line reads as a reason rather than a second path. Empty output means it opened cleanly.
+reader_refusal() { # reader_refusal <bundle root>
+  local verdict
+  if verdict="$("$TESSERA" verify "$1" 2>&1)"; then
+    return 0
+  fi
+  echo "${verdict#FAILED*: }"
+  return 1
+}
 
 for scale in "${SCALES[@]}"; do
   for set_name in "${ALL_SETS[@]}"; do
@@ -101,13 +136,22 @@ for scale in "${SCALES[@]}"; do
     [[ -f "$pairs" ]] || { echo "SKIP  scale=$scale set=$set_name — no $pairs"; continue; }
 
     out="$FIXTURES/$scale/$set_name"
+    refusal=""
     if [[ -f "$out/CURRENT" ]]; then
-      echo "HAVE  scale=$scale set=$set_name"
-      skipped=$((skipped + 1)); continue
+      if refusal="$(reader_refusal "$out")"; then
+        echo "HAVE  scale=$scale set=$set_name"
+        skipped=$((skipped + 1)); continue
+      fi
+      echo "STALE scale=$scale set=$set_name — $refusal"
+      stale=$((stale + 1))
     fi
 
     if [[ "$LIST_ONLY" == "1" ]]; then
-      echo "TODO  scale=$scale set=$set_name -> $out"
+      if [[ -n "$refusal" ]]; then
+        echo "TODO  scale=$scale set=$set_name -> $out  (rebuild over the stale bundle)"
+      else
+        echo "TODO  scale=$scale set=$set_name -> $out"
+      fi
       continue
     fi
 
@@ -142,6 +186,9 @@ if [[ -f "$canonical/CURRENT" && ! -e /tmp/tessera-2m4 ]]; then
 fi
 
 echo "----"
-echo "built=$built skipped=$skipped failed=$failed in $(( $(date +%s) - started_all ))s"
+echo "built=$built skipped=$skipped stale=$stale failed=$failed in $(( $(date +%s) - started_all ))s"
+if [[ "$LIST_ONLY" == "1" && "$stale" -gt 0 ]]; then
+  echo "$stale bundle(s) the current reader cannot open. Re-run without --list to rebuild them."
+fi
 du -sh "$FIXTURES" 2>/dev/null
 exit $(( failed > 0 ? 1 : 0 ))
