@@ -1364,10 +1364,17 @@ async fn an_engine_without_a_write_executor_is_not_ready() {
 /// discloses nothing about its own surface, and a future change that mounted the probes back (or
 /// moved the layer to a per-route `route_layer`, letting the 404 through) turns this red.
 ///
-/// **Mutations this kills:** re-adding `.route("/readyz", ..)` / `.route("/healthz", ..)` to
-/// `control::router` → 200 at the 401 legs; re-introducing an exemption in
-/// `require_operator_credential` → 404 at the 401 legs; `readyz` returning 503 unconditionally → red
-/// at the viewer/session legs.
+/// **Mutations this kills:** re-introducing an exemption in `require_operator_credential` → 404 at
+/// the 401 legs (measured); the pre-2026-08-01 state, i.e. that exemption *plus* the two `.route`
+/// lines back on `control::router` → 200 at the 401 legs (measured); `readyz` returning 503
+/// unconditionally → red at the viewer/session legs.
+///
+/// **A mutation this deliberately does NOT kill, recorded because the obvious claim is false and was
+/// measured to be false.** Re-adding `.route("/healthz", ..)` / `.route("/readyz", ..)` to
+/// `control::router` *without* an exemption leaves this test green — the routes answer 401, because
+/// the credential layer is unconditional and wraps them. That is not a gap: the mount was never the
+/// disclosure, the exemption was. The layer is what this test is really pinned to, and the routes'
+/// absence is a simplification of `control::router`, not a security property in its own right.
 #[tokio::test]
 async fn a_healthy_server_is_ready_on_every_listener_that_serves_the_probe() {
     let tmp = TempDir::new().unwrap();
