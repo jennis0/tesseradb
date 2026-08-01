@@ -1,5 +1,6 @@
-//! WAL round-trip and the positional CRC rule (task-9 brief, Step 1; plus the fail-open holes
-//! found in review — C1/C2/I1 below).
+//! WAL round-trip and the positional CRC rule, plus three fail-open holes the rule alone does
+//! not close: a log shorter than its own sync point, a missing or truncated sidecar, and a
+//! corrupted length prefix. Each is named at the section it is tested in.
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -118,7 +119,7 @@ fn corruption_before_sync_point_fails_closed() {
     expect_corruption(Wal::open(&path));
 }
 
-// --- C1: a WAL that is simply shorter than the recorded sync point must fail closed, even with
+// --- A WAL that is simply shorter than the recorded sync point must fail closed, even with
 // no corrupted record at all (e.g. a restored stale copy, or lost filesystem blocks). ---
 
 #[test]
@@ -143,7 +144,7 @@ fn wal_shorter_than_sync_point_fails_closed() {
     expect_corruption(Wal::open(&path));
 }
 
-// --- C2: a missing or malformed sidecar must default to "assume everything present is acked",
+// --- A missing or malformed sidecar must default to "assume everything present is acked",
 // not "assume nothing is acked" — the latter is fail-open, silently downgrading real, previously
 // fsynced records to discardable tail noise. ---
 
@@ -203,7 +204,7 @@ fn four_byte_sidecar_still_fails_closed_on_corruption() {
     expect_corruption(Wal::open(&path));
 }
 
-// --- I1: a corrupted length prefix must be bounded against the file's actual remaining bytes
+// --- A corrupted length prefix must be bounded against the file's actual remaining bytes
 // before allocating for it, and then routed through the same positional CRC rule as any other
 // framing failure. ---
 
@@ -390,15 +391,14 @@ fn bad_header_is_rejected() {
     }
 }
 
-// --- Phase 2 stage 2.1, Task 3a: poisoning, for real and injected. ---
+// --- Poisoning, for real and injected. ---
 //
 // `poisoned_error_is_distinct_and_reports_itself` above asserts a Display string and nothing else,
-// which is why the Phase 1 ledger carries "deny-op WAL-failure path inspection-only" as a
-// deferral. These two close it, and they exist as a **pair**: the first pins what a real I/O
-// failure does, the second pins that the injected fault does the same thing. Task 3a's
-// `deny_append_failure_still_applies` and `a_poisoned_wal_trips_the_not_ready_posture` both run on
-// injection, so if the two ever disagree those tests are measuring the harness rather than the
-// engine.
+// which leaves the deny-op WAL-failure path covered by inspection only. These two close it, and
+// they exist as a **pair**: the first pins what a real I/O failure does, the second pins that the
+// injected fault does the same thing. `deny_append_failure_still_applies` and
+// `a_poisoned_wal_trips_the_not_ready_posture` both run on injection, so if the two ever disagree
+// those tests are measuring the harness rather than the engine.
 
 /// A **genuine** I/O failure — not an injected one — poisons the handle, and the sequence is
 /// `Io` first, `Poisoned` after.
@@ -407,8 +407,8 @@ fn bad_header_is_rejected() {
 /// `sync_data()` on an already-open fd (unaffected by the mode change) and then does the sidecar's
 /// write-tmp-then-rename, whose `open` needs write permission on the *directory* — so it fails
 /// with `EACCES` and lands in the arm that sets `poisoned`. That is the sidecar branch
-/// specifically, not the `sync_data` branch; the distinction is recorded because Task 8's crash
-/// test depends on which of the two a fault represents.
+/// specifically, not the `sync_data` branch; the distinction is recorded because a crash test's
+/// meaning depends on which of the two a fault represents.
 ///
 /// Skipped under uid 0: `chmod` does not bind root, so on a root CI runner this would silently
 /// assert nothing rather than fail.
@@ -452,7 +452,7 @@ fn a_real_fsync_failure_poisons_the_handle() {
 /// The injected fault reproduces that sequence exactly: `Io` on the failing call, `Poisoned` on
 /// every call after, and `is_poisoned()` true throughout.
 ///
-/// This is the assertion that lets Task 3a's WAL-failure tests mean anything. Without it, a
+/// This is the assertion that lets the engine's WAL-failure tests mean anything. Without it, a
 /// switchboard that returned `Poisoned` on the *first* call would pass every one of them while
 /// describing a failure mode the real WAL never produces.
 #[cfg(feature = "fault-injection")]
@@ -488,7 +488,7 @@ fn an_injected_failure_is_indistinguishable_from_a_real_one() {
     ));
 
     // A failed operation is not counted: the meter measures durability actually achieved, which is
-    // what Task 7a's `one_fsync_per_window` is an assertion about.
+    // what `one_fsync_per_window` is an assertion about.
     assert_eq!(
         (meter.appends(), meter.fsyncs()),
         (2, 1),

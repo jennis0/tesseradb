@@ -1,13 +1,12 @@
-//! The ingest buffer: replayed `WalRow`s not yet in any segment (task-10 brief).
+//! The ingest buffer: replayed `WalRow`s not yet in any segment.
 //!
-//! Phase 1 has no flush — an ingested item is durable (WAL-fsynced) and participates in
-//! authorisation state (I1 composition rule 4) the moment it's accepted, but has no row geometry
-//! until the next `tessera build` folds it into a bundle. This is a stated Phase 1 limitation
-//! (plan §5's WAL rationale is durability semantics, not visibility latency), not a bug: a
-//! buffered item simply has no `Permutation::row_of` entry anywhere, so it can never contribute
-//! to a tile's geometry, only (if its terms are satisfied) to the *count* — and even that only
-//! once a future task teaches the composition path to synthesise a row for it, which Phase 1
-//! does not do.
+//! **⊘ Specified, not implemented: there is no flush.** An ingested item is durable (WAL-fsynced)
+//! and participates in authorisation state (I1's composition rule 4) the moment it is accepted, but
+//! has no row geometry until the next `tessera build` folds it into a bundle. That is a durability
+//! guarantee, not a visibility-latency one, and it is not a bug: a buffered item has no
+//! `Permutation::row_of` entry anywhere, so it can never contribute to a tile's geometry — only,
+//! if its terms are satisfied, to the *count*, and even that only once the composition path can
+//! synthesise a row for it, which it cannot.
 //!
 //! Term descriptors are resolved through [`DescriptorResolver`]: the bundle dictionary first,
 //! then a deterministic in-memory extension interned in replay order for descriptors the
@@ -17,16 +16,16 @@
 //! credential evaluation), so this is fail-closed, not fail-open: a novel descriptor can buffer
 //! an item, but cannot make it visible, until the next build assigns it a durable term id.
 //!
-//! **Extension ids are allocated from the top of the `u32` range downward** (review finding #2),
+//! **Extension ids are allocated from the top of the `u32` range downward**,
 //! never from `dict.len()` upward: a downward-from-`u32::MAX` extension id can never collide with
 //! a *future* dictionary ordinal the way an upward one could. An upward scheme's "unsatisfiable"
 //! property was prose-only and silently broken by growth: extension id `N == dict.len()` at
 //! replay time is exactly the ordinal the *next* `tessera build` would assign to some unrelated,
 //! real descriptor; if the overlay/buffer ever survived a bundle swap without a fresh replay
-//! against the new dictionary (not true in Phase 1's walking skeleton, but not guaranteed by
-//! anything in this module either), a stale extension-tagged entity would silently start
-//! evaluating against whatever real term inherited that ordinal — a viewer legitimately holding
-//! that term would then expose it. Reserving the top of the id space (`R6`'s
+//! against the new dictionary — nothing does that today, and nothing in this module guarantees
+//! nothing ever will — a stale extension-tagged entity would silently start
+//! evaluating against whatever real term inherited that ordinal, and a viewer legitimately holding
+//! that term would then be shown it. Reserving the top of the id space (the
 //! `max_distinct_terms` bound is 200,000,000, vanishingly far from `u32::MAX`'s ~4.29 billion)
 //! makes that collision structurally impossible rather than merely unlikely-so-far.
 
@@ -61,16 +60,17 @@ impl std::fmt::Debug for DescriptorResolver<'_> {
 }
 
 /// Extension ids count down from here — see this module's doc for why the top of the range,
-/// never `dict.len()` upward. `R6`'s `declared_bounds().max_distinct_terms` (200,000,000) is the
-/// largest a real dictionary is sized for; this leaves a margin of roughly 4.09 billion ids
-/// between the highest extension id ever handed out in a single session and the highest ordinal
-/// a dictionary could plausibly reach, so exhausting it would require an implausible number of
-/// distinct novel descriptors in one session, not merely dictionary growth over time.
+/// never `dict.len()` upward. The plugin ABI's `declared_bounds().max_distinct_terms`
+/// (200,000,000) is the largest a real dictionary is sized for; this leaves a margin of roughly
+/// 4.09 billion ids between the highest extension id ever handed out in a single session and the
+/// highest ordinal a dictionary could plausibly reach, so exhausting it would require an
+/// implausible number of distinct novel descriptors in one session, not merely dictionary growth
+/// over time.
 const EXTENSION_ID_START: u32 = u32::MAX;
 
-/// Compile-time guarantee that the extension range starts strictly above R6's declared
-/// `max_distinct_terms` bound (200,000,000) — a real dictionary is never sized to reach anywhere
-/// near this range, so an extension id can never be mistaken for one.
+/// Compile-time guarantee that the extension range starts strictly above the plugin ABI's
+/// declared `max_distinct_terms` bound (200,000,000) — a real dictionary is never sized to reach
+/// anywhere near this range, so an extension id can never be mistaken for one.
 const _: () = assert!(EXTENSION_ID_START > 200_000_000);
 
 impl<'a> DescriptorResolver<'a> {
@@ -107,7 +107,7 @@ impl<'a> DescriptorResolver<'a> {
 
     /// Resume a resolver from a previously-persisted extension state.
     ///
-    /// Task 13's server keeps accepting live `/control/ingest`/`/control/changes` requests after
+    /// The server keeps accepting live `/control/ingest`/`/control/changes` requests after
     /// `replay` has returned — a fresh `DescriptorResolver::new` for each live request would
     /// restart extension-id assignment from [`EXTENSION_ID_START`] every time, colliding with ids
     /// already handed out to *other* novel descriptors earlier in the same process's lifetime
@@ -137,8 +137,8 @@ impl<'a> DescriptorResolver<'a> {
 }
 
 /// One buffered item's authorisation-relevant state: its resolved terms and the geometry/scalars
-/// carried by its WAL row (kept for when a future flush gives it a row; unused by Phase 1
-/// composition, which only reads `terms`).
+/// carried by its WAL row. The geometry is kept for a flush that would give the item a row;
+/// composition reads only `terms`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BufferedItem {
     pub terms: Vec<TermId>,
@@ -150,7 +150,7 @@ pub struct BufferedItem {
 /// Replayed `WalRow`s not yet folded into a bundle, keyed by (internal) `EntityId` — the id the
 /// row was allocated under (SA §6.2: WAL rows carry their already-allocated id; replay reuses it,
 /// never re-allocates).
-/// `Clone` (added for Task 13): the server's live `/control/ingest` acceptance path builds the
+/// `Clone` because the live `/control/ingest` acceptance path builds the
 /// next generation's buffer by cloning the current one and inserting the newly-accepted rows,
 /// rather than mutating shared state in place — the immutable-snapshot-behind-`ArcSwap` design
 /// (see `tessera_engine::Generation`'s doc) requires every generation's buffer to be a distinct,
@@ -244,8 +244,8 @@ mod tests {
         assert_eq!(resolver.resolve(b"novel-2"), TermId::new(u32::MAX - 1));
     }
 
-    /// Review finding #2: extension ids must never be able to collide with a dictionary ordinal,
-    /// however large the dictionary grows — encoded as a property over dictionaries up to R6's
+    /// Extension ids must never be able to collide with a dictionary ordinal,
+    /// however large the dictionary grows — encoded as a property over dictionaries up to the ABI's
     /// declared `max_distinct_terms` bound (200,000,000), far below where extension ids start.
     #[test]
     fn extension_ids_never_collide_with_a_dictionary_sized_up_to_the_declared_bound() {

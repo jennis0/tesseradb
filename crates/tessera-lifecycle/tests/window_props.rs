@@ -1,11 +1,10 @@
-//! Commit-window properties (Phase 2 stage 2.1, Task 7a): what a window must be true of however
-//! the submissions that fill it are shaped, and the compression figure the window exists to buy.
+//! Commit-window properties: what a window must be true of however the submissions that fill it
+//! are shaped, and the compression figure the window exists to buy.
 //!
 //! The engine-level cases (one fsync per window, each waiter's own ids, the partially-acked window)
 //! live in `tessera-engine/tests/write.rs`, because they are statements about the executor. These
 //! are statements about the allocation, which is entity-space and needs no `Engine`, no `Bundle` and
-//! no `TempDir` — that separation is why `CommitWindow` lives in this crate (plan Task 0,
-//! Decision 1).
+//! no `TempDir` — that separation is why `CommitWindow` lives in this crate at all.
 
 use std::collections::HashSet;
 
@@ -155,10 +154,10 @@ fn framed_ids_of<W>(entry: &tessera_lifecycle::window::ClosedEntry<W>) -> Vec<u6
     framed_ids(&entry.record)
 }
 
-/// **The compression figure, reported against the full-sort ceiling** (Task 7a brief §3).
+/// **The compression figure, reported against the full-sort ceiling.**
 ///
-/// Posting *runs* in entity space, for one corpus assigned three ways: request-scoped (the
-/// pre-7a behaviour), window-scoped (this task), and one full-corpus sort (the ceiling the probes'
+/// Posting *runs* in entity space, for one corpus assigned three ways: request-scoped (what a
+/// window-less executor gets), window-scoped, and one full-corpus sort (the ceiling the probes'
 /// 8.9–36.7× was measured under). The quantity is `postings / runs` per term, averaged over terms —
 /// higher is better, `1.0` is fully scattered.
 ///
@@ -166,7 +165,7 @@ fn framed_ids_of<W>(entry: &tessera_lifecycle::window::ClosedEntry<W>) -> Vec<u6
 /// claim about latency. It exists so the sort scope is *pinned* — a later change that quietly
 /// narrows it shows up here.
 ///
-/// **What this corpus cannot tell you** (fix round 1, F2). Every row carries exactly one term, so an
+/// **What this corpus cannot tell you.** Every row carries exactly one term, so an
 /// item's signature **is** its term and `run = chunk × density` holds by construction. That makes
 /// the ordering property below robust and the *magnitudes* meaningless as a forecast: on a real
 /// corpus `assign_sorted` sorts on the whole term signature, so a term's postings split across every
