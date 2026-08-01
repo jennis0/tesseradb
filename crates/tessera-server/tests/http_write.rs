@@ -2060,6 +2060,23 @@ fn changes_never_429s() {
 /// operator, so this spelling is reachable only through `mount_server`, which is what that seam was
 /// split out for.
 ///
+/// **And that spelling is a test device, not a description of the shipped state — which it was.**
+/// At the defaults this task first shipped (`ingest_admission = ingest_queue_bound = 64`) the state
+/// under test here was unreachable in *every* operator-legal configuration: `accept_ingest` blocks
+/// on its receipt, so an admitted handler holds at most one queue entry and outstanding entries were
+/// bounded by admitted handlers. `SubmitError::QueueFull` was dead in production and this test was
+/// the only thing that reached it. `DEFAULT_INGEST_QUEUE_BOUND` is now strictly below
+/// `DEFAULT_INGEST_ADMISSION` and `config::tests::the_default_admission_bound_exceeds_the_default_
+/// queue_bound` pins that; the state is now reachable at the shipped defaults by 33 concurrent
+/// submitters.
+///
+/// This test still uses the rendezvous spelling, deliberately: reproducing a real *transition* into
+/// fullness needs a controllable stall inside the executor, i.e. the `fault-injection`
+/// dev-dependency this stage declines for `tessera-server` (four in-tree statements say nothing
+/// outside `tessera-lifecycle` and `tessera-engine`'s tests may depend on it). Racing 33 real
+/// submitters against a real executor would be a flake, not a test. What this pins is the wire path;
+/// what makes the wire path *live* is the defaults relation, and that is pinned in `config.rs`.
+///
 /// **What this proves, and what it does not.** It proves the whole path from `TrySendError::Full`
 /// through `SubmitError::QueueFull`, `map_accept_error`, `ApiError::WriteBackpressure` and onto the
 /// wire, including the derived `retry_after_s` and its agreeing header. It does **not** prove
@@ -2228,7 +2245,13 @@ async fn an_oversized_batch_is_422_not_a_queue_slot() {
     );
     assert_eq!(body["error"], "contract");
     let detail = body["detail"].as_str().unwrap();
-    assert!(detail.contains('9') && detail.contains('4'), "{detail}");
+    // The batch's own size and the bound it broke, both named. `contains('9') && contains('4')` was
+    // the earlier assertion and is near-vacuous — any two digits anywhere satisfy it, including the
+    // digits of an unrelated byte count.
+    assert!(
+        detail.contains("9 rows") && detail.contains("4-row"),
+        "the detail must name the batch's row count AND the cap it broke: {detail}"
+    );
 
     let after = control_status(&server).await;
     assert_eq!(
@@ -2319,18 +2342,27 @@ async fn an_oversized_body_is_422_not_413() {
 ///
 /// Five states, one ordering. An unauthenticated caller must be unable to learn, from a status code
 /// alone: that this server is at its ingest-admission bound, that its work queue is full, what its
-/// per-batch row cap is, or what its per-batch byte cap is. Each is checked twice — once without a
-/// credential, which must be 401, and once with, which must be the pressure signal — so the test
-/// cannot pass by the server simply never producing the signal.
+/// per-batch row cap is, or what its per-batch byte cap is.
 ///
-/// The **oversize** legs are the ones a `body: Bytes` extractor would fail: axum's extractors run
+/// **Every leg is checked twice** — once without a credential, which must be 401, and once with,
+/// which must be the pressure signal itself — so no leg can pass by the server simply never
+/// producing the signal. That was not true of the shipped version: only two of five legs had the
+/// authenticated half, and **leg 3's subject was unreachable on the server it ran against**. Server A
+/// has `admission: 0`, so an authenticated over-row-cap request 429s at the admission check before
+/// `run_ingest`'s row check can run; the row-cap 422 could not be produced there at all, and the
+/// 401-only leg proved nothing about the row cap. Demonstrated by mutation: raising server A's
+/// `max_batch_rows` from 2 to 200 000 left that leg green. The row-cap leg now runs on server B,
+/// where a permit is available and the row check is genuinely what answers.
+///
+/// The **byte cap** leg is the one a `body: Bytes` extractor would fail: axum's extractors run
 /// before the handler body, so a rejecting extractor answers before `check_bearer` is ever reached.
 /// `body: Result<Bytes, _>` is what moves that decision inside the handler and behind the
-/// credential.
+/// credential — and its authenticated half is what shows the rejection is being *mapped* to 422
+/// rather than merely being ordered after the credential.
 ///
-/// **Mutations this kill:** moving `check_bearer` below the body-rejection mapping, below the
+/// **Mutations these kill:** moving `check_bearer` below the body-rejection mapping, below the
 /// admission check, or below the batch-id header check; taking `body: Bytes` instead of
-/// `Result<Bytes, _>`.
+/// `Result<Bytes, _>`; raising server B's `max_batch_rows` above the row-cap leg's batch.
 #[tokio::test]
 async fn backpressure_is_invisible_before_auth() {
     let tmp = TempDir::new().unwrap();
@@ -2344,7 +2376,10 @@ async fn backpressure_is_invisible_before_auth() {
     let cap = one_row.len();
 
     // Server A: the admission bound is saturated by construction (`Semaphore::new(0)` has no
-    // permits to give), and both 422 caps are set tight. Three of the four signals live here.
+    // permits to give), and the byte cap is set tight. The two signals that are checked **ahead of
+    // the admission check** live here — the byte cap and the missing batch-id header — plus the
+    // admission 429 itself. The row cap deliberately does NOT: it is checked inside `run_ingest`,
+    // which this server can never reach.
     let mut engine_a = Engine::open(
         &bundle_root,
         &tmp.path().join("cache-a"),
@@ -2360,7 +2395,9 @@ async fn backpressure_is_invisible_before_auth() {
         generous_test_gate(),
         IngestLimits {
             admission: 0,
-            max_batch_rows: 2,
+            // Generous **on purpose**: the row cap is unreachable on this server (see above), and
+            // setting it tight here is what made the earlier leg 3 vacuous.
+            max_batch_rows: 200_000,
             max_batch_bytes: cap,
         },
     )
@@ -2383,26 +2420,45 @@ async fn backpressure_is_invisible_before_auth() {
          otherwise learn this deployment's batch cap by bisection, unauthenticated"
     );
     assert_eq!(body["error"], "bad-credential");
+    // And the signal is genuinely there — with a credential it is the *mapped* 422, not axum's
+    // 413 and not the admission 429, which proves the body check precedes the admission check.
+    let (code, body) = post_ingest(&server_a, "a2", &big, true).await;
+    assert_eq!(
+        code, 422,
+        "the byte cap must answer 422 for an authenticated caller — 413 is outside contracts \
+         §3.1's closed code list, and a 429 here would mean the admission check ran first"
+    );
+    assert_eq!(body["error"], "contract");
+    assert!(body["detail"].as_str().unwrap().contains(&cap.to_string()));
 
-    // 3. The row cap's 422. Under the byte cap, over the row cap, so the row check is what would
-    //    fire.
-    let (code, body) = post_ingest(&server_a, "a3", &rows_from(860, 3), false).await;
-    assert_eq!(code, 401);
-    assert_eq!(body["error"], "bad-credential");
+    // 3. The missing-batch-id 422 — the pre-existing check, still behind the credential, and also
+    //    ahead of the admission check.
+    let missing_batch_id = |authed: bool| {
+        let mut req = server_a
+            .client
+            .post(server_a.control_url("/control/ingest"))
+            .header("content-type", "application/octet-stream")
+            .body(one_row.clone());
+        if authed {
+            req = req.bearer_auth(OPERATOR_CREDENTIAL);
+        }
+        req.send()
+    };
+    assert_eq!(missing_batch_id(false).await.unwrap().status(), 401);
+    let resp = missing_batch_id(true).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        422,
+        "the batch-id check must precede the admission bound, or this server's 429 would hide it"
+    );
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["error"],
+        "contract"
+    );
 
-    // 4. The missing-batch-id 422 — the pre-existing check, still behind the credential.
-    let resp = server_a
-        .client
-        .post(server_a.control_url("/control/ingest"))
-        .header("content-type", "application/octet-stream")
-        .body(one_row.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-
-    // Server B: the *queue* 429, the one signal server A cannot produce (its admission bound
-    // refuses first, which is itself the ordering under test).
+    // Server B: the *queue* 429 and the *row cap* 422 — the two signals server A cannot produce.
+    // Its admission bound refuses before `run_ingest` runs at all, which is itself the ordering
+    // under test, so a row-cap leg on server A can only ever observe the 429.
     let mut engine_b = Engine::open(
         &bundle_root,
         &tmp.path().join("cache-b"),
@@ -2418,12 +2474,15 @@ async fn backpressure_is_invisible_before_auth() {
         generous_test_gate(),
         IngestLimits {
             admission: 8,
-            max_batch_rows: 200_000,
+            // Tight, and this is where it *bites*: a permit is available here, so an authenticated
+            // over-row-cap batch reaches `run_ingest` and the row check is what answers.
+            max_batch_rows: 2,
             max_batch_bytes: 64 * 1024 * 1024,
         },
     )
     .await;
 
+    // 4. The queue 429.
     let (code, body) = post_ingest(&server_b, "b1", &rows_from(870, 1), false).await;
     assert_eq!(
         code, 401,
@@ -2433,6 +2492,27 @@ async fn backpressure_is_invisible_before_auth() {
     let (code, body) = post_ingest(&server_b, "b1", &rows_from(870, 1), true).await;
     assert_eq!(code, 429);
     assert!(body["detail"].as_str().unwrap().contains("write queue"));
+
+    // 5. The row cap's 422 — three rows against a cap of two, under the byte cap, on a server with
+    //    a free admission permit. **This is the leg that was vacuous**: on server A the same request
+    //    429s at the admission check and the row cap is never consulted.
+    let (code, body) = post_ingest(&server_b, "b2", &rows_from(880, 3), false).await;
+    assert_eq!(
+        code, 401,
+        "an unauthenticated caller must not learn this deployment's row cap"
+    );
+    assert_eq!(body["error"], "bad-credential");
+    let (code, body) = post_ingest(&server_b, "b2", &rows_from(880, 3), true).await;
+    assert_eq!(
+        code, 422,
+        "the row cap must answer 422 — and it must be REACHED, which is what the admission bound \
+         on server A prevented"
+    );
+    assert_eq!(body["error"], "contract");
+    assert!(
+        body["detail"].as_str().unwrap().contains("3 rows"),
+        "and it must be the row cap that answered, not the queue: {body}"
+    );
 }
 
 /// **`overlay_soft_limit` alarms, and it does not act** (Task 6, D5). There is no fold until stage
@@ -2450,8 +2530,16 @@ async fn backpressure_is_invisible_before_auth() {
 ///    arrive. Asserted here by moving the limit under a live overlay, which is the same state
 ///    replay produces and the only one a server test can construct.
 ///
+/// **And it is edge-triggered** (fix round 1, F5). `Overlay::len` never decreases in this build, so
+/// a level-triggered alarm emitted one four-line WARN per deny, forever, with no path back —
+/// flooding the log precisely while the node is under deny pressure. The counter therefore counts
+/// **crossings**: the second suppression below is over the limit and must NOT alarm again. The
+/// earlier version of this test could not distinguish the two, because both of its legs were single
+/// crossings; the third leg here is the one that can.
+///
 /// **Mutations this kills:** deleting `apply_change`'s check (leg 1 stays at 0); deleting
-/// `set_overlay_soft_limit`'s one-shot evaluation (leg 2 stays at its leg-1 value).
+/// `set_overlay_soft_limit`'s one-shot evaluation (leg 2 stays at its leg-1 value); dropping the
+/// edge latch from `note_overlay_depth` (leg 3 counts 2).
 #[tokio::test]
 async fn the_overlay_soft_limit_alarms_and_does_not_act() {
     let tmp = TempDir::new().unwrap();
@@ -2500,18 +2588,148 @@ async fn the_overlay_soft_limit_alarms_and_does_not_act() {
         "a limit set below the overlay it finds must alarm as it lands, not wait for the next deny"
     );
 
-    // Leg 1: the executor's own check, on the next growth.
+    // Leg 3: the next growth is over the limit and is **not a crossing**. A level-triggered alarm
+    // would count it, and would then count every deny after it for the life of the process.
     assert_eq!(suppress(12).await.unwrap().status(), 200);
     let status = control_status(&server).await;
     assert_eq!(status["overlay"]["depth"], 2);
-    assert_eq!(status["overlay"]["soft_limit_alarms"], 2);
+    assert_eq!(
+        status["overlay"]["soft_limit_alarms"], 1,
+        "the alarm is edge-triggered: the overlay was already over the limit, so this deny is not a \
+         crossing. Counting it means one WARN per deny, forever, with no path back — exactly when \
+         the node is under deny pressure"
+    );
 
-    // **And nothing acted**: the overlay is still exactly as deep as the denies made it, and both
-    // suppressions are still in force. There is no fold to shrink it and this test must not read
-    // as though there were.
+    // Leg 1: the executor's own check does fire on a genuine crossing. Re-setting the limit re-arms
+    // the edge, so moving it to 3 and then growing past it exercises `apply_change`'s own site
+    // rather than the setter's.
+    server.state.engine.set_overlay_soft_limit(3);
+    assert_eq!(
+        control_status(&server).await["overlay"]["soft_limit_alarms"],
+        1,
+        "a limit set ABOVE the live overlay must not alarm as it lands"
+    );
+    assert_eq!(suppress(13).await.unwrap().status(), 200);
+    let status = control_status(&server).await;
+    assert_eq!(status["overlay"]["depth"], 3);
+    assert_eq!(
+        status["overlay"]["soft_limit_alarms"], 2,
+        "the executor's own check must alarm on the deny that crosses"
+    );
+
+    // **And nothing acted**: the overlay is still exactly as deep as the denies made it, and every
+    // suppression is still in force. There is no fold to shrink it and this test must not read as
+    // though there were.
     assert_eq!(
         control_status(&server).await["overlay"]["depth"],
-        2,
+        3,
         "the alarm must not have shrunk, folded or retired anything"
+    );
+}
+
+/// **`/control/changes` answers 422, not axum's 413, and never before the bearer check** (fix round
+/// 1, F6).
+///
+/// The route carried a bare `post(changes)` with a `Json(items)` extractor, so axum's default body
+/// limit rejected inside the extractor and answered a plain **413** — a status outside contracts
+/// §3.1's closed code list — with axum's own body and **no credential check at all**. An operator
+/// submitting ~20 000 suppressions (≈2 MiB of JSON) met it, on the never-shed lane, which is where
+/// an out-of-list status is least defensible. The remedy is the one `/control/ingest` already had:
+/// `Result<Json<..>, JsonRejection>`, mapped after `check_bearer`.
+///
+/// Three legs, because the rejection has two shapes and the ordering rule is a third property:
+/// oversize, malformed JSON, and the same oversize body without a credential.
+///
+/// **Mutations this kills:** taking `Json(items)` instead of `Result<Json<..>, _>` (leg 1 becomes
+/// 413 and leg 3 becomes 413 rather than 401); collapsing the two rejection shapes onto one detail
+/// (leg 2's assertion that it is *not* reported as an oversize batch goes red).
+#[tokio::test]
+async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let mut engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        default_engine_config(),
+    )
+    .unwrap();
+    engine.start_write_executor(1024).unwrap();
+    let server = mount_server(engine, 200, generous_test_gate()).await;
+
+    // A syntactically valid change array well past the 2 MiB cap. Every item names a real external
+    // id, so nothing but the size can be what refuses it.
+    let external_id =
+        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    const SUPPRESS_SOURCE_ID: u64 = 7;
+    let mut items = Vec::new();
+    while serde_json::to_vec(&items).unwrap().len() < 3 * 1024 * 1024 {
+        for _ in 0..10_000 {
+            items.push(serde_json::json!({ "external_id": external_id, "op": "suppress" }));
+        }
+    }
+    let oversized = serde_json::to_vec(&items).unwrap();
+
+    // Leg 1 — authenticated: the mapped 422, naming the cap.
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("content-type", "application/json")
+        .body(oversized.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        422,
+        "413 is not in contracts §3.1's closed code list, and this is the never-shed lane"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract");
+    assert!(
+        body["detail"].as_str().unwrap().contains("2097152"),
+        "the detail must name the cap the operator hit: {body}"
+    );
+
+    // Leg 2 — malformed JSON is a *different* 422. Reporting it as an oversize batch would send an
+    // operator to split a request whose size was never the problem.
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("content-type", "application/json")
+        .body("[{\"external_id\": ")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract");
+    assert!(
+        !body["detail"].as_str().unwrap().contains("2097152"),
+        "a truncated body is not an oversized one: {body}"
+    );
+
+    // Leg 3 — the ordering rule. The credential is checked first, so an unauthenticated caller
+    // learns nothing about this endpoint's body cap.
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .header("content-type", "application/json")
+        .body(oversized)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "the bearer check must precede the body rejection, exactly as it does on /control/ingest"
     );
 }
