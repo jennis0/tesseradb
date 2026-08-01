@@ -25,43 +25,198 @@ pub struct SessionEntry {
     pub session: Session,
 }
 
+/// The current Unix second, as `Session::expires_at` measures it.
+///
+/// One function rather than the expression inlined at each site, because two readings of the same
+/// deadline must not be able to disagree about *which* clock they are on: session expiry is a wall
+/// clock throughout (the deadline is minted from the system clock by the engine), so a monotonic
+/// `Instant` is not an available substitute here even though it is the right choice for the pin
+/// drain list, which times an interval rather than reaching a timestamp.
+pub fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before the Unix epoch")
+        .as_secs()
+}
+
+/// The retained-session count at which a sweep runs, when twice the live set is smaller.
+///
+/// **Not load-bearing, and the honest reason it exists is not "cost".** An O(n) scan at n ≤ 16 is
+/// nothing; the floor is here so that [`SessionRegistry::insert`] does not run a sweep on literally
+/// every call while the registry holds one or two sessions, and so the threshold is never zero.
+/// What the number *does* fix is the residue a quiescent process keeps: with the live set below it,
+/// up to this many expired sessions — and the fragments they pin — survive until the next
+/// authorisation. 16 is twice `serve.expected_concurrent_sessions`' default of 8, which is the
+/// concurrency the cache bounds are already sized against, so the sweep's own slack is of the same
+/// order as the working set the deployment declared rather than a number chosen for roundness.
+const SWEEP_FLOOR_ENTRIES: usize = 16;
+
 /// Every live session, indexed both by bearer token (the viewer plane's lookup) and by
 /// `token_id` (`/session/revoke`'s request shape, R5).
 ///
-/// # This registry is a third attacker-driven memory path, and nothing here bounds it
+/// # Why the registry has to shed, and what a retained session actually costs
 ///
-/// Recorded because Task 5 closed the other two (the projection cache's byte bound and entry
-/// floor, and `FragmentCache`'s `key_memo` clear) and this one is not Track C's to close — the
-/// expiry sweep is the owner's/Track B's. **An expired session is 403'd but never removed**:
-/// [`AppState::authenticated_session`] checks the deadline and refuses, and nothing ever calls
-/// [`Self::revoke`] for it, so both maps grow for the life of the process at one entry per
-/// `/session/authorise` call. `/session/authorise` is behind the shared session credential, so this
-/// is not a viewer-plane exposure; a holder of that secret already has cheaper things to do.
+/// An expired session is refused, not forgotten: [`AppState::authenticated_session`] compares the
+/// deadline and answers 403. Refusing is an authorisation act and it is complete on its own; what
+/// it does not do is give the memory back. Without a sweep both maps grow for the life of the
+/// process at one entry per `/session/authorise` call, and the growth is attacker-driven for anyone
+/// holding the session credential.
 ///
-/// **The consequence that is not obvious: it defeats the fragment cache's byte bound.** Each
-/// retained [`SessionEntry`] holds a `Session`, which holds an `Arc<FrozenFragment>` — a live
-/// mapping. `FragmentCache`'s bound governs *its own map*; evicting an entry frees nothing while
-/// any session still references it (see `FrozenFragment`'s `CacheWeight` impl). So dead-but-
-/// retained sessions pin exactly the memory the new bound was added to release.
+/// The cost is not the map entry. Each retained [`SessionEntry`] holds a `Session`, which holds an
+/// `Arc<FrozenFragment>` — a live memory mapping. `FragmentCache`'s byte bound governs *its own
+/// map*, so evicting an entry there frees nothing while a session still references it (see
+/// `FrozenFragment`'s `CacheWeight` impl). **Dead sessions pin exactly the memory that bound exists
+/// to release**, which is why this is a memory mechanism rather than tidiness.
 ///
-/// [`Self::len`] is the gauge; `/control/status` publishing it is Track B's wiring, alongside
-/// `CacheStats`. A sweep — on a timer, or opportunistically on insert — is the fix, and it is a
-/// controller decision, not this track's.
-#[derive(Default)]
+/// # When the sweep runs, and what bounds the pause
+///
+/// It runs on **insert**, and on nothing else. Growth is the thing being bounded and insert is the
+/// only path that grows the registry, so the trigger sits on the event it is chasing. A sweep is a
+/// full pass over `by_token` under the same mutex the viewer plane takes on every request, so it is
+/// throttled: the threshold after a sweep is `max(2 × live, SWEEP_FLOOR_ENTRIES)`, which gives
+///
+/// - **amortised O(1) per authorisation** — each pass over `n` entries is preceded by at least
+///   `n/2` inserts that did not sweep;
+/// - **retention bounded at `2 × live + 1`**, or the floor, whichever is larger, so the registry
+///   can never hold more than twice the sessions that are actually usable;
+/// - a **worst-case pause of O(retained) under the request-path lock** — a hash-map scan with no
+///   allocation and no IO. That is only acceptable because `retained` is *observable*: it is
+///   published on `/control/status` beside `sweeps` and `swept_total`, so an operator can see the
+///   n this pass is O(of) rather than infer it. A pass whose n is unobservable is not admissible
+///   here however cheap it looks.
+///
+/// # What it deliberately does not do
+///
+/// **It is not a timer, and a quiescent process keeps its last generation of dead sessions.** A
+/// periodic task would have to be spawned by whoever builds the runtime, so the property would hold
+/// under `tessera serve` and not under `mount_server`, an embedder, or a test — the same
+/// "sufficient only where this crate builds the runtime" objection `control::DENY_RUNTIME` records
+/// against derived arithmetic. Growth-triggered, the sweep is a property of this type: it needs no
+/// runtime, it is deterministic, and a test observes it without waiting on a clock. The cost is
+/// stated rather than hidden — after the last authorisation up to `2 × live + floor` expired
+/// entries remain until the next one. That residue is bounded, it is not growing, and nothing is
+/// building new fragments to contend with it, which is the regime in which retention stops
+/// mattering.
+///
+/// **It is not an authorisation mechanism, and nothing may make it one.** The deadline check in
+/// [`AppState::authenticated_session`] is what refuses an expired session, and it holds whether or
+/// not a sweep has run; [`Self::revoke`] removes a session immediately and no sweep can delay,
+/// defer or undo that — a sweep only ever removes. The two directions matter differently: a sweep
+/// that ran late would cost memory, whereas a revocation that ran late would be fail-open, so
+/// revocation is never routed through this machinery.
+///
+/// **It does not remove an expired session at the point of refusal**, which would be O(1) and is
+/// tempting. Once an entry is gone the next presentation of that token is `bad-credential` (401)
+/// rather than `expired-token` (403), so evicting at the refusal would make the 403 unobservable on
+/// any retry — a diagnostic loss on precisely the path that tells a client to re-authorise, for
+/// memory the throttled sweep already reclaims. The 403 is best-effort either way: **once a session
+/// is swept it is indistinguishable from one that never existed**, and no client may treat the
+/// 401/403 split as a statement about whether a token was ever valid.
 pub struct SessionRegistry {
     by_token: FxHashMap<String, std::sync::Arc<SessionEntry>>,
     token_id_to_token: FxHashMap<u64, String>,
+    /// Retained count at which [`Self::insert`] runs a sweep. See [`next_sweep_threshold`].
+    sweep_at: usize,
+    sweeps: u64,
+    swept_total: u64,
+}
+
+impl Default for SessionRegistry {
+    /// Hand-written rather than derived: a derived `Default` would leave `sweep_at` at zero, which
+    /// sweeps on every insert from an empty registry — correct, but not the throttle this type
+    /// documents, and the difference would be invisible.
+    fn default() -> Self {
+        SessionRegistry {
+            by_token: FxHashMap::default(),
+            token_id_to_token: FxHashMap::default(),
+            sweep_at: SWEEP_FLOOR_ENTRIES,
+            sweeps: 0,
+            swept_total: 0,
+        }
+    }
+}
+
+/// The retained count at which the sweep after this one should run, given the live set it just
+/// left behind.
+///
+/// Doubling is what makes the sweep amortised O(1) per insert; the floor is what keeps it off a
+/// registry too small to be worth scanning. `saturating_mul` rather than `*`: overflow here would
+/// produce a *small* threshold, i.e. it would sweep more often than intended — harmless in
+/// direction but silently not the documented policy, and this file's discipline is that arithmetic
+/// on an attacker-influenced count is checked even where the wrap is benign.
+fn next_sweep_threshold(live: usize) -> usize {
+    live.saturating_mul(2).max(SWEEP_FLOOR_ENTRIES)
+}
+
+/// What the registry has retained and reclaimed — `/control/status`'s `sessions` block.
+pub struct SessionRegistryStats {
+    /// Sessions currently retained: **live and expired-but-not-yet-swept alike**. This is the `n`
+    /// the sweep's O(n) pass is over, which is why it is published.
+    pub retained: usize,
+    /// Sweeps run since process start.
+    pub sweeps: u64,
+    /// Entries the sweeps have removed, in total. `retained` rising while this stays at zero is the
+    /// signature of a registry that is not shedding; both rising together is the mechanism working.
+    pub swept_total: u64,
+    /// The retained count at which the next sweep runs — `max(2 × live, 16)` as of the last one.
+    /// Published so the bound above `retained` is readable rather than a number in a doc comment.
+    pub sweep_at: usize,
 }
 
 impl SessionRegistry {
-    pub fn insert(&mut self, session: Session) -> std::sync::Arc<SessionEntry> {
+    /// Insert a freshly authorised session, and sweep if the registry has grown past its threshold.
+    ///
+    /// `now_secs` is the caller's Unix-second reading, passed in rather than read here so that the
+    /// clock is consulted once per request at the handler and so this method is a pure function of
+    /// its inputs. It is a *wall-clock* second because `Session::expires_at` is one; a monotonic
+    /// clock cannot be compared against a deadline minted from the system clock.
+    pub fn insert(&mut self, session: Session, now_secs: u64) -> std::sync::Arc<SessionEntry> {
         let token = session.token.clone();
         let token_id = session.token_id;
         let entry = std::sync::Arc::new(SessionEntry { session });
         self.by_token
             .insert(token.clone(), std::sync::Arc::clone(&entry));
         self.token_id_to_token.insert(token_id, token);
+        if self.by_token.len() >= self.sweep_at {
+            self.sweep_expired(now_secs);
+        }
         entry
+    }
+
+    /// Drop every session whose deadline has passed.
+    ///
+    /// The predicate is **exactly** [`AppState::authenticated_session`]'s, negated: that method
+    /// refuses when `now >= expires_at`, so an entry survives here iff `expires_at > now`. Stated
+    /// as an equality rather than a "safe margin" on purpose — a sweep looser than the refusal
+    /// would retain memory the refusal has already written off, and a sweep tighter than it would
+    /// remove a session that is still being served, turning a 403 into a 401 early. Neither is a
+    /// security difference, and that is the point: this pass can only ever remove what the
+    /// authorisation check would already refuse.
+    fn sweep_expired(&mut self, now_secs: u64) {
+        let before = self.by_token.len();
+        self.by_token
+            .retain(|_, entry| entry.session.expires_at > now_secs);
+        // The secondary index is pruned against the primary map rather than swept on its own
+        // deadline, so the two cannot disagree about which sessions exist — `revoke` reaches
+        // `by_token` only through this index, and an index entry outliving its session would make
+        // a revocation a silent no-op.
+        let by_token = &self.by_token;
+        self.token_id_to_token
+            .retain(|_, token| by_token.contains_key(token));
+        self.sweeps += 1;
+        self.swept_total += (before - self.by_token.len()) as u64;
+        self.sweep_at = next_sweep_threshold(self.by_token.len());
+        // The two maps hold one entry per session each and every mutation touches both, so their
+        // lengths are equal at rest. Asserted rather than commented because the failure it catches
+        // is silent: an index left unpruned would keep growing while `retained` — which reads
+        // `by_token` — reported the sweep working. No `/control/status` field can see it, so this is
+        // the only mechanism available. Debug-only: it is a statement about this file's own
+        // arithmetic, not a runtime guard against a caller.
+        debug_assert_eq!(
+            self.by_token.len(),
+            self.token_id_to_token.len(),
+            "the token-id index must be pruned with the session map, or half the registry leaks"
+        );
     }
 
     pub fn get(&self, token: &str) -> Option<std::sync::Arc<SessionEntry>> {
@@ -70,17 +225,16 @@ impl SessionRegistry {
 
     /// Revoke by `token_id` (R5): a token id this registry never minted, or already revoked, is
     /// simply a no-op — `/session/revoke` is 204 either way (revoking twice is not an error).
+    ///
+    /// **Immediate, and independent of the sweep.** Removal happens in this call; nothing defers it
+    /// to a later pass, and the sweep cannot reinstate an entry because it only ever removes.
     pub fn revoke(&mut self, token_id: u64) {
         if let Some(token) = self.token_id_to_token.remove(&token_id) {
             self.by_token.remove(&token);
         }
     }
 
-    /// Sessions currently retained — **live and expired-but-not-swept alike**, which is the whole
-    /// reason it is worth publishing. See this type's doc: nothing removes an expired session, so a
-    /// number here that only ever rises, while `young_evictions` stays quiet, is the signature of
-    /// the retention path rather than of cache pressure. The two gauges answer different questions
-    /// and an operator needs both.
+    /// Sessions currently retained — **live and expired-but-not-yet-swept alike**.
     pub fn len(&self) -> usize {
         self.by_token.len()
     }
@@ -89,6 +243,15 @@ impl SessionRegistry {
     /// `len() == 0` is the meaningful reading, not this.
     pub fn is_empty(&self) -> bool {
         self.by_token.is_empty()
+    }
+
+    pub fn stats(&self) -> SessionRegistryStats {
+        SessionRegistryStats {
+            retained: self.by_token.len(),
+            sweeps: self.sweeps,
+            swept_total: self.swept_total,
+            sweep_at: self.sweep_at,
+        }
     }
 }
 
@@ -354,11 +517,7 @@ impl AppState {
             .lock()
             .get(token)
             .ok_or(ApiError::BadCredential)?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock is before the Unix epoch")
-            .as_secs();
-        if now >= entry.session.expires_at {
+        if now_secs() >= entry.session.expires_at {
             return Err(ApiError::ExpiredToken);
         }
         Ok(entry)
@@ -403,6 +562,35 @@ impl AppState {
         } else {
             Err(ApiError::BadCredential)
         }
+    }
+}
+
+#[cfg(test)]
+mod session_registry_tests {
+    use super::*;
+
+    /// The sweep's two guarantees are both properties of this one expression, and neither is
+    /// observable from an HTTP test at the scale one can drive: that the registry never retains
+    /// more than twice its live set (plus the floor), and that each O(n) pass is paid for by at
+    /// least n/2 inserts that did not sweep.
+    ///
+    /// A `SessionRegistry` cannot be built in a unit test — a `Session` owns an
+    /// `Arc<FrozenFragment>`, which only the engine's cache can produce — so the arithmetic is
+    /// tested here and the behaviour over HTTP, in `tests/http_engine_state.rs`.
+    #[test]
+    fn the_sweep_threshold_doubles_above_the_floor_and_never_falls_below_it() {
+        assert_eq!(next_sweep_threshold(0), SWEEP_FLOOR_ENTRIES);
+        assert_eq!(next_sweep_threshold(1), SWEEP_FLOOR_ENTRIES);
+        // The floor binds up to half itself; above that, doubling does.
+        assert_eq!(
+            next_sweep_threshold(SWEEP_FLOOR_ENTRIES / 2),
+            SWEEP_FLOOR_ENTRIES
+        );
+        assert_eq!(next_sweep_threshold(100), 200);
+
+        // An absurd live set must not wrap to a *small* threshold, which would sweep constantly
+        // rather than never — benign in direction, silently not the documented policy.
+        assert_eq!(next_sweep_threshold(usize::MAX), usize::MAX);
     }
 }
 

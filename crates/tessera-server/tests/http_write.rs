@@ -2986,7 +2986,9 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
 ///
 /// **What this does NOT show, and is not claimed:** an *authenticated* caller still buffers up to
 /// `ingest_max_batch_bytes`, and the number of connections doing so is unbounded — `axum::serve`
-/// applies no connection cap. That residue is unchanged and is an open owner item.
+/// applies no connection cap. What one such connection may cost is bounded at startup by
+/// `config::INGEST_MAX_BATCH_BYTES_CEILING`; how many there may be is a deployment property (SA §8),
+/// and that constant's doc says why the two in-process alternatives were declined.
 ///
 /// The timeout is in the **failing** path only; on a healthy build the 401 arrives in microseconds.
 #[tokio::test]
