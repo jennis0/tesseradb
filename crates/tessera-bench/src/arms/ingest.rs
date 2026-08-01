@@ -610,3 +610,202 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
     run.finish();
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------
+// Mode: concurrent — what group commit actually collects when submissions overlap
+// ---------------------------------------------------------------------------------------------
+
+/// Rows whose **signatures vary**, which `synth_rows` deliberately does not do.
+///
+/// `synth_rows` gives every row the *same* term list, because the arms it was written for want
+/// buffered items that are uniformly visible to the reading principal. That makes every row's
+/// signature identical, so every term has `k = W` in every window — where the fragmentation
+/// baseline `k·(W − k + 1)/W` is `1` and one contiguous run is `1`, and `run_ratio` is pinned at
+/// exactly `1.0` for every window size. Measured: the first run of this arm reported `1.0` at one,
+/// four and sixteen submitters. That is a property of the corpus, not of the server.
+///
+/// So this arm builds its own rows: a two-term signature per row, cycled over the grant's terms, so
+/// a term's postings split across every signature carrying it as they do on a real corpus.
+///
+/// **The distribution is synthetic and uniform, and no `run_ratio` from this arm forecasts a
+/// deployment.** The measured corpus is heavily skewed (probes results §3: 54,791 signatures over
+/// 2.42 M items, mean group 44, top 500 groups covering 82.4%), and a uniform cycle has none of
+/// that shape. What this arm's figure *is* good for is the mechanism: that the counters move with
+/// the window and with concurrency, on a real engine over a real bundle.
+fn varied_signature_rows(count: usize, start: u64, terms: &[TermId]) -> Vec<UnallocatedRow> {
+    let mut rows = synth_rows(count, start, terms);
+    if terms.len() < 2 {
+        return rows;
+    }
+    for (i, row) in rows.iter_mut().enumerate() {
+        let a = (i * 7) % terms.len();
+        rows_signature(row, terms[a], terms[(a + 1) % terms.len()]);
+    }
+    rows
+}
+
+fn rows_signature(row: &mut UnallocatedRow, a: TermId, b: TermId) {
+    row.terms = vec![a, b];
+}
+
+/// Concurrent ingest: N submitters at once, so commit windows hold more than one entry.
+///
+/// # Why this arm exists, and why `batch` above cannot answer the same question
+///
+/// `run_batch` submits **sequentially** and blocks on each receipt, so the executor never has a
+/// second entry queued when it closes a window: every window it produces holds exactly one entry,
+/// `wal_appends / wal_fsyncs` is pinned at 1.0, and any group-commit figure taken from it is a null
+/// result dressed as a measurement. That is a property of the harness, not of the server — a real
+/// `/control/ingest` caller is one of `ingest_admission` concurrent handlers.
+///
+/// So this arm spawns N threads each calling `Engine::accept_ingest`, which is exactly what N
+/// concurrent handlers do one layer up (`control.rs` runs `run_ingest` inside `spawn_blocking`).
+///
+/// # What is reported, and what is exact
+///
+/// **Two counter-derived figures, which need no quiet box**: `entries_per_window`
+/// (`wal_appends / wal_fsyncs` — group commit's amortisation, exact) and the fragmentation block
+/// (`run_ratio`, `postings_per_container`, and the raw counters — exact, contracts §3.4). Both are
+/// integer counters read off `ExecutorStats`; neither is a timing.
+///
+/// **One timing, reported as a throughput and not as a latency budget**: wall time for the whole
+/// concurrent submission. It is load-dependent by construction and must not be read as an ack
+/// latency; `run_batch` is where ack latency is measured.
+///
+/// `run_ratio` here is **within-window sort quality against a within-window random baseline** — see
+/// `tessera_lifecycle::window::FragmentationTally`. It is not comparable with the probes' §2
+/// full-corpus posting compression, and it is not the row-space run ratio `crate::metrics` computes.
+pub fn run_concurrent(
+    ctx: &Context,
+    submitters: &[usize],
+    batch: usize,
+    window: usize,
+    seed: u64,
+) -> Result<()> {
+    let mut run = ctx.open("ingest_concurrent")?;
+
+    for fixture in &ctx.fixtures {
+        let postings = tessera_authz::PostingsReader::open(&fixture.postings_path(), true)?;
+        let stats = TermStats::compute(&postings)?;
+        let (grant, _) = build_grant_to_coverage(
+            &stats,
+            &postings,
+            GrantShape::Random,
+            0.05,
+            fixture.scale,
+            seed,
+        )?;
+        if grant.terms.is_empty() {
+            continue;
+        }
+
+        for &threads in submitters {
+            let cell_id = format!(
+                "ingest_concurrent/{}/{}/t{}b{}w{}",
+                fixture.scale, fixture.label_set, threads, batch, window
+            );
+            if run.ledger.is_done(&cell_id) {
+                run.skipped += 1;
+                continue;
+            }
+
+            let tmp = std::env::temp_dir().join(format!(
+                "tessera-bench-concurrent-{}-{}",
+                std::process::id(),
+                threads
+            ));
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp)?;
+            let mut engine = Engine::open(
+                &fixture.root,
+                &tmp.join("cache"),
+                &tmp.join("wal.log"),
+                Passthrough::new(),
+                EngineConfig {
+                    token_max_lifetime_secs: 3600,
+                    max_k: 200,
+                    k_min: 2,
+                    k_max_marks: 500,
+                    theta_target_marks: 16,
+                    max_underlay_offset: 4,
+                    max_underlay_cells: 8192,
+                    max_tiles_per_request: 262_144,
+                    compute_threads: tessera_engine::default_compute_threads(),
+                    pin_ttl_secs: 300,
+                    pins_per_session_max: 4,
+                },
+            )?;
+            // Generous, deliberately: this arm means to measure what a full window collects, never
+            // queue-full backpressure.
+            engine.start_write_executor(4096)?;
+            engine.set_commit_window_max_rows(window);
+            let engine = std::sync::Arc::new(engine);
+
+            let start = std::time::Instant::now();
+            std::thread::scope(|s| {
+                for t in 0..threads {
+                    let engine = std::sync::Arc::clone(&engine);
+                    let terms = grant.terms.clone();
+                    s.spawn(move || {
+                        for rep in 0..ctx.repeat {
+                            let base = (t as u64 * 1_000_000) + (rep as u64 * batch as u64);
+                            let rows = varied_signature_rows(batch, base, &terms);
+                            let batch_id = format!("conc-{t}-{rep}");
+                            engine
+                                .accept_ingest(rows, batch_id, [t as u8; 32])
+                                .expect("the batch is accepted");
+                        }
+                    });
+                }
+            });
+            let elapsed = start.elapsed();
+
+            let stats = engine.write_executor_stats();
+            let rows_total = (threads * batch * ctx.repeat as usize) as u64;
+            let entries_per_window = if stats.wal_fsyncs > 0 {
+                stats.wal_appends as f64 / stats.wal_fsyncs as f64
+            } else {
+                0.0
+            };
+
+            let work = Work {
+                points_gathered: rows_total,
+                ..Default::default()
+            };
+            run.emit(
+                cell_id,
+                fixture,
+                serde_json::json!({
+                    "submitters": threads,
+                    "batch_size": batch,
+                    "commit_window_max_items": window,
+                    "rows_total": rows_total,
+                    // Exact counters. `entries_per_window` at ~1.0 means group commit ran and
+                    // collected nothing — which is what the sequential `batch` arm always reports.
+                    "wal_appends": stats.wal_appends,
+                    "wal_fsyncs": stats.wal_fsyncs,
+                    "entries_per_window": entries_per_window,
+                    "fragmentation_windows": stats.fragmentation_windows,
+                    "fragmentation_postings": stats.fragmentation.postings,
+                    "fragmentation_runs": stats.fragmentation.runs,
+                    "fragmentation_containers": stats.fragmentation.containers,
+                    "run_ratio": stats.run_ratio(),
+                    "postings_per_container": stats.postings_per_container(),
+                    // Load-dependent by construction. NOT an ack latency and NOT a budget.
+                    "wall_ns": elapsed.as_nanos() as u64,
+                    "rows_per_sec": rows_total as f64 / elapsed.as_secs_f64(),
+                }),
+                work,
+                vec![elapsed.as_nanos() as u64],
+                None,
+                Vec::new(),
+            )?;
+
+            drop(engine);
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    }
+
+    run.finish();
+    Ok(())
+}
