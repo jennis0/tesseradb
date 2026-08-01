@@ -934,6 +934,113 @@ affordance owned by the core and surfaced by default rather than opted into. It 
 beside the trichotomy as a conformance item, and it is the display half of §6.1's rule
 3.
 
+### 9.1 Derived artifacts, and the three ways they are gated
+
+Everything above concerns points. **Clusters, labels, hulls, contours, aggregation
+cells, edges and trajectories form a second class** — artifacts derived from points,
+whose visibility is tied to point visibility — and the design carries two instances of it
+with different rules and no framework connecting them *(owner, 2026-08-01)*. Labels
+(§7.6) gate on exact containment; cluster nodes (§7.5) gate on a threshold; C2 records
+that node extent and hull need no gate at all. The generalisation is worth stating,
+because a third artifact type will otherwise go looking for precedent and find two
+contradictory ones.
+
+**The rule: a derived artifact is gated by how it was produced.**
+
+| How produced | Gate | Instance | Literature |
+|---|---|---|---|
+| Shared, precomputed, content-bearing | **exact containment** — serve iff `G ⊆ M_auth` | labels (§7.6), annotations, region summaries | the derivation axiom, multilevel-secure databases (Appendix D) |
+| Shared, precomputed, structure-revealing | **threshold**, as a named disclosure control | cluster nodes, `min_visible_members` (§7.5) | **small-cell suppression**, statistical disclosure control |
+| Recomputed per viewer from masked membership | **none** | hulls, centroids, contours, cells (C2) | not a shared artifact, so nothing to gate |
+
+Content-bearing artifacts need containment because their *content* can reveal what is
+inside documents the viewer cannot read — and they inherit §7.6's availability
+pathology, where one deletion breaks containment for every principal and a nested chain
+dark-ships. Structure-revealing artifacts disclose only existence and shape, so a
+threshold is defensible, but only as the security control §7.5 already insists it be.
+Per-viewer-recomputed artifacts are safe by construction, and the failure to avoid is
+**serving a generated artifact instead of recomputing it**: a build-time centroid over
+full membership, shown to someone who sees 5% of it, points at where the invisible
+members are.
+
+**The threshold tier has a fifty-year literature and a named attack we have not checked
+against** *(survey, 2026-08-01)*. `min_visible_members` is **small-cell suppression**
+from statistical disclosure control — the census-table field — and that field's central
+known weakness is the **differencing attack**: two overlapping releases whose difference
+isolates a cell below the threshold. §8.4 already blocks the filter route by fixing
+maximum depth against `M_auth` rather than `M_sel`, which is the operational form of I12.
+**What has not been examined is differencing the frontier across pan, zoom and slice.**
+C1's owner review is listed as outstanding before launch; it should be conducted in that
+vocabulary and against that literature rather than from first principles. Raised as an
+annotation at design §7.5, since the control lives there.
+
+**The differentiator check came back clean.** Nobody gates shared precomputed derived
+artifacts per viewer. The field has exactly two other moves, and both are the near
+misses: *re-derive per query under a filter* — Elasticsearch's `geotile_grid`/`geohex_grid`
+under document-level security, which is the nearest thing to our underlay that exists in
+production, at per-query cost and with the seam leaks its own documentation concedes;
+and PostGIS `ST_ClusterDBSCAN`/`ST_ConcaveHull` under row-level security, possible but
+O(corpus) per query and heir to the query-plan disclosures Appendix D demolishes — or
+*regenerate per viewer and never share*, which is the whole permissions-aware RAG
+pattern, avoiding the gating problem by paying generation cost per viewer per query.
+**Nobody does the third thing: share the expensive artifact and gate it with a cheap
+containment test.** That is §7.6's "appears unpublished" claim, now checked against the
+adjacent fields rather than assumed. §7.5's rollup-rather-than-suppression frontier
+likewise has no analogue found in any clustering or mapping system — an absence claim,
+and marked as one.
+
+**Hierarchies ride the verbs, not the tiles, and the API idiom already exists.** There is
+no wire standard for delivering a cluster hierarchy; MVT is flat per tile, and the maps
+industry encodes hierarchy as per-zoom membership plus `rank` properties. What *is*
+de-facto standard is an interaction API — supercluster's, which every mapping developer
+has met: `getClusters(bbox, zoom)` returning flat features with `cluster_id` and
+`point_count`, plus `getChildren`, `getLeaves(id, limit, offset)` and
+`getClusterExpansionZoom`. That maps almost one-to-one onto what Phase 3 will build:
+session node handle for `cluster_id`, masked count for `point_count`, the keyset cursor
+for paged leaves, frontier depth for expansion zoom. **Speak that idiom.** Its
+architecture — a KD-tree over fully resident data — is unavailable to us and irrelevant;
+the API shape is the transferable part. The MVT adapter accordingly emits the current
+frontier as flat per-zoom features carrying rank, exactly as basemap schemas do.
+
+**Contours: serve nothing.** They are a client-side derivation of the number channel —
+marching squares (`d3-contour`) over an aggregation grid — and our underlay *is* that
+grid, already masked and exact. Client-derived isolines over served sub-cell counts are
+per-viewer and correct with **zero new server surface**, and level selection is a client
+encoding under §9's ruling. This generalises the third tier: **any client-derived geometry
+over served masked aggregates is safe**, because it derives from what the viewer can
+already see.
+
+**Edges are the benign case of containment, and their hard problem is elsewhere.** An
+edge's generating set has cardinality two, so exact containment is cheap and free of the
+label pathology — dark-shipping pain scales with `|G|`, and one hidden endpoint correctly
+kills one edge rather than a chain. Delivery convention is uniform across the graph
+renderers: **edges travel as index pairs into a node buffer**. The collision is not with
+masking but with **sampling**: an edge is drawable only if both endpoints are in the
+*served* set, not merely the visible one, so a future graph domain must either restrict
+edges to served×served — degree-biased, and a named hard problem, the **induced-subgraph
+sampling problem** — or let edges pull their endpoints into the served set, perturbing
+the point sample. Parked with that name; Appendix H's masked-degree aggregates need none
+of it and remain the near-term graph story.
+
+**And this corrects §2's naming.** A cluster hull is an aggregate over the visible set, so
+a client that draws a hull around the *k* points it holds has committed the sample-as-set
+error in geometry rather than in numbers. **The number channel is really the exact
+masked-aggregate channel, and geometry travels on it** — hulls, centroids, contour inputs
+and cell counts alike. The mark channel carries the sample; the other carries whatever is
+exact, whatever its shape.
+
+**Three traps, one sentence each.** Adapter cluster and cell tiles must never be cached
+across viewers — the same rule as point tiles, restated because aggregate tiles *look*
+shareable. Cluster identifiers in the wild are ephemeral per rebuild, which matches our
+per-session node handles, so promise no more stability than supercluster taught people to
+expect. And any client-side derivation that computes breakpoints "from the data" means
+*the viewer's masked data* — automatic in our model, but state it, so nobody imports a
+library preset that expects corpus-global breaks.
+
+*(One presentational idiom worth copying, from Kibana Maps: a "blended" layer that
+auto-switches between individual documents and cluster marks on a count threshold. That
+is the marks-to-underlay transition, decided client-side from served counts.)*
+
 ## 10. The client stack
 
 **One headless core, in TypeScript**, owning everything invariant-bearing: session and
