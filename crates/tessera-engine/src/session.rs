@@ -536,7 +536,7 @@ impl Engine {
     /// Gated behind the `bench-timing` feature both crates' integration test suites already
     /// build with, so this does not exist at all — not even as a compiled, unreachable symbol —
     /// in a build without it, and a shipped binary never has it
-    /// (`scripts/check-no-stage-header.sh` asserts the compile gate stays off by default).
+    /// (`scripts/check-layers.sh` asserts the runtime gate is present and defaults closed).
     ///
     /// **Why this exists.** `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 in §14's post-B9
     /// re-calibration. A fixture that genuinely clears it is impractical to build inside a unit

@@ -27,8 +27,28 @@ reader to separate the two, every time.
 The second sentence keeps the whole reason. It just does not narrate.
 
 Corollary: avoid phase numbers, task numbers, and "currently"/"for now" in the corpus. If
-something is not built yet, say *what is specified and what is implemented* explicitly — see
-rule 6 — rather than writing in a present tense that quietly means "eventually".
+something is not built yet, mark it — see below — rather than writing in a present tense that
+quietly means "eventually".
+
+#### Marking what is specified but not built
+
+The corpus specifies a target; the code is behind it in places. Present tense about absent
+machinery is the most damaging error available here, because on a security property it reads as
+an assurance. Mark it **at the claim**, never only in a preamble the reader has forgotten by §5:
+
+> **⊘ Specified, not implemented.** One sentence on what exists instead, and what the reader must
+> not assume meanwhile.
+
+Rules for the marker:
+
+- It goes immediately after the claim it qualifies — same paragraph or the line below.
+- It says what *is* true now. "Not implemented" alone leaves the reader unable to reason about
+  the system they actually have.
+- Where the unbuilt thing is a **guarantee**, it also says what the current behaviour is instead,
+  and whether that is safe. "Safe today only because nothing retires at all" is the useful form.
+- Every marker appears in the summary table in `docs/design/README.md`, so the set is countable.
+
+Use **⊘ Partially implemented** where some of a mechanism exists, and name which part.
 
 ### 2. A paragraph should be readable on its own
 
