@@ -26,11 +26,21 @@ export function renderCounts(state: AppState): string {
     const recentlyFailed = state.failures.some(
       (f) => Date.now() - f.at < RECENT_FAILURE_MS
     );
+    // Loading is not empty either. At 1e9 a broad principal's shallow tiles take over a second,
+    // so a plain "no tiles" reads as "this principal sees nothing" during every pan — which is
+    // the same collapse one step along. The MVP does not carry the full four-state treatment; it
+    // does carry the three states that are actively misleading when merged.
+    if (recentlyFailed) {
+      return panel(
+        'Counts',
+        '<div class="bad">counts unavailable — requests failed, see below. This is not an empty region.</div>'
+      );
+    }
     return panel(
       'Counts',
-      recentlyFailed
-        ? '<div class="bad">counts unavailable — requests failed, see below. This is not an empty region.</div>'
-        : '<div class="muted">no tiles loaded yet</div>'
+      state.inFlight > 0
+        ? `<div class="muted">loading ${state.inFlight} tile${state.inFlight === 1 ? '' : 's'}…</div>`
+        : '<div class="muted">no tiles loaded</div>'
     );
   }
   const depth = Math.max(...tiles.map((t) => t.z));
