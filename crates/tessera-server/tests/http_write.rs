@@ -1698,6 +1698,19 @@ impl ParkedFixture {
     }
 }
 
+/// **Release on unwind, or a failing assertion hangs instead of failing.**
+///
+/// Found by planting this file's own mutations: with the admission bound removed, the surplus
+/// requests park, the assertion panics, and `release()` is never reached — so the parked handlers
+/// hold their blocking threads forever and the runtime's shutdown blocks joining them. The test
+/// was red, but it took three minutes to say so and left threads behind, which in CI is
+/// indistinguishable from a hang. A test must fail promptly for the reason it names.
+impl Drop for ParkedFixture {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// `ingest_admission = 2` against a **4-thread** blocking pool: two parked handlers leave two
 /// threads, and an unbounded ingest would take all four.
 const PARKED_MAX_BLOCKING_THREADS: usize = 4;
