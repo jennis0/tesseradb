@@ -156,6 +156,39 @@ enum Command {
         seed: u64,
     },
 
+    /// Deny-ack latency against **buffered-item depth**, quiescent and under contention, plus the
+    /// never-shed asymmetry.
+    ///
+    /// `changes` grows the overlay and leaves the buffer empty; this grows the buffer, which is
+    /// what `ExecutorHealth::apply_nanos_*` is O(), and what a deny can be queued behind
+    /// (lifecycle §1.3: a deny's wait is bounded by the work item currently executing).
+    DenyAck {
+        /// Only the two deny dispositions by default — `predicate` retires at its compaction fold
+        /// and is not the security-critical latency.
+        #[arg(long, value_delimiter = ',', default_values_t = ["suppress".to_string(), "delete".to_string()])]
+        op: Vec<String>,
+        /// Buffered-item depths to measure at. Brackets `overlay_soft_limit` (500,000) and reaches
+        /// the 1 M point plan 7b sizes the clone at.
+        #[arg(long, value_delimiter = ',', default_values_t = [0u64, 10_000, 100_000, 1_000_000])]
+        buffered: Vec<u64>,
+        /// Denies timed per phase, per cell.
+        #[arg(long, default_value_t = 30)]
+        denies: usize,
+        /// Background ingest submitters for the contended phase. Must exceed `queue-bound` + 1 for
+        /// the work lane to saturate at all.
+        #[arg(long = "flood-workers", default_value_t = 6)]
+        flood_workers: usize,
+        /// Rows per ingest batch, both for the fill and for the flood.
+        #[arg(long = "ingest-batch", default_value_t = 10_000)]
+        ingest_batch: usize,
+        /// `ingest_queue_bound`. Small on purpose: the never-shed phase needs the bounded lane to
+        /// actually refuse, so the unbounded lane's contrast is measured rather than assumed.
+        #[arg(long = "queue-bound", default_value_t = 2)]
+        queue_bound: usize,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+    },
+
     /// Blank-database ingest: `tessera build` decomposed into its eleven pipeline stages.
     IngestBuild {
         #[arg(long, value_delimiter = ',', default_values_t = [250_000u64, 2_422_486, 25_000_000])]
@@ -382,6 +415,24 @@ fn main() -> std::process::ExitCode {
             checkpoint,
             seed,
         } => arms::changes::run(&ctx, &op, &checkpoint, seed),
+        Command::DenyAck {
+            op,
+            buffered,
+            denies,
+            flood_workers,
+            ingest_batch,
+            queue_bound,
+            seed,
+        } => arms::changes::run_deny_ack(
+            &ctx,
+            &op,
+            &buffered,
+            denies,
+            flood_workers,
+            ingest_batch,
+            queue_bound,
+            seed,
+        ),
         Command::IngestBuild {
             scale,
             label_set,

@@ -357,3 +357,305 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
     run.finish();
     Ok(())
 }
+
+// =================================================================================================
+// Mode: deny_ack — the security-critical latency, against the two things that actually move it
+// =================================================================================================
+
+/// **Deny-ack latency against buffered-item depth, quiescent and contended, plus never-shed.**
+///
+/// # What the existing `run` above does not measure, and why that mattered
+///
+/// `run` grows the **overlay** and measures ack against it. It never ingests, so its buffer is
+/// empty in every cell. That leaves the quantity the plan actually sizes the deny-ack floor from —
+/// `ExecutorHealth::apply_nanos_*`, whose doc calls the clone "O(total buffered items)" — entirely
+/// unexercised, and it leaves lifecycle §1.3's real bound ("a deny's wait is bounded by the work
+/// item currently executing") untested, because nothing is ever executing.
+///
+/// This mode measures three things `run` cannot:
+///
+/// 1. **Quiescent deny-ack against buffered depth.** Ingest to depth `N`, then time denies on an
+///    otherwise idle executor, reading `write_executor_stats()` immediately either side of each
+///    one so the delta in `apply_nanos_total` *is* that deny's own apply step, exactly.
+/// 2. **Contended deny-ack.** Background threads submit large ingest batches continuously while
+///    denies are issued, so a deny lands behind an in-flight `apply_ingest` that is cloning an
+///    `N`-entry buffer. This is the head-of-line term, and it is the one §1.3 bounds.
+/// 3. **Never-shed** (`crates/tessera-engine/src/write.rs:899-931`): the work lane is a bounded
+///    `SyncSender` (`QueueFull`), the deny lane an unbounded `Sender`. With the queue genuinely
+///    saturated — proven by counting `QueueFull` on the ingest lane rather than assumed — no deny
+///    may be refused. **Scope limit: this exercises the engine's lane split only.** Task 6, which
+///    owns `/control/ingest`'s 429 and the startup headroom arithmetic, has not landed, so the
+///    HTTP-level asymmetry (`changes_never_429s`) is not exercisable here and is not claimed.
+pub fn run_deny_ack(
+    ctx: &Context,
+    ops: &[String],
+    buffered: &[u64],
+    denies: usize,
+    flood_workers: usize,
+    ingest_batch: usize,
+    queue_bound: usize,
+    seed: u64,
+) -> Result<()> {
+    let mut run = ctx.open("deny_ack")?;
+
+    let ops: Vec<Op> = ops
+        .iter()
+        .map(|o| Op::parse(o).ok_or_else(|| format!("unknown op {o:?}")))
+        .collect::<std::result::Result<_, _>>()?;
+
+    for fixture in &ctx.fixtures {
+        let postings = PostingsReader::open(&fixture.postings_path(), true)?;
+        let stats = TermStats::compute(&postings)?;
+        let (grant, coverage) = build_grant_to_coverage(
+            &stats,
+            &postings,
+            GrantShape::Random,
+            0.05,
+            fixture.scale,
+            seed,
+        )?;
+        if grant.terms.is_empty() {
+            continue;
+        }
+        let visible_entities = crate::postings::union(&postings, &grant.terms)?;
+
+        for &op in &ops {
+            for &depth in buffered {
+                let cell_id = format!(
+                    "deny_ack/{}/{}/{}/buffered{}",
+                    fixture.scale,
+                    fixture.label_set,
+                    op.name(),
+                    depth
+                );
+                if run.ledger.is_done(&cell_id) {
+                    run.skipped += 1;
+                    continue;
+                }
+
+                // A fresh engine per cell: the overlay must start empty, or the deny's own
+                // `apply_change` clone (which is O(overlay), not O(buffer) — see the finding in
+                // the memo) would carry the previous cell's depth into this one's numbers.
+                let tmp = std::env::temp_dir().join(format!(
+                    "tessera-bench-denyack-{}-{}-{}-{}",
+                    std::process::id(),
+                    fixture.scale,
+                    op.name(),
+                    depth
+                ));
+                let _ = std::fs::remove_dir_all(&tmp);
+                std::fs::create_dir_all(&tmp)?;
+                let mut engine = Engine::open(
+                    &fixture.root,
+                    &tmp.join("cache"),
+                    &tmp.join("wal.log"),
+                    Passthrough::new(),
+                    EngineConfig {
+                        token_max_lifetime_secs: 3600,
+                        max_k: 200,
+                        k_min: 2,
+                        k_max_marks: 500,
+                        theta_target_marks: 16,
+                        max_underlay_offset: 4,
+                        max_underlay_cells: 8192,
+                        max_tiles_per_request: 262_144,
+                        compute_threads: tessera_engine::default_compute_threads(),
+                        pin_ttl_secs: 300,
+                        pins_per_session_max: 4,
+                    },
+                )?;
+                // Small on purpose, unlike the other arms' generous 1024: the never-shed phase
+                // needs the work lane to actually saturate, and a deep queue would measure
+                // patience rather than the lane split.
+                engine.start_write_executor(queue_bound)?;
+
+                // ---- fill the buffer to `depth` -----------------------------------------------
+                let fill_started = std::time::Instant::now();
+                let mut next_id = 0u64;
+                let mut filled = 0u64;
+                while filled < depth {
+                    let n = ingest_batch.min((depth - filled) as usize);
+                    let rows = crate::arms::ingest::synth_rows(n, next_id, &grant.terms);
+                    next_id += n as u64;
+                    engine.accept_ingest(rows, format!("fill-{next_id}"), [0u8; 32])?;
+                    filled += n as u64;
+                }
+                let fill_ns = fill_started.elapsed().as_nanos() as u64;
+
+                // ---- phase 1: quiescent deny-ack ----------------------------------------------
+                let mut targets = visible_entities.iter().map(|e| EntityId::new(e as u64));
+                let mut quiet_ack = Vec::with_capacity(denies);
+                let mut quiet_apply = Vec::with_capacity(denies);
+                for _ in 0..denies {
+                    let Some(entity) = targets.next() else { break };
+                    let before = engine.write_executor_stats();
+                    let start = std::time::Instant::now();
+                    engine.accept_change(
+                        format!("bench-deny-{}", entity.raw()).into_bytes(),
+                        entity,
+                        op.change_op(),
+                        None,
+                    )?;
+                    let ack = start.elapsed().as_nanos() as u64;
+                    let after = engine.write_executor_stats();
+                    quiet_ack.push(ack);
+                    // The executor is idle, so exactly one apply happened between the two reads:
+                    // this delta IS this deny's own apply step.
+                    quiet_apply.push(after.apply_nanos_total - before.apply_nanos_total);
+                }
+
+                // ---- phase 2: contended deny-ack, and never-shed ------------------------------
+                let stop = std::sync::atomic::AtomicBool::new(false);
+                let queue_full = std::sync::atomic::AtomicU64::new(0);
+                let ingest_ok = std::sync::atomic::AtomicU64::new(0);
+                let deny_refused = std::sync::atomic::AtomicU64::new(0);
+                let mut busy_ack: Vec<u64> = Vec::with_capacity(denies);
+                let apply_max_before = engine.write_executor_stats().apply_nanos_max;
+
+                std::thread::scope(|scope| -> Result<()> {
+                    let engine = &engine;
+                    let (stop, queue_full, ingest_ok) = (&stop, &queue_full, &ingest_ok);
+                    let terms = &grant.terms;
+                    let mut floods = Vec::new();
+                    for w in 0..flood_workers {
+                        floods.push(scope.spawn(move || {
+                            let mut id = 1_000_000_000u64 + (w as u64) * 100_000_000;
+                            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                let rows =
+                                    crate::arms::ingest::synth_rows(ingest_batch, id, terms);
+                                id += ingest_batch as u64;
+                                match engine.accept_ingest(rows, format!("flood-{w}-{id}"), [0u8; 32])
+                                {
+                                    Ok(_) => {
+                                        ingest_ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    Err(tessera_engine::AcceptError::Submit(_)) => {
+                                        // The bounded work lane refusing under load: the
+                                        // *expected* half of the asymmetry, and the proof that
+                                        // the queue is genuinely saturated for the deny phase.
+                                        queue_full
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                        }));
+                    }
+
+                    // Let the flood saturate the queue before any deny is timed.
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+
+                    for _ in 0..denies {
+                        let Some(entity) = targets.next() else { break };
+                        let start = std::time::Instant::now();
+                        let r = engine.accept_change(
+                            format!("bench-deny-{}", entity.raw()).into_bytes(),
+                            entity,
+                            op.change_op(),
+                            None,
+                        );
+                        busy_ack.push(start.elapsed().as_nanos() as u64);
+                        if matches!(r, Err(tessera_engine::AcceptError::Submit(_))) {
+                            // The failure this whole arm exists to detect: a security operation
+                            // refused for load. Never acceptable (SA §4.2, contracts §3.1).
+                            deny_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    for f in floods {
+                        let _ = f.join();
+                    }
+                    Ok(())
+                })?;
+
+                let final_stats = engine.write_executor_stats();
+                let refused = deny_refused.load(std::sync::atomic::Ordering::Relaxed);
+                let saturated = queue_full.load(std::sync::atomic::Ordering::Relaxed);
+
+                let mut flags = Vec::new();
+                if refused > 0 {
+                    flags.push(format!("DENY_REFUSED_FOR_LOAD n={refused}"));
+                    eprintln!(
+                        "deny_ack: {cell_id}: {refused} denies refused for load — refusing a \
+                         security operation for capacity is fail-open (SA §4.2)"
+                    );
+                }
+                if saturated == 0 {
+                    // Not a failure of the system; a failure of the *experiment*. Recorded so a
+                    // reader never reads "no deny was refused" as evidence when the queue was
+                    // never full in the first place.
+                    flags.push("WORK_QUEUE_NEVER_SATURATED".to_string());
+                }
+
+                let pct = |v: &mut Vec<u64>, p: f64| -> u64 {
+                    if v.is_empty() {
+                        return 0;
+                    }
+                    v.sort_unstable();
+                    v[(((v.len() as f64) * p) as usize).min(v.len() - 1)]
+                };
+                let mut q = quiet_ack.clone();
+                let mut b = busy_ack.clone();
+                let mut qa = quiet_apply.clone();
+
+                run.emit(
+                    cell_id,
+                    fixture,
+                    serde_json::json!({
+                        "op": op.name(),
+                        "buffered_items": depth,
+                        "ingest_batch": ingest_batch,
+                        "queue_bound": queue_bound,
+                        "flood_workers": flood_workers,
+                        "fill_ns": fill_ns,
+                        // Phase 1 — quiescent.
+                        "quiet_ack_p50_ns": pct(&mut q, 0.50),
+                        "quiet_ack_p99_ns": pct(&mut q, 0.99),
+                        "quiet_ack_min_ns": quiet_ack.iter().copied().min().unwrap_or(0),
+                        "quiet_ack_max_ns": quiet_ack.iter().copied().max().unwrap_or(0),
+                        // The deny's OWN apply step, exactly (idle executor, delta of one apply).
+                        "quiet_apply_p50_ns": pct(&mut qa, 0.50),
+                        "quiet_apply_max_ns": quiet_apply.iter().copied().max().unwrap_or(0),
+                        "quiet_apply_share_of_ack": quiet_apply.iter().sum::<u64>() as f64
+                            / quiet_ack.iter().sum::<u64>().max(1) as f64,
+                        // Phase 2 — contended.
+                        "busy_ack_p50_ns": pct(&mut b, 0.50),
+                        "busy_ack_p99_ns": pct(&mut b, 0.99),
+                        "busy_ack_max_ns": busy_ack.iter().copied().max().unwrap_or(0),
+                        // The counter Task 7b is told to size the deny-ack floor from. The max
+                        // over the contended phase is the ingest lane's apply, i.e. the
+                        // head-of-line term a deny can queue behind.
+                        "apply_nanos_max_before_flood": apply_max_before,
+                        "apply_nanos_max_after_flood": final_stats.apply_nanos_max,
+                        "apply_nanos_total": final_stats.apply_nanos_total,
+                        "wal_appends": final_stats.wal_appends,
+                        "wal_fsyncs": final_stats.wal_fsyncs,
+                        "work_submitted": final_stats.work_submitted,
+                        "deny_submitted": final_stats.deny_submitted,
+                        // Never-shed.
+                        "ingest_queue_full_count": saturated,
+                        "ingest_accepted_count": ingest_ok.load(std::sync::atomic::Ordering::Relaxed),
+                        "denies_refused_for_load": refused,
+                        "never_shed_holds": refused == 0,
+                        "never_shed_exercised": saturated > 0,
+                        "seed": seed,
+                    }),
+                    Work {
+                        coverage,
+                        ..Default::default()
+                    },
+                    quiet_ack.clone(),
+                    None,
+                    flags,
+                )?;
+
+                drop(engine);
+                let _ = std::fs::remove_dir_all(&tmp);
+            }
+        }
+    }
+
+    run.finish();
+    Ok(())
+}

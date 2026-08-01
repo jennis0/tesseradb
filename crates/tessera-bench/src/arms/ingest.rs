@@ -77,7 +77,13 @@
 //!   cost of a database that has been *running* and absorbing writes for a while is unmeasurable
 //!   here, and design §16's "how many live segments before per-tile fan-out is noticeable" stays
 //!   open — see this module's note rather than assuming the continuous arm answered it.
-//! * **`accept_change` — not benchmarked at all.** Deletes, suppressions, unsuppressions and
+//! * **`accept_change` — benchmarked since 2026-07-30 in `arms::changes`; this note is kept for
+//!   the half of it that stayed true until 2026-08-01.** `changes` measures ack, tail and the
+//!   visibility arithmetic against *overlay* depth. It never ingests, so its buffer is empty in
+//!   every cell — which left the deny-ack floor's actual drivers (buffered depth, and the
+//!   head-of-line wait behind an in-flight ingest) unmeasured until `arms::changes::run_deny_ack`
+//!   (`tessera-bench deny-ack`, `docs/design-memos/2026-08-01-deny-ack-baseline.md`). The original
+//!   note read "not benchmarked at all", which was already stale when it was written.
 //!   predicate changes are the *other* write path, and the one with a security-relevant latency
 //!   bound (lifecycle §1.3: deny visibility is bounded by queue-front + fsync, and
 //!   `/control/changes` is never refused for capacity because refusing a security operation for
@@ -309,7 +315,7 @@ pub fn run_build(
 /// and onto the write executor, so `/control/ingest` now submits `UnallocatedRow`s and the thread
 /// that owns the WAL assigns the ids (`control.rs`). This helper follows, so it keeps describing a
 /// state the system can actually reach — which was the whole point of the note this replaces.
-fn synth_rows(count: usize, start: u64, terms: &[TermId]) -> Vec<UnallocatedRow> {
+pub(crate) fn synth_rows(count: usize, start: u64, terms: &[TermId]) -> Vec<UnallocatedRow> {
     (0..count)
         .map(|i| {
             let n = start + i as u64;

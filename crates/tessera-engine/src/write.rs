@@ -138,11 +138,26 @@ pub struct ExecutorHealth {
     /// The clone dominates it (it is O(total buffered items) while the inserts are O(batch)), which
     /// is why it is still the right operand for that sizing; but the name now says what was timed.
     ///
-    /// **This is the deny-ack latency floor, and in stage 2.1 nothing caps it.** A deny's wait is
-    /// bounded by "the work item currently executing", and that item includes a clone that is
-    /// O(total buffered items) — plan 7b sizes it at 100–300 ms per clone at 1 M buffered items
-    /// and 1–3 s at 10 M — while `flush_max_items` is inert until stage 2.2, so the buffer only
-    /// grows. Counted from Task 3a rather than 7b precisely because 3a is where lifecycle §1.3's
+    /// **This bounds the deny-ack *wait*, not the deny's own cost — corrected 2026-08-01 against
+    /// measurement** (`docs/design-memos/2026-08-01-deny-ack-baseline.md`). A deny's wait is
+    /// bounded by "the work item currently executing", and *that* item's apply includes a clone
+    /// that is O(total buffered items) — plan 7b sizes it at 100–300 ms per clone at 1 M buffered
+    /// items and 1–3 s at 10 M — while `flush_max_items` is inert until stage 2.2, so the buffer
+    /// only grows. Measured at 1 M buffered items: a deny under sustained ingest acks in 165 ms
+    /// p50 / 346 ms max, against a 3.2 ms quiescent floor. That much is confirmed.
+    ///
+    /// **What this counter is NOT is the deny's own floor**, which an earlier revision of this doc
+    /// claimed and Task 7b was told to size from. `apply_change` clones the **overlay**
+    /// (`Executor::apply_change`); only `apply_ingest` clones the buffer. Measured, a deny's own
+    /// apply is **1.3 µs at 1,000,000 buffered items** and is flat in buffer depth — it is
+    /// O(overlay), rising to ~4.3 µs at overlay depth 2,000. This counter sums **both lanes**, so
+    /// its value is dominated by ingest applies and attributes none of itself to either.
+    ///
+    /// **And it is an estimator of the wait, not a bound on it**: measured, the worst deny ack
+    /// exceeds `apply_nanos_max` over the same phase by up to 1.53×, because a deny waits for the
+    /// whole in-flight item (append, fsync, apply, ack) and then pays its own append and fsync.
+    ///
+    /// Counted from Task 3a rather than 7b precisely because 3a is where lifecycle §1.3's
     /// "never queued behind work of unbounded duration" first becomes a claim made in code.
     apply_nanos_total: AtomicU64,
     apply_nanos_max: AtomicU64,

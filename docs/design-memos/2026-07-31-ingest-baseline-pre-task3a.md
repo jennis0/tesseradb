@@ -96,7 +96,22 @@ should be sized from compose share rather than from memory.
 
 ## What this does not measure
 
-The deny path. `accept_change` is not benchmarked at all — a gap `tessera-bench`'s own
-`arms/ingest.rs` doc already records — so the deny-ack latency that lifecycle §4 and stage 2.1's
-never-shed asymmetry both turn on has **no baseline**, before or after. Task 3a's coupled-ack work
-would be the natural place to add one.
+The deny path.
+
+> **Corrected and closed 2026-08-01.** This section read: *"`accept_change` is not benchmarked at
+> all — a gap `tessera-bench`'s own `arms/ingest.rs` doc already records — so the deny-ack latency
+> that lifecycle §4 and stage 2.1's never-shed asymmetry both turn on has no baseline, before or
+> after."* **Two corrections.** First, "not benchmarked at all" was already wrong when written:
+> `crates/tessera-bench/src/arms/changes.rs` has measured `accept_change` ack, tail and visibility
+> arithmetic against *overlay* depth since 2026-07-30. Second, the real gap was narrower and more
+> interesting than the sentence claimed — that arm never ingests, so its buffer is empty in every
+> cell, which left the two things that actually move deny-ack unmeasured: buffered-item depth, and
+> the head-of-line wait behind an in-flight ingest apply.
+>
+> Both are now measured, along with never-shed:
+> **[`2026-08-01-deny-ack-baseline.md`](2026-08-01-deny-ack-baseline.md)**. Headline: the quiescent
+> floor is one fsync (~3.2 ms) and is **flat across 0 → 1,000,000 buffered items**, because a deny
+> clones the overlay and not the buffer — but under sustained ingest the same deny takes **67–167 ms
+> p50 and up to 666 ms**, because it waits behind a work item whose apply *is* O(buffer). That memo
+> also corrects `ExecutorHealth::apply_nanos_*`'s doc, which names itself the deny-ack floor and is
+> off by five orders of magnitude for that use.
