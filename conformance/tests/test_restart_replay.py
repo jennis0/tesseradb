@@ -1,7 +1,39 @@
-"""Restart-replay: deny survival and WAL idempotency across a `SIGKILL` (plan §10.3, brief step
-2).
+"""Restart-replay: deny survival and WAL idempotency across a `SIGKILL`, and durability *ordering*
+across a simulated power loss (plan §10.3; conformance design §5).
 
-Sequence: start a server on its own (private, non-shared) WAL/cache/bundle → ingest one Arrow
+**Two tests, proving different things, and the difference is the point of the second.** A SIGKILL
+loses nothing: the page cache survives process death, so the bytes a process wrote are still there
+for the next process to read whether or not anyone fsynced them. A kill-and-restart test therefore
+verifies *replay logic* — and **an engine that acked before it fsynced would pass it**. Conformance
+design §5 says so in those words, and for a while this module contained only that test.
+
+`test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded` is the variant §5 asks for.
+After the kill it **truncates the WAL to its last-synced offset** before restarting, which is what
+a power loss would have done, and then asks the same survival questions. The offset comes from the
+WAL's own sidecar — `wal.log` → `wal.sync`, an 8-byte little-endian offset written
+write-tmp-then-rename and fsynced together with its directory entry after every WAL fsync, because
+replay already needs it (`tessera-lifecycle/src/wal.rs`, "the durable prefix"). §5 specifies an
+`fsync_offset()` introspection command behind a `conformance` cargo feature to supply this number;
+none of that is needed, because the number is already on disk, durably, by construction.
+
+Because power loss is simulated by truncation rather than depended on, this may run on any
+filesystem including tmpfs — recorded here, per §5, so the first flake does not relitigate it.
+
+**Both of its assertions were demonstrated to fail, rather than argued to be capable of it.**
+Measured against this fixture on 2026-08-01, in a scratch harness kept out of the suite because
+each control needs a deliberately damaged WAL:
+
+- *Acked bytes past the sync point.* A correct run gives `sync == len == 233`, so `discarded == 0`.
+  Appending 64 bytes after the last ack — the shape an ack-before-fsync engine produces — gives
+  `discarded == 64` and the assertion fires. It is therefore a live check on the offset, not an
+  arithmetic identity between two names for the same number.
+- *The truncated bytes are load-bearing.* Truncating 40 bytes **below** the sync point destroys
+  bytes a caller was told were durable, and the server refuses to start: `refused to start: wal
+  error: wal corruption before the last-fsynced offset — acked state may be damaged`. So the
+  survival assertions that follow the truncation depend on the log's content and cannot pass
+  against a log that quietly lost part of its durable prefix.
+
+The first test's sequence: start a server on its own (private, non-shared) WAL/cache/bundle → ingest one Arrow
 batch of new items over the control plane → suppress two built-in fixture items and delete a
 third → assert all three are now invisible → `SIGKILL` (not a graceful terminate) the process →
 restart it pointed at the SAME WAL/cache/bundle, with no re-submission of anything → assert,
@@ -94,8 +126,8 @@ BATCH_ID = "conformance-restart-replay-batch-1"
 
 def _build_ingest_batch(*, access: str = "999002") -> bytes:
     """One small Arrow IPC stream, schema `(external_id: binary, x: float32, y: float32,
-    access: utf8)` (R5) — three brand-new items, external ids well outside the fixture's own
-    source-id range (which is `< 250_000`, R4's build-with-`--limit`), so there's no collision.
+    access: utf8)` (R5) — three brand-new items, external ids far outside the fixture's own
+    source-id range (the catalogue's is `< 150,000`), so there's no collision.
     `access` (the third item's access string) is a parameter so a caller can build a body that
     differs from the original under the SAME batch id, for the conflict/replay-evidence check."""
     external_ids = [
@@ -141,13 +173,140 @@ def restart_paths(tmp_path):
     }
 
 
-def test_deny_ops_and_ingest_survive_a_sigkill_restart(bundle_root: Path, restart_paths):
-    oracle_bundle = Bundle(bundle_root)
+def sync_sidecar_of(wal_path: Path) -> Path:
+    """`wal.log` → `wal.sync`, beside it — `wal.rs`'s `sync_sidecar_path`, transcribed.
+
+    Transcribed rather than derived from the server, because a harness that asked the server where
+    its durable prefix ended would be taking the engine's word for the very thing under test.
+    """
+    return wal_path.with_suffix(".sync")
+
+
+def read_sync_offset(wal_path: Path) -> int:
+    """The WAL's last-fsynced offset: 8 bytes, little-endian."""
+    raw = sync_sidecar_of(wal_path).read_bytes()
+    assert len(raw) == 8, f"sync sidecar is {len(raw)} bytes, not 8 — cannot be an offset"
+    return int.from_bytes(raw, "little")
+
+
+def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
+    catalogue_bundle_root: Path, restart_paths
+):
+    """Conformance §5's crash-realism variant: kill, **truncate to the last-synced offset**,
+    restart, and assert every acked operation is still there.
+
+    Two assertions do the work, and they fail for different reasons.
+
+    **Nothing acked lies beyond the sync point.** After the last 200 has been received, the WAL's
+    durable prefix must already cover every byte the server wrote for the operations it acked — so
+    truncating to that prefix discards nothing. This is the ack-ordering property stated directly:
+    an engine that returned 200 and fsynced afterwards would have written bytes past the sync
+    point, and `discarded` below would be non-zero. It is checked *before* the truncation rather
+    than inferred from what survived it, because "the deny is still there" has more than one
+    possible cause and "the log was already durable to its end" has exactly one.
+
+    **The sync point advanced across the acked operations.** A sidecar that were written once at
+    open and never updated would make the first assertion vacuously true for ever — the log would
+    always be truncated back to wherever it started and the survival checks would fail confusingly,
+    or, worse, pass on a no-op log. Recording the offset before and after the denies and requiring
+    it to move is what keeps the first assertion about the engine rather than about a dead file.
+
+    Then the survival questions, against a WAL that has provably lost everything unsynced.
+    """
+    oracle_bundle = Bundle(catalogue_bundle_root)
     cache_dir = restart_paths["cache"]
     wal_path = restart_paths["wal"]
     tmp_dir = restart_paths["root"]
 
-    srv, proc = spawn_server(bundle_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path)
+    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path)
+
+    try:
+        resp = srv.ingest(_build_ingest_batch(), BATCH_ID)
+        assert resp.status_code == 200, resp.text
+        high_water_after_ingest = srv.status()["entity_id_high_water"]
+        sync_after_ingest = read_sync_offset(wal_path)
+
+        term0 = 0
+        base_mask = mask_mod.mask_of({term0}, oracle_bundle.pairs_path())
+        assert len(base_mask) >= 3, "fixture must have >= 3 term-0 members for this test"
+        delete_entity, suppress_a, suppress_b = sorted(base_mask)[:3]
+
+        def ext_b64(entity_id: int) -> str:
+            return base64.b64encode(oracle_bundle.external_id_of(entity_id)).decode()
+
+        resp = srv.changes(
+            [
+                {"external_id": ext_b64(delete_entity), "op": "delete"},
+                {"external_id": ext_b64(suppress_a), "op": "suppress"},
+                {"external_id": ext_b64(suppress_b), "op": "suppress"},
+            ]
+        )
+        assert resp.status_code == 200, resp.text
+
+        changes = mask_mod.ChangeSet()
+        changes.apply(delete_entity, "delete")
+        changes.apply(suppress_a, "suppress")
+        changes.apply(suppress_b, "suppress")
+        resolved_mask = changes.resolve(base_mask, {term0})
+
+        dictionary = oracle_bundle.dictionary
+        bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
+        zoom = 4
+        expected_counts = _oracle_counts(oracle_bundle, resolved_mask, SLICE, zoom, bbox)
+
+        # --- the sync point advanced, so the sidecar is live ---------------------------------
+        sync_point = read_sync_offset(wal_path)
+        assert sync_point > sync_after_ingest, (
+            "the WAL's last-synced offset did not move across three acked deny operations — the "
+            "sidecar is not tracking fsyncs, so truncating to it would prove nothing about "
+            "durability ordering"
+        )
+
+        # --- nothing acked lies beyond it --------------------------------------------------
+        wal_len = wal_path.stat().st_size
+        discarded = wal_len - sync_point
+        assert discarded == 0, (
+            f"{discarded} bytes were written past the last-synced offset while every operation "
+            f"that produced them had already been acked — the engine acks before it fsyncs, and a "
+            f"power loss here would lose an operation a caller was told was durable"
+        )
+
+        kill_server(proc)
+        proc = None
+
+        # --- what a power loss would have done ----------------------------------------------
+        with wal_path.open("r+b") as fh:
+            fh.truncate(sync_point)
+        assert wal_path.stat().st_size == sync_point
+
+        srv2, proc2 = spawn_server(
+            catalogue_bundle_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path
+        )
+        try:
+            assert srv2.status()["entity_id_high_water"] == high_water_after_ingest, (
+                "the acked ingest's allocator state did not survive the discard of the unsynced "
+                "tail — it was acked out of a buffer that was never made durable"
+            )
+
+            token = srv2.authorise([dictionary[term0].decode("ascii")])["token"]
+            tiles, _points = decode_viewport(srv2.viewport(token, SLICE, zoom, bbox, k=200))
+            assert {t: v for t, v, m, _s in tiles} == expected_counts, (
+                "an acked delete or suppression did not survive the discard of the unsynced tail"
+            )
+        finally:
+            stop_server(proc2)
+    finally:
+        if proc is not None:
+            stop_server(proc)
+
+
+def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Path, restart_paths):
+    oracle_bundle = Bundle(catalogue_bundle_root)
+    cache_dir = restart_paths["cache"]
+    wal_path = restart_paths["wal"]
+    tmp_dir = restart_paths["root"]
+
+    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path)
 
     try:
         # --- ingest one batch -------------------------------------------------------------
@@ -206,7 +365,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(bundle_root: Path, restar
         proc = None  # already reaped by kill_server
 
         # --- restart on the SAME wal/cache/bundle, nothing re-submitted ---------------------
-        srv2, proc2 = spawn_server(bundle_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path)
+        srv2, proc2 = spawn_server(catalogue_bundle_root, tmp_dir, cache_dir=cache_dir, wal_path=wal_path)
         try:
             status_after_restart = srv2.status()
             assert status_after_restart["entity_id_high_water"] == high_water_after_ingest, (

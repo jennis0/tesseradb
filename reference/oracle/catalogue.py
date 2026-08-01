@@ -169,7 +169,18 @@ class Block:
 #   cross_lo      3,750    2.50%   below §7.2's ~5% direct-evaluation crossover
 #   cross_hi     11,250    7.50%   cross_lo ∪ cross_hi = 10.00%, above it
 #   one_tile        250    0.17%   geometry confined to one depth-6 tile
-#   filler_tail  69,134   46.09%   spans the second container boundary, 131,072
+#   filler_tail  59,134   39.42%   spans the second container boundary, 131,072
+#   high_tail    10,000    6.67%   140,000..150,000 — every member above the byte-scan's floor
+#
+# `high_tail` is the one block with no `MaskCase`. It exists so that a grant set can put entity ids
+# **on both sides of a grant boundary while every one of them is above `SAFE_ID_FLOOR`**, which is
+# what `conformance/tests/test_byte_scan.py` needs and what no other layout here can supply: the
+# floor is 100,000, blocks are the grantable unit, and before this block existed `filler_tail` was
+# the only block straddling the floor — so every entity id above it was admitted together or denied
+# together, and the scan's "admitted *and* denied ids above the floor" precondition was
+# unsatisfiable on this corpus. Splitting the tail rather than giving the byte-scan a third corpus
+# keeps one designed entity-ID layout in the suite. `filler_tail` was resized to compensate, so
+# `N_ITEMS`, every other block's entity range, and both container claims are unchanged.
 #
 # **APPEND-ONLY, and this is load-bearing rather than a style preference.** A block's position in
 # this list is two things at once: `_build_blocks` hands out term IDs by index, and it lays the
@@ -188,7 +199,8 @@ _LAYOUT: list[tuple[str, int]] = [
     ("cross_lo", 3_750),
     ("cross_hi", 11_250),
     ("one_tile", 250),
-    ("filler_tail", 69_134),
+    ("filler_tail", 59_134),
+    ("high_tail", 10_000),
 ]
 
 
@@ -214,6 +226,13 @@ def _build_blocks() -> dict[str, Block]:
 BLOCKS: dict[str, Block] = _build_blocks()
 
 CONTAINER_SIZE = 1 << 16
+
+# The entity id above which `conformance/tests/test_byte_scan.py` can tell a leaked id from a
+# legitimate small integer the harness itself emits — ports, `k`, zoom, status codes, none of which
+# exceed 65,535. It lives here, not with the scan, because it is a constraint on **this layout**:
+# `high_tail` is placed to satisfy it and `verify()` refuses a corpus that stops doing so. The scan
+# asserts its own floor matches this one, so the two cannot drift apart.
+HIGH_ID_FLOOR = 100_000
 
 
 @dataclass(frozen=True)
@@ -641,6 +660,24 @@ def verify(bundle: Bundle) -> VerificationReport:
         report.failures.append(
             f"full coverage touches containers {sorted({e >> 16 for e in everything})}, not "
             f"{sorted(expected_containers)} — every container the corpus reaches"
+        )
+
+    # `high_tail`'s reason for existing, checked rather than described. The byte-scan needs a grant
+    # set whose admitted *and* denied entity ids both reach above `HIGH_ID_FLOOR`; that holds only
+    # while `high_tail` sits entirely above the floor and some other block still reaches above it
+    # too. Resizing `filler_tail` breaks the second half silently — the block boundaries move, no
+    # posting check notices, and the byte-scan's precondition assertion fires far from the cause.
+    high_tail = report.blocks.get("high_tail", set())
+    if high_tail and min(high_tail) < HIGH_ID_FLOOR:
+        report.failures.append(
+            f"high_tail starts at {min(high_tail)}, below the byte-scan floor {HIGH_ID_FLOOR} — "
+            "its members are no longer all separable from the small integers the harness emits"
+        )
+    outside_above = {e for e in everything - high_tail if e >= HIGH_ID_FLOOR}
+    if not outside_above:
+        report.failures.append(
+            f"no block outside high_tail reaches above {HIGH_ID_FLOOR}, so a grant of high_tail "
+            "leaves nothing denied above the floor and the byte-scan can only check one direction"
         )
 
     one_tile = report.blocks.get("one_tile", set())
