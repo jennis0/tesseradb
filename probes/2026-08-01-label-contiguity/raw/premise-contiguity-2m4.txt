@@ -1,0 +1,42 @@
+=== categories-subclass dense ===
+bundle: /home/joe/code/tessera/data/bench-fixtures/2m4
+grant mode: random (bench GrantShape::Random, default) (w=10), reps=25, max_tiles=131072
+
+grant contiguity (universe 2422486 rows): entity-space card=386128 cov=15.9393% containers=35 run_ratio=106.665 | row-space card=386128 cov=15.9393% containers=37 run_ratio=1.750
+GRANT,2422486,386128,35,106.665064,386128,37,1.750380,65|17|77|79|45|76|53|97|51|20
+
+=== categories-subclass sparse ===
+bundle: /home/joe/code/tessera/data/bench-fixtures/2m4
+grant mode: spread (deterministic, --sparse) (w=10), reps=25, max_tiles=131072
+
+grant contiguity (universe 2422486 rows): entity-space card=599200 cov=24.7349% containers=36 run_ratio=136.086 | row-space card=599200 cov=24.7349% containers=37 run_ratio=1.666
+GRANT,2422486,599200,36,136.085804,599200,37,1.665916,110|33|34|52|25|53|140|79|66|7
+
+=== categories-archive dense ===
+bundle: /tmp/tessera-bench/fixtures/2422486/categories-archive
+grant mode: random (bench GrantShape::Random, default) (w=10), reps=25, max_tiles=131072
+
+grant contiguity (universe 2422486 rows): entity-space card=1158985 cov=47.8428% containers=25 run_ratio=16791.505 | row-space card=1158985 cov=47.8428% containers=37 run_ratio=5.230
+GRANT,2422486,1158985,25,16791.505210,1158985,37,5.229596,21|34|25|29|11|27|4|2|6|17
+
+=== categories-archive sparse ===
+bundle: /tmp/tessera-bench/fixtures/2422486/categories-archive
+grant mode: spread (deterministic, --sparse) (w=10), reps=25, max_tiles=131072
+
+grant contiguity (universe 2422486 rows): entity-space card=929590 cov=38.3734% containers=23 run_ratio=3793.873 | row-space card=929590 cov=38.3734% containers=37 run_ratio=3.386
+GRANT,2422486,929590,23,3793.872875,929590,37,3.386025,21|12|35|19|17|27|28|8|9|24
+
+=== surnames dense ===
+bundle: /tmp/tessera-bench/fixtures/2422486/surnames
+grant mode: random (bench GrantShape::Random, default) (w=10), reps=25, max_tiles=131072
+
+grant contiguity (universe 2422486 rows): entity-space card=123 cov=0.0051% containers=22 run_ratio=2.674 | row-space card=123 cov=0.0051% containers=25 run_ratio=1.025
+GRANT,2422486,123,22,2.673777,123,25,1.024948,95993|201030|58833|365348|40676|396396|164018|284753|354217|304269
+
+=== surnames sparse ===
+bundle: /tmp/tessera-bench/fixtures/2422486/surnames
+grant mode: spread (deterministic, --sparse) (w=10), reps=25, max_tiles=131072
+
+grant contiguity (universe 2422486 rows): entity-space card=81 cov=0.0033% containers=24 run_ratio=1.884 | row-space card=81 cov=0.0033% containers=27 run_ratio=1.000
+GRANT,2422486,81,24,1.883658,81,27,0.999967,209335|198635|182943|235280|223865|346149|125982|143353|247732|27790
+

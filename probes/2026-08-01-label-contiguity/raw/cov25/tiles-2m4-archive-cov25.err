@@ -1,0 +1,4 @@
+bench-slot: slot acquired (/tmp/tessera-bench.slot.lock)
+bench-slot: loadavg 1.25 >= 1.0, waiting 30s
+bench-slot: loadavg 0.46 — starting
+bench-slot: released (exit 0)

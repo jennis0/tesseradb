@@ -13,6 +13,12 @@ The memo's recommendation is answered here: **a two-term rule does separate the 
 term cannot.** See the memo's "Follow-up 4, answered" section for the recommendation; this file is
 the raw data and the method.
 
+**Every cell here is `categories-subclass`.** The label axis — mask contiguity, which
+`probes/results.md` §5 measures at run ratio 1.00 → 5.11 across label sets — is swept separately in
+[`../2026-08-01-label-contiguity/`](../2026-08-01-label-contiguity/), over 315 further cells at
+2.42M. Result: with coverage held fixed, a 3.8× swing in contiguity moves no family's crossover,
+and the highest serial-favouring tile count is 4,225 in every label set, as here.
+
 ## Method
 
 **Instrument:** `crates/tessera-engine/examples/tile_axis_sweep.rs` (new; the campaign's
