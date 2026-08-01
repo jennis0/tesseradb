@@ -2437,13 +2437,13 @@ mod tests {
         );
     }
 
-    /// **The queue-full 429 must be reachable at the shipped defaults**, which it was not: with
+    /// **The queue-full 429 must be reachable at the shipped defaults.** With
     /// `ingest_admission == ingest_queue_bound` an admitted handler holds at most one queue entry
-    /// (`Engine::accept_ingest` blocks on its receipt), so outstanding entries were bounded by
-    /// admitted handlers and `try_send` could never observe `Full`. D3's whole wire surface —
-    /// `SubmitError::QueueFull`, `estimate_retry_after_s` at any depth above zero, the derived
-    /// `retry_after_s` — was dead at the defaults, reachable only through a `start_write_executor(0)`
-    /// spelling `non_zero_usize` refuses to operators.
+    /// (`Engine::accept_ingest` blocks on its receipt), so outstanding entries are bounded by
+    /// admitted handlers and `try_send` can never observe `Full`. The whole queue-backpressure wire
+    /// surface — `SubmitError::QueueFull`, `estimate_retry_after_s` at any depth above zero, the
+    /// derived `retry_after_s` — would then be dead at the defaults, reachable only through a
+    /// `start_write_executor(0)` spelling `non_zero_usize` refuses to operators.
     ///
     /// **Mutation:** set `DEFAULT_INGEST_QUEUE_BOUND` back to 64 and this goes red.
     #[test]

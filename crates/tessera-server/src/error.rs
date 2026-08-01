@@ -586,8 +586,8 @@ pub fn map_change_batch_error(
         // false of the other two sources folded in here: a successfully applied item IS durable, and
         // a lost receipt may have completed the whole `append → fsync → apply → swap` before the ack
         // was lost. Naming the two mechanisms is what makes the sentence actionable; asserting the
-        // stronger one over all of them is a doc claiming a property the code does not have, which
-        // is the defect class this fix round is mostly made of.
+        // stronger one over all of them would be a comment claiming a property the code does not
+        // have.
         detail.push_str(
             "; a change in it may be in force — a deny-disposition change whose durability failed \
              is applied anyway (lifecycle §4), and a command whose receipt was lost may have \
