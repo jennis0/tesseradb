@@ -36,6 +36,14 @@ verb surface, the client stack, the integration tier, the customisable UI, the d
 stretches — each of which wants its own spec and plan against §13's gradient. Read its
 size as the span it covers rather than as the size of any piece of work in it.
 
+**One companion has already split off.** The gating of *derived artifacts* — clusters,
+labels, hulls, boundary polygons, edges — is
+**`2026-08-01-derived-artifact-gating-design.md`**. It left on 2026-08-01 because it is not
+a client question: it generalises design §7.5 and §7.6, its audience is a security
+reviewer, and it carries a live disclosure question that belongs with C1's review rather
+than with an integrator. §9.1 keeps the pointer and the three conclusions this document
+relies on.
+
 ## 2. The anatomy: two channels
 
 Four integration seams were worked end to end (§8). All four are **count-blind** —
@@ -52,6 +60,14 @@ renderers.
 region breakdowns, cluster counts, anything with a number in it — through the viewer
 verbs into panels, legends and DOM. It is low-volume, exact, and **never** derivable
 from the mark channel, because the marks are a sample and the numbers are not.
+
+**"Number" is too narrow, and the derived-artifact work corrects it** *(2026-08-01; see
+`2026-08-01-derived-artifact-gating-design.md`)*. A cluster hull is an aggregate over the
+visible set, so a client that draws a hull around the *k* points it holds has committed the
+sample-as-set error **in geometry** — the same failure in a shape nobody thinks to check.
+So this is the **exact masked-aggregate channel**, and geometry travels on it: hulls,
+centroids, contour inputs and cell counts alike. The mark channel carries the sample; this
+one carries whatever is exact, whatever its shape.
 
 Every seam analysis in §8 falls into this shape: *renderer via the seam, product via
 the verbs.* An integration that uses only the mark channel produces a picture with no
@@ -934,210 +950,29 @@ affordance owned by the core and surfaced by default rather than opted into. It 
 beside the trichotomy as a conformance item, and it is the display half of §6.1's rule
 3.
 
-### 9.1 Derived artifacts, and the three ways they are gated
+### 9.1 Derived artifacts — moved
 
-Everything above concerns points. **Clusters, labels, hulls, contours, aggregation
-cells, edges and trajectories form a second class** — artifacts derived from points,
-whose visibility is tied to point visibility — and the design carries two instances of it
-with different rules and no framework connecting them *(owner, 2026-08-01)*. Labels
-(§7.6) gate on exact containment; cluster nodes (§7.5) gate on a threshold; C2 records
-that node extent and hull need no gate at all. The generalisation is worth stating,
-because a third artifact type will otherwise go looking for precedent and find two
-contradictory ones.
+Clusters, labels, hulls, contours, aggregation cells, boundary polygons and edges form a
+second class: **named subsets of the point set plus an attachment**, whose visibility is
+tied to point visibility. The design gates three of them by three different rules (§7.6
+containment, §7.5 threshold, C2 none), and the framework connecting them —
+together with the cardinality axis that separates artifact-scale members from edges, the
+three forms a polygon can take, and a live question about differencing the frontier — is
+**`2026-08-01-derived-artifact-gating-design.md`**.
 
-**The rule: a derived artifact is gated by how it was produced.**
+It was split out on 2026-08-01: it had grown to a quarter of this document while answering
+a question that is not a client question. It generalises two sections of the specification,
+its audience is a security reviewer, and it has already produced annotations at design §7.5.
 
-| How produced | Gate | Instance | Literature |
-|---|---|---|---|
-| Shared, precomputed, content-bearing | **exact containment** — serve iff `G ⊆ M_auth` | labels (§7.6), annotations, region summaries | the derivation axiom, multilevel-secure databases (Appendix D) |
-| Shared, precomputed, structure-revealing | **threshold**, as a named disclosure control | cluster nodes, `min_visible_members` (§7.5) | **small-cell suppression**, statistical disclosure control |
-| Recomputed per viewer from masked membership | **none** | hulls, centroids, contours, cells (C2) | not a shared artifact, so nothing to gate |
+Three of its conclusions are load-bearing here and are relied on above and below:
 
-Content-bearing artifacts need containment because their *content* can reveal what is
-inside documents the viewer cannot read — and they inherit §7.6's availability
-pathology, where one deletion breaks containment for every principal and a nested chain
-dark-ships. Structure-revealing artifacts disclose only existence and shape, so a
-threshold is defensible, but only as the security control §7.5 already insists it be.
-Per-viewer-recomputed artifacts are safe by construction, and the failure to avoid is
-**serving a generated artifact instead of recomputing it**: a build-time centroid over
-full membership, shown to someone who sees 5% of it, points at where the invisible
-members are.
-
-**What the class actually is** *(owner, 2026-08-01)*. A cluster has no inherent geometry:
-each point is a member of some cluster set, and the cluster's shape is *derived* from that
-membership. Generalising — **every member of this class is a named subset of the point
-set, plus an attachment**:
-
-| Artifact | Subset | Attachment |
-|---|---|---|
-| Cluster node | membership bitmap | geometry, **derived** per viewer |
-| Boundary polygon | points inside it, resolved at build | geometry, **supplied** and corpus-independent |
-| Label | generating set | content, **derived** from the corpus |
-| Aggregation cell | a Morton range | nothing — the range is the subset |
-
-The engine already has this machinery: §7.5 specifies a membership bitmap per node plus a
-bounding box per slice for pruning, with geometry recomputed from masked membership. So
-the class needs no new mechanism, only a gate.
-
-**But a polygon may be independent of the points, and that splits it off the table above**
-*(owner, 2026-08-01)*. A cluster cannot exist without members; a boundary can. Three
-distinct things hide here, and only the first belongs to this class:
-
-*A geometry that **induces** a subset.* A postcode exists whether or not any document
-falls in it, so it is not a subset with an attachment — it is a shape whose relation to
-the point set is derived, and possibly **empty**. It joins the class through its induced
-count, not through its existence.
-
-*A geometry used purely as **context**.* Reference outlines the client draws. Viewer-
-independent, disclosing nothing, contributing to no displayed quantity. Free.
-
-*A polygon that is an **access-controlled item in its own right***, with its own identity
-and its own terms. This is **not a derived artifact at all** — it is an item that happens
-to have an extent, governed by the points framework rather than this one. At the
-cardinalities in question it is cheap: give it an entity ID and a code from its containing
-cell, and mask it exactly as a point is masked. The extent matters only for tile
-assignment, which the smallest-containing-tile convention handles, and at 10⁴–10⁶ objects
-a full scan per viewport is defensible anyway.
-
-**The trap sits between the first two, and it looks like no decision at all.** If a client
-draws only the boundaries that contain visible points, **that filtering is small-cell
-suppression with a threshold of one**: displaying a boundary asserts "at least one visible
-item here", omitting it asserts "none". One is precisely the threshold the census
-literature identifies as too low. So either draw **all** boundaries — context,
-viewer-independent, free — or gate them on `min_visible_members` like every other
-structure-revealing artifact. Gating on non-emptiness is the option that must not be taken
-by default.
-
-**The two kinds coexist, and mixing them needs no new mechanism** *(owner, 2026-08-01)*.
-A deployment may hold boundaries tied to point visibility by a threshold *and* boundaries
-under independent term-based control — and the same boundary may be both. If a boundary
-carries its own terms it is an item, so it lives in entity space and the existing mask
-covers it: one token, one satisfied-term set, two populations. `M_auth ∩ boundary_ids`
-gives the boundaries a viewer may see; `and_cardinality(members(B), M_auth ∩ point_ids)`
-gives the masked count within one. The induced-membership relation is §7.5's node
-membership bitmap under another name.
-
-Two composition rules follow.
-
-*Terms first, always.* The boundary's own mask decides whether the viewer learns of it at
-all; the threshold applies only after. **The fail-open to name is the reverse** — a
-healthy induced count surfacing a boundary whose terms the viewer does not satisfy, which
-is contained data granting access to its own container. Conjunction, never disjunction,
-in the same shape as `M_sel = M_auth ∧ filters`.
-
-*Where the geometry is independently authorised, the threshold governs the count, not the
-shape.* For a cluster the hull **is** corpus-derived, so a threshold must suppress the
-geometry — the shape is the disclosure. For a boundary the viewer is cleared for, the
-shape discloses nothing they are not already entitled to, so withholding it achieves
-nothing and costs the map: what must be withheld is the **number**. That is §7.5's
-rollup-rather-than-suppression applied to a second object — a boundary with no count, or
-a count at a coarser level of the administrative hierarchy, rather than a hole.
-
-**And the gate is chosen by whether the attachment is corpus-derived**, which is sharper
-than "how it was produced". A city boundary exists independently of the data, so its
-*shape* needs no gate at all and only the count within it is masked. Label text derives
-from documents, so it takes containment. A cluster hull derives from membership, so it is
-recomputed rather than gated.
-
-**A second, orthogonal axis: disclosure sets the gate, cardinality sets the mechanism.**
-Clusters and labels top out around 10⁵; boundary polygons are similar — *"city, town,
-postcode level, rather than per point"* (owner) — so all three are **artifact-scale**,
-where a per-item test against the mask is affordable and membership bitmaps are the right
-representation. **Edges are the exception and are point-scale or larger**: a sparse graph
-over 10⁹ points is 10⁹–10¹⁰ edges, so a per-item containment test is impossible however
-correct it is, and edges need the points' machinery instead — an ordering, contiguous
-ranges, bitmap arithmetic, and a priority prefix. Structurally, with edges sorted by
-`(source, target)`, the visible set is the adjacency runs of visible sources intersected
-with visible targets: O(visible edges), bounded by the mask rather than the corpus. **The
-gating rule for edges is right and the mechanism is not** — that is what the cardinality
-axis catches.
-
-*Polygons, consequently.* Rare boundary polygons need **no new spatial index** for the
-query that matters: "how many points in this postcode" is a build-time membership bitmap
-and one `and_cardinality`, with no query-time spatial join. Only "which polygons intersect
-this viewport" wants a structure, and at these cardinalities that is the bounding-box
-prune §7.5 already performs for nodes. Administrative boundaries are also naturally
-hierarchical, so the frontier machinery applies unchanged. *Context* polygons — reference
-outlines the client simply draws — need none of this, and the only rule they carry is that
-they never contribute to a displayed quantity.
-
-**The threshold tier has a fifty-year literature and a named attack we have not checked
-against** *(survey, 2026-08-01)*. `min_visible_members` is **small-cell suppression**
-from statistical disclosure control — the census-table field — and that field's central
-known weakness is the **differencing attack**: two overlapping releases whose difference
-isolates a cell below the threshold. §8.4 already blocks the filter route by fixing
-maximum depth against `M_auth` rather than `M_sel`, which is the operational form of I12.
-**What has not been examined is differencing the frontier across pan, zoom and slice.**
-C1's owner review is listed as outstanding before launch; it should be conducted in that
-vocabulary and against that literature rather than from first principles. Raised as an
-annotation at design §7.5, since the control lives there.
-
-**The differentiator check came back clean.** Nobody gates shared precomputed derived
-artifacts per viewer. The field has exactly two other moves, and both are the near
-misses: *re-derive per query under a filter* — Elasticsearch's `geotile_grid`/`geohex_grid`
-under document-level security, which is the nearest thing to our underlay that exists in
-production, at per-query cost and with the seam leaks its own documentation concedes;
-and PostGIS `ST_ClusterDBSCAN`/`ST_ConcaveHull` under row-level security, possible but
-O(corpus) per query and heir to the query-plan disclosures Appendix D demolishes — or
-*regenerate per viewer and never share*, which is the whole permissions-aware RAG
-pattern, avoiding the gating problem by paying generation cost per viewer per query.
-**Nobody does the third thing: share the expensive artifact and gate it with a cheap
-containment test.** That is §7.6's "appears unpublished" claim, now checked against the
-adjacent fields rather than assumed. §7.5's rollup-rather-than-suppression frontier
-likewise has no analogue found in any clustering or mapping system — an absence claim,
-and marked as one.
-
-**Hierarchies ride the verbs, not the tiles, and the API idiom already exists.** There is
-no wire standard for delivering a cluster hierarchy; MVT is flat per tile, and the maps
-industry encodes hierarchy as per-zoom membership plus `rank` properties. What *is*
-de-facto standard is an interaction API — supercluster's, which every mapping developer
-has met: `getClusters(bbox, zoom)` returning flat features with `cluster_id` and
-`point_count`, plus `getChildren`, `getLeaves(id, limit, offset)` and
-`getClusterExpansionZoom`. That maps almost one-to-one onto what Phase 3 will build:
-session node handle for `cluster_id`, masked count for `point_count`, the keyset cursor
-for paged leaves, frontier depth for expansion zoom. **Speak that idiom.** Its
-architecture — a KD-tree over fully resident data — is unavailable to us and irrelevant;
-the API shape is the transferable part. The MVT adapter accordingly emits the current
-frontier as flat per-zoom features carrying rank, exactly as basemap schemas do.
-
-**Contours: serve nothing.** They are a client-side derivation of the number channel —
-marching squares (`d3-contour`) over an aggregation grid — and our underlay *is* that
-grid, already masked and exact. Client-derived isolines over served sub-cell counts are
-per-viewer and correct with **zero new server surface**, and level selection is a client
-encoding under §9's ruling. This generalises the third tier: **any client-derived geometry
-over served masked aggregates is safe**, because it derives from what the viewer can
-already see.
-
-**Edges are the benign case of containment, and their hard problem is elsewhere.** An
-edge's generating set has cardinality two, so exact containment is cheap and free of the
-label pathology — dark-shipping pain scales with `|G|`, and one hidden endpoint correctly
-kills one edge rather than a chain. Delivery convention is uniform across the graph
-renderers: **edges travel as index pairs into a node buffer**. The collision is not with
-masking but with **sampling**: an edge is drawable only if both endpoints are in the
-*served* set, not merely the visible one, so a future graph domain must either restrict
-edges to served×served — degree-biased, and a named hard problem, the **induced-subgraph
-sampling problem** — or let edges pull their endpoints into the served set, perturbing
-the point sample. Parked with that name; Appendix H's masked-degree aggregates need none
-of it and remain the near-term graph story.
-
-**And this corrects §2's naming.** A cluster hull is an aggregate over the visible set, so
-a client that draws a hull around the *k* points it holds has committed the sample-as-set
-error in geometry rather than in numbers. **The number channel is really the exact
-masked-aggregate channel, and geometry travels on it** — hulls, centroids, contour inputs
-and cell counts alike. The mark channel carries the sample; the other carries whatever is
-exact, whatever its shape.
-
-**Three traps, one sentence each.** Adapter cluster and cell tiles must never be cached
-across viewers — the same rule as point tiles, restated because aggregate tiles *look*
-shareable. Cluster identifiers in the wild are ephemeral per rebuild, which matches our
-per-session node handles, so promise no more stability than supercluster taught people to
-expect. And any client-side derivation that computes breakpoints "from the data" means
-*the viewer's masked data* — automatic in our model, but state it, so nobody imports a
-library preset that expects corpus-global breaks.
-
-*(One presentational idiom worth copying, from Kibana Maps: a "blended" layer that
-auto-switches between individual documents and cluster marks on a count threshold. That
-is the marks-to-underlay transition, decided client-side from served counts.)*
+- **Contours are served as nothing.** They are a client-side derivation over the underlay's
+  masked sub-cell counts, so per-viewer isolines cost no new server surface.
+- **Cluster hierarchies ride the verbs, not the tiles**, and should speak supercluster's
+  interaction idiom, which maps almost one-to-one onto the Phase 3 frontier.
+- **The number channel is really the exact masked-aggregate channel, and geometry travels
+  on it.** A client drawing a hull around the *k* points it holds commits §2's
+  sample-as-set error in geometry rather than in numbers — which corrects the naming in §2.
 
 ## 10. The client stack
 
