@@ -688,6 +688,14 @@ fn an_injected_append_failure_is_not_repairable() {
         wal.retry_durability(&[sample_record(1)]),
         Err(WalError::Poisoned)
     ));
+    // **And it does not recover by discarding either**, which is the other route back to service.
+    // Truncating to the last durable offset would in fact restore a torn handle — that offset is
+    // still a record boundary, and a partial `write_all` can only have landed above it — so this is
+    // a deliberate conservatism rather than an impossibility, and it is pinned here because the
+    // executor's own guard is redundant with this one: removing that guard changes no behaviour
+    // precisely because the refusal lives here.
+    assert!(matches!(wal.discard_undurable(), Err(WalError::Poisoned)));
+    assert!(wal.is_poisoned(), "and the handle stays poisoned");
 }
 
 /// The **append** injection arm, which nothing else exercises.

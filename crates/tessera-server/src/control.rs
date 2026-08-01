@@ -1411,6 +1411,13 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "deny_submitted": executor.deny_submitted,
             "wal_appends": executor.wal_appends,
             "wal_fsyncs": executor.wal_fsyncs,
+            // The durability incident's only surviving trace. `posture` returns to `running` once a
+            // WAL fault clears — which is what stops a transient device error costing a node its
+            // routing for the life of the process — so a reader watching the posture alone sees
+            // nothing afterwards. This is the number to alarm on: rising at all means denies were
+            // answered 500 and their callers owe retries (contracts §3.1); rising repeatedly means a
+            // disk failing slowly.
+            "wal_recoveries": executor.wal_recoveries,
             "apply_nanos_total": executor.apply_nanos_total,
             "apply_nanos_max": executor.apply_nanos_max,
             // Task 6: the queue-depth gauge and the drain estimate `retry_after_s` is derived

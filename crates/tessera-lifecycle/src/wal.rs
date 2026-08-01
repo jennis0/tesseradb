@@ -578,6 +578,78 @@ impl Wal {
         matches!(self.state, WalState::Unsynced | WalState::Unpublished)
     }
 
+    /// Discard everything above the last durable offset and return the handle to service.
+    ///
+    /// ## What this is, and why it is a *discard* rather than a second repair
+    ///
+    /// [`Wal::retry_durability`] rescues a window whose caller has not yet been answered. Once that
+    /// window has been answered — with an error saying its write is not durable — the region above
+    /// `durable_len` becomes something else entirely: **bytes every caller has been told do not
+    /// count.** Making them durable afterwards is the fail-open the module doc argues against at
+    /// the top, reached from the other end. A refused ingest would reappear, and a deny window's
+    /// `unsuppress` — appended like every other entry, but deliberately *not* applied in memory
+    /// (lifecycle §4 scopes the apply-anyway rule to deletion and suppression) — would take effect
+    /// at the next replay, un-hiding an item whose operator was told it was still suppressed.
+    ///
+    /// So the recovery is the other direction: truncate to `durable_len`, which is **exactly what a
+    /// restart does with the same file**. `Wal::open` resolves the sidecar, replays the prefix and
+    /// truncates the tail; this performs that same truncation in place, without the restart. A
+    /// handle recovered this way is therefore in a state some restart could have produced, which is
+    /// the strongest safety argument available for any in-process recovery.
+    ///
+    /// It needs no records, so nothing has to be retained to make it possible, and it treats
+    /// [`WalState::Unsynced`] and [`WalState::Unpublished`] identically — the bytes are discarded
+    /// whether or not they reached the device.
+    ///
+    /// ## What it deliberately does not do
+    ///
+    /// It does not recover [`WalState::Torn`]. Truncating to `durable_len` would in fact restore a
+    /// torn handle too — `durable_len` is a record boundary, and a partial `write_all` can only
+    /// have landed above it — but a torn handle is the one state in which what the file contains and
+    /// where the descriptor sits are both unknown, and it is the state this module has always
+    /// treated as terminal. Widening it is a decision with an owner, not a consequence of this one.
+    ///
+    /// It does not un-apply anything. Deletions and suppressions applied under the apply-anyway rule
+    /// stay applied in memory for as long as the process lives; this only makes the log agree with
+    /// what those callers were told, which is that a restart will not carry them.
+    pub fn discard_undurable(&mut self) -> Result<u64> {
+        if self.state == WalState::Torn {
+            return Err(WalError::Poisoned);
+        }
+        if self.state == WalState::Healthy && self.len == self.durable_len {
+            return Ok(self.durable_len);
+        }
+        // Every other case does the same work, including a *healthy* handle carrying appends that
+        // have not been synced. Keying the discard on the region rather than on the state is what
+        // keeps this honest under fault injection, where the poison is held by the wrapper and the
+        // underlying handle is healthy with exactly such a region: a version that returned early on
+        // `Healthy` would leave those bytes in place, and the next window's fsync would sweep the
+        // refused records into the durable prefix — the fail-open this whole function exists to
+        // avoid, reintroduced through the test harness.
+
+        // **The boundary comes down before the bytes do, and the order is load-bearing.** In
+        // `Unpublished` the sidecar's rename may already have completed — only its directory fsync
+        // failed — so the sidecar can name the *higher* offset. Truncating first and crashing before
+        // republishing would leave a log shorter than its own sync point, which `open` refuses
+        // outright (C1): a recovery that can produce an unopenable node is not a recovery.
+        //
+        // Republishing first is safe in every state, including the one where it changes nothing:
+        // lowering the recorded boundary to a value that was already durable only ever discards
+        // more, and discarding is what this call is for. A crash between the two steps leaves the
+        // sidecar naming `durable_len` and the file longer, which is the ordinary tail `open`
+        // truncates away.
+        write_sync_offset(&self.sync_path, self.durable_len).map_err(WalError::Io)?;
+        self.file.set_len(self.durable_len).map_err(WalError::Io)?;
+        self.file.sync_data().map_err(WalError::Io)?;
+        self.file
+            .seek(SeekFrom::Start(self.durable_len))
+            .map_err(WalError::Io)?;
+
+        self.len = self.durable_len;
+        self.state = WalState::Healthy;
+        Ok(self.durable_len)
+    }
+
     /// Flushes buffered appends to durable storage and advances the sidecar's last-fsync offset
     /// to match. Returns the new durable offset. The ack contract must not return 200 until this
     /// has returned `Ok`.
@@ -849,6 +921,26 @@ impl ExecutorWal {
         out
     }
 
+    /// Discard the undurable region and return to service — see [`Wal::discard_undurable`], which
+    /// this is the fault-injectable face of.
+    ///
+    /// Not counted by the meter: nothing was made durable, which is the whole point of it.
+    pub fn discard_undurable(&mut self) -> Result<u64> {
+        #[cfg(feature = "fault-injection")]
+        {
+            match self.injected {
+                // A torn handle does not recover, injected or real.
+                Some(InjectedPoison::Torn) => return Err(WalError::Poisoned),
+                // An injected sync failure left the real `Wal` untouched, so there is no undurable
+                // region on disk for it to discard — but the *handle* must come back, or an injected
+                // failure would be terminal where a real one is not.
+                Some(InjectedPoison::Recoverable) => self.injected = None,
+                None => {}
+            }
+        }
+        self.wal.discard_undurable()
+    }
+
     /// Count a successful sync, whichever call achieved it. A failed one is not counted: the meter
     /// measures durability actually achieved.
     fn count_sync(&self, out: &Result<u64>) {
@@ -945,6 +1037,35 @@ mod tests {
             vec![record(0), record(1), record(2)],
             "the re-written records must be back, in order and exactly once"
         );
+    }
+
+    /// **A torn handle recovers by neither route.** Pinned here, against a real [`WalState::Torn`],
+    /// because the wrapper's injected-fault arm refuses first and so hides whatever this function
+    /// does — `tests/wal.rs`'s injected case asserts the wrapper, and asserting the same property
+    /// twice at the same layer is not defence in depth, it is one test written twice.
+    ///
+    /// Truncating to `durable_len` would in fact restore this handle: that offset is a record
+    /// boundary and a partial `write_all` can only have landed above it. The refusal is a chosen
+    /// conservatism about the one state in which neither the file's contents nor the descriptor's
+    /// position is known — not an impossibility, and widening it is an owner's decision.
+    #[test]
+    fn a_torn_handle_recovers_by_neither_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.log");
+        let (mut wal, _) = Wal::open(&path).unwrap();
+        wal.append(&record(0)).unwrap();
+        wal.fsync().unwrap();
+        wal.append(&record(1)).unwrap();
+
+        wal.state = WalState::Torn;
+
+        assert!(matches!(wal.discard_undurable(), Err(WalError::Poisoned)));
+        assert!(matches!(
+            wal.retry_durability(&[record(1)]),
+            Err(WalError::Poisoned)
+        ));
+        assert!(wal.is_poisoned(), "and it stays poisoned");
+        assert!(!wal.is_recoverable(), "and it never claims otherwise");
     }
 
     /// **The naive repair — publish the boundary and hope — is unsafe, and this is what it costs.**

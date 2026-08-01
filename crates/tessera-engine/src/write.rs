@@ -90,9 +90,18 @@ use crate::{Generation, GenerationHandle};
 /// Four states rather than a bool, because the operator response differs and a bool would collapse
 /// "nobody started a writer" into "the writer died", which are different bugs.
 ///
-/// **Monotone.** Published with `fetch_max` over the discriminant, never `store`, so a thread that
-/// panics the instant it is spawned cannot have its `Dead` clobbered by the parent's `Running`.
-/// Readiness that can go back up is not readiness.
+/// **Composed from two components, not latched as one value.** The thread's own state
+/// (`NotStarted` → `Running` → `Dead`) is monotone and latched: published with `fetch_max`, never
+/// `store`, so a thread that panics the instant it is spawned cannot have its `Dead` clobbered by
+/// the parent's `Running`, and `Dead` is absorbing. The WAL's state is **not** latched — it is
+/// mirrored live from the WAL in both directions, because a WAL that has discarded its undurable
+/// region is genuinely healthy again and a posture that could not say so would be reporting a
+/// condition that no longer exists. See [`ExecutorHealth::posture`] for how the two compose and why
+/// `Dead` still wins over everything.
+///
+/// A latched value was the original shape and it made this enum's own doc false: `fetch_max` over
+/// all four meant `WalPoisoned` could never be left, so the function whose stated purpose was to
+/// mirror the WAL rather than remember an error was the one that remembered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum ExecutorPosture {
@@ -103,6 +112,13 @@ pub enum ExecutorPosture {
     /// The WAL refuses every further operation (lifecycle §4's fail-closed rule). **The executor
     /// is still alive and still applying denies** — see [`Executor::run`] for why exiting here
     /// would be the worse of two fail-closed answers.
+    ///
+    /// **Leavable, and only in one direction that matters.** A sync failure is repairable: the
+    /// executor discards the undurable region and the posture returns to `Running` without a
+    /// restart ([`Executor::recover_wal`]). A torn append is not repairable, so a handle that
+    /// reaches it stays here for the life of the process — not by a latch here, but because the
+    /// WAL itself never leaves that state. Terminality lives in the one place that knows whether it
+    /// is true.
     WalPoisoned = 2,
     /// The thread is gone: it panicked, or every handle was dropped and it shut down. Both mean
     /// the same thing to a caller — there is nothing left to apply a write to.
@@ -143,7 +159,33 @@ impl ExecutorPosture {
 /// owns no executor should not own the executor's liveness vocabulary.
 #[derive(Debug)]
 pub struct ExecutorHealth {
-    posture: AtomicU8,
+    /// The **thread's** own state: `NotStarted` → `Running` → `Dead`, advanced with `fetch_max` and
+    /// never lowered. `Dead` is absorbing and is written by a drop guard on the executor's own
+    /// stack during unwind, so a panicked executor can never read as running again.
+    ///
+    /// The WAL's state is deliberately not folded in here — see [`Self::wal_poisoned`].
+    lifecycle: AtomicU8,
+    /// Whether the WAL currently refuses operations, mirrored from the WAL on every observation and
+    /// **in both directions**.
+    ///
+    /// Separate from [`Self::lifecycle`] because the two have opposite temporal shapes and one
+    /// atomic cannot carry both. Thread death is permanent and must latch; WAL poisoning is a
+    /// condition that a discard can end. Folding them into one monotone value — which is what this
+    /// was — meant a node that recovered went on reporting a fault it no longer had, and left
+    /// `Executor::observe_wal`'s stated purpose ("mirror the WAL rather than remember an error")
+    /// describing something the code did not do.
+    ///
+    /// Written only by the executor thread, so a plain store is enough; read by `/readyz` and
+    /// `/control/status` from any thread.
+    wal_poisoned: AtomicBool,
+    /// Times the executor discarded an undurable WAL region and returned to service.
+    ///
+    /// **The incident survives the recovery.** Readiness coming back is the right operator-facing
+    /// answer — a node latched unready over a condition that cleared seconds ago is an outage the
+    /// storage never caused — but it would otherwise erase every trace that durability was once
+    /// lost. This counter is that trace, and it is the number to alarm on: a node that recovers
+    /// repeatedly is a node whose disk is failing slowly, which no single posture reading shows.
+    wal_recoveries: AtomicU64,
     work_submitted: AtomicU64,
     deny_submitted: AtomicU64,
     /// Total nanoseconds spent in **the whole apply step** — the `IngestBuffer`/`Overlay` clone,
@@ -323,6 +365,15 @@ pub struct ExecutorStats {
     /// on nearly every entry), and it is the difference between group commit working and group commit
     /// running.
     pub wal_fsyncs: u64,
+    /// Times the executor discarded an undurable WAL region and returned to service — see
+    /// [`ExecutorHealth::wal_recoveries`].
+    ///
+    /// **The durability incident's only surviving trace.** The posture returns to `running` once the
+    /// condition clears, which is the right answer for routing and the wrong one for diagnosis; this
+    /// is what an operator alarms on. A node recovering repeatedly has a disk that is failing
+    /// slowly, and every deny answered 500 in between is one whose caller owes a retry
+    /// (contracts §3.1).
+    pub wal_recoveries: u64,
     /// Work-lane jobs whose `execute` has returned (Task 6).
     pub work_completed: u64,
     /// `work_submitted - work_completed`, saturating.
@@ -402,7 +453,9 @@ impl ExecutorStats {
 impl ExecutorHealth {
     fn new() -> Self {
         ExecutorHealth {
-            posture: AtomicU8::new(ExecutorPosture::NotStarted as u8),
+            lifecycle: AtomicU8::new(ExecutorPosture::NotStarted as u8),
+            wal_poisoned: AtomicBool::new(false),
+            wal_recoveries: AtomicU64::new(0),
             work_submitted: AtomicU64::new(0),
             deny_submitted: AtomicU64::new(0),
             apply_nanos_total: AtomicU64::new(0),
@@ -421,12 +474,56 @@ impl ExecutorHealth {
         }
     }
 
+    /// Advance the **thread's** state. Monotone: `NotStarted` → `Running` → `Dead`, never back.
+    ///
+    /// Takes only those three; the WAL's contribution arrives through [`Self::mirror_wal`], and
+    /// keeping them apart is what stops a caller latching a recoverable condition by reaching for
+    /// the function next to it.
     fn advance(&self, to: ExecutorPosture) {
-        self.posture.fetch_max(to as u8, Ordering::SeqCst);
+        debug_assert!(
+            to != ExecutorPosture::WalPoisoned,
+            "the WAL's state is mirrored, never advanced — see `mirror_wal`"
+        );
+        self.lifecycle.fetch_max(to as u8, Ordering::SeqCst);
     }
 
+    /// Publish the WAL's current state, in **either** direction. Executor thread only.
+    ///
+    /// Returns whether this observation was a recovery, so the counter is bumped exactly once per
+    /// transition rather than once per observation — the executor observes on a timer while
+    /// degraded, and a level-triggered count would report the poll rate.
+    fn mirror_wal(&self, poisoned: bool) -> bool {
+        let was = self.wal_poisoned.swap(poisoned, Ordering::SeqCst);
+        let recovered = was && !poisoned;
+        if recovered {
+            self.wal_recoveries.fetch_add(1, Ordering::Relaxed);
+        }
+        recovered
+    }
+
+    /// The two components composed, in the order an operator needs them.
+    ///
+    /// **`Dead` wins over everything**, including a poisoned WAL: a thread that is gone cannot apply
+    /// a write whatever the log says, and the two faults call for different operator actions. It is
+    /// also the only arm that must survive a racing recovery — the drop guard runs during unwind,
+    /// after which no executor exists to mirror anything, so a `Dead` node stays `Dead` by the
+    /// latch rather than by anyone remembering to stop mirroring.
+    ///
+    /// **`NotStarted` is answered before the WAL is consulted**, because a WAL that no executor owns
+    /// has had no operation attempted on it and reporting it poisoned would describe a failure that
+    /// could not have happened. Both reduce to not-ready, so neither is the fail-open direction.
     pub fn posture(&self) -> ExecutorPosture {
-        ExecutorPosture::from_u8(self.posture.load(Ordering::SeqCst))
+        match ExecutorPosture::from_u8(self.lifecycle.load(Ordering::SeqCst)) {
+            ExecutorPosture::Dead => ExecutorPosture::Dead,
+            ExecutorPosture::NotStarted => ExecutorPosture::NotStarted,
+            _ if self.wal_poisoned.load(Ordering::SeqCst) => ExecutorPosture::WalPoisoned,
+            other => other,
+        }
+    }
+
+    /// Times an undurable WAL region was discarded and the executor returned to service.
+    pub fn wal_recoveries(&self) -> u64 {
+        self.wal_recoveries.load(Ordering::Relaxed)
     }
 
     pub fn stats(&self) -> ExecutorStats {
@@ -440,6 +537,7 @@ impl ExecutorHealth {
             apply_nanos_max: self.apply_nanos_max.load(Ordering::Relaxed),
             wal_appends: self.wal.appends(),
             wal_fsyncs: self.wal.fsyncs(),
+            wal_recoveries: self.wal_recoveries.load(Ordering::Relaxed),
             work_completed,
             work_depth: work_submitted.saturating_sub(work_completed),
             work_service_nanos_ewma: self.work_service_nanos_ewma.load(Ordering::Relaxed),
@@ -1737,6 +1835,20 @@ const DENY_DURABILITY_BACKOFF: [std::time::Duration; 2] = [
 /// schedule changes — it starts testing recovery instead, and passes either way.
 pub const DENY_DURABILITY_ATTEMPTS: usize = DENY_DURABILITY_BACKOFF.len() + 1;
 
+/// How often a degraded executor wakes to attempt recovery when no traffic would wake it
+/// ([`Executor::wait_for_work`]).
+///
+/// **It bounds how long a node stays unready after its storage recovers, and nothing else.** The
+/// attempt is two small file operations, so the cost of polling is negligible; the cost of polling
+/// *too slowly* is an idle node steering traffic away from itself long after the fault cleared.
+/// A second is short against the interval an operator or an orchestrator would take to notice, and
+/// long enough that a genuinely dead device is retried sixty times a minute rather than continuously.
+///
+/// It is not a latency bound on anything a caller sees: a degraded node still answers denies
+/// immediately, and traffic arriving at any point wakes the loop through the doorbell as usual, so
+/// a busy node attempts recovery far more often than this.
+const WAL_RECOVERY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// One deny in an open window: its record, and everything needed to apply it and answer its caller.
 ///
 /// `record` is built at the drain rather than at the append so the window is a list of things that
@@ -1810,13 +1922,81 @@ impl Executor {
     /// its `try_recv`, so a token is still only ever discarded while a job is still visible.
     fn run(&mut self) {
         loop {
+            self.recover_wal();
             while self.run_deny_pass() {}
             if self.run_work_pass() {
                 continue;
             }
-            if self.queues.bell.recv().is_err() {
+            if !self.wait_for_work() {
                 break;
             }
+        }
+    }
+
+    /// If the WAL is degraded and the degradation is one a discard can end, end it.
+    ///
+    /// ## Why a node must be able to leave `WalPoisoned` without a restart
+    ///
+    /// The causes are transient at least as often as they are terminal — a filesystem that filled
+    /// and was relieved, a device that stumbled — and the previous behaviour latched the node
+    /// unready for the life of the process over any of them. That is an outage the storage did not
+    /// cause. Denies were never blocked by it (they are applied in memory and answered 500 whatever
+    /// the posture says, and nothing gates `/control/changes` on readiness), but routing was, and a
+    /// node that will not take reads again until someone notices is not fail-closed, it is just
+    /// down.
+    ///
+    /// ## Why the recovery discards rather than repairs
+    ///
+    /// By the time this runs, every caller of the region above the durable boundary has been told
+    /// its write is not durable. Making those bytes durable *afterwards* is fail-open in both lanes:
+    /// a refused ingest reappears, and an exhausted deny window's `unsuppress` — appended like every
+    /// other entry but deliberately not applied in memory — takes effect at the next replay, undoing
+    /// a suppression whose operator was told it still stood. So the region is discarded, which is
+    /// precisely what a restart would do with the same file
+    /// (`tessera_lifecycle::wal::Wal::discard_undurable`). Nothing is retained to make it possible
+    /// and both halves of a sync failure are covered: the bytes go whether or not they reached the
+    /// device.
+    ///
+    /// **What does not recover.** A torn append. There is no repair for it here and the WAL offers
+    /// none, so such a node stays `WalPoisoned` until it is restarted — which is the honest answer,
+    /// since a partial `write_all` leaves neither the file's contents nor the descriptor's position
+    /// known.
+    ///
+    /// **What it costs a healthy node: one bool read per loop iteration**, and the loop iterates
+    /// only when there was work or a wake-up. Everything below the guard is unreachable while the
+    /// WAL is fine.
+    fn recover_wal(&mut self) {
+        if !self.wal.is_poisoned() {
+            return;
+        }
+        if !self.wal.is_recoverable() {
+            return;
+        }
+        // A failure here leaves the handle exactly as it was, so the next pass tries again. It is
+        // deliberately silent about failing: this runs on a timer while degraded, and a log line per
+        // attempt would turn one storage fault into an unbounded stream of them.
+        let _ = self.wal.discard_undurable();
+        self.observe_wal();
+    }
+
+    /// Block until something may be waiting, and report whether the executor should keep running.
+    ///
+    /// **While the WAL is degraded this wakes on a timer as well as on the doorbell**, because
+    /// otherwise recovery would be reachable only by traffic: a node whose disk recovered during a
+    /// quiet period would stay unready until something arrived to wake it, and `/readyz` steers
+    /// traffic away from exactly that node. The poll runs only while degraded, so a healthy
+    /// executor blocks indefinitely exactly as it did.
+    ///
+    /// Shutdown is unchanged and still leaves only from here, after both queues have been observed
+    /// empty: a timeout resumes the loop, and only a disconnect ends it.
+    fn wait_for_work(&self) -> bool {
+        if self.wal.is_poisoned() {
+            !matches!(
+                self.queues.bell.recv_timeout(WAL_RECOVERY_POLL_INTERVAL),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+            )
+        } else {
+            self.queues.bell.recv().is_ok()
         }
     }
 
@@ -2848,14 +3028,17 @@ impl Executor {
         Published::by_swap()
     }
 
-    /// Mirror the WAL's own poison flag into the posture.
+    /// Mirror the WAL's own poison flag into the posture, **in both directions**.
     ///
     /// Asked of the WAL rather than remembered from the last error this loop happened to see: a
-    /// posture derived from the executor's bookkeeping can drift from the thing it describes.
+    /// posture derived from the executor's bookkeeping can drift from the thing it describes. That
+    /// was the stated intent from the start and it was not what the code did — the flag was raised
+    /// through a monotone `fetch_max`, so it could be entered and never left, and the WAL returning
+    /// to health was invisible. It is a plain store now, and the WAL is the only thing that decides:
+    /// a torn handle never reports healthy because it never *becomes* healthy, not because anything
+    /// here refuses to lower the flag.
     fn observe_wal(&self) {
-        if self.wal.is_poisoned() {
-            self.health.advance(ExecutorPosture::WalPoisoned);
-        }
+        self.health.mirror_wal(self.wal.is_poisoned());
     }
 
     /// Send a **successful** receipt. Requires proof that the effect is live — see [`Published`].

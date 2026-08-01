@@ -98,6 +98,20 @@ fn visible(engine: &Engine) -> u64 {
     out.tiles[0].visible
 }
 
+/// Block until `cond` holds, polling a value the executor publishes rather than sleeping on a guess
+/// about how long it takes to get there. Bounded, so a property that never arrives fails the test
+/// instead of hanging CI.
+fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting: {what}"
+        );
+        std::thread::yield_now();
+    }
+}
+
 fn entity_of(engine: &Engine, source_id: u64) -> EntityId {
     engine
         .resolve_external_id(&source_id_key(source_id))
@@ -609,10 +623,25 @@ fn deny_append_failure_still_applies() {
         before - 1,
         "…and the item must be hidden ANYWAY: an under-durable deny beats a refused one ({err})"
     );
+
+    // The node went unready over the failure and comes back by discarding the undurable region.
+    // Asserted through the recovery counter rather than through the posture, because the posture is
+    // no longer a stable value to read from another thread: the executor clears it on its own next
+    // pass, so a bare `assert_eq!(posture, WalPoisoned)` here would be a race that happens to win.
+    // A counter that only ever rises records the same event without one.
+    wait_until("the executor discarded the undurable region", || {
+        engine.write_executor_stats().wal_recoveries == 1
+    });
     assert_eq!(
         engine.write_executor_posture(),
-        ExecutorPosture::WalPoisoned,
-        "durability is owed, so the node must stop claiming it is ready"
+        ExecutorPosture::Running,
+        "recovery is the point: a node must not stay unready over a condition that has cleared"
+    );
+    assert_eq!(
+        visible(&engine),
+        before - 1,
+        "and recovery must not un-apply the suppression — discarding the log's undurable tail says \
+         nothing about the overlay, which keeps the item hidden for the life of this process"
     );
 }
 
@@ -845,29 +874,41 @@ fn an_unsuppress_append_failure_applies_nothing() {
         "the item must STAY hidden: an unsuppress that is not durable must not be applied, or a \
          restart re-hides an item the operator was told was still suppressed anyway ({err})"
     );
+
+    // **And recovery must not apply it either.** This is the sharpest form of the rule: the
+    // `Unsuppress` record was appended before the sync failed, so it sits in the undurable region,
+    // and a recovery that made that region durable rather than discarding it would un-hide the item
+    // at the next replay — behind a 500 whose body says nothing was applied.
+    wait_until("the executor discarded the undurable region", || {
+        engine.write_executor_stats().wal_recoveries == 1
+    });
     assert_eq!(
-        engine.write_executor_posture(),
-        ExecutorPosture::WalPoisoned,
-        "durability is owed, so the node must stop claiming it is ready"
+        visible(&engine),
+        suppressed,
+        "the item must still be hidden after recovery"
     );
 }
 
-/// **A poisoned WAL trips the posture rather than being retried** (lifecycle §4).
+/// **A torn WAL trips the posture, stays there, and still applies denies** (lifecycle §4).
 ///
 /// The second half is what stops an obvious optimisation from being fail-open. "The posture is
 /// poisoned, so skip the WAL call and return the error" would satisfy the first assertion while
 /// leaving **every deny after the first unapplied** — the exact failure §4 exists to prevent. So
 /// this submits a suppression *after* the poison and requires that the item still disappears.
 ///
-/// Named for the posture, not for readiness: wiring `readyz` is Task 3b's, and this is the signal
-/// it reads.
+/// **The fault is an append failure, not a sync failure, and that is now load-bearing.** A partial
+/// `write_all` leaves no record boundary, so it is terminal and the posture is a stable value another
+/// thread can read. A *sync* failure is recoverable: the executor discards the undurable region on
+/// its next pass and the posture returns to `Running`, so asserting `WalPoisoned` after one would be
+/// a race that happens to win — see `a_recovered_wal_returns_to_ready_without_a_restart` for that
+/// path asserted as the eventual condition it is.
 #[test]
-fn a_poisoned_wal_trips_the_not_ready_posture() {
+fn a_torn_wal_stays_poisoned_and_still_applies_denies() {
     let tmp = TempDir::new().unwrap();
     let (engine, faults) = engine_with_faults(&tmp, 8);
 
     let doomed = entity_of(&engine, 3);
-    faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
+    faults.fail_next_appends(1);
     let _ = engine.accept_change(source_id_key(3), doomed, ChangeOp::Suppress, None);
     assert_eq!(
         engine.write_executor_posture(),
@@ -896,6 +937,114 @@ fn a_poisoned_wal_trips_the_not_ready_posture() {
         before - 1,
         "a poisoned WAL must not stop denies being applied — that is why WalPoisoned is a posture \
          and not a shutdown"
+    );
+
+    // **And it must never leave.** The recovery path exists and runs on a timer while degraded, so
+    // this asserts the WAL's own terminality rather than trusting that nothing calls it: there is no
+    // boundary to rewind a torn append to, and a node that reported ready again would be claiming a
+    // log it cannot describe.
+    assert_eq!(
+        engine.write_executor_stats().wal_recoveries,
+        0,
+        "a torn WAL offers nothing to discard, so no recovery may be recorded"
+    );
+    assert_eq!(
+        engine.write_executor_posture(),
+        ExecutorPosture::WalPoisoned,
+        "and the posture stays there for the life of the process"
+    );
+}
+
+/// **A node that loses durability and gets it back returns to ready without a restart.**
+///
+/// The failure latched the posture for the life of the process before this: every cause — a
+/// filesystem that filled and was relieved, a device that stumbled — cost the node its routing until
+/// someone noticed. Denies were never blocked (they are applied in memory and answered 500 whatever
+/// the posture says), so what was lost was reads, to a node that was fine.
+///
+/// The wait is on `wal_recoveries`, a value the executor publishes, not on a duration.
+#[test]
+fn a_recovered_wal_returns_to_ready_without_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+
+    let entity = entity_of(&engine, 3);
+    faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
+    engine
+        .accept_change(source_id_key(3), entity, ChangeOp::Suppress, None)
+        .expect_err("every attempt failed, so durability is owed");
+
+    wait_until("the executor recovered", || {
+        engine.write_executor_stats().wal_recoveries == 1
+    });
+    assert_eq!(
+        engine.write_executor_posture(),
+        ExecutorPosture::Running,
+        "the condition has cleared, so the node must stop reporting it"
+    );
+
+    // Ready means ready: the next write must actually land, durably, with no fault armed.
+    let second = entity_of(&engine, 6);
+    let before = visible(&engine);
+    engine
+        .accept_change(source_id_key(6), second, ChangeOp::Suppress, None)
+        .expect("a recovered executor accepts writes again");
+    assert_eq!(visible(&engine), before - 1);
+}
+
+/// **The recovery discards the undurable region; it does not publish it.** This is the fail-open the
+/// direction of the recovery is chosen to avoid, asserted end to end.
+///
+/// An `Unsuppress` is appended to the WAL like every other deny entry, but lifecycle §4 scopes the
+/// apply-anyway rule to deletion and suppression, so a failed window deliberately does **not** apply
+/// it: the item stays hidden and its caller is told the change did not take. Those bytes are
+/// nonetheless sitting above the durable boundary. A recovery that finished the interrupted write —
+/// which is the intuitive reading of "repair" and is free for the half where the data is already on
+/// disk and only the boundary record is missing — would make them durable, and the next replay would
+/// un-hide an item whose operator was told it was still suppressed.
+///
+/// So the assertion is on a **reopened** engine, because the divergence is invisible on the live one:
+/// the overlay keeps the item hidden either way, and only replay shows which bytes were kept.
+#[test]
+fn recovery_discards_the_undurable_region_rather_than_publishing_it() {
+    let tmp = TempDir::new().unwrap();
+    let wal_path = tmp.path().join("wal.log");
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+
+    let entity = entity_of(&engine, 3);
+    let before = visible(&engine);
+    engine
+        .accept_change(source_id_key(3), entity, ChangeOp::Suppress, None)
+        .expect("the suppression is durable: no fault is armed yet");
+    let suppressed = visible(&engine);
+    assert_eq!(
+        suppressed,
+        before - 1,
+        "the item must be hidden before the unsuppress, or this test asserts nothing"
+    );
+
+    faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
+    engine
+        .accept_change(source_id_key(3), entity, ChangeOp::Unsuppress, None)
+        .expect_err("the unsuppress never became durable");
+    wait_until("the executor recovered", || {
+        engine.write_executor_stats().wal_recoveries == 1
+    });
+    drop(engine);
+
+    let mut reopened = open_engine(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache-reopened"),
+        &wal_path,
+    );
+    reopened
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    assert_eq!(
+        visible(&reopened),
+        suppressed,
+        "the item must STILL be suppressed after the restart: the unsuppress was refused, so \
+         recovery must have discarded its record rather than publishing it"
     );
 }
 
@@ -961,6 +1110,21 @@ fn an_executor_panic_is_reported_dead() {
         .accept_change(source_id_key(3), EntityId::new(1), ChangeOp::Suppress, None)
         .expect_err("a dead executor must be reported, never swallowed");
     assert!(format!("{err}").contains("not running"), "got: {err}");
+
+    // **`Dead` is absorbing, and it has to be asserted now that the posture is composed rather than
+    // latched as one value.** The WAL this executor left behind is perfectly healthy — the panic was
+    // at a pause point, not a durability failure — so a composition that read the WAL first, or that
+    // let the thread's own state be re-stored rather than raised, would answer `Running` for a
+    // process with no writer at all. That is the worst available answer: a caller would go on being
+    // told its suppressions are in flight.
+    for _ in 0..64 {
+        assert_eq!(
+            engine.write_executor_posture(),
+            ExecutorPosture::Dead,
+            "a dead executor must never report anything else, whatever its WAL says"
+        );
+        std::thread::yield_now();
+    }
 }
 
 /// An engine that never started an executor refuses writes rather than pretending.
