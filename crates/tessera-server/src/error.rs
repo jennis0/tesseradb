@@ -2,8 +2,8 @@
 //!
 //! Every response body is `{"error": code, "detail": string}`. `detail` strings built by this
 //! crate never carry a bearer token, auth-data bytes, an entity id, or a server filesystem path
-//! (the logging rule Task 15 tests, honoured here too even though these are response bodies, not
-//! log lines). That is enforced, not merely intended: a lower layer's error `Display` is never
+//! (the same rule the logging tests enforce, honoured here too even though these are response
+//! bodies, not log lines). That is enforced, not merely intended: a lower layer's error `Display` is never
 //! forwarded into a body — see [`map_store_error`], which logs it and substitutes a fixed string.
 
 use axum::http::StatusCode;
@@ -20,7 +20,7 @@ pub enum ApiError {
     /// 401: missing, malformed, or unrecognised bearer credential.
     BadCredential,
     /// 403: a bearer token the engine recognises, but whose `expires_at` has passed (the engine
-    /// itself never checks this — Task 11's report flags it as a server obligation).
+    /// itself never checks this; enforcing the deadline is `AppState::authenticated_session`'s job).
     ExpiredToken,
     /// 404: a named slice, external id, or handle this bundle/session has never heard of.
     Unknown(String),
@@ -34,13 +34,13 @@ pub enum ApiError {
     /// 500: mask construction, WAL durability, or any other fail-closed failure (Global
     /// Constraint 3). Never returned for a partial or best-effort result.
     FailClosed(String),
-    /// 429 (D-B/D-E): the viewer/session compute-admission gate is saturated — either the outer
+    /// 429: the viewer/session compute-admission gate is saturated — either the outer
     /// slots semaphore had no permit to `try_acquire` at all, or the inner compute semaphore did
     /// not free one within `admission_timeout_ms`. Whole-request shed, never a partial result or
     /// a narrowed `k` (spec constraint: shedding must not change WHAT a principal sees). Carries
     /// `Retry-After: 1` and body `retry_after_s: 1`, both fixed, never a knob. Also reached from
-    /// `EngineError::ProjectionBuilding`/`FragmentBuilding` (D-G): a concurrent single-flight
-    /// build is already in progress, and by the client's retry the slot is warm.
+    /// `EngineError::ProjectionBuilding`/`FragmentBuilding`: a concurrent single-flight build is
+    /// already in progress, and by the client's retry the slot is warm.
     Backpressure,
     /// 429 `backpressure` for the **write** path: the bounded ingest work queue was full
     /// (`SubmitError::QueueFull`; contracts §3.1's 429 row names ingest first).
@@ -52,22 +52,19 @@ pub enum ApiError {
     /// grounds that a compute-admission saturation clears on one request's timescale, which is not
     /// true of a write queue draining at fsync timescale.
     ///
-    /// **The value is per-subject, and that is now contract** — contracts §3.1's 429 row and §0.3
-    /// **deviation 11** (r10, 2026-08-01). What every 429 on every plane must carry is the
-    /// `Retry-After` header and a body `retry_after_s` holding the same number; what is *not*
-    /// contract is that the number is `1` anywhere but the compute-admission gate. Task 3b took
-    /// that reading at implementation and recorded it here as unratified; it has since been
-    /// ratified, and deviation 11 spells out the consequence this variant exists to make possible —
-    /// "a caller that retries at 1 s against a queue draining in 30 s manufactures exactly the load
-    /// the 429 exists to shed".
+    /// **The value is per-subject, and that is contract** — contracts §3.1's 429 row and §0.3
+    /// **deviation 11**. What every 429 on every plane must carry is the `Retry-After` header and a
+    /// body `retry_after_s` holding the same number; what is *not* contract is that the number is
+    /// `1` anywhere but the compute-admission gate. Deviation 11 spells out the consequence this
+    /// variant exists to make possible — "a caller that retries at 1 s against a queue draining in
+    /// 30 s manufactures exactly the load the 429 exists to shed".
     ///
-    /// **`retry_after_s` is derived, as of Task 6**, by `tessera_engine::estimate_retry_after_s`
-    /// from the work queue's depth and an EWMA of observed work-lane service time. That function's
-    /// doc states, at the site, the three things that make it an **estimator and not a bound**:
-    /// service time is not stationary (the `IngestBuffer` clone is O(total buffered items) and
-    /// flush is inert until 2.2), the deny lane is drained to empty before every work item and so
-    /// is in the real drain but not in the figure, and the depth is a snapshot of two
-    /// independently-advancing counters.
+    /// **`retry_after_s` is derived** by `tessera_engine::estimate_retry_after_s` from the work
+    /// queue's depth and an EWMA of observed work-lane service time. That function's doc states, at
+    /// the site, the three things that make it an **estimator and not a bound**: service time is not
+    /// stationary (the `IngestBuffer` clone is O(total buffered items)), the deny lane is drained to
+    /// empty before every work item and so is in the real drain but not in the figure, and the depth
+    /// is a snapshot of two independently-advancing counters.
     ///
     /// **Unreachable from `/control/changes`, twice over.** A `Command::Change` goes to the
     /// unbounded deny lane by `Command::is_never_shed`, so it cannot produce `QueueFull`; and
@@ -75,8 +72,8 @@ pub enum ApiError {
     /// contracts §3.1 says `/control/changes` is **never** load-shed and a structural absence
     /// survives an edit to `is_never_shed` that a comment would not.
     WriteBackpressure { retry_after_s: u64 },
-    /// 429 `backpressure` for `/control/ingest`'s **admission** bound (Task 6, D2): this server is
-    /// already running `ingest_admission` ingest handlers, each holding a blocking-pool thread.
+    /// 429 `backpressure` for `/control/ingest`'s **admission** bound: this server is already
+    /// running `ingest_admission` ingest handlers, each holding a blocking-pool thread.
     /// The refusal happens *before* `spawn_blocking`, so it costs no thread, no queue slot and no
     /// WAL byte.
     ///
@@ -94,8 +91,8 @@ pub enum ApiError {
     ///
     /// **Distinguishable from `WriteBackpressure` on the wire, deliberately**, because the two
     /// tests that pin them would otherwise be able to pass on each other's 429: the `detail`
-    /// strings name different mechanisms and every 429 assertion in this task matches on the body,
-    /// never on the status alone.
+    /// strings name different mechanisms, and every 429 assertion matches on the body rather than
+    /// on the status alone.
     IngestAdmissionBackpressure { retry_after_s: u64 },
     /// 503 `not-ready`: contracts §3.1's row — "unverified bundle, unready worker, unloaded
     /// plugin". Reached when the write executor was never started, or is gone **without having
@@ -119,13 +116,14 @@ pub enum ApiError {
 struct ErrorBody {
     error: &'static str,
     detail: String,
-    /// Contracts §3.1's error body: `retry_after_s` is optional and, until this task, unused —
-    /// present only on `Backpressure`, so every other error body stays byte-identical.
+    /// Contracts §3.1's error body: `retry_after_s` is optional and present only on the three
+    /// backpressure variants, so every other error body carries no such field at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_s: Option<u64>,
 }
 
-/// D-E: `Retry-After` is fixed at 1 second, never a knob — the same figure the body's
+/// `Retry-After` for the compute-admission gate is fixed at 1 second, never a knob — the same
+/// figure the body's
 /// `retry_after_s` carries, so a caller reading either agrees with the other.
 const RETRY_AFTER_SECS: u64 = 1;
 
@@ -192,16 +190,15 @@ impl ApiError {
 
     /// The `Retry-After` header and the body's `retry_after_s`, which must always agree.
     ///
-    /// **Exhaustive, with no `_` arm, and that is the point.** This was
-    /// `matches!(self, ApiError::Backpressure).then_some(RETRY_AFTER_SECS)` — correct while there
-    /// was one 429, and silently wrong the moment a second arrived: a new retryable variant would
-    /// have shipped a 429 carrying neither the header nor the body field, with nothing failing to
-    /// compile and the existing header test staying green over the *other* variant. Naming every
-    /// variant makes a new one a compile error here, which is the same discipline
-    /// [`map_accept_error`] applies to its own table.
+    /// **Exhaustive, with no `_` arm, and that is the point.** A `matches!(self,
+    /// ApiError::Backpressure)` would be correct for one 429 and silently wrong the moment a second
+    /// arrived: a new retryable variant would ship a 429 carrying neither the header nor the body
+    /// field, with nothing failing to compile and the existing header test staying green over the
+    /// *other* variant. Naming every variant makes a new one a compile error here, which is the
+    /// same discipline [`map_accept_error`] applies to its own table.
     fn retry_after_s(&self) -> Option<u64> {
         match self {
-            // D-E: fixed at one second, never a knob — see the variant's doc.
+            // Fixed at one second, never a knob — see the variant's doc.
             ApiError::Backpressure => Some(RETRY_AFTER_SECS),
             ApiError::WriteBackpressure { retry_after_s } => Some(*retry_after_s),
             // Deviation 11's third subject — see the variant's doc for why its number is neither
@@ -250,7 +247,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// `retry_after_s` for [`ApiError::IngestAdmissionBackpressure`] (Task 6, D2).
+/// `retry_after_s` for [`ApiError::IngestAdmissionBackpressure`].
 ///
 /// **One work item's service time, not the queue's** — and the difference is the argument. An
 /// admission permit frees when one in-flight handler completes, the executor is serial, so the
@@ -286,12 +283,10 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
     match e {
         EngineError::PinExpired => ApiError::PinExpired,
         EngineError::UnknownSlice(slice) => ApiError::Unknown(format!("unknown slice '{slice}'")),
-        // Contracts §2.2/§3.2 r6: `POST /v1/items/{tessera_id}`'s caller-supplied `idset` did not
-        // match the generation `Engine::item` validated it against (fix wave, Task 2 finding —
-        // this check used to run in the handler, against a separate `Engine::meta()` call, before
-        // moving inside `Engine::item` to close a second generation load). Fixed detail string,
-        // named explicitly rather than left to the catch-all, so a future catch-all change can
-        // never accidentally alter this one response's body.
+        // Contracts §2.2/§3.2: `POST /v1/items/{tessera_id}`'s caller-supplied `idset` did not
+        // match the generation `Engine::item` validated it against. Fixed detail string, named
+        // explicitly rather than left to the catch-all, so a future catch-all change can never
+        // accidentally alter this one response's body.
         EngineError::StaleIdSet => {
             ApiError::Conflict("stale idset; re-resolve by external_id".to_string())
         }
@@ -305,29 +300,26 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // Lifecycle §2.2's per-session pin cap, the third member of the same family: contracts
         // §3.1's 422 row is "malformed request, bounds exceeded, unknown filter operand", and this
         // is a bound exceeded. Deliberately NOT 429 — the cap clears when a pin expires, on the
-        // TTL's timescale, so `Retry-After: 1` would be a lie. Landed by the seam commit with the
-        // variant itself (Task 0 gate, C2) so Track C's Task 4, which owns `pins.rs` but not this
-        // file, does not have to choose between editing Track B's file and letting a caller-fixable
-        // bound fall through the catch-all below as a fail-closed 500.
+        // TTL's timescale, so `Retry-After: 1` would be a lie. Named explicitly rather than left
+        // to the catch-all below, which would turn a caller-fixable bound into a fail-closed 500.
         cap @ EngineError::PinCapExceeded { .. } => ApiError::Contract(cap.to_string()),
         // `Store`/`Io` wrap a `StoreError`/`io::Error` whose `Display` names a filesystem path —
         // the same leak `map_store_error` closes, reached through the engine's error enum instead
         // of directly. One sanitiser for both doors.
         store_or_io @ (EngineError::Store(_) | EngineError::Io(_)) => map_store_error(store_or_io),
-        // D-G / Task 4: a concurrent request is already building this session's row projection.
-        // The single-flight cache never blocks a second caller (D-G's non-blocking-waiters
-        // rule), so the honest response is 429 `backpressure` with `Retry-After: 1` — by the
-        // client's retry the slot is warm. Named explicitly rather than left to the catch-all so
-        // this mapping stays visible at the call site.
+        // A concurrent request is already building this session's row projection. The single-flight
+        // cache never blocks a second caller, so the honest response is 429 `backpressure` with
+        // `Retry-After: 1` — by the client's retry the slot is warm. Named explicitly rather than
+        // left to the catch-all so this mapping stays visible at the call site.
         EngineError::ProjectionBuilding => ApiError::Backpressure,
-        // D-G / Task 4 (lifecycle §3.3): the fragment-cache twin of the arm above — a concurrent
+        // Lifecycle §3.3, the fragment-cache twin of the arm above: a concurrent
         // `authorise` call is already building this credential's mask fragment. Same mapping.
         EngineError::FragmentBuilding => ApiError::Backpressure,
-        // D-C: cooperative cancellation (the rapid-pan case). Named explicitly, rather than left
+        // Cooperative cancellation (the rapid-pan case). Named explicitly, rather than left
         // to the catch-all below, so the response body can NEVER carry this variant's own
         // `Display` — a fixed string only, the same rule `map_store_error`/`map_join_error` apply
         // to a lower layer's text. Fail-closed 500, never a 2xx or any 4xx: in practice this arm
-        // is unreachable today (the server's drop-guard only flips the token when the whole
+        // is unreachable (the server's drop-guard only flips the token when the whole
         // handler future is dropped, which means nobody is left to read a response either), but it
         // must stay fail-closed-shaped in case a future refactor makes it reachable on a still-live
         // connection.
@@ -353,10 +345,10 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
 /// filesystem path in a viewer-plane 500 body, and — before the store's messages were made
 /// entity-independent — an entity ID with it, contradicting this module's own opening claim.
 ///
-/// Both arms are unreachable in Phase 1, but they go live in Phase 2: once a flush gives buffered
-/// entities rows, a post-build item whose external ID is genuinely null (a legitimate state under
-/// §3.4) takes the sidecar's inconsistency branch, and the caller gets a 500 for a perfectly
-/// correct item. Whatever else that costs, it must not also be a disclosure.
+/// Both sidecar-inconsistency arms are unreachable while every row comes from the build, and go
+/// live once a flush gives buffered entities rows: a post-build item whose external ID is genuinely
+/// null (a legitimate state under §3.4) takes the inconsistency branch, and the caller gets a 500
+/// for a perfectly correct item. Whatever else that costs, it must not also be a disclosure.
 ///
 /// Diagnosability moves to the log, not to the client: the full `Display` is emitted at
 /// `error!`, and the body is a fixed, entity-independent string. Uniform across all three planes
@@ -379,15 +371,11 @@ pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
 /// **The detail never crosses to the caller.** `WalError::Io` wraps a raw `std::io::Error`, whose
 /// `Display` can echo whatever the OS or a lower call site chose to say about the failure —
 /// exactly the class of detail (up to and including a filesystem path) this module's opening doc
-/// comment forbids in a body, the same door [`map_store_error`] already closes for a different
-/// lower layer. Before this fix, both `/control/ingest` and `/control/changes` built their `500`
-/// body with `format!("wal append/fsync failed: {e}")` directly — this closes it, one sanitiser
-/// for a third door.
+/// comment forbids in a body, and the same door [`map_store_error`] closes for a different lower
+/// layer. `/control/ingest` and `/control/changes` both reach it, so one sanitiser serves both.
 ///
-/// Diagnosability moves to the log: the full `Display` is emitted at `error!` (this call site's
-/// own `tracing::error!`, immediately above where this is used, carries the batch/op context;
-/// this adds the error detail itself, which neither call site logged before this fix), and the
-/// body is a fixed, path-independent string.
+/// Diagnosability moves to the log: the full `Display` is emitted at `error!` here, alongside the
+/// batch/op context each call site logs itself, and the body is a fixed, path-independent string.
 pub fn map_wal_error<E: std::fmt::Display>(e: E) -> ApiError {
     tracing::error!(detail = %e, "wal append/fsync failed; answering fail-closed");
     ApiError::FailClosed(
@@ -419,8 +407,7 @@ pub fn map_wal_error<E: std::fmt::Display>(e: E) -> ApiError {
 /// for its two send-shaped producers and by "the executor was never started" for the third — and
 /// false for `ReceiptLost`, where the executor died holding a command it may have appended,
 /// fsynced, applied and swapped. A single 503 over both would report an in-force suppression as a
-/// no-op. Found by four independent reviewers at the Task 3b design gate; the variants were split
-/// at the source rather than papered over here, and `tessera-engine`'s
+/// no-op. The variants are split at the source rather than papered over here, and `tessera-engine`'s
 /// `an_executor_panic_is_reported_dead` pins `ReceiptLost` at its producer so a refactor cannot
 /// quietly merge them back.
 ///
@@ -444,8 +431,8 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
 
     match e {
         AcceptError::Submit(SubmitError::QueueFull { retry_after_s }) => {
-            // Deliberately not `tracing::error!` and, since fix round 1, not `warn!` either: once
-            // the queue bound bites this is a routine, expected shed, and a formatted line per
+            // Deliberately `debug!`, not `error!` or `warn!`: once the queue bound bites this is a
+            // routine, expected shed, and a formatted line per
             // refusal is a synchronous write on the reactor at 10⁹ ingest rates. `tracing` checks
             // interest before evaluating fields, so at any level above DEBUG this is a load and a
             // branch. The operator's signal is `write_executor.work_depth` on `/control/status`,
@@ -491,11 +478,11 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
 ///
 /// # Why a fold at all
 ///
-/// Task 3a made `run_changes` submit every validated item even after one fails, and report the
-/// *first* error. That was right about continuing (aborting leaves later denies unapplied while
-/// `WalPoisoned` persists) and wrong about reporting: an item's status describes an item.
-/// Concretely, and this ordering **is** constructible — item 1's WAL append fails, so its suppress
-/// is applied anyway and is in force; the executor then dies, so item 2 is refused outright:
+/// `run_changes` submits every validated item even after one fails — aborting would leave later
+/// denies unapplied while `WalPoisoned` persists. It therefore ends with a *set* of dispositions,
+/// and reporting the first error would be reporting an item's status as the batch's. This ordering
+/// **is** constructible — item 1's WAL append fails, so its suppress is applied anyway and is in
+/// force; the executor then dies, so item 2 is refused outright:
 ///
 /// - first-error reporting answers 500, which happens to be right;
 /// - the mirror case — nothing failed at the executor, but one item was refused after an earlier
@@ -529,14 +516,12 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
 /// Because lifecycle §4's apply-anyway rule is scoped to `Delete`/`Suppress` and the executor
 /// honours that scope (`write.rs`'s `Executor::commit_denies`, whose failure fold applies the
 /// `Delete`/`Suppress` entries of a deny window and nothing else: a `Predicate`/`Unsuppress` whose
-/// append fails is refused **without** applying). An op-blind fold over `ExecError::Wal` therefore got **both**
-/// halves wrong on the same batch shape this task's own end-to-end test uses
-/// (`[suppress, predicate, suppress]`): a batch of only failed non-deny ops answered a body
-/// asserting a deletion or suppression "may be in force" when it contained neither, and
-/// `[suppress applied-anyway, unsuppress refused]` never told the operator the unsuppress had not
-/// taken hold. Fail-closed in the disclosure direction both times, and dishonest both times, which
-/// is the thing this function exists to produce. The op is in `run_changes`'s hand at the push, so
-/// it is carried rather than re-derived.
+/// append fails is refused **without** applying). An op-blind fold over `ExecError::Wal` gets
+/// **both** halves wrong: a batch of only failed non-deny ops would answer a body asserting a
+/// deletion or suppression "may be in force" when it contained neither, and `[suppress
+/// applied-anyway, unsuppress refused]` would never tell the operator the unsuppress had not taken
+/// hold. Dishonest in both directions, which is the thing this function exists to prevent. The op
+/// is in `run_changes`'s hand at the push, so it is carried rather than re-derived.
 ///
 /// Returns `None` for a batch with no failures: a fold that manufactured an error for a wholly
 /// successful batch would be a 500 on the success path, and making that unrepresentable is cheaper
@@ -601,8 +586,8 @@ pub fn map_change_batch_error(
         // false of the other two sources folded in here: a successfully applied item IS durable, and
         // a lost receipt may have completed the whole `append → fsync → apply → swap` before the ack
         // was lost. Naming the two mechanisms is what makes the sentence actionable; asserting the
-        // stronger one over all of them is a doc claiming a property the code does not have, which
-        // is the defect class this fix round is mostly made of.
+        // stronger one over all of them would be a comment claiming a property the code does not
+        // have.
         detail.push_str(
             "; a change in it may be in force — a deny-disposition change whose durability failed \
              is applied anyway (lifecycle §4), and a command whose receipt was lost may have \
@@ -624,9 +609,7 @@ pub fn map_change_batch_error(
 /// Only `Wal` can be, and only for a `Delete`/`Suppress`: lifecycle §4's apply-anyway rule is scoped
 /// to those two ops and `write.rs`'s `Executor::commit_denies` applies exactly that scope — a
 /// `Predicate`/`Unsuppress` whose append failed is refused **without** being applied, because an
-/// `Unsuppress` applied without durability would re-expose an item that replay still hides. This
-/// function used to return `true` for every `Wal` regardless of op while its own doc stated the
-/// scoping; the code now applies it.
+/// `Unsuppress` applied without durability would re-expose an item that replay still hides.
 ///
 /// The two 409-class variants are contract answers with no effect by definition (contracts §3.1:
 /// "a 409 batch had **no effect**"), and `Alloc` leaves the high-water unchanged.
@@ -634,8 +617,8 @@ pub fn map_change_batch_error(
 /// Named rather than folded into a `matches!(.., Exec(_))`, because the four variants genuinely
 /// differ and a wildcard here would over-report.
 ///
-/// **Task 8 lands a 409-able change here *and* in the status decision.** If a change op becomes
-/// 409-able, this function classifies its effect — but the *status* the batch answers is decided by
+/// **A new 409-able change op lands here *and* in the status decision.** This function classifies
+/// such an op's effect — but the *status* the batch answers is decided by
 /// `map_change_batch_error`'s `reached_executor`/`may_be_in_force`/`some_not_applied` block above,
 /// and the single-item status by [`map_accept_error`]'s table. Editing only this function ships a
 /// 500 whose body says "re-submit the whole request" for what contracts §3.1 calls a 409 with no
@@ -652,7 +635,7 @@ fn exec_failure_may_be_in_force(
     }
 }
 
-/// Map a `spawn_blocking` `JoinError` (Task 3, D-A) to the fail-closed 500 arm. A `JoinError` here
+/// Map a `spawn_blocking` `JoinError` to the fail-closed 500 arm. A `JoinError` here
 /// means the closure running the engine call panicked — I13a: a panic is a failed request, never
 /// an empty one, so this is a typed 500, not a dropped connection or a silently empty body.
 ///
@@ -683,16 +666,14 @@ mod tests {
         )))
     }
 
-    /// Task 3b's first fix, and a live defect rather than a tidy-up: Task 3a shipped a real bounded
-    /// work queue while `map_accept_error` sent `QueueFull` to the fail-closed **500** arm, where
-    /// contracts §3.1 says **429** with `Retry-After`. Phase 1 had no bound at all, so 3a is what
-    /// opened the window.
+    /// A full ingest work queue is contracts §3.1's **429** with `Retry-After`, never the
+    /// fail-closed 500: the caller can come back, and telling them otherwise turns a shed into a
+    /// reported fault.
     ///
     /// **The `7` is load-bearing.** `ApiError::Backpressure` sits next door with a hard-coded
     /// `Retry-After: 1`, so a build that routed write backpressure through *it* would pass any
     /// version of this test written with `1`. Asserting a value the fixed arm cannot produce is
-    /// what distinguishes "the status is right" from "the queue's own interval reaches the caller"
-    /// — which is the half Task 6 will start varying.
+    /// what distinguishes "the status is right" from "the queue's own interval reaches the caller".
     #[test]
     fn queue_full_is_429_with_retry_after() {
         let response = map_accept_error(AcceptError::Submit(SubmitError::QueueFull {
@@ -747,13 +728,13 @@ mod tests {
         );
     }
 
-    /// **The unanimous CRITICAL from the design gate.** A receipt lost to a dying executor must
-    /// never be 503: the executor's sequence is `append → fsync → apply → swap → ack`, so a death
-    /// after the swap leaves a durable, in-force suppression with no receipt. 503 would tell an
-    /// operator nothing happened while the item was already hidden.
+    /// A receipt lost to a dying executor must never be 503: the executor's sequence is
+    /// `append → fsync → apply → swap → ack`, so a death after the swap leaves a durable, in-force
+    /// suppression with no receipt. 503 would tell an operator nothing happened while the item was
+    /// already hidden.
     ///
-    /// The mutation this kills is the one the design originally specified: map `ReceiptLost` to
-    /// `NotReady` alongside `ExecutorDead`.
+    /// The mutation this kills is the obvious one: mapping `ReceiptLost` to `NotReady` alongside
+    /// `ExecutorDead`, on the reasoning that both mean "the executor is gone".
     #[test]
     fn a_lost_receipt_is_500_not_503_and_says_it_may_be_in_force() {
         let (status, code, detail) =
@@ -862,14 +843,14 @@ mod tests {
         );
     }
 
-    /// **Fix round 1, half one of the op-blind fold.** A batch whose only failures are *non-deny*
-    /// ops must not claim anything may be in force: `Executor::commit_denies` refuses a
-    /// `Predicate`/`Unsuppress` whose WAL append failed **without** applying it (lifecycle §4's
-    /// apply-anyway rule is scoped to `Delete`/`Suppress`), so the honest body says only that
-    /// nothing took hold and the operator must re-submit.
+    /// Half one of the op-blind fold. A batch whose only failures are *non-deny* ops must not claim
+    /// anything may be in force: `Executor::commit_denies` refuses a `Predicate`/`Unsuppress` whose
+    /// WAL append failed **without** applying it (lifecycle §4's apply-anyway rule is scoped to
+    /// `Delete`/`Suppress`), so the honest body says only that nothing took hold and the operator
+    /// must re-submit.
     ///
-    /// The mutation this kills is the shipped one: `exec_failure_may_be_in_force` returning `true`
-    /// for every `ExecError::Wal` regardless of op, while its own doc stated the scoping.
+    /// The mutation this kills is `exec_failure_may_be_in_force` returning `true` for every
+    /// `ExecError::Wal` regardless of op.
     #[test]
     fn a_batch_of_only_refused_non_deny_changes_claims_nothing_is_in_force() {
         for op in [ChangeOp::Predicate, ChangeOp::Unsuppress] {
@@ -889,11 +870,11 @@ mod tests {
         }
     }
 
-    /// **Fix round 1, half two.** The mirror error on the same fold: an applied-anyway `Suppress`
-    /// beside a refused `Unsuppress`. The `Unsuppress` was *not* applied, so the body must say so —
-    /// under the op-blind version it was counted as possibly-in-force and therefore omitted from
-    /// `some_not_applied` entirely, and the operator was never told the unsuppress had not taken
-    /// hold. Both halves, both true.
+    /// Half two, the mirror error on the same fold: an applied-anyway `Suppress` beside a refused
+    /// `Unsuppress`. The `Unsuppress` was *not* applied, so the body must say so — under an op-blind
+    /// fold it is counted as possibly-in-force and therefore omitted from `some_not_applied`
+    /// entirely, and the operator is never told the unsuppress did not take hold. Both halves, both
+    /// true.
     #[test]
     fn an_applied_anyway_suppress_beside_a_refused_unsuppress_reports_both_halves() {
         let failures = vec![
@@ -965,18 +946,17 @@ mod tests {
         assert_eq!(code, "not-ready");
     }
 
-    /// A fully successful batch has no error to fold. Returning `ApiError` unconditionally made a
-    /// 500 representable on the success path; `Option` makes it not.
+    /// A fully successful batch has no error to fold. Returning `ApiError` unconditionally would
+    /// make a 500 representable on the success path; `Option` makes it unrepresentable.
     #[test]
     fn a_successful_change_batch_folds_to_no_error() {
         assert!(map_change_batch_error(&[], 3).is_none());
     }
 
-    /// Fix wave, Task 3: `WalError`'s `Display` (a raw `std::io::Error`, potentially naming the
-    /// WAL's filesystem path) must never reach the caller either — `map_wal_error`'s twin of
-    /// `map_store_error_does_not_forward_the_detail_to_the_caller`, for the third door
-    /// (`/control/ingest` and `/control/changes`) that used to forward a lower layer's `Display`
-    /// straight into a `500` body via `format!("wal append/fsync failed: {e}")`.
+    /// `WalError`'s `Display` (a raw `std::io::Error`, potentially naming the WAL's filesystem
+    /// path) must never reach the caller — `map_wal_error`'s twin of
+    /// `map_store_error_does_not_forward_the_detail_to_the_caller`, for the door
+    /// `/control/ingest` and `/control/changes` open.
     #[test]
     fn map_wal_error_does_not_forward_the_detail_to_the_caller() {
         let leaky = "wal io error: No space left on device (os error 28) at \
@@ -990,9 +970,9 @@ mod tests {
         );
     }
 
-    /// S7: a lower layer's `Display` must never reach the caller. The sidecar's inconsistency arms
-    /// name its absolute path (and, before this fix, an entity id); both arms go live in Phase 2,
-    /// when a post-build item with a null external ID takes them for a perfectly correct item.
+    /// A lower layer's `Display` must never reach the caller. The sidecar's inconsistency arms name
+    /// its absolute path, and they become reachable once a post-build item with a null external ID
+    /// takes them for a perfectly correct item.
     #[test]
     fn map_store_error_does_not_forward_the_detail_to_the_caller() {
         let leaky = "invalid sidecar at /srv/tessera/v00000/partitions/default/entities/\
@@ -1044,8 +1024,8 @@ mod tests {
         );
     }
 
-    /// D-G / Task 4: `ProjectionBuilding` is explicitly named in `map_engine_error`'s match (not
-    /// caught only by the wildcard arm) and now maps to 429 `backpressure` — a concurrent
+    /// `ProjectionBuilding` is explicitly named in `map_engine_error`'s match (not caught only by
+    /// the wildcard arm) and maps to 429 `backpressure` — a concurrent
     /// single-flight build never blocks, so the honest response is retryable, not fail-closed.
     #[test]
     fn map_engine_error_takes_projection_building_to_backpressure() {
@@ -1054,7 +1034,7 @@ mod tests {
         assert_eq!(code, "backpressure");
     }
 
-    /// D-G / Task 4: `FragmentBuilding` is explicitly named in `map_engine_error`'s match and
+    /// `FragmentBuilding` is explicitly named in `map_engine_error`'s match and
     /// maps to the same 429 `backpressure` arm as `ProjectionBuilding`.
     #[test]
     fn map_engine_error_takes_fragment_building_to_backpressure() {
@@ -1063,11 +1043,11 @@ mod tests {
         assert_eq!(code, "backpressure");
     }
 
-    /// Task 0 gate (C2): the per-session pin cap is a **bound exceeded**, so contracts §3.1 puts
-    /// it on the 422 `contract` row beside `TooManyTiles`, not on 429 — and it is named in
-    /// `map_engine_error`'s match rather than left to the catch-all, which would have made a
-    /// caller-fixable refusal a fail-closed 500. Constructed by nobody until Task 4; this test is
-    /// what stops the mapping rotting in the meantime.
+    /// The per-session pin cap is a **bound exceeded**, so contracts §3.1 puts it on the 422
+    /// `contract` row beside `TooManyTiles`, not on 429 — and it is named in `map_engine_error`'s
+    /// match rather than left to the catch-all, which would make a caller-fixable refusal a
+    /// fail-closed 500. No production path constructs `PinCapExceeded` yet, so this test is what
+    /// stops the mapping rotting before one does.
     #[test]
     fn map_engine_error_takes_a_pin_cap_refusal_to_422_contract() {
         let (status, code, detail) =
@@ -1080,10 +1060,8 @@ mod tests {
         );
     }
 
-    /// Fix wave, Task 2: `StaleIdSet` (now raised by `Engine::item` itself, against the
-    /// one generation it loads, rather than by a separate handler-side `Engine::meta()` check)
-    /// maps to the same 409 `conflict` body `POST /v1/items/{tessera_id}` has always returned for
-    /// a stale idset.
+    /// `StaleIdSet` — raised by `Engine::item` itself, against the one generation it loads — maps
+    /// to the 409 `conflict` body `POST /v1/items/{tessera_id}` returns for a stale idset.
     #[test]
     fn map_engine_error_takes_stale_idset_to_409_conflict() {
         let (status, code, detail) = map_engine_error(EngineError::StaleIdSet).parts();
@@ -1092,7 +1070,7 @@ mod tests {
         assert_eq!(detail, "stale idset; re-resolve by external_id");
     }
 
-    /// D-C: `Cancelled` is explicitly named in `map_engine_error`'s match (not caught only by the
+    /// `Cancelled` is explicitly named in `map_engine_error`'s match (not caught only by the
     /// wildcard arm) and maps to the fail-closed 500 — never a 2xx or any 4xx. This is the arm's
     /// defence-in-depth case (see its comment at the match site): the server-side drop-guard fires
     /// on ANY future drop, so a future refactor could in principle reach this arm on a still-live
@@ -1104,7 +1082,7 @@ mod tests {
         assert_eq!(code, "fail-closed");
     }
 
-    /// D-E: a `Backpressure` response carries both the `Retry-After: 1` header and the
+    /// A `Backpressure` response carries both the `Retry-After: 1` header and the
     /// `retry_after_s: 1` body field, fixed, so a caller reading either agrees with the other.
     #[test]
     fn backpressure_carries_retry_after_header_and_body_field() {
@@ -1119,9 +1097,9 @@ mod tests {
         );
     }
 
-    /// D-E: every OTHER error body stays byte-identical to before this task — `retry_after_s` is
+    /// Every other error body omits the field entirely — `retry_after_s` is
     /// `skip_serializing_if Option::is_none`, so a non-backpressure error's JSON body must not
-    /// gain the field at all.
+    /// gain it at all.
     #[test]
     fn non_backpressure_errors_omit_retry_after_s_from_the_body() {
         let (_, code, _) = ApiError::BadCredential.parts();

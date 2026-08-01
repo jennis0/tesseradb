@@ -73,7 +73,7 @@ And there is a second term, which the CPU measurement forces:
 
 **Under these, the owner's stated worst case is honestly answered:** 1000 unique users at median
 10⁶–10⁷ visible fits comfortably. **100 concurrently active unique *broad* principals at 10⁹ does
-not** — 12.5 GB of projections against 10 GB, and `config.rs`'s own Task 5 note says this regime
+not** — 12.5 GB of projections against 10 GB, and `config.rs`'s cache-bound note says this regime
 *collapses* rather than degrades (miss/hit ratio 10⁵–10⁷, single-flight 429 storm). It is
 unservable on memory and on CPU simultaneously, so no cache rescues it.
 
@@ -110,7 +110,7 @@ advisory and safely evictable under P5.
 minus, plus }` applies the diff at query time — so it is a pure function of (grant set, slice,
 segments_version) and could be shared by content address, exactly as S1 already is. Worth doing;
 but under near-unique grant sets it saves nothing, so it must not be presented as the capacity
-answer. **One real cost:** `revoke` currently calls `prune_token`, which works only because the key
+answer. **One real cost:** `revoke` calls `prune_token`, which works only because the key
 *is* the token; sharing needs refcounting or drop-when-unreferenced.
 
 ## 6. Client caching, which is the latency mechanism
@@ -315,5 +315,5 @@ on the merits and the arithmetic reworked; §7.1's direction split is the most v
 out of that exchange.
 
 A fifth correction came from the owner mid-exchange: the target draw is 1–2 × 10⁶ marks, not the
-~66 × 10³ the client is currently configured to. That changed conclusions rather than numbers, and
+~66 × 10³ the client is configured to. That changed conclusions rather than numbers, and
 §1 is its consequence.

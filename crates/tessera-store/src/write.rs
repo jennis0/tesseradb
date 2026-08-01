@@ -1,5 +1,5 @@
-//! Segment file writers: `columns.arrow`, `morton.u32`, `permutation.bin` (contracts §2.1/§2.6,
-//! Reference Sheet R4). Byte formats here are fixed by the contracts spec — do not vary them.
+//! Segment file writers: `columns.arrow`, `morton.u32`, `permutation.bin` (contracts §2.1/§2.6).
+//! Byte formats here are fixed by the contracts spec — do not vary them.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};

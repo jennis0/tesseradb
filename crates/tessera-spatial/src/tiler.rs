@@ -10,7 +10,7 @@ use tessera_types::{EntityId, TesseraId};
 use crate::morton::{morton_of, Extent};
 
 /// A declared-scalar value carried alongside the fixed columns (`tessera_id`, `x`, `y`,
-/// `priority`). Phase 1 supports the three scalar kinds below (R4).
+/// `priority`). The three kinds below are the whole set (contracts §2.2).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarValue {
     U64(u64),
@@ -53,7 +53,7 @@ pub struct TilerItem {
 /// does not change at 10^10 or 10^11 (contracts §2.5, r5; was a low-aligned `u64`).
 ///
 /// Morton codes are computed from the `f32` `x`/`y` values promoted to `f64` for the
-/// quantisation math (R2: `cell()` is defined over `f64`), against `extent`.
+/// quantisation math (contracts §2.5 defines `cell()` over `f64`), against `extent`.
 ///
 /// `entity_ids` is permuted identically to `items` (a companion vector, not a sort key) and
 /// must be the same length.

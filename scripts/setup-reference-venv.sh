@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sets up the independent Python differential oracle's virtualenv (Task 14).
+# Sets up the independent Python differential oracle's virtualenv.
 # Deliberately isolated from the Rust workspace: Python here is a test-only consumer
 # (never a component — see CLAUDE.md "Working method").
 set -euo pipefail

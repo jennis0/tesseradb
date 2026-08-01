@@ -1,4 +1,4 @@
-//! Task 7: the `tessera build` identity-key CLI surface (contracts §2.2, plan Critical N-1).
+//! The `tessera build` identity-key CLI surface (contracts §2.2).
 //!
 //! Exercises the compiled binary directly (`CARGO_BIN_EXE_tessera`, set automatically for an
 //! integration test in the same package as the `tessera` bin target) rather than calling

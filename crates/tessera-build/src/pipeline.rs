@@ -5,7 +5,7 @@
 //!
 //! The linear build materialises one struct per point (each carrying its own heap-allocated
 //! signature) and the whole `term -> entity list` relation as a `Vec<Vec<u32>>` before it writes
-//! a byte. At the Phase 0 10⁹-item corpus that is tens of gigabytes of small allocations and it
+//! a byte. At the probe corpus's 10⁹ items that is tens of gigabytes of small allocations and it
 //! was OOM-killed on a 47 GiB box during staging, before any output existed.
 //!
 //! ## The construction
@@ -26,7 +26,7 @@
 //! | points ×1 | external ids (when minting) | 20N |
 //! | points ×1 | geometry, the tiler sort, and the segment | 28N |
 //!
-//! ## Batch-scoped signature assignment (§11.1 r23)
+//! ## Batch-scoped signature assignment (§11.1)
 //!
 //! Entity ids are assigned by signature order **within each batch and only within one** — the
 //! design's own scope for the sort (I10's per-batch clause; the serving allocator's group
@@ -112,7 +112,7 @@
 //!   holding a single item.
 //! * **The signature sort.** `recs` is pre-sorted on a 64-bit key built from the signature's
 //!   first two terms, which totally orders every item whose signature is at most two terms long
-//!   (the overwhelming majority — the Phase 0 corpus averages 1.72). Only groups that tie on
+//!   (the overwhelming majority — the probe corpus averages 1.72). Only groups that tie on
 //!   that key *and* contain a longer signature are refined by a full signature comparison. The
 //!   pre-sort key is order-consistent with the lexicographic signature order, so refining within
 //!   ties reproduces it exactly.
@@ -534,7 +534,7 @@ fn plan_build(
                 )));
             }
             // Needlessly small batches permanently forfeit posting compression (I9; §11.1
-            // r23's container model): refuse unless the budget itself is the reason. An
+            // §11.1's container model): refuse unless the budget itself is the reason. An
             // operator who wants small batches states the matching budget, which makes the
             // choice deliberate and reproducible.
             if b.saturating_mul(2) < auto_batch {
@@ -710,21 +710,20 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let mut failure: Option<BuildError> = None;
     let mut chunk: Vec<(u64, u64)> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(pair_rows.max(1)));
     let mut resolved: Vec<(u64, u64)> = Vec::new();
-    let mut resolve = |chunk: &mut Vec<(u64, u64)>,
-                       resolved: &mut Vec<(u64, u64)>,
-                       sink: &mut BucketSink| {
-        resolve_pairs_chunk(
-            chunk,
-            resolved,
-            &source_ids,
-            &term_keys,
-            &term_ids,
-            |value| {
-                pushed += 1;
-                sink.push(value)
-            },
-        )
-    };
+    let mut resolve =
+        |chunk: &mut Vec<(u64, u64)>, resolved: &mut Vec<(u64, u64)>, sink: &mut BucketSink| {
+            resolve_pairs_chunk(
+                chunk,
+                resolved,
+                &source_ids,
+                &term_keys,
+                &term_ids,
+                |value| {
+                    pushed += 1;
+                    sink.push(value)
+                },
+            )
+        };
     input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
@@ -754,7 +753,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     timer.end(BuildStage::PairsPack, pushed);
 
-    // ---- 4–5. per batch: sort, signature-refine, assign, emit bands (§11.1 r23) -------
+    // ---- 4–5. per batch: sort, signature-refine, assign, emit bands (§11.1) -----------
     // Entity id = batch base + position in the batch's signature order. Batches partition
     // ordinal space, so per-batch sort+dedup of the packed relation equals the historical
     // global sort+dedup (a duplicate pair shares its ordinal, hence its batch), and one batch
@@ -851,9 +850,8 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 let term = term_of(value);
                 let band = band_los.partition_point(|&lo| lo <= term) - 1;
                 band_writers[band].push(term, entity)?;
-                term_counts[term as usize] = term_counts[term as usize]
-                    .checked_add(1)
-                    .ok_or_else(|| {
+                term_counts[term as usize] =
+                    term_counts[term as usize].checked_add(1).ok_or_else(|| {
                         BuildError::Invalid(format!(
                             "term {term} exceeds 2^32 postings, which the entity ceiling makes \
                              impossible for an unmutated input"
@@ -1078,10 +1076,10 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let mut failure: Option<BuildError> = None;
     let mut chunk: Vec<(u64, (f32, f32))> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
     let resolve = |chunk: &mut Vec<(u64, (f32, f32))>,
-                       x_of_entity: &mut Vec<f32>,
-                       y_of_entity: &mut Vec<f32>,
-                       points_seen: &mut u64,
-                       geom_anchor: &mut u64| {
+                   x_of_entity: &mut Vec<f32>,
+                   y_of_entity: &mut Vec<f32>,
+                   points_seen: &mut u64,
+                   geom_anchor: &mut u64| {
         join_chunk(chunk, &source_ids, |ordinal, source_id, (x, y)| {
             let Some(ordinal) = ordinal else {
                 return Err(input_changed(&format!(
@@ -1355,7 +1353,7 @@ struct Dictionary {
 /// item's terms in ascending source-term order; a term's id is its rank in that stream of *first*
 /// appearances. That rank is `(smallest ordinal carrying the term, source term id)` — computable
 /// from one pass over the pairs relation, over a map with one entry per distinct term (~48k in
-/// the Phase 0 corpus), rather than from a materialised item list.
+/// the probe corpus), rather than from a materialised item list.
 ///
 /// Returns [`Dictionary`].
 fn build_dictionary(
@@ -1367,7 +1365,8 @@ fn build_dictionary(
     // per-range histogram, are commutative aggregations — no arrival order is observable.
     let mut first_ordinal: FxHashMap<u64, (u64, u64)> = FxHashMap::default();
     // Ordinal-range histogram for batch sizing: 2^16 ranges regardless of n.
-    let histogram_shift = (64 - (source_ids.len().max(1) as u64).leading_zeros()).saturating_sub(16);
+    let histogram_shift =
+        (64 - (source_ids.len().max(1) as u64).leading_zeros()).saturating_sub(16);
     let mut histogram = vec![0u64; (source_ids.len() >> histogram_shift) + 1];
     // Absent ids are reported by count and minimum, never collected: a mispaired input naming
     // billions of missing ids would otherwise accumulate a multi-gigabyte set — the exact
@@ -1425,7 +1424,7 @@ fn build_dictionary(
         .collect();
     order.sort_unstable();
 
-    // The Phase 0 corpus carries integer term ids; the item's `access` label is the comma-joined
+    // The probe corpus carries integer term ids; the item's `access` label is the comma-joined
     // decimal source term ids, so `builtin:passthrough` yields decimal-string descriptors (R6).
     // Streamed, not interned: the descriptors here are distinct by construction (one per
     // distinct source term) and arrive in term-id order, which is `DictStreamWriter`'s exact
@@ -1490,7 +1489,7 @@ fn build_dictionary(
 /// binary search — and the
 /// long sort compares contiguous scratch, not the multi-gigabyte relation. The previous
 /// implementation did two `partition_point` probes over `packed` *per comparison*; with 46% of
-/// the Phase 0 corpus inside refined groups that was the single largest cost of the whole
+/// the probe corpus inside refined groups that was the single largest cost of the whole
 /// build (measured: 52.5% of the 1e8 build, superlinear).
 ///
 /// Groups are disjoint slices of `recs`, so refinement runs in parallel across groups; each
@@ -1551,7 +1550,7 @@ struct RefineScratch {
     longs: Vec<(usize, usize, SortRec)>,
     /// Worst case for one group is all long tails in the corpus sharing one two-term prefix —
     /// 4 bytes per tail term, approaching 4P in the fully degenerate one-group corpus. The
-    /// Phase 0 shape stays in the tens of megabytes; a corpus pathological enough to matter
+    /// probe corpus's shape stays in the tens of megabytes; a corpus pathological enough to matter
     /// here would already be pathological for `flat` (4P, resident in the same build).
     arena: Vec<u32>,
 }

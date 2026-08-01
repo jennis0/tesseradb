@@ -40,8 +40,8 @@ pub enum GrantShape {
     /// essentially every tile.
     Tail,
     /// Terms whose postings are most entity-contiguous, i.e. the *clustered* arm at equal
-    /// coverage. Paired with `Random`, this isolates the contiguity effect Phase 0 measured at up
-    /// to ~130x on union cost with cardinality held constant.
+    /// coverage. Paired with `Random`, this isolates the contiguity effect the probes measured at
+    /// up to ~130x on union cost with cardinality held constant.
     Clustered,
 }
 

@@ -1,4 +1,4 @@
-//! Task 7, Step 1: hand-assemble a tiny bundle in a tempdir (real digests, computed with
+//! Hand-assemble a tiny bundle in a tempdir (real digests, computed with
 //! `sha2`, the same crate the reader uses) and exercise the full read protocol end to end:
 //! `open_bundle`, `ColumnsRef` accessors, `Permutation::project` against a per-entity
 //! `row_of` loop, and `tile_ranges` against a linear scan of the morton array. Then corrupt
@@ -23,8 +23,8 @@ use tessera_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS}
 
 /// A synthetic `tessera_id`-shaped value for test fixtures: full splitmix64 output over a
 /// seed, so its top 16 bits are a `priority` prefix like any real `tessera_id` (contracts
-/// §2.6), without claiming this is the actual Feistel construction (Task 5's own tests cover
-/// that separately).
+/// §2.6), without claiming this is the actual Feistel construction — `tessera-types`'s identity
+/// tests cover that separately.
 fn synthetic_tessera_id(seed: u64) -> TesseraId {
     let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
@@ -360,18 +360,17 @@ fn add_segments_manifest(root: &Path, n: u64, edit: impl FnOnce(&mut serde_json:
 }
 
 // -------------------------------------------------------------------------------------------
-// The honourable-state guard (Task 1; contracts §2.3's publication rule, SA §9).
+// The honourable-state guard (contracts §2.3's publication rule, SA §9).
 //
 // `SegmentsManifest` parses `deltas`, `tombstones` and `deny`, and the read path acts on none
-// of them. That is inert only while nothing writes them, and stage 2.2 starts writing them —
-// so *today* a manifest carrying `"tombstones": [17]` opens and serves entity 17. These tests
-// pin the two dispositions apart:
+// of them. That is inert only while nothing writes them — the moment something does, a manifest
+// carrying `"tombstones": [17]` would open and serve entity 17. These tests pin the two
+// dispositions apart:
 //
 //   * `deltas` alone is missing data — step down, staleness in the fail-safe direction.
 //   * `tombstones` or `deny` means a deny was ACCEPTED. Stepping down past one silently undoes
-//     every suppression and deletion since the last honourable manifest, indefinitely, and
-//     the freshness gate §2.3 pairs with step-down does not land until 2.2. The partition is
-//     unready instead.
+//     every suppression and deletion since the last honourable manifest, indefinitely, and the
+//     freshness gate §2.3 pairs with step-down does not exist. The partition is unready instead.
 //
 // Each test therefore asserts the *disposition*, not merely "an error happened": a guard that
 // refused everything would pass a test that only checked for `Err`.
@@ -611,8 +610,8 @@ fn a_manifest_carrying_only_deltas_steps_down_and_serves() {
     );
 
     // The step-down is a *success* return, so the only trace of it is a `warn!` — which nothing
-    // can gate on. Contracts §2.3 pairs step-down with a `readyz` freshness gate (roadmap O4,
-    // stage 2.2), and this is the data that gate is built from.
+    // can gate on. Contracts §2.3 pairs step-down with a `readyz` freshness gate, and this is the
+    // data that gate is built from.
     assert_eq!(partition.segments_n, 0, "served SEGMENTS-0");
     assert_eq!(
         partition.highest_candidate_n, 1,

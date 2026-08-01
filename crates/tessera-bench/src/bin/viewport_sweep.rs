@@ -1,4 +1,4 @@
-//! Task 1 of the viewport/underlay plan: **what does one large viewport request cost?**
+//! **What does one large viewport request cost?**
 //!
 //! The MVP client is tile-addressed — one `POST /v1/viewport` per deck.gl tile — and at 10⁹ that
 //! shed 12 of 23 requests from a single tab. The proposed fix is one *viewport*-addressed request
@@ -39,7 +39,9 @@ const THETA_TARGET: u64 = 16;
 const MAX_TILES_PER_REQUEST: usize = 262_144;
 
 #[derive(Parser)]
-#[command(about = "Cost of one viewport-addressed request, across depth, viewport fraction and scale")]
+#[command(
+    about = "Cost of one viewport-addressed request, across depth, viewport fraction and scale"
+)]
 struct Args {
     /// Bundle root (the directory containing `CURRENT`).
     #[arg(long)]
@@ -151,11 +153,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if measured.is_empty() {
         return Err("no candidate term is visible to anyone".into());
     }
-    let pick = |frac: f64| measured[((measured.len() as f64 * frac) as usize).min(measured.len() - 1)].clone();
+    let pick = |frac: f64| {
+        measured[((measured.len() as f64 * frac) as usize).min(measured.len() - 1)].clone()
+    };
     let principals: Vec<(String, Vec<String>)> = vec![
         ("narrow".to_string(), vec![pick(0.05).0]),
         ("medium".to_string(), vec![pick(0.5).0]),
-        ("broad".to_string(), vec![measured[measured.len() - 1].0.clone()]),
+        (
+            "broad".to_string(),
+            vec![measured[measured.len() - 1].0.clone()],
+        ),
         (
             "everything".to_string(),
             measured.iter().map(|(t, _)| t.clone()).collect(),
@@ -175,7 +182,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // also keep the row-projection cache honest (each is warmed before timing).
                 let sessions: Vec<_> = (0..threads)
                     .map(|_| {
-                        let s = engine.authorise(auth_json(terms).as_bytes()).expect("authorise");
+                        let s = engine
+                            .authorise(auth_json(terms).as_bytes())
+                            .expect("authorise");
                         let _ = engine
                             .viewport(&s, ViewportRequest::new(&slice_id, 0, full, K_MAX_MARKS))
                             .expect("warm-up");
@@ -198,7 +207,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let out = engine
                                         .viewport(
                                             session,
-                                            ViewportRequest::new(slice_id, depth, full, K_MAX_MARKS),
+                                            ViewportRequest::new(
+                                                slice_id,
+                                                depth,
+                                                full,
+                                                K_MAX_MARKS,
+                                            ),
                                         )
                                         .expect("viewport");
                                     lat.push(t0.elapsed().as_micros() as u64);
@@ -208,11 +222,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             })
                         })
                         .collect();
-                    handles.into_iter().map(|h| h.join().expect("thread")).collect()
+                    handles
+                        .into_iter()
+                        .map(|h| h.join().expect("thread"))
+                        .collect()
                 });
                 let wall = started.elapsed().as_secs_f64();
 
-                let mut lat: Vec<u64> = results.iter().flat_map(|(l, _)| l.iter().copied()).collect();
+                let mut lat: Vec<u64> = results
+                    .iter()
+                    .flat_map(|(l, _)| l.iter().copied())
+                    .collect();
                 lat.sort_unstable();
                 let marks: u64 = results.iter().map(|(_, m)| m).sum();
                 let n = lat.len();
@@ -240,7 +260,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The row-projection cache fill must never land in a sample: the first viewport of a
         // session crosses entity space into row space over the whole fragment, and at 10⁹ that is
         // seconds. Every other harness in this crate excludes it; so does this one.
-        let warm = engine.viewport(&session, ViewportRequest::new(&slice_id, 0, full, K_MAX_MARKS))?;
+        let warm = engine.viewport(
+            &session,
+            ViewportRequest::new(&slice_id, 0, full, K_MAX_MARKS),
+        )?;
         let visible_total: u64 = warm.tiles.iter().map(|t| t.visible).sum();
         eprintln!(
             "{name}: {} terms, visible {visible_total}, warm-up {:.1} ms (projection_built={})",
@@ -263,7 +286,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Refuse rather than measure a request the server would reject.
                 let tiles_predicted = (frac * frac * 4f64.powi(depth as i32)).ceil() as usize;
                 if tiles_predicted > MAX_TILES_PER_REQUEST {
-                    println!("{name},{},{visible_total},{label},{depth},,,,,,,,,refused-max-tiles", terms.len());
+                    println!(
+                        "{name},{},{visible_total},{label},{depth},,,,,,,,,refused-max-tiles",
+                        terms.len()
+                    );
                     continue;
                 }
 

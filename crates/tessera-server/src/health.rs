@@ -1,14 +1,14 @@
 //! `/healthz` (liveness) and `/readyz` (readiness), on the **viewer and session** listeners
 //! (R5, contracts §3.1 r11).
 //!
-//! **Not on the control listener** (owner decision, 2026-08-01). Contracts §3.1 previously said "on
-//! every plane's listener"; it no longer does. The control plane is now uniformly authenticated —
-//! every route on it requires the operator credential, with no exemption — which is what lets the
-//! control listener be firewalled to admin-only with no health-probe hole. Nothing is lost from the
-//! probe itself: both handlers below are identical on every listener they are mounted on, so a third
-//! mount was a third copy of one bit. What an unauthenticated caller can no longer observe is "the
-//! control listener is accepting connections"; the argument for accepting that, and the
-//! `/control/status` call that replaces it, is in `control::require_operator_credential`'s doc.
+//! **Not on the control listener**
+//! (docs/decisions/0011-health-probes-off-control-plane.md). The control plane is uniformly
+//! authenticated — every route on it requires the operator credential, with no exemption — which is
+//! what lets the control listener be firewalled to admin-only with no health-probe hole. Nothing is
+//! lost from the probe itself: both handlers below are identical on every listener they are mounted
+//! on, so a third mount would be a third copy of one bit. What an unauthenticated caller cannot
+//! observe is "the control listener is accepting connections"; the argument for accepting that, and
+//! the `/control/status` call that replaces it, is in `control::require_operator_credential`'s doc.
 //!
 //! # What `/readyz` answers, and where each half of the answer is discharged
 //!
@@ -19,17 +19,16 @@
 //! | §3.1 condition | discharged | where |
 //! |---|---|---|
 //! | **verified** (bundle digests) | at `prepare` — the process refuses to start | `open_bundle`'s digest checks → `Engine::open` → [`crate::prepare`] returns `Err` before [`crate::run`] binds a listener |
-//! | **pinned** (a verifying `SEGMENTS-<n>.json` per partition) | at `prepare` — the process refuses to start | Track A's guard: `Honourability::Unready` → `StoreError::UnhonourableManifest` → the per-partition loop propagates it out of `open_bundle` |
+//! | **pinned** (a verifying `SEGMENTS-<n>.json` per partition) | at `prepare` — the process refuses to start | `Honourability::Unready` → `StoreError::UnhonourableManifest` → the per-partition loop propagates it out of `open_bundle` |
 //! | **plugin loaded** | at `prepare` — the process refuses to start | `Engine::open` loads it |
 //! | **workers ready** | **here** | `Engine::write_executor_posture()` — see [`is_ready`] |
-//! | **fresh** (step-down lag bound) | **not enforced** | the *signal* exists — `tessera_store`'s `PartitionData::stepped_down()`, carried by Track A for exactly this — but the configured lag bound does not (contracts §2.3, roadmap O4). Stage 2.2 ships the deny writer and this gate as one unit |
+//! | **fresh** (step-down lag bound) | **not enforced** ⊘ | the *signal* exists — `tessera_store`'s `PartitionData::stepped_down()` — but the configured lag bound does not (contracts §2.3, roadmap O4), so a replica arbitrarily far behind its primary still answers 200 here |
 //!
 //! **The first three are conditions on a process that started at all**, and they hold only while
-//! nothing re-opens a bundle at runtime. Nothing does today: `open_bundle`'s only caller in the
-//! serving path is `Engine::open`. **Stage 2.2's bundle swap is the change that makes "verified"
-//! and "pinned" genuine runtime conditions**, at which point they need real conjuncts here. That is
-//! the inheritance note, and it is a true statement rather than a dead `&&` that would read as
-//! coverage while providing none.
+//! nothing re-opens a bundle at runtime. Nothing does: `open_bundle`'s only caller in the serving
+//! path is `Engine::open`. **A runtime bundle swap is what would make "verified" and "pinned"
+//! genuine runtime conditions**, at which point they need real conjuncts here. Saying so is a true
+//! statement, where a dead `&&` over three constants would read as coverage while providing none.
 //!
 //! # What this predicate cannot see
 //!
@@ -98,9 +97,9 @@ pub async fn healthz() -> StatusCode {
 /// own `a_deny_does_not_queue_behind_a_saturated_blocking_pool` accepts for a comparable property.
 /// What is missing is a way to **induce** an executor panic from this crate's test binary: that
 /// needs `tessera-engine`'s `fault-injection` feature as a `tessera-server` dev-dependency, which
-/// Task 3b's design gate deliberately declined (report D4, in favour of the real-`EACCES` route for
-/// the WAL cases). Adding the dev-dependency is what unblocks the end-to-end row; nothing about the
-/// posture's shape does.
+/// this crate deliberately does not take — the WAL fault cases are driven through a real `EACCES`
+/// instead, which exercises the production error path rather than a test-only one. Adding the
+/// dev-dependency is what unblocks the end-to-end row; nothing about the posture's shape does.
 ///
 /// Every non-`Running` posture is not ready, `NotStarted` included. That is not a live state for a
 /// server — [`crate::prepare`] starts the executor and propagates its failure before any listener

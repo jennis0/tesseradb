@@ -7,16 +7,14 @@
 //!
 //! This arm **never calls `Engine::viewport` or `sample_tile`**. It opens a segment's columns
 //! directly, builds its own mask, and supplies its own row selection. Whatever sampler ships —
-//! the real `priority = splitmix64(entity) >> 48` one currently in flight, or anything after it —
-//! cannot change these numbers, because the thing being measured is *the shape of the memory
-//! access*, not which rows a policy chose.
+//! the shipped `priority`-ordered one or anything after it — cannot change these numbers, because
+//! the thing being measured is *the shape of the memory access*, not which rows a policy chose.
 //!
-//! That matters because today's placeholder `sample_tile` takes the first `k` rows in storage
-//! order: a contiguous forward run, the cheapest gather that exists. Benchmarking only it would
-//! understate every realistic sampler. The real priority key is uncorrelated with row order by
-//! construction (it is a keyed Feistel of the entity id), so a real sampler's access pattern is
-//! `scattered` — and the gap between `contiguous` and `scattered` here is the cost the current
-//! placeholder is hiding.
+//! That matters because the cheapest gather that exists is the first `k` rows in storage order: a
+//! contiguous forward run. Measuring only that would understate every realistic sampler. The
+//! priority key is uncorrelated with row order by construction — it is a prefix of the keyed
+//! bijection over the entity id — so a real sampler's access pattern is `scattered`, and the gap
+//! between `contiguous` and `scattered` here is what that costs.
 //!
 //! # Axes
 //!

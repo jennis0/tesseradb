@@ -34,10 +34,9 @@ use crate::manifest::{CurrentPointer, FileDigest, Honourability, Manifest, Segme
 use crate::permutation::Permutation;
 
 /// One loaded (partition, slice) pair: the permutation addressing its rows, and every segment
-/// in that slice — Phase 1 always has exactly one (contracts §2.1's "one segment per
-/// (partition, slice) at build"); the field is a `Vec` because the on-disk shape (and the
-/// engine's tile-lookup interface, per the task brief) already generalises to streamed
-/// segments.
+/// in that slice — a build writes exactly one (contracts §2.1's "one segment per
+/// (partition, slice) at build"); the field is a `Vec` because the on-disk shape, and the
+/// engine's tile-lookup interface with it, already generalises to streamed segments.
 #[derive(Debug)]
 pub struct SliceData {
     pub permutation: Permutation,
@@ -73,8 +72,12 @@ pub struct PartitionData {
     /// freshness gate — "`readyz` fails if the newest verifying `n` is older than the
     /// deployment's configured lag bound; unbounded step-down would let a badly synced replica
     /// serve long-deleted items as live" — and that gate cannot be built from a log. This field
-    /// and [`Self::segments_n`] are what it needs (roadmap O4, stage 2.2). They are also the
+    /// and [`Self::segments_n`] are the data that gate is built from. They are also the
     /// only way a test can assert that a step-down did, or did not, happen.
+    ///
+    /// **⊘ Specified, not implemented.** The freshness gate itself does not exist: step-down is
+    /// built, its time bound is not, so a stepped-down partition serves its older manifest
+    /// indefinitely. Contracts §2.3 is marked the same way.
     pub highest_candidate_n: u64,
     pub slices: HashMap<String, SliceData>,
 }
@@ -1091,8 +1094,8 @@ fn invalid_columns(path: &Path, detail: &str) -> StoreError {
 
 /// The row range `tile` occupies within `seg`'s Morton order, found by binary search over
 /// `seg.morton.u32()` (contracts §2.5). Callers must treat a tile as resolving to a **set** of
-/// ranges — one per segment sharing the tile's slice — even though Phase 1 has exactly one
-/// segment per slice; the engine-level signature is `Vec<Range<u32>>` (task brief).
+/// ranges — one per segment sharing the tile's slice — even though a build writes exactly one
+/// segment per slice; the engine-level signature is `Vec<Range<u32>>` accordingly.
 ///
 /// `Tile::code_range` returns `u64` bounds deliberately: at depth 0 the exclusive end is
 /// `1 << 32`, which does not fit in `u32`. Each stored code is widened for the comparison

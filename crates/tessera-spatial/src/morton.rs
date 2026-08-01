@@ -1,4 +1,4 @@
-//! Quantisation and Morton interleaving (contracts §2.5, Reference Sheet R2).
+//! Quantisation and Morton interleaving (contracts §2.5).
 //!
 //! Grid is 2^16 x 2^16; Morton codes are 32-bit, low-aligned in a `u64` on disk.
 //! Cells are half-open: `v = max` lands in the top cell (65535), clamped otherwise.
@@ -40,7 +40,7 @@ impl Extent {
 /// Quantise a coordinate value into a 16-bit cell index.
 ///
 /// `cell(v) = clamp( floor( (v - min) / (max - min) * 65536 ), 0, 65535 )`, computed in f64.
-/// Cells are half-open; `v = max` lands in cell 65535 (contracts §2.5, Reference Sheet R2).
+/// Cells are half-open; `v = max` lands in cell 65535 (contracts §2.5).
 ///
 /// Behaviour is defined only for finite `v` over a valid extent (`min < max`, both finite) —
 /// callers that quantise against user-controlled bounds must validate the [`Extent`] first via

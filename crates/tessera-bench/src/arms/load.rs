@@ -62,13 +62,13 @@
 //! hourly meets it on every rotation. Building the projection outside the lock (or keying an
 //! in-progress marker so concurrent builders wait per-key rather than globally) would fix it.
 //!
-//! *(**That mutex no longer exists.** The paragraph above is the 2026-07-29 measurement as taken,
-//! kept because the Task 9 re-measurement below is only meaningful against it — but the code it
-//! describes is gone: D-G replaced the global lock with the per-key slot-state single flight in
-//! `tessera-engine/src/single_flight.rs`, wrapped since the stage-2.1 seam as `RowProjectionCache`
-//! in `cache.rs`, whose map lock is held only for the O(1) `Building`/`Ready` transition and never
-//! across `RowProjection::new`. Read `viewport.rs`'s cache-lookup comment for the guardrail that
-//! keeps it that way.)*
+//! *(**That mutex no longer exists.** The paragraph above is the measurement as taken, kept
+//! because the re-measurement below is only meaningful against it — but the code it describes is
+//! gone: D-G replaced the global lock with the per-key slot-state single flight in
+//! `tessera-engine/src/single_flight.rs`, wrapped as `RowProjectionCache` in `cache.rs`, whose map
+//! lock is held only for the O(1) `Building`/`Ready` transition and never across
+//! `RowProjection::new`. Read `viewport.rs`'s cache-lookup comment for the guardrail that keeps it
+//! that way.)*
 //!
 //! **Memory: ~248 KiB per distinct session** at this scale (243 MiB of RSS delta over 1000
 //! sessions; the smaller-N rows are noise at 1–4 MiB). That is the fragment plus its row
@@ -83,10 +83,10 @@
 //! the generator on a different box. The flag exists to stop those numbers being quoted as
 //! server measurements, and it should be believed.
 //!
-//! # Task 9 re-measurement, 2026-07-30, same fixture/params, post D-A..D-G (Tasks 1-8)
+//! # Re-measurement, 2026-07-30, same fixture and parameters, with D-A..D-G in place
 //!
 //! Full numbers, per-criterion verdicts, and the shed/pan-storm/cold-build cells are in
-//! `.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/task-9-report.md`; this is the headline only.
+//! `probes/2026-07-31-concurrency-workstream/task-9-report.md`; this is the headline only.
 //!
 //! | arm | conc | rps | p50 | p99 | server p99 | server CPU | shed% |
 //! |---|---:|---:|---:|---:|---:|---:|---:|
@@ -96,17 +96,17 @@
 //! **F4's lock-contention signature is gone.** Arm A c=1000 end-to-end p99 falls **1042 ms →
 //! 59 ms** and server CPU no longer collapses with concurrency (537% → 646% → 629% → 610% across
 //! c=5/10/100/1000 — a mild plateau from gate-shedding at high c, never the 712%→426% *collapse*
-//! that was F4's smoking gun). `RowProjection::new` no longer runs under a global mutex (Tasks 1
-//! and 2, D-G): concurrent first-touch races on the same key now shed with 429 instead of
-//! queueing behind one lock.
+//! that was F4's smoking gun). `RowProjection::new` no longer runs under a global mutex (D-G):
+//! concurrent first-touch races on the same key now shed with 429 instead of queueing behind one
+//! lock.
 //!
 //! **Raw throughput does not clear the ≥35k rps bar** (10.1k measured) — not a regression, a
-//! structural change the ≥35k figure predates: Task 4's admission gate (D-B) now caps
+//! structural change the ≥35k figure predates: the admission gate (D-B) now caps
 //! *sustained, running* compute at `compute_admission` (default = available cores, 12 here) with
 //! a bounded queue on top, so successful-request throughput is deliberately ceilinged well below
 //! what raw, ungated compute could push, in exchange for the availability guarantee the whole
-//! workstream exists to provide. See the report for the full argument and the honest FAIL this
-//! produces against the criterion's literal wording.
+//! workstream exists to provide. The report cited above carries the full argument, and the honest
+//! FAIL this produces against the bar's literal wording.
 //!
 //! **A new, non-F4 shed pattern appears at low concurrency** (c=5: 150 sheds, c=10: 245 sheds,
 //! Arm B): confirmed via `/control/status`'s gate-only `shed_total` staying at 0 across the cell
@@ -121,7 +121,7 @@ use std::time::{Duration, Instant};
 use crate::arms::{Context, Result};
 use crate::report::Work;
 
-/// Task 9's client-driven extensions to the plain closed/open-loop generator: the pan-storm mode
+/// Client-driven extensions to the plain closed/open-loop generator: the pan-storm mode
 /// (abandon-and-reissue, D-C's cancellation payoff) and the cold-build storm (D-G's non-blocking
 /// single-flight at a scale where a *blocking* waiter would have shed the world). Grouped into one
 /// struct rather than four more positional arguments to `run`/`drive`.
@@ -248,11 +248,11 @@ pub fn run(
         return Err("no samples collected — did the server accept any request?".into());
     }
 
-    // Per-status accounting (deliverable 1). `429` is a SHED, never an error — Task 4's gate and
-    // Tasks 1-2's single-flight caches both produce it by design, and the ledger note on Arm B's
-    // opening burst is explicit that counting it as an error would misreport a working mechanism
-    // as a fault. `aborted` (pan-storm's own deadline) is likewise expected, not an error, and is
-    // disjoint from `hung` by construction (only one of the two deadline kinds is ever armed).
+    // Per-status accounting. `429` is a SHED, never an error — the admission gate and the
+    // single-flight caches both produce it by design, and counting it as an error would misreport
+    // a working mechanism as a fault (Arm B's opening burst is exactly that case). `aborted`
+    // (pan-storm's own deadline) is likewise expected, not an error, and is disjoint from `hung`
+    // by construction: only one of the two deadline kinds is ever armed.
     let ok: Vec<&Sample> = samples.iter().filter(|s| s.status == 200).collect();
     let shed: Vec<&Sample> = samples.iter().filter(|s| s.status == 429).collect();
     let aborted: Vec<&Sample> = samples.iter().filter(|s| s.aborted).collect();

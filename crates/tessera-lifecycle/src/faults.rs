@@ -45,6 +45,13 @@
 //! tests that depend on injection are measuring the harness. Both injection arms are exercised:
 //! `an_injected_append_failure_follows_the_real_sequence` and its fsync twin, in `tests/wal.rs`.
 //!
+//! **Repairability is part of the sequence, not a detail beside it.** A real append failure is
+//! terminal and a real sync failure is not (`crate::wal`'s two kinds of write failure), so the two
+//! injection arms poison differently and [`FaultSwitchboard::fail_next_fsyncs`] arms a *count* the
+//! repair path consumes. Making every injected failure terminal is the safe-looking error here, and
+//! it would leave the deny lane's durability retry with no test that could distinguish recovery
+//! from exhaustion — both would look like exhaustion, and both would pass.
+//!
 //! ## Why this module is here and not in `tessera-engine`
 //!
 //! [`Step`], [`PauseSite`] and [`FaultSwitchboard::pause_point`] describe **the executor**, and
@@ -225,9 +232,14 @@ impl FaultSwitchboard {
         self.fail_appends.store(n, Ordering::SeqCst);
     }
 
-    /// Fail the next `n` fsyncs — "disk full on a suppress": the record
-    /// may be in the page cache, but nothing is durable, so the deny must be applied in memory and
-    /// the caller must get 500 (lifecycle §4).
+    /// Fail the next `n` syncs — the first `fsync` and then each repair attempt, in order, since
+    /// the deny lane's retry consumes from the same count.
+    ///
+    /// This is the "disk full on a suppress" the durability rules are written for: the record may be
+    /// in the page cache, but nothing is durable. **The count is what selects which behaviour is
+    /// under test.** One failure exercises the repair succeeding, and the deny is acknowledged
+    /// normally; `tessera_engine::DENY_DURABILITY_ATTEMPTS` failures exhaust it, and the deny is
+    /// applied in memory with a 500 to its caller (lifecycle §4).
     pub fn fail_next_fsyncs(&self, n: usize) {
         self.fail_fsyncs.store(n, Ordering::SeqCst);
     }

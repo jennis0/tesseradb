@@ -1,4 +1,4 @@
-//! `serve.dev_cors_origins` — the dev-only browser seam (MVP client spec §3).
+//! `serve.dev_cors_origins` — the dev-only browser seam. See `tessera_server::cors`.
 //!
 //! Three assertions and no more: absent means no CORS headers at all, a configured origin
 //! round-trips including the response headers the viewer's stats panel reads, and an origin that
@@ -95,7 +95,10 @@ async fn a_configured_origin_round_trips_with_the_exposed_headers() {
         "x-tessera-admission-us",
         "x-tessera-stage-ns",
     ] {
-        assert!(exposed.contains(header), "{header} must be exposed, got: {exposed}");
+        assert!(
+            exposed.contains(header),
+            "{header} must be exposed, got: {exposed}"
+        );
     }
 }
 
@@ -136,7 +139,10 @@ async fn the_session_plane_carries_the_layer_too() {
         )
         .header("Origin", "http://localhost:5173")
         .header("Access-Control-Request-Method", "POST")
-        .header("Access-Control-Request-Headers", "authorization,content-type")
+        .header(
+            "Access-Control-Request-Headers",
+            "authorization,content-type",
+        )
         .send()
         .await
         .unwrap();

@@ -1,17 +1,13 @@
 //! Engine state over HTTP: pin identity and session revocation — the server-plane half of what
 //! `tessera-engine/tests/pins.rs` asserts in-process.
 //!
-//! Split out of `tests/http.rs` at Task 0c (Phase 2 stage 2.1) so Track C owns a server-plane
-//! file. Task 4 replaces `PinManager`'s equality check with a drain list, and Task 5 makes
-//! `revoke` prune the projection cache; both need somewhere to land an end-to-end assertion, and
-//! `http.rs` is frozen for the stage.
+//! Named for *engine state* rather than for pins alone: it holds session revocation and the
+//! cache-pruning assertions too, all of which are the same subject — server-observable state the
+//! engine owns.
 //!
-//! Named for Track C's subject in the plan (*engine state*) rather than for pins alone: it already
-//! holds a session-revocation case, and Task 5's cache-pruning assertions belong here too, so
-//! `http_pins.rs` would have read wrong by the end of the stage (Task 0 gate, minor).
-//!
-//! The property `g2_pins_survive_overlay_swaps` guards is lifecycle §2.3 and it is the one most
-//! easily broken by Task 4: **a pin fixes row-space geometry and never authorisation state**, so
+//! The property `g2_pins_survive_overlay_swaps` guards is lifecycle §2.3, and it is the one a
+//! plausible change to the drain list most easily breaks: **a pin fixes row-space geometry and
+//! never authorisation state**, so
 //! an overlay swap must not expire it — and, in the other direction, a suppression must apply to
 //! a pinned request the moment it is accepted. `PinnedGeometry` exists to make the second half
 //! structural; this file is where the first half stays honest.
@@ -173,7 +169,7 @@ async fn g2_pins_survive_overlay_swaps() {
     assert_eq!(tiles_after[0].1, tiles_before[0].1 - 1);
 }
 
-// --- Task 5: cache pruning, the startup bound, and check_bearer ---
+// --- Cache pruning, the startup bound, and check_bearer ---
 
 /// **End-to-end revoke pruning.** `tests/cache.rs` asserts the engine-level pruner; this asserts
 /// the handler actually calls it, which is a separate failure — a pruner nothing invokes closes no
@@ -184,12 +180,10 @@ async fn g2_pins_survive_overlay_swaps() {
 /// projection is gone from the cache.
 ///
 /// **The observable is `row_projection_cache_stats().entries`, read through `TestServer::state`,
-/// and that is the whole point of this test.** Its first version asserted a 204 and that a survivor
-/// still got 200 — neither of which touches the cache — so deleting
-/// `state.engine.prune_token(req.token_id)` from the revoke handler left all 38 tests in this crate
-/// green while the doc above claimed the opposite (round-1 review, MX1). A test doc that asserts
-/// what the test does not is worse than no test: the next worker to refactor this handler sees
-/// green and reopens the Phase 1 deferral with a test standing over it.
+/// and that is the whole point of this test.** Asserting a 204 and that a survivor still gets 200
+/// touches the cache not at all: deleting `state.engine.prune_token(req.token_id)` from the revoke
+/// handler leaves every status code in this crate's tests unchanged, so a test written that way
+/// would stand over the handler claiming a property it never checks.
 ///
 /// The survivor's entry is asserted to *remain* for the symmetric reason: a `prune_token` that
 /// cleared the whole cache would satisfy "the doomed entry is gone" just as well.
@@ -277,7 +271,7 @@ async fn revoke_prunes_the_token() {
 ///
 /// Both caches are covered, and the second half of this test is the one that matters: a validation
 /// covering only the projection cache leaves the fragment bound free to be set to a collapsing
-/// value (Task 0 gate, F11).
+/// value.
 #[tokio::test]
 async fn an_undersized_cache_bound_refuses_to_start() {
     let tmp = TempDir::new().unwrap();
@@ -344,7 +338,7 @@ async fn an_undersized_cache_bound_refuses_to_start() {
     assert!(
         message.contains("fragment_cache_bytes"),
         "the fragment bound must be validated too, or it is free to be set to a collapsing \
-         value while its sibling is checked (Task 0 gate, F11); got: {message}"
+         value while its sibling is checked; got: {message}"
     );
 }
 
