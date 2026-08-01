@@ -801,7 +801,7 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
     }
 }
 
-/// Owner ruling: an identifier naming nothing and one naming an invisible item are indistinguishable
+/// An identifier naming nothing and one naming an invisible item are indistinguishable
 /// — one `Ok(None)` from one code path, with no error variant separating the two.
 #[test]
 fn an_unknown_id_and_an_invisible_one_are_indistinguishable() {

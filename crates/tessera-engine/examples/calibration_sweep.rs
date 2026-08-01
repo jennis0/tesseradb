@@ -109,7 +109,7 @@ fn all_descriptors(bundle_root: &Path) -> Vec<String> {
     out
 }
 
-/// Fix round 1: the sweep's ORIGINAL grant. Deterministic even-spacing across the dictionary, NOT
+/// The sweep's sparse grant. Deterministic even-spacing across the dictionary, NOT
 /// representative of the validation workload's actual grant construction — review caught that
 /// this produced a mask ~20x sparser than `bench_concurrency.py`'s own w=10 random-term grant
 /// (`sigma_visible=21` at the exact validation bbox vs the real run's ~433 points/request on the
@@ -183,7 +183,7 @@ fn main() {
         return;
     }
 
-    // Fix round 1: `--dense` selects the bench's own `GrantShape::Random` grant construction
+    // `--dense` selects the bench's own `GrantShape::Random` grant construction
     // (matching the real validation workload's mask density) instead of this tool's original
     // deterministic even-spacing, which review found produced an unrepresentatively sparse mask.
     // Both are kept — see `spread_descriptors`/`random_grant`'s docs.

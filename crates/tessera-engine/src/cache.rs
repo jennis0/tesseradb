@@ -122,7 +122,7 @@ pub(crate) struct RowProjectionCache {
 }
 
 impl RowProjectionCache {
-    /// `bound_bytes` is the resident-byte ceiling. `u64::MAX` means "no bound" — the pre-Task-5
+    /// `bound_bytes` is the resident-byte ceiling. `u64::MAX` means "no bound" — the unbounded
     /// behaviour, and what every non-server construction site gets until
     /// [`crate::Engine::set_cache_bounds`] is called.
     pub(crate) fn new(bound_bytes: u64) -> Self {

@@ -25,7 +25,7 @@
 //! construction** — not by convention, not by observation of the current rayon version. A serial,
 //! in-order fold over that vector (still in `Engine::viewport`) then short-circuits on the first
 //! `Err` (D-C's per-tile cancellation check, moved inside `tile_result` — see its doc) and
-//! concatenates `tile_counts`/`points`/`sub_cells` exactly as the pre-Task-6 serial loop did.
+//! concatenates `tile_counts`/`points`/`sub_cells` exactly as the serial fold does.
 //!
 //! **Calibration task: below [`SERIAL_FALLBACK_MAX_ROWS`], the fan-out above does not run at
 //! all.** Measured (2.42M-fixture, w=10 grant, zoom 8) at 2.97x-13x slower at
@@ -310,7 +310,7 @@ impl Engine {
     ///
     /// Returns `Ok(None)` both when `id` names nothing in this bundle and when it names an item
     /// the principal may not see — deliberately one outcome from one code path, so the server
-    /// cannot differentiate what the engine does not tell it (owner ruling; contracts §3.2).
+    /// cannot differentiate what the engine does not tell it (contracts §3.2).
     ///
     /// **The timing channel is closed, not narrowed** (design Appendix C, C4
     /// annotation). The idset check is entity-independent — it runs identically for every `id`,
@@ -574,7 +574,7 @@ impl Engine {
         // clamping (see `EngineError::UnderlayRefused`). The cell budget is checked before any
         // counting work because the underlay multiplies the (already-bounded) tile set by 4^offset.
         //
-        // Fix round 1: `underlay_cells_demanded` (0 when no underlay was requested) is captured
+        // `underlay_cells_demanded` (0 when no underlay was requested) is captured
         // here, outside the match, so the serial-fallback predictor below can see it — review
         // caught that the predictor was blind to underlay cost entirely (`total_rows_in_ranges`
         // alone), which is a real gap since a saturated underlay (`max_underlay_cells`, default
@@ -664,7 +664,7 @@ impl Engine {
         // work from either candidate path to compute. See [`SERIAL_FALLBACK_MAX_ROWS`]'s doc for
         // why this predictor (and not tile count) is the one the sweep data supports.
         //
-        // Fix round 1: `underlay_cells_demanded` is added in, not left out. The underlay's own
+        // `underlay_cells_demanded` is added in, not left out. The underlay's own
         // per-cell cost is "one small binary search plus one bitmap range-count" (the underlay
         // block's own comment, below) — the same shape of operation `count_range` performs per
         // row-range, so summing the two into one row-equivalent total before comparing against
@@ -716,7 +716,7 @@ impl Engine {
         // checkpoint keeps running to completion; every tile whose worker had not yet reached it
         // observes the flip there instead and returns immediately. The serial path's bound is
         // therefore strictly tighter, not merely no-worse.
-        // Fix round 1: one closure, not two independently-maintained copies of the same 9-argument
+        // One closure, not two independently-maintained copies of the same 9-argument
         // call — the duplication was a divergence risk (a future change to `tile_result`'s
         // argument list would need to be made twice, silently, with no compiler help if one copy
         // were missed). `run` captures only shared references and `Copy` values (`&mask`,
@@ -775,7 +775,7 @@ impl Engine {
 
         // D-F: the serial, IN-ORDER fold. `tile_outcomes`' order equals `tiles`' order by
         // construction (the indexed collect path above — this module's doc), so this reconstructs
-        // exactly the concatenation the pre-Task-6 serial loop produced. Short-circuits on the
+        // exactly the concatenation the serial fold produces. Short-circuits on the
         // first `Err` (D-C's `Cancelled`, or any other per-tile error): every tile's own work is
         // already done by this point (the parallel sweep does not itself short-circuit — that is
         // the point of collecting `Vec<Result<..>>` rather than `Result<Vec<..>>`), so bailing out

@@ -414,7 +414,7 @@ struct EvictionTally {
 
 impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// `bound_bytes` is the byte ceiling on resident entries. `u64::MAX` means "no bound", which is
-    /// the pre-Task-5 behaviour and what every non-server construction site gets; `tessera-server`
+    /// unbounded, and what every non-server construction site gets; `tessera-server`
     /// always sets a real one at startup, after validating it (`tessera_server::prepare`).
     pub(crate) fn new(bound_bytes: u64) -> Self {
         SingleFlightCache {

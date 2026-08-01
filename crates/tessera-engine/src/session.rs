@@ -512,7 +512,7 @@ impl Engine {
             fragment_cache,
             // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
             // after `open`, having validated the figure; every other embedder (tests, benches,
-            // examples) gets the pre-Task-5 behaviour, which is what they had and what they want.
+            // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: RowProjectionCache::new(u64::MAX),
             pool,
             config,
@@ -827,7 +827,7 @@ impl Engine {
     ///
     /// Called by `tessera_server::prepare` immediately after [`Self::open`], *after* it has
     /// validated both figures against `expected_concurrent_sessions`. An embedder that never calls
-    /// this gets unbounded caches — the pre-Task-5 behaviour — which is stated here rather than
+    /// this gets unbounded caches, which is stated here rather than
     /// silently assumed, and is the same posture `EngineConfig::k_min` documents for a constraint
     /// only the server's loader enforces.
     pub fn set_cache_bounds(&self, row_projection_bytes: u64, fragment_bytes: u64) {
