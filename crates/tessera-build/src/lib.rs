@@ -90,10 +90,10 @@ pub struct BuildArgs {
     /// deliberately has no hex accessor, to preserve its redacted `Debug` (a hex accessor would
     /// undo the redaction).
     pub identity_key_hex: String,
-    /// MANIFEST `identity.epoch` (contracts §2.2/§2a): advanced by the CLI when the operator
-    /// passes `--bump-id-epoch` or rotates the key, carried forward verbatim on a normal
+    /// MANIFEST `identity.idset` (contracts §2.2/§2a): advanced by the CLI when the operator
+    /// passes `--bump-idset` or rotates the key, carried forward verbatim on a normal
     /// rebuild, reset to 1 by `--mint-id-key`.
-    pub identity_epoch: u32,
+    pub idset: u32,
     /// The §13.3 row-range shard this build produces. Phase 1: 0.
     pub shard_id: u32,
     /// Mint an external ID for every item from its source entity id (8 bytes LE), and write
@@ -156,7 +156,7 @@ impl std::fmt::Debug for BuildArgs {
                 "identity_key_hex",
                 &identity_key_fingerprint(&self.identity_key_hex),
             )
-            .field("identity_epoch", &self.identity_epoch)
+            .field("idset", &self.idset)
             .field("shard_id", &self.shard_id)
             .field("mint_external_ids", &self.mint_external_ids)
             .field("emit_oracle_pairs", &self.emit_oracle_pairs)
@@ -592,7 +592,7 @@ fn write_manifests(
             rounds: IDENTITY_ROUNDS,
             key: args.identity_key_hex.clone(),
             shard_id: args.shard_id,
-            epoch: args.identity_epoch,
+            idset: args.idset,
         },
         slices: vec![SliceDescriptor {
             id: args.slice_id.clone(),
@@ -664,7 +664,7 @@ pub struct VerifyReport {
 pub fn verify(root: &Path) -> Result<VerifyReport> {
     let bundle = tessera_store::read::open_bundle(root)?;
     // The key is parsed here, not by `open_bundle`: `IdentityDescriptor::validate` (run at
-    // open) checks `construction`/`rounds`/`epoch` but never parses `key`'s hex, since
+    // open) checks `construction`/`rounds`/`idset` but never parses `key`'s hex, since
     // `tessera-store` has no need to hold a live `IdentityKey` at all — only `tessera verify`
     // and the build do.
     let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
@@ -1139,7 +1139,7 @@ mod tests {
             limit: None,
             identity_key: tessera_types::IdentityKey::from_hex(KEY_HEX).unwrap(),
             identity_key_hex: KEY_HEX.to_string(),
-            identity_epoch: 1,
+            idset: 1,
             shard_id: 0,
             mint_external_ids: true,
             emit_oracle_pairs: true,

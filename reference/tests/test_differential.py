@@ -357,7 +357,7 @@ def test_items_drilldown_returns_expected_external_id(server, oracle_bundle: Bun
     # `server` is session-scoped (a boot is expensive) and
     # `test_mixed_change_composition_stress` mutates `sorted(base_mask)[0..3]` of this same
     # mask — including a **delete**, which is terminal in Phase 1 by design: nothing clears
-    # it, because deletion denies retire only via the epoch ledger and that does not exist
+    # it, because deletion denies retire only via the stamp ledger and that does not exist
     # until compaction lands (lifecycle §3.1's three retirement rules). So `min(base_mask)`
     # is permanently invisible to every test that runs after the stress test, and this test
     # correctly got a 404 when it targeted it — the product was right and the fixture sharing

@@ -281,19 +281,19 @@ pub fn admission_retry_after_s(stats: &tessera_engine::ExecutorStats) -> u64 {
 
 /// Map an `EngineError` to the R5 code list. `MultiSegmentSlice`, `Store`/`Wal`/`Overlay`/
 /// `Plugin`/`Io`/`Malformed` are all fail-closed engine-internal failures (500); `PinExpired`,
-/// `UnknownSlice` and `StaleIdentityEpoch` have a more specific code.
+/// `UnknownSlice` and `StaleIdSet` have a more specific code.
 pub fn map_engine_error(e: EngineError) -> ApiError {
     match e {
         EngineError::PinExpired => ApiError::PinExpired,
         EngineError::UnknownSlice(slice) => ApiError::Unknown(format!("unknown slice '{slice}'")),
-        // Contracts §2.2/§3.2 r6: `POST /v1/items/{tessera_id}`'s caller-supplied `epoch` did not
+        // Contracts §2.2/§3.2 r6: `POST /v1/items/{tessera_id}`'s caller-supplied `idset` did not
         // match the generation `Engine::item` validated it against (fix wave, Task 2 finding —
         // this check used to run in the handler, against a separate `Engine::meta()` call, before
         // moving inside `Engine::item` to close a second generation load). Fixed detail string,
         // named explicitly rather than left to the catch-all, so a future catch-all change can
         // never accidentally alter this one response's body.
-        EngineError::StaleIdentityEpoch => {
-            ApiError::Conflict("stale identity epoch; re-resolve by external_id".to_string())
+        EngineError::StaleIdSet => {
+            ApiError::Conflict("stale idset; re-resolve by external_id".to_string())
         }
         // A refused underlay is a request the caller can fix by asking for less, so it is a
         // contract error (422) rather than a fail-closed 500. Its `Display` names only the
@@ -1079,16 +1079,16 @@ mod tests {
         );
     }
 
-    /// Fix wave, Task 2: `StaleIdentityEpoch` (now raised by `Engine::item` itself, against the
+    /// Fix wave, Task 2: `StaleIdSet` (now raised by `Engine::item` itself, against the
     /// one generation it loads, rather than by a separate handler-side `Engine::meta()` check)
     /// maps to the same 409 `conflict` body `POST /v1/items/{tessera_id}` has always returned for
-    /// a stale epoch.
+    /// a stale idset.
     #[test]
-    fn map_engine_error_takes_stale_identity_epoch_to_409_conflict() {
-        let (status, code, detail) = map_engine_error(EngineError::StaleIdentityEpoch).parts();
+    fn map_engine_error_takes_stale_idset_to_409_conflict() {
+        let (status, code, detail) = map_engine_error(EngineError::StaleIdSet).parts();
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(code, "conflict");
-        assert_eq!(detail, "stale identity epoch; re-resolve by external_id");
+        assert_eq!(detail, "stale idset; re-resolve by external_id");
     }
 
     /// D-C: `Cancelled` is explicitly named in `map_engine_error`'s match (not caught only by the

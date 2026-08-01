@@ -23,7 +23,8 @@ make them.
    blinding permutation preventing viewer-plane correlation and enumeration, explicitly not a
    cryptographic guarantee and explicitly not a defence against a bundle-holder. The threat model
    is promoted from `identity.rs` into the specification. No code changes.
-3. **Scope of this rewrite:** every metadata and framing row, plus the substantive rows where a
+3. **S3 and S5 are ruled and applied** (2026-08-01). S3: §2.6 keeps the entity-space *definition* of `M_auth`; §10.4 gains the normative evaluation strategy — the fragment is projected and cached per session, composition applied as row-space diffs — and the `∩ base` / `∖ base` clamps become a stated requirement rather than a source comment. SA §5 defers to it instead of restating an order it had partly inverted. S5: §10.6 gains three named refusal classes (Failure, Backpressure, Shape) with distinct client obligations, plus the safety rule that a refusal is a function of the request and the deployment's configuration and never of the viewer's data; contracts §3.1 groups its codes the same way.
+4. **Scope of this rewrite:** every metadata and framing row, plus the substantive rows where a
    wrong document misleads about a guarantee — S1, S6, S7, S10, S12, S18, S19, S20, S21, S22, S23
    and the retirement rules. The remainder becomes GitHub issues against the epics that will build
    the machinery.

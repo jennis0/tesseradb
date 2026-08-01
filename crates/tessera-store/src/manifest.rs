@@ -83,18 +83,18 @@ pub struct IdentityDescriptor {
     /// case-folding — contracts §2.6).
     pub key: String,
     pub shard_id: u32,
-    /// The transport-identity epoch (contracts §2.2, §2.6 r6). Advanced whenever the
-    /// partitioning or sharding changes, carried forward verbatim by a normal rebuild, and
-    /// reset to 1 by a key rotation.
+    /// The idset — which set of `tessera_id` values this bundle's identifiers belong to
+    /// (contracts §2.2, §2.6 r6). Advanced whenever the partitioning or sharding changes,
+    /// carried forward verbatim by a normal rebuild, and reset to 1 by a key rotation.
     ///
     /// **Not `#[serde(default)]`, deliberately.** `tessera_id` is stable across rebuilds but
     /// *not* across a repartition, and the churn is **partial** — so without this signal a
     /// stale identifier does not fail, it silently names whichever entity now occupies that
-    /// permutation input. A defaulted epoch would make every bundle claim epoch 0 and defeat
+    /// permutation input. A defaulted idset would make every bundle claim idset 0 and defeat
     /// the one mechanism that distinguishes "your identifier is old" from "your identifier
-    /// resolved". An absent `epoch` is a typed reader error, exactly as an absent `identity`
+    /// resolved". An absent `idset` is a typed reader error, exactly as an absent `identity`
     /// object is.
-    pub epoch: u32,
+    pub idset: u32,
 }
 
 /// **Hand-written, not derived: `key` is the deployment's identity key in plaintext hex.**
@@ -109,7 +109,7 @@ impl std::fmt::Debug for IdentityDescriptor {
             .field("rounds", &self.rounds)
             .field("key", &identity_key_fingerprint(&self.key))
             .field("shard_id", &self.shard_id)
-            .field("epoch", &self.epoch)
+            .field("idset", &self.idset)
             .finish()
     }
 }
@@ -136,13 +136,13 @@ impl IdentityDescriptor {
                 ),
             });
         }
-        // Contracts §2.2: the epoch is "reset to 1 by a key rotation" and advanced from there,
+        // Contracts §2.2: the idset is "reset to 1 by a key rotation" and advanced from there,
         // so 0 is not a value any conforming writer produces. Refusing it here means a
         // hand-edited or partially-written manifest fails closed rather than presenting an
-        // epoch that no client can meaningfully compare against.
-        if self.epoch == 0 {
+        // idset that no client can meaningfully compare against.
+        if self.idset == 0 {
             return Err(StoreError::InvalidIdentity {
-                detail: "identity epoch is 0; conforming writers start at 1 and advance \
+                detail: "idset is 0; conforming writers start at 1 and advance \
                          (contracts §2.2)"
                     .to_string(),
             });
@@ -349,7 +349,7 @@ mod tests {
             rounds: IDENTITY_ROUNDS,
             key: KEY_HEX.to_string(),
             shard_id: 0,
-            epoch: 1,
+            idset: 1,
         }
     }
 

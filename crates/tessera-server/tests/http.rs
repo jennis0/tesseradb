@@ -335,11 +335,11 @@ async fn viewer_meta_requires_bearer() {
     assert_eq!(resp.status(), 200);
 }
 
-/// Contracts §2.2 r6: `GET /v1/meta` reports the transport-identity epoch as `identity_epoch` —
-/// and reports **only** the epoch: the identity key appears in no API response on any plane.
-/// Nothing asserted either half before, which is what let S2's epoch regression sit untested.
+/// Contracts §2.2 r6: `GET /v1/meta` reports the idset as `idset` —
+/// and reports **only** the idset: the identity key appears in no API response on any plane.
+/// Nothing asserted either half before, which is what let S2's idset regression sit untested.
 #[tokio::test]
-async fn viewer_meta_reports_the_identity_epoch_and_never_the_key() {
+async fn viewer_meta_reports_the_idset_and_never_the_key() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -366,8 +366,8 @@ async fn viewer_meta_reports_the_identity_epoch_and_never_the_key() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(
-        body["identity_epoch"], FIXTURE_EPOCH,
-        "/v1/meta must report the bundle's identity_epoch: {body}"
+        body["idset"], FIXTURE_IDSET,
+        "/v1/meta must report the bundle's idset: {body}"
     );
     let raw = body.to_string();
     assert!(
@@ -376,12 +376,12 @@ async fn viewer_meta_reports_the_identity_epoch_and_never_the_key() {
     );
 }
 
-/// Contracts §2.2/§3.2 r6: `POST /v1/items/{tessera_id}` accepts an optional `epoch` and answers
-/// `409 conflict` — "stale identity epoch; re-resolve by external_id" — when it does not match.
+/// Contracts §2.2/§3.2 r6: `POST /v1/items/{tessera_id}` accepts an optional `idset` and answers
+/// `409 conflict` — "stale idset; re-resolve by external_id" — when it does not match.
 /// The 409 had no test at any level, and the check is decided before inversion, so a matching
-/// epoch must not alter the answer for the same id.
+/// idset must not alter the answer for the same id.
 #[tokio::test]
-async fn item_with_a_stale_epoch_is_409_and_a_matching_epoch_changes_nothing() {
+async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -414,16 +414,16 @@ async fn item_with_a_stale_epoch_is_409_and_a_matching_epoch_changes_nothing() {
     let (_tiles, points) = decode_viewport(&viewport.bytes().await.unwrap());
     let tessera_id = points[0].0;
 
-    // Baseline: no epoch at all → 200.
+    // Baseline: no idset at all → 200.
     let plain = post_item(&server, token, tessera_id).await;
     assert_eq!(plain.status(), 200);
 
-    // A stale epoch → 409, with the contract's own detail string.
+    // A stale idset → 409, with the contract's own detail string.
     let stale = server
         .client
         .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
         .bearer_auth(token)
-        .json(&serde_json::json!({ "epoch": FIXTURE_EPOCH + 1 }))
+        .json(&serde_json::json!({ "idset": FIXTURE_IDSET + 1 }))
         .send()
         .await
         .unwrap();
@@ -432,34 +432,34 @@ async fn item_with_a_stale_epoch_is_409_and_a_matching_epoch_changes_nothing() {
     assert_eq!(body["error"], "conflict");
     assert_eq!(
         body["detail"],
-        "stale identity epoch; re-resolve by external_id"
+        "stale idset; re-resolve by external_id"
     );
 
-    // The matching epoch is a no-op: same 200, same body as the epoch-less request.
+    // The matching idset is a no-op: same 200, same body as the idset-less request.
     let matching = server
         .client
         .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
         .bearer_auth(token)
-        .json(&serde_json::json!({ "epoch": FIXTURE_EPOCH }))
+        .json(&serde_json::json!({ "idset": FIXTURE_IDSET }))
         .send()
         .await
         .unwrap();
     assert_eq!(matching.status(), 200);
 
-    // And a stale epoch on an id naming nothing is still the 409, decided before inversion —
+    // And a stale idset on an id naming nothing is still the 409, decided before inversion —
     // identical for every identifier, so it opens no channel (Appendix C, C4).
     let stale_unknown = server
         .client
         .post(server.viewer_url("/v1/items/0"))
         .bearer_auth(token)
-        .json(&serde_json::json!({ "epoch": FIXTURE_EPOCH + 1 }))
+        .json(&serde_json::json!({ "idset": FIXTURE_IDSET + 1 }))
         .send()
         .await
         .unwrap();
     assert_eq!(
         stale_unknown.status(),
         409,
-        "the epoch check must be entity-independent, not fall through to 404"
+        "the idset check must be entity-independent, not fall through to 404"
     );
 }
 

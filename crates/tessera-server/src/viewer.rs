@@ -124,10 +124,10 @@ async fn meta(
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
-        // contracts §2.2/§2.6 r6: the transport-identity epoch. The identity KEY never appears
-        // in any response, log line or metric label (I10, Appendix C C17) -- this is the epoch
+        // contracts §2.2/§2.6 r6: the idset. The identity KEY never appears
+        // in any response, log line or metric label (I10, Appendix C C17) -- this is the idset
         // only, which is meaningless without the key and is what `POST /v1/items` checks against.
-        "identity_epoch": meta.identity_epoch,
+        "idset": meta.idset,
         "slices": meta.slices.iter().map(|(id, name)| serde_json::json!({"id": id, "display_name": name})).collect::<Vec<_>>(),
         "quantisation": {
             "x_min": meta.quantisation.x_min,
@@ -563,10 +563,10 @@ struct ItemReq {
     /// Optional (contracts §2.2/§2.6 r6, owner ruling): the durable identifier is `external_id`,
     /// so a conforming consumer has no stale `tessera_id` to present in the first place, and
     /// rotation/repartitioning are deliberate breaking changes rather than scheduled hygiene. A
-    /// caller that omits this accepts that a `tessera_id` from a past epoch may now name a
+    /// caller that omits this accepts that a `tessera_id` from a past idset may now name a
     /// different item after a repartitioning.
     #[serde(default)]
-    epoch: Option<u32>,
+    idset: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -581,7 +581,7 @@ struct ItemResp {
 
 /// `POST /v1/items/{tessera_id}`.
 ///
-/// **The epoch check runs before inversion and is entity-independent** — identical work and an
+/// **The idset check runs before inversion and is entity-independent** — identical work and an
 /// identical `409` for every presented `tessera_id`, so it opens no channel (contracts §2.2, C4).
 /// Fix wave, Task 2 finding: the check itself now runs *inside* `Engine::item`, against the same
 /// generation snapshot that call already loads for the lookup that follows — not a separate
@@ -611,10 +611,10 @@ fn run_item(
     state: &AppState,
     session: &tessera_engine::Session,
     raw: u64,
-    epoch: Option<u32>,
+    idset: Option<u32>,
 ) -> Result<ItemResp, ApiError> {
-    let item = match state.engine.item(session, TesseraId::new(raw), epoch) {
-        // `EngineError::StaleIdentityEpoch` -> 409, same fixed detail string as before this was
+    let item = match state.engine.item(session, TesseraId::new(raw), idset) {
+        // `EngineError::StaleIdSet` -> 409, same fixed detail string as before this was
         // moved inside `Engine::item`. A corrupt or unreadable sidecar (`Store`/`Io`) is a SERVER
         // fault, not "no such item" -- `.ok().flatten()` here would serve a 200 with
         // `external_id: null` and call a digest mismatch a missing field -- fail-open, and
@@ -661,22 +661,22 @@ async fn item(
     // with 429 `backpressure` on either stage.
     let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
 
-    // D-A: `engine.item` checks `req.epoch` (if the caller sent one) against the ONE generation
+    // D-A: `engine.item` checks `req.idset` (if the caller sent one) against the ONE generation
     // it loads, inverts the id (pure, no IO), then reads the external-id sidecar for a visible
-    // item — file IO, moved off the reactor. Fix wave, Task 2 finding: the epoch check used to
+    // item — file IO, moved off the reactor. Fix wave, Task 2 finding: the idset check used to
     // run here, on the reactor, before `admit()`, against a SEPARATE `state.engine.meta()` call
     // — a second, independent `generation.load_full()` ahead of `engine.item`'s own (lifecycle
     // §1.1's one-load-per-request invariant, broken for a request that is nominally one lookup).
     // Moving it inside `engine.item` costs this one check its previous free ride ahead of the
-    // compute-admission gate — a stale-epoch request now holds a gate permit for the length of
+    // compute-admission gate — a stale-idset request now holds a gate permit for the length of
     // the `spawn_blocking` call rather than being rejected before `admit()` runs — which is the
     // trade lifecycle §1.1's invariant asks for; see `Engine::item`'s doc for the full argument.
     // Closure capture: `state` moved in directly (nothing after this `.await` needs the handler's
-    // own copy), `entry` moved (already an `Arc<SessionEntry>`), `raw`/`req.epoch` are `Copy`,
+    // own copy), `entry` moved (already an `Arc<SessionEntry>`), `raw`/`req.idset` are `Copy`,
     // `gate_permits` (D-B) moves in so both permits release only when this closure returns.
     let resp = tokio::task::spawn_blocking(move || {
         let _gate_permits = gate_permits;
-        run_item(&state, &entry.session, raw, req.epoch)
+        run_item(&state, &entry.session, raw, req.idset)
     })
     .await
     .map_err(map_join_error)??;

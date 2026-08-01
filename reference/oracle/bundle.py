@@ -118,7 +118,7 @@ class Bundle:
         # `identity` (contracts r6, docs/evidence/memos/2026-07-30-tessera-id-construction.md
         # §2): the per-deployment key and the §13.3 shard prefix `tessera_id` is built
         # under. A bundle that *does* carry `identity` is read strictly, per the memo's
-        # fail-closed rule: bad construction/rounds/key/shard_id/epoch all refuse, none
+        # fail-closed rule: bad construction/rounds/key/shard_id/idset all refuse, none
         # default. An absent object takes the PRE_R6_IDENTITY_FALLBACK_REMOVE_AT scaffold
         # path above instead of raising -- see its docstring for why that is still
         # tolerated and when it must go.
@@ -134,13 +134,13 @@ class Bundle:
                 identity_obj["key"]
             )
             self.identity_shard_id: int | None = identity_obj["shard_id"]
-            if "epoch" not in identity_obj:
-                raise ValueError("manifest `identity` object is missing `epoch`")
-            self.identity_epoch: int | None = identity_obj["epoch"]
+            if "idset" not in identity_obj:
+                raise ValueError("manifest `identity` object is missing `idset`")
+            self.idset: int | None = identity_obj["idset"]
         else:
             self.identity_key = None
             self.identity_shard_id = None
-            self.identity_epoch = None
+            self.idset = None
 
         # Phase 1: exactly one partition, "default".
         partition_dir = self.prefix_dir / "partitions" / "default"

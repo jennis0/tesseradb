@@ -4,7 +4,7 @@ export type Quantisation = {xMin: number; xMax: number; yMin: number; yMax: numb
 
 export type Meta = {
   apiVersion: number;
-  identityEpoch: number;
+  idset: number;
   slices: {id: string; displayName: string}[];
   quantisation: Quantisation;
   declaredScalars: {name: string; arrowType: string}[];

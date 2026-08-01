@@ -76,7 +76,7 @@ fn ensure_bundle() -> PathBuf {
             limit: Some(ITEM_LIMIT),
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
             identity_key_hex: TEST_KEY_HEX.to_string(),
-            identity_epoch: 1,
+            idset: 1,
             shard_id: 0,
             mint_external_ids: false,
             batch_items: None,

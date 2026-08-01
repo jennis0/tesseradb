@@ -3,7 +3,7 @@
 //!
 //! `OverlayEntry` carries **three independent facts**, never one overwritable disposition:
 //! `deleted`, `suppressed` and `evaluate_terms` retire on entirely different triggers (deletion
-//! denies retire only via the epoch ledger, which does not exist until compaction lands;
+//! denies retire only via the stamp ledger, which does not exist until compaction lands;
 //! suppressions retire only on `Unsuppress`; predicate changes retire at their compaction fold —
 //! lifecycle §3). Collapsing them into a single enum ("last write wins") was caught fail-open in
 //! review twice (CLAUDE.md): the sequence `delete → suppress → unsuppress` must not re-expose a
@@ -23,7 +23,7 @@ use crate::wal::{ChangeOp, WalRecord};
 /// constructed as a stand-in for "not deleted", only ever the actual absence of any change.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OverlayEntry {
-    /// Set by `Delete`. Terminal in Phase 1: nothing clears it (no epoch ledger yet).
+    /// Set by `Delete`. Terminal in Phase 1: nothing clears it (no stamp ledger yet).
     pub deleted: bool,
     /// Set by `Suppress`; cleared **only** by `Unsuppress`. Never touched by `Delete` or
     /// `Predicate`.

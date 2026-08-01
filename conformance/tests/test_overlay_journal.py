@@ -85,7 +85,7 @@ BATCH = 400
 def overlay_server(tmp_path_factory, catalogue_bundle_root):
     """A server of its own, not the session-scoped catalogue ones.
 
-    Overlay changes are **irreversible in Phase 1** — a deletion deny retires only via the epoch
+    Overlay changes are **irreversible in Phase 1** — a deletion deny retires only via the stamp
     ledger, which does not exist until compaction lands (lifecycle §3.1) — so a module that deletes
     items must not share a server with modules that assume the corpus intact. `reference/tests`
     learned this the expensive way and left the comment to prove it.

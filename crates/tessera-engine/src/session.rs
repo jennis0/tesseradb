@@ -260,18 +260,18 @@ pub enum EngineError {
     /// be a silent behaviour change the D-D design (one shared pool, no second throttle) does not
     /// admit.
     ThreadPoolBuild(String),
-    /// `POST /v1/items/{tessera_id}` (contracts §2.2/§3.2 r6): the caller-supplied `epoch` does
-    /// not match the identity epoch of the generation [`crate::viewport::Engine::item`] loaded
-    /// for this call. Named explicitly so the epoch check can run *inside* `item`, against the
+    /// `POST /v1/items/{tessera_id}` (contracts §2.2/§3.2 r6): the caller-supplied `idset` does
+    /// not match the idset of the generation [`crate::viewport::Engine::item`] loaded
+    /// for this call. Named explicitly so the idset check can run *inside* `item`, against the
     /// SAME `generation.load_full()` the lookup that follows already needs — not a separate
     /// `Engine::meta()` call (and its own, second `load_full`) ahead of it. That used to be two
     /// independent loads for one logical request, against lifecycle §1.1's one-load-per-request
-    /// invariant: a generation swap landing between them could check the epoch against one
+    /// invariant: a generation swap landing between them could check the idset against one
     /// snapshot and serve the lookup from another. Maps to HTTP 409 `conflict` with a fixed
     /// detail string (`tessera-server::error::map_engine_error`'s explicit arm) — entity
     /// independent, decided before the id is inverted, so it opens no timing channel (Appendix C,
     /// C4).
-    StaleIdentityEpoch,
+    StaleIdSet,
 }
 
 impl std::fmt::Display for EngineError {
@@ -321,7 +321,7 @@ impl std::fmt::Display for EngineError {
             EngineError::ThreadPoolBuild(detail) => {
                 write!(f, "failed to build the shared compute pool: {detail}")
             }
-            EngineError::StaleIdentityEpoch => write!(f, "stale identity epoch"),
+            EngineError::StaleIdSet => write!(f, "stale idset"),
         }
     }
 }

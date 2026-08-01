@@ -48,7 +48,7 @@ proves the rule is about this system.
 ## What it does not model
 
 The three retirement rules (lifecycle §3) are the *engine's* obligation, not this journal's:
-deletion denies retire by the epoch ledger, suppressions retire only on unsuppress, and
+deletion denies retire by the stamp ledger, suppressions retire only on unsuppress, and
 predicate-change entries retire at their compaction fold. This journal records what was acked; it
 never expires an entry on its own, because from the viewer's side a retired deny and a live deny
 are indistinguishable — both mean "not visible" — and a journal that expired entries by its own

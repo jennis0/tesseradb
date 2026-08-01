@@ -83,7 +83,7 @@ use crate::report::{Stages, Work};
 pub enum Op {
     /// The security-critical one: retires *only* on unsuppress, never touches postings.
     Suppress,
-    /// Retires by the epoch ledger.
+    /// Retires by the stamp ledger.
     Delete,
     /// Retires at its compaction fold.
     Predicate,
@@ -123,7 +123,7 @@ impl Op {
     /// calls the op rather than of the op alone.
     ///
     /// The three ops still differ in their **retirement rules** (lifecycle §3: deletes retire by
-    /// the epoch ledger, suppressions only on unsuppress, predicate changes at their compaction
+    /// the stamp ledger, suppressions only on unsuppress, predicate changes at their compaction
     /// fold). Conflating those is fail-open and was caught twice in review — but it is a
     /// correctness property for the conformance suite, not something this arm measures.
     fn removes_from_mask(&self) -> bool {

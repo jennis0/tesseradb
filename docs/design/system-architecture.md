@@ -1,6 +1,6 @@
 # Tessera — System Architecture: Storage, Serving and Lifecycle
 
-**Status:** Draft r9 — r6's rewrite against the built system (the streaming build, the write executor and its commit window, the admission gate, the current identity model, the bundle tree the code actually writes); r7 restored the losses that rewrite introduced; r8 added §3's dependency register, folded in from the retiring implementation plan and re-checked row by row against the tree; r9 makes a key rotation a session invalidation event (see Appendix R)
+**Status:** Draft r10 — r9's rotation ruling plus decision 0026's vocabulary rename and the S3 composition-order ruling (see Appendix R)
 
 **Companion to** `architecture.md` (the specification, which owns the invariants and the *why*) and `../archive/implementation-plan.md` (which owns phasing). This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the architecture design; `contracts §n` to `contracts.md`; `lifecycle §n` to `concurrency-lifecycle.md`. Where this document and the design disagree, the design is right; where this document and `contracts.md` disagree, contracts §0.3's recorded deviations govern.
 
@@ -593,6 +593,9 @@ Recorded in the design's own style, because each will otherwise be re-proposed.
 **Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across slices (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity index-ordinal split of plan §14, which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
 
 ## Appendix R — Review record
+
+**r10** applies decision [0026](../decisions/0026-idset-stamp-version.md) and one design ruling. The word "epoch" is gone: §4.2 and §4.5's identity signal is the **idset**, and §6.5's lazy fragment advance and §6.6's deny-retirement rule are keyed by **stamps**. And §5 no longer *restates* the composition order — this document's own preamble says the design wins where the two differ, and restating an order it had partly inverted was the mechanism by which the two came apart. Design §10.4 now states the strategy and its clamps normatively; §5 says only where they live.
+
 
 r1 was reviewed by two independent reviewers with no stake in the draft — one against the design's invariants, one for engineering and operational soundness — and r2 resolved their findings under a third verification pass. r3 closed three specification gaps that rewrite had introduced: the deny-retirement rule, the pinned watermark bound to the fragment stamp, and the allocator's address under fan-out. r4 applied three owner-directed amendments: the bulk builder moved from Python into the engine (D4), the Python package reframed as SDK plus supervisor over language-agnostic surfaces (D1), and `authorise` split onto a dedicated session plane (D2). r5 applied an audit of the Phase 1 ingest implementation: the scope qualifier on §6.5's "correctness never depends on patching", the open question of how a large batch lands into a live bundle, and a fragmentation metric.
 

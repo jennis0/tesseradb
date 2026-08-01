@@ -432,7 +432,7 @@ impl PinManager {
     ///
     /// - **Never reconstruct `(n_old, W)` from an old side-manifest.** Half-reconstruction mixes
     ///   old rows with a fresh fragment cache and a replayed overlay, in combinations only
-    ///   lifecycle §3.3's build-epoch rule keeps safe — and a restart is exactly when that rule's
+    ///   lifecycle §3.3's build-stamp rule keeps safe — and a restart is exactly when that rule's
     ///   state is coldest.
     /// - **Never reinterpret the pin against current geometry.** It would return a viewport of
     ///   unrelated items, silently, with a `200`.
@@ -757,7 +757,7 @@ mod tests {
                 rounds: 1,
                 key: "0123456789abcdef0123456789abcdef".to_string(),
                 shard_id: 0,
-                epoch: 1,
+                idset: 1,
             },
             slices: vec![],
             partitions: vec![],

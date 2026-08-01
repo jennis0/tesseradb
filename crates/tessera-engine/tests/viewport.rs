@@ -699,14 +699,14 @@ fn item_lookup_goes_through_the_permutation_not_a_column_scan() {
     );
 }
 
-/// Fix wave, Task 2: `Engine::item`'s `epoch` argument is checked against the ONE generation this
+/// Fix wave, Task 2: `Engine::item`'s `idset` argument is checked against the ONE generation this
 /// call loads, before inversion, and identically for every `id` — a real, visible id and one
-/// naming nothing both take the same `Err(StaleIdentityEpoch)` for the same mismatched epoch
-/// (mirrors `item_with_a_stale_epoch_is_409_and_a_matching_epoch_changes_nothing` in
+/// naming nothing both take the same `Err(StaleIdSet)` for the same mismatched idset
+/// (mirrors `item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing` in
 /// `tessera-server`'s `http.rs`, at the engine layer this fix moved the check into). A matching
-/// epoch is a no-op, same as `None`.
+/// idset is a no-op, same as `None`.
 #[test]
-fn item_epoch_check_is_entity_independent_and_decided_before_inversion() {
+fn item_idset_check_is_entity_independent_and_decided_before_inversion() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -729,22 +729,22 @@ fn item_epoch_check_is_entity_independent_and_decided_before_inversion() {
         .forward(0, EntityId::new(N_ITEMS + 1_000_000))
         .unwrap();
 
-    // Fixture's identity_epoch is 1 (see `build_fixture_n`). A matching epoch changes nothing.
+    // Fixture's idset is 1 (see `build_fixture_n`). A matching idset changes nothing.
     assert!(engine
         .item(&session, visible_id, Some(1))
         .unwrap()
         .is_some());
 
-    // A stale epoch is `Err(StaleIdentityEpoch)` for a real, visible id...
+    // A stale idset is `Err(StaleIdSet)` for a real, visible id...
     assert!(matches!(
         engine.item(&session, visible_id, Some(2)),
-        Err(EngineError::StaleIdentityEpoch)
+        Err(EngineError::StaleIdSet)
     ));
     // ...and identically for an id naming nothing — decided before inversion, so it cannot be
     // used to learn whether an id exists.
     assert!(matches!(
         engine.item(&session, unknown_id, Some(2)),
-        Err(EngineError::StaleIdentityEpoch)
+        Err(EngineError::StaleIdSet)
     ));
 }
 
@@ -769,7 +769,7 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
-        identity_epoch: 1,
+        idset: 1,
         shard_id: 0,
         mint_external_ids: false,
         emit_oracle_pairs: false,
@@ -788,7 +788,7 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
 
     // Any built entity: below the high-water, no locator anywhere. Drill-down must succeed
     // with no external id, for the first entity and the last alike.
-    // (`item`'s third argument is the fix-wave epoch check, landed on this branch after main's
+    // (`item`'s third argument is the fix-wave idset check, landed on this branch after main's
     // version of this test was written; `None` preserves its original meaning.)
     for entity in [0, N_ITEMS - 1] {
         let id = test_key().forward(0, EntityId::new(entity)).unwrap();
@@ -1118,7 +1118,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             limit: Some(ITEM_LIMIT),
             identity_key: test_key(),
             identity_key_hex: TEST_KEY_HEX.to_string(),
-            identity_epoch: 1,
+            idset: 1,
             shard_id: 0,
             mint_external_ids: true,
             emit_oracle_pairs: true,

@@ -99,7 +99,7 @@ its job changes completely, because its old job no longer exists.
   leaked id. Handles are gone from the wire; this job has nothing left to do.
 - *New job:* protect the **decimal-text** scans (the server log, and `/v1/items` JSON bodies)
   against **legitimate small integers this harness actually emits** — ports (ephemeral range, at
-  most `65535`), `k` (`<= 500`), zoom (`<= 6`), the identity epoch (`1`), the shard id (small), and
+  most `65535`), `k` (`<= 500`), zoom (`<= 6`), the idset (`1`), the shard id (small), and
   HTTP status codes (`< 600`). None of these exceeds `65535`; `SAFE_ID_FLOOR = 100_000` clears all
   of them with headroom and is kept at its old numeric value because nothing about the new design
   makes a smaller floor either necessary or safer. (Process ids are the one source of legitimate
@@ -232,7 +232,7 @@ K = 20
 UNDERLAY_OFFSET = 2
 # See module doc's "SAFE_ID_FLOOR, re-derived rather than inherited" section: this now protects
 # only the decimal-text scans (log, /v1/items) against legitimate small integers this harness
-# emits (ports <= 65535, k <= 500, zoom <= 6, epoch, shard id, HTTP status). The binary,
+# emits (ports <= 65535, k <= 500, zoom <= 6, idset, shard id, HTTP status). The binary,
 # per-element-aligned entity-id scan of `tessera_id` needs no floor at all (see the same section).
 SAFE_ID_FLOOR = 100_000
 ITEM_SAMPLE_SIZE = 25  # tessera ids sampled for the /v1/items/{tessera_id} textual scan

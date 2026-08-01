@@ -50,7 +50,7 @@ broken by a plausible-looking change:
   ([decision 0014](docs/decisions/0014-i10-weakened-to-construction.md)) — do not describe it as a
   cryptographic guarantee, and do not treat it as a defence against a bundle-holder.
 - **Deny handling is fail-closed with three distinct retirement rules** (lifecycle §3): deletion
-  denies retire by the epoch ledger; suppressions retire *only* on unsuppress (they never touch
+  denies retire by the stamp ledger; suppressions retire *only* on unsuppress (they never touch
   postings); predicate-change entries retire at their compaction fold. Conflating them is
   fail-open — caught in review twice; do not rediscover it. **Two of the three are specified but
   not built**, and are safe today only because nothing retires at all.

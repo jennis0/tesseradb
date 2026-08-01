@@ -64,15 +64,15 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r28 | 14 |
+| `architecture.md` | Normative — r29 | 14 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `concurrency-lifecycle.md` | Normative — r5 | 21 |
 | `conformance.md` | Normative — r4 | 14 |
-| `contracts.md` | Normative — r12 | 14 |
+| `contracts.md` | Normative — r13 | 14 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
 | `slices-and-multi-table.md` | Provisional — under review |  |
-| `system-architecture.md` | Normative — r9 | 27 |
+| `system-architecture.md` | Normative — r10 | 27 |
 | `tile-addressed-integration.md` | Provisional — under review |  |

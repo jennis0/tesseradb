@@ -254,11 +254,11 @@ pub struct EngineMeta {
     pub slices: Vec<(String, String)>,
     pub quantisation: Quantisation,
     pub declared_scalars: Vec<DeclaredScalar>,
-    /// The transport-identity epoch (contracts §2.2/§2.6 r6). `GET /v1/meta` reports this
-    /// verbatim as `identity_epoch`; `POST /v1/items/{tessera_id}` compares an optional
-    /// caller-supplied `epoch` against it. Never the identity **key** — that never leaves the
+    /// The idset (contracts §2.2/§2.6 r6). `GET /v1/meta` reports this
+    /// verbatim as `idset`; `POST /v1/items/{tessera_id}` compares an optional
+    /// caller-supplied `idset` against it. Never the identity **key** — that never leaves the
     /// server, on any plane (design Appendix C, C17; I10).
-    pub identity_epoch: u32,
+    pub idset: u32,
 }
 
 impl Engine {
@@ -277,7 +277,7 @@ impl Engine {
                 .collect(),
             quantisation: manifest.quantisation,
             declared_scalars: manifest.declared_scalars.clone(),
-            identity_epoch: manifest.identity.epoch,
+            idset: manifest.identity.idset,
         }
     }
 
@@ -296,18 +296,18 @@ impl Engine {
         )
     }
 
-    /// `POST /v1/items/{handle}` (R5): validate `epoch` if the caller sent one, invert `id` to
+    /// `POST /v1/items/{handle}` (R5): validate `idset` if the caller sent one, invert `id` to
     /// its entity, test visibility in entity space, and only then locate a row and read its
     /// scalars/external id.
     ///
-    /// **`epoch` is checked against the SAME generation this call loads for the lookup below —
+    /// **`idset` is checked against the SAME generation this call loads for the lookup below —
     /// never a separate `Engine::meta()` call.** Fix wave, Task 2 finding: the handler used to
     /// call `Engine::meta()` (its own `generation.load_full()`, plus a clone of every declared
     /// scalar and slice name, just to read one field) before calling this method, which loads
     /// the generation again — two independent loads for one logical request, against lifecycle
     /// §1.1's one-load-per-request invariant. Checking here, first, against the snapshot already
     /// in hand removes the second load and closes the (correctness, not just cost) gap where a
-    /// generation swap landing between the two calls could validate the epoch against one
+    /// generation swap landing between the two calls could validate the idset against one
     /// generation and serve the lookup from another.
     ///
     /// Returns `Ok(None)` both when `id` names nothing in this bundle and when it names an item
@@ -315,7 +315,7 @@ impl Engine {
     /// cannot differentiate what the engine does not tell it (owner ruling; contracts §3.2).
     ///
     /// **The timing channel is closed, not narrowed** (Critical C-5; design Appendix C, C4
-    /// annotation). The epoch check is entity-independent — it runs identically for every `id`,
+    /// annotation). The idset check is entity-independent — it runs identically for every `id`,
     /// before inversion, and does not read `id` at all — so it opens no channel of its own.
     /// Inversion is a pure function taking no I/O. The visibility test that follows is an
     /// entity-space question — three constant-time probes — and is **the same three probes for
@@ -333,15 +333,15 @@ impl Engine {
         &self,
         session: &Session,
         id: TesseraId,
-        epoch: Option<u32>,
+        idset: Option<u32>,
     ) -> Result<Option<ItemOut>> {
         let generation = self.generation.load_full();
 
         // Checked FIRST, against the generation this call already loaded above — see this
         // method's doc for why that (not a separate `Engine::meta()` call) is load-bearing here.
-        if let Some(e) = epoch {
-            if e != generation.bundle.manifest.identity.epoch {
-                return Err(EngineError::StaleIdentityEpoch);
+        if let Some(e) = idset {
+            if e != generation.bundle.manifest.identity.idset {
+                return Err(EngineError::StaleIdSet);
             }
         }
 

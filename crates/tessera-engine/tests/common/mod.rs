@@ -170,7 +170,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
-        identity_epoch: 1,
+        idset: 1,
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,

@@ -39,9 +39,9 @@ pub const OPERATOR_CREDENTIAL: &str = "operator-secret";
 /// contains no real deployment key.
 pub const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
-/// The fixture bundle's `identity.epoch` — contracts §2.2's transport-identity epoch, which
-/// `/v1/meta` reports and `/v1/items` compares an optional `epoch` against.
-pub const FIXTURE_EPOCH: u32 = 1;
+/// The fixture bundle's `identity.idset` — contracts §2.2's idset, which
+/// `/v1/meta` reports and `/v1/items` compares an optional `idset` against.
+pub const FIXTURE_IDSET: u32 = 1;
 
 pub fn test_key() -> IdentityKey {
     IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
@@ -132,7 +132,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
-        identity_epoch: FIXTURE_EPOCH,
+        idset: FIXTURE_IDSET,
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: true,
@@ -433,7 +433,7 @@ pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value
     resp.json().await.unwrap()
 }
 
-/// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no epoch).
+/// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no idset).
 pub async fn post_item(server: &TestServer, token: &str, tessera_id: u64) -> reqwest::Response {
     server
         .client

@@ -113,10 +113,10 @@ fn a_build_with_no_identity_key_decision_refuses_and_writes_nothing() {
     );
 }
 
-/// `--mint-id-key` produces a fresh, non-degenerate key at epoch 1; carrying it forward via
-/// `--carry-id-key-from` reproduces the identical key, epoch, and `tessera_id` column.
+/// `--mint-id-key` produces a fresh, non-degenerate key at idset 1; carrying it forward via
+/// `--carry-id-key-from` reproduces the identical key, idset, and `tessera_id` column.
 #[test]
-fn mint_then_carry_reproduces_the_same_key_and_epoch() {
+fn mint_then_carry_reproduces_the_same_key_and_idset() {
     let tmp = tempfile::tempdir().unwrap();
     let points = tiny_points(tmp.path());
     let pairs = tiny_pairs(tmp.path());
@@ -161,8 +161,8 @@ fn mint_then_carry_reproduces_the_same_key_and_epoch() {
     let manifest_b = manifest_of(&out_b);
     assert_eq!(manifest_a["identity"]["key"], manifest_b["identity"]["key"]);
     assert_eq!(
-        manifest_a["identity"]["epoch"],
-        manifest_b["identity"]["epoch"]
+        manifest_a["identity"]["idset"],
+        manifest_b["identity"]["idset"]
     );
 
     let columns_a = std::fs::read(
@@ -246,15 +246,15 @@ fn disagreeing_key_sources_refuse_without_rotate_and_succeed_with_it() {
     );
     let manifest_b = manifest_of(&out_b);
     assert_eq!(manifest_b["identity"]["key"], key_b);
-    assert_eq!(manifest_b["identity"]["epoch"], 1);
+    assert_eq!(manifest_b["identity"]["idset"], 1);
 }
 
-/// S2: `--id-key-file` is *the* home for a deployment's key (contracts §2.2), so the epoch must
-/// travel with it. Before this, a deployment that advanced to epoch 2 for a repartition and then
-/// rebuilt from its key file silently republished epoch 1 — under which a stale pre-repartition
-/// `tessera_id` compares equal and is accepted, exactly the failure the epoch exists to prevent.
+/// S2: `--id-key-file` is *the* home for a deployment's key (contracts §2.2), so the idset must
+/// travel with it. Before this, a deployment that advanced to idset 2 for a repartition and then
+/// rebuilt from its key file silently republished idset 1 — under which a stale pre-repartition
+/// `tessera_id` compares equal and is accepted, exactly the failure the idset exists to prevent.
 #[test]
-fn the_key_file_carries_the_epoch_and_epoch_flag_overrides_it() {
+fn the_key_file_carries_the_idset_and_idset_flag_overrides_it() {
     let tmp = tempfile::tempdir().unwrap();
     let points = tiny_points(tmp.path());
     let pairs = tiny_pairs(tmp.path());
@@ -275,71 +275,71 @@ fn the_key_file_carries_the_epoch_and_epoch_flag_overrides_it() {
         cmd.output().unwrap()
     };
 
-    // (a) No epoch in the file: the lineage never advanced, so epoch 1.
+    // (a) No idset in the file: the lineage never advanced, so idset 1.
     let plain = tmp.path().join("plain.toml");
     std::fs::write(&plain, format!("[identity]\nkey = \"{key}\"\n")).unwrap();
     let out_a = tmp.path().join("bundle-a");
     assert!(build_with(&out_a, &plain, &[]).status.success());
-    assert_eq!(manifest_of(&out_a)["identity"]["epoch"], 1);
+    assert_eq!(manifest_of(&out_a)["identity"]["idset"], 1);
 
-    // (b) The file records epoch 2 — a normal rebuild must republish 2, not regress to 1.
-    let with_epoch = tmp.path().join("epoch2.toml");
+    // (b) The file records idset 2 — a normal rebuild must republish 2, not regress to 1.
+    let with_idset = tmp.path().join("idset2.toml");
     std::fs::write(
-        &with_epoch,
-        format!("[identity]\nkey = \"{key}\"\nepoch = 2\n"),
+        &with_idset,
+        format!("[identity]\nkey = \"{key}\"\nidset = 2\n"),
     )
     .unwrap();
     let out_b = tmp.path().join("bundle-b");
-    let built = build_with(&out_b, &with_epoch, &[]);
+    let built = build_with(&out_b, &with_idset, &[]);
     assert!(
         built.status.success(),
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
     assert_eq!(
-        manifest_of(&out_b)["identity"]["epoch"],
+        manifest_of(&out_b)["identity"]["idset"],
         2,
-        "a rebuild from a key file recording epoch 2 must not republish epoch 1"
+        "a rebuild from a key file recording idset 2 must not republish idset 1"
     );
 
-    // (c) `--epoch` accompanies `--id-key-file` and wins over the file.
+    // (c) `--idset` accompanies `--id-key-file` and wins over the file.
     let out_c = tmp.path().join("bundle-c");
-    assert!(build_with(&out_c, &with_epoch, &["--epoch", "5"])
+    assert!(build_with(&out_c, &with_idset, &["--idset", "5"])
         .status
         .success());
-    assert_eq!(manifest_of(&out_c)["identity"]["epoch"], 5);
+    assert_eq!(manifest_of(&out_c)["identity"]["idset"], 5);
 
-    // (d) `--bump-id-epoch` still advances from whatever the file said.
+    // (d) `--bump-idset` still advances from whatever the file said.
     let out_d = tmp.path().join("bundle-d");
-    assert!(build_with(&out_d, &with_epoch, &["--bump-id-epoch"])
+    assert!(build_with(&out_d, &with_idset, &["--bump-idset"])
         .status
         .success());
-    assert_eq!(manifest_of(&out_d)["identity"]["epoch"], 3);
+    assert_eq!(manifest_of(&out_d)["identity"]["idset"], 3);
 
-    // (e) An epoch of 0 is refused where the operator can still see which file said it.
+    // (e) An idset of 0 is refused where the operator can still see which file said it.
     let zero = tmp.path().join("zero.toml");
-    std::fs::write(&zero, format!("[identity]\nkey = \"{key}\"\nepoch = 0\n")).unwrap();
+    std::fs::write(&zero, format!("[identity]\nkey = \"{key}\"\nidset = 0\n")).unwrap();
     let out_e = tmp.path().join("bundle-e");
     let refused = build_with(&out_e, &zero, &[]);
     assert!(!refused.status.success());
     assert!(!out_e.exists());
 }
 
-/// Two *recorded* epochs that disagree are refused rather than silently ranked: whichever were
+/// Two *recorded* idsets that disagree are refused rather than silently ranked: whichever were
 /// picked, the other could be the true one, and picking the lower one is fail-open.
 #[test]
-fn disagreeing_epoch_sources_refuse_until_epoch_is_stated() {
+fn disagreeing_idset_sources_refuse_until_idset_is_stated() {
     let tmp = tempfile::tempdir().unwrap();
     let points = tiny_points(tmp.path());
     let pairs = tiny_pairs(tmp.path());
     let key = "000102030405060708090a0b0c0d0e0f";
 
-    // A bundle at epoch 2 (the post-repartition state).
+    // A bundle at idset 2 (the post-repartition state).
     let out_a = tmp.path().join("bundle-a");
     let key_file = tmp.path().join("key.toml");
     std::fs::write(
         &key_file,
-        format!("[identity]\nkey = \"{key}\"\nepoch = 2\n"),
+        format!("[identity]\nkey = \"{key}\"\nidset = 2\n"),
     )
     .unwrap();
     let first = tessera()
@@ -355,13 +355,13 @@ fn disagreeing_epoch_sources_refuse_until_epoch_is_stated() {
         .output()
         .unwrap();
     assert!(first.status.success());
-    assert_eq!(manifest_of(&out_a)["identity"]["epoch"], 2);
+    assert_eq!(manifest_of(&out_a)["identity"]["idset"], 2);
 
-    // A key file that still says epoch 1, carried alongside that bundle: same key, two epochs.
+    // A key file that still says idset 1, carried alongside that bundle: same key, two idsets.
     let stale_file = tmp.path().join("stale.toml");
     std::fs::write(
         &stale_file,
-        format!("[identity]\nkey = \"{key}\"\nepoch = 1\n"),
+        format!("[identity]\nkey = \"{key}\"\nidset = 1\n"),
     )
     .unwrap();
     let out_b = tmp.path().join("bundle-b");
@@ -381,11 +381,11 @@ fn disagreeing_epoch_sources_refuse_until_epoch_is_stated() {
         .unwrap();
     assert!(
         !refused.status.success(),
-        "two recorded epochs that disagree must refuse"
+        "two recorded idsets that disagree must refuse"
     );
     assert!(!out_b.exists());
 
-    // `--epoch` is how the operator resolves it.
+    // `--idset` is how the operator resolves it.
     let resolved = tessera()
         .args(["build", "--points"])
         .arg(&points)
@@ -398,7 +398,7 @@ fn disagreeing_epoch_sources_refuse_until_epoch_is_stated() {
         .arg(&out_a)
         .args(["--id-key-file"])
         .arg(&stale_file)
-        .args(["--epoch", "2"])
+        .args(["--idset", "2"])
         .output()
         .unwrap();
     assert!(
@@ -406,7 +406,7 @@ fn disagreeing_epoch_sources_refuse_until_epoch_is_stated() {
         "{}",
         String::from_utf8_lossy(&resolved.stderr)
     );
-    assert_eq!(manifest_of(&out_b)["identity"]["epoch"], 2);
+    assert_eq!(manifest_of(&out_b)["identity"]["idset"], 2);
 }
 
 /// S3: the rotation refusal must not print either key. It goes to stderr on a CLI whose own

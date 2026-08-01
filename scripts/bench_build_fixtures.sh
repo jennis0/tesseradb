@@ -121,7 +121,7 @@ for scale in "${SCALES[@]}"; do
         --points "$GEOMETRY" --pairs "$pairs" --out "$out" \
         --extent "$EXTENT" --slice s0 --limit "$scale" \
         --mint-external-ids \
-        --id-key "$KEY" --epoch 1 >"$log" 2>&1; then
+        --id-key "$KEY" --idset 1 >"$log" 2>&1; then
       elapsed=$(( $(date +%s) - started ))
       bytes=$(du -sb "$out" | cut -f1)
       echo "  ok  ${elapsed}s  $(numfmt --to=iec "$bytes")"

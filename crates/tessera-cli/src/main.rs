@@ -66,13 +66,13 @@ enum Command {
         #[arg(long, value_parser = parse_byte_size)]
         memory_budget: Option<u64>,
 
-        /// Carry `identity.key` and `identity.epoch` forward from an existing bundle's
+        /// Carry `identity.key` and `identity.idset` forward from an existing bundle's
         /// MANIFEST.json. **This is the normal rebuild path** (contracts §2.2).
         #[arg(long, value_name = "BUNDLE_ROOT")]
         carry_id_key_from: Option<PathBuf>,
         /// Read the deployment's identity key from a config file named explicitly on the
         /// command line (owner ruling Q6) — `[identity]\nkey = "<32 lowercase hex>"`, plus an
-        /// optional `epoch = <n>`. There is no default search path and no environment variable:
+        /// optional `idset = <n>`. There is no default search path and no environment variable:
         /// the path must always be typed.
         #[arg(long, value_name = "PATH")]
         id_key_file: Option<PathBuf>,
@@ -81,7 +81,7 @@ enum Command {
         /// `--id-key-file`.
         #[arg(long, value_name = "HEX32")]
         id_key: Option<String>,
-        /// Explicitly mint a fresh 16-byte key from the OS CSPRNG at epoch 1 and print it
+        /// Explicitly mint a fresh 16-byte key from the OS CSPRNG at idset 1 and print it
         /// prominently. **Starts a NEW identity lineage; every `tessera_id` any client holds
         /// becomes wrong.**
         #[arg(long)]
@@ -91,16 +91,16 @@ enum Command {
         /// the key is now part of the storage sort key — reorders every row.**
         #[arg(long)]
         rotate_id_key: bool,
-        /// Advance `identity.epoch` while keeping the key: the repartitioning/resharding signal
+        /// Advance `identity.idset` while keeping the key: the repartitioning/resharding signal
         /// (contracts §2a).
         #[arg(long)]
-        bump_id_epoch: bool,
-        /// Set `identity.epoch` explicitly. Accompanies **any** key source — `--id-key`,
-        /// `--id-key-file` (whose `[identity].epoch`, if present, it overrides) or
-        /// `--carry-id-key-from` (whose carried epoch it overrides) — and is the only way to
-        /// state an epoch for a key source that records none. Default 1.
+        bump_idset: bool,
+        /// Set `identity.idset` explicitly. Accompanies **any** key source — `--id-key`,
+        /// `--id-key-file` (whose `[identity].idset`, if present, it overrides) or
+        /// `--carry-id-key-from` (whose carried idset it overrides) — and is the only way to
+        /// state an idset for a key source that records none. Default 1.
         #[arg(long)]
-        epoch: Option<u32>,
+        idset: Option<u32>,
     },
     /// Verify a bundle: the read protocol (digests, manifests) plus permutation bijectivity and
     /// the identity column (contracts §2.6 r6: `tessera_id` re-derived from the key).
@@ -141,11 +141,11 @@ fn parse_extent(raw: &str) -> Result<Extent, String> {
 
 /// What [`resolve_identity`] decided: the parsed key, its canonical hex form (carried alongside
 /// the key rather than recovered from it — `IdentityKey` deliberately has no hex accessor, to
-/// preserve its redacted `Debug`), and the epoch this build's MANIFEST should record.
+/// preserve its redacted `Debug`), and the idset this build's MANIFEST should record.
 struct ResolvedIdentity {
     key: IdentityKey,
     hex: String,
-    epoch: u32,
+    idset: u32,
     /// Set only by `--mint-id-key`, so the caller can print it prominently — the one and only
     /// place a freshly minted key is ever surfaced.
     minted: bool,
@@ -161,7 +161,7 @@ fn no_key_decision_message() -> String {
         .to_string()
 }
 
-/// Read `identity.key`, `identity.epoch`, `identity.construction` and `identity.rounds`
+/// Read `identity.key`, `identity.idset`, `identity.construction` and `identity.rounds`
 /// verbatim from `bundle_root`'s current `MANIFEST.json` (contracts §2.2's `--carry-id-key-from`
 /// behaviour). A direct JSON read rather than the full digest-verifying read protocol: carrying
 /// a key forward needs the manifest's own claims, not a re-verification of every segment file.
@@ -189,22 +189,22 @@ fn read_carried_identity(bundle_root: &Path) -> Result<(String, u32, String, u32
         })?;
     Ok((
         manifest.identity.key,
-        manifest.identity.epoch,
+        manifest.identity.idset,
         manifest.identity.construction,
         manifest.identity.rounds,
     ))
 }
 
 /// Read `--id-key-file`'s minimal TOML shape: `[identity]\nkey = "<32 lowercase hex>"`, plus an
-/// **optional** `epoch = <u32>`.
+/// **optional** `idset = <u32>`.
 ///
-/// **The epoch belongs in this file** (contracts §2.2 designates it as the key's home outside the
+/// **The idset belongs in this file** (contracts §2.2 designates it as the key's home outside the
 /// bundle and leaves "the file's wider schema … not specified here", so extending it is
-/// legitimate). Without it, a deployment that advanced to epoch 2 for a repartition and then
-/// rebuilt from its key file — the spec's own recommended rebuild path — republished epoch 1, and
+/// legitimate). Without it, a deployment that advanced to idset 2 for a repartition and then
+/// rebuilt from its key file — the spec's own recommended rebuild path — republished idset 1, and
 /// a stale pre-repartition `tessera_id` then compared *equal* and was accepted: exactly the
-/// failure §2.2 says the epoch exists to prevent. A key file that records no epoch still means
-/// epoch 1 (the lineage never advanced), and `--epoch` overrides whatever the file says.
+/// failure §2.2 says the idset exists to prevent. A key file that records no idset still means
+/// idset 1 (the lineage never advanced), and `--idset` overrides whatever the file says.
 ///
 /// Unknown top-level sections are ignored (so a later phase's wider deployment config file can
 /// grow without breaking this binary); an unknown key *inside* `[identity]` is an error, so a
@@ -233,10 +233,10 @@ fn read_id_key_file(path: &Path) -> Result<(String, Option<u32>), String> {
         )
     })?;
     for key_name in identity_table.keys() {
-        if key_name != "key" && key_name != "epoch" {
+        if key_name != "key" && key_name != "idset" {
             return Err(format!(
                 "--id-key-file {}: unknown key '{key_name}' in [identity] (expected 'key' or \
-                 'epoch')",
+                 'idset')",
                 path.display()
             ));
         }
@@ -250,35 +250,35 @@ fn read_id_key_file(path: &Path) -> Result<(String, Option<u32>), String> {
                 path.display()
             )
         })?;
-    let epoch = match identity_table.get("epoch") {
+    let idset = match identity_table.get("idset") {
         None => None,
         Some(value) => {
             let raw = value.as_integer().ok_or_else(|| {
                 format!(
-                    "--id-key-file {}: [identity].epoch must be an integer",
+                    "--id-key-file {}: [identity].idset must be an integer",
                     path.display()
                 )
             })?;
             // §2.2: conforming writers start at 1 and advance; 0 (or a value past `u32`) is a
             // config error, and `IdentityDescriptor::validate` would refuse it at read time
             // anyway — refuse it here, where the operator can still see which file said it.
-            let epoch = u32::try_from(raw).map_err(|_| {
+            let idset = u32::try_from(raw).map_err(|_| {
                 format!(
-                    "--id-key-file {}: [identity].epoch {raw} is out of range for a u32",
+                    "--id-key-file {}: [identity].idset {raw} is out of range for a u32",
                     path.display()
                 )
             })?;
-            if epoch == 0 {
+            if idset == 0 {
                 return Err(format!(
-                    "--id-key-file {}: [identity].epoch is 0; conforming writers start at 1 and \
+                    "--id-key-file {}: [identity].idset is 0; conforming writers start at 1 and \
                      advance (contracts §2.2)",
                     path.display()
                 ));
             }
-            Some(epoch)
+            Some(idset)
         }
     };
-    Ok((key.to_string(), epoch))
+    Ok((key.to_string(), idset))
 }
 
 /// Draw a fresh 16-byte key from the OS CSPRNG, retrying on a degenerate draw (`k1 == 0`,
@@ -346,15 +346,15 @@ fn resolve_identity(
     id_key: &Option<String>,
     mint_id_key: bool,
     rotate_id_key: bool,
-    bump_id_epoch: bool,
-    epoch_flag: Option<u32>,
+    bump_idset: bool,
+    idset_flag: Option<u32>,
 ) -> Result<ResolvedIdentity, String> {
     let mut sources: Vec<(&'static str, String)> = Vec::new();
-    let mut carried_epoch: Option<u32> = None;
-    let mut file_epoch: Option<u32> = None;
+    let mut carried_idset: Option<u32> = None;
+    let mut file_idset: Option<u32> = None;
 
     if let Some(root) = carry_id_key_from {
-        let (hex, epoch, construction, rounds) = read_carried_identity(root)?;
+        let (hex, idset, construction, rounds) = read_carried_identity(root)?;
         if construction != IDENTITY_CONSTRUCTION || rounds != IDENTITY_ROUNDS {
             return Err(format!(
                 "--carry-id-key-from {}: identity construction/rounds ({construction}, {rounds}) \
@@ -365,12 +365,12 @@ fn resolve_identity(
             ));
         }
         sources.push(("--carry-id-key-from", hex));
-        carried_epoch = Some(epoch);
+        carried_idset = Some(idset);
     }
     if let Some(path) = id_key_file {
-        let (hex, epoch) = read_id_key_file(path)?;
+        let (hex, idset) = read_id_key_file(path)?;
         sources.push(("--id-key-file", hex));
-        file_epoch = epoch;
+        file_idset = idset;
     }
     if let Some(hex) = id_key {
         sources.push(("--id-key", hex.clone()));
@@ -392,7 +392,7 @@ fn resolve_identity(
         return Ok(ResolvedIdentity {
             key,
             hex,
-            epoch: 1,
+            idset: 1,
             minted: true,
         });
     }
@@ -441,50 +441,50 @@ fn resolve_identity(
     };
     let final_key = IdentityKey::from_hex(&final_hex).map_err(|e| format!("identity key: {e}"))?;
 
-    // Epoch resolution, most explicit source first: `--epoch`, then the key file's own
-    // `[identity].epoch`, then the epoch carried out of an existing bundle, then 1.
+    // Idset resolution, most explicit source first: `--idset`, then the key file's own
+    // `[identity].idset`, then the idset carried out of an existing bundle, then 1.
     //
     // The order matters for the reason `--id-key-file` exists: it is *the* home for a
     // deployment's key (contracts §2.2), so a normal rebuild from it must not silently republish
-    // epoch 1 after the deployment advanced to 2 for a repartition — a stale pre-repartition
+    // idset 1 after the deployment advanced to 2 for a repartition — a stale pre-repartition
     // `tessera_id` would then compare equal and be accepted, which is precisely the failure the
-    // epoch prevents. Two *recorded* epochs that disagree are refused rather than silently
+    // idset prevents. Two *recorded* idsets that disagree are refused rather than silently
     // ranked: whichever we picked, the other could be the true one, and getting it wrong is
-    // fail-open. `--epoch` is how the operator resolves that.
-    let mut epoch = if disagreement {
-        // A rotation resets the epoch (contracts §2.2), unless the operator also supplied an
-        // explicit --epoch to accompany the new key.
-        epoch_flag.unwrap_or(1)
+    // fail-open. `--idset` is how the operator resolves that.
+    let mut idset = if disagreement {
+        // A rotation resets the idset (contracts §2.2), unless the operator also supplied an
+        // explicit --idset to accompany the new key.
+        idset_flag.unwrap_or(1)
     } else {
-        if let (None, Some(carried), Some(from_file)) = (epoch_flag, carried_epoch, file_epoch) {
+        if let (None, Some(carried), Some(from_file)) = (idset_flag, carried_idset, file_idset) {
             if carried != from_file {
                 return Err(format!(
-                    "identity epoch sources disagree (--carry-id-key-from={carried}, \
-                     --id-key-file={from_file}); pass --epoch <n> to state which epoch this \
-                     build publishes — guessing risks republishing a superseded epoch, under \
+                    "idset sources disagree (--carry-id-key-from={carried}, \
+                     --id-key-file={from_file}); pass --idset <n> to state which idset this \
+                     build publishes — guessing risks republishing a superseded idset, under \
                      which a stale pre-repartition tessera_id compares equal and is accepted"
                 ));
             }
         }
-        epoch_flag.or(file_epoch).or(carried_epoch).unwrap_or(1)
+        idset_flag.or(file_idset).or(carried_idset).unwrap_or(1)
     };
-    if bump_id_epoch {
-        epoch += 1;
+    if bump_idset {
+        idset += 1;
     }
 
     // NOT IMPLEMENTED, deliberately, and flagged rather than built: contracts §2.2 also requires
     // a build whose **partitioning or sharding differs** from the bundle it carried the key from
-    // to advance the epoch *or refuse*. Nothing here checks that, because nothing here can
+    // to advance the idset *or refuse*. Nothing here checks that, because nothing here can
     // differ: Phase 1 emits exactly one partition (`default`) and shard 0, both hard-coded in
     // `tessera_build` (`PHASH`, `shard_id`). The refusal becomes reachable — and required — the
-    // moment either becomes a build input; it belongs next to this epoch resolution, comparing
+    // moment either becomes a build input; it belongs next to this idset resolution, comparing
     // this build's partition/shard plan against `--carry-id-key-from`'s manifest and refusing
-    // unless `--bump-id-epoch` (or an explicit `--epoch`) accompanies the change.
+    // unless `--bump-idset` (or an explicit `--idset`) accompanies the change.
 
     Ok(ResolvedIdentity {
         key: final_key,
         hex: final_hex,
-        epoch,
+        idset,
         minted: false,
     })
 }
@@ -508,8 +508,8 @@ fn main() -> ExitCode {
             id_key,
             mint_id_key,
             rotate_id_key,
-            bump_id_epoch,
-            epoch,
+            bump_idset,
+            idset,
         } => {
             // CRITICAL N-1: resolved and refused, if it refuses, before any work — before `df`,
             // before reading input, before creating the output directory.
@@ -519,8 +519,8 @@ fn main() -> ExitCode {
                 &id_key,
                 mint_id_key,
                 rotate_id_key,
-                bump_id_epoch,
-                epoch,
+                bump_idset,
+                idset,
             ) {
                 Ok(identity) => identity,
                 Err(detail) => {
@@ -530,7 +530,7 @@ fn main() -> ExitCode {
             };
             if identity.minted {
                 eprintln!(
-                    "minted a new identity key (epoch 1): {} — starts a NEW identity lineage; \
+                    "minted a new identity key (idset 1): {} — starts a NEW identity lineage; \
                      every tessera_id any client holds becomes wrong. Record this key (e.g. via \
                      --id-key-file's deployment config) so future rebuilds can carry it forward.",
                     identity.hex
@@ -581,7 +581,7 @@ fn main() -> ExitCode {
                 limit,
                 identity_key: identity.key,
                 identity_key_hex: identity.hex,
-                identity_epoch: identity.epoch,
+                idset: identity.idset,
                 shard_id: 0,
                 mint_external_ids,
                 emit_oracle_pairs: !no_oracle_pairs,

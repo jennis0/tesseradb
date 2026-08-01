@@ -89,7 +89,7 @@ pub struct WalRow {
 }
 
 /// The disposition change carried by a `Change` record. The three retirement rules (lifecycle
-/// §3) are distinct and must not be conflated: deletion denies retire by the epoch ledger,
+/// §3) are distinct and must not be conflated: deletion denies retire by the stamp ledger,
 /// suppressions retire only on `Unsuppress` (never touching postings), and predicate changes
 /// retire at their compaction fold.
 ///

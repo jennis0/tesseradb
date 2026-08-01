@@ -3,7 +3,7 @@
   "bundle_format": 1,
   "declared_scalars": [],
   "filter_operands": [],
-  "identity_epoch": 1,
+  "idset": 1,
   "quantisation": {
     "x_max": 65536,
     "x_min": 0,

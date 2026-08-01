@@ -80,7 +80,7 @@ export class TesseraClient {
     const m = (await response.json()) as RawMeta;
     return {
       apiVersion: m.api_version,
-      identityEpoch: m.identity_epoch,
+      idset: m.idset,
       slices: m.slices.map((s) => ({id: s.id, displayName: s.display_name})),
       quantisation: {
         xMin: m.quantisation.x_min,
@@ -152,7 +152,7 @@ export class TesseraClient {
 /** `GET /v1/meta`'s snake_case wire shape, mapped to {@link Meta} above. */
 type RawMeta = {
   api_version: number;
-  identity_epoch: number;
+  idset: number;
   slices: {id: string; display_name: string}[];
   quantisation: {x_min: number; x_max: number; y_min: number; y_max: number};
   declared_scalars: {name: string; arrow_type: string}[];
