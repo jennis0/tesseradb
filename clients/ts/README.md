@@ -154,6 +154,26 @@ over-plotting. See `core/src/coords.ts`'s `tileToRequestBbox`.
 `[serve] stage_timing = true`. Absence is a configuration fact, not an error, and the stats panel
 says so.
 
+## A free positional ground-truth check
+
+The synthetic corpus carries **deliberate structures** (`probes/dataset.md` §"Replicas 0–4 pin
+deliberate edge cases"), and they are the cheapest correctness check the viewer has: if the
+positional pipeline — quantisation, Morton, the request bbox, the data→world transform — were
+wrong anywhere, they would smear or move.
+
+What to look for at 1e9 with a broad principal:
+
+- **A sharp vertical line at the extent midpoint.** Confirmed in the data, not a rendering
+  artefact: the midpoint column carries 1.37× its neighbouring column and 1.51× the equivalent
+  row, with 1,339 of ~1 M sampled points at exactly `x = 32767`.
+- **Dense edges at `x`/`y` = 0 and 65535** — the corner-pinned replicas (2 and 3) hitting the
+  quantisation clamps. 26,444 sampled points sit at `x = 0`.
+
+If the line renders crisp and vertical and the edges are dense, positions are right. *(Note for
+whoever next touches the fixtures: `probes/dataset.md:131` describes replica 4 as "degenerate line
+(y collapsed)", which would render **horizontal**. The measured structure is constant-**x**. One of
+the two is mislabelled — harmless, but it cost an investigation once.)*
+
 ## Measured
 
 _Machine: WSL2. Figures from the stats panel and `smoke.mjs`; re-measure rather than trusting
