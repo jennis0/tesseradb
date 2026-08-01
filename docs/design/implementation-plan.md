@@ -1,5 +1,9 @@
 # Tessera — Implementation Plan
 
+**Status:** Superseded in part — being retired, not yet retired. The six-phase model this document is organised around has been replaced by capability epics ([decision 0015](../decisions/0015-plans-retired-for-epics.md)), and §10.2's invariant matrix is superseded by `conformance.md` §4.6, which states the *measured* position rather than the intended one.
+
+It is kept in the corpus rather than archived because three things in it have no other home yet: §2's language and runtime arguments — including §2.4's fair statement of what is lost by not using Java — §3's dependency register with its **licence** rejections, and §14's deferred sketches. Those fold into `system-architecture.md` when someone does the work. Read the phases as history; read §2, §3 and §14 as current.
+
 **Companion to** `architecture.md` (r23) and `system-architecture.md` (r5), which — with the contracts spec, lifecycle design and conformance design — carries the component decomposition, contracts and mechanisms this plan's phases build. That document specifies *what* the system guarantees; this one specifies *how it gets built, in what order, and what would make us stop*.
 
 **Chosen stack:** Rust throughout the engine — serving core *and* build pipeline, one binary with a batch mode. Python is a first-class packaged consumer (SDK, supervisor) and the language of the test-only reference oracle, never a component. (Amended from "Python build pipeline"; the argument is in 2.2.)

@@ -406,7 +406,7 @@ impl Engine {
     /// **D-C cancellation checkpoints** (cooperative, the rapid-pan case): once per tile, at the
     /// top of the tile loop below; once before [`compose`] runs; once before θ's anchor
     /// (`mask.visible_total()`). A hit at any of these aborts the WHOLE request with
-    /// [`EngineError::Cancelled`] — no partial `ViewportOut` is ever returned (I13). The
+    /// [`EngineError::Cancelled`] — no partial `ViewportOut` is ever returned (I13a). The
     /// row-projection single-flight build (D-G, above the compose checkpoint) is deliberately
     /// NOT gated — see [`check_cancelled`]'s doc.
     pub fn viewport(&self, session: &Session, req: ViewportRequest<'_>) -> Result<ViewportOut> {

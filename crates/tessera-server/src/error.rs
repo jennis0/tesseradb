@@ -652,7 +652,7 @@ fn exec_failure_may_be_in_force(
 }
 
 /// Map a `spawn_blocking` `JoinError` (Task 3, D-A) to the fail-closed 500 arm. A `JoinError` here
-/// means the closure running the engine call panicked — I13: a panic is a failed request, never
+/// means the closure running the engine call panicked — I13a: a panic is a failed request, never
 /// an empty one, so this is a typed 500, not a dropped connection or a silently empty body.
 ///
 /// **The panic payload never crosses into the response body** — same rule as
@@ -1005,7 +1005,7 @@ mod tests {
         );
     }
 
-    /// I13, `map_join_error`'s twin of `map_store_error_does_not_forward_the_detail_to_the_caller`
+    /// I13a, `map_join_error`'s twin of `map_store_error_does_not_forward_the_detail_to_the_caller`
     /// above: a `JoinError`'s `Display` can echo the panicking closure's payload verbatim (a file
     /// path, an assertion detail, anything the panic carried), so it must never reach the response
     /// body either. Spawns a task whose panic message names a path and an entity id, exactly the

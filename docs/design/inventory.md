@@ -70,7 +70,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `conformance.md` | Normative — r4 | 14 |
 | `contracts.md` | Normative — r12 | 14 |
 | `derived-artifact-gating.md` | Provisional — under review |  |
-| `implementation-plan.md` | — |  |
+| `implementation-plan.md` | Superseded in part |  |
 | `slices-and-multi-table.md` | Provisional — under review |  |
 | `system-architecture.md` | Normative — r7 | 17 |
 | `tile-addressed-integration.md` | Provisional — under review |  |

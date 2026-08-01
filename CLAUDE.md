@@ -58,7 +58,7 @@ broken by a plausible-looking change:
   request the moment it is accepted.
 
 The conformance suite is the deliverable: an implementation that keeps the Morton and Roaring
-machinery while quietly dropping I2, I7 or I13 passes every functional test while leaking. Three
+machinery while quietly dropping I2, I7 or I13b passes every functional test while leaking. Three
 of the thirteen invariants are currently covered as designed.
 
 ## Working method

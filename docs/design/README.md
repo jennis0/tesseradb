@@ -72,13 +72,13 @@ Measurements are in [`../../probes/`](../../probes/). Settled decisions are in
 §0.3 govern. A provisional document loses to a normative one. `§n` unprefixed means the
 architecture design.
 
-| Document | Status | What it owns |
+| Document | Standing | What it owns |
 |---|---|---|
-| [`architecture.md`](architecture.md) | **Normative — r25** | The specification: data model, the thirteen invariants, the leak register |
-| [`system-architecture.md`](system-architecture.md) | **Normative — r6** | The built system: processes, planes, crates, lifecycle, config, packaging |
-| [`contracts.md`](contracts.md) | **Normative — r12** | Byte level: bundle format, service API, plugin ABI, wire |
-| [`concurrency-lifecycle.md`](concurrency-lifecycle.md) | **Normative — r5** | Generations, pins, the three retirement rules, the WAL, merge versus snapshot |
-| [`conformance.md`](conformance.md) | **Normative — r4** | The suite: the definitions-oracle, canaries, the byte-scanner, interleavings |
+| [`architecture.md`](architecture.md) | Normative | The specification: data model, the thirteen invariants, the leak register |
+| [`system-architecture.md`](system-architecture.md) | Normative | The built system: processes, planes, crates, lifecycle, config, packaging |
+| [`contracts.md`](contracts.md) | Normative | Byte level: bundle format, service API, plugin ABI, wire |
+| [`concurrency-lifecycle.md`](concurrency-lifecycle.md) | Normative | Generations, pins, the three retirement rules, the WAL, merge versus snapshot |
+| [`conformance.md`](conformance.md) | Normative | The suite: the definitions-oracle, canaries, the byte-scanner, interleavings |
 | [`client-interaction.md`](client-interaction.md) | Provisional | What a client is: holdings, version coordinates, display obligations, protocol |
 | [`caching.md`](caching.md) | Provisional | Where data rests and what that costs — caching as feasibility, not optimisation |
 | [`derived-artifact-gating.md`](derived-artifact-gating.md) | Provisional | Non-point artifacts: clusters, labels, hulls, cells — one class, three gates |
@@ -89,6 +89,10 @@ architecture design.
 **Provisional** means code is already written against the document but it is not yet normative.
 Each says in its first lines what remains before it becomes so. Read the `Status:` line before
 trusting any document — location does not tell you standing.
+
+Revision numbers are deliberately not listed here. They live in each document's `Status:` line and
+are collected in the generated [`inventory.md`](inventory.md); a second hand-maintained copy would
+go stale, and did.
 
 Every document carries its review trail in an Appendix R. Read it before re-opening a decision;
 most obvious objections have been raised and answered there, and the trail records which of them
@@ -109,9 +113,10 @@ property as delivered:
 - **The conformance suite covers three of thirteen invariants as designed.** Two more are covered
   in substance but in Rust rather than the suite. None of the eight scripted interleavings exist,
   and there is no CI.
-- **I13b — a partition not consulted fails closed — is unimplemented.** There is one partition, no
-  required-set gate, and no test. It is lettered separately from I13a precisely so that confirming
-  one cannot be read as covering the other.
+- **I13b and I13c are unimplemented.** A partition not consulted must fail closed (I13b), and one
+  unreachable through outage is an error rather than an empty contribution (I13c). There is one
+  partition, no required-set gate and no test for either. They are lettered apart from I13a — which
+  *is* enforced — precisely so that confirming one cannot be read as covering the others.
 
 ## What is settled
 
@@ -152,7 +157,7 @@ real labels should re-measure before relying on them.
 
 **The conformance suite is the deliverable.** The performance architecture is attractive and
 separable, and a partial implementation that keeps the Morton and Roaring machinery while quietly
-dropping I2, I7 or I13 passes every functional test while leaking through cluster existence and
+dropping I2, I7 or I13b passes every functional test while leaking through cluster existence and
 density.
 
 **The narrow query surface is a safety property, not a stage to grow out of.** Appendix C can be

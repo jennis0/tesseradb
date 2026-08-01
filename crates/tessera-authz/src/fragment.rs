@@ -425,7 +425,7 @@ pub struct FragmentCache {
     rebuilds: AtomicU64,
 }
 
-/// [`FragmentCache::get_or_build`]'s failure modes. Neither variant is ever cached (I13
+/// [`FragmentCache::get_or_build`]'s failure modes. Neither variant is ever cached (I13a
 /// fail-closed): a `Building` observation means some other caller owns the in-flight build, and
 /// an `Io` failure means the canonical key is left absent so the very next call retries from
 /// scratch.
@@ -547,7 +547,7 @@ impl FragmentCache {
     }
 
     /// Canonical-key slots currently held (`Building` and `Ready` both counted) — exposed for
-    /// fail-closed tests confirming a failed build leaves no wedge (I13), analogous to
+    /// fail-closed tests confirming a failed build leaves no wedge (I13a), analogous to
     /// `tessera_engine::Engine::row_projection_cache_len`.
     pub fn slot_count(&self) -> usize {
         self.slots.len()
@@ -611,7 +611,7 @@ impl FragmentCache {
     /// already have persisted it) before falling back to [`build_fragment`]. A concurrent arrival
     /// on the same canonical key while a build is in flight gets `Err(FragmentCacheError::
     /// Building)` immediately — it does not wait (D-G's non-blocking-waiters rule) — and a failed
-    /// build (`Err` or panic) leaves the key absent rather than wedged or cached (I13).
+    /// build (`Err` or panic) leaves the key absent rather than wedged or cached (I13a).
     pub fn get_or_build(
         &self,
         satisfied: &[TermId],

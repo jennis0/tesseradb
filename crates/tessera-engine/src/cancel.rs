@@ -6,7 +6,7 @@
 //! original from a drop-guard wired to client disconnect (see `tessera-server::viewer`'s
 //! `CancelGuard`). [`crate::viewport::Engine::viewport`] polls it at a few checkpoints (its own
 //! doc lists them) and aborts the whole request with [`crate::EngineError::Cancelled`] the moment
-//! it observes the flip — never a partial `ViewportOut` (I13).
+//! it observes the flip — never a partial `ViewportOut` (I13a).
 //!
 //! **Ordering: `Relaxed` for both the flip and the check.** The flag carries no payload — nothing
 //! else needs to be published alongside it or synchronised against it — so `Release`/`Acquire`

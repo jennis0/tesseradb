@@ -2102,7 +2102,7 @@ fn rows_in_ranges_is_mask_independent() {
 // `Engine::viewport` checks a caller-supplied `CancelToken` at three points (see its own doc):
 // once before `compose`, once before θ's anchor (`mask.visible_total()`), and once per tile at
 // the top of the tile loop. A hit at any of these aborts the WHOLE request with
-// `EngineError::Cancelled` — I13: no partial `ViewportOut` is ever constructed past that point.
+// `EngineError::Cancelled` — I13a: no partial `ViewportOut` is ever constructed past that point.
 //
 // The first test below is fully deterministic: the token is flipped before the call is even
 // made, so the outcome does not depend on scheduling at all. Genuinely interrupting a request
@@ -2133,7 +2133,7 @@ fn config_for_slow_multi_tile_sweep() -> EngineConfig {
     }
 }
 
-/// D-C, I13: a token cancelled before the call is even made aborts the whole request with
+/// D-C, I13a: a token cancelled before the call is even made aborts the whole request with
 /// `Cancelled` specifically — not swallowed into some other error arm, and (since the call
 /// returns `Err`) no `ViewportOut`, partial or otherwise, is ever constructed.
 #[test]

@@ -179,7 +179,7 @@ pub(crate) const PER_ENTRY_FLOOR_BYTES: u64 = 512;
 ///
 /// There is deliberately no third, "failed" state: D-G requires a failed (panicking) build to
 /// remove the entry outright rather than cache anything for it, so the next arrival retries —
-/// caching a failure would be a permanent fail-closed wedge (I13).
+/// caching a failure would be a permanent fail-closed wedge (I13a).
 enum Slot<K, V> {
     /// A build is in flight. `seq` identifies *which* build, so a publish or an unwind can tell
     /// its own slot from a later builder's — this module's doc, rule 2.
@@ -484,7 +484,7 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// *inside* those acquisitions and add none of their own; a recency index behind its own mutex,
     /// or a re-lock to evict after publishing, is what those assertions refuse.
     ///
-    /// **Panic safety (I13).** If `build` unwinds, [`RemoveOnUnwind`] removes *this build's*
+    /// **Panic safety (I13a).** If `build` unwinds, [`RemoveOnUnwind`] removes *this build's*
     /// `Building` entry — identified by its sequence number, so a slot a later builder owns is left
     /// alone — before the unwind propagates, and the next arrival sees a plain miss.
     ///
@@ -496,7 +496,7 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// failure, so a build that can fail must not be wrapped in a closure that panics or that
     /// stuffs an error into `V` — use `tessera-authz`'s `SingleFlightCache::get_or_try_build` twin
     /// instead, which carries the `Result` through the slot state machine properly (fail-closed,
-    /// not a cached failure — I13).
+    /// not a cached failure — I13a).
     pub(crate) fn get_or_build(
         &self,
         key: K,
@@ -604,7 +604,7 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     ///   publish nothing. **Removing it is essential, not tidiness**: a `Building` slot with no
     ///   builder is a permanent `ProjectionBuilding` wedge for that key — an unrecoverable 429 for
     ///   the rest of that session — which is exactly the fail-closed wedge [`Slot`]'s own doc says
-    ///   the two-state design exists to prevent (I13).
+    ///   the two-state design exists to prevent (I13a).
     /// - otherwise → evict to fit, then publish `Ready`.
     #[allow(clippy::too_many_arguments)]
     fn publish(
@@ -933,7 +933,7 @@ mod tests {
         assert_eq!(slow.join().unwrap().unwrap().0, 1);
     }
 
-    /// I13: a panicking build must never leave a permanent `Building` wedge. The entry is absent
+    /// I13a: a panicking build must never leave a permanent `Building` wedge. The entry is absent
     /// afterwards (not `Building`, not a cached failure), so the very next call retries cleanly.
     #[test]
     fn a_panicking_build_leaves_the_key_absent_so_a_retry_rebuilds() {
@@ -946,7 +946,7 @@ mod tests {
         assert_eq!(
             cache.len(),
             0,
-            "a panicked build must not leave a Building wedge (I13)"
+            "a panicked build must not leave a Building wedge (I13a)"
         );
 
         let rebuilt = cache.get_or_build(7, || Weighed(7, BIG)).unwrap();
@@ -1137,7 +1137,7 @@ mod tests {
         assert_eq!(slow.join().unwrap().unwrap().0, 1);
     }
 
-    /// **The I13 wedge the oversized path would otherwise leave.** A value larger than the whole
+    /// **The I13a wedge the oversized path would otherwise leave.** A value larger than the whole
     /// bound is served to its caller (rule 3) and not retained — and its `Building` slot is
     /// *removed*, so the next arrival sees a plain miss rather than a permanent
     /// `ProjectionBuilding` refusal for the rest of that session.
@@ -1153,7 +1153,7 @@ mod tests {
             cache.len(),
             0,
             "the Building slot must be REMOVED, not left behind: a Building slot with no builder \
-             is a permanent ProjectionBuilding wedge for that key (I13)"
+             is a permanent ProjectionBuilding wedge for that key (I13a)"
         );
 
         // The wedge test proper: the very next arrival must be able to build, not be refused.

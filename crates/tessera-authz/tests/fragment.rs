@@ -411,7 +411,7 @@ fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
     assert_eq!(got, expected);
 }
 
-/// Fail-closed (I13): a build failure must never cache the error and must never leave a wedged
+/// Fail-closed (I13a): a build failure must never cache the error and must never leave a wedged
 /// `Building` entry. Here the failure is a real IO error (the cache directory's parent is a
 /// plain file, so `create_dir_all` fails with `ENOTDIR`) rather than an injected panic, exercising
 /// the same drop-guard path through its `Err` arm. After "repairing" the filesystem (turning the
@@ -440,7 +440,7 @@ fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
     assert_eq!(
         cache.slot_count(),
         0,
-        "a failed build must not leave a wedged Building entry, nor cache the Err (I13)"
+        "a failed build must not leave a wedged Building entry, nor cache the Err (I13a)"
     );
     assert_eq!(cache.rebuild_count(), 0);
 

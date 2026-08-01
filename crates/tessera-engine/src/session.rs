@@ -246,7 +246,7 @@ pub enum EngineError {
     /// D-C: the caller's [`crate::cancel::CancelToken`] was observed flipped mid-request (the
     /// rapid-pan case — a client aborted a fetch it no longer needs). Whole-request abort:
     /// [`crate::viewport::Engine::viewport`] returns this the instant a check catches the flip,
-    /// and no partial `ViewportOut` is ever constructed past that point (I13 — cancelled is not
+    /// and no partial `ViewportOut` is ever constructed past that point (I13a — cancelled is not
     /// an empty-but-valid contribution, it is no contribution). Maps to a fixed fail-closed 500 at
     /// the server boundary (`tessera-server::error::map_engine_error`'s explicit arm) — this must
     /// never become a 2xx or any 4xx, even if a future refactor makes the arm reachable on a
@@ -1281,12 +1281,12 @@ impl ExternalIdIndex {
 
 #[cfg(test)]
 mod tests {
-    /// I13 pin (D-F): a panic inside `install`/`par_iter` on the engine's shared pool must
+    /// I13a pin (D-F): a panic inside `install`/`par_iter` on the engine's shared pool must
     /// propagate to the caller — never be swallowed into a truncated `Ok`. `Engine::viewport`'s
     /// parallel tile sweep runs on exactly this pool, built exactly this way (`Engine::open`'s
     /// `rayon::ThreadPoolBuilder::new().num_threads(..).build()`), via `self.pool.install(...)`;
     /// if a worker-thread panic never reached `viewport`'s caller, a panicking tile would produce
-    /// a silently-truncated 200 instead of the fail-closed 500 I13 requires (the server's
+    /// a silently-truncated 200 instead of the fail-closed 500 I13a requires (the server's
     /// `JoinError` arm, already pinned by its own test — this test pins the engine-side half of
     /// that chain: the pool itself does not eat the panic before it ever reaches `spawn_blocking`).
     ///

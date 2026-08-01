@@ -86,7 +86,7 @@ pub(crate) const PER_ENTRY_FLOOR_BYTES: u64 = 512;
 /// One key's state. There is deliberately no third, "failed" state: a failed (`Err`-returning or
 /// panicking) build must remove the entry outright rather than cache anything for it, so the next
 /// arrival retries — caching a failure would be a permanent fail-closed wedge for that credential
-/// (I13).
+/// (I13a).
 enum Slot<K, V> {
     /// A build is in flight. `seq` identifies *which* build — see the engine twin's rule 2, and
     /// [`RemoveUnlessReady`] below.
@@ -121,7 +121,7 @@ pub(crate) enum SingleFlightError<E> {
     /// `EngineError::FragmentBuilding`.
     Building,
     /// The build that *this* call ran failed. The entry has already been removed (never cached —
-    /// I13 fail-closed) by the time this is returned, so the next arrival sees a plain miss.
+    /// I13a fail-closed) by the time this is returned, so the next arrival sees a plain miss.
     Build(E),
 }
 
@@ -334,7 +334,7 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// `Building` state and errors rather than deadlocking, for the same reason: the map lock is
     /// never held across `build`.
     ///
-    /// **Fail-closed (I13).** If `build` returns `Err` or unwinds, [`RemoveUnlessReady`] removes
+    /// **Fail-closed (I13a).** If `build` returns `Err` or unwinds, [`RemoveUnlessReady`] removes
     /// *this build's* `Building` entry — identified by its sequence number — before this call
     /// returns or the unwind propagates, so the key is left absent, never wedged at `Building` and
     /// never a cached `Err`.
@@ -440,7 +440,7 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// The publish half of a miss. Runs with the lock held. See the engine twin's `publish` for the
     /// three outcomes and why the oversized arm must *remove* the `Building` slot rather than leave
     /// it (a `Building` slot with no builder is a permanent fail-closed wedge for that credential —
-    /// I13, and the precise thing this module's two-state `Slot` exists to prevent).
+    /// I13a, and the precise thing this module's two-state `Slot` exists to prevent).
     #[allow(clippy::too_many_arguments)]
     fn publish(
         &self,
@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(slow.join().unwrap().unwrap().0, 1);
     }
 
-    /// I13: a build returning `Err` must never leave a permanent `Building` wedge, and the error
+    /// I13a: a build returning `Err` must never leave a permanent `Building` wedge, and the error
     /// must never be cached — the entry is absent afterwards, so the very next call retries cleanly
     /// (and can succeed, unlike a cached failure, which would be a permanent fail-closed wedge).
     #[test]
@@ -708,7 +708,7 @@ mod tests {
         assert_eq!(
             cache.len(),
             0,
-            "a failed build must not leave a Building wedge, nor cache the Err (I13)"
+            "a failed build must not leave a Building wedge, nor cache the Err (I13a)"
         );
 
         let rebuilt = cache
@@ -718,7 +718,7 @@ mod tests {
         assert_eq!(cache.len(), 1);
     }
 
-    /// I13, panic form: same guarantee via unwinding rather than a returned `Err`.
+    /// I13a, panic form: same guarantee via unwinding rather than a returned `Err`.
     #[test]
     fn a_panicking_build_leaves_the_key_absent_so_a_retry_rebuilds() {
         let cache = unbounded();
@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(
             cache.len(),
             0,
-            "a panicked build must not leave a Building wedge (I13)"
+            "a panicked build must not leave a Building wedge (I13a)"
         );
 
         let rebuilt = cache
@@ -847,7 +847,7 @@ mod tests {
         assert_eq!(slow.join().unwrap().unwrap().0, 1);
     }
 
-    /// The I13 wedge the oversized path would otherwise leave — the authz copy.
+    /// The I13a wedge the oversized path would otherwise leave — the authz copy.
     #[test]
     fn an_entry_larger_than_the_bound_is_served_but_not_retained() {
         let cache = SingleFlightCache::<u32, Weighed>::new(BIG);
@@ -862,7 +862,7 @@ mod tests {
             cache.len(),
             0,
             "the Building slot must be REMOVED: one with no builder is a permanent fail-closed \
-             wedge for that credential (I13)"
+             wedge for that credential (I13a)"
         );
 
         let again = cache.get_or_try_build(1, || Ok::<_, ()>(Weighed(6, BIG * 4)));

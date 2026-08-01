@@ -104,7 +104,7 @@ use crate::state::AppState;
 /// Built fallibly by [`init_deny_runtime`] from `prepare`, so a runtime that cannot be constructed
 /// — `EAGAIN` under precisely the thread exhaustion this exists for — is a **fail-to-start**, not a
 /// panic discovered by the first suppression. (A panic in the async handler body is not caught by
-/// `map_join_error`; the connection would drop with no status at all, violating I13's "a panic is a
+/// `map_join_error`; the connection would drop with no status at all, violating I13a's "a panic is a
 /// failed request, never an empty one".)
 ///
 /// **The stored runtime is never dropped**, because a `OnceLock`'s value outlives every caller. That
@@ -112,7 +112,7 @@ use crate::state::AppState;
 /// the value back** when it loses a race, so the *loser* of two concurrent
 /// [`init_deny_runtime`] calls had a live `Runtime` to dispose of, at a statement inside `changes()`'s
 /// async body — `Runtime::drop` blocks, and dropping one on a reactor thread panics with "Cannot
-/// drop a runtime in a context where blocking is not allowed". Exactly the I13 shape above, and
+/// drop a runtime in a context where blocking is not allowed". Exactly the I13a shape above, and
 /// reproducible on both tokio flavours. See [`discard_losing_runtime`], which is where the loser now
 /// goes.
 static DENY_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
@@ -1310,7 +1310,7 @@ mod tests {
     /// that statement — and the lazy path is called from inside `changes()`'s async body, where
     /// `Runtime::drop`'s blocking shutdown panics with "Cannot drop a runtime in a context where
     /// blocking is not allowed". The panic is in the handler body, so `map_join_error` cannot see it:
-    /// the connection drops with no status at all, which is the I13 violation the design gate used to
+    /// the connection drops with no status at all, which is the I13a violation the design gate used to
     /// reject a `LazyLock` here.
     ///
     /// `prepare` closes it for the shipped binary by initialising before any listener binds. It was

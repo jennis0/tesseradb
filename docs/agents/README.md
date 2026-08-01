@@ -58,5 +58,5 @@ records which ones were wrong.
 
 The conformance suite is the deliverable, not the performance architecture. An implementation
 that keeps every clever thing about this system — Morton order, Roaring masks, tiered decode —
-while quietly dropping I2, I7 or I13 passes every functional test and leaks. Optimisations are
+while quietly dropping I2, I7 or I13b passes every functional test and leaks. Optimisations are
 welcome; they are not welcome at the cost of being able to see that the guarantees hold.
