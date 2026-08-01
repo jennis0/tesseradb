@@ -125,30 +125,39 @@ Headless chromium needs `npx playwright install chromium-headless-shell` once.
 
 Each of these is a recorded decision (design §7), not an oversight:
 
-- **Epochs and cross-channel consistency.** The bundle is static for this exercise; the counts
-  panel sums responses fetched at different times, which is wrong the moment ingest runs.
+- **Epochs and cross-channel consistency.** The bundle is static for this exercise. One request
+  per view makes a single response internally consistent by construction, but nothing ties
+  successive responses to one epoch.
 - **Reconciliation, prefix declarations, the session cursor.**
 - **The change signal**, and the refresh affordance client-interaction §4 makes mandatory.
 - **`{shown, total}` as an inseparable type.** The discipline is honoured in the panel; it is not
   enforced by the type system, so a future panel can still render a bare sample count.
-- **The four display states.** Only the failure case survives: a failed tile is listed, and a
-  viewport with no tiles and a recent failure reads *counts unavailable*, never *zero*.
-- **The *k* non-decreasing rule (P6).** The slider can lower `k`. This survives only until the
-  replica store owns `k`.
+- **Shown-but-stale**, the fourth display state. The other four — loading, retrying, empty and
+  refused — *are* distinct, and only `shown` may display counts.
 - **The conformance kit, the obligations list, the tile-addressed GET alias, labels, filters,
   export, and the Python client.**
 
 ## Things worth knowing before you read a number
 
-**`k` is usually not binding.** §7.2 selects by a threshold θ *and* a cap `k`; the cap only bites
-when θ would admit more than `k`. Against these fixtures θ decides everywhere sampled, so moving
-the `k` slider changes nothing and the map is right to ignore it. The panel says which clause is
-deciding, measured from the served counts. Raise `serve.theta_target_marks` to make `k` bite.
+**Depth is chosen for the mark budget, not from the zoom.** §7.2 makes marks-per-*tile*
+depth-stable, so marks-on-*screen* is `m_target × tiles-in-view` and the only lever is which
+depth's tiles are requested. The request carries `budget / m_target` tiles at every zoom level.
+Measured at 1e9: depth climbs 6→10 as you zoom in while the tile count stays ~3,300–4,900 and
+marks vary 2.33× — against ~25× for the tile-addressed version.
 
-**The request bbox is inset to cell centres, deliberately.** `tessera-spatial`'s `tile_corners`
-quantises both corners and iterates inclusively, so a bbox closed on the tile boundary names the
-neighbouring row and column too — one request would answer for four tiles, double-counting and
-over-plotting. See `core/src/coords.ts`'s `tileToRequestBbox`.
+**`k` is not a viewer control any more.** It is a per-tile cap that θ never reaches (measured:
+inert at every depth on every fixture), so the quantity worth setting is the budget. Raise
+`serve.theta_target_marks` if you want `k` to bite.
+
+**Calibration only ever goes deeper.** A shallower request returns a strict *subset* of what is
+already drawn, so marks would pop *out* while the user did nothing — the lever design §7.2 and §7.3
+strike as unsound. It also stops once the principal's whole visible set is served, or a sparse
+principal ratchets depth to the tile cap forever to deliver its 1,366 marks.
+
+**The request bbox is a *view* bbox, and is not inset.** `core/src/coords.ts`'s
+`tileToRequestBbox` insets to cell centres and exists for addressing a single tile; the viewport
+layer deliberately does not use it, because `tile_corners`' inclusive behaviour is what makes the
+request cover every tile the view touches.
 
 **`x-tessera-stage-ns` is usually absent.** It needs both the `bench-timing` cargo feature and
 `[serve] stage_timing = true`. Absence is a configuration fact, not an error, and the stats panel
