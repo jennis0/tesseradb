@@ -448,23 +448,29 @@ fn deny_priority_survives_the_window(window_max_rows: Option<usize>) {
 
 /// **The same property on the third close path — the one Task 7a's F1 fix did not reach.**
 ///
-/// `run_work_pass` closes a window mid-drain when an entry conflicts with the one that is open
-/// (`CommitWindow::conflicts_with` — the mechanism that keeps Task 3a's security C1 closed). Until
-/// Task 7b that close *continued* draining, and `window.rows()` resets with the replacement, so the
-/// row bound could never trip on a conflict-heavy stream: a pass could perform an unbounded number
-/// of full `append → fsync → apply → swap` cycles without ever returning to `Executor::run`'s deny
-/// drain. That is lifecycle §1.3's prohibition verbatim — a deny queued behind work of unbounded
-/// duration — and it was reachable at the shipped defaults from a client retrying a `batch_id`
-/// while the original is still in the open window.
+/// `run_work_pass` closes a window mid-drain when an entry names an external id the open window
+/// already holds (`CommitWindow::holds_external_id_of` — the mechanism that keeps Task 3a's
+/// security C1 closed). Until Task 7b that close *continued* draining, and `window.rows()` resets
+/// with the replacement, so the row bound could never trip on a conflict-heavy stream: a pass could
+/// perform an unbounded number of full `append → fsync → apply → swap` cycles without ever
+/// returning to `Executor::run`'s deny drain. That is lifecycle §1.3's prohibition verbatim — a
+/// deny queued behind work of unbounded duration — and it is reachable at the shipped defaults from
+/// a client re-ingesting an `external_id` a still-open window holds.
 ///
-/// The workload is **pairs sharing a `batch_id`**: whichever member of a pair the drain meets
-/// second conflicts, whatever order the submitting threads reach the queue in. The executor is
-/// parked at `AfterFsync` inside that first conflict-forced close, which is what lets the deny be
-/// enqueued *during* the pass rather than before it — enqueueing it before would prove nothing,
-/// since `Executor::run` drains deny at the top of every iteration anyway.
+/// **The workload is pairs sharing an `external_id` under different batch ids, and Task 8 is why.**
+/// It was pairs sharing a `batch_id` — until Task 8's `Held` join answered that case from inside
+/// the window and stopped it forcing a close at all. Left as it was, this test would have kept
+/// passing while asserting nothing: no close, no yield, and the property 7b's CRITICAL fix exists
+/// for would have had **no test in the tree**. (7b's report records that all twenty other tests
+/// stayed green under the mutation; this is the one.) Whichever member of a pair the drain meets
+/// second conflicts, whatever order the submitting threads reach the queue in.
 ///
-/// Red on the defect (`yield_after_this_entry` removed): the deny lands last, after all six work
-/// items. Green with it: after two.
+/// The executor is parked at `AfterFsync` inside that first conflict-forced close, which is what
+/// lets the deny be enqueued *during* the pass rather than before it — enqueueing it before would
+/// prove nothing, since `Executor::run` drains deny at the top of every iteration anyway.
+///
+/// Red on the defect (`Admission::YieldedAfterClose`'s `break` removed): the deny lands last, after
+/// all six work items. Green with it: after two.
 #[test]
 fn a_deny_is_never_queued_behind_a_conflict_forced_window_split() {
     const PAIRS: usize = 3;
@@ -499,12 +505,13 @@ fn a_deny_is_never_queued_behind_a_conflict_forced_window_split() {
             let e = Arc::clone(&engine);
             let order = Arc::clone(&order);
             workers.push(std::thread::spawn(move || {
-                // Same batch id within a pair, different bytes and different external ids: the
-                // conflict is on `batch_id`, and the second one 409s once the close has applied the
-                // first.
+                // Same **external id** within a pair, different batch ids: the conflict is Task
+                // 3a's C1 shape, and the second one 409s on `established_collisions` once the
+                // close has applied the first. (A shared *batch id* no longer forces a close —
+                // Task 8's join answers it in place — which is why this workload changed.)
                 let _ = e.accept_ingest(
-                    vec![row(&format!("c-{i}-{half}"))],
-                    format!("pair-{i}"),
+                    vec![row(&format!("c-{i}"))],
+                    format!("pair-{i}-{half}"),
                     [(i as u8) * 2 + half; 32],
                 );
                 order.lock().unwrap().push("work");
@@ -1296,59 +1303,363 @@ fn an_idle_work_pass_arms_nothing() {
     );
 }
 
-/// A byte-identical retry that lands in the **same open window** does not allocate a second time.
+// =================================================================================================
+// Task 8 — the batch-id state machine across a held window
+// =================================================================================================
+
+/// Two anonymous rows: **no external id**, so no map can catch a double-ingest and the batch-id
+/// path is the only thing under test. It is also the case the recorded-ids design exists for —
+/// nothing could re-derive these ids from anything a retry sends.
+fn anonymous_pair() -> Vec<UnallocatedRow> {
+    (0..2)
+        .map(|_| {
+            let mut r = row("ignored");
+            r.external_id = None;
+            r
+        })
+        .collect()
+}
+
+/// Submit one ingest on its own thread and wait until it is **enqueued**, so the drain order is
+/// deterministic rather than a race between threads. `Window::run` cannot be reused for these
+/// cases: it spawns every submission at once and derives each body hash from the submission index
+/// (`let hash = [i as u8; 32]`), so it cannot express a byte-identical retry at all.
+fn enqueue(
+    engine: &Arc<Engine>,
+    batch_id: &str,
+    body_hash: [u8; 32],
+    rows: Vec<UnallocatedRow>,
+    want_submitted: u64,
+) -> std::thread::JoinHandle<Result<Vec<EntityId>, AcceptError>> {
+    let e = Arc::clone(engine);
+    let id = batch_id.to_string();
+    let handle = std::thread::spawn(move || e.accept_ingest(rows, id, body_hash));
+    let deadline = std::time::Instant::now() + WAIT;
+    while engine.write_executor_stats().work_submitted < want_submitted {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "submission {want_submitted} never reached the queue: {:?}",
+            engine.write_executor_stats()
+        );
+        std::thread::yield_now();
+    }
+    handle
+}
+
+/// **A byte-identical retry that lands in a held window JOINS it** (Task 8; contracts §3.4 r8's
+/// third state, lifecycle §5.1: "a retry must join the open window rather than allocate a second
+/// time").
 ///
-/// Rows with **no external id** are used deliberately: they are established in no map, so the
-/// duplicate-external-id backstop above cannot catch this and the batch-id path is the only thing
-/// under test. Task 8 replaces the forced close with the `Held` join, which answers both callers off
-/// one allocation; until then the close is what keeps the answer honest.
+/// **What discriminates this from the pre-state, and why the obvious assertions do not.** Before
+/// Task 8 a held `batch_id` forced the window to close, and the retry was then answered from the
+/// durable index. That answer was already correct: same ids, one WAL record, high-water up by the
+/// batch's rows once. Those three assertions pass on the pre-state and prove nothing about this
+/// task. What the close cost, and the join does not, is a **second window**: the pass yields after
+/// a conflict, so `A, A', C` committed in two windows and two fsyncs where the join commits one.
+/// The `wal_fsyncs` leg is therefore the load-bearing one, and it is `== 1` rather than "did not
+/// rise" because a build that never fsynced would satisfy the weaker form.
 #[test]
-fn a_byte_identical_retry_inside_an_open_window_does_not_double_allocate() {
+fn a_retry_joins_rather_than_reallocating() {
     let tmp = TempDir::new().unwrap();
     let (engine, faults) = engine_with_faults(&tmp, 64);
     let engine = Arc::new(engine);
 
-    let anonymous = || {
-        let mut r = row("ignored");
-        r.external_id = None;
-        vec![r, {
-            let mut r = row("ignored");
-            r.external_id = None;
-            r
-        }]
-    };
-
     let window = Window::park(Arc::clone(&engine), faults);
     let before = window.high_water_before;
-    // Both submissions carry the same batch id AND the same body hash — `Window::run` derives the
-    // hash from the submission index, so this test submits them by hand.
-    let a = Arc::clone(&engine);
-    let b = Arc::clone(&engine);
-    let h1 =
-        std::thread::spawn(move || a.accept_ingest(anonymous(), "same-batch".to_string(), [9; 32]));
-    let h2 =
-        std::thread::spawn(move || b.accept_ingest(anonymous(), "same-batch".to_string(), [9; 32]));
-    let deadline = std::time::Instant::now() + WAIT;
-    while engine.write_executor_stats().work_submitted < 3 {
-        assert!(std::time::Instant::now() < deadline, "never enqueued");
-        std::thread::yield_now();
-    }
+    let fsyncs_before = engine.write_executor_stats().wal_fsyncs;
+
+    // `A` and `A'`: same batch id, same body hash. `C`: a fresh batch, which is what makes the
+    // fsync count discriminating — without it there is nothing left in the pass to share a window
+    // with, and both shapes commit one window.
+    let a = enqueue(&engine, "same-batch", [9; 32], anonymous_pair(), 2);
+    let retry = enqueue(&engine, "same-batch", [9; 32], anonymous_pair(), 3);
+    let c = enqueue(&engine, "other-batch", [7; 32], vec![row("c-0")], 4);
+
     window.faults.release();
-    let first = h1.join().unwrap().expect("accepted");
-    let second = h2
+    let first = a.join().unwrap().expect("accepted");
+    let second = retry
         .join()
         .unwrap()
-        .expect("the replay is answered, not refused");
+        .expect("the retry is answered, not refused");
+    let third = c.join().unwrap().expect("accepted");
+    window.join_prime();
 
     assert_eq!(
         first, second,
-        "a byte-identical replay must answer with the SAME ids (contracts §3.4), not a second \
+        "a byte-identical retry must answer with the SAME ids (contracts §3.4), not a second \
          allocation"
+    );
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        engine.allocator_high_water(),
+        before + 3,
+        "the id space must advance by A's two rows and C's one — not by A's rows twice"
+    );
+
+    let stats = engine.write_executor_stats();
+    assert_eq!(
+        stats.wal_fsyncs - fsyncs_before,
+        1,
+        "the retry must JOIN the open window, not split the pass into two windows and two \
+         fsyncs: {stats:?}"
+    );
+    assert_eq!(
+        stats.work_depth, 0,
+        "a joined retry occupied a queue slot and must be counted completed, or `work_depth` \
+         drifts up one per retry forever and every 429's retry_after_s inherits it: {stats:?}"
+    );
+    // And the join added a waiter, not an entry: two records for two batches, not three.
+    assert_eq!(
+        stats.wal_appends - 1,
+        2,
+        "one record per ENTRY — the priming batch aside, A and C, with no record for the retry: \
+         {stats:?}"
+    );
+    assert!(!third.is_empty());
+}
+
+/// The child half of [`crash_between_fsync_and_swap_replays_rather_than_reallocates`] runs this
+/// same test binary with this variable set to the scratch directory to work in.
+const CRASH_CHILD_DIR: &str = "TESSERA_TASK8_CRASH_CHILD_DIR";
+const CRASH_BATCH_ID: &str = "crash-batch";
+const CRASH_BODY_HASH: [u8; 32] = [5; 32];
+
+/// **A process killed between fsync and swap replays its batch; a retry does not reallocate.**
+///
+/// Lifecycle §8's crash row ("after fsync, before swap", at risk: none) and contracts §3.4's
+/// idempotency rule, met across a **real** process death.
+///
+/// **Why a child process, and why no in-process fault can stand in.** `faults.rs`'s `PauseAction`
+/// carries exactly one kill action, `Panic`, and its own doc says why: a panic unwinds, runs
+/// `DeathGuard`, drops the `Job` and closes the `ExecutorWal`, and a `SIGKILL` does none of those.
+/// Task 3a deleted an `Abort` variant that was a second `panic!` with a different message, because
+/// arming it would have modelled a clean shutdown and called it a crash, and left this task the
+/// obligation to build the real thing.
+///
+/// The assembly, with no sleep anywhere: the child builds a fixture, arms `AfterFsync`/`Stall`,
+/// submits one batch from a thread and waits on the switchboard's own arrival counter — at which
+/// point the record is **durable and the swap has not happened** — then creates a marker file and
+/// blocks forever. The parent polls for the marker (deadline-bounded, like every other wait in this
+/// file), `SIGKILL`s the child, and reopens the WAL.
+///
+/// The expected ids are read **from the WAL**, not from the child: the child never acknowledged,
+/// which is the whole property. `WritePath::reconstruct` rebuilds `accepted_batches` from the
+/// replayed `IngestBatch` records, so the parent's retry meets `BatchState::Accepted` and is
+/// replayed rather than re-ingested.
+#[test]
+fn crash_between_fsync_and_swap_replays_rather_than_reallocates() {
+    match std::env::var(CRASH_CHILD_DIR) {
+        Ok(dir) => crash_child(std::path::PathBuf::from(dir)),
+        Err(_) => crash_parent(),
+    }
+}
+
+/// The child: get one batch durable, publish that fact, and wait to be killed. Never returns.
+fn crash_child(dir: std::path::PathBuf) {
+    let bundle_root = dir.join("bundle");
+    build_fixture(
+        &bundle_root,
+        &dir.join("points.parquet"),
+        &dir.join("pairs.parquet"),
+    );
+    let mut engine = open_engine(&bundle_root, &dir.join("cache"), &dir.join("wal.log"));
+    let faults = Arc::new(FaultSwitchboard::new());
+    engine
+        .start_write_executor_with_faults(8, Arc::clone(&faults))
+        .expect("the executor starts once");
+
+    faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
+    let e = Arc::new(engine);
+    let submitter = Arc::clone(&e);
+    std::thread::spawn(move || {
+        let _ = submitter.accept_ingest(
+            vec![row("crash-0"), row("crash-1")],
+            CRASH_BATCH_ID.to_string(),
+            CRASH_BODY_HASH,
+        );
+    });
+    faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
+
+    // Durable, not in force, not acknowledged. Say so, then wait to die — `std::mem::forget` on the
+    // engine so that even an unexpected unwind cannot run the executor's drop path.
+    std::mem::forget(e);
+    std::fs::write(dir.join("parked"), b"parked").expect("the marker is written");
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Kills the child on the way out, so a failing assertion cannot leak a process that outlives the
+/// `TempDir` it is holding open.
+struct ChildGuard(std::process::Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn crash_parent() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let child = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .arg("crash_between_fsync_and_swap_replays_rather_than_reallocates")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(CRASH_CHILD_DIR, &dir)
+        .spawn()
+        .expect("the child test process starts");
+    let mut child = ChildGuard(child);
+
+    let marker = dir.join("parked");
+    let deadline = std::time::Instant::now() + WAIT;
+    while !marker.exists() {
+        if let Some(status) = child.0.try_wait().expect("the child is waitable") {
+            panic!("the child exited before parking: {status}");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the child never reached the after-fsync pause point"
+        );
+        std::thread::yield_now();
+    }
+
+    // **A real kill**: SIGKILL, no unwinding, no destructors, no WAL close.
+    child.0.kill().expect("the child is killable");
+    let status = child.0.wait().expect("the child is waitable");
+    assert!(
+        !status.success(),
+        "the child must have died by signal, not exited cleanly: {status}"
+    );
+
+    let wal_path = dir.join("wal.log");
+    let durable = crash_batch_ids(&wal_path);
+    assert_eq!(
+        durable.len(),
+        2,
+        "the killed process's batch must be durable — fsync returned before it was killed"
+    );
+
+    // Reopen: replay reinstates the rows AND the idempotency index.
+    let mut engine = open_engine(&dir.join("bundle"), &dir.join("cache2"), &wal_path);
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    let high_water_after_replay = engine.allocator_high_water();
+
+    let replayed = engine
+        .accept_ingest(
+            vec![row("crash-0"), row("crash-1")],
+            CRASH_BATCH_ID.to_string(),
+            CRASH_BODY_HASH,
+        )
+        .expect("the retry is answered, not refused");
+
+    assert_eq!(
+        replayed, durable,
+        "the retry must replay the ids the crashed process's WAL record carries — not allocate a \
+         second set for rows that are already durable"
+    );
+    assert_eq!(
+        engine.allocator_high_water(),
+        high_water_after_replay,
+        "and it must burn no entity ids"
+    );
+    drop(engine);
+
+    assert_eq!(
+        crash_batch_ids(&wal_path).len(),
+        2,
+        "the replay must append no second record for this batch id"
+    );
+}
+
+/// The entity ids the WAL's `IngestBatch` record for [`CRASH_BATCH_ID`] carries, in row order.
+fn crash_batch_ids(wal_path: &std::path::Path) -> Vec<EntityId> {
+    let (_wal, records) = tessera_lifecycle::Wal::open(wal_path).expect("the WAL reopens");
+    records
+        .iter()
+        .filter_map(|r| match r {
+            tessera_lifecycle::WalRecord::IngestBatch { batch_id, rows, .. }
+                if batch_id == CRASH_BATCH_ID =>
+            {
+                Some(rows.iter().map(|row| row.entity_id))
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// **A retry of a held batch with different bytes 409s, and the held original is undisturbed.**
+///
+/// This is the **owner-confirmable default** of Task 8 brief §3 — contracts §3.4's "the batch has
+/// no effect" reaches the refused retry and not the accepted original — and it is asserted where it
+/// has to be, on the *original's* outcome. Asserting only that the retry 409s would pass equally
+/// well on a build that threw the original away.
+///
+/// "In force" for a buffered ingest in stage 2.1 is the **live external-id map**: buffered rows
+/// have no geometry until 2.2's flush, so `visible()` cannot see them and `resolve_external_id` is
+/// the observable (Task 7a fix round, F5).
+#[test]
+fn held_plus_different_bytes_409s_without_disturbing_the_original() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 64);
+    let engine = Arc::new(engine);
+
+    let window = Window::park(Arc::clone(&engine), faults);
+    let before = window.high_water_before;
+    let fsyncs_before = engine.write_executor_stats().wal_fsyncs;
+
+    let a = enqueue(&engine, "same-batch", [1; 32], vec![row("held-0")], 2);
+    let retry = enqueue(&engine, "same-batch", [2; 32], vec![row("held-1")], 3);
+    let c = enqueue(&engine, "other-batch", [7; 32], vec![row("c-0")], 4);
+
+    window.faults.release();
+    let original = a.join().unwrap().expect("the held original still applies");
+    let refused = retry.join().unwrap();
+    c.join().unwrap().expect("accepted");
+    window.join_prime();
+
+    assert!(
+        matches!(
+            refused,
+            Err(AcceptError::Exec(
+                tessera_lifecycle::ExecError::BatchConflict { .. }
+            ))
+        ),
+        "a held batch id with different bytes is a 409, not an acceptance: {refused:?}"
+    );
+    assert_eq!(original.len(), 1);
+    assert_eq!(
+        engine
+            .resolve_external_id(b"held-0")
+            .expect("resolve")
+            .expect("the original's row is established"),
+        original[0],
+        "the original is in force with the ids it was acked"
+    );
+    assert_eq!(
+        engine.resolve_external_id(b"held-1").expect("resolve"),
+        None,
+        "and the refused retry's rows are not — a 409 batch has no effect"
     );
     assert_eq!(
         engine.allocator_high_water(),
         before + 2,
-        "and the id space must have advanced by the batch's rows ONCE, not twice"
+        "the refused retry burns no entity ids"
+    );
+
+    let stats = engine.write_executor_stats();
+    assert_eq!(
+        stats.wal_fsyncs - fsyncs_before,
+        1,
+        "and the 409 does not close the window either: {stats:?}"
+    );
+    assert_eq!(
+        stats.work_depth, 0,
+        "the 409'd retry must be counted completed too: {stats:?}"
     );
 }
 

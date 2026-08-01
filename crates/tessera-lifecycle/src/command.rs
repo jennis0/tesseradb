@@ -339,8 +339,10 @@ pub enum ExecError {
     /// no effect: `Allocator::allocate` leaves the high-water mark unchanged on this path.
     Alloc(AllocError),
     /// This `batch_id` was already accepted, or is held in an open window, with **different**
-    /// body bytes → HTTP 409 (contracts §3.4). The retry has no effect, and — Task 8, open
-    /// question O1 — a held original is *not* disturbed by it.
+    /// body bytes → HTTP 409 (contracts §3.4). The retry has no effect, and **a held original is
+    /// not disturbed by it** — Task 8 implemented that as the owner-confirmable default; the
+    /// argument, and what changes if the owner rules the other way, are at the one site that
+    /// decides it (`tessera-engine`'s `Executor::admit_ingest`, the `Held` arm).
     ///
     /// Evaluated on the executor rather than in the handler, which is why it is an [`ExecError`]
     /// and not something the handler decides before submitting.
