@@ -264,8 +264,18 @@ pub async fn spawn_server_from_engine(
     engine
         .start_write_executor(1024)
         .expect("the write executor starts once per engine");
-    let engine = engine;
+    mount_server(engine, max_k, compute_gate).await
+}
 
+/// The listener/router/`AppState` half of [`spawn_server_from_engine`], for an engine whose write
+/// executor the caller has already dealt with — started with its own bound, started with faults, or
+/// **deliberately not started at all**.
+///
+/// Split out by Task 3b, whose readiness tests need the last of those: `/readyz` must answer 503 for
+/// an engine with no executor, and `spawn_server_from_engine` starts one unconditionally (and would
+/// panic on `AlreadyStarted` if a test started its own first). Purely additive — that function keeps
+/// its name, its bound and its behaviour, so the frozen `tests/http.rs` is untouched by this split.
+pub async fn mount_server(engine: Engine, max_k: usize, compute_gate: ComputeGate) -> TestServer {
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),

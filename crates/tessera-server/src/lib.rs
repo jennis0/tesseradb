@@ -86,6 +86,13 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     engine.start_write_executor(config.ingest_queue_bound)?;
     let engine = engine;
 
+    // Phase 2 stage 2.1, Task 3b: the deny lane's own blocking runtime, built here so a runtime
+    // that cannot be constructed is a fail-to-start rather than a panic discovered by the first
+    // suppression — the same rule Task 3a applied when it replaced the executor's spawn `expect`
+    // with a typed `ExecutorStartError::Spawn`. See `control::init_deny_runtime` for why
+    // `/control/changes` does not share tokio's blocking pool at all.
+    control::init_deny_runtime()?;
+
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
