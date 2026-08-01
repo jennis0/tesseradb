@@ -4,7 +4,7 @@ Two TypeScript packages and a headless-browser smoke test, built to answer one q
 **does a running Tessera actually work?**
 
 - `core/` — `@tessera/client`. The four viewer/session verbs, the framed-Arrow decoder, the
-  coordinate arithmetic. Stateless: no cache, no epoch, no replica state.
+  coordinate arithmetic. Stateless: no cache, no view key, no replica state.
 - `viewer/` — a Vite + deck.gl app. All UI, all state.
 - `spike/` — the deck.gl tile-convention spike, kept as a regression guard.
 
@@ -125,9 +125,9 @@ Headless chromium needs `npx playwright install chromium-headless-shell` once.
 
 Each of these is a recorded decision (design §7), not an oversight:
 
-- **Epochs and cross-channel consistency.** The bundle is static for this exercise. One request
+- **View keys and cross-channel consistency.** The bundle is static for this exercise. One request
   per view makes a single response internally consistent by construction, but nothing ties
-  successive responses to one epoch.
+  successive responses within one view key.
 - **Reconciliation, prefix declarations, the session cursor.**
 - **The change signal**, and the refresh affordance client-interaction §4 makes mandatory.
 - **`{shown, total}` as an inseparable type.** The discipline is honoured in the panel; it is not

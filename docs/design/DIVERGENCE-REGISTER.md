@@ -28,6 +28,7 @@ make them.
    wrong document misleads about a guarantee — S1, S6, S7, S10, S12, S18, S19, S20, S21, S22, S23
    and the retirement rules. The remainder becomes GitHub issues against the epics that will build
    the machinery.
+5. **S8, S9, S24, A7 and A8 are ruled and applied** (2026-08-01), by decisions [0027](../decisions/0027-i5-is-unverified.md) (I5 is unverified — the mitigation claim is removed, not replaced), [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md) (the requirement is the array-containment refusal and a memory-bounded build; `pairs.parquet` is optional for serving and required for conformance), [0032](../decisions/0032-delete-the-dead-handle-table.md) (the dead per-session handle allocation is removed; the type and its constraint stay), [0030](../decisions/0030-determinism-is-not-a-guarantee.md) (response byte-stability is a documented implementation detail, not a guarantee) and [0031](../decisions/0031-decode-tiers-are-specified-not-promised.md) (the three decode tiers are described where selection is specified, so C19's argument can be audited, and marked the same way). No invariant text changed and no leak-register row was added, removed or rescoped.
 
 ---
 

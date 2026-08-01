@@ -224,8 +224,8 @@ bundle/
                                    only after every file it names is durable
       terms/postings.arrow         CSR: one tagged record per term, portable Roaring
       terms/deltas-<n>.arrow       per-flush posting deltas
-      terms/pairs.parquet          the exploded (entity_id, term_id) relation; optional,
-                                   off by default, read only by build machinery and by
+      terms/pairs.parquet          the exploded (entity_id, term_id) relation; optional to
+                                   serve and REQUIRED to run the conformance differential —
                                    the reference oracle, which derives masks from it by
                                    direct scan rather than from postings
       entities/external-ids-<k>.arrow   caller external ID → entity, byte-sorted extents

@@ -1,7 +1,7 @@
 # Caching architecture — where data rests, and what that costs
 
 **Date:** 2026-08-01
-**Status:** Provisional — under review. Graduated into the corpus 2026-08-01. Already load-bearing: it supersedes Phase 2 of the archived underlay plan. **To become normative:** owner sign-off on the S1–S5/C1 tier model, and the eviction rules reconciled against `engine/src/single_flight.rs`, which implements a cache this document does not yet describe.
+**Status:** Provisional r2 — under review. Graduated into the corpus 2026-08-01. r2 applies decision 0029: every cache key formerly written against an "epoch" is written against the **view key** — see §15. Already load-bearing: it supersedes Phase 2 of the archived underlay plan. **To become normative:** owner sign-off on the S1–S5/C1 tier model, and the eviction rules reconciled against `engine/src/single_flight.rs`, which implements a cache this document does not yet describe.
 **Companion to** `client-interaction.md`, whose §3, §5, §5.1, §6.2
 and §10 this makes concrete and in two places corrects.
 **Touches:** design §7.1–7.3, §8.5, §10.4, §11; client-interaction §3–§6, §8.1–8.6, §10; SA §7, §13.
@@ -16,9 +16,14 @@ is the feasibility mechanism.** A 1–2 × 10⁶-mark view at 10⁹ costs a meas
 broad principals per box**. Serving deltas against what the client already holds lifts that to
 ~10–40 and turns a 1.3–2.6 s transfer into a fraction of one. Everything below follows from that
 inversion: the architecture is **delta-native**, and the full self-contained response is demoted to
-bootstrap, epoch refresh and long-range jumps.
+bootstrap, view-key refresh and long-range jumps.
 
 The naive path stays correct (P6) — it simply operates at a lower mark budget.
+
+**The view key**, which every key below is expressed against, is client-interaction §6's
+composite of **(mask, overlay version, slice, *k*, idset)** — the coordinate within which a served
+viewport is stable. **The viewport is not one of its components**, so one view key covers every pan
+and zoom a session performs; that is what makes it usable as a cache key at all.
 
 ## 2. Why this document exists
 
@@ -92,13 +97,13 @@ point cache and the server density raster — could not sensibly share a design.
 |---|---|---|---|---|---|---|
 | S1 | Mask fragment *(exists)* | server | canonical grant set | `fragment_cache_bytes` | LRU | content-addressed; never |
 | S2 | Row projection *(exists)* | server | (token, slice, segments_version) | `row_projection_cache_bytes` | LRU + `prune_generation` | compaction |
-| S3 | Density raster | server | (grant set, slice, content epoch, depth) | new knob, ~512 MB | LRU | content version; rebuild async, serve stale-marked |
-| S4 | Overview / bootstrap answers | server | (grant set, slice, epoch, view, k) | new knob | LRU | content version |
-| S5 | Adapter tiles *(class b only)* | server, in boundary | (grant set, overlay version, segments_version, slice, epoch nonce, z/x/y, k, encoding) | new knob, 1–2 GB | LRU + single-flight | content version; epoch-scoped URL self-busts browser copies |
-| C1 | **Replica point bands** | client | (epoch, tile prefix) → band up to cut *c* | `client_cache_bytes`, 512 MB–1 GB | **truncate cuts, deepest/least-recent/farthest first; never the floor prefix** | identity generation → all; content version → stale-mark, lazy refetch |
-| C2 | Density raster | client | (epoch, slice), deepest level only | 1–4 MB | replaced whole | content version |
+| S3 | Density raster | server | (grant set, slice, content version, depth) | new knob, ~512 MB | LRU | content version; rebuild async, serve stale-marked |
+| S4 | Overview / bootstrap answers | server | (grant set, slice, content version, view, k) | new knob | LRU | content version |
+| S5 | Adapter tiles *(class b only)* | server, in boundary | (grant set, overlay version, segments_version, slice, view-key nonce, z/x/y, k, encoding) | new knob, 1–2 GB | LRU + single-flight | content version; view-key-scoped URL self-busts browser copies |
+| C1 | **Replica point bands** | client | (view key, tile prefix) → band up to cut *c* | `client_cache_bytes`, 512 MB–1 GB | **truncate cuts, deepest/least-recent/farthest first; never the floor prefix** | identity generation → all; content version → stale-mark, lazy refetch |
+| C2 | Density raster | client | (view key, slice), deepest level only | 1–4 MB | replaced whole | content version |
 
-Plus **the session cursor**, which is not a cache: `(tile, epoch, cut)` triples, ~64 KB/session,
+Plus **the session cursor**, which is not a cache: `(tile, view key, cut)` triples, ~64 KB/session,
 advisory and safely evictable under P5.
 
 **S2's re-key is hygiene, not a lever.** The projection is pre-overlay — `EffectiveMask { base,
@@ -165,7 +170,7 @@ intact and the naive client needs no declaration logic at all.
 
 At 1–2 M marks a view spans **60–125 k tiles**, so per-tile declarations are **0.7–1.5 MB on the
 uplink** — not trivial. Cuts are θ-derived and near-uniform across tiles at one depth, so the
-default encoding is *"subtree under ancestor A, held to depth d, cut-uniform, epoch E"*, with
+default encoding is *"subtree under ancestor A, held to depth d, cut-uniform, view key E"*, with
 per-tile entries as the exception path. That compresses the common case to kilobytes.
 
 ### 7.3 What each interaction then costs
@@ -218,10 +223,10 @@ They operate at their own, much lower per-view budget by construction. S5's sizi
 precisely *because* of that. The adapter's documentation must **state the budget ceiling** rather
 than let an integrator discover it.
 
-What class (b) needs is **coalescing, not caching**: single-flight per (grant set, epoch, viewport
-band), evaluate once, split by `served`, hand each `{z}/{x}/{y}` its slice. Posture per §8.3
-unchanged — inside the trust boundary, `Cache-Control: private`, epoch-scoped URL segment as a
-**session nonce rather than the raw epoch** (URLs reach history and proxies), key carrying overlay
+What class (b) needs is **coalescing, not caching**: single-flight per (grant set, view key,
+viewport band), evaluate once, split by `served`, hand each `{z}/{x}/{y}` its slice. Posture per §8.3
+unchanged — inside the trust boundary, `Cache-Control: private`, view-key-scoped URL segment as a
+**session nonce rather than the raw view key** (URLs reach history and proxies), key carrying overlay
 version and not mask identity alone.
 
 ## 11. Invariants and the leak register
@@ -292,6 +297,14 @@ Measure, in order:
 8. **S2 re-key** — hygiene.
 
 ## 15. Provenance
+
+**r2 (2026-08-01) applies decision [0029](../decisions/0029-view-key.md)** and changes no key's
+content. What §5's table and §7's mechanism called an "epoch" is the **view key** — the composite
+of mask, overlay version, slice, *k* and idset within which a served viewport is stable. The
+viewport is not one of its components, which is exactly why it can key a cache: one entry covers
+every pan and zoom a session performs under it. Where a key already enumerates the view key's other
+components — S3 and S4 — the remaining term is named the **content version**, which is what
+client-interaction §6.2 calls that tier.
 
 Produced 2026-08-01 from building and measuring the MVP client, then two rounds of adversarial
 review with an independent agent that had no stake in the conclusions. The owner rejected four of

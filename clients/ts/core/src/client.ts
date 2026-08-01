@@ -46,7 +46,7 @@ export type TesseraClientOptions = {
 /**
  * The four viewer/session verbs, and nothing else.
  *
- * No cache, no epoch, no session lifetime, no replica state — client-interaction §10's session
+ * No cache, no view key, no session lifetime, no replica state — client-interaction §10's session
  * client layer, which is what a REST user would have written anyway. The replica store goes
  * *above* this, not inside it, so that this file stays a thing you can read in one sitting and
  * check against the contracts spec.

@@ -1,7 +1,7 @@
 # Tile-addressed integration — serving MapLibre, OpenLayers and QGIS
 
 **Date:** 2026-08-01
-**Status:** Provisional — under review. Graduated into the corpus 2026-08-01. **To become normative:** owner sign-off, and reconciliation against `caching.md`'s S5 tier, which is this document's cache.
+**Status:** Provisional r2 — under review. Graduated into the corpus 2026-08-01. r2 applies decision 0029: the adapter's cache validity is the **view key** — see §9. **To become normative:** owner sign-off, and reconciliation against `caching.md`'s S5 tier, which is this document's cache.
 **Companion to** `client-interaction.md` (§8.3's MVT adapter, §8.6's
 tile-addressed alias) and `caching.md`, whose **S5** is this
 document's cache.
@@ -63,17 +63,22 @@ tile-addressed answer is still owed.
 
 ### 4.2 **Build:** a stateful, session-scoped, coalescing adapter inside the trust boundary
 
+The **view key**, which the adapter's cache validity is expressed against, is client-interaction
+§6's composite of mask, overlay version, slice, *k* and idset — the coordinate within which a
+served viewport is stable. **The viewport is not one of its components**, which is exactly what
+lets one cached evaluation answer every tile inside its extent.
+
 `{z}/{x}/{y}` — MVT and the raw-Arrow alias alike — terminates at an adapter co-located with
 `tessera-server`, which:
 
 - maps the tile to an **effective depth** `d_eff = max(z + s, d_floor(V_total))`, where the floor
   scales with the principal's own visible count, which the session already holds;
-- **single-flights** per (session, epoch, covering region at a cohort depth): the first arriving
+- **single-flights** per (session, view key, covering region at a cohort depth): the first arriving
   tile triggers one internal viewport evaluation over the covering region at `d_eff`; the other five
   concurrent fetches join it. **The machinery exists** — `crates/tessera-authz/src/single_flight.rs`,
   built for mask builds; this is its second use;
-- caches the evaluation keyed by **(grant set, overlay version, segments_version, slice, epoch,
-  k)** — §8.3's rule verbatim, mask identity alone being insufficient because suppressions live in
+- caches the evaluation keyed by **(grant set, overlay version, segments_version, slice, content
+  version, k)** — the view key spelled out, and §8.3's rule verbatim, mask identity alone being insufficient because suppressions live in
   the overlay — and serves each arriving tile as a **slice** of it, which is arithmetic (tiles are
   contiguous Morton ranges), not selection;
 - serves counts for the MVT cells layer from per-tile `range_cardinality`, which touches no data
@@ -87,11 +92,11 @@ tile-addressed answer is still owed.
    the differential oracle. Serve the deeper superset in the shallow tile instead; nesting makes it
    pop-free and I7 holds because it is literally the served set of a request the principal could
    make.
-2. **Cache validity is the epoch integer, checked per serve — never a TTL.** Denies publish
+2. **Cache validity is the view key, checked per serve — never a TTL.** Denies publish
    immediately (contracts §2.3), so a content-version bump invalidates the cached evaluation before
    the next tile is served from it. This is what carries *"the server never serves it again"*
-   (client-interaction §4, mechanism 1) **through** the adapter. TTLs are hygiene; the epoch check is
-   the control.
+   (client-interaction §4, mechanism 1) **through** the adapter. TTLs are hygiene; the view-key
+   check is the control.
 3. **Fail-closed on abort.** A cancelled internal evaluation caches nothing and joined waiters get
    the error — matching deck.gl's own contract (§8.2: *"on abort… never return incomplete data"*).
 
@@ -148,11 +153,11 @@ measurement will reasonably conclude the product is slow.
   the adapter is inside it. Anything carrying per-session handles (Phase 3 labels' `node_handle`)
   must never enter a *shared* cache entry.
 - **The three retirement rules.** The adapter holds responses, not overlay state, and re-evaluates
-  on any epoch bump. It never interprets deny semantics.
+  on any view-key change. It never interprets deny semantics.
 - **Pins fix geometry, never authorisation.** The cache key carries overlay version independently of
   any pin, so a suppression voids cached tiles even under a pinned request.
 - **CDN posture, unchanged from §8.3.** Per-viewer masked tiles are intrinsically CDN-hostile;
-  `Cache-Control: private`, epoch-scoped URL segments using a **session nonce and never the bearer
+  `Cache-Control: private`, view-key-scoped URL segments using a **session nonce and never the bearer
   token** (URLs reach history and proxies), max-age inside the deny-visibility budget.
 - **C4 / P3 cost profile.** Cache hit-versus-miss timing discloses the session's own prior activity.
   Where entries are shared across sessions of one grant set, that becomes another session's
@@ -170,7 +175,7 @@ measurement will reasonably conclude the product is slow.
   **measured rather than reasoned** — the −32%/+14% drift in the marks model across viewport
   fractions says that arithmetic has edges.
 - **In-process rather than a separate proxy**, from state-sharing economics: the adapter needs the
-  session's mask identity, epoch signal and cache anyway, and a separate process would re-create a
+  session's mask identity, view-key signal and cache anyway, and a separate process would re-create a
   trust-boundary hop for nothing. The cache key already makes later separation possible.
 
 ## 8. What was framed wrongly
@@ -182,6 +187,13 @@ what lets one URL play the first without ever being permitted the second. The ea
 they point in the same direction once the alias is a facade rather than a front door.
 
 ## 9. Provenance
+
+**r2 (2026-08-01) applies decision [0029](../decisions/0029-view-key.md).** What §4.2 called an
+"epoch" is the **view key** — mask, overlay version, slice, *k*, idset. The viewport is not one of
+its components, which is what makes §3's answer-store property expressible at all: one cached
+evaluation stays valid across every tile and every pan within a view key. §4.2's cache-key list
+names the **content version** rather than the whole key, because the list already enumerates the
+key's other components. No mechanism changes.
 
 Produced 2026-08-01 by an independent agent briefed on the measured 429 finding, the viewport-cost
 probes and the integration seams, with no stake in the existing plan. Its central contributions are

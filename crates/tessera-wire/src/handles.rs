@@ -12,8 +12,20 @@
 //! `tessera_engine::viewport::row_to_point`).
 //!
 //! Kept, not deleted, because Phase 3's node handles (`/v1/labels` returns
-//! `node_handle`) are genuinely per-session and need exactly this machinery — and
-//! because deleting the type would delete the argument with it.
+//! `node_handle`) are genuinely per-session and need exactly this machinery — a
+//! frontier node is a query-time object rather than a corpus object, so there is no
+//! stable identity to permute — and because deleting the type would delete the
+//! constraint below with it. **Nothing allocates a table today**: no per-session
+//! entry holds one, because there is nothing to put in it until that verb exists.
+//!
+//! **The constraint a node handle must obey, which is what this type records.** A
+//! decoded worker-local reference is an **index into the worker's own table, never an
+//! entity ID**. The temptation under router/worker fan-out is to put the entity ID
+//! into the permutation's plaintext and let the router invert it; that would ship
+//! corpus identifiers to the router, which is precisely what I10 forbids and what the
+//! per-partition isolation of the compartmented design assumes does not happen. The
+//! table is the indirection that makes the plaintext local, and the encoding hardening
+//! described below sits on top of it rather than replacing it.
 //!
 //! **Sequential-mint leak rationale** (preserved from the viewer-plane design this module
 //! originally served, and still the rationale a future Phase 3 caller inherits). `handle_for`

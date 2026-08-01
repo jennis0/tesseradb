@@ -1,7 +1,7 @@
 # Client interaction architecture — how anything talks to Tessera
 
 **Date:** 2026-07-31
-**Status:** Provisional — under review. Graduated into the corpus 2026-08-01 because code is already written against it; it is not yet normative. **To become normative:** owner sign-off on the protocol surface, and its four children (caching, derived-artifact gating, tile-addressed integration, and the MVP viewer) reconciled against what shipped. Where this document and `architecture.md` disagree, the architecture design governs.
+**Status:** Provisional r2 — under review. Graduated into the corpus 2026-08-01 because code is already written against it; it is not yet normative. r2 applies decisions 0029 (the composite formerly called "epoch" is the **view key**) and 0030 (determinism is documented, not promised) — see §16. **To become normative:** owner sign-off on the protocol surface, and its four children (caching, derived-artifact gating, tile-addressed integration, and the MVP viewer) reconciled against what shipped. Where this document and `architecture.md` disagree, the architecture design governs.
 **Succeeds** `../archive/visualisation.md`, which owned *rendering* and is archived; this document owns everything protocol-facing and is the reference for the client that was actually built.
 **Touches:** design §2.2–2.6, §7.1–7.5, §8, §11.2, Appendix C, Appendix H; contracts §3, §5; SA §4.2–4.5; plan §5–§9; viz architecture §1–§2, §7, §9.
 
@@ -74,19 +74,19 @@ the verbs.* An integration that uses only the mark channel produces a picture wi
 trustworthy quantities in it — which is a legitimate product (a viewer) but must be
 named as one.
 
-**The obligation this exposes is cross-channel epoch consistency** — but it is smaller
+**The obligation this exposes is cross-channel view-key consistency** — but it is smaller
 and more mechanical than the split makes it look, and an earlier draft over-dramatised
 it *(third review, 2026-08-01)*. Within one response the channels are atomically
 consistent **by construction**: the viewport verb delivers tile counts and points in a
 single body (contracts §5). The risk is purely *temporal* — composing responses fetched
 at different times, so that a cached tile sits beneath a fresh count or the reverse.
 
-So the obligation reduces to **render only responses sharing one epoch**, which is
-snapshot isolation, and it is therefore a **data-structure property of the replica
-store** rather than a discipline every integrator must hold: all state keyed by epoch,
-the renderer reading exactly one epoch's keyspace, flips atomic. That reduction is what
+So the obligation reduces to **render only responses sharing one view key** (§6), which
+is snapshot isolation, and it is therefore a **data-structure property of the replica
+store** rather than a discipline every integrator must hold: all state keyed by view key,
+the renderer reading exactly one view key's keyspace, flips atomic. That reduction is what
 makes it testable — the conformance assertion is one predicate, *no frame mixed
-epochs*, rather than a review of everything a client draws. Only a client can enforce
+view keys*, rather than a review of everything a client draws. Only a client can enforce
 it: the service answers one request at a time and cannot see the screen.
 
 The two-channel split remains the document's anatomy. It is *not* the source of the
@@ -152,7 +152,7 @@ must still be correct.** *Prevents:* the entire class of cache-coherence fail-op
 paths, with no coherence protocol to review.
 
 **P6 — The naive path is correct; sophistication is opt-in and lives in the client.**
-A consumer that ignores reconciliation, epochs, prefetch and every optimisation gets
+A consumer that ignores reconciliation, view keys, prefetch and every optimisation gets
 correct behaviour, only slower. Nothing a client *must* do to be correct may be
 complex. *Prevents:* a REST surface whose reference implementation is a disguised
 requirement. *Has teeth:* §7.2's *k*-non-decreasing rule is a correctness-affecting
@@ -183,7 +183,7 @@ it refreshes, bounded by token lifetime, which I6 already makes the caller's to 
 **The server never relies on the client to forget.** One corollary the cache must
 respect: a client that answers pans entirely from held tiles makes an accepted change
 invisible indefinitely, because there is no next request. *Don't re-download* is free;
-*don't re-request* needs an explicit staleness bound, and the bound is the epoch.
+*don't re-request* needs an explicit staleness bound, and the bound is the view key (§6).
 
 **The budget is minutes, in both directions** *(owner ruling, 2026-08-01)*: *"minutes of
 latency on new items appearing, and minutes of latency on items disappearing, so long as
@@ -225,16 +225,18 @@ it's about not restreaming, and more importantly for the backend, not having to
 re-read, points the client already has."*
 
 Stability is conditional and the precise form matters, because the protocol depends on
-it: `served(viewport)` is stable within **(mask, overlay version, slice, k, identity
-epoch)**. §7.2 accepts θ movement on overlay swap; contracts §2.6 makes row order
-key-dependent. Those five coordinates are the epoch (§6).
+it: `served(viewport)` is stable within **(mask, overlay version, slice, k, idset)**.
+§7.2 accepts θ movement on overlay swap; contracts §2.6 makes row order key-dependent.
+Those five coordinates are the **view key** (§6). The viewport is not one of them, and
+that is the whole point of the concept: a served viewport is stable *across* viewports
+within one view key.
 
 **The mechanism.** §7.2 defines `served(T)` as the smallest `m(T)` members of `vis(T)`
 by `tessera_id` — the served set is a **`tessera_id`-order prefix** of the visible set
 in a range, the union of floor, threshold and cap being a prefix is what the nesting
 proof turns on, and the client can evaluate that ordering itself because it holds the
 identities. So client state is declarable as **prefix declarations** — *for tile T I
-hold everything up to cut c, as of epoch E* — rather than identity lists. One parent
+hold everything up to cut c, as of view key E* — rather than identity lists. One parent
 declaration answers for all four children on zoom-in, which is the case a tile-level
 ETag cannot cover.
 
@@ -245,9 +247,9 @@ never inferred client-side. A suppressed item is simply not named, so the client
 it. No invalidation protocol exists to get wrong.
 
 *Advisory.* A server ignoring every declaration is correct (P5). That is what makes it
-reviewable, and it is why the epoch guard suffices for the one real bug: an item
+reviewable, and it is why the view-key guard suffices for the one real bug: an item
 flushed or unsuppressed below the client's cut would otherwise be assumed-held and
-arrive with no attributes, so a stale epoch simply drops the declaration.
+arrive with no attributes, so a stale view key simply drops the declaration.
 
 *Opt-in, and self-contained by default.* §8 corrected an over-generalisation here.
 Only deepscatter wants deltas on the wire; deck.gl and MVT want self-contained tiles
@@ -288,7 +290,7 @@ of 2026-08-01, which post-dates this paragraph, says the opposite in terms: *"a 
 served: the disclosure completed at serve time and no client behaviour retracts it. **Redrawing it
 from cache to the same principal discloses nothing that has not already been disclosed.**"* A client
 drawing a suppressed item it already holds is **stale, not fail-open** — an inconvenience §4
-explicitly accepts, bounded by the epoch.
+explicitly accepts, bounded by the view key.
 
 The rejection is **re-grounded, not withdrawn.** What actually survives it:
 
@@ -298,8 +300,8 @@ The rejection is **re-grounded, not withdrawn.** What actually survives it:
 2. **§4's own corollary, which is about bounds rather than disclosure.** *"A client that answers
    pans entirely from held tiles makes an accepted change invisible indefinitely, because there is
    no next request. Don't re-download is free; don't re-request needs an explicit staleness bound,
-   and the bound is the epoch."* Client-derived membership is the unbounded form; §6.1's rule 3 —
-   compare the epoch integer, render stale-marked — is the bound that makes it acceptable.
+   and the bound is the view key."* Client-derived membership is the unbounded form; §6.1's
+   rule 3 — compare the view key, render stale-marked — is the bound that makes it acceptable.
 3. **Removals stay server-authoritative** regardless, from the deny set and the stamp ledger. That
    is the half no client derivation may touch, and it is what the "fail-closed by naming" property
    in this section is really protecting.
@@ -310,13 +312,13 @@ because priority prefixes nest, a zoom-out's served set is a subset of the union
 already held, so the client could render it with no request at all — against a measured 8–16 s of
 server CPU for a full view at 10⁹. That is the single cheapest interaction available and this
 paragraph currently forbids it on a ground that no longer holds. Any revisit must keep (1) and (3)
-above and must carry §6.1's epoch bound; it is a coherence design, not a disclosure one.
+above and must carry §6.1's view-key bound; it is a coherence design, not a disclosure one.
 
 *Recorded because the "fail-open" wording caused exactly the error it should prevent: it was read,
 during the 2026-08-01 caching work, as making stale redraw a leak.*
 
-**Deferred pending a written safety argument: epoch-delta naming** — naming only
-changes since the client's epoch rather than the complete served set. It fixes the
+**Deferred pending a written safety argument: view-key-delta naming** — naming only
+changes since the client's view key rather than the complete served set. It fixes the
 economics at the large drawn-mark budget, where naming 10⁷ identities costs ~80 MB
 with every attribute elided, and the completeness guarantee it needs is one the
 contracts already give replicas via the deny set's immediate-publication rule. It also
@@ -331,17 +333,17 @@ Everything above treats *who holds the replica record* as settled (the client) a
 direction in this document** *(third review, 2026-08-01)*.
 
 The server already holds per-session state: masks per token, θ per session, the
-drawn-mark spec's handle tables. A **per-session cursor** — at minimum the last epoch
+drawn-mark spec's handle tables. A **per-session cursor** — at minimum the last view key
 answered, at most the tile→cut record mirroring what it named — is a small addition to
 state that exists anyway, and it changes the safety calculus above. The fail-open risk
 in delta naming is trusting a *client's claim* about what it holds; if the server
-computes "changes since epoch E" from its **own** record — the deny set since E, which
+computes "changes since view key E" from its **own** record — the deny set since E, which
 contracts §2.3's side-manifest rule already publishes immediately, plus what became
 visible since E — then no client claim is load-bearing and the completeness guarantee
 becomes checkable in one place.
 
 Tessera's version of this record is far cheaper than the field's, and for a reason
-specific to this design: because `served` is a `tessera_id`-order prefix, `(tile, epoch,
+specific to this design: because `served` is a `tessera_id`-order prefix, `(tile, view key,
 cut)` is a *complete* description of client state — three integers, where the sync
 engines need a key-to-version map. **The mechanism this document already has is the
 compression; §5 merely gives the record to the other party.**
@@ -371,15 +373,23 @@ surface. Figma's LiveGraph reached this verdict at scale: invalidate-and-refetch
 incremental maintenance because invalidations on active views are sparse. Take the
 session cursor for delta economics at the 10⁷ budget; do not take the layer above it.
 
-## 6. The epoch, and the change signal
+## 6. The view key, and the change signal
 
 All four seams independently demand a client-visible unit of cache validity: MVT needs
-epoch-scoped URLs for safe browser caching, deepscatter needs reload scoping,
+view-key-scoped URLs for safe browser caching, deepscatter needs reload scoping,
 Mosaic-extract needs a consistent snapshot, deck.gl needs an `updateTriggers` key. So
-the epoch is an **integration requirement**, not an internal optimisation.
+the view key is an **integration requirement**, not an internal optimisation.
 
-The epoch is the five coordinates of §5. Distinct from `x-tessera-pin`, which is
-row-space geometry and deliberately not authorisation state (I11).
+The view key is the five coordinates of §5 — mask, overlay version, slice, *k*, idset —
+and it is the coordinate within which `served(viewport)` is stable. **The viewport is
+not one of its components**, and that exclusion is the concept: a served viewport is
+stable *across* viewports, so every pan and every zoom within one view key answers from
+one coherent snapshot. A client holds one cache entry per view key and flips atomically
+between them, which is why it is a *key* — something that identifies — rather than a
+*state*, which would invite a reader to assume the camera was included.
+
+Distinct from `x-tessera-pin`, which is row-space geometry and deliberately not
+authorisation state (I11).
 
 **The change signal is the one renderer-relevant primitive that is not derivable from
 what the principal may see.** "Something in your view changed" is metadata about corpus
@@ -409,10 +419,10 @@ all *(third review, 2026-08-01)*.
 **The cadence is already decided, elsewhere, and it decides the transport.** Design §3
 puts the whole write path — denies included — at seconds to minutes, because it is
 human-reaction-dominated. So the change signal never needs sub-second delivery: it may
-tick on a configured cadence of order seconds, batching epoch advances. That kills by
-construction the failure this section should fear — epoch churn under continuous ingest
+tick on a configured cadence of order seconds, batching view-key advances. That kills by
+construction the failure this section should fear — view-key churn under continuous ingest
 driving constant refetch — and it means SSE, long-poll and plain polling are all
-adequate. SSE is the mild favourite because `Last-Event-ID` gives epoch-resume for free
+adequate. SSE is the mild favourite because `Last-Event-ID` gives view-key resume for free
 and it is proxy-friendly; nothing here needs bidirectional push. The field agrees: live
 layers over tiled maps are universally poll-or-invalidate, never per-tile push.
 
@@ -428,7 +438,7 @@ strictly smaller channel than the broadcast design.
 
 **Three client rules, which are the reconcile table's behavioural half.**
 
-1. *Refresh is a new epoch snapshot, not an in-place update.* Fetch behind the current
+1. *Refresh is a new view key's snapshot, not an in-place update.* Fetch behind the current
    display and flip atomically when the visible tiles and their counts are complete —
    double buffering, standard in every tile map, and the operational form of §2's
    snapshot isolation.
@@ -441,15 +451,15 @@ strictly smaller channel than the broadcast design.
    is masked. **Auto-flipping is the wrong default** for the same reason: a large flush
    can displace on the order of a tenth of the served marks, and churning that under
    someone who is reading is worse than telling them. Prefer "N new items — refresh".
-3. *Cache validity binds to the epoch integer.* A tile older than the last signalled
-   epoch is renderable but **stale-marked**, and no number-channel value may be
-   displayed against it. One integer comparison, and it is what closes §4's
+3. *Cache validity binds to the view key.* A tile carrying a view key older than the
+   last signalled one is renderable but **stale-marked**, and no number-channel value may
+   be displayed against it. One equality comparison, and it is what closes §4's
    "pan answered entirely from held tiles" corollary with a mechanism rather than a
    remark.
 
-### 6.2 What the epoch is made of, and what each part invalidates
+### 6.2 What the view key is made of, and what each part invalidates
 
-Treating the epoch as one monolithic key is over-coarse, and an earlier draft did
+Treating the view key as one monolithic key is over-coarse, and an earlier draft did
 *(owner, 2026-08-01)*. Its components invalidate genuinely different things, and folding
 them together forces a full re-render for a change whose delta is tiny.
 
@@ -618,7 +628,7 @@ compose. Means need weighted columns.
 **So: a self-aggregating consumer takes the number channel or a full-visible extract,
 never the mark channel.** One rule, stated once, covering every such component we might
 embed. **Perspective** (FINOS, Apache-2.0; Arrow-native, incremental `table.update`, so
-epoch refresh maps directly onto it) is the strongest candidate for mode 2's table and
+view-key refresh maps directly onto it) is the strongest candidate for mode 2's table and
 panel half under exactly that rule, and is the natural counterpart to deck.gl's map half.
 
 **The partition is per-principal, not per-app, and that is a support surprise unless
@@ -701,7 +711,7 @@ translucent underlay and depth test off, or by separating the layers.
 
 *Stranger vs us.* A stranger gets a working, correctly-masked map in a few hundred
 lines and a few days with no Tessera code. What they silently lack is request
-coalescing, the multi-stream framing, cross-channel epoch consistency, `{shown, total}`
+coalescing, the multi-stream framing, cross-channel view-key consistency, `{shown, total}`
 discipline, the *k* obligation, three-state rendering and re-authorisation. **So the TS
 core is load-bearing for conformance and consistency, and merely convenient for
 everything else** — which argues for shipping the obligations list and conformance kit
@@ -762,7 +772,7 @@ the Profile B documentation, since that profile names Leaflet.
 the warm stateful tier is the product.** Default CDN keying is by URL, so a shared CDN
 serves one user's masked tile to another — the failure viz §7 catalogues for three
 geospatial tile servers, relocated one layer out. Posture: `Cache-Control: private`,
-epoch-scoped URL segments using a session nonce and never the bearer token, and a
+view-key-scoped URL segments using a session nonce and never the bearer token, and a
 max-age inside the deny-visibility budget. **An adapter cache key carries mask identity
 *and* overlay version** — mask identity alone is insufficient, because the mask fragment
 is pre-composition and suppressions live in the overlay; §8.5's table shows the pattern
@@ -786,7 +796,7 @@ What works is **extract-hybrid**: materialise the session's visible set into Duc
 Aggregates are then exact over `M_auth` rather than sample estimates, and the security
 posture is clean — the client holds only authorised rows, and local computation over
 them is safe by §9's test. Panning and zooming do not churn anything: the extract is
-per-epoch, re-taken on the change signal, and all interaction is local.
+per view key, re-taken on the change signal, and all interaction is local.
 
 **Its limit is the §8.1 partition and there is no fix**, because the fix would be
 Mosaic not being Mosaic. A principal who sees 10⁹ items cannot extract. A
@@ -809,7 +819,7 @@ The "static and shared" assumption proves **not** fatal: its loader fetches each
 once and caches per session, so per-session-varying contents are tolerated provided
 they are stable *within* a session, which our determinism gives. What is genuinely lost
 is reconciliation — a suppressed item persists until full reload — bounded by
-epoch-scoping tile URLs so a reload cannot mix epochs, and accepted under §4's staleness
+view-key-scoping tile URLs so a reload cannot mix view keys, and accepted under §4's staleness
 ruling. Its `ix` identifier may not tolerate BigInt; the fallback is adapter-minted
 per-session dense `u32` ordinals with a server-side mapping, which is legitimate because
 the adapter is inside our boundary.
@@ -823,7 +833,7 @@ mechanism (a fixed global order determines coarse-zoom membership) and has no
 
 ### 8.6 What four seams demand in common
 
-1. **The epoch** as a client-visible unit of cache validity — all four, independently.
+1. **The view key** as a client-visible unit of cache validity — all four, independently.
    Promoted to architecture in §6.
 2. **A `tessera_id` representation rule**, because u64 is a JS-ecosystem liability with
    three distinct answers: BigInt on Arrow paths; a decimal string in JSON; and
@@ -831,7 +841,7 @@ mechanism (a fixed global order determines coarse-zoom membership) and has no
    slot is too narrow (MVT feature ids, deepscatter's `ix`). Binary-attribute renderers
    need none of it — identity never enters their render path.
 3. **A tile-addressed GET alias of the viewport verb.** Three of four seams address data
-   *by tile*; our verb is viewport-addressed. An alias with the epoch in the path and a
+   *by tile*; our verb is viewport-addressed. An alias with the view key in the path and a
    points-only single Arrow stream — no multi-stream framing — makes a stranger's
    `getTileData` a five-line function, removes their framing parse, and gives browser
    HTTP caching a correct URL shape for free. Identical selection underneath, so it
@@ -1087,8 +1097,8 @@ a conformance item, and it is why developer experience and observability earn
 architectural status here rather than being tooling concerns.
 
 **There is a fourth state, created by §4's own staleness ruling and previously unnamed**
-*(third review, 2026-08-01)*: **shown-but-stale** — drawn from epoch *E* while the change
-signal reports *E′ > E*. The ruling makes this legitimate; nothing currently makes it
+*(third review, 2026-08-01)*: **shown-but-stale** — drawn under view key *E* while the
+change signal reports *E′ > E*. The ruling makes this legitimate; nothing currently makes it
 *visible*, and an unmarked stale display is the truthfulness failure the staleness
 concession quietly buys. The fields that handle this honestly are the regulated ones —
 delayed market data must carry a delay badge — and the general pattern is an "as of"
@@ -1125,7 +1135,7 @@ Three of its conclusions are load-bearing here and are relied on above and below
 **One headless core, in TypeScript**, owning everything invariant-bearing: session and
 token lifecycle, viewport-to-range arithmetic, tile scheduling and prefetch, Arrow
 decode, the replica state of §3 and §5, filter state, frontier and label selection,
-cross-channel epoch consistency (§2), and *k* (§4, P6).
+cross-channel view-key consistency (§2), and *k* (§4, P6).
 
 **Its scheduler has a gap the design does not cover, and the point-cloud field has
 solved it** *(survey, 2026-08-01)*. §7.2 bounds marks **per tile**; nothing bounds the
@@ -1185,7 +1195,7 @@ with a reimplementation of the obligations list.
 
 **Three layers, each usable alone**, because the three usage modes want different
 surfaces: a **session client** (plain async verb calls, no state — what a REST user
-would write anyway); a **replica store** owning cache, epochs, reconciliation,
+would write anyway); a **replica store** owning cache, view keys, reconciliation,
 invalidation and *k*, exposing observable state projections (Mosaic's `Selection` and
 `Param` semantics are the closest studied prior art for this layer and worth reading
 directly); and a **drop-in deck.gl layer**, which for the map audience is the single
@@ -1207,7 +1217,7 @@ context, not reimplemented in Python.
 core: the **client obligations list** (every rule the server cannot enforce) and the
 **conformance kit**. The kit's subject is truthfulness, not secrecy (§4) — displayed
 counts sourced from the number channel, both numbers on every selection, *k*
-non-decreasing, the four display states, and §2's one-predicate epoch assertion. §11's
+non-decreasing, the four display states, and §2's one-predicate view-key assertion. §11's
 determinism is what makes it shippable.
 
 **But the kit cannot *bind* a client we cannot inspect, and an earlier draft claimed it
@@ -1237,11 +1247,18 @@ queries and sees nothing will conclude Tessera is broken unless the SDK surfaces
 ## 11. Determinism as a product property
 
 `served` is a pure function of (mask, corpus state, *k*, viewport) — §7.2 contains no
-server-side randomness. Three payoffs nobody has claimed: bit-exact cache-correctness
-tests; a **record-replay conformance harness** (a scripted server with canned
+server-side randomness. Three payoffs nobody has claimed: cache-correctness
+tests over decoded content; a **record-replay conformance harness** (a scripted server with canned
 suppressions mid-session, asserting displayed state) which is how §10's kit becomes
 operational against clients we cannot inspect; and cross-session reproducibility as a
 documented feature for notebook users — same credentials, same corpus, same picture.
+
+**What is determined is the served set, not its bytes**, and the distinction is worth holding
+because it is easy to spend. Two responses that encode the same served set are equally correct;
+the service does not promise they are byte-identical. They are today, at any configured thread
+count, and design §10.4 records why — but as an implementation detail a future optimisation may
+remove, not as a contract. A client or a test that compares response bytes rather than decoded
+content is depending on something nobody has offered it.
 
 ## 12. Customisability, and the data-shape stretches
 
@@ -1342,7 +1359,7 @@ Correct for basemaps. The positioning that falls out: *Tessera is to per-viewer 
 data what a tile server is to public data — what you use precisely when the static
 archive is forbidden.*
 
-**Epoch-delta naming.** Not rejected — deferred pending a written safety argument. §5.
+**View-key-delta naming.** Not rejected — deferred pending a written safety argument. §5.
 
 ## 15. Open questions
 
@@ -1399,18 +1416,18 @@ archive is forbidden.*
 - **Whether a shared WASM kernel should own the invariant-bearing arithmetic** *(third
   review, 2026-08-01; owner ruling: record as an open question, do not restructure §10)*.
   §10's TypeScript core reimplements Morton and tile arithmetic that `tessera-spatial`
-  already owns, plus the nesting and *k* rules and epoch comparison — precisely the code
+  already owns, plus the nesting and *k* rules and view-key comparison — precisely the code
   where an engine/client disagreement would be silent and conformance-relevant. A small
   crate compiled to WASM would give one implementation. The boundary matters if it is
   ever taken: **arithmetic only**, with the replica store staying TypeScript, because
   chatty stateful APIs across the WASM boundary are where Rust-in-the-browser goes wrong.
-- **Is the epoch a readable coordinate, or only a cache-busting nonce?** *(third review,
+- **Is the view key a readable coordinate, or only a cache-busting nonce?** *(third review,
   2026-08-01)*. Every sync engine surveyed answers "readable, with a retention window".
-  It matters at §6.1's flip: a pan mid-flip may need one more *old*-epoch tile to keep the
-  outgoing snapshot complete. If the server will serve a still-retained epoch — the same
-  retention shape as pins and `410` — flips never tear; if not, the client force-flips
-  early or shows holes. Serving a stale epoch briefly keeps an accepted suppression
-  visible within that epoch's responses, but bounded by the same deny-visibility budget
+  It matters at §6.1's flip: a pan mid-flip may need one more tile under the *old* view key
+  to keep the outgoing snapshot complete. If the server will serve a still-retained view key
+  — the same retention shape as pins and `410` — flips never tear; if not, the client
+  force-flips early or shows holes. Serving a stale view key briefly keeps an accepted
+  suppression visible within that view key's responses, but bounded by the same deny-visibility budget
   as the flip deadline, so it spends §4's existing concession rather than a new one.
   **The reconcile table cannot be written until this is chosen.**
 - **Licence review** for any Grafana or Metabase plugin work (both AGPLv3: a plugin is
@@ -1441,6 +1458,17 @@ archive is forbidden.*
   iteration must never be reachable from a user token (§2.5).
 
 ## 16. Provenance
+
+**r2 (2026-08-01) applies two decisions and changes no mechanism.** Decision
+[0029](../decisions/0029-view-key.md) names the composite this document is largely about: the
+coordinate **(mask, overlay version, slice, *k*, idset)** within which `served(viewport)` is
+stable was a fourth thing called "epoch", and is now the **view key** (§6). *Key* rather than
+*state* because the viewport is deliberately **not** one of its components — a served viewport is
+stable *across* viewports within one view key — and a name that needed a disclaimer in every
+document using it was the wrong name. Decision
+[0030](../decisions/0030-determinism-is-not-a-guarantee.md) separates §11's two claims: `served`
+is a determined function of (mask, corpus state, *k*, viewport), which is promised, from
+byte-identical responses, which hold today and are not.
 
 Brainstormed with the owner 2026-07-31. Reviewed by independent agents with no stake in
 the plan being right, per CLAUDE.md's working method.

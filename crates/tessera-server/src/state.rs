@@ -11,16 +11,18 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use tessera_engine::{Engine, Session};
-use tessera_wire::HandleTable;
 
 use crate::error::ApiError;
 
-/// One authorised session: the engine's [`Session`] plus its own per-session handle table (I10) —
-/// held alongside, not inside, `Session` (Task 11's report flags this as the intended seam, since
-/// `tessera-wire` must not depend on `tessera-engine`'s `EntityId`).
+/// One authorised session: the engine's [`Session`], and nothing else.
+///
+/// **No per-session handle table is held here.** The viewer plane carries `tessera_id` directly
+/// and mints no handles, so there is nothing to put in one. Phase 3's node handles are genuinely
+/// per-session and want exactly this seam — held alongside, not inside, `Session`, because
+/// `tessera-wire` must not depend on `tessera-engine`'s `EntityId` — and the type they need, with
+/// the constraint it records, is `tessera_wire::handles::HandleTable`.
 pub struct SessionEntry {
     pub session: Session,
-    pub handles: Mutex<HandleTable>,
 }
 
 /// Every live session, indexed both by bearer token (the viewer plane's lookup) and by
@@ -40,8 +42,7 @@ pub struct SessionEntry {
 /// retained [`SessionEntry`] holds a `Session`, which holds an `Arc<FrozenFragment>` — a live
 /// mapping. `FragmentCache`'s bound governs *its own map*; evicting an entry frees nothing while
 /// any session still references it (see `FrozenFragment`'s `CacheWeight` impl). So dead-but-
-/// retained sessions pin exactly the memory the new bound was added to release. Each also holds a
-/// `HandleTable`, which grows with the session's own drill-downs.
+/// retained sessions pin exactly the memory the new bound was added to release.
 ///
 /// [`Self::len`] is the gauge; `/control/status` publishing it is Track B's wiring, alongside
 /// `CacheStats`. A sweep — on a timer, or opportunistically on insert — is the fix, and it is a
@@ -56,10 +57,7 @@ impl SessionRegistry {
     pub fn insert(&mut self, session: Session) -> std::sync::Arc<SessionEntry> {
         let token = session.token.clone();
         let token_id = session.token_id;
-        let entry = std::sync::Arc::new(SessionEntry {
-            session,
-            handles: Mutex::new(HandleTable::new()),
-        });
+        let entry = std::sync::Arc::new(SessionEntry { session });
         self.by_token
             .insert(token.clone(), std::sync::Arc::clone(&entry));
         self.token_id_to_token.insert(token_id, token);

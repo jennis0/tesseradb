@@ -64,12 +64,12 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r29 | 14 |
+| `architecture.md` | Normative — r30 | 12 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `concurrency-lifecycle.md` | Normative — r5 | 21 |
-| `conformance.md` | Normative — r4 | 14 |
-| `contracts.md` | Normative — r13 | 14 |
+| `conformance.md` | Normative — r5 | 14 |
+| `contracts.md` | Normative — r14 | 14 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
