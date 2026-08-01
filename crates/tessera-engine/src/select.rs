@@ -23,7 +23,7 @@
 //!   obligation. Recorded here because §7.2 keeps its bit-reversal note for exactly this class of
 //!   mistake being re-derived.
 //! - **The comparator is the full `tessera_id`, not the `priority` prefix**, and no
-//!   prefix-scan-then-fall-through path exists (§7.2 r21 directs that none be built in Phase 1).
+//!   prefix-scan-then-fall-through path exists (§7.2 r21 directs that none be built).
 //!   The two orders are identical because `priority` is a prefix, so this costs no correctness —
 //!   only 8 B/row of scanned column where 2 B would do. Design Appendix A records that cost and
 //!   §7.2 the trigger for revisiting it.
@@ -33,7 +33,8 @@
 //! **NO CANDIDATE-LIST ROUTE.** Everything below evaluates the definition *directly* from the
 //! mask, at every coverage. §7.2 specifies a second route — per-node precomputed lists of the
 //! top `c·k` items by `tessera_id`, unmasked, filtered at query time — and the owner has
-//! **declined** it (Phase 2 roadmap, ruling 1). This block records why, with the evidence,
+//! **declined** it (`docs/decisions/0008-candidate-list-route-declined.md`). This block records
+//! why, with the evidence,
 //! because a claim without its evidence gets re-litigated and the deletion of the direct path
 //! is the specific mistake that has been made before, by others, in production.
 //!
@@ -51,7 +52,7 @@
 //! almost no realistic principal (§7.2). Widening is linear in both help and cost: 1% needs
 //! `c = 100`, comparable in size to the hot columns.
 //!
-//! **2. Realistic masks live on the wrong side of the crossover, measured.** Phase 0 over the
+//! **2. Realistic masks live on the wrong side of the crossover, measured.** Measurement over the
 //! synthetic 10⁹ corpus (`probes/results.md` §5 — **re-read it rather than trusting these
 //! numbers second-hand**) puts the run ratio of surnames, the most realistic principal shape
 //! available, at **1.03–1.15** against a flat-hash control of exactly 1.00: masks are essentially
@@ -209,9 +210,9 @@ pub struct SelectParams {
     /// cell the identity column is **sorted** — one binary search finds where ids reach `P_d`, and
     /// `C_θ` for that cell is a range cardinality over the mask, which is O(containers touched)
     /// rather than O(rows). A coarser tile is a merge of `4^(16-d)` such runs, so the trick pays
-    /// where the runs are few or the tile is dense, and the scan wins where they are many. Phase 1
-    /// builds none of it, preferring the obviously-correct single pass (CLAUDE.md: audit before
-    /// performance); §7.2 records the trigger for revisiting.
+    /// where the runs are few or the tile is dense, and the scan wins where they are many. None of
+    /// it is built, the obviously-correct single pass being preferred until the trigger §7.2 records
+    /// is met.
     pub cap: usize,
     pub threshold: Threshold,
 }
@@ -735,7 +736,10 @@ mod tests {
 
         // No overflow at the row-space extremes: visible and range_len are both < 2^32, so the
         // ×100 stays far inside u64.
-        assert_eq!(decode_tier(u32::MAX as u64 - 1, u32::MAX as u64), DecodeTier::Runs);
+        assert_eq!(
+            decode_tier(u32::MAX as u64 - 1, u32::MAX as u64),
+            DecodeTier::Runs
+        );
         assert_eq!(
             decode_tier((u32::MAX as u64) / 2, u32::MAX as u64),
             DecodeTier::Values

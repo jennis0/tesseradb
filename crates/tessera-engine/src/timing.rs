@@ -47,12 +47,12 @@
 /// one again (§14.2).** Both are computed once in the serial prefix — `tiles_resolved` from
 /// `tiles_for_bbox`'s output length, `rows_in_ranges` from one `Σ range.len()` over `ranges` —
 /// before the parallel sweep starts and before any tile's mask is consulted, which is what makes
-/// them mask-independent by construction. `rows_in_ranges` briefly lived in [`TileStats`] instead
-/// (Task 6's tile-loop restructure): counted per-tile, before that tile's own `visible == 0`
-/// check, whose `Ok(None)` return `Engine::viewport`'s fold discards outright — silently making a
+/// them mask-independent by construction. Counting `rows_in_ranges` in [`TileStats`] instead —
+/// per-tile, before that tile's own `visible == 0`
+/// check, whose `Ok(None)` return `Engine::viewport`'s fold discards outright — silently makes a
 /// field the C4 leak-register numerator depends on being mask-free (`rows_in_ranges -
-/// sigma_visible`, "rows scanned that this principal cannot see") instead track *which tiles the
-/// grant left empty*. Fixed by moving the count to the serial prefix and deleting the field from
+/// sigma_visible`, "rows scanned that this principal cannot see") track *which tiles the
+/// grant left empty* instead. Keeping the count in the serial prefix, and the field out of
 /// `TileStats` — see `Engine::viewport`'s call site for the argument in full.
 ///
 /// See [`Self::unattributed_ns`] for the direct consequence of this for that quantity, and
@@ -153,17 +153,17 @@ pub struct StageTimings {
     /// exists.
     ///
     /// **It must be an observation of the selection path, never a restatement of another counter.**
-    /// A version of this briefly took its value from the caller's `visible`, which made the natural
-    /// `visited == sigma_visible` assertion a tautology: both sides came from one variable and no
-    /// behaviour of selection reached either. Compare it against `sigma_visible` to detect an early
+    /// Taking its value from the caller's `visible` would make the natural
+    /// `visited == sigma_visible` assertion a tautology: both sides would come from one variable and
+    /// no behaviour of selection would reach either. Compare it against `sigma_visible` to detect an early
     /// exit or a prefix sample (fewer) or a walk of the raw row range rather than the mask (more) —
     /// and only where the fixture makes `sigma_visible < rows_in_ranges`, or the second direction is
     /// structurally invisible.
     ///
     /// It pins the **implemented route**, not the definition. Design §7.2 admits exact routes that
     /// visit fewer than Σvisible rows — within a leaf Morton cell the `tessera_id` column is sorted,
-    /// so `C_θ` there is a binary search plus a range cardinality — and Phase 1 declines to build
-    /// them, preferring the obviously-correct scan. If one ever lands, revise this alongside the
+    /// so `C_θ` there is a binary search plus a range cardinality — and none of them is built, the
+    /// obviously-correct scan being preferred. If one ever lands, revise this alongside the
     /// differential oracle rather than deleting it.
     pub select_rows_visited: u64,
     /// Points actually returned.
@@ -336,13 +336,13 @@ impl Probe {
 /// via [`TileProbe`]'s internal `#[cfg]`, so a consumer can never mistake an uninstrumented
 /// build's zeros for a genuinely free tile.
 ///
-/// **Deliberately does NOT carry `rows_in_ranges` (§14.2 fix).** It briefly did: counted here,
-/// per-tile, before that tile's own `visible == 0` check — and `tile_result` returns `Ok(None)`
+/// **Deliberately does NOT carry `rows_in_ranges`.** Counted here it would be per-tile, taken
+/// before that tile's own `visible == 0` check — and `tile_result` returns `Ok(None)`
 /// on that exact branch, which `Engine::viewport`'s fold discards without ever calling
-/// [`Self::fold_into`]. That silently made a field documented as mask-independent
-/// (`StageTimings::rows_in_ranges`'s doc) track which tiles a grant left empty instead. Fixed by
-/// computing it once, mask-free, over `ranges` in `Engine::viewport`'s serial prefix — before this
-/// struct is ever built — rather than by threading it through the `Ok(None)` case here as well;
+/// [`Self::fold_into`]. That would silently make a field documented as mask-independent
+/// (`StageTimings::rows_in_ranges`'s doc) track which tiles a grant left empty instead. It is
+/// computed once, mask-free, over `ranges` in `Engine::viewport`'s serial prefix — before this
+/// struct is ever built — rather than threaded through the `Ok(None)` case here as well;
 /// see that call site for the argument. If a field is ever added to this struct, ask first whether
 /// it is genuinely per-tile (depends on this tile's mask, segment or geometry) or, like
 /// `rows_in_ranges`, already available before the sweep — the latter belongs in the serial prefix,

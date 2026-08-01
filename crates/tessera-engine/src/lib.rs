@@ -1,5 +1,4 @@
-//! `tessera-engine` — the request-serving core: generation snapshots and the I1 mask composition
-//! (task-10 brief).
+//! `tessera-engine` — the request-serving core: generation snapshots and the I1 mask composition.
 //!
 //! [`Generation`] is one immutable snapshot of everything a request needs: the loaded bundle, the
 //! live overlay and ingest buffer, and the version counters that identify it. A running process
@@ -37,7 +36,7 @@ pub use pins::{
     GeometryRefused, GeometryRefusedReason, PinStats, Reclaimed, DRAIN_DEPTH_ALARM, DRAIN_DEPTH_MAX,
 };
 pub use session::{default_compute_threads, Engine, EngineConfig, EngineError, Session};
-// Task 5's cache gauges. `single_flight` itself stays private — the cache, its slot state
+// The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot state
 // machine and its four eviction rules are engine-internal — but the numbers `/control/status`
 // publishes have to cross the crate boundary, exactly as `PinStats` does above.
 pub use single_flight::CacheStats;
@@ -47,7 +46,7 @@ pub use single_flight::CacheStats;
 // **This re-export is what makes `Engine::fragment_cache_stats`'s return type nameable at all.**
 // `tessera-server` may not depend on `tessera-authz` (SA §3; `scripts/check-layers.sh` has
 // `deny tessera-server tessera-authz`), and `tessera_authz::CacheStats` is not a public path even
-// for a crate that could — its module is private there. A Track B worker wiring `/control/status`
+// for a crate that could — its module is private there. Whoever wires `/control/status`
 // writes `use tessera_engine::FragmentCacheStats;` and nothing else.
 pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
@@ -62,36 +61,36 @@ pub use viewport::{
 pub use tessera_store::manifest::DeclaredScalar;
 // The write path's **outcome** vocabulary, and nothing else.
 //
-// An earlier draft also re-exported `LifecycleHandle`, `LifecycleQueues`, `Job` and `Responder`,
-// with a comment saying `tessera-server`'s handlers hold the handle and submit through it. That
-// design was cancelled in review (Task 3a's C1/A1) and the opposite is now true: `LifecycleHandle`
-// is deliberately not `Clone` and `WritePath` is its sole owner, precisely so `WritePath::drop` can
-// disconnect the queues and join the thread. No handler can hold one, and none of those four types
-// appeared anywhere outside `write.rs` — a 3b worker following that comment would have found the
-// handle unreachable and then reached for whatever compiled instead. They are `pub(crate)` now.
+// `LifecycleHandle`, `LifecycleQueues`, `Job` and `Responder` are deliberately **not** here, and
+// the tempting design where a handler holds the handle and submits through it is refused:
+// `LifecycleHandle` is not `Clone` and `WritePath` is its sole owner, precisely so `WritePath::drop`
+// can disconnect the queues and join the thread. No handler can hold one, and none of those four
+// types appears anywhere outside `write.rs`.
 //
 // What a handler does hold is `Engine`, and it submits through `Engine::accept_ingest` /
 // `Engine::accept_change` — blocking calls, hence inside `spawn_blocking`. What it needs from here
-// is how to answer: `AcceptError` for the status mapping (Task 3b owns the table) and
-// `ExecutorPosture`/`ExecutorStats` for `readyz` and `/control/status`.
+// is how to answer: `AcceptError` for the status mapping, and `ExecutorPosture`/`ExecutorStats`
+// for `readyz` and `/control/status`.
 pub use write::{
     AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, PendingChange,
     DENY_WINDOW_MAX_ENTRIES,
 };
-// Task 6: the queue's own `retry_after_s` derivation. Exported because `tessera-server` derives a
+// The queue's own `retry_after_s` derivation. Exported because `tessera-server` derives a
 // *second* 429 subject's value from the same estimator over a different depth (contracts §0.3
 // deviation 11: the value is per-subject), and two independent implementations of one estimator is
 // how the two subjects come to disagree about the same queue.
 //
-// **The floor and ceiling are exported for readers, not for callers.** An earlier version of this
-// comment said `tessera-server` derives from them; it does not — it calls
-// `estimate_retry_after_s` and inherits both. They stay `pub` because `estimate_retry_after_s`'s
+// **The floor and ceiling are exported for readers, not for callers.** `tessera-server` does not
+// derive from them — it calls `estimate_retry_after_s` and inherits both. They stay `pub` because
+// `estimate_retry_after_s`'s
 // own doc names them as the bounds on its result, and a documented bound whose value is unreachable
 // from the crate that reads the doc is a dead reference.
 pub use write::{estimate_retry_after_s, RETRY_AFTER_MAX_SECS, RETRY_AFTER_MIN_SECS};
 
-/// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1, slimmed for
-/// Phase 1: no merge/compaction fields yet).
+/// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1).
+/// **⊘ Partially implemented:** §1.1's merge and compaction fields are absent, there being no
+/// merge and no compaction; what is here is the bundle, the overlay, the buffer and the counters
+/// that identify them.
 pub struct Generation {
     /// The bundle's `CURRENT` prefix (e.g. `"v00000"`) this generation was loaded from.
     pub prefix: String,
@@ -115,6 +114,5 @@ pub struct Generation {
 /// than once within a single request risks composing a fragment built against one generation's
 /// bundle/watermark against an overlay or buffer swapped in from a later one, which is exactly
 /// the kind of cross-generation mismatch `RowProjection`'s cache key (token, slice, pin) and
-/// `FrozenFragment`'s stored watermark both assume can't happen. Wire this comment forward to the
-/// actual request-handling load site when it lands (Task 13).
+/// `FrozenFragment`'s stored watermark both assume cannot happen.
 pub type GenerationHandle = ArcSwap<Generation>;

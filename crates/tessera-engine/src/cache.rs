@@ -1,8 +1,8 @@
 //! The row-projection cache seam: the key, the byte bound's arithmetic, and the two pruners.
 //!
-//! A named wrapper around the generic [`SingleFlightCache`] the D-G work landed, carved out of
-//! `session.rs` (Phase 2 stage 2.1, Task 0a). Task 5 gives it the policy the wrapper was carved out
-//! to grow: a byte bound, LRU eviction, and removal of entries whose key no request can produce.
+//! A named wrapper around the generic [`SingleFlightCache`], carrying the policy that is specific
+//! to projections: a byte bound, LRU eviction, and removal of entries whose key no request can
+//! produce.
 //!
 //! The single-flight state machine, the four eviction rules and the counted choke point all live in
 //! [`crate::single_flight`] and are argued there. What lives *here* is what is specific to
@@ -30,17 +30,18 @@ use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache};
 /// constraint 8). `token_id` rather than the token string so the cache never has to hash or
 /// compare a full bearer token.
 ///
-/// **Named fields, not a tuple, and the reason is a disclosure** *(Task 0 gate, F4)*. Two of the
+/// **Named fields, not a tuple, and the reason is a disclosure.** Two of the
 /// three components are `u64`, so as `(u64, String, u64)` a transposition at the construction site
 /// compiles, runs, and keys every session's projection on `(segments_version, slice, token_id)` —
 /// at which point any two sessions whose `token_id` collides with the live `segments_version` share
 /// a row projection. That is cross-principal mask reuse: one viewer composing against another's
-/// `M_auth` (I2/I3), presenting as a cache-hit-rate improvement. Task 5's two pruners must each
-/// pick the right `u64` out of this key, so the shape earns its keep twice over.
+/// `M_auth` — a principal's authorised set (I2/I3) — presenting as a cache-hit-rate improvement.
+/// The two pruners below must each pick the right `u64` out of this key, so the shape earns its
+/// keep twice over.
 ///
 /// # Two facts this key's safety rests on, neither of which the type can enforce
 ///
-/// Both are load-bearing for Task 5's pruners and neither is asserted anywhere in the code, so they
+/// Both are load-bearing for the pruners and neither is asserted anywhere in the code, so they
 /// are written down here, at the type they constrain:
 ///
 /// 1. **`token_id` is never reused.** `Engine::authorise` draws it from a monotonic `AtomicU64`
@@ -55,8 +56,8 @@ use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache};
 ///    and design §10.2 makes the prefix name *be* the segment-set version. Relax that guard and
 ///    this pruner starts removing the wrong generation's entries.
 ///
-/// Open question O3 widens this with `seg_id` at stage 2.2 (N segments means N row spaces and
-/// therefore N projections); a named struct makes that additive.
+/// A multi-segment slice would widen this with `seg_id` — N segments means N row spaces and
+/// therefore N projections — and a named struct makes that additive.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RowProjectionKey {
     /// The session's process-local identity (`Session::token_id`), never the bearer token itself.
@@ -70,7 +71,7 @@ pub(crate) struct RowProjectionKey {
 }
 
 /// A losing arrival's outcome: another caller is already building this key, and this call did not
-/// wait for it (D-G). Carries nothing — the caller only needs to know to retry.
+/// wait for it. Carries nothing — the caller only needs to know to retry.
 ///
 /// Distinct from `single_flight::Building` so the wrapper's callers depend on this module's
 /// contract rather than on the generic cache's internals.
@@ -85,9 +86,8 @@ impl CacheWeight for RowProjection {
     /// ~2×), so the bound is approximate — but that caveat does not apply where it matters here.**
     /// At the ≥25%-coverage dense bound this cache is sized against (a *measured* 125.12 MB per
     /// entry at 10⁹), the mask is bitmap-container dominated and in-memory size equals serialised
-    /// size. The Task 0 gate (F12) corrected the same claim where it appeared in
-    /// `tessera-server::config`, having been used there to justify a margin it does not explain;
-    /// the correction is repeated here because this is the site that computes the number.
+    /// size. The caveat is stated here, at the site that computes the number, because the same claim
+    /// is easy to reach for in `tessera-server::config` to justify a margin it does not explain.
     ///
     /// The floor applied on top of this (`single_flight::PER_ENTRY_FLOOR_BYTES`) is what stops the
     /// *opposite* error — a bound that charges a near-empty projection its true handful of bytes
@@ -137,9 +137,9 @@ impl RowProjectionCache {
     }
 
     /// Slots currently held, `Building` and `Ready` both counted — a diagnostic, not a capacity
-    /// bound. `Engine::row_projection_cache_len` publishes this, and Task 5 deliberately leaves its
-    /// semantics alone: it is critical C-5's observable (`Engine::item` must construct no
-    /// projection, warm or cold), which counts slots in either state.
+    /// bound. `Engine::row_projection_cache_len` publishes this, and its semantics are deliberately
+    /// left alone: it is the observable behind "`Engine::item` must construct no projection, warm or
+    /// cold", which counts slots in either state.
     pub(crate) fn len(&self) -> usize {
         self.inner.len()
     }
@@ -182,8 +182,7 @@ impl RowProjectionCache {
     /// **Revoke is also not the common retention path** — an *expired* session is 403'd but never
     /// removed from the registry, and nothing prunes it, so at the 3600 s default lifetime the
     /// overwhelming majority of dead sessions' entries are reclaimed by the byte bound rather than
-    /// by this. This closes the Phase 1 deferral ("revoke does not prune the cache") and makes
-    /// reclamation timely; it does not make it the mechanism.
+    /// by this. Pruning on revoke makes reclamation timely; it does not make it the mechanism.
     ///
     /// # Cost, stated rather than argued
     ///
@@ -213,8 +212,8 @@ impl RowProjectionCache {
     /// geometry is *still resolvable* — `PinManager::resolve_drained` finds it on the drain list —
     /// so pruning at the swap would delete the very key an outstanding pin is about to ask for, and
     /// charge that request a multi-second rebuild in the middle of an interaction. Tying cache
-    /// lifetime to the rule that governs the geometry those entries describe is why this task
-    /// depends on Task 4 rather than merely on the swap.
+    /// lifetime to the rule that governs the geometry those entries describe is why this hangs off
+    /// the drain list rather than off the swap.
     ///
     /// **The licence to prune is a `Reclaimed` value, not any particular method.** `Engine` prunes
     /// from every site that produces one — see `Engine::prune_reclaimed`, called from both

@@ -1,9 +1,8 @@
 //! I1 mask composition: `M_auth = (fragment \ L) ∪ direct_eval(L)` — evaluated as diffs over a
-//! cached row-space projection of the frozen fragment, never by recomputing the whole mask
-//! (task-10 brief).
+//! cached row-space projection of the frozen fragment, never by recomputing the whole mask.
 //!
 //! [`RowProjection`] is the cached `Permutation::project` output for one `(token, slice, pin)` —
-//! computed once (seconds at 10⁹ rows, shared-context constraint 8) and reused across every
+//! computed once — seconds at 10⁹ rows — and reused across every
 //! viewport and every `compose` call in that session, never recomputed on a per-viewport path.
 //!
 //! [`compose`] walks `L = keys(overlay) ∪ {buffered entities ≥ fragment.watermark}` exactly once
@@ -227,7 +226,7 @@ impl EffectiveMask {
         }
     }
 
-    /// The two structural invariants (task-10 brief): `minus ⊆ base` and `plus ∩ base = ∅`.
+    /// The two structural invariants: `minus ⊆ base` and `plus ∩ base = ∅`.
     /// Exposed for tests; also asserted in debug builds at construction time in [`compose`].
     pub fn check_structural_invariants(&self) -> bool {
         self.minus.is_subset(self.base.bitmap()) && self.plus.and(self.base.bitmap()).is_empty()
@@ -341,7 +340,7 @@ fn verdict(
 ///
 /// `fragment` is consulted only for its `watermark` (the SEGMENTS watermark the frozen fragment
 /// was built against — a buffered entity below it would mean a bundle/WAL inconsistency and is
-/// excluded from `L` defensively, even though Phase 1 never actually produces one). `satisfied`
+/// excluded from `L` defensively, even though nothing actually produces one). `satisfied`
 /// is the viewer's granted term set (already resolved to `TermId`s by the auth plugin path).
 /// `base` is the cached row-space projection (see [`RowProjection`]'s doc); `perm` is used only
 /// for per-entity `row_of` lookups (O(1)-ish, not the O(bound) `project` cost).
@@ -373,7 +372,7 @@ pub fn compose(
                     fail_rows.push(row.raw());
                 }
             }
-            // No row in this segment: Phase 1 has no cross-segment geometry, so this entity
+            // No row in this segment: there is no cross-segment geometry, so this entity
             // simply cannot contribute to this segment's diff either way.
         }
     }
@@ -396,10 +395,9 @@ pub fn compose(
                     fail_rows.push(row.raw());
                 }
             }
-            // Phase 1 buffered entities have no row anywhere (no flush yet) — this branch is
-            // kept and tested (with a synthetic permutation) against the day a later phase gives
-            // buffered items provisional rows, but today it always takes the "no row" path
-            // above.
+            // Buffered entities have no row anywhere, there being no flush (⊘) — this branch is
+            // kept and tested (with a synthetic permutation) against the day buffered items get
+            // provisional rows, but today it always takes the "no row" path above.
         }
     }
 
@@ -440,7 +438,7 @@ fn entity_as_u32(entity: EntityId) -> u32 {
 /// `RowProjection` is constructed or consulted. It is therefore **identical work for an entity
 /// that does not exist, one that exists and is invisible, and one that exists and is visible** —
 /// which is what closes the `/v1/items` timing channel outright rather than narrowing it (design
-/// Appendix C, C4 annotation; Critical C-5).
+/// Appendix C, C4 annotation).
 ///
 /// Equivalent to `compose(...).contains_row(perm.row_of(entity))` wherever a row exists — see
 /// this module's clamp doc: a `false` verdict lands in `minus` or outside `base` and is false
@@ -526,8 +524,14 @@ mod tests {
         b.add_range(100..=200);
         assert!(runs_of(&b, 50..50).is_empty(), "empty range");
         assert!(runs_of(&b, 60..40).is_empty(), "inverted range");
-        assert!(runs_of(&b, 0..100).is_empty(), "range wholly before the run");
-        assert!(runs_of(&b, 201..300).is_empty(), "range wholly after the run");
+        assert!(
+            runs_of(&b, 0..100).is_empty(),
+            "range wholly before the run"
+        );
+        assert!(
+            runs_of(&b, 201..300).is_empty(),
+            "range wholly after the run"
+        );
     }
 
     #[test]

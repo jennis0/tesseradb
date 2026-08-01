@@ -204,10 +204,8 @@ pub struct Reclaimed {
     pub exclusively_held: bool,
 }
 
-/// Operator-facing pin gauges — the figures lifecycle §2.2 wants on `/control/status`.
-///
-/// Wiring these onto that endpoint needs `tessera-server/src/control.rs`, which stage 2.1's
-/// allowlist gives to another track; this track exposes them and reports the wiring.
+/// Operator-facing pin gauges — the figures lifecycle §2.2 wants on `/control/status`, and what
+/// that endpoint publishes as `pins`.
 ///
 /// Every field is read from an atomic and **this type is produced without taking the drain lock** —
 /// deliberately, so that `drain_locks` can be an honest measure of the type's own locking rather

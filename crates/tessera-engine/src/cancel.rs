@@ -14,8 +14,8 @@
 //! another thread observes the flip, only what other memory operations are ordered relative to
 //! it (there are none here). `Relaxed` gives exactly the guarantee this mechanism needs — every
 //! thread holding a clone eventually observes a flip made on any other clone — at the lowest cost
-//! per check, which matters because the per-tile check sits on the hot path. This is the ordering
-//! the design brief explicitly permits ("Relaxed or Acquire load per check is fine").
+//! per check, which matters because the per-tile check sits on the hot path. Either `Relaxed` or
+//! `Acquire` would be correct here; `Relaxed` is the cheaper of the two.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

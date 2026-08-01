@@ -1,4 +1,4 @@
-//! The masked viewport query (task-11 brief, design §2.6 retrieve steps 1–9).
+//! The masked viewport query (design §2.6, retrieve steps 1–9).
 //!
 //! [`Engine::viewport`] loads the generation pointer exactly once, validates or mints the pin
 //! (I11: geometry identity only, `(prefix, segments_version)` — never `overlay_version`, so an
@@ -58,7 +58,7 @@ use crate::timing::{Probe, StageTimings, TileProbe, TileStats};
 use crate::Generation;
 
 /// One declared-scalar value carried alongside a point (mirrors `tessera_spatial::ScalarValue`'s
-/// three Phase 1 kinds, but on the *output* side — read from `ColumnsRef`, not staged for write).
+/// three kinds, but on the *output* side — read from `ColumnsRef`, not staged for write).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarOut {
     U64(u64),
@@ -66,8 +66,7 @@ pub enum ScalarOut {
     Utf8(String),
 }
 
-/// One tile's count row: `matched == visible` always in Phase 1 (no filters yet — Reference
-/// Sheet R5).
+/// One tile's count row. `matched == visible` always, there being no filter contract yet (⊘).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TileCount {
     /// The tile's Morton prefix at the request's zoom depth.
@@ -203,7 +202,7 @@ pub struct ViewportOut {
     /// The §3.3 density underlay, when requested — empty otherwise. Only non-empty cells appear.
     pub sub_cells: Vec<SubCellCount>,
     /// The declared-scalar names, in manifest order, from the SAME generation this response's
-    /// points were gathered from (Task 8). Carried here rather than left for the caller to
+    /// points were gathered from. Carried here rather than left for the caller to
     /// re-fetch via `Engine::meta()` — that second call would `load_full()` the generation
     /// pointer a second time, against lifecycle §1.1's "exactly once, at request start". The
     /// names come from the same manifest either way, so response bytes are unaffected; this only
@@ -222,7 +221,7 @@ pub struct ViewportOut {
 /// therefore flaky the moment `bench-timing` is enabled — which is exactly when those tests
 /// matter most.
 ///
-/// `scalar_names` joins the comparison (Task 8): it is drawn from the same manifest as `points`'
+/// `scalar_names` joins the comparison: it is drawn from the same manifest as `points`'
 /// values, in the same generation, so two responses that agree on `points` already agree on it —
 /// including it costs nothing and is more honest than silently exempting a field that happens
 /// never to differ in practice.
@@ -301,20 +300,19 @@ impl Engine {
     /// scalars/external id.
     ///
     /// **`idset` is checked against the SAME generation this call loads for the lookup below —
-    /// never a separate `Engine::meta()` call.** Fix wave, Task 2 finding: the handler used to
-    /// call `Engine::meta()` (its own `generation.load_full()`, plus a clone of every declared
-    /// scalar and slice name, just to read one field) before calling this method, which loads
-    /// the generation again — two independent loads for one logical request, against lifecycle
-    /// §1.1's one-load-per-request invariant. Checking here, first, against the snapshot already
-    /// in hand removes the second load and closes the (correctness, not just cost) gap where a
-    /// generation swap landing between the two calls could validate the idset against one
-    /// generation and serve the lookup from another.
+    /// never a separate `Engine::meta()` call.** A handler that called `Engine::meta()` (its own
+    /// `generation.load_full()`, plus a clone of every declared scalar and slice name, just to read
+    /// one field) before calling this method would load the generation twice for one logical
+    /// request, against lifecycle §1.1's one-load-per-request invariant. Checking here, first,
+    /// against the snapshot already in hand is not merely cheaper: it closes the gap where a
+    /// generation swap landing between the two calls validates the idset against one
+    /// generation and serves the lookup from another.
     ///
     /// Returns `Ok(None)` both when `id` names nothing in this bundle and when it names an item
     /// the principal may not see — deliberately one outcome from one code path, so the server
     /// cannot differentiate what the engine does not tell it (owner ruling; contracts §3.2).
     ///
-    /// **The timing channel is closed, not narrowed** (Critical C-5; design Appendix C, C4
+    /// **The timing channel is closed, not narrowed** (design Appendix C, C4
     /// annotation). The idset check is entity-independent — it runs identically for every `id`,
     /// before inversion, and does not read `id` at all — so it opens no channel of its own.
     /// Inversion is a pure function taking no I/O. The visibility test that follows is an
@@ -324,11 +322,11 @@ impl Engine {
     /// correlate against, warm or cold. A row is located only after the answer is already
     /// "visible", and the sidecar is read only after that.
     ///
-    /// **Returns `Err` rather than a fail-open `None`** (Critical N-3). A digest mismatch, an
+    /// **Returns `Err` rather than a fail-open `None`.** A digest mismatch, an
     /// out-of-order extent or a short locator is a `500`, never an item served with
-    /// `external_id: null` — `.ok().flatten()` would discard exactly the typed errors Task 8
-    /// exists to produce. This does not reopen C-5: the sidecar is touched only for an item
-    /// already established as visible, so no attacker-drivable path can raise it.
+    /// `external_id: null` — `.ok().flatten()` would discard exactly the typed errors the sidecar
+    /// exists to produce. This does not reopen the timing channel: the sidecar is touched only for
+    /// an item already established as visible, so no attacker-drivable path can raise it.
     pub fn item(
         &self,
         session: &Session,
@@ -365,8 +363,8 @@ impl Engine {
                 let Some(row) = slice_data.permutation.row_of(entity) else {
                     continue;
                 };
-                // Phase 1 always has exactly one segment per (partition, slice) (R4 — the same
-                // invariant `Engine::viewport`'s `MultiSegmentSlice` guard rests on); the
+                // There is exactly one segment per (partition, slice) — the same
+                // invariant `Engine::viewport`'s `MultiSegmentSlice` guard rests on; the
                 // permutation addresses that single segment's row space.
                 let Some(segment) = slice_data.segments.first() else {
                     continue;
@@ -450,7 +448,7 @@ impl Engine {
         // Fail closed on a slice spanning partitions, for the same reason the segment guard below
         // exists: this resolves to ONE partition, and theta's anchor and every rank are then taken
         // over that partition alone — which §12.3 forbids (the anchor must be session-global, or
-        // "below the cut" means different things in different partitions). Phase 1 emits one
+        // "below the cut" means different things in different partitions). The build emits one
         // partition, so this is unreachable; it is here so a §12 bundle cannot be served
         // half-masked with no error, which is the failure the multi-segment guard already refuses.
         let carriers = geometry
@@ -471,7 +469,7 @@ impl Engine {
 
         // Fail closed on more than one segment (see `EngineError::MultiSegmentSlice`'s doc):
         // `tile_ranges` returns segment-local row indices, but `mask` is built from the slice's
-        // single `Permutation`, which addresses exactly one segment's row space. Phase 1's build
+        // single `Permutation`, which addresses exactly one segment's row space. The build
         // never produces more than one, so this is not reachable today — but silently iterating
         // "just in case" would mis-count/mis-index the moment it became reachable, which is worse
         // than refusing outright.
@@ -511,9 +509,9 @@ impl Engine {
                 // Crosses entity space into row space over the *whole* fragment
                 // (`Permutation::project`'s cost note: seconds at 10⁹ rows) — paid once per
                 // (token, slice, segments_version) and cached here, never recomputed on a
-                // per-viewport path (shared-context constraint 8).
+                // per-viewport path.
                 probe.mark_projection_built();
-                // Task 7: `Permutation::project` parallelises internally (ambient rayon,
+                // `Permutation::project` parallelises internally (ambient rayon,
                 // `par_chunks`/`par_sort_unstable`) but owns no pool of its own — this is the
                 // one call site that supplies one, the same shared pool `Engine::viewport`'s
                 // tile sweep uses (D-D: no second, per-request pool). Wrapping only this build,
@@ -700,14 +698,13 @@ impl Engine {
         // `mask`/`segment`/`declared_scalars`/`params` are the generation- and request-derived
         // values already resolved above (lifecycle §1.1 — nothing is re-loaded per tile), and
         // `cancel` is the D-C token, checked inside `tile_result` at the very top (moved there
-        // from the old loop's first line — Task 5).
+        // at the very top of that function rather than here).
         //
         // Both branches produce `Vec<Result<Option<TileResult>>>` (this crate's `Result<T>` alias
         // for `std::result::Result<T, EngineError>`), in `tiles`' order, so the fold below is
         // identical either way — this is what makes the two paths byte-identical (see this
         // module's doc; `with_min_len(TILE_PAR_MIN_LEN)` and the parallel branch's own collect
-        // shape are unchanged from Task 6, still load-bearing for THAT claim within the parallel
-        // branch itself).
+        // shape are load-bearing for THAT claim within the parallel branch itself).
         //
         // D-C cancellation bound, both branches: a `Cancelled` observed inside `tile_result`
         // propagates to the fold below regardless of path, which discards every result after the
@@ -741,7 +738,7 @@ impl Engine {
             )
         };
 
-        // §14 fix round 1/2: the threshold is read from `self`, not the constant directly, so
+        // The threshold is read from `self`, not the constant directly, so
         // `set_serial_fallback_max_rows_for_test` (session.rs, test-only) can override it per-
         // `Engine` — see that method's doc. **The `serial_fallback_max_rows` field and this load
         // are unconditional — present and paid in EVERY build, not just `bench-timing` ones.**
@@ -798,7 +795,7 @@ impl Engine {
             tiles: tile_counts,
             points,
             sub_cells,
-            // Task 8: from the SAME `declared_scalars` slice `row_to_point` read for every point
+            // From the SAME `declared_scalars` slice `row_to_point` read for every point
             // above (`generation.bundle.manifest.declared_scalars`), not a fresh `meta()` call —
             // that would `load_full()` the generation pointer a second time.
             scalar_names: declared_scalars.iter().map(|d| d.name.clone()).collect(),
@@ -828,7 +825,7 @@ impl Engine {
 /// `GrantShape::Random`) with **no single row-count threshold able to serve all three** — the
 /// numbers force this, not a preference:
 ///
-/// - At 1e9 (the bench's own dense grant — the realistic one, per fix round 1's own finding):
+/// - At 1e9 (the bench's own dense grant, the realistic one):
 ///   every "natural" client-viewport-shaped sample (a fixed-size window at any zoom) measured
 ///   SERIAL-favouring, up to the highest row count that shape family reached in the sweep
 ///   (354,900,645 rows). No amount of additional row count made that family favour parallel under
@@ -877,11 +874,10 @@ impl Engine {
 /// which scales with the range read, not the tile count) — it is still the right *kind* of
 /// predictor, it just no longer maps to one right *number* across scales.
 ///
-/// Mask density (fix round 1) remains unmodelled by this pre-mask predictor for the same reason
-/// as before — see the historical argument in this crate's git history (commit `7e5b553`) for the
-/// full reasoning; §14's re-sweep used both a sparse and the bench's dense grant at every scale and
-/// found the shape-family split above (natural vs full-extent) under BOTH, so mask density is not
-/// the dominant driver of the three-scale tension this revision addresses.
+/// Mask density remains unmodelled by this pre-mask predictor, and deliberately so: the re-sweep
+/// used both a sparse and the bench's dense grant at every scale and found the shape-family split
+/// above (natural vs full-extent) under BOTH, so mask density is not the dominant driver of the
+/// three-scale tension.
 pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 500_000_000;
 
 /// The predictor, pulled out as its own pure function so it is unit-testable without an `Engine`
@@ -889,7 +885,7 @@ pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 500_000_000;
 /// below-threshold request runs the serial fold") is otherwise only observable through output
 /// equality or timing, neither of which makes a good unit test on its own.
 ///
-/// Takes `threshold` explicitly (§14 fix round 1) rather than reading `SERIAL_FALLBACK_MAX_ROWS`
+/// Takes `threshold` explicitly rather than reading `SERIAL_FALLBACK_MAX_ROWS`
 /// directly, so the one call site (`Engine::viewport`) can supply either the production constant
 /// or a test's override — see `Engine::set_serial_fallback_max_rows_for_test`'s doc for why an
 /// override exists at all and why it lives on `Engine`, not here.
@@ -1026,9 +1022,9 @@ const _: () = {
 /// bigger chunk (values up to 512 were swept: 8/32/128/512, `examples/min_len_sweep.rs`, on the
 /// `full-extent` shape family and `natural/z4`).
 ///
-/// **Claim, scoped precisely (fix round 1 correction — the first pass over-generalised).** `8` is
+/// **Claim, scoped precisely — it does not generalise.** `8` is
 /// decisively best on `full-extent/{z2,z3,z4,z5}` at 1e8 and 1e9 — these are the shapes that
-/// actually reach the parallel branch after §14's threshold change (`full-extent`'s row count is
+/// actually reach the parallel branch at the calibrated threshold (`full-extent`'s row count is
 /// ~always the whole segment, comfortably above 500,000,000 at those two scales), and the wins
 /// there are large, not marginal (1e9 full-extent/z3: 2.16 ms at 8 vs 3.02 ms at 32, 4.00 ms at
 /// 128, 3.58 ms at 512; full-extent/z4: 1.76 ms at 8 vs 2.92/3.88/4.27 ms). It is NOT uniformly
@@ -1051,8 +1047,8 @@ const TILE_PAR_MIN_LEN: usize = 8;
 ///
 /// `Ok(None)` — an empty tile: no segment for this slice, or nothing visible in `range`. Exactly
 /// the "skip empty" rule the old inline loop applied (no count row, no selection work). `Err`
-/// carries [`EngineError::Cancelled`] from the D-C per-tile cancellation checkpoint below (moved
-/// here, unchanged, from the top of the old loop body — Task 5) — checked first, so a flip
+/// carries [`EngineError::Cancelled`] from the per-tile cancellation checkpoint below — checked
+/// first, so a flip
 /// observed here costs only the one atomic read, never any of this tile's own
 /// count/select/gather/underlay work.
 #[allow(clippy::too_many_arguments)]
@@ -1101,7 +1097,7 @@ fn tile_result(
     let count = TileCount {
         tile: tile.prefix,
         visible,
-        // Phase 1 has no filters (Reference Sheet R5): matched == visible everywhere.
+        // There is no filter contract yet (⊘): matched == visible everywhere.
         matched: visible,
         served: selected.rows.len() as u64,
     };
@@ -1177,7 +1173,7 @@ fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) ->
     let mut scalars = Vec::with_capacity(declared.len());
     for declared_scalar in declared {
         // A declared scalar absent from this segment's schema (shouldn't happen once the build
-        // pipeline writes declared columns, but Phase 1's build never does yet) is skipped rather
+        // pipeline writes declared columns, which it does not yet) is skipped rather
         // than treated as an error — nothing here is authorisation-relevant.
         if let Some(value) = cols.scalar(&declared_scalar.name) {
             scalars.push(match value {
@@ -1200,8 +1196,8 @@ fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) ->
 mod tests {
     use super::*;
 
-    /// Calibration task's own behavioural test on the predictor, per the brief's preference for
-    /// this over test-only instrumentation: exact boundary behaviour, both edges.
+    /// The predictor's behaviour at its boundary, both edges — asserted directly rather than
+    /// through test-only instrumentation of the call site.
     #[test]
     fn should_fold_serially_is_a_strict_less_than_at_the_calibrated_boundary() {
         let t = SERIAL_FALLBACK_MAX_ROWS;
@@ -1212,7 +1208,7 @@ mod tests {
         assert!(!should_fold_serially(u64::MAX, t, 1));
     }
 
-    /// §14 fix round 1: `should_fold_serially` takes its threshold as a parameter now (so
+    /// `should_fold_serially` takes its threshold as a parameter (so
     /// `Engine::set_serial_fallback_max_rows_for_test` has something to feed it) — this pins that
     /// it is a genuine parameter, not the constant in disguise, at a threshold far from the real
     /// production value.
@@ -1246,7 +1242,11 @@ mod tests {
             "AT the arm the fan-out runs though the row term alone would fold serially -- this is \
              the whole of the 2026-08-01 change"
         );
-        assert!(!should_fold_serially(rows_far_below, t, TILE_PAR_MIN_TILES + 1));
+        assert!(!should_fold_serially(
+            rows_far_below,
+            t,
+            TILE_PAR_MIN_TILES + 1
+        ));
     }
 
     /// The rule is a disjunction: either term alone suffices and neither is necessary. A mutation
@@ -1255,7 +1255,10 @@ mod tests {
     fn the_two_terms_are_a_disjunction_not_a_conjunction() {
         let t = SERIAL_FALLBACK_MAX_ROWS;
         assert!(!should_fold_serially(t, t, 1), "rows fire alone");
-        assert!(!should_fold_serially(1, t, TILE_PAR_MIN_TILES), "tiles fire alone");
+        assert!(
+            !should_fold_serially(1, t, TILE_PAR_MIN_TILES),
+            "tiles fire alone"
+        );
         assert!(
             should_fold_serially(t - 1, t, TILE_PAR_MIN_TILES - 1),
             "neither fires -- the only serial case"
@@ -1278,7 +1281,11 @@ mod tests {
     /// still folds serially.
     #[test]
     fn the_natural_family_cannot_reach_the_tile_arm() {
-        assert!(should_fold_serially(354_900_645, SERIAL_FALLBACK_MAX_ROWS, 81));
+        assert!(should_fold_serially(
+            354_900_645,
+            SERIAL_FALLBACK_MAX_ROWS,
+            81
+        ));
     }
 
     /// §14: `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 (see its doc). A fixture that genuinely
