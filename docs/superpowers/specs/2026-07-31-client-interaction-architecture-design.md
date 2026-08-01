@@ -282,6 +282,39 @@ compaction (I11); a Morton prefix is deliberately stable across pins.
 held points qualify). It saves the identity read and is fail-open on newly-suppressed
 items. Recorded so it is not re-proposed.
 
+**Annotated 2026-08-01 — this rejection's stated ground contradicts §4, and the contradiction
+misleads.** *"Fail-open on newly-suppressed items"* reads as a security verdict. §4's owner ruling
+of 2026-08-01, which post-dates this paragraph, says the opposite in terms: *"a served item is
+served: the disclosure completed at serve time and no client behaviour retracts it. **Redrawing it
+from cache to the same principal discloses nothing that has not already been disclosed.**"* A client
+drawing a suppressed item it already holds is **stale, not fail-open** — an inconvenience §4
+explicitly accepts, bounded by the epoch.
+
+The rejection is **re-grounded, not withdrawn.** What actually survives it:
+
+1. **Reviewability.** The server naming the complete served set is what makes §5 checkable in one
+   place; membership inferred client-side has no invalidation protocol to review, which is the
+   property this section opens by claiming.
+2. **§4's own corollary, which is about bounds rather than disclosure.** *"A client that answers
+   pans entirely from held tiles makes an accepted change invisible indefinitely, because there is
+   no next request. Don't re-download is free; don't re-request needs an explicit staleness bound,
+   and the bound is the epoch."* Client-derived membership is the unbounded form; §6.1's rule 3 —
+   compare the epoch integer, render stale-marked — is the bound that makes it acceptable.
+3. **Removals stay server-authoritative** regardless, from the deny set and the epoch ledger. That
+   is the half no client derivation may touch, and it is what the "fail-closed by naming" property
+   in this section is really protecting.
+
+**And the trade has moved 20-fold, so the rejection is worth revisiting rather than inherited.** At
+the 1–2 × 10⁶ drawn-mark operating point, one interaction is *derivable client-side for free*:
+because priority prefixes nest, a zoom-out's served set is a subset of the union of the children
+already held, so the client could render it with no request at all — against a measured 8–16 s of
+server CPU for a full view at 10⁹. That is the single cheapest interaction available and this
+paragraph currently forbids it on a ground that no longer holds. Any revisit must keep (1) and (3)
+above and must carry §6.1's epoch bound; it is a coherence design, not a disclosure one.
+
+*Recorded because the "fail-open" wording caused exactly the error it should prevent: it was read,
+during the 2026-08-01 caching work, as making stale redraw a leak.*
+
 **Deferred pending a written safety argument: epoch-delta naming** — naming only
 changes since the client's epoch rather than the complete served set. It fixes the
 economics at the large drawn-mark budget, where naming 10⁷ identities costs ~80 MB
