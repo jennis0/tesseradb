@@ -32,13 +32,11 @@
 //!
 //! Two caveats on that extrapolation, both load-bearing:
 //!
-//! * SA §7's overlay/flush bounds were **design-document values, not implemented** when this was
-//!   measured, and the extrapolation therefore had no ceiling rather than a 500,000 one. Phase 2
-//!   stage 2.1 Task 0b landed them as parsed, validated config keys, which does **not** change
-//!   the caveat: `overlay_soft_limit` alarms and does not fold (there is no fold until stage
-//!   2.3), and `flush_max_items`/`flush_max_age_secs` are inert until stage 2.2 gives them a
-//!   consumer. The buffer still grows without bound in code, so this extrapolation stands as
-//!   written.
+//! * SA §7's overlay/flush bounds are **⊘ partially implemented**, so the extrapolation has no
+//!   ceiling rather than a 500,000 one. They exist as parsed, validated config keys, and that is
+//!   all: `overlay_soft_limit` alarms and does not fold, because there is no fold, and
+//!   `flush_max_items`/`flush_max_age_secs` have no consumer, because there is no flush. The
+//!   buffer grows without bound in code, so this extrapolation stands as written.
 //! * The measured ~10 ns/item is a **lower bound**. None of the buffered rows are visible (see
 //!   below), so `compose` iterates the buffer and *rejects* every entry at `perm.row_of`. Rows
 //!   that resolved would additionally push into `pass_rows`/`fail_rows` and build the diff
@@ -62,16 +60,15 @@
 //! # Scope: what "writes to an existing database" does and does not cover here
 //!
 //! `batch` and `continuous` both open a real prebuilt bundle and write into it, so they are
-//! genuinely update-path measurements, not first-write ones. But Phase 1's update path stops
-//! earlier than the word "ingest" suggests, and the arms can only measure what exists:
+//! genuinely update-path measurements, not first-write ones. But the update path stops earlier
+//! than the word "ingest" suggests, and the arms can only measure what exists:
 //!
 //! * **Durability — covered.** WAL append → fsync → buffer insert → generation swap, which is the
 //!   whole of what `/control/ingest` promises before it acks.
 //! * **Visibility — NOT reached.** `sigma_visible` is *identical* at every buffer depth measured
 //!   (16,108 across 501 → 25,001 buffered). A buffered entity has no row in the segment's
-//!   permutation, so `compose` skips it — `compose.rs`'s rule-4 loop says so outright: "No row in
-//!   this segment: Phase 1 has no cross-segment geometry." Ingested rows are durable and
-//!   invisible.
+//!   permutation, so `compose` skips it: its rule-4 loop has no cross-segment geometry to
+//!   resolve the entity against. Ingested rows are durable and invisible.
 //! * **Absorption — does not exist.** No flush, no posting-delta fold, no merge, no compaction.
 //!   `EngineError::MultiSegmentSlice` fails closed above one segment per slice. So the steady-state
 //!   cost of a database that has been *running* and absorbing writes for a while is unmeasurable
@@ -310,11 +307,11 @@ pub fn run_build(
 /// principal — ingesting items the reader cannot see would exercise none of the composition path
 /// and would make the F2 measurement meaningless.
 ///
-/// **Entity IDs still come from the allocator, not from a counter** — they are simply assigned one
-/// layer further in. Phase 2 stage 2.1 (Task 3a) moved signature-sorted assignment off the handler
-/// and onto the write executor, so `/control/ingest` now submits `UnallocatedRow`s and the thread
-/// that owns the WAL assigns the ids (`control.rs`). This helper follows, so it keeps describing a
-/// state the system can actually reach — which was the whole point of the note this replaces.
+/// **Entity IDs come from the allocator, not from a counter** — they are simply assigned one layer
+/// further in. Signature-sorted assignment lives on the write executor rather than the handler, so
+/// `/control/ingest` submits `UnallocatedRow`s and the thread that owns the WAL assigns the ids
+/// (`control.rs`). This helper produces the same shape, so what it synthesises is a state the
+/// system can actually reach.
 pub(crate) fn synth_rows(count: usize, start: u64, terms: &[TermId]) -> Vec<UnallocatedRow> {
     (0..count)
         .map(|i| {
@@ -392,9 +389,9 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     pins_per_session_max: 4,
                 },
             )?;
-            // Phase 2 stage 2.1 (Task 3a): the WAL now lives on a dedicated executor thread, so an
-            // engine that writes must start one. Bound is generous — this harness never means to
-            // measure queue-full backpressure, only ack latency.
+            // The WAL lives on a dedicated executor thread, so an engine that writes must start
+            // one. Bound is generous — this harness never means to measure queue-full
+            // backpressure, only ack latency.
             engine.start_write_executor(1024)?;
 
             let mut next_id = 0u64;
@@ -504,9 +501,9 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 pins_per_session_max: 4,
             },
         )?;
-        // Phase 2 stage 2.1 (Task 3a): the WAL now lives on a dedicated executor thread, so an
-        // engine that writes must start one. Bound is generous — this harness never means to
-        // measure queue-full backpressure, only ack latency.
+        // The WAL lives on a dedicated executor thread, so an engine that writes must start one.
+        // Bound is generous — this harness never means to measure queue-full backpressure, only
+        // ack latency.
         engine.start_write_executor(1024)?;
         let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;
 

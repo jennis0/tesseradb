@@ -9,7 +9,7 @@
 //! because refusing a security operation for load is fail-open. Both statements are claims about
 //! latency, and neither has been measured.
 //!
-//! It is also the only write path in Phase 1 whose effect is *observable*. Ingested rows are
+//! It is also the only write path whose effect is *observable*. Ingested rows are
 //! durable but invisible — a buffered entity has no row in the segment's permutation, so
 //! `compose` skips it (see `arms::ingest`'s scope note). A change targets an entity that already
 //! **has** a row, so `perm.row_of` resolves, the overlay entry lands in the diff, and the masked
@@ -216,9 +216,9 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                     pins_per_session_max: 4,
                 },
             )?;
-            // Phase 2 stage 2.1 (Task 3a): the WAL now lives on a dedicated executor thread, so an
-            // engine that writes must start one. Bound is generous — this harness never means to
-            // measure queue-full backpressure, only ack latency.
+            // The WAL lives on a dedicated executor thread, so an engine that writes must start
+            // one. Bound is generous — this harness never means to measure queue-full
+            // backpressure, only ack latency.
             engine.start_write_executor(1024)?;
             let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;
 
@@ -367,7 +367,7 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
 /// # What the existing `run` above does not measure, and why that mattered
 ///
 /// `run` grows the **overlay** and measures ack against it. It never ingests, so its buffer is
-/// empty in every cell. That leaves the quantity the plan actually sizes the deny-ack floor from —
+/// empty in every cell. That leaves the quantity the deny-ack floor is actually sized from —
 /// `ExecutorHealth::apply_nanos_*`, whose doc calls the clone "O(total buffered items)" — entirely
 /// unexercised, and it leaves lifecycle §1.3's real bound ("a deny's wait is bounded by the work
 /// item currently executing") untested, because nothing is ever executing.
@@ -380,12 +380,12 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
 /// 2. **Contended deny-ack.** Background threads submit large ingest batches continuously while
 ///    denies are issued, so a deny lands behind an in-flight `apply_ingest` that is cloning an
 ///    `N`-entry buffer. This is the head-of-line term, and it is the one §1.3 bounds.
-/// 3. **Never-shed** (`crates/tessera-engine/src/write.rs:899-931`): the work lane is a bounded
+/// 3. **Never-shed** (`tessera-engine/src/write.rs`'s two-lane submit): the work lane is a bounded
 ///    `SyncSender` (`QueueFull`), the deny lane an unbounded `Sender`. With the queue genuinely
 ///    saturated — proven by counting `QueueFull` on the ingest lane rather than assumed — no deny
-///    may be refused. **Scope limit: this exercises the engine's lane split only.** Task 6, which
-///    owns `/control/ingest`'s 429 and the startup headroom arithmetic, has not landed, so the
-///    HTTP-level asymmetry (`changes_never_429s`) is not exercisable here and is not claimed.
+///    may be refused. **Scope limit: this exercises the engine's lane split only.** The HTTP-level
+///    asymmetry is a different claim and is not made here; `changes_never_429s` in
+///    `tessera-server/tests/http_write.rs` is what asserts it.
 // Eight parameters, one over clippy's default. A bench arm's signature IS its knob surface --
 // ops, buffered depths, submitters, repeats and seed are each independently swept from the CLI,
 // and folding them into a params struct would put a second name on every one of them for no
@@ -526,13 +526,16 @@ pub fn run_deny_ack(
                         floods.push(scope.spawn(move || {
                             let mut id = 1_000_000_000u64 + (w as u64) * 100_000_000;
                             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                                let rows =
-                                    crate::arms::ingest::synth_rows(ingest_batch, id, terms);
+                                let rows = crate::arms::ingest::synth_rows(ingest_batch, id, terms);
                                 id += ingest_batch as u64;
-                                match engine.accept_ingest(rows, format!("flood-{w}-{id}"), [0u8; 32])
-                                {
+                                match engine.accept_ingest(
+                                    rows,
+                                    format!("flood-{w}-{id}"),
+                                    [0u8; 32],
+                                ) {
                                     Ok(_) => {
-                                        ingest_ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        ingest_ok
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     }
                                     Err(tessera_engine::AcceptError::Submit(_)) => {
                                         // The bounded work lane refusing under load: the
@@ -628,9 +631,9 @@ pub fn run_deny_ack(
                         "busy_ack_p50_ns": pct(&mut b, 0.50),
                         "busy_ack_p99_ns": pct(&mut b, 0.99),
                         "busy_ack_max_ns": busy_ack.iter().copied().max().unwrap_or(0),
-                        // The counter Task 7b is told to size the deny-ack floor from. The max
-                        // over the contended phase is the ingest lane's apply, i.e. the
-                        // head-of-line term a deny can queue behind.
+                        // The counter the deny-ack floor is sized from. Its max over the
+                        // contended phase is the ingest lane's apply, i.e. the head-of-line term
+                        // a deny can queue behind.
                         "apply_nanos_max_before_flood": apply_max_before,
                         "apply_nanos_max_after_flood": final_stats.apply_nanos_max,
                         "apply_nanos_total": final_stats.apply_nanos_total,

@@ -37,7 +37,7 @@ struct Cli {
     #[arg(long, default_value = "/tmp/tessera-bench/runs/current", global = true)]
     run_dir: PathBuf,
 
-    /// Repetitions per cell. Phase 0's convention is 3 generally, 5 at the largest scale; the
+    /// Repetitions per cell. The probes' convention is 3 generally, 5 at the largest scale; the
     /// minimum is the headline and the spread is retained.
     #[arg(long, default_value_t = 3, global = true)]
     repeat: u32,
@@ -277,19 +277,19 @@ enum Command {
         zoom: u8,
         #[arg(long, default_value_t = 0)]
         seed: u64,
-        /// Pan-storm mode (Task 9, criterion 5): each worker races its request against
+        /// Pan-storm mode: each worker races its request against
         /// `--abort-after-ms` and, on losing that race, drops the in-flight request (D-C
         /// cancellation) and immediately issues its next one rather than waiting.
         #[arg(long, default_value_t = false)]
         pan_storm: bool,
         #[arg(long, default_value_t = 50)]
         abort_after_ms: u64,
-        /// Hang-watchdog (Task 9, criterion 2): a hard client-side deadline used to positively
+        /// Hang-watchdog: a hard client-side deadline used to positively
         /// catch a hang rather than rely on the 120 s connection timeout. Ignored when
         /// `--pan-storm` is also set (that mode's own deadline already bounds every request).
         #[arg(long)]
         hang_timeout_ms: Option<u64>,
-        /// Cold-build storm (Task 9, criterion 6): the first N workers reuse `tokens[0]` (the
+        /// Cold-build storm: the first N workers reuse `tokens[0]` (the
         /// shared cold key) on every request; the rest round-robin `tokens[1..]` (the warm
         /// pool). `0` (default) disables the split.
         #[arg(long, default_value_t = 0)]
@@ -299,7 +299,7 @@ enum Command {
     /// Morton tile enumeration and masked counting, swept over zoom.
     ///
     /// Covers zoom 0..=3 as well, which every existing script omits: counting is nearly free at
-    /// depth 0 (Phase 0 measured a billion rows in 191 us) but nobody has measured the gather
+    /// depth 0 (the probes measured a billion rows in 191 us) but nobody has measured the gather
     /// there, and that is the drawn-mark-budget regime.
     Tiles {
         #[arg(long, value_delimiter = ',', default_values_t = [0u8, 2, 4, 6, 8, 10, 12])]
