@@ -1905,12 +1905,24 @@ impl Executor {
     /// on where in an arbitrary drain order an item landed would be the less fail-closed reading of
     /// the two.
     ///
-    /// **What the fold does not fix.** `wal::replay` reinstates every well-framed record, including
-    /// records past the last fsync point, so an appended-but-unfsynced `Unsuppress` is re-applied on
-    /// restart even though its caller was correctly told it was not applied. That is a WAL replay
-    /// property and it is true of a single command too (`append` succeeding and `fsync` failing
-    /// leaves exactly this record in the file); a window widens it from one record to at most k,
-    /// the same proportional widening the ingest window carries at `Executor::close_window`.
+    /// **What a restart then does with the window, and the one thing it costs.** Replay reads only
+    /// the log's durable prefix (`tessera_lifecycle::wal`), so every record this window appended is
+    /// discarded: the `Unsuppress` that was correctly refused stays refused, and the `Suppress` that
+    /// was applied in memory comes back **unhidden**. That is the honest reading of the 500 the
+    /// waiters received — durability was not achieved, it is owed, and the caller must retry
+    /// (lifecycle §4) — and it is what the append-failure case has always done anyway, since a
+    /// `Suppress` whose *append* failed leaves no bytes to replay. Making the two adjacent failure
+    /// points agree is the point: a hiding that survives a restart only when the failure happened to
+    /// land on the fsync rather than on the append is not a guarantee anyone can reason about.
+    ///
+    /// **The in-memory rule above is untouched by that**, and must stay so. The item is hidden from
+    /// the moment the disposition is accepted until the process ends, which is the whole interval a
+    /// live node can be asked about, and the node stops claiming readiness for the rest of it.
+    /// Nothing else may come to depend on an under-durable deny: lifecycle §4 gates side-manifest
+    /// publication on WAL durability on exactly this reasoning, so that no other node can observe a
+    /// suppression a restart here would drop.
+    /// **⊘ Specified, not implemented** — there is no replication and no side-manifest publication,
+    /// so the obligation is on whoever builds one, not a property to be relied on today.
     fn commit_denies(&mut self, entries: Vec<DenyEntry>) {
         let mut failed_at: Option<(usize, WalError)> = None;
         for (i, entry) in entries.iter().enumerate() {
@@ -2369,23 +2381,14 @@ impl Executor {
     /// `an_ingest_append_failure_applies_nothing` holds this rule and
     /// `an_unsuppress_append_failure_applies_nothing` holds the deny lane's op scope beside it.
     ///
-    /// *One pre-existing property this widens and does not fix:* `wal::replay` replays every
-    /// well-framed record, including records written **past** the last-fsynced offset — it does not
-    /// truncate to the sync point. So an un-fsynced, un-acked ingest record whose bytes reached the
-    /// file is reinstated on restart. That is already true per command (append succeeds, fsync
-    /// fails, caller gets 500, nothing is applied, replay applies it); a window makes it k records
-    /// instead of one.
-    ///
-    /// **Task 8 owned this and is handing it back with the disposition, not a test.** Task 8's
-    /// `crash_between_fsync_and_swap_replays_rather_than_reallocates` covers the *fsynced* half —
-    /// a real killed process between fsync and swap — which is lifecycle §8's crash row and the
-    /// case a client can retry into. The un-fsynced half is a different property and is **not**
-    /// under test, but it is also not the C1 shape it looks like: `Wal::fsync` poisons the handle
-    /// on failure and `Wal::append` refuses every later append, so exactly one record for that
-    /// batch reaches the file and replay establishes one entity, not two. What a restart actually
-    /// produces is an item the caller was told (correctly, at the time) it did not have — visible,
-    /// named by its own `external_id`, and therefore reachable by a deny. Fail-closed; recorded so
-    /// the next reader does not spend the effort re-deriving it.
+    /// **A restart does not undo the refusal.** Replay reads only the log's durable prefix
+    /// (`tessera_lifecycle::wal`), so the window's records — which by construction lie past the last
+    /// fsync — are discarded rather than replayed. Without that, an ingest refused for want of
+    /// durability would exist after the next restart: the caller was told it had nothing, so a
+    /// caller doing what the 500 asks and retrying under a fresh batch identifier would end up
+    /// holding two. `an_ingest_whose_durability_failed_stays_absent_across_a_reopen` holds this, and
+    /// `crash_between_fsync_and_swap_replays_rather_than_reallocates` holds the other half — a real
+    /// killed process whose window *did* fsync, which replays rather than reallocating.
     fn close_window(&mut self, window: CommitWindow<Responder>) {
         let entries = window.len() as u64;
         let started = window.opened_at();

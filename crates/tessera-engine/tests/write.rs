@@ -643,6 +643,48 @@ fn an_ingest_append_failure_applies_nothing() {
     );
 }
 
+/// **And a restart must not undo that refusal.** An ingest whose durability write failed is
+/// refused, applies nothing — and is still absent after the process reopens the WAL.
+///
+/// This is the mirror of the acknowledgement contract: §4 forbids acknowledging an item that is
+/// not durable, and equally forbids an item becoming durable after its caller was told it was not.
+/// The failure leaves the record's bytes in the file — the append succeeded and only the fsync did
+/// not — so a replay that reinstated every well-framed record would make the item exist behind the
+/// caller's back. A caller who did what the 500 tells them to do and retried under a fresh batch
+/// identifier would then hold two.
+///
+/// Asserted through `Engine` rather than `Wal` because the divergence is only observable as an
+/// item: `resolve_external_id` answers from state replay rebuilt.
+#[test]
+fn an_ingest_whose_durability_failed_stays_absent_across_a_reopen() {
+    let tmp = TempDir::new().unwrap();
+    let wal_path = tmp.path().join("wal.log");
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+
+    faults.fail_next_fsyncs(1);
+    engine
+        .accept_ingest(vec![row("never-lands")], "doomed".to_string(), [3u8; 32])
+        .expect_err("an ingest whose fsync failed must be refused");
+    drop(engine);
+
+    let mut reopened = open_engine(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache-reopened"),
+        &wal_path,
+    );
+    reopened
+        .start_write_executor(8)
+        .expect("the executor starts once");
+
+    assert!(
+        reopened
+            .resolve_external_id(b"never-lands")
+            .unwrap()
+            .is_none(),
+        "the caller was told this ingest was not durable; a restart must not make it so"
+    );
+}
+
 /// **The apply-anyway exception is scoped to the two deny ops, and this is the control that pins
 /// the scope.** An `Unsuppress` whose durability write failed applies **nothing**.
 ///

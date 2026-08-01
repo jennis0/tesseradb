@@ -248,6 +248,115 @@ fn huge_length_prefix_before_sync_point_fails_closed() {
     expect_corruption(Wal::open(&path));
 }
 
+// --- The durable prefix: replay stops at the last-fsynced offset, whether or not the bytes past
+// it happen to frame and checksum correctly. A well-formed record past that offset was never
+// acknowledged, so reinstating it makes durable an effect its caller was told had failed. ---
+
+#[test]
+fn a_well_formed_record_past_the_sync_point_is_not_replayed() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wal.log");
+
+    {
+        let (mut wal, _) = Wal::open(&path).unwrap();
+        wal.append(&sample_record(0)).unwrap();
+        wal.fsync().unwrap();
+        // Appended, framed and checksummed perfectly — and never fsynced, so no caller was ever
+        // told it was durable.
+        wal.append(&sample_record(1)).unwrap();
+    }
+
+    let (_wal, records) = Wal::open(&path).unwrap();
+    assert_eq!(
+        records,
+        vec![sample_record(0)],
+        "a record past the last-fsynced offset was never acknowledged; replaying it reinstates an \
+         effect its caller was told had failed"
+    );
+}
+
+#[test]
+fn the_discarded_tail_is_truncated_rather_than_left_to_be_rediscovered() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wal.log");
+
+    let sync_point;
+    {
+        let (mut wal, _) = Wal::open(&path).unwrap();
+        wal.append(&sample_record(0)).unwrap();
+        sync_point = wal.fsync().unwrap();
+        wal.append(&sample_record(1)).unwrap();
+        assert!(fs::metadata(&path).unwrap().len() > sync_point);
+    }
+
+    let (_wal, _records) = Wal::open(&path).unwrap();
+    assert_eq!(
+        fs::metadata(&path).unwrap().len(),
+        sync_point,
+        "the tail is discarded on disk, not merely skipped in memory — otherwise the next append \
+         lands in front of bytes a later replay would have to reason about again"
+    );
+}
+
+/// The same rule reached through a **genuine** I/O failure rather than a hand-built file: the
+/// record is on disk and `sync_data` has even returned for it, but the sidecar could not be
+/// advanced, so nothing was acknowledged and nothing may be replayed.
+///
+/// Provoked the way `a_real_fsync_failure_poisons_the_handle` provokes it — a read-only WAL
+/// directory, which fails the sidecar's write-tmp-then-rename with `EACCES`. Skipped under uid 0,
+/// where `chmod` does not bind.
+#[test]
+fn a_record_stranded_by_a_real_fsync_failure_is_not_replayed() {
+    if unsafe { geteuid() } == 0 {
+        eprintln!("skipped: running as root, where a read-only directory is not read-only");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wal.log");
+    {
+        let (mut wal, _) = Wal::open(&path).unwrap();
+        wal.append(&sample_record(0)).unwrap();
+        wal.fsync().unwrap();
+
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        wal.append(&sample_record(1)).unwrap();
+        assert!(
+            matches!(wal.fsync(), Err(WalError::Io(_))),
+            "the fsync must genuinely fail, or this test asserts nothing"
+        );
+    }
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (_wal, records) = Wal::open(&path).unwrap();
+    assert_eq!(
+        records,
+        vec![sample_record(0)],
+        "the caller of the failed fsync was told its record was not durable; a restart must not \
+         make it durable behind their back"
+    );
+}
+
+/// A sidecar naming an offset that is **not** a record boundary means the log and the sidecar
+/// disagree about which bytes were made durable. That is a statement about acknowledged bytes, so
+/// it fails closed rather than being rounded to the nearest boundary in either direction.
+#[test]
+fn a_record_straddling_the_sync_point_fails_closed() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wal.log");
+    let sync_path = dir.path().join("wal.sync");
+
+    setup_two_synced_records(&path);
+
+    // One byte short of record 1's end: the record starts inside the durable prefix and finishes
+    // outside it.
+    let mid_record = fs::metadata(&path).unwrap().len() - 1;
+    fs::write(&sync_path, mid_record.to_le_bytes()).unwrap();
+
+    expect_corruption(Wal::open(&path));
+}
+
 // --- I3: a poisoned handle is a distinct, matchable error callers can check for. Deterministic
 // fault injection into a mid-write I/O failure isn't portable in a plain unit test; this checks
 // the observable contract instead. ---
