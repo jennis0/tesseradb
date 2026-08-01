@@ -54,3 +54,5 @@ prevent.
 | [0034](0034-the-window-does-not-linger.md) | 2026-08-01 | A commit window closes when its queue drains; it does not linger |
 | [0035](0035-session-sweep-runs-on-growth-not-on-a-timer.md) | 2026-08-01 | The session registry sheds on growth, not on a timer |
 | [0036](0036-per-connection-body-ceiling-not-a-connection-cap.md) | 2026-08-01 | The buffered-body window gets a per-connection ceiling, not a connection cap |
+| [0037](0037-canary-canonicalisation-joins-on-tessera-id.md) | 2026-08-01 | The canary comparison canonicalises on `tessera_id`, not on `fx_key` |
+| [0038](0038-fsync-offset-is-a-sidecar-not-a-command.md) | 2026-08-01 | Crash realism reads the WAL's sync sidecar; `fsync_offset()` is not built |

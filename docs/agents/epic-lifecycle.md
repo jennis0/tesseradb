@@ -61,7 +61,7 @@ closes:
   changed how the system works and did not change its specification has left the specification
   wrong.
 - **Leftovers** → new issues. Not a "deferred" note in a document nobody will read again. If it
-  is real work, it is an issue; if it is not real work, delete it.
+  is real work, it is an issue; if it is not real work, delete it. That said, be smart about the issues you create. Group issues into coherent tickets, and make sure it isn't better to do the work now. Issues should be for large workchunks and explicitly deferred improvements, not things that should already be fixed.
 
 Then close it. An epic that stays open because 10% of it might one day matter is no longer
 tracking anything.
