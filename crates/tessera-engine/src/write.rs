@@ -521,9 +521,26 @@ impl std::error::Error for ExecutorStartError {}
 /// Why an accepted write did not succeed: it was never handed to the executor
 /// ([`SubmitError`]), or it failed while executing ([`ExecError`]).
 ///
-/// The two must stay distinguishable all the way to the HTTP boundary: `QueueFull` is a 429 the
-/// caller should retry, `ExecutorDead` is a 503 and a not-ready node, and an `ExecError::Wal` on a
-/// deny is a **500 for an effect that is nonetheless in force**. Task 3b owns the mapping table.
+/// The four outcomes must stay distinguishable all the way to the HTTP boundary, and this is the
+/// type `accept_ingest`/`accept_change` return, so it is the first place a caller meets them:
+///
+/// - `Submit(QueueFull)` — 429, the caller should retry;
+/// - `Submit(ExecutorDead)` — 503 `not-ready`; non-enqueue is **proven**, so "nothing happened" is
+///   true;
+/// - `Submit(ReceiptLost)` — **500, never 503.** The executor died *holding* the command, which may
+///   be fully applied and swapped in. Reporting it as not-ready is the fail-open the Task 3b design
+///   gate's unanimous CRITICAL was about, and it is missing from this list no longer;
+/// - `Exec(Wal)` on a `Delete`/`Suppress` — a **500 for an effect that is nonetheless in force**.
+///
+/// `tessera-server`'s `map_accept_error` owns the table; `map_change_batch_error` folds it for a
+/// batch.
+///
+/// **Deliberately not `#[non_exhaustive]`, and that absence is load-bearing.** Neither this enum
+/// nor [`SubmitError`]/[`ExecError`] carries the attribute, which is the only reason adding a
+/// variant to any of them is an `E0004` at every cross-crate match — including the mapping table
+/// above, which has no `_` arm precisely so a new outcome cannot become a silent 500. Adding
+/// `#[non_exhaustive]` later looks like ordinary API hygiene for a `pub` enum and would convert
+/// every one of those compile errors into a permitted wildcard.
 #[derive(Debug)]
 pub enum AcceptError {
     Submit(SubmitError),
@@ -713,12 +730,18 @@ impl WritePath {
                 // revision of this comment claimed it did** (found at the Task 3b design gate).
                 // `Job { command, respond }` is destructured into `Executor::execute`'s frame, so
                 // the in-flight `Responder` drops *earlier* in the unwind than this guard: that
-                // caller's `rx.recv()` can return before the posture moves. Two consequences, both
-                // load-bearing. The caller's error is `SubmitError::ReceiptLost`, mapped to a
-                // fail-closed 500 rather than 503 — which is correct regardless of the posture,
-                // because the command may be fully applied. And an HTTP-level test of "panic, then
-                // probe `/readyz`" is a **race**, which is why `tessera-server`'s readiness table
-                // is asserted over `is_ready` directly rather than through the socket.
+                // caller's `rx.recv()` can return before the posture moves. The consequence that
+                // matters is that the caller's error must be `SubmitError::ReceiptLost` — mapped to
+                // a fail-closed 500 rather than 503 — which is correct *regardless* of the posture,
+                // because the command may be fully applied. `tests/write.rs`'s
+                // `an_executor_panic_is_reported_dead` asserts both halves and pins that error at
+                // its producer.
+                //
+                // **This ordering does not make a `/readyz` test a race**, which an earlier revision
+                // also claimed: `ExecutorPosture` is published with `fetch_max`, so `Dead` is
+                // absorbing and a bounded poll converges — the loop in that same test is one. What
+                // stops `tessera-server` writing the socket-level version is that inducing the panic
+                // needs `fault-injection` as a dev-dependency there; see `health.rs`'s `is_ready`.
                 let _guard = DeathGuard(health);
                 executor.run();
             })

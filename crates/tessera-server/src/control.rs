@@ -21,6 +21,7 @@ use base64::Engine as _;
 use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
+use tessera_engine::AcceptError;
 use tessera_lifecycle::{ChangeOp, UnallocatedRow, WalScalar};
 use tessera_types::{EntityId, TermId};
 
@@ -80,14 +81,47 @@ use crate::state::AppState;
 /// — `EAGAIN` under precisely the thread exhaustion this exists for — is a **fail-to-start**, not a
 /// panic discovered by the first suppression. (A panic in the async handler body is not caught by
 /// `map_join_error`; the connection would drop with no status at all, violating I13's "a panic is a
-/// failed request, never an empty one".) The `OnceLock` is never dropped, which also means
-/// `Runtime::drop` can never fire inside an async context.
+/// failed request, never an empty one".)
+///
+/// **The stored runtime is never dropped**, because a `OnceLock`'s value outlives every caller. That
+/// is not the whole of it, and an earlier revision of this paragraph stopped there: `set` **returns
+/// the value back** when it loses a race, so the *loser* of two concurrent
+/// [`init_deny_runtime`] calls had a live `Runtime` to dispose of, at a statement inside `changes()`'s
+/// async body — `Runtime::drop` blocks, and dropping one on a reactor thread panics with "Cannot
+/// drop a runtime in a context where blocking is not allowed". Exactly the I13 shape above, and
+/// reproducible on both tokio flavours. See [`discard_losing_runtime`], which is where the loser now
+/// goes.
 static DENY_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
+/// Dispose of a runtime that lost the `OnceLock::set` race, **from wherever the loser happens to
+/// be** — which is an async context whenever the lazy path in [`spawn_on_deny_lane`] raced.
+///
+/// `shutdown_background` rather than `drop`: it returns immediately instead of blocking on the
+/// worker's shutdown, which is what makes it legal on a reactor thread. A losing runtime has no
+/// spawned work at all — it was built two statements ago and never handed to anyone — so there is
+/// nothing for the non-waiting shutdown to abandon.
+///
+/// `std::mem::forget` would also avoid the panic and is what a first reading suggests; it leaks the
+/// worker thread instead of stopping it. Bounded (races happen only at first use) but pointless when
+/// a non-blocking shutdown exists.
+///
+/// A named function with a test rather than an inline call, because the property under test is
+/// "**this disposal is legal in an async context**", and that is a statement about the disposal, not
+/// about the caller.
+fn discard_losing_runtime(rt: tokio::runtime::Runtime) {
+    rt.shutdown_background();
+}
 
 /// Build the deny lane's runtime, once. Called by `crate::prepare` so failure is a startup failure.
 ///
 /// Idempotent: a second call is a no-op, so tests that build an `AppState` directly (without
-/// `prepare`) reach the same runtime through [`deny_runtime`]'s lazy path.
+/// `prepare`) reach the same runtime through [`spawn_on_deny_lane`]'s lazy path.
+///
+/// **Not race-free at the `get`, and it does not need to be** — the `get` is a fast path, the `set`
+/// is the arbiter, and the loser is disposed of by [`discard_losing_runtime`] rather than dropped
+/// where it stands. Two racers is not a hypothetical: `mount_server`/`spawn_server_from_engine` do
+/// not call `prepare`, so every integration test reaches this through the lazy path, and
+/// `tests/http_write.rs` runs several `/control/changes` cases concurrently in one process.
 pub fn init_deny_runtime() -> std::io::Result<()> {
     if DENY_RUNTIME.get().is_some() {
         return Ok(());
@@ -102,7 +136,9 @@ pub fn init_deny_runtime() -> std::io::Result<()> {
         // be able to tell these apart from tokio's shared pool.
         .thread_name("tessera-deny")
         .build()?;
-    let _ = DENY_RUNTIME.set(rt);
+    if let Err(loser) = DENY_RUNTIME.set(rt) {
+        discard_losing_runtime(loser);
+    }
     Ok(())
 }
 
@@ -610,10 +646,10 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     // remaining `Delete`/`Suppress` is applied to the live overlay by the executor even though its
     // append fails, so the items are hidden and the caller still gets a 500.
     //
-    // The **first** error is the one reported, so the status a caller sees does not depend on which
-    // item happened to fail last. Validation is already wholesale above, so nothing reached here
-    // can be a client-correctable fault: everything below is an infrastructure failure and every
-    // one of them is alarmed individually.
+    // Validation is already wholesale above, so nothing reached here can be a client-correctable
+    // fault: everything below is an infrastructure failure and every one of them is alarmed
+    // individually.
+    //
     // **The batch's answer is a FOLD over dispositions, not the first item's status.** Task 3a
     // reported `first_error`, which is wrong in a way that matters now that the mapping table
     // distinguishes 503 from 500: an item's status describes an item. The constructible bad case is
@@ -623,7 +659,14 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     //
     // So every failure is collected with the count that succeeded, and `map_change_batch_error`
     // decides once, over all of them. See its doc for the rules and for why 500 dominates 503.
-    let mut failures = Vec::new();
+    //
+    // **Each failure is collected WITH ITS OP.** Lifecycle §4's apply-anyway rule is scoped to
+    // `Delete`/`Suppress` and the executor applies exactly that scope, so "did this failure leave an
+    // effect in force?" cannot be answered from the error alone — a `Predicate` whose append failed
+    // was refused without applying, and an op-blind fold reported it as possibly in force *and*
+    // omitted it from the "not applied" half. The op is already in hand here, one line below, so it
+    // is carried rather than re-derived at the fold.
+    let mut failures: Vec<(ChangeOp, AcceptError)> = Vec::new();
     let mut applied = 0usize;
     for change in validated {
         let op = change.op;
@@ -651,7 +694,7 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
                         "wal append/fsync failed for a non-deny change; refusing without applying"
                     );
                 }
-                failures.push(e);
+                failures.push((op, e));
             }
         }
     }
@@ -820,5 +863,49 @@ mod tests {
                 let _ = release_tx.send(());
             }
         });
+    }
+
+    /// **The lazy path must not drop a `Runtime` on the reactor** — found by both fix-round-1 lenses
+    /// independently, and reproducible.
+    ///
+    /// `init_deny_runtime` builds a runtime and then `set`s it. `OnceLock::set` hands the value
+    /// **back** on a lost race, so with `let _ = DENY_RUNTIME.set(rt)` the loser's runtime dropped on
+    /// that statement — and the lazy path is called from inside `changes()`'s async body, where
+    /// `Runtime::drop`'s blocking shutdown panics with "Cannot drop a runtime in a context where
+    /// blocking is not allowed". The panic is in the handler body, so `map_join_error` cannot see it:
+    /// the connection drops with no status at all, which is the I13 violation the design gate used to
+    /// reject a `LazyLock` here.
+    ///
+    /// `prepare` closes it for the shipped binary by initialising before any listener binds. It was
+    /// open for **every integration test** (`mount_server`/`spawn_server_from_engine` never call
+    /// `prepare`) and for embedders, which the lazy path exists for.
+    ///
+    /// Asserted on the disposal itself rather than by racing two `init_deny_runtime` calls, because
+    /// `DENY_RUNTIME` is process-global and any other test in this binary may have already won it.
+    /// **The mutation is [`discard_losing_runtime`]'s body**: replace `shutdown_background()` with
+    /// `drop(rt)` (or delete the function and go back to `let _ = ...set(rt)`) and this panics.
+    ///
+    /// Both flavours, because the two have different blocking-permission machinery and the original
+    /// finding reproduced on both.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_losing_deny_runtime_is_discarded_legally_on_a_multi_thread_reactor() {
+        discard_losing_runtime(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("tessera-deny-loser")
+                .build()
+                .unwrap(),
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_losing_deny_runtime_is_discarded_legally_on_a_current_thread_reactor() {
+        discard_losing_runtime(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("tessera-deny-loser")
+                .build()
+                .unwrap(),
+        );
     }
 }

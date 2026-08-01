@@ -77,12 +77,20 @@ pub async fn healthz() -> StatusCode {
 /// The readiness predicate: **ready iff the write executor is `Running`.**
 ///
 /// A named function over the enum rather than an inline `matches!`, for two reasons. It is
-/// unit-testable across every posture without a running server — and the `Dead` row is *only*
-/// assertable that way, because an HTTP-level "kill the executor, then probe" is a race: the
-/// in-flight `Responder` lives in `Executor::execute`'s frame and drops **before** the death guard
-/// declared in the thread closure, so a caller's error can be observed while the posture still
-/// reads `Running`, and nothing is published after the panic to wait on. It also gives a future
-/// posture variant one obvious place to be classified.
+/// unit-testable across every posture without a running server, which is how the `Dead` row is
+/// asserted today; and it gives a future posture variant one obvious place to be classified.
+///
+/// **Why the `Dead` row is not *also* driven through the socket, stated as the dependency it is.**
+/// Not because the observation would race: [`ExecutorPosture`] is published with `fetch_max` and
+/// `Dead` is its maximum, so the posture is monotone and absorbing — a bounded poll of `/readyz`
+/// after inducing a panic converges or the property is broken, which is exactly the form
+/// `tessera-engine`'s `an_executor_panic_is_reported_dead` already uses, and the form this crate's
+/// own `a_deny_does_not_queue_behind_a_saturated_blocking_pool` accepts for a comparable property.
+/// What is missing is a way to **induce** an executor panic from this crate's test binary: that
+/// needs `tessera-engine`'s `fault-injection` feature as a `tessera-server` dev-dependency, which
+/// Task 3b's design gate deliberately declined (report D4, in favour of the real-`EACCES` route for
+/// the WAL cases). Adding the dev-dependency is what unblocks the end-to-end row; nothing about the
+/// posture's shape does.
 ///
 /// Every non-`Running` posture is not ready, `NotStarted` included. That is not a live state for a
 /// server — [`crate::prepare`] starts the executor and propagates its failure before any listener
@@ -106,11 +114,12 @@ pub async fn readyz(State(state): State<Arc<AppState>>) -> StatusCode {
 mod tests {
     use super::*;
 
-    /// The whole readiness table, including the row no HTTP test can reach deterministically.
+    /// The whole readiness table, including the row no HTTP test reaches today.
     ///
-    /// `Dead` is the row this exists for; see [`is_ready`] for why it cannot be asserted through
-    /// the HTTP surface without a race. The engine-level half — that a panicked executor reaches
-    /// `Dead` at all — is `tessera-engine`'s `an_executor_panic_is_reported_dead`.
+    /// `Dead` is the row this exists for; see [`is_ready`] for what blocks the end-to-end version of
+    /// it (a declined dev-dependency, not a race). The engine-level half — that a panicked executor
+    /// reaches `Dead` at all, and that its in-flight caller is handed `ReceiptLost` — is
+    /// `tessera-engine`'s `an_executor_panic_is_reported_dead`.
     /// `/control/status`'s `posture` strings are an operator-facing contract, so a Rust variant
     /// rename must not silently change one. Pinned here — where `/control/status` is consumed —
     /// rather than beside `as_str`, so the spellings are asserted against the surface that

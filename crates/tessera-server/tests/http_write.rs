@@ -1290,16 +1290,17 @@ async fn readyz_status(server: &TestServer, url: String) -> u16 {
 
 /// **The readiness wiring**: `/readyz` reports the write executor's posture, on every listener.
 ///
-/// Driven with `NotStarted` rather than `Dead`, and the choice is the point. Reaching `Dead`
-/// through this surface means killing the executor and then probing, and there is no condition
-/// published *after* the panic to wait on — the in-flight `Responder` drops before the executor's
-/// death guard, so the caller's error can be observed while the posture still reads `Running`. That
-/// race is recorded in `write.rs`'s drop-guard comment. The `Dead` row is asserted exactly instead,
-/// in `health.rs`'s `only_a_running_executor_is_ready`, and `tessera-engine`'s
-/// `an_executor_panic_is_reported_dead` covers the engine half.
+/// Driven with `NotStarted` rather than `Dead`, and the reason is a **dependency**, not a race.
+/// `ExecutorPosture` is published with `fetch_max`, so it is monotone and `Dead` is absorbing: a
+/// bounded poll of `/readyz` after inducing a panic is sound, and is exactly the form
+/// `tessera-engine`'s `an_executor_panic_is_reported_dead` uses. What this crate's test binary
+/// cannot do is **induce** the panic — that needs `tessera-engine/fault-injection` as a
+/// `tessera-server` dev-dependency, declined at Task 3b's design gate (report D4). The `Dead` row is
+/// asserted exactly instead, in `health.rs`'s `only_a_running_executor_is_ready`.
 ///
 /// **What this leaves uncovered, stated rather than counted as coverage:** no test drives a
-/// panicked executor through the HTTP readiness surface.
+/// panicked executor through the HTTP readiness surface. Taking the dev-dependency is the whole of
+/// what it costs.
 ///
 /// Mutations this kills: `readyz` returning `OK` unconditionally (its Phase 1 body); and
 /// `is_ready` written as `p != Dead`, which this catches and a `Dead`-only test could not.
@@ -1593,6 +1594,17 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
         !detail.contains("refused"),
         "'refused' is false of the apply-anyway case and invites a retry of a suppression that has \
          already taken hold; got: {detail}"
+    );
+    // **Fix round 1: the middle item is a `predicate`, and it was NOT applied.** Lifecycle §4's
+    // apply-anyway rule covers `Delete`/`Suppress` only, and `execute_change` honours that — a
+    // `Predicate` whose append fails is refused without touching the overlay. The op-blind fold
+    // counted it as possibly-in-force along with the two suppressions, so `some_not_applied` was
+    // false and this body never told the operator that a third of their batch had not taken hold.
+    // Constructible with the shape this test already had, which is why the assertion lands here.
+    assert!(
+        detail.contains("NOT applied"),
+        "item 2 is a `predicate`: refused without applying, so the operator must be told to \
+         re-submit rather than assume the whole batch took hold; got: {detail}"
     );
 
     // **The item assertion is the one that discriminates.** C is the third item; a batch that

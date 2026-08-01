@@ -52,11 +52,30 @@ pub enum ApiError {
     /// grounds that a compute-admission saturation clears on one request's timescale, which is not
     /// true of a write queue draining at fsync timescale.
     ///
+    /// **A reading of contracts §3.1 is being taken here, and it should be visible.** The spec's
+    /// 429 row carries the parenthetical "`Retry-After: 1`, fixed" on a subject list that opens with
+    /// ingest, which read literally would forbid this variant's variable value. The reading taken is
+    /// that the fixed-1 rationale belongs to the **compute-admission gate** (D-E's argument, which is
+    /// about a saturation clearing on one request's timescale and says nothing about an fsync-paced
+    /// queue), and that the row's `Retry-After` is a requirement to *carry the header*, not to carry
+    /// that number everywhere. It costs nothing today — the value is 1 either way — and becomes
+    /// wire-visible the moment Task 6 derives it, which is why the reading is recorded now rather
+    /// than discovered then. A §0.3 clarification is proposed to the controller.
+    ///
     /// **`retry_after_s` is carried, not derived — and its only producer hard-codes `1` today**
     /// (`LifecycleHandle::submit`, where the field is labelled a placeholder). Until Task 6 derives
     /// it from window age and observed drain rate, this variant and `Backpressure` are
     /// byte-identical on the wire. The plumbing is what lands now; calling it "derived" before then
     /// would be a doc claiming a property the code does not have.
+    ///
+    /// **The end-to-end "fill the queue, get a 429" is Task 6's, and it is expressible today.** The
+    /// defect this variant closed was the **status** — `QueueFull` was reaching the fail-closed 500
+    /// arm — and a status is discriminable end to end regardless of what `retry_after_s` holds;
+    /// `mount_server` was split out of `spawn_server_from_engine` precisely so a caller can start the
+    /// executor with its own `ingest_queue_bound`. It is deferred because the plan assigns
+    /// `ingest_429s_when_the_queue_is_full` to Task 6 by name, alongside the value derivation the
+    /// same test will want to assert — not because the two 429s' identical *bodies* make it
+    /// impossible. Task 6 should write it.
     ///
     /// **Unreachable from `/control/changes`, twice over.** A `Command::Change` goes to the
     /// unbounded deny lane by `Command::is_never_shed`, so it cannot produce `QueueFull`; and
@@ -337,12 +356,15 @@ pub fn map_wal_error<E: std::fmt::Display>(e: E) -> ApiError {
 /// those *are* families whose members share a status.)
 ///
 /// **Why `ExecutorDead` and `ReceiptLost` cannot share a status.** 503 `not-ready` asserts "this
-/// node did not take your write". That is provable for `ExecutorDead` — every producer is a `send`
-/// that failed, and a failed `send` returns the job — and false for `ReceiptLost`, where the
-/// executor died holding a command it may have appended, fsynced, applied and swapped. A single
-/// 503 over both would report an in-force suppression as a no-op. Found by four independent
-/// reviewers at the Task 3b design gate; the variants were split at the source rather than
-/// papered over here.
+/// node did not take your write". That is provable for `ExecutorDead` — the invariant over its
+/// producers is *non-enqueue is proven*, discharged by a failed `send` (which hands the job back)
+/// for its two send-shaped producers and by "the executor was never started" for the third — and
+/// false for `ReceiptLost`, where the executor died holding a command it may have appended,
+/// fsynced, applied and swapped. A single 503 over both would report an in-force suppression as a
+/// no-op. Found by four independent reviewers at the Task 3b design gate; the variants were split
+/// at the source rather than papered over here, and `tessera-engine`'s
+/// `an_executor_panic_is_reported_dead` pins `ReceiptLost` at its producer so a refactor cannot
+/// quietly merge them back.
 ///
 /// **The detail never reaches the caller** — the same rule as [`map_store_error`]. `ExecError`'s
 /// `Display` composes `WalError`'s, which carries the WAL's filesystem path and the OS error
@@ -441,11 +463,24 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
 /// the un-acked suppressions took hold. Contracts §3.1's body shape is closed
 /// (`{error, detail, retry_after_s?}`), so `detail` is the only channel available and it says both.
 ///
+/// # Why the failures arrive **paired with their op**
+///
+/// Because lifecycle §4's apply-anyway rule is scoped to `Delete`/`Suppress` and the executor
+/// honours that scope (`write.rs`'s `execute_change`: a `Predicate`/`Unsuppress` whose append fails
+/// is refused **without** applying). An op-blind fold over `ExecError::Wal` therefore got **both**
+/// halves wrong on the same batch shape this task's own end-to-end test uses
+/// (`[suppress, predicate, suppress]`): a batch of only failed non-deny ops answered a body
+/// asserting a deletion or suppression "may be in force" when it contained neither, and
+/// `[suppress applied-anyway, unsuppress refused]` never told the operator the unsuppress had not
+/// taken hold. Fail-closed in the disclosure direction both times, and dishonest both times, which
+/// is the thing this function exists to produce. The op is in `run_changes`'s hand at the push, so
+/// it is carried rather than re-derived.
+///
 /// Returns `None` for a batch with no failures: a fold that manufactured an error for a wholly
 /// successful batch would be a 500 on the success path, and making that unrepresentable is cheaper
 /// than documenting a precondition.
 pub fn map_change_batch_error(
-    failures: &[tessera_engine::AcceptError],
+    failures: &[(tessera_lifecycle::ChangeOp, tessera_engine::AcceptError)],
     applied: usize,
 ) -> Option<ApiError> {
     use tessera_engine::AcceptError;
@@ -460,9 +495,10 @@ pub fn map_change_batch_error(
 
     // Rule 2's condition, and it is deliberately the *narrowest* of the three: 503 asserts the node
     // took nothing at all, so anything that reached the executor — including a 409-class refusal,
-    // which is a contract answer and not a readiness fault — disqualifies it.
+    // which is a contract answer and not a readiness fault — disqualifies it. Op-blind on purpose:
+    // "did it reach the executor" is a question about the queue, not about what the command was.
     let reached_executor = applied > 0
-        || failures.iter().any(|f| match f {
+        || failures.iter().any(|(_, f)| match f {
             AcceptError::Exec(_) => true,
             AcceptError::Submit(e) => e.may_have_taken_effect(),
         });
@@ -475,12 +511,16 @@ pub fn map_change_batch_error(
     }
 
     let may_be_in_force = applied > 0
-        || failures.iter().any(|f| match f {
-            AcceptError::Exec(e) => exec_failure_may_be_in_force(e),
+        || failures.iter().any(|(op, f)| match f {
+            AcceptError::Exec(e) => exec_failure_may_be_in_force(*op, e),
             AcceptError::Submit(e) => e.may_have_taken_effect(),
         });
-    let some_not_applied = failures.iter().any(|f| match f {
-        AcceptError::Exec(e) => !exec_failure_may_be_in_force(e),
+    // The exact negation, item by item, so no item can be counted in both halves or in neither. A
+    // `ReceiptLost` is in neither category's *certain* sense — it lands in `may_be_in_force` and out
+    // of this one, which is right: its disposition is unknown, so the operator must not be told it
+    // definitely did not apply.
+    let some_not_applied = failures.iter().any(|(op, f)| match f {
+        AcceptError::Exec(e) => !exec_failure_may_be_in_force(*op, e),
         AcceptError::Submit(e) => !e.may_have_taken_effect(),
     });
 
@@ -494,9 +534,17 @@ pub fn map_change_batch_error(
 
     let mut detail = String::from("this change request was attempted in full and did not complete");
     if may_be_in_force {
+        // **"may be", not "is not durable".** The previous wording asserted non-durability as fact,
+        // which is true of the applied-anyway deny (lifecycle §4 — in force, durability owed) and
+        // false of the other two sources folded in here: a successfully applied item IS durable, and
+        // a lost receipt may have completed the whole `append → fsync → apply → swap` before the ack
+        // was lost. Naming the two mechanisms is what makes the sentence actionable; asserting the
+        // stronger one over all of them is a doc claiming a property the code does not have, which
+        // is the defect class this fix round is mostly made of.
         detail.push_str(
-            "; a deletion or suppression in it may be in force but is not durable, so do not treat \
-             this as a no-op",
+            "; a change in it may be in force — a deny-disposition change whose durability failed \
+             is applied anyway (lifecycle §4), and a command whose receipt was lost may have \
+             completed in full — so do not treat this as a no-op",
         );
     }
     if some_not_applied {
@@ -508,19 +556,35 @@ pub fn map_change_batch_error(
     Some(ApiError::FailClosed(detail))
 }
 
-/// Whether an executed-and-failed change may nonetheless be in force.
+/// Whether an executed-and-failed change may nonetheless be in force — **a question about the op as
+/// much as about the error**.
 ///
-/// Only `Wal` can be: lifecycle §4 applies a `Delete`/`Suppress` whose append failed **anyway**.
+/// Only `Wal` can be, and only for a `Delete`/`Suppress`: lifecycle §4's apply-anyway rule is scoped
+/// to those two ops and `write.rs`'s `execute_change` applies exactly that scope — a
+/// `Predicate`/`Unsuppress` whose append failed is refused **without** being applied, because an
+/// `Unsuppress` applied without durability would re-expose an item that replay still hides. This
+/// function used to return `true` for every `Wal` regardless of op while its own doc stated the
+/// scoping; the code now applies it.
+///
 /// The two 409-class variants are contract answers with no effect by definition (contracts §3.1:
 /// "a 409 batch had **no effect**"), and `Alloc` leaves the high-water unchanged.
 ///
 /// Named rather than folded into a `matches!(.., Exec(_))`, because the four variants genuinely
-/// differ and a wildcard here would over-report — and because Task 8 may make a change 409-able,
-/// at which point this function is where that lands rather than a silent widening.
-fn exec_failure_may_be_in_force(e: &tessera_lifecycle::ExecError) -> bool {
-    use tessera_lifecycle::ExecError;
+/// differ and a wildcard here would over-report.
+///
+/// **Task 8 lands a 409-able change here *and* in the status decision.** If a change op becomes
+/// 409-able, this function classifies its effect — but the *status* the batch answers is decided by
+/// `map_change_batch_error`'s `reached_executor`/`may_be_in_force`/`some_not_applied` block above,
+/// and the single-item status by [`map_accept_error`]'s table. Editing only this function ships a
+/// 500 whose body says "re-submit the whole request" for what contracts §3.1 calls a 409 with no
+/// effect, while `/control/ingest` answers a correct 409 for the identical failure.
+fn exec_failure_may_be_in_force(
+    op: tessera_lifecycle::ChangeOp,
+    e: &tessera_lifecycle::ExecError,
+) -> bool {
+    use tessera_lifecycle::{ChangeOp, ExecError};
     match e {
-        ExecError::Wal(_) => true,
+        ExecError::Wal(_) => matches!(op, ChangeOp::Delete | ChangeOp::Suppress),
         ExecError::BatchConflict { .. } | ExecError::DuplicateExternalId { .. } => false,
         ExecError::Alloc(_) => false,
     }
@@ -549,7 +613,7 @@ mod tests {
     use super::*;
 
     use tessera_engine::AcceptError;
-    use tessera_lifecycle::{ExecError, SubmitError};
+    use tessera_lifecycle::{ChangeOp, ExecError, SubmitError};
 
     fn wal_failure() -> AcceptError {
         AcceptError::Exec(ExecError::Wal(tessera_lifecycle::wal::WalError::Io(
@@ -658,8 +722,14 @@ mod tests {
     #[test]
     fn a_change_batch_that_reached_nothing_is_503() {
         let failures = vec![
-            AcceptError::Submit(SubmitError::ExecutorDead),
-            AcceptError::Submit(SubmitError::ExecutorDead),
+            (
+                ChangeOp::Suppress,
+                AcceptError::Submit(SubmitError::ExecutorDead),
+            ),
+            (
+                ChangeOp::Suppress,
+                AcceptError::Submit(SubmitError::ExecutorDead),
+            ),
         ];
         let (status, code, _) = map_change_batch_error(&failures, 0).unwrap().parts();
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -675,7 +745,10 @@ mod tests {
     /// not applied. One of those alone is not the statement an operator can act on.
     #[test]
     fn a_partially_applied_change_batch_is_500_not_503() {
-        let failures = vec![AcceptError::Submit(SubmitError::ExecutorDead)];
+        let failures = vec![(
+            ChangeOp::Suppress,
+            AcceptError::Submit(SubmitError::ExecutorDead),
+        )];
         let (status, code, detail) = map_change_batch_error(&failures, 1).unwrap().parts();
         assert_eq!(
             status,
@@ -699,8 +772,11 @@ mod tests {
     #[test]
     fn a_wal_failure_then_a_dead_executor_is_500_with_both_halves() {
         let failures = vec![
-            wal_failure(),
-            AcceptError::Submit(SubmitError::ExecutorDead),
+            (ChangeOp::Suppress, wal_failure()),
+            (
+                ChangeOp::Suppress,
+                AcceptError::Submit(SubmitError::ExecutorDead),
+            ),
         ];
         let (status, _, detail) = map_change_batch_error(&failures, 0).unwrap().parts();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -712,7 +788,10 @@ mod tests {
     /// batch cannot claim the node took nothing.
     #[test]
     fn a_lost_receipt_alone_keeps_the_batch_off_the_503_arm() {
-        let failures = vec![AcceptError::Submit(SubmitError::ReceiptLost)];
+        let failures = vec![(
+            ChangeOp::Suppress,
+            AcceptError::Submit(SubmitError::ReceiptLost),
+        )];
         let (status, _, _) = map_change_batch_error(&failures, 0).unwrap().parts();
         assert_eq!(
             status,
@@ -721,15 +800,100 @@ mod tests {
         );
     }
 
+    /// **Fix round 1, half one of the op-blind fold.** A batch whose only failures are *non-deny*
+    /// ops must not claim anything may be in force: `execute_change` refuses a
+    /// `Predicate`/`Unsuppress` whose WAL append failed **without** applying it (lifecycle §4's
+    /// apply-anyway rule is scoped to `Delete`/`Suppress`), so the honest body says only that
+    /// nothing took hold and the operator must re-submit.
+    ///
+    /// The mutation this kills is the shipped one: `exec_failure_may_be_in_force` returning `true`
+    /// for every `ExecError::Wal` regardless of op, while its own doc stated the scoping.
+    #[test]
+    fn a_batch_of_only_refused_non_deny_changes_claims_nothing_is_in_force() {
+        for op in [ChangeOp::Predicate, ChangeOp::Unsuppress] {
+            let failures = vec![(op, wal_failure())];
+            let (status, code, detail) = map_change_batch_error(&failures, 0).unwrap().parts();
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(code, "fail-closed");
+            assert!(
+                !detail.contains("may be in force"),
+                "a refused-not-applied {op:?} leaves no effect; asserting one invites the operator \
+                 to hunt for a deny that is not there. Got: {detail}"
+            );
+            assert!(
+                detail.contains("NOT applied"),
+                "the operator must be told to re-submit; got: {detail}"
+            );
+        }
+    }
+
+    /// **Fix round 1, half two.** The mirror error on the same fold: an applied-anyway `Suppress`
+    /// beside a refused `Unsuppress`. The `Unsuppress` was *not* applied, so the body must say so —
+    /// under the op-blind version it was counted as possibly-in-force and therefore omitted from
+    /// `some_not_applied` entirely, and the operator was never told the unsuppress had not taken
+    /// hold. Both halves, both true.
+    #[test]
+    fn an_applied_anyway_suppress_beside_a_refused_unsuppress_reports_both_halves() {
+        let failures = vec![
+            (ChangeOp::Suppress, wal_failure()),
+            (ChangeOp::Unsuppress, wal_failure()),
+        ];
+        let (status, _, detail) = map_change_batch_error(&failures, 0).unwrap().parts();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            detail.contains("may be in force"),
+            "the suppress was applied anyway (lifecycle §4); got: {detail}"
+        );
+        assert!(
+            detail.contains("NOT applied"),
+            "the unsuppress was refused without applying, and an operator who is not told that \
+             believes the item is visible again; got: {detail}"
+        );
+    }
+
+    /// The classification itself, pinned per op rather than trusted from the fold's behaviour —
+    /// lifecycle §4's scope is the whole content of this function.
+    #[test]
+    fn only_a_deny_ops_wal_failure_may_be_in_force() {
+        let wal = ExecError::Wal(tessera_lifecycle::wal::WalError::Io(std::io::Error::other(
+            "no space left on device",
+        )));
+        assert!(exec_failure_may_be_in_force(ChangeOp::Delete, &wal));
+        assert!(exec_failure_may_be_in_force(ChangeOp::Suppress, &wal));
+        assert!(
+            !exec_failure_may_be_in_force(ChangeOp::Predicate, &wal),
+            "a predicate change whose append failed is refused without applying"
+        );
+        assert!(
+            !exec_failure_may_be_in_force(ChangeOp::Unsuppress, &wal),
+            "an unsuppress applied without durability would re-expose an item replay still hides, \
+             so the executor refuses it — it is never in force"
+        );
+
+        // The 409-class and allocation failures are op-independent: no effect, by definition.
+        for op in [
+            ChangeOp::Delete,
+            ChangeOp::Suppress,
+            ChangeOp::Predicate,
+            ChangeOp::Unsuppress,
+        ] {
+            assert!(!exec_failure_may_be_in_force(
+                op,
+                &ExecError::DuplicateExternalId { count: 1 }
+            ));
+        }
+    }
+
     /// Contracts §3.1: `/control/changes` is **never** load-shed. `QueueFull` is unreachable on
     /// that lane (`Command::is_never_shed` routes a change to the unbounded queue), and the fold
     /// contains no route to 429 regardless — the absence is what survives an edit to
     /// `is_never_shed` that a comment would not.
     #[test]
     fn a_change_batch_never_answers_429() {
-        let failures = vec![AcceptError::Submit(SubmitError::QueueFull {
-            retry_after_s: 1,
-        })];
+        let failures = vec![(
+            ChangeOp::Suppress,
+            AcceptError::Submit(SubmitError::QueueFull { retry_after_s: 1 }),
+        )];
         let (status, code, _) = map_change_batch_error(&failures, 0).unwrap().parts();
         assert_ne!(
             status,

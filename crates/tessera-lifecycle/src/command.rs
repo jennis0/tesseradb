@@ -174,6 +174,13 @@ impl Command {
 /// Every variant must be surfaced. A handle that swallows a dead executor while still returning
 /// 202s is the worst available outcome — the caller believes its write is in flight and it is
 /// not, which for a suppression means an item stays visible with an acknowledgement in hand.
+///
+/// **Deliberately not `#[non_exhaustive]`, and that absence is load-bearing.** `tessera-server`'s
+/// `map_accept_error` names every variant of this enum and of [`ExecError`] with no `_` arm, so a
+/// new variant is an `E0004` there rather than a silent 500 — but only because neither type permits
+/// a cross-crate wildcard. Adding `#[non_exhaustive]` later reads as ordinary API hygiene for a
+/// `pub` enum and would turn that compile error into a permitted catch-all, which is how a new
+/// outcome acquires a status nobody chose for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitError {
     /// The bounded work queue is full → HTTP 429 with `Retry-After: retry_after_s` (contracts
@@ -187,9 +194,19 @@ pub enum SubmitError {
     /// belongs to is disconnected. → HTTP 503 `not-ready`, and the planes report not-ready.
     ///
     /// **Nothing was attempted, and that is a fact about the code rather than an expectation of
-    /// it**: every producer is a `send` that failed, and a failed `send` returns the job rather
-    /// than enqueuing it. That is what makes 503 — "this node did not take your write" — honest
-    /// here and dishonest for [`SubmitError::ReceiptLost`].
+    /// it.** The invariant every producer must satisfy is *non-enqueue is proven* — not the
+    /// syntactic test an earlier revision gave ("every producer is a `send` that failed"), which
+    /// already failed for one of the three: `WritePath::handle` produces this from
+    /// `self.handle.as_ref().ok_or(..)`, where there is no channel to send on because the executor
+    /// was never started. That conclusion is *stronger* than a failed send, so the mapping is right;
+    /// stating the weaker syntactic rule invites a future producer to be checked against a test its
+    /// own siblings fail. The two send-shaped producers are instances of the invariant:
+    /// `Sender::send`/`try_send` hand the job **back** inside their error, so a failed send is a
+    /// proof of non-enqueue.
+    ///
+    /// That invariant is what makes 503 — "this node did not take your write" — honest here and
+    /// dishonest for [`SubmitError::ReceiptLost`]. A new producer belongs here only if it can prove
+    /// the same thing; if it cannot, it is a `ReceiptLost`.
     ///
     /// Reachable from **both** lanes: a deny is never refused for *load*, which is not the same
     /// as never refused. There is no honest 200 to give when there is nothing left to apply it.
@@ -206,6 +223,15 @@ pub enum SubmitError {
     /// Two producers, and both are genuinely post-enqueue: a disconnected doorbell (rung *after*
     /// the job is in the queue, and the executor's shutdown pass drains and **executes** the deny
     /// queue before it observes the disconnect), and a dropped responder.
+    ///
+    /// **Only the dropped responder is reachable on the panic path today, and the reason is a field
+    /// order.** `LifecycleQueues` declares `work, deny, bell`, so during the executor's unwind the
+    /// two job receivers disconnect *before* the bell does — a submitter racing that window is
+    /// refused at its `send` with [`SubmitError::ExecutorDead`] and returns before the bell is rung.
+    /// The doorbell producer is therefore a correct answer to a state nothing currently reaches, kept
+    /// because reordering those fields (or giving the bell an independent lifetime) makes it live,
+    /// and the answer it gives is the right one either way. `tessera-engine`'s
+    /// `an_executor_panic_is_reported_dead` pins the reachable one at its producer.
     ///
     /// Stage 2.1 makes this narrow — nothing fallible sits between the swap and the ack — but
     /// Task 7a widens it structurally: a commit window performs one swap and then acks N waiters
