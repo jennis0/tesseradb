@@ -25,7 +25,7 @@
 //! `"60s"` sketch, taken deliberately so a value's unit survives being read out of a log line or
 //! a status payload without its key.
 //!
-//! **Two of the fourteen are inert this stage**: `flush_max_items` and `flush_max_age_secs` are
+//! **Two of the fifteen are inert this stage**: `flush_max_items` and `flush_max_age_secs` are
 //! parsed, validated and stored, and *nothing reads them*, because flush does not exist until
 //! stage 2.2. [`tests::the_flush_knobs_are_inert`] asserts that mechanically, so an operator
 //! cannot set one and believe it works without this file's doc having been changed first.
@@ -126,6 +126,39 @@ pub enum ConfigError {
         key: &'static str,
         consequence: &'static str,
     },
+    /// **Task 6, relation 1 (lifecycle §4's headroom rule).** The ingest queue's worst-case byte
+    /// footprint, plus the bytes reserved for change records, does not sit strictly below the WAL's
+    /// configured ceiling — so a full ingest queue could consume the room a deny needs, and a deny
+    /// is never refused for load and has no admission control of its own to fall back on.
+    ///
+    /// Names **both** sides, and the third operand it is a product of, because an operator who is
+    /// told only "the relation fails" cannot tell which of three knobs to move.
+    WalHeadroom {
+        queue_worst_case: u64,
+        reserved_deny_headroom: u64,
+        wal_hard_limit_bytes: u64,
+        ingest_queue_bound: usize,
+        ingest_max_batch_bytes: usize,
+    },
+    /// **Task 6, relation 1, unrepresentable.** `ingest_queue_bound × ingest_max_batch_bytes`, or
+    /// that product plus the reserved deny headroom, overflows `u64`.
+    ///
+    /// Refused rather than wrapped, for [`crate::validate_cache_bounds`]'s reason verbatim: a wrap
+    /// produces a *small* left-hand side, i.e. it silently admits exactly the collapsing
+    /// configuration this relation exists to refuse.
+    WalHeadroomOverflow {
+        ingest_queue_bound: usize,
+        ingest_max_batch_bytes: usize,
+    },
+    /// **Task 6, relation 2.** The serving runtime's blocking pool would have to be sized past
+    /// [`SERVING_BLOCKING_THREAD_CEILING`] to cover its declared consumers — see
+    /// [`serving_blocking_threads`] for what those are and why the pool is derived rather than
+    /// assumed. Both operands are named because both are knobs.
+    BlockingThreadCeiling {
+        compute_admission: usize,
+        ingest_admission: usize,
+        required: usize,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -223,6 +256,54 @@ impl std::fmt::Display for ConfigError {
                 "{key} = 0 is degenerate, not 'off': {consequence}. Startup refuses rather than \
                  clamping, so a typo cannot quietly disable a mechanism"
             ),
+            ConfigError::WalHeadroom {
+                queue_worst_case,
+                reserved_deny_headroom,
+                wal_hard_limit_bytes,
+                ingest_queue_bound,
+                ingest_max_batch_bytes,
+            } => write!(
+                f,
+                "the ingest queue's worst case ({ingest_queue_bound} × {ingest_max_batch_bytes} B \
+                 = {queue_worst_case} B) plus the {reserved_deny_headroom} B reserved for change \
+                 records is {} B, which does not sit strictly below ingest.wal_hard_limit_bytes = \
+                 {wal_hard_limit_bytes} B. Refusing to start: a full ingest queue could then \
+                 consume the WAL room a deletion or suppression needs, and denies are NEVER \
+                 refused for load (contracts §3.1), so they have no admission control of their own \
+                 to fall back on — the failure would be an append error on a security operation, \
+                 not a 429 on an ingest. Lower ingest.ingest_queue_bound or \
+                 ingest.ingest_max_batch_bytes, or raise ingest.wal_hard_limit_bytes. Note that \
+                 the same {queue_worst_case} B is ALSO resident heap while it is queued — queued \
+                 commands hold their rows in memory — and nothing enforces that half",
+                queue_worst_case.saturating_add(*reserved_deny_headroom)
+            ),
+            ConfigError::WalHeadroomOverflow {
+                ingest_queue_bound,
+                ingest_max_batch_bytes,
+            } => write!(
+                f,
+                "ingest.ingest_queue_bound ({ingest_queue_bound}) × ingest.ingest_max_batch_bytes \
+                 ({ingest_max_batch_bytes} B) overflows u64, so no WAL ceiling could satisfy the \
+                 headroom relation. Refusing to start rather than wrapping: a wrap produces a \
+                 SMALL worst case, i.e. it would silently admit exactly the configuration this \
+                 check exists to refuse"
+            ),
+            ConfigError::BlockingThreadCeiling {
+                compute_admission,
+                ingest_admission,
+                required,
+            } => write!(
+                f,
+                "serve.compute_admission ({compute_admission}) + ingest.ingest_admission \
+                 ({ingest_admission}) + the reserve needs a blocking pool of {required} threads, \
+                 above the {SERVING_BLOCKING_THREAD_CEILING}-thread ceiling. Refusing to start: \
+                 each blocking thread carries a 2 MiB stack, so this configuration asks for \
+                 {} GiB of thread stacks alone. Lower serve.compute_admission or \
+                 ingest.ingest_admission. (The pool is SIZED from these two knobs rather than \
+                 assumed — an admitted request can never find no thread — so this refusal is about \
+                 the machine, not about the relation between them.)",
+                (*required as u64 * 2) / 1024
+            ),
         }
     }
 }
@@ -281,6 +362,8 @@ struct RawIngest {
     commit_window_max_age_ms: Option<u64>,
     #[serde(default)]
     ingest_queue_bound: Option<usize>,
+    #[serde(default)]
+    ingest_admission: Option<usize>,
     #[serde(default)]
     ingest_max_batch_rows: Option<usize>,
     #[serde(default)]
@@ -432,6 +515,10 @@ pub struct Config {
     /// **Task 6** — the bounded work queue's depth; full is a 429 with `retry_after_s`.
     /// See [`DEFAULT_INGEST_QUEUE_BOUND`]. The deny queue is unbounded and this never bounds it.
     pub ingest_queue_bound: usize,
+    /// **Task 6** — concurrent `/control/ingest` handlers admitted; over is 429. See
+    /// [`DEFAULT_INGEST_ADMISSION`]. Distinct from [`Config::ingest_queue_bound`], which bounds
+    /// *queued commands*: the two bound different resources and move independently.
+    pub ingest_admission: usize,
     /// **Task 6** — per-request row cap on `/control/ingest`; over is 422 (contracts §3.1).
     /// See [`DEFAULT_INGEST_MAX_BATCH_ROWS`].
     pub ingest_max_batch_rows: usize,
@@ -640,6 +727,98 @@ const DEFAULT_COMMIT_WINDOW_MAX_AGE_MS: u64 = 200;
 /// 46.4 GB RSS), so this is deliberately a small number: backpressure that arrives early is a
 /// working queue, backpressure that arrives at the OOM killer is not.
 const DEFAULT_INGEST_QUEUE_BOUND: usize = 64;
+
+/// Task 6: concurrent `/control/ingest` handlers admitted at once. Over is a 429 with its own
+/// derived `retry_after_s`; the refusal costs no blocking thread, no queue slot and no WAL byte.
+///
+/// **It bounds blocking-pool threads. It does not bound queued commands, and it does not bound
+/// heap.** [`DEFAULT_INGEST_QUEUE_BOUND`] does the first of those; nothing does the second beyond
+/// the byte cap's arithmetic. The distinction is the whole reason this is a separate key.
+///
+/// # Why this is not derived from `ingest_queue_bound`
+///
+/// The tempting derivation is "admitting more concurrent handlers than the queue can hold buys
+/// nothing, since the surplus can only 429 anyway". That is false, and the refutation is what makes
+/// this a key rather than an expression. An ingest handler holds a blocking thread across:
+///
+/// - Arrow decode, the plugin's `terms_of_label` loop, `resolve_terms` and the external-ID sidecar
+///   lookup — during which it holds **no queue slot at all**, because it has not submitted yet; and
+/// - its whole blocking wait on the executor's receipt — during which it *also* holds no queue slot,
+///   because the executor has dequeued the command and is running it.
+///
+/// So the useful concurrency is the queue's depth **plus** the handlers doing pre-submit work, and
+/// setting this equal to the queue bound truncates that second term to zero. The two numbers are
+/// equal at the defaults by choice, not by derivation: tying them would mean an operator raising
+/// `ingest_queue_bound` for burst tolerance — a *heap* decision — silently raising blocking-thread
+/// demand and moving [`serving_blocking_threads`]'s arithmetic under their feet.
+///
+/// 64 against the default pool leaves the viewer plane its whole `compute_admission`, by
+/// construction rather than by luck — see [`serving_blocking_threads`].
+const DEFAULT_INGEST_ADMISSION: usize = 64;
+
+/// Task 6: the WAL bytes reserved for change records above the ingest queue's own worst case.
+///
+/// **Argued from the record, not chosen for roundness.** A change record is an op, an entity id and
+/// a caller-supplied external id capped at 64 bytes (`control.rs`'s `EXTERNAL_ID_MAX_LEN`) plus its
+/// descriptors — order 200 B — so 1 GiB is room for roughly five million deny appends *above a
+/// completely full ingest queue*. Denies are never refused for load (contracts §3.1) and so have no
+/// admission control of their own to fall back on, which is why this is a term in the startup
+/// relation and not a comment beside it (lifecycle §4's headroom rule).
+const RESERVED_DENY_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Task 6: blocking threads held back for work that is not one of the two admission-bounded
+/// consumers [`serving_blocking_threads`] enumerates.
+///
+/// The one such consumer that exists is [`crate::control`]'s `spawn_on_deny_lane` **fallback**: if
+/// the deny runtime is unavailable it alarms and runs the suppression on the shared pool, because
+/// running there beats refusing a security operation. That is a last resort, so the right size for
+/// it is a reserve, not a mechanism.
+const BLOCKING_THREAD_RESERVE: usize = 32;
+
+/// Task 6: the ceiling on the serving runtime's blocking pool, and the right-hand side of the
+/// second startup relation.
+///
+/// **This is not a bound the arithmetic has to fit under by luck** — [`serving_blocking_threads`]
+/// *derives* the pool from its declared consumers, so there is no configuration in which an
+/// admitted request finds no thread. What this ceiling refuses is a configuration that would size
+/// an OS-thread pool past what the machine can carry: tokio's blocking threads take a 2 MiB stack
+/// each, so 4096 of them is 8 GiB of stacks. Without it, `serve.compute_admission` is an operator
+/// number with nothing between it and the address space.
+///
+/// It governs the **serving** pool. The deny lane has its own runtime with its own pool
+/// (`control::DENY_MAX_BLOCKING_THREADS`), and this number does not cover it — deliberately, since
+/// the whole point of that lane is that it is not sized against ingest.
+pub const SERVING_BLOCKING_THREAD_CEILING: usize = 4096;
+
+/// The serving runtime's `max_blocking_threads`, derived from the config's declared consumers.
+///
+/// **Every consumer of the shared blocking pool is one of these, and the list is an enumeration
+/// rather than an estimate** — verified by grep at Task 6, not assumed:
+///
+/// - the viewer/session closures (`/v1/viewport`, `/v1/items`, `/session/authorise`), each of which
+///   awaits `ComputeGate::admit` **before** `spawn_blocking`, so at most `compute_admission` of them
+///   hold a thread. `compute_queue` is deliberately **not** a term: a queued request is parked on a
+///   semaphore and holds no thread;
+/// - `/control/ingest`, at most `ingest_admission` as of Task 6;
+/// - `/control/changes`, which contributes **zero** because it runs on its own runtime with its own
+///   pool (Task 3b) — except on that lane's alarmed fallback, which [`BLOCKING_THREAD_RESERVE`]
+///   covers.
+///
+/// **Called by `tessera-cli`'s runtime builder, which is the only reason this is `pub`.** Before
+/// Task 6 no line of this repository stated the pool's size at all: it was tokio's undeclared
+/// default, which a tokio upgrade or an embedder's own builder invalidates in silence. Deriving it
+/// from the consumers is stronger than asserting a constant covers them — an operator who raises
+/// `compute_admission` gets a pool that fits, rather than a refusal telling them to lower it again.
+///
+/// Embedders and every integration test build their own runtime and get none of this. What they
+/// keep is the *mechanism* — the ingest admission semaphore is an `AppState` field, so every server
+/// however constructed has one — and what they lose is only the sizing.
+pub fn serving_blocking_threads(config: &Config) -> usize {
+    config
+        .compute_admission
+        .saturating_add(config.ingest_admission)
+        .saturating_add(BLOCKING_THREAD_RESERVE)
+}
 
 /// Task 6: per-request row cap on `/control/ingest`; over is 422 (contracts §3.1).
 ///
@@ -985,10 +1164,10 @@ fn parse(text: &str) -> Result<Config> {
         return Err(ConfigError::AdmissionTimeoutZero);
     }
 
-    // The Phase 2 stage-2.1 knobs (Task 0b). All fourteen default (SA §7: performance knobs
-    // default, disclosure controls do not — none of these is a disclosure control); all fourteen
-    // refuse a zero, each with its own silent failure named. No consumer is wired here: every one
-    // is read by a later task, and two of them (`flush_*`) by a later *stage*.
+    // The Phase 2 stage-2.1 knobs (Task 0b, plus `ingest_admission` at Task 6). All fifteen
+    // default (SA §7: performance knobs default, disclosure controls do not — none of these is a
+    // disclosure control); all fifteen refuse a zero, each with its own silent failure named. Two
+    // of them (`flush_*`) are still read by nothing until stage 2.2.
     let commit_window_max_items = non_zero_usize(
         "ingest.commit_window_max_items",
         raw.ingest
@@ -1011,9 +1190,23 @@ fn parse(text: &str) -> Result<Config> {
         raw.ingest
             .ingest_queue_bound
             .unwrap_or(DEFAULT_INGEST_QUEUE_BOUND),
-        "a zero-depth work queue is a rendezvous, not a bound: submissions block until the \
-         executor picks them up instead of being shed with 429, so backpressure becomes an \
-         unbounded wait with no signal",
+        // **Corrected at Task 6 against the code.** This string used to say a zero-depth queue
+        // makes submissions "block until the executor picks them up instead of being shed with
+        // 429". It does the opposite: `LifecycleHandle::submit` uses `try_send` and
+        // `Executor::run` takes work with `try_recv`, never blocking in `work.recv()`, so a
+        // rendezvous channel has no waiting receiver ever and EVERY ingest is refused. That is
+        // worse than the stated failure and it is what an operator needs to be told.
+        "a zero-depth work queue is a rendezvous with nobody waiting at it: the executor takes \
+         work with try_recv, so a zero bound refuses EVERY ingest with 429 while denies continue \
+         normally — indistinguishable from ingest being switched off, but silently",
+    )?;
+    let ingest_admission = non_zero_usize(
+        "ingest.ingest_admission",
+        raw.ingest
+            .ingest_admission
+            .unwrap_or(DEFAULT_INGEST_ADMISSION),
+        "zero concurrent ingest handlers admits no ingest at all — every batch is shed with 429 \
+         before it is even decoded, which is indistinguishable from the write executor being down",
     )?;
     let ingest_max_batch_rows = non_zero_usize(
         "ingest.ingest_max_batch_rows",
@@ -1103,6 +1296,55 @@ fn parse(text: &str) -> Result<Config> {
          than bounding it",
     )?;
 
+    // ---------------------------------------------------------------------------------------
+    // Task 6: the two startup relations (D4). Both refuse naming both sides.
+    //
+    // They live here rather than in `prepare` for the reason the `compute_admission + \
+    // compute_queue` check above does: cross-key validation is this function's job, and a refusal
+    // expressible at `parse()` is testable without a bundle, a WAL or a listener.
+    // ---------------------------------------------------------------------------------------
+
+    // Relation 1 — WAL bytes (lifecycle §4's headroom rule). `checked_*` throughout, for
+    // `validate_cache_bounds`' reason verbatim: a wrap produces a *small* left-hand side, i.e. it
+    // silently admits exactly the collapsing configuration this refuses.
+    let queue_worst_case = (ingest_queue_bound as u64)
+        .checked_mul(ingest_max_batch_bytes as u64)
+        .ok_or(ConfigError::WalHeadroomOverflow {
+            ingest_queue_bound,
+            ingest_max_batch_bytes,
+        })?;
+    let required_wal = queue_worst_case
+        .checked_add(RESERVED_DENY_HEADROOM_BYTES)
+        .ok_or(ConfigError::WalHeadroomOverflow {
+            ingest_queue_bound,
+            ingest_max_batch_bytes,
+        })?;
+    // **Strictly** below: at equality a full ingest queue plus the reserve exactly consumes the
+    // ceiling, leaving the next deny nothing.
+    if required_wal >= wal_hard_limit_bytes {
+        return Err(ConfigError::WalHeadroom {
+            queue_worst_case,
+            reserved_deny_headroom: RESERVED_DENY_HEADROOM_BYTES,
+            wal_hard_limit_bytes,
+            ingest_queue_bound,
+            ingest_max_batch_bytes,
+        });
+    }
+
+    // Relation 2 — blocking threads. The pool is *derived* from its two admission-bounded
+    // consumers (see `serving_blocking_threads`), so what is refused here is a pool the machine
+    // cannot carry, not an imbalance between the knobs.
+    let required_threads = compute_admission
+        .saturating_add(ingest_admission)
+        .saturating_add(BLOCKING_THREAD_RESERVE);
+    if required_threads > SERVING_BLOCKING_THREAD_CEILING {
+        return Err(ConfigError::BlockingThreadCeiling {
+            compute_admission,
+            ingest_admission,
+            required: required_threads,
+        });
+    }
+
     Ok(Config {
         bundle_path: raw.bundle.path,
         cache_dir: raw.bundle.cache,
@@ -1135,6 +1377,7 @@ fn parse(text: &str) -> Result<Config> {
         commit_window_max_items,
         commit_window_max_age_ms,
         ingest_queue_bound,
+        ingest_admission,
         ingest_max_batch_rows,
         ingest_max_batch_bytes,
         wal_hard_limit_bytes,
@@ -1471,6 +1714,7 @@ mod tests {
             DEFAULT_COMMIT_WINDOW_MAX_AGE_MS
         );
         assert_eq!(config.ingest_queue_bound, DEFAULT_INGEST_QUEUE_BOUND);
+        assert_eq!(config.ingest_admission, DEFAULT_INGEST_ADMISSION);
         assert_eq!(config.ingest_max_batch_rows, DEFAULT_INGEST_MAX_BATCH_ROWS);
         assert_eq!(
             config.ingest_max_batch_bytes,
@@ -1494,7 +1738,7 @@ mod tests {
     }
 
     /// And the keys are actually wired to their fields — a defaults test alone would pass just as
-    /// happily against fourteen constants nothing parses. One key per section, plus the byte- and
+    /// happily against fifteen constants nothing parses. One key per section, plus the byte- and
     /// duration-typed shapes, so a mis-sectioned or mis-typed key is caught here.
     #[test]
     fn the_stage_2_1_knobs_are_read_from_their_sections() {
@@ -1502,17 +1746,20 @@ mod tests {
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
         let config = parse(&valid_toml_with(
             "pin_ttl_secs = 42\nrow_projection_cache_bytes = 777000000",
-            "commit_window_max_items = 7\nwal_hard_limit_bytes = 999000000",
+            // 3 GiB + a bit: this key is now an operand of Task 6's startup relation, so a value
+            // chosen only for legibility (it was 999000000) makes the whole config refuse to
+            // start. Kept above `queue worst case + reserved deny headroom` at the defaults.
+            "commit_window_max_items = 7\nwal_hard_limit_bytes = 3000000000",
         ))
         .expect("must load");
         assert_eq!(config.pin_ttl_secs, 42);
         assert_eq!(config.row_projection_cache_bytes, 777_000_000);
         assert_eq!(config.commit_window_max_items, 7);
-        assert_eq!(config.wal_hard_limit_bytes, 999_000_000);
+        assert_eq!(config.wal_hard_limit_bytes, 3_000_000_000);
     }
 
     /// Every stage-2.1 knob refuses a zero, and refuses it by *name*. Zero is degenerate for all
-    /// fourteen — never "off" — and the failure modes are silent ones: a window that batches
+    /// fifteen — never "off" — and the failure modes are silent ones: a window that batches
     /// nothing, a queue that blocks instead of shedding, an alarm that never stops firing, a
     /// cache that turns every request into a 429. Same discipline as `k_min = 0`.
     ///
@@ -1528,6 +1775,7 @@ mod tests {
             "commit_window_max_items",
             "commit_window_max_age_ms",
             "ingest_queue_bound",
+            "ingest_admission",
             "ingest_max_batch_rows",
             "ingest_max_batch_bytes",
             "wal_hard_limit_bytes",
@@ -1544,8 +1792,9 @@ mod tests {
         ];
         assert_eq!(
             ingest_keys.len() + serve_keys.len(),
-            14,
-            "the plan lands fourteen keys; this table must cover all of them"
+            15,
+            "the plan lands fourteen keys and Task 6 adds ingest_admission; this table must cover \
+             all of them"
         );
 
         for key in ingest_keys {
@@ -1703,29 +1952,161 @@ mod tests {
         out
     }
 
-    /// The defaults are a *consistent set*, not fourteen independent numbers. Task 6 asserts at
-    /// startup that `ingest_queue_bound × ingest_max_batch_bytes`, plus reserved deny headroom,
-    /// sits strictly below `wal_hard_limit_bytes`. That assertion does not exist yet — but if the
-    /// defaults do not satisfy it, the *default* configuration will refuse to start the day it
-    /// lands, which is not a default. Checked here so a later edit to one constant cannot break
-    /// the relation silently.
+    /// The defaults are a *consistent set*, not fifteen independent numbers. Task 6 refuses to
+    /// start unless `ingest_queue_bound × ingest_max_batch_bytes`, plus
+    /// [`RESERVED_DENY_HEADROOM_BYTES`], sits strictly below `wal_hard_limit_bytes` — so if the
+    /// defaults did not satisfy it, the *default* configuration would refuse to start, which is
+    /// not a default. Checked here so a later edit to one constant cannot break the relation
+    /// silently, and against **the constant the check uses**: the earlier version of this test
+    /// asserted `queue_worst_case × 2 < ceiling` as "the shape of the choice Task 6 will make",
+    /// which would have gone on passing had Task 6 reserved something else.
     #[test]
     fn defaults_satisfy_task_6s_headroom_relation() {
         let queue_worst_case =
             DEFAULT_INGEST_QUEUE_BOUND as u64 * DEFAULT_INGEST_MAX_BATCH_BYTES as u64;
         assert!(
-            queue_worst_case < DEFAULT_WAL_HARD_LIMIT_BYTES,
-            "queue worst case {queue_worst_case} B does not fit under the WAL ceiling \
+            queue_worst_case + RESERVED_DENY_HEADROOM_BYTES < DEFAULT_WAL_HARD_LIMIT_BYTES,
+            "queue worst case {queue_worst_case} B plus {RESERVED_DENY_HEADROOM_BYTES} B of \
+             reserved deny headroom does not fit strictly under the WAL ceiling \
              {DEFAULT_WAL_HARD_LIMIT_BYTES} B"
         );
-        // And with room to spare, because denies are never shed for load and so have no
-        // admission control of their own to fall back on when the ingest queue is full. Task 6
-        // chooses the reserved figure; this asserts the shape of the choice — the queue may not
-        // be able to consume even half the ceiling.
+    }
+
+    /// The second relation's defaults, for the same reason: the serving blocking pool is *derived*
+    /// from `compute_admission + ingest_admission + reserve`, and a default configuration whose
+    /// derived pool exceeded [`SERVING_BLOCKING_THREAD_CEILING`] would refuse to start.
+    ///
+    /// The default `compute_admission` is machine-dependent (`4 ×` available parallelism), so this
+    /// asserts the property at the **largest machine the ceiling admits** rather than at this
+    /// box's: `compute_admission` may be up to `ceiling − ingest_admission − reserve`, which at the
+    /// current constants is 4000, i.e. a 1000-core box. That is the honest statement of the bite.
+    #[test]
+    fn defaults_satisfy_task_6s_blocking_thread_relation() {
+        let headroom = SERVING_BLOCKING_THREAD_CEILING - DEFAULT_INGEST_ADMISSION;
         assert!(
-            queue_worst_case * 2 < DEFAULT_WAL_HARD_LIMIT_BYTES,
-            "a full ingest queue may not be able to claim half the WAL ceiling; denies need \
-             headroom above it"
+            headroom > BLOCKING_THREAD_RESERVE,
+            "the default ingest admission plus the reserve already fills the blocking-thread \
+             ceiling, leaving the viewer plane nothing"
+        );
+        let admissible_cores = (headroom - BLOCKING_THREAD_RESERVE) / COMPUTE_ADMISSION_MULTIPLIER;
+        assert!(
+            admissible_cores >= 256,
+            "a default configuration must start on any machine this project could plausibly be \
+             deployed on; the ceiling currently admits only {admissible_cores} cores"
+        );
+    }
+
+    /// **Task 6, D4.** Both relations refuse, and each refusal names both of its operands.
+    ///
+    /// Two legs in one test deliberately: the deliverable is "*the* startup headroom assertion",
+    /// and a reader checking it should see both halves and their two different shapes — one is a
+    /// relation between operator values, the other is a ceiling on a derived resource.
+    #[test]
+    fn headroom_arithmetic_is_checked_at_startup() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+
+        // Leg 1 — WAL bytes. A queue deep enough that its worst case plus the reserve does not fit
+        // under the configured ceiling.
+        let err = parse(&valid_toml_with(
+            "",
+            "ingest_queue_bound = 1024\ningest_max_batch_bytes = 16777216\n\
+             wal_hard_limit_bytes = 8589934592",
+        ))
+        .unwrap_err();
+        let ConfigError::WalHeadroom {
+            queue_worst_case,
+            wal_hard_limit_bytes,
+            ..
+        } = err
+        else {
+            panic!("a queue whose worst case exceeds the WAL ceiling must refuse to start: {err}");
+        };
+        assert_eq!(queue_worst_case, 1024 * 16 * 1024 * 1024);
+        assert_eq!(wal_hard_limit_bytes, 8 * 1024 * 1024 * 1024);
+        // Both sides in the message, so an operator can act without reading this file.
+        let text = ConfigError::WalHeadroom {
+            queue_worst_case,
+            reserved_deny_headroom: RESERVED_DENY_HEADROOM_BYTES,
+            wal_hard_limit_bytes,
+            ingest_queue_bound: 1024,
+            ingest_max_batch_bytes: 16 * 1024 * 1024,
+        }
+        .to_string();
+        assert!(text.contains(&queue_worst_case.to_string()), "{text}");
+        assert!(text.contains(&wal_hard_limit_bytes.to_string()), "{text}");
+        assert!(
+            text.contains(&RESERVED_DENY_HEADROOM_BYTES.to_string()),
+            "the reserved deny headroom is the term that makes this relation more than \
+             'the queue fits'; it must be named: {text}"
+        );
+
+        // The same configuration one byte of ceiling above the requirement loads, which is what
+        // makes the leg above a statement about the relation rather than about the numbers.
+        let ok_ceiling = 1024u64 * 16 * 1024 * 1024 + RESERVED_DENY_HEADROOM_BYTES + 1;
+        let config = parse(&valid_toml_with(
+            "",
+            &format!(
+                "ingest_queue_bound = 1024\ningest_max_batch_bytes = 16777216\n\
+                 wal_hard_limit_bytes = {ok_ceiling}"
+            ),
+        ))
+        .expect("strictly below the ceiling must load");
+        assert_eq!(config.wal_hard_limit_bytes, ok_ceiling);
+
+        // Leg 2 — blocking threads.
+        let err = parse(&valid_toml_with(
+            &format!("compute_admission = {SERVING_BLOCKING_THREAD_CEILING}"),
+            "",
+        ))
+        .unwrap_err();
+        let ConfigError::BlockingThreadCeiling {
+            compute_admission,
+            ingest_admission,
+            required,
+        } = err
+        else {
+            panic!("a blocking pool above the ceiling must refuse to start: {err}");
+        };
+        assert_eq!(compute_admission, SERVING_BLOCKING_THREAD_CEILING);
+        assert_eq!(ingest_admission, DEFAULT_INGEST_ADMISSION);
+        assert_eq!(
+            required,
+            SERVING_BLOCKING_THREAD_CEILING + DEFAULT_INGEST_ADMISSION + BLOCKING_THREAD_RESERVE
+        );
+        let text = ConfigError::BlockingThreadCeiling {
+            compute_admission,
+            ingest_admission,
+            required,
+        }
+        .to_string();
+        assert!(text.contains(&compute_admission.to_string()), "{text}");
+        assert!(text.contains(&ingest_admission.to_string()), "{text}");
+    }
+
+    /// The pool is **derived from its consumers**, not a constant they must fit under — which is
+    /// the whole reason a 128-core box does not refuse to start. Mutating
+    /// [`serving_blocking_threads`] to return a constant makes this red.
+    #[test]
+    fn the_serving_blocking_pool_covers_its_declared_consumers() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        // 128 cores' worth of compute admission: comfortably past tokio's undeclared 512 default,
+        // which is the figure this task replaced.
+        let config = parse(&valid_toml_with(
+            "compute_admission = 512",
+            "ingest_admission = 64",
+        ))
+        .expect("a large but serviceable machine must start");
+        let pool = serving_blocking_threads(&config);
+        assert!(
+            pool >= config.compute_admission + config.ingest_admission,
+            "the pool ({pool}) must cover both admission bounds, or an admitted request can find \
+             no blocking thread — the failure Task 6's D2 exists to prevent"
+        );
+        assert!(
+            pool > 512,
+            "and it must not be pinned to tokio's old default"
         );
     }
 

@@ -52,30 +52,22 @@ pub enum ApiError {
     /// grounds that a compute-admission saturation clears on one request's timescale, which is not
     /// true of a write queue draining at fsync timescale.
     ///
-    /// **A reading of contracts §3.1 is being taken here, and it should be visible.** The spec's
-    /// 429 row carries the parenthetical "`Retry-After: 1`, fixed" on a subject list that opens with
-    /// ingest, which read literally would forbid this variant's variable value. The reading taken is
-    /// that the fixed-1 rationale belongs to the **compute-admission gate** (D-E's argument, which is
-    /// about a saturation clearing on one request's timescale and says nothing about an fsync-paced
-    /// queue), and that the row's `Retry-After` is a requirement to *carry the header*, not to carry
-    /// that number everywhere. It costs nothing today — the value is 1 either way — and becomes
-    /// wire-visible the moment Task 6 derives it, which is why the reading is recorded now rather
-    /// than discovered then. A §0.3 clarification is proposed to the controller.
+    /// **The value is per-subject, and that is now contract** — contracts §3.1's 429 row and §0.3
+    /// **deviation 11** (r10, 2026-08-01). What every 429 on every plane must carry is the
+    /// `Retry-After` header and a body `retry_after_s` holding the same number; what is *not*
+    /// contract is that the number is `1` anywhere but the compute-admission gate. Task 3b took
+    /// that reading at implementation and recorded it here as unratified; it has since been
+    /// ratified, and deviation 11 spells out the consequence this variant exists to make possible —
+    /// "a caller that retries at 1 s against a queue draining in 30 s manufactures exactly the load
+    /// the 429 exists to shed".
     ///
-    /// **`retry_after_s` is carried, not derived — and its only producer hard-codes `1` today**
-    /// (`LifecycleHandle::submit`, where the field is labelled a placeholder). Until Task 6 derives
-    /// it from window age and observed drain rate, this variant and `Backpressure` are
-    /// byte-identical on the wire. The plumbing is what lands now; calling it "derived" before then
-    /// would be a doc claiming a property the code does not have.
-    ///
-    /// **The end-to-end "fill the queue, get a 429" is Task 6's, and it is expressible today.** The
-    /// defect this variant closed was the **status** — `QueueFull` was reaching the fail-closed 500
-    /// arm — and a status is discriminable end to end regardless of what `retry_after_s` holds;
-    /// `mount_server` was split out of `spawn_server_from_engine` precisely so a caller can start the
-    /// executor with its own `ingest_queue_bound`. It is deferred because the plan assigns
-    /// `ingest_429s_when_the_queue_is_full` to Task 6 by name, alongside the value derivation the
-    /// same test will want to assert — not because the two 429s' identical *bodies* make it
-    /// impossible. Task 6 should write it.
+    /// **`retry_after_s` is derived, as of Task 6**, by `tessera_engine::estimate_retry_after_s`
+    /// from the work queue's depth and an EWMA of observed work-lane service time. That function's
+    /// doc states, at the site, the three things that make it an **estimator and not a bound**:
+    /// service time is not stationary (the `IngestBuffer` clone is O(total buffered items) and
+    /// flush is inert until 2.2), the deny lane is drained to empty before every work item and so
+    /// is in the real drain but not in the figure, and the depth is a snapshot of two
+    /// independently-advancing counters.
     ///
     /// **Unreachable from `/control/changes`, twice over.** A `Command::Change` goes to the
     /// unbounded deny lane by `Command::is_never_shed`, so it cannot produce `QueueFull`; and
@@ -83,6 +75,28 @@ pub enum ApiError {
     /// contracts §3.1 says `/control/changes` is **never** load-shed and a structural absence
     /// survives an edit to `is_never_shed` that a comment would not.
     WriteBackpressure { retry_after_s: u64 },
+    /// 429 `backpressure` for `/control/ingest`'s **admission** bound (Task 6, D2): this server is
+    /// already running `ingest_admission` ingest handlers, each holding a blocking-pool thread.
+    /// The refusal happens *before* `spawn_blocking`, so it costs no thread, no queue slot and no
+    /// WAL byte.
+    ///
+    /// **A third variant for one wire code, and it is the third for the same reason as the
+    /// second**: contracts §3.1 lists `backpressure` once and all three emit it, but §0.3 deviation
+    /// 11 makes the *value* per-subject, and this subject's value is neither of the other two's.
+    /// [`ApiError::Backpressure`]'s fixed `1` rests on a compute-admission saturation clearing on
+    /// one request's timescale; [`ApiError::WriteBackpressure`]'s comes from a queue's depth. This
+    /// one is neither: a permit here frees when one in-flight handler finishes, and the executor is
+    /// serial, so the wait for the *next* permit is about **one** work item's service time — not
+    /// the whole queue's, and not one second. Giving it the gate's fixed `1` would be exactly the
+    /// "future 429 subject silently inheriting a number that was never argued for it" that
+    /// deviation 11 was written to prevent; the number here is derived by
+    /// [`admission_retry_after_s`].
+    ///
+    /// **Distinguishable from `WriteBackpressure` on the wire, deliberately**, because the two
+    /// tests that pin them would otherwise be able to pass on each other's 429: the `detail`
+    /// strings name different mechanisms and every 429 assertion in this task matches on the body,
+    /// never on the status alone.
+    IngestAdmissionBackpressure { retry_after_s: u64 },
     /// 503 `not-ready`: contracts §3.1's row — "unverified bundle, unready worker, unloaded
     /// plugin". Reached when the write executor was never started, or is gone **without having
     /// been handed the command** (`SubmitError::ExecutorDead`).
@@ -155,6 +169,15 @@ impl ApiError {
                      changes are never shed for load and are unaffected"
                 ),
             ),
+            ApiError::IngestAdmissionBackpressure { retry_after_s } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "backpressure",
+                format!(
+                    "the server is at its ingest-admission bound; retry after {retry_after_s}s. \
+                     Nothing in this request was decoded, queued or appended. Deny-disposition \
+                     changes are never shed for load and are unaffected"
+                ),
+            ),
             ApiError::NotReady => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "not-ready",
@@ -178,6 +201,9 @@ impl ApiError {
             // D-E: fixed at one second, never a knob — see the variant's doc.
             ApiError::Backpressure => Some(RETRY_AFTER_SECS),
             ApiError::WriteBackpressure { retry_after_s } => Some(*retry_after_s),
+            // Deviation 11's third subject — see the variant's doc for why its number is neither
+            // of the other two's.
+            ApiError::IngestAdmissionBackpressure { retry_after_s } => Some(*retry_after_s),
             ApiError::BadCredential
             | ApiError::ExpiredToken
             | ApiError::Unknown(_)
@@ -219,6 +245,21 @@ impl IntoResponse for ApiError {
         }
         response
     }
+}
+
+/// `retry_after_s` for [`ApiError::IngestAdmissionBackpressure`] (Task 6, D2).
+///
+/// **One work item's service time, not the queue's** — and the difference is the argument. An
+/// admission permit frees when one in-flight handler completes, the executor is serial, so the
+/// expected wait for the *next* free permit is about one work item, however many permits are held.
+/// `estimate_retry_after_s(1, ..)` is therefore the right call and `estimate_retry_after_s(bound,
+/// ..)` would be a figure for a caller waiting for *every* permit, which no caller is.
+///
+/// It inherits that function's floor (`1`, when nothing has completed and there is no observation
+/// at all) and its ceiling, and it inherits its honesty: it is an estimator. See
+/// `tessera_engine::estimate_retry_after_s` for the three specific reasons.
+pub fn admission_retry_after_s(stats: &tessera_engine::ExecutorStats) -> u64 {
+    tessera_engine::estimate_retry_after_s(1, stats.work_service_nanos_ewma)
 }
 
 /// Map an `EngineError` to the R5 code list. `MultiSegmentSlice`, `Store`/`Wal`/`Overlay`/

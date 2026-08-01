@@ -171,11 +171,11 @@ fn read_carried_identity(bundle_root: &Path) -> Result<(String, u32, String, u32
         .map_err(|e| format!("--carry-id-key-from {}: {e}", current_path.display()))?;
     let current: tessera_store::manifest::CurrentPointer = serde_json::from_slice(&current_bytes)
         .map_err(|e| {
-        format!(
-            "--carry-id-key-from {}: CURRENT is not valid JSON: {e}",
-            current_path.display()
-        )
-    })?;
+            format!(
+                "--carry-id-key-from {}: CURRENT is not valid JSON: {e}",
+                current_path.display()
+            )
+        })?;
     let manifest_path = bundle_root.join(&current.prefix).join("MANIFEST.json");
     let manifest_bytes = std::fs::read(&manifest_path)
         .map_err(|e| format!("--carry-id-key-from {}: {e}", manifest_path.display()))?;
@@ -637,7 +637,26 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // Phase 2 stage 2.1, Task 6 (D4): **the blocking pool is sized here, from the config's
+            // declared consumers**, and it is the only place in the process where that number
+            // exists.
+            //
+            // Before this it was tokio's undeclared default (512), which two things depend on and
+            // neither states: the viewer plane's `spawn_blocking` closures, bounded by
+            // `compute_admission`, and `/control/ingest`'s, bounded by `ingest_admission`. A tokio
+            // release or an embedder's own builder could move it in silence, and an admitted
+            // viewport would then queue behind ingest closures in the shared FIFO with no timeout —
+            // hanging rather than shedding.
+            //
+            // Derived rather than asserted-against: `serving_blocking_threads` covers both bounds
+            // plus a reserve, so there is no configuration in which an admitted request finds no
+            // thread. What `config::load` refuses is a pool the *machine* cannot carry
+            // (`SERVING_BLOCKING_THREAD_CEILING`), which is a different question and is already
+            // settled by the time this runs — `prepare` returned above.
+            let blocking_threads =
+                tessera_server::config::serving_blocking_threads(&prepared.config);
             let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .max_blocking_threads(blocking_threads)
                 .enable_all()
                 .build()
             {

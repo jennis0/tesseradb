@@ -1616,3 +1616,878 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
          deny after the first is silently unapplied while the WAL stays poisoned"
     );
 }
+
+// =================================================================================================
+// Task 6 — the admission bound, the batch caps, and the never-shed asymmetry
+// =================================================================================================
+
+/// A `Passthrough` that can be made to **park inside `terms_of_label`**, on command.
+///
+/// `terms_of_label` is called from inside `/control/ingest`'s `spawn_blocking` closure
+/// (`control::run_ingest`), which is precisely the blocking-pool thread Task 6's admission bound
+/// exists to ration — so parking here holds exactly the resource under test, with no
+/// `fault-injection` dependency and no sleep anywhere.
+///
+/// Every other method delegates, **including both hashes**: the bundle's `MANIFEST.json` records
+/// the plugin hash and `Engine::open` refuses a mismatch, so this must be `builtin:passthrough`'s
+/// identity in every respect but its willingness to block.
+///
+/// `armed` is a switch rather than a permanent block because the fixture has to *use* the plugin
+/// before it can saturate anything: `/session/authorise` resolves auth terms, and a
+/// `/control/changes` item can only name an external id that ingest already established.
+struct ParkingPlugin {
+    inner: tessera_plugin::Passthrough,
+    armed: Arc<std::sync::atomic::AtomicBool>,
+    arrived: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl tessera_plugin::Plugin for ParkingPlugin {
+    fn terms_of_label(
+        &self,
+        access: &[u8],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            // Publish arrival **before** blocking, so the test waits on a condition this thread
+            // has actually reached rather than on a duration it hopes is enough.
+            let _ = self.arrived.send(());
+            let (lock, cv) = &*self.release;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = cv.wait(released).unwrap();
+            }
+        }
+        self.inner.terms_of_label(access)
+    }
+
+    fn terms_of_auth(
+        &self,
+        auth_data: &[u8],
+    ) -> Result<tessera_plugin::AuthTerms, tessera_plugin::PluginError> {
+        self.inner.terms_of_auth(auth_data)
+    }
+
+    fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
+        self.inner.declared_bounds()
+    }
+
+    fn data_plugin_hash(&self) -> String {
+        self.inner.data_plugin_hash()
+    }
+
+    fn auth_plugin_hash(&self) -> String {
+        self.inner.auth_plugin_hash()
+    }
+}
+
+/// Everything the two saturation tests share: a server whose ingest handlers can be parked on
+/// command, with the pool small enough that unbounded ingest would exhaust it.
+struct ParkedFixture {
+    server: TestServer,
+    armed: Arc<std::sync::atomic::AtomicBool>,
+    arrived: tokio::sync::mpsc::UnboundedReceiver<()>,
+    release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    token: String,
+}
+
+impl ParkedFixture {
+    fn release(&self) {
+        let (lock, cv) = &*self.release;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+}
+
+/// `ingest_admission = 2` against a **4-thread** blocking pool: two parked handlers leave two
+/// threads, and an unbounded ingest would take all four.
+const PARKED_MAX_BLOCKING_THREADS: usize = 4;
+const PARKED_INGEST_ADMISSION: usize = 2;
+
+async fn parked_fixture(tmp: &TempDir) -> ParkedFixture {
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (arrived_tx, arrived) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+
+    let mut engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        ParkingPlugin {
+            inner: Passthrough::new(),
+            armed: Arc::clone(&armed),
+            arrived: arrived_tx,
+            release: Arc::clone(&release),
+        },
+        default_engine_config(),
+    )
+    .expect("engine should open against a freshly built bundle");
+    // Generous, so nothing here can 429 for the *queue*: this fixture is about the admission
+    // bound, and `ingest_429s_when_the_queue_is_full` is about the other one.
+    engine
+        .start_write_executor(1024)
+        .expect("the write executor starts once");
+
+    let server = mount_server_with_ingest_limits(
+        engine,
+        200,
+        generous_test_gate(),
+        IngestLimits {
+            admission: PARKED_INGEST_ADMISSION,
+            max_batch_rows: 200_000,
+            max_batch_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .await;
+
+    // **Warm every connection before arming.** reqwest resolves and connects lazily, and a fresh
+    // connection's DNS resolution goes through `spawn_blocking` — on this deliberately tiny pool
+    // that would queue behind the parked handlers and turn a real result into a hang. One
+    // round-trip per plane now means every later request rides a pooled keep-alive connection.
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+    assert_eq!(viewport_status(&server, &token).await, 200);
+    assert_eq!(control_status(&server).await["ingest"]["in_flight"], 0);
+
+    ParkedFixture {
+        server,
+        armed,
+        arrived,
+        release,
+        token,
+    }
+}
+
+/// One `/v1/viewport` on the warmed connection, returning its status.
+async fn viewport_status(server: &TestServer, token: &str) -> u16 {
+    server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+/// Post one small, valid ingest batch. Returns `(status, body)`.
+async fn post_ingest(
+    server: &TestServer,
+    batch_id: &str,
+    rows: &[(u64, f32, f32, &str)],
+    auth: bool,
+) -> (u16, serde_json::Value) {
+    let mut req = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .header("x-tessera-batch-id", batch_id)
+        .header("content-type", "application/octet-stream")
+        .body(build_ingest_batch(rows));
+    if auth {
+        req = req.bearer_auth(OPERATOR_CREDENTIAL);
+    }
+    let resp = req.send().await.unwrap();
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// Fresh source ids for Task 6's fixtures. Offset well clear of `N_ITEMS`, or every batch here
+/// collides with the bundle's own external ids and answers 409 before any bound is consulted.
+fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
+    const TASK_6_ID_BASE: u64 = 1_000_000;
+    (0..n)
+        .map(|i| (TASK_6_ID_BASE + base + i, i as f32, i as f32, "0"))
+        .collect()
+}
+
+/// **The class Task 3b left open, closed and demonstrated rather than argued.**
+///
+/// Task 3b's own deferral, verbatim: *"the viewer plane still shares the blocking FIFO with
+/// unbounded ingest, with no timeout on the wait, so an admitted viewport hangs rather than
+/// shedding."* `ComputeGate::admit` is `async` and awaited **before** `spawn_blocking`, so viewer
+/// *demand* is bounded — but an admitted viewport's closure still queues behind ingest closures in
+/// tokio's shared, unbounded FIFO, and there is no timeout on that queue. The failure is a hang,
+/// not a shed, and it is invisible to every gauge the viewer plane has.
+///
+/// The construction: a 4-thread blocking pool, `ingest_admission = 2`, and two ingest handlers
+/// parked *inside* `terms_of_label` — i.e. holding two of the four threads as a **fact**, since
+/// each publishes its arrival before blocking and the test waits on those arrivals. Two more ingest
+/// requests must then be refused **before** `spawn_blocking`, and a viewport must still run.
+///
+/// **The mutation is the `try_admit` call in `control::ingest`** (delete it, or raise the bound to
+/// 4): the two surplus requests then park too, all four threads are held, and both the 429
+/// assertions and the viewport time out. The timeouts are in the *failing* path only — on a healthy
+/// build every one of these resolves in milliseconds.
+///
+/// There is deliberately no assertion that the surplus requests *did not* run: a negative statement
+/// about another thread's progress is not establishable without waiting (Task 3a fix round 1,
+/// CRITICAL 1). What is asserted is that they were refused with the admission body, and that the
+/// viewer plane was still served while the pool was demonstrably occupied.
+#[test]
+fn ingest_admission_sheds_before_the_blocking_pool_fills() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(PARKED_MAX_BLOCKING_THREADS)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    runtime.block_on(async {
+        let tmp = TempDir::new().unwrap();
+        let mut fx = parked_fixture(&tmp).await;
+
+        fx.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut parked = Vec::new();
+        for i in 0..PARKED_INGEST_ADMISSION {
+            let client = fx.server.client.clone();
+            let url = fx.server.control_url("/control/ingest");
+            let body = build_ingest_batch(&rows_from(500 + i as u64 * 10, 1));
+            parked.push(tokio::spawn(async move {
+                client
+                    .post(url)
+                    .bearer_auth(OPERATOR_CREDENTIAL)
+                    .header("x-tessera-batch-id", format!("parked-{i}"))
+                    .header("content-type", "application/octet-stream")
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .as_u16()
+            }));
+        }
+        // Both handlers are inside `terms_of_label`, holding a blocking thread each. A fact, not a
+        // hope: each published its arrival before it blocked.
+        for _ in 0..PARKED_INGEST_ADMISSION {
+            fx.arrived.recv().await.expect("a handler must park");
+        }
+
+        // Every admission permit is now held, and `/control/status` says so.
+        let status = control_status(&fx.server).await;
+        assert_eq!(status["ingest"]["in_flight"], PARKED_INGEST_ADMISSION);
+
+        // The surplus is refused **before** `spawn_blocking`, so it takes no thread.
+        for i in 0..2 {
+            let (code, body) = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                post_ingest(
+                    &fx.server,
+                    &format!("surplus-{i}"),
+                    &rows_from(900 + i * 10, 1),
+                    true,
+                ),
+            )
+            .await
+            .expect(
+                "a surplus ingest request did not answer within 20s: it is holding a blocking \
+                 thread instead of being refused, which is the unbounded-ingest shape Task 3b left \
+                 open",
+            );
+            assert_eq!(code, 429, "surplus ingest must be shed, not queued");
+            assert_eq!(body["error"], "backpressure");
+            assert!(
+                body["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("ingest-admission bound"),
+                "this must be the ADMISSION 429, not the queue's — the two are discriminated by \
+                 body, and this fixture's queue bound is 1024 so the queue cannot be full: {body}"
+            );
+            // Deviation 11: the header and the body field must agree, and the value must be one
+            // this subject argued for.
+            assert!(body["retry_after_s"].as_u64().unwrap() >= 1);
+        }
+
+        // **And the viewer plane is still served**, on a pool two of whose four threads are held.
+        let viewport = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            viewport_status(&fx.server, &fx.token),
+        )
+        .await
+        .expect(
+            "an admitted viewport did not complete within 20s while ingest handlers held blocking \
+             threads — it is queued behind them in tokio's shared FIFO, with no timeout, which is \
+             exactly the hang-rather-than-shed failure this bound exists to prevent",
+        );
+        assert_eq!(viewport, 200);
+
+        fx.release();
+        for task in parked {
+            assert_eq!(
+                task.await.unwrap(),
+                200,
+                "a parked ingest must still succeed"
+            );
+        }
+    });
+}
+
+/// **The asymmetry, and the test that matters most in this task.** Batching a security operation
+/// for latency is acceptable; refusing one for load is fail-open.
+///
+/// Run **in the same state that 429s ingest**: every admission permit held, every parked handler
+/// occupying a blocking thread. `/control/changes` must answer 200 anyway. It does so structurally
+/// rather than by luck — it rides its own runtime (`control::DENY_RUNTIME`), its command takes the
+/// unbounded lane by `Command::is_never_shed`, and `map_change_batch_error` contains no route from
+/// that lane to a 429 at all.
+///
+/// The suppression is deliberately a bare `{external_id, op}` with **no `access` field**, so
+/// `run_changes` makes no `terms_of_label` call and the parking plugin cannot block it. That is a
+/// property of the fixture, not of the deny lane, and it is stated here so a later reader does not
+/// mistake it for part of what is being proved.
+///
+/// **Mutations this kills:** an admission bound applied to `changes` as well as `ingest` (429
+/// instead of 200); routing `changes` through `tokio::task::spawn_blocking` instead of
+/// `spawn_on_deny_lane` (the pool is full, so it hangs and the bounded await fails).
+#[test]
+fn changes_never_429s() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(PARKED_MAX_BLOCKING_THREADS)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    runtime.block_on(async {
+        let tmp = TempDir::new().unwrap();
+        let mut fx = parked_fixture(&tmp).await;
+
+        fx.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut parked = Vec::new();
+        for i in 0..PARKED_INGEST_ADMISSION {
+            let client = fx.server.client.clone();
+            let url = fx.server.control_url("/control/ingest");
+            let body = build_ingest_batch(&rows_from(600 + i as u64 * 10, 1));
+            parked.push(tokio::spawn(async move {
+                client
+                    .post(url)
+                    .bearer_auth(OPERATOR_CREDENTIAL)
+                    .header("x-tessera-batch-id", format!("parked-{i}"))
+                    .header("content-type", "application/octet-stream")
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .as_u16()
+            }));
+        }
+        for _ in 0..PARKED_INGEST_ADMISSION {
+            fx.arrived.recv().await.expect("a handler must park");
+        }
+
+        // The state is genuinely one that sheds ingest — asserted here rather than assumed, or
+        // this test would prove only that `/control/changes` works on an idle server.
+        let (code, body) = post_ingest(&fx.server, "shed-me", &rows_from(950, 1), true).await;
+        assert_eq!(code, 429, "the premise: ingest is being shed right now");
+        assert_eq!(body["error"], "backpressure");
+
+        const SUPPRESS_SOURCE_ID: u64 = 5;
+        let external_id =
+            base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            fx.server
+                .client
+                .post(fx.server.control_url("/control/changes"))
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+                .send(),
+        )
+        .await
+        .expect(
+            "a suppression did not answer within 20s while ingest was saturated — it is queued \
+             behind ingest work, which is lifecycle §1.3's forbidden shape",
+        )
+        .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "/control/changes is NEVER load-shed (contracts §3.1): refusing a security operation \
+             for load is fail-open, where batching one for latency is not"
+        );
+
+        fx.release();
+        for task in parked {
+            assert_eq!(task.await.unwrap(), 200);
+        }
+    });
+}
+
+/// **The queue-full 429, end to end** — Task 3b deferred this here by name.
+///
+/// The queue is made full **deterministically, with no sleep and no fault injection**: a work queue
+/// of bound `0` is a `std::sync::mpsc::sync_channel(0)`, a rendezvous, and `Executor::run` takes
+/// work with `try_recv` and blocks only on the doorbell — so there is never a receiver waiting at
+/// the rendezvous and `try_send` returns `Full` every time. `config.rs` refuses `0` for an
+/// operator, so this spelling is reachable only through `mount_server`, which is what that seam was
+/// split out for.
+///
+/// **What this proves, and what it does not.** It proves the whole path from `TrySendError::Full`
+/// through `SubmitError::QueueFull`, `map_accept_error`, `ApiError::WriteBackpressure` and onto the
+/// wire, including the derived `retry_after_s` and its agreeing header. It does **not** prove
+/// anything about the *transition* into fullness — a queue that is never not full cannot
+/// distinguish "429 on Full" from "429 always". Inducing a real transition needs a controllable
+/// stall inside the executor, i.e. the `fault-injection` dev-dependency this stage deliberately
+/// declines for `tessera-server` (four in-tree statements say nothing outside `tessera-lifecycle`
+/// and `tessera-engine`'s tests may depend on it).
+///
+/// **The discriminator is the body, not the status**, because the admission 429 shares the status.
+/// This fixture's admission bound is 8 and one request is in flight, so the admission bound cannot
+/// be the one firing.
+///
+/// **Mutations this kills:** mapping `QueueFull` to anything but 429; deleting `retry_after_s`'s
+/// `WriteBackpressure` arm in `error.rs` (the header disappears); `estimate_retry_after_s`
+/// returning 0.
+#[tokio::test]
+async fn ingest_429s_when_the_queue_is_full() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let mut engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        default_engine_config(),
+    )
+    .unwrap();
+    engine
+        .start_write_executor(0)
+        .expect("the write executor starts once");
+    let server = mount_server_with_ingest_limits(
+        engine,
+        200,
+        generous_test_gate(),
+        IngestLimits {
+            admission: 8,
+            max_batch_rows: 200_000,
+            max_batch_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .await;
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "queue-full")
+        .header("content-type", "application/octet-stream")
+        .body(build_ingest_batch(&rows_from(700, 1)))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 429, "a full work queue is 429, never 500");
+    let retry_after_header: u64 = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .expect("contracts §3.1 (r10): EVERY 429 carries Retry-After")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "backpressure");
+    assert!(
+        body["detail"].as_str().unwrap().contains("write queue"),
+        "this must be the QUEUE 429, not the admission bound's (8 permits, one request): {body}"
+    );
+    assert_eq!(
+        body["retry_after_s"].as_u64().unwrap(),
+        retry_after_header,
+        "§0.3 deviation 11: the header and the body field must carry the SAME number"
+    );
+    // Nothing has ever completed on this server, so the estimator has no observation at all and
+    // answers its floor. That is the documented no-evidence case, not a measurement.
+    assert_eq!(retry_after_header, 1);
+
+    // The refusal cost nothing durable.
+    let status = control_status(&server).await;
+    assert_eq!(status["write_executor"]["work_submitted"], 0);
+    assert_eq!(status["write_executor"]["wal_appends"], 0);
+    assert_eq!(status["write_executor"]["work_depth"], 0);
+
+    // And the never-shed lane is unaffected in the very same state.
+    const SUPPRESS_SOURCE_ID: u64 = 6;
+    let external_id =
+        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "the deny lane is unbounded; a full *work* queue must never reach it"
+    );
+}
+
+/// **The row cap costs no queue slot and no WAL append**, asserted on the counters rather than on
+/// the status alone.
+///
+/// The baseline is deliberately **non-zero**: one valid batch is ingested first and
+/// `/control/status` is read, so "unchanged" is a statement about a working server rather than one
+/// a server that cannot ingest at all would also satisfy.
+///
+/// The over-cap batch is **valid Arrow** and differs from the accepted one only in its row count,
+/// so nothing else in `run_ingest` can be what refuses it.
+///
+/// **Mutations this kills:** deleting the row-cap check (the batch is accepted, so `work_submitted`
+/// moves); moving the check *below* `accept_ingest` (the 422 still arrives, but both counters have
+/// moved — which is the whole point of asserting them).
+#[tokio::test]
+async fn an_oversized_batch_is_422_not_a_queue_slot() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let mut engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        default_engine_config(),
+    )
+    .unwrap();
+    engine.start_write_executor(1024).unwrap();
+    let server = mount_server_with_ingest_limits(
+        engine,
+        200,
+        generous_test_gate(),
+        IngestLimits {
+            admission: 8,
+            max_batch_rows: 4,
+            max_batch_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .await;
+
+    let (code, _) = post_ingest(&server, "under-cap", &rows_from(800, 3), true).await;
+    assert_eq!(code, 200, "a batch under the row cap must be accepted");
+
+    let before = control_status(&server).await;
+    assert_eq!(
+        before["write_executor"]["work_submitted"], 1,
+        "the baseline must be non-zero, or 'unchanged' proves nothing"
+    );
+    assert!(before["write_executor"]["wal_appends"].as_u64().unwrap() >= 1);
+
+    let (code, body) = post_ingest(&server, "over-cap", &rows_from(810, 9), true).await;
+    assert_eq!(
+        code, 422,
+        "over the row cap is 422 contract, never 429 or 500"
+    );
+    assert_eq!(body["error"], "contract");
+    let detail = body["detail"].as_str().unwrap();
+    assert!(detail.contains('9') && detail.contains('4'), "{detail}");
+
+    let after = control_status(&server).await;
+    assert_eq!(
+        after["write_executor"]["work_submitted"], before["write_executor"]["work_submitted"],
+        "a refused batch must cost no queue slot"
+    );
+    assert_eq!(
+        after["write_executor"]["wal_appends"], before["write_executor"]["wal_appends"],
+        "a refused batch must cost no WAL append"
+    );
+    assert_eq!(
+        after["entity_id_high_water"],
+        before["entity_id_high_water"]
+    );
+}
+
+/// **The byte cap answers 422, not axum's 413** — the finding that made D1 reachable at all.
+///
+/// axum applies a 2 MiB default body limit to the `Bytes` extractor, well under the 16 MiB
+/// `ingest_max_batch_bytes` defaults to, so before Task 6 the configured cap could never be the
+/// refusal a caller met and an over-2-MiB batch got a **413**, a status outside contracts §3.1's
+/// closed code list. `control::router` now sets the limit to the configured cap and the handler
+/// maps the rejection itself.
+///
+/// The cap is derived from a real body rather than guessed, so the two legs cannot drift with
+/// Arrow's framing overhead.
+///
+/// **Mutation:** remove the `DefaultBodyLimit` layer from `control::router` and the over-cap leg
+/// gets **200** — the cap is then enforced nowhere at all, which is the pre-Task-6 state.
+#[tokio::test]
+async fn an_oversized_body_is_422_not_413() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let one_row = build_ingest_batch(&rows_from(820, 1));
+    let cap = one_row.len();
+
+    let mut engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        default_engine_config(),
+    )
+    .unwrap();
+    engine.start_write_executor(1024).unwrap();
+    let server = mount_server_with_ingest_limits(
+        engine,
+        200,
+        generous_test_gate(),
+        IngestLimits {
+            admission: 8,
+            max_batch_rows: 200_000,
+            max_batch_bytes: cap,
+        },
+    )
+    .await;
+
+    let (code, _) = post_ingest(&server, "at-cap", &rows_from(820, 1), true).await;
+    assert_eq!(code, 200, "a body exactly at the cap must be accepted");
+
+    let big = rows_from(830, 200);
+    assert!(build_ingest_batch(&big).len() > cap);
+    let (code, body) = post_ingest(&server, "over-cap-bytes", &big, true).await;
+    assert_eq!(
+        code, 422,
+        "over the byte cap must be 422 contract — 413 is not in contracts §3.1's closed code list"
+    );
+    assert_eq!(body["error"], "contract");
+    assert!(
+        body["detail"].as_str().unwrap().contains(&cap.to_string()),
+        "the detail must name the bound the operator set: {body}"
+    );
+
+    let status = control_status(&server).await;
+    assert_eq!(
+        status["write_executor"]["work_submitted"], 1,
+        "the refused body cost no queue slot"
+    );
+}
+
+/// **401 ahead of every pressure signal this endpoint can emit** — the ordering rule the whole of
+/// `control::ingest` is arranged around.
+///
+/// Five states, one ordering. An unauthenticated caller must be unable to learn, from a status code
+/// alone: that this server is at its ingest-admission bound, that its work queue is full, what its
+/// per-batch row cap is, or what its per-batch byte cap is. Each is checked twice — once without a
+/// credential, which must be 401, and once with, which must be the pressure signal — so the test
+/// cannot pass by the server simply never producing the signal.
+///
+/// The **oversize** legs are the ones a `body: Bytes` extractor would fail: axum's extractors run
+/// before the handler body, so a rejecting extractor answers before `check_bearer` is ever reached.
+/// `body: Result<Bytes, _>` is what moves that decision inside the handler and behind the
+/// credential.
+///
+/// **Mutations this kill:** moving `check_bearer` below the body-rejection mapping, below the
+/// admission check, or below the batch-id header check; taking `body: Bytes` instead of
+/// `Result<Bytes, _>`.
+#[tokio::test]
+async fn backpressure_is_invisible_before_auth() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let one_row = build_ingest_batch(&rows_from(840, 1));
+    let cap = one_row.len();
+
+    // Server A: the admission bound is saturated by construction (`Semaphore::new(0)` has no
+    // permits to give), and both 422 caps are set tight. Three of the four signals live here.
+    let mut engine_a = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache-a"),
+        &tmp.path().join("wal-a.log"),
+        Passthrough::new(),
+        default_engine_config(),
+    )
+    .unwrap();
+    engine_a.start_write_executor(1024).unwrap();
+    let server_a = mount_server_with_ingest_limits(
+        engine_a,
+        200,
+        generous_test_gate(),
+        IngestLimits {
+            admission: 0,
+            max_batch_rows: 2,
+            max_batch_bytes: cap,
+        },
+    )
+    .await;
+
+    // 1. Admission 429, invisible without a credential.
+    let (code, body) = post_ingest(&server_a, "a1", &rows_from(840, 1), false).await;
+    assert_eq!(code, 401, "an unauthenticated caller must not see the 429");
+    assert_eq!(body["error"], "bad-credential");
+    let (code, body) = post_ingest(&server_a, "a1", &rows_from(840, 1), true).await;
+    assert_eq!(code, 429, "and the signal must genuinely be there to see");
+    assert_eq!(body["error"], "backpressure");
+
+    // 2. The byte cap's 422, likewise — this is the leg an extractor-level rejection would fail.
+    let big = rows_from(850, 200);
+    let (code, body) = post_ingest(&server_a, "a2", &big, false).await;
+    assert_eq!(
+        code, 401,
+        "an oversized body must be 401 without a credential, never 413 or 422: the caller would \
+         otherwise learn this deployment's batch cap by bisection, unauthenticated"
+    );
+    assert_eq!(body["error"], "bad-credential");
+
+    // 3. The row cap's 422. Under the byte cap, over the row cap, so the row check is what would
+    //    fire.
+    let (code, body) = post_ingest(&server_a, "a3", &rows_from(860, 3), false).await;
+    assert_eq!(code, 401);
+    assert_eq!(body["error"], "bad-credential");
+
+    // 4. The missing-batch-id 422 — the pre-existing check, still behind the credential.
+    let resp = server_a
+        .client
+        .post(server_a.control_url("/control/ingest"))
+        .header("content-type", "application/octet-stream")
+        .body(one_row.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // Server B: the *queue* 429, the one signal server A cannot produce (its admission bound
+    // refuses first, which is itself the ordering under test).
+    let mut engine_b = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache-b"),
+        &tmp.path().join("wal-b.log"),
+        Passthrough::new(),
+        default_engine_config(),
+    )
+    .unwrap();
+    engine_b.start_write_executor(0).unwrap();
+    let server_b = mount_server_with_ingest_limits(
+        engine_b,
+        200,
+        generous_test_gate(),
+        IngestLimits {
+            admission: 8,
+            max_batch_rows: 200_000,
+            max_batch_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .await;
+
+    let (code, body) = post_ingest(&server_b, "b1", &rows_from(870, 1), false).await;
+    assert_eq!(
+        code, 401,
+        "an unauthenticated caller must not see the queue 429"
+    );
+    assert_eq!(body["error"], "bad-credential");
+    let (code, body) = post_ingest(&server_b, "b1", &rows_from(870, 1), true).await;
+    assert_eq!(code, 429);
+    assert!(body["detail"].as_str().unwrap().contains("write queue"));
+}
+
+/// **`overlay_soft_limit` alarms, and it does not act** (Task 6, D5). There is no fold until stage
+/// 2.3, so an operator who sets this today gets a signal that the overlay is deep, never a
+/// mechanism that makes it shallower — and this test asserts exactly that much and no more.
+///
+/// Two properties, because the check has two sites and only one of them is the executor's:
+///
+/// 1. **At runtime**, `Executor::apply_change` — the only place the overlay grows once the executor
+///    is running — counts each publication at or above the limit.
+/// 2. **At configuration**, `Engine::set_overlay_soft_limit` evaluates the predicate once as it
+///    lands. That leg exists because the executor is *not* the only place an overlay is built: a
+///    WAL replay builds one inside `Engine::open`, before any executor exists, so a node restarting
+///    already over its limit would otherwise sit silently over it until the next deny happened to
+///    arrive. Asserted here by moving the limit under a live overlay, which is the same state
+///    replay produces and the only one a server test can construct.
+///
+/// **Mutations this kills:** deleting `apply_change`'s check (leg 1 stays at 0); deleting
+/// `set_overlay_soft_limit`'s one-shot evaluation (leg 2 stays at its leg-1 value).
+#[tokio::test]
+async fn the_overlay_soft_limit_alarms_and_does_not_act() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let mut engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        default_engine_config(),
+    )
+    .unwrap();
+    engine.start_write_executor(1024).unwrap();
+    // Unset: `usize::MAX` is the engine's "no limit configured", which is what every embedder and
+    // every test that never calls the setter gets.
+    let server = mount_server(engine, 200, generous_test_gate()).await;
+
+    let suppress = |id: u64| {
+        let external_id = base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
+        server
+            .client
+            .post(server.control_url("/control/changes"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+            .send()
+    };
+
+    assert_eq!(suppress(11).await.unwrap().status(), 200);
+    let status = control_status(&server).await;
+    assert_eq!(status["overlay"]["depth"], 1);
+    assert_eq!(
+        status["overlay"]["soft_limit_alarms"], 0,
+        "an unset limit must never alarm"
+    );
+
+    // Leg 2: the limit lands *under* a live overlay — the restart shape.
+    server.state.engine.set_overlay_soft_limit(1);
+    let status = control_status(&server).await;
+    assert_eq!(
+        status["overlay"]["soft_limit_alarms"], 1,
+        "a limit set below the overlay it finds must alarm as it lands, not wait for the next deny"
+    );
+
+    // Leg 1: the executor's own check, on the next growth.
+    assert_eq!(suppress(12).await.unwrap().status(), 200);
+    let status = control_status(&server).await;
+    assert_eq!(status["overlay"]["depth"], 2);
+    assert_eq!(status["overlay"]["soft_limit_alarms"], 2);
+
+    // **And nothing acted**: the overlay is still exactly as deep as the denies made it, and both
+    // suppressions are still in force. There is no fold to shrink it and this test must not read
+    // as though there were.
+    assert_eq!(
+        control_status(&server).await["overlay"]["depth"],
+        2,
+        "the alarm must not have shrunk, folded or retired anything"
+    );
+}

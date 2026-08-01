@@ -135,6 +135,9 @@ pub fn init_deny_runtime() -> std::io::Result<()> {
         // Named so the lane is legible in a thread dump — an operator diagnosing deny latency must
         // be able to tell these apart from tokio's shared pool.
         .thread_name("tessera-deny")
+        // See [`DENY_MAX_BLOCKING_THREADS`]: tokio's own default, stated here so it is not an
+        // undeclared figure the process's thread demand rests on.
+        .max_blocking_threads(DENY_MAX_BLOCKING_THREADS)
         .build()?;
     if let Err(loser) = DENY_RUNTIME.set(rt) {
         discard_losing_runtime(loser);
@@ -175,9 +178,39 @@ where
     }
 }
 
+/// The deny runtime's own blocking-pool bound.
+///
+/// **Stated rather than inherited.** Task 6 made the serving runtime's `max_blocking_threads` a
+/// derived, declared number (`config::serving_blocking_threads`); this runtime was still taking
+/// tokio's undeclared default, so the process's thread demand would have gone on resting on a
+/// figure no line of this repository states — just a different one. 512 is that default, so setting
+/// it changes no behaviour; what changes is that a tokio release cannot move it in silence.
+///
+/// **Deliberately not small**, and [`DENY_RUNTIME`]'s "Why it is NOT small" section is the
+/// argument: isolation comes from the pool being *separate*, and `run_changes` submits and awaits
+/// each item individually, so one caller-sized batch occupies one thread for N sequential fsyncs.
+const DENY_MAX_BLOCKING_THREADS: usize = 512;
+
 pub fn router(state: Arc<AppState>) -> Router {
+    // Task 6 (D1): the byte cap, enforced **here** rather than by a `body.len()` check in the
+    // handler, and the difference is not stylistic.
+    //
+    // axum applies a default request-body limit of 2 MiB to the `Bytes` extractor, well under this
+    // deployment's `ingest_max_batch_bytes` (16 MiB by default) — so before this layer existed the
+    // configured cap could never be the refusal a caller met, and an over-2-MiB batch got a **413**,
+    // a status outside contracts §3.1's closed code list. Both halves of that are closed by setting
+    // the limit to the configured cap and mapping the rejection ourselves: buffering is bounded at
+    // exactly the number the operator set, and the answer is the 422 §3.1's "bounds exceeded" row
+    // calls for.
+    //
+    // The handler takes `Result<Bytes, _>` so that `check_bearer` still runs **first** — an
+    // extractor that rejects on its own would answer an unauthenticated caller before the
+    // credential was ever checked, which is the one ordering rule this endpoint has.
+    let ingest_route = post(ingest).layer(axum::extract::DefaultBodyLimit::max(
+        state.ingest_max_batch_bytes,
+    ));
     Router::new()
-        .route("/control/ingest", post(ingest))
+        .route("/control/ingest", ingest_route)
         .route("/control/changes", post(changes))
         .route("/control/status", get(status))
         .route("/healthz", get(healthz))
@@ -358,6 +391,30 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
 
     let items = parse_ingest_batch(body)?;
 
+    // Task 6 (D1): the row cap. 422 per contracts §3.1's "bounds exceeded" row, naming the bound
+    // and the batch's own size.
+    //
+    // **What is already spent when this fires, stated rather than implied**: the whole Arrow
+    // decode, because the row count is not knowable before it. That is the cost of the cap and it
+    // is why the *byte* cap is enforced a layer earlier, on the route, where nothing has been
+    // decoded at all.
+    //
+    // **Placed before the `terms_of_label`/`resolve_terms` loop below, which narrows a known
+    // consequence without closing it.** Task 3a recorded that `resolve_terms` runs pre-submit, so
+    // extension-id dictionary state grows on refused batches; putting this check first means an
+    // over-large batch no longer contributes to that. A batch that is *under* the row cap and
+    // fails later still does. This comment says which of those two it is on purpose — the check
+    // does not close the path.
+    if items.len() > state.ingest_max_batch_rows {
+        return Err(ApiError::Contract(format!(
+            "ingest batch has {} rows, exceeding the {}-row per-batch cap \
+             (ingest.ingest_max_batch_rows); refused before allocation, so it cost no entity id, \
+             no queue slot and no WAL append",
+            items.len(),
+            state.ingest_max_batch_rows
+        )));
+    }
+
     // Resolve each item's descriptors and terms up front — idempotent even on a replayed
     // request, since `resolve_terms` looks up already-interned descriptors without reassigning
     // (see `Engine::resolve_terms`'s doc).
@@ -514,12 +571,38 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
     })
 }
 
+/// **The ordering here is the whole of `backpressure_is_invisible_before_auth`, and it is
+/// load-bearing.** An unauthenticated caller must not be able to learn anything about this server's
+/// ingest pressure — or about its configured batch cap — by reading a status code. So:
+///
+/// 1. `check_bearer` → **401**, always first, before every other check in this function;
+/// 2. the body's own rejection (over `ingest_max_batch_bytes`) → **422**;
+/// 3. the missing batch-id header → **422**;
+/// 4. the admission bound → **429**, evaluated before `spawn_blocking` because the resource it
+///    bounds is the thing `spawn_blocking` takes;
+/// 5. the row cap, inside `run_ingest` after the Arrow decode → **422**;
+/// 6. the queue bound, inside the executor's `submit` → **429**.
+///
+/// `body: Result<Bytes, _>` rather than `body: Bytes` is what makes step 1 precede step 2: an
+/// extractor that rejected on its own would answer before this function ran at all. Its rejection
+/// type is `Infallible`, so this is total.
 async fn ingest(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<IngestResp>, ApiError> {
     state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
+
+    // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**, unknown filter operand".
+    // The rejection's own `Display` is not forwarded — this module's rule — and would say nothing
+    // useful anyway; the detail names the bound the operator set.
+    let body = body.map_err(|_| {
+        ApiError::Contract(format!(
+            "ingest body exceeds the {}-byte per-batch cap (ingest.ingest_max_batch_bytes); \
+             refused before decoding, so it cost no queue slot and no WAL append",
+            state.ingest_max_batch_bytes
+        ))
+    })?;
 
     let batch_id = headers
         .get("x-tessera-batch-id")
@@ -527,13 +610,33 @@ async fn ingest(
         .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
         .to_string();
 
+    // Task 6 (D2): the admission bound, **before** `spawn_blocking`. See `IngestAdmission`.
+    let Some(permit) = state.ingest_admission.try_admit() else {
+        // `warn!`, not `error!`: once the bound bites this is a routine, expected shed, and an
+        // ERROR per occurrence is an alarm flood rather than a signal — the same level
+        // `map_accept_error` sets for the queue's 429.
+        tracing::warn!("the ingest admission bound is saturated; answering 429 backpressure");
+        return Err(ApiError::IngestAdmissionBackpressure {
+            retry_after_s: crate::error::admission_retry_after_s(
+                &state.engine.write_executor_stats(),
+            ),
+        });
+    };
+
     // D-A / review finding 7: closure capture is `state` (moved in directly — nothing after this
     // `.await` needs the handler's own copy), `body` (an owned `Bytes` — cheap, refcounted clone
     // of the request body already read off the socket, not a copy) and `batch_id` (owned
-    // `String`). Never gated (see `run_ingest`'s doc).
-    let resp = tokio::task::spawn_blocking(move || run_ingest(&state, &body, batch_id))
-        .await
-        .map_err(map_join_error)??;
+    // `String`). Never gated by `ComputeGate` (see `run_ingest`'s doc).
+    //
+    // The permit is **moved in**, not held across the `.await`: a disconnected client's handler
+    // future is dropped while this closure keeps running and keeps its thread, so releasing on
+    // handler-drop would under-count exactly when the pool is under pressure.
+    let resp = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        run_ingest(&state, &body, batch_id)
+    })
+    .await
+    .map_err(map_join_error)??;
 
     Ok(Json(resp))
 }
@@ -765,6 +868,15 @@ async fn status(
     // `DRAIN_DEPTH_ALARM` is the operator alarm, and `oldest_retired_secs` is what distinguishes
     // "deep because busy" from "deep because reclaim is not running".
     let pins = state.engine.pin_stats();
+    // Task 6 (D6): Task 4's and Task 5's counters, wired here now that both have landed.
+    //
+    // **`tessera_engine::FragmentCacheStats`, never `tessera_authz::...`** — `check-layers.sh`
+    // denies a `tessera-server → tessera-authz` edge (SA §3), and the re-export at
+    // `tessera-engine`'s crate root exists precisely so this call site has a nameable type.
+    let projection_cache: tessera_engine::CacheStats = state.engine.row_projection_cache_stats();
+    let fragment_cache: tessera_engine::FragmentCacheStats = state.engine.fragment_cache_stats();
+    let ingest = state.ingest_admission.status();
+    let sessions_retained = state.sessions.lock().len();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
         "compute": {
@@ -783,10 +895,79 @@ async fn status(
             "wal_fsyncs": executor.wal_fsyncs,
             "apply_nanos_total": executor.apply_nanos_total,
             "apply_nanos_max": executor.apply_nanos_max,
+            // Task 6: the queue-depth gauge and the drain estimate `retry_after_s` is derived
+            // from. `work_depth` is a snapshot of two independently-advancing counters — see
+            // `ExecutorStats::work_depth` — and `work_service_nanos_ewma` is an estimator, not a
+            // bound; `estimate_retry_after_s`'s doc says what makes it one.
+            "work_completed": executor.work_completed,
+            "work_depth": executor.work_depth,
+            "work_service_nanos_ewma": executor.work_service_nanos_ewma,
+        },
+        // Task 6 (D2/D1). `admission` is the bound, `in_flight` is read live off the semaphore.
+        // `shed_total` counts **this bound's** 429s only — the queue-full 429 is produced inside
+        // the engine and is not counted here; `work_depth` above is its gauge.
+        "ingest": {
+            "admission": ingest.admission,
+            "in_flight": ingest.in_flight,
+            "shed_total": ingest.shed_total,
+            "max_batch_rows": state.ingest_max_batch_rows,
+            "max_batch_bytes": state.ingest_max_batch_bytes,
+        },
+        // Task 6 (D5). **It alarms; it does not act** — there is no fold until stage 2.3, so
+        // `soft_limit_alarms` rising is a signal that the overlay is deep, never a mechanism that
+        // makes it shallower. `depth` is read off the live generation, so it cannot drift from
+        // what a request composes against.
+        "overlay": {
+            "depth": state.engine.overlay_depth(),
+            "soft_limit_alarms": executor.overlay_soft_limit_alarms,
         },
         "pins": {
             "drain_depth": pins.drain_depth,
             "oldest_retired_secs": pins.oldest_retired_secs,
+        },
+        // Task 5's two caches (Task 3b deferred this to here by name, because Task 5 was not
+        // merged on that branch).
+        //
+        // **`young_evictions` is an alarm, not an undifferentiated counter, and `thrashing` is the
+        // predicate spelled out.** `> 0` is the argued threshold, not an arbitrary one: `prepare`
+        // refuses at startup any bound below `expected_concurrent_sessions × the measured
+        // per-entry size (see `validate_cache_bounds`), so a young eviction means the collapsing
+        // regime was entered *another* way — a second slice per session, a generation swap's
+        // transient duplicate, or entries larger than the measured figure. That is precisely what
+        // `validate_cache_bounds`' own doc says this counter is for.
+        "row_projection_cache": {
+            "entries": projection_cache.entries,
+            "bytes": projection_cache.bytes,
+            "bound_bytes": projection_cache.bound_bytes,
+            "hits": projection_cache.hits,
+            "misses": projection_cache.misses,
+            "building_refusals": projection_cache.building_refusals,
+            "evictions": projection_cache.evictions,
+            "young_evictions": projection_cache.young_evictions,
+            "thrashing": projection_cache.young_evictions > 0,
+            "oversized_admissions": projection_cache.oversized_admissions,
+        },
+        "fragment_cache": {
+            "entries": fragment_cache.entries,
+            "bytes": fragment_cache.bytes,
+            "bound_bytes": fragment_cache.bound_bytes,
+            "hits": fragment_cache.hits,
+            "misses": fragment_cache.misses,
+            "building_refusals": fragment_cache.building_refusals,
+            "evictions": fragment_cache.evictions,
+            "young_evictions": fragment_cache.young_evictions,
+            "thrashing": fragment_cache.young_evictions > 0,
+            "oversized_admissions": fragment_cache.oversized_admissions,
+            // The observable that separates an in-memory eviction from a genuinely cold rebuild.
+            "rebuilds": state.engine.fragment_cache_rebuilds(),
+        },
+        // The gauge only. **S17 — the expiry sweep — is out of scope** and remains an open owner
+        // decision: an expired session is 403'd but never removed, and each retained one pins an
+        // `Arc<FrozenFragment>`, so `fragment_cache.bytes` falling does not mean that memory was
+        // released. Publishing the number is what makes that visible to whoever rules on it; a
+        // count that only ever rises while `young_evictions` stays quiet is the signature.
+        "sessions": {
+            "retained": sessions_retained,
         },
     })))
 }

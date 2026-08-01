@@ -231,6 +231,83 @@ impl ComputeGate {
     }
 }
 
+/// Task 6 (D2): the bound on **concurrent `/control/ingest` handlers**, which is the bound on how
+/// many blocking-pool threads ingest can hold.
+///
+/// # The failure it exists to prevent
+///
+/// `spawn_blocking` dispatches onto a process-wide **unbounded FIFO** served by a fixed number of
+/// threads. Before this, nothing bounded concurrent `/control/ingest` handlers, and each one holds
+/// a thread across the Arrow decode, the plugin's `terms_of_label` loop, the external-ID sidecar IO
+/// **and** its whole blocking wait on the executor's receipt. Task 3b closed the deny lane's
+/// exposure to that by giving `/control/changes` its own runtime; it did not close the class. The
+/// viewer plane still shared the FIFO with unbounded ingest and had **no timeout on the wait**, so
+/// an admitted viewport — one that `ComputeGate` had already let through — would *hang* rather than
+/// shed. That is what this closes, and `ingest_admission_sheds_before_the_blocking_pool_fills` is
+/// what asserts it.
+///
+/// # Not a second `ComputeGate`
+///
+/// One semaphore, `try_acquire` only: no queue and no timeout. A queued ingest handler is exactly
+/// the parked submitter Task 3b's ruling established is *not* the problem — the problem is an
+/// *admitted* one. So the control plane either takes the work now or refuses it, and the refusal
+/// costs no blocking thread, no queue slot and no WAL byte.
+///
+/// # Not a `OnceLock`
+///
+/// `DENY_RUNTIME`'s process-global pattern is right for a `tokio::runtime::Runtime` and wrong here:
+/// this must be **per server**, because the integration-test binary runs many servers in one
+/// process and a process-global bound would make every ingest test contend with every other.
+pub struct IngestAdmission {
+    pub bound: usize,
+    permits: Arc<Semaphore>,
+    /// Every ingest 429 this bound has produced. Process-wide, no per-principal label (SA §9).
+    /// Distinct from the *queue-full* 429, which is counted nowhere here because it is produced
+    /// inside the engine — `/control/status` publishes `work_depth` for that one instead.
+    shed_total: AtomicU64,
+}
+
+/// `/control/status`'s `ingest` block.
+pub struct IngestAdmissionStatus {
+    pub admission: usize,
+    pub in_flight: usize,
+    pub shed_total: u64,
+}
+
+impl IngestAdmission {
+    pub fn new(bound: usize) -> Self {
+        IngestAdmission {
+            bound,
+            permits: Arc::new(Semaphore::new(bound)),
+            shed_total: AtomicU64::new(0),
+        }
+    }
+
+    /// Take a permit, or `None` if the bound is reached. **The permit must be moved into the
+    /// blocking closure, not held across the handler's `.await`**: `spawn_blocking`'s closure keeps
+    /// running (and keeps its thread) after a disconnected client's handler future is dropped, so a
+    /// permit released at handler-drop would under-count exactly when the pool is under pressure.
+    /// This is [`GatePermits`]' stated rule — a permit tracks compute completion, never caller
+    /// interest — applied to a second resource.
+    pub fn try_admit(&self) -> Option<OwnedSemaphorePermit> {
+        match Arc::clone(&self.permits).try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                self.shed_total.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    pub fn status(&self) -> IngestAdmissionStatus {
+        IngestAdmissionStatus {
+            admission: self.bound,
+            in_flight: self.bound - self.permits.available_permits(),
+            shed_total: self.shed_total.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Process-wide server state, shared (behind `Arc`) across every axum handler on every plane.
 pub struct AppState {
     pub engine: Engine,
@@ -238,6 +315,19 @@ pub struct AppState {
     pub max_k: usize,
     /// D-B: the viewer/session admission gate. Never touched by the control plane (D13).
     pub compute_gate: ComputeGate,
+    /// Task 6 (D2): the control plane's own admission bound. Deliberately **not** `compute_gate` —
+    /// D13 keeps the control plane out of the viewer gate, because an ingest batch durability-
+    /// syncing must not be throttled by the budget a slow viewport consumes.
+    pub ingest_admission: IngestAdmission,
+    /// Task 6 (D1): per-request row cap on `/control/ingest`; over is 422. Checked after the Arrow
+    /// decode, which is the earliest point the row count is knowable.
+    pub ingest_max_batch_rows: usize,
+    /// Task 6 (D1): per-request body-byte cap on `/control/ingest`; over is 422.
+    ///
+    /// **Enforced by a `DefaultBodyLimit` layer on the route, not by a length check in the
+    /// handler** — see `control::router`. Carried here so the layer and the 422's detail string
+    /// read the same number.
+    pub ingest_max_batch_bytes: usize,
     /// Runtime half of the `x-tessera-stage-ns` gate (see `Config::stage_timing`). The other half
     /// is the `bench-timing` compile feature; both must hold.
     pub stage_timing: bool,
