@@ -1,5 +1,24 @@
 # Viewport-Addressed Requests, the Global Mark Budget, and the Full-Resolution Underlay
 
+> ## STATUS, 2026-08-01: Phase 0 and Phase 1 are DONE. Phase 2 is SUPERSEDED.
+>
+> **Do not execute this plan as written.** The unticked boxes below are misleading.
+>
+> * **Phase 0 (Tasks 1, 5)** — ran; results in `probes/2026-08-02-viewport-and-underlay/`.
+> * **Phase 1 (Tasks 2, 2a, 3, 4)** — implemented and merged. The viewport-addressed client,
+>   the mark budget, one-directional calibration and the four display states are all in
+>   `clients/ts/`. Measured at 10⁹: marks vary 2.33× across five zoom levels against ~25× before,
+>   and a six-interaction session fell from 31 requests to 9.
+> * **Phase 2 (Tasks 6, 7, 8)** — **superseded** by
+>   `docs/superpowers/specs/2026-08-01-caching-architecture-design.md`. The underlay is no longer a
+>   rider on the viewport request: it becomes a cached per-session density raster (that document's
+>   **S3**/**C2**), the client derives its own mip chain by summing, and `max_underlay_cells` is
+>   re-sized there rather than here. The single-pass route (Task 6) remains deferred, and becomes
+>   likely-necessary under the pyramid.
+>
+> Read the caching design first; it changes the operating point this plan was written against
+> (1–2 × 10⁶ marks, not 66 × 10³).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the client issue one viewport-addressed request per view at a depth chosen to hit a global mark budget, and make the density underlay reach screen resolution — so that marks-on-screen is roughly constant across zoom, one client cannot shed itself with 429s, and the underlay is a density field rather than a mosaic.
