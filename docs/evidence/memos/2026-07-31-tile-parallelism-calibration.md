@@ -2,7 +2,7 @@
 
 **Status:** landed on main (merge 55eab5f). Constants in `crates/tessera-engine/src/viewport.rs`;
 raw sweep data and the full process history archived in
-[probes/2026-07-31-concurrency-workstream/](../../probes/2026-07-31-concurrency-workstream/)
+[probes/2026-07-31-concurrency-workstream/](../../../probes/2026-07-31-concurrency-workstream/)
 (the SDD ledger, per-task reports, and `bench-runs/`). This memo is the decision record; read
 nothing else unless auditing.
 
@@ -21,7 +21,7 @@ every scale, 1.4×–10×", overstated the source report and cost a measured ~2�
 Under the dense grant at 10⁹ every `natural` sample measured serial-favouring across the whole
 observed row range, minimum ratio 1.00, up to 9.93×; that is the regression this workstream exists
 to fix and it is solid. At 10⁸ the family is mixed (0.54–9.71). **At 2.42 M the pool wins most
-`natural` samples** (0.25–1.05 sparse, 0.39–1.02 dense — [report §14.3](../../probes/2026-07-31-concurrency-workstream/calibration-report.md)),
+`natural` samples** (0.25–1.05 sparse, 0.39–1.02 dense — [report §14.3](../../../probes/2026-07-31-concurrency-workstream/calibration-report.md)),
 which is exactly the forfeit §14.5 accepted and the table below still records. The fan-out's
 ~0.5–1 ms scheduling overhead dwarfs post-B9 tile work only where tile work is small.
 
@@ -99,7 +99,7 @@ and is the mechanism any future re-calibration re-arms with one constant.
 # Follow-up 4, answered: the two-axis sweep
 
 *(Added 2026-08-01. Raw cells, method and fixture provenance:
-[probes/2026-08-01-two-axis-sweep/](../../probes/2026-08-01-two-axis-sweep/). 210 measured cells —
+[probes/2026-08-01-two-axis-sweep/](../../../probes/2026-08-01-two-axis-sweep/). 210 measured cells —
 35 shapes × 3 scales × 2 grant densities — every run under `scripts/bench-slot.sh` on a quiet box,
 no build concurrent with any measurement.)*
 
@@ -261,7 +261,7 @@ never measured above 1,024. This is the regression memo's recommendation 4, minu
 # Follow-up 4, addendum: the label axis
 
 *(Added 2026-08-01. Raw cells, method and the premise check:
-[probes/2026-08-01-label-contiguity/](../../probes/2026-08-01-label-contiguity/). 315 measured
+[probes/2026-08-01-label-contiguity/](../../../probes/2026-08-01-label-contiguity/). 315 measured
 cells — 35 shapes × 9 grant/label-set configurations at 2.42M — every run under
 `scripts/bench-slot.sh`, no build concurrent with any measurement.)*
 
