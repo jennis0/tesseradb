@@ -205,6 +205,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     // so a node that replayed a WAL already over the limit alarms at startup rather than waiting
     // for the next deny.
     engine.set_overlay_soft_limit(config.overlay_soft_limit);
+    // Phase 2 stage 2.1, Task 7a: `commit_window_max_items`' consumer — the row count at which a
+    // commit window closes, and with it the scope of design §11.1's signature sort. Additive for
+    // the same reason as the two above.
+    engine.set_commit_window_max_rows(config.commit_window_max_items);
     let engine = engine;
 
     // Phase 2 stage 2.1, Task 3b: the deny lane's own blocking runtime, built here so a runtime
