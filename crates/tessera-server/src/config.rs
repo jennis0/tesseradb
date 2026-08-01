@@ -1,22 +1,21 @@
 //! Fail-closed configuration: `tessera.toml` (SA §7).
 //!
 //! `[disclosure]` has no defaults at all: absence of the section, or of either key inside it, is
-//! a startup error naming design §7.5/§2.3 — `min_visible_members` is parsed and stored even
-//! though nothing consumes it until Phase 3; the startup rule, not the value, is the point.
+//! a startup error naming design §7.5/§2.3. `min_visible_members` is parsed and stored even though
+//! no handler reads it — ⊘ specified, not implemented — because the *startup rule* is what this
+//! section enforces: a deployment must state its disclosure parameters rather than inherit them.
 //! Every other section either has a documented default (`max_k = 1000`) or is required outright.
 //! Credentials are never inline: `[serve]`'s `*_credential_file`/`*_credential_env` pairs are the
 //! only way to supply the session/operator bearer secrets.
 //!
-//! ## The Phase 2 stage-2.1 knobs (Task 0b)
+//! ## The write-path and admission knobs
 //!
-//! Fourteen keys land here *before* the code that reads them, so no parallel track has to edit
-//! this file mid-stream (stage-2.1 plan, "How the work parallelises", rule 2). Every one of them
-//! is a **performance knob, not a disclosure control**, so under SA §7's rule ("performance knobs
-//! default; disclosure controls do not") every one of them defaults, and
+//! Every one of them is a **performance knob, not a disclosure control**, so under SA §7's rule
+//! ("performance knobs default; disclosure controls do not") every one of them defaults, and
 //! [`tests::every_stage_2_1_knob_defaults`] pins that reading. They still refuse a **zero**, which
 //! is a different thing: a zero is degenerate for every one of these (see
-//! [`ConfigError::MustBeNonZero`]), and this file's established discipline is to refuse rather
-//! than clamp so a typo cannot silently disable a mechanism.
+//! [`ConfigError::MustBeNonZero`]), and this file's discipline is to refuse rather than clamp so a
+//! typo cannot silently disable a mechanism.
 //!
 //! Sectioning follows SA §7's own sketch: the write-path knobs sit under `[ingest]` (where SA §7
 //! already puts `flush_max_items`, `flush_max_age` and `overlay_soft_limit`), the serving-side
@@ -25,10 +24,10 @@
 //! `"60s"` sketch, taken deliberately so a value's unit survives being read out of a log line or
 //! a status payload without its key.
 //!
-//! **Three of the fifteen are inert**: `flush_max_items` and `flush_max_age_secs` are parsed,
-//! validated and stored, and *nothing reads them*, because flush does not exist until stage 2.2;
-//! `commit_window_max_age_ms` likewise, because Task 7b established that an age bound has no
-//! subject in an executor whose commit window never waits (see
+//! **Three of the fifteen are inert.** ⊘ Specified, not implemented: `flush_max_items` and
+//! `flush_max_age_secs` are parsed, validated and stored, and *nothing reads them*, because flush
+//! does not exist; `commit_window_max_age_ms` likewise, because an age bound has no subject in an
+//! executor whose commit window never waits (see
 //! [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`]). [`tests::the_flush_knobs_are_inert`] and
 //! [`tests::the_commit_window_age_bound_is_inert`] assert that mechanically, so an operator cannot
 //! set one and believe it works without this file's doc having been changed first.
@@ -53,7 +52,7 @@ pub enum ConfigError {
     /// named file/env var could not be read.
     MissingCredential(&'static str),
     BadAddr(String),
-    /// Phase 1 ships only `builtin:passthrough` (the wasmtime host is out of scope).
+    /// Only `builtin:passthrough` is available; the wasmtime plugin host is not built.
     UnsupportedPlugin(String),
     /// `serve.k_min = 0`, which switches off §7.2's floor clause — the **I7 guarantee** that a
     /// non-empty tile always draws at least one mark. With no floor, a tile whose visible items all
@@ -85,15 +84,15 @@ pub enum ConfigError {
     /// prevent, reachable through config instead of through a shift bug — so it is refused in the
     /// same spirit.
     ThetaTargetZero,
-    /// `serve.compute_threads = 0` (D-B): the pool this knob sizes must fill the machine, and a
+    /// `serve.compute_threads = 0`: the pool this knob sizes must fill the machine, and a
     /// zero-width pool can run nothing at all. Refused rather than clamped to 1, so a typo cannot
     /// quietly turn "one thread per core" into "one thread total".
     ComputeThreadsZero,
-    /// `serve.compute_admission = 0` (D-B): the compute semaphore would have zero permits, so
+    /// `serve.compute_admission = 0`: the compute semaphore would have zero permits, so
     /// every gated request sheds unconditionally — indistinguishable from the server being down,
     /// but silently. Refused rather than clamped to 1 for the same reason as the floor clause.
     ComputeAdmissionZero,
-    /// `serve.admission_timeout_ms = 0` (D-E) would silently disable the bounded queue wait —
+    /// `serve.admission_timeout_ms = 0` would silently disable the bounded queue wait —
     /// every request either starts immediately or sheds instantly, with no queueing at all, which
     /// is what `serve.compute_queue = 0` (a legal value) already expresses explicitly. Refused so
     /// a zero here reads as a mistake rather than a second spelling of that same knob.
@@ -117,7 +116,7 @@ pub enum ConfigError {
     ComputeAdmissionDefaultOverflow {
         compute_threads: usize,
     },
-    /// One of the Phase 2 stage-2.1 knobs (Task 0b) was set to `0`, and `0` is degenerate for
+    /// One of the write-path or admission knobs was set to `0`, and `0` is degenerate for
     /// every one of them — not "off", but "on and silently useless". `consequence` names the
     /// specific silent failure at the check site, because a generic "must be non-zero" tells an
     /// operator what to type and nothing about what they nearly did.
@@ -129,7 +128,7 @@ pub enum ConfigError {
         key: &'static str,
         consequence: &'static str,
     },
-    /// **Task 6, relation 1 (lifecycle §4's headroom rule).** The ingest queue's worst-case byte
+    /// **Relation 1 (lifecycle §4's headroom rule).** The ingest queue's worst-case byte
     /// footprint, plus the bytes reserved for change records, does not sit strictly below the WAL's
     /// configured ceiling — so a full ingest queue could consume the room a deny needs, and a deny
     /// is never refused for load and has no admission control of its own to fall back on.
@@ -143,7 +142,7 @@ pub enum ConfigError {
         ingest_queue_bound: usize,
         ingest_max_batch_bytes: usize,
     },
-    /// **Task 6, relation 1, unrepresentable.** `ingest_queue_bound × ingest_max_batch_bytes`, or
+    /// **Relation 1, unrepresentable.** `ingest_queue_bound × ingest_max_batch_bytes`, or
     /// that product plus the reserved deny headroom, overflows `u64`.
     ///
     /// Refused rather than wrapped, for [`crate::validate_cache_bounds`]'s reason verbatim: a wrap
@@ -153,7 +152,7 @@ pub enum ConfigError {
         ingest_queue_bound: usize,
         ingest_max_batch_bytes: usize,
     },
-    /// **Task 6, relation 2.** The serving runtime's blocking pool would have to be sized past
+    /// **Relation 2.** The serving runtime's blocking pool would have to be sized past
     /// [`SERVING_BLOCKING_THREAD_CEILING`] to cover its declared consumers — see
     /// [`serving_blocking_threads`] for what those are and why the pool is derived rather than
     /// assumed. Both operands are named because both are knobs.
@@ -162,14 +161,14 @@ pub enum ConfigError {
         ingest_admission: usize,
         required: usize,
     },
-    /// **Task 6, relation 3 (added at the fix round).** The ingest path's worst-case *resident*
+    /// **Relation 3.** The ingest path's worst-case *resident*
     /// bytes — queued commands **plus** admitted-but-not-yet-queued handlers, each holding a decoded
     /// batch — exceeds [`INGEST_RESIDENT_CEILING_BYTES`].
     ///
-    /// Relations 1 and 2 between them bounded WAL bytes and OS threads and nothing bounded heap,
-    /// which is the resource that actually binds at 10⁹ (the Phase 1 build was OOM-killed at 46.4 GB
-    /// RSS). `compute_admission = 8, ingest_admission = 4000` satisfied both of the other two and
-    /// admitted four thousand concurrent handlers each holding a 16 MiB batch.
+    /// Relations 1 and 2 between them bound WAL bytes and OS threads, and neither bounds heap —
+    /// which is the resource that actually binds at 10⁹ (a build was OOM-killed at 46.4 GB RSS).
+    /// Without this one, `compute_admission = 8, ingest_admission = 4000` satisfies both of the
+    /// others while admitting four thousand concurrent handlers each holding a 16 MiB batch.
     ///
     /// **It is a machine-scale refusal, not a memory budget**, and [`INGEST_RESIDENT_CEILING_BYTES`]
     /// says what it does and does not measure.
@@ -179,7 +178,7 @@ pub enum ConfigError {
         ingest_max_batch_bytes: usize,
         required: u64,
     },
-    /// **Task 6, relation 3, unrepresentable.** `(ingest_queue_bound + ingest_admission) ×
+    /// **Relation 3, unrepresentable.** `(ingest_queue_bound + ingest_admission) ×
     /// ingest_max_batch_bytes` overflows `u64`. Refused rather than wrapped, for
     /// [`ConfigError::WalHeadroomOverflow`]'s reason verbatim: a wrap produces a *small* left-hand
     /// side, i.e. it silently admits exactly the configuration the relation exists to refuse.
@@ -225,8 +224,8 @@ impl std::fmt::Display for ConfigError {
             ConfigError::BadAddr(raw) => write!(f, "not a valid listen address: '{raw}'"),
             ConfigError::UnsupportedPlugin(module) => write!(
                 f,
-                "unsupported plugin module '{module}' — Phase 1 ships only builtin:passthrough \
-                 (the wasmtime host is out of scope)"
+                "unsupported plugin module '{module}' — this build ships only \
+                 builtin:passthrough (the wasmtime plugin host is not built)"
             ),
             ConfigError::FloorClauseDisabled => write!(
                 f,
@@ -259,19 +258,19 @@ impl std::fmt::Display for ConfigError {
             ),
             ConfigError::ComputeThreadsZero => write!(
                 f,
-                "serve.compute_threads = 0 — the compute pool must fill the machine (D-B); a \
+                "serve.compute_threads = 0 — the compute pool must fill the machine; a \
                  zero-width pool can run nothing. Startup refuses rather than clamping to 1"
             ),
             ConfigError::ComputeAdmissionZero => write!(
                 f,
                 "serve.compute_admission = 0 — the compute semaphore would have zero permits, so \
-                 every gated request would shed unconditionally (D-B). Startup refuses rather than \
+                 every gated request would shed unconditionally. Startup refuses rather than \
                  clamping to 1"
             ),
             ConfigError::AdmissionTimeoutZero => write!(
                 f,
                 "serve.admission_timeout_ms = 0 would silently disable the bounded queue wait \
-                 (D-E) — use serve.compute_queue = 0 to disable queueing explicitly instead"
+                 — use serve.compute_queue = 0 to disable queueing explicitly instead"
             ),
             ConfigError::ComputeAdmissionQueueOverflow {
                 compute_admission,
@@ -412,12 +411,12 @@ impl From<toml::de::Error> for ConfigError {
 
 pub type Result<T> = std::result::Result<T, ConfigError>;
 
-/// **`deny_unknown_fields` on every raw section** *(Task 0 gate, F13)*. Serde's default is to
-/// ignore what it does not recognise, which for this file means a typo'd section header
-/// (`[ingestion]`) or key (`wal_hard_limit`) parses clean and silently defaults — against this
-/// module's own stated discipline that every check here refuses rather than clamps, so a typo
-/// cannot silently disable an invariant. Fourteen keys landed at once precisely so operators would
-/// set them, and an operator who sets one and gets the default has no signal at all that they did.
+/// **`deny_unknown_fields` on every raw section.** Serde's default is to ignore what it does not
+/// recognise, which for this file means a typo'd section header (`[ingestion]`) or key
+/// (`wal_hard_limit`) parses clean and silently defaults — against this module's own stated
+/// discipline that every check here refuses rather than clamps, so a typo cannot silently disable
+/// an invariant. An operator who sets a key and gets the default has no signal at all that they
+/// did.
 ///
 /// The cost is that a `tessera.toml` carrying a key from a *newer* build is refused rather than
 /// ignored. That is the right direction for a fail-closed config: a downgrade that silently drops
@@ -439,7 +438,7 @@ struct RawConfig {
     ingest: RawIngest,
 }
 
-/// SA §7's `[ingest]` section (Task 0b). Every field is `Option` and the struct is `Default`, so
+/// SA §7's `[ingest]` section. Every field is `Option` and the struct is `Default`, so
 /// a `tessera.toml` with no `[ingest]` section at all parses to "every key defaulted".
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -530,7 +529,7 @@ struct RawServe {
     pin_ttl_secs: Option<u64>,
     #[serde(default)]
     pins_per_session_max: Option<usize>,
-    /// Browser origins permitted to call the viewer and session planes (MVP client spec §3).
+    /// Browser origins permitted to call the viewer and session planes.
     ///
     /// **Absent means no CORS layer at all**, which is the only sensible default for a key whose
     /// effect is to let a page from another origin present a session token and the session
@@ -554,8 +553,10 @@ pub struct Config {
     pub bundle_path: PathBuf,
     pub cache_dir: PathBuf,
     pub wal_path: PathBuf,
-    /// Parsed and stored, consumed by nothing until Phase 3 — the startup rule is the point
-    /// (design §7.5/§2.3).
+    /// The disclosure floor. Parsed and stored because design §7.5/§2.3 makes a missing
+    /// `[disclosure]` section a refusal to start.
+    /// ⊘ Specified, not implemented: no handler reads it, so nothing is suppressed for being below
+    /// the floor.
     pub min_visible_members: u64,
     pub token_max_lifetime_secs: u64,
     pub viewer_addr: SocketAddr,
@@ -584,92 +585,86 @@ pub struct Config {
     pub dev_cors_origins: Vec<String>,
     pub session_credential: String,
     pub operator_credential: String,
-    /// D-B: the pool this sizes should fill the machine. This task adds the knob and its
-    /// validation only — the rayon pool that consumes it arrives in a later task.
+    /// Sizes `Engine::open`'s shared rayon pool, which should fill the machine.
     pub compute_threads: usize,
-    /// D-B: the compute semaphore's permit count — a bound on in-flight *requests*, admitted for
-    /// the viewer/session planes only (never the control plane, D13), not a bound on runnable CPU:
+    /// The compute semaphore's permit count — a bound on in-flight *requests*, admitted for the
+    /// viewer/session planes only (never the control plane), not a bound on runnable CPU:
     /// `compute_threads` (the rayon pool) still bounds the parallel-sweep CPU each admitted
     /// request may fan out across, and this gate deliberately lets the serialise phase
     /// oversubscribe up to `compute_admission` because small requests are latency-bound on
     /// scheduling, not CPU. Defaults to [`COMPUTE_ADMISSION_MULTIPLIER`]`× compute_threads` — see
     /// that constant's doc for the measurement behind the multiplier.
     pub compute_admission: usize,
-    /// D-B: the outer slots semaphore's *additional* permits beyond `compute_admission` — the
+    /// The outer slots semaphore's *additional* permits beyond `compute_admission` — the
     /// bounded queue. Legally `0` (shed the instant every compute permit is busy). Defaults to
     /// `2 × compute_admission`, now effectively `2 × COMPUTE_ADMISSION_MULTIPLIER = 8×` cores.
     pub compute_queue: usize,
-    /// D-E: how long a request may wait for a compute permit before it is shed with 429
+    /// How long a request may wait for a compute permit before it is shed with 429
     /// `backpressure` and `Retry-After: 1`.
     pub admission_timeout_ms: u64,
 
-    // ---- Phase 2 stage 2.1 (Task 0b). Landed here ahead of their consumers so no track has to
-    // edit this file mid-stream. Each field names the task that reads it; the argument for each
-    // default is on its `DEFAULT_*` constant.
-    /// **Task 7a** — the **row** count at which a commit window closes (an *item* is a row; entries
-    /// are admitted whole, so a window closes at or just past this).
+    // ---- The write-path and admission knobs. The argument for each default is on its
+    // `DEFAULT_*` constant.
+    /// The **row** count at which a commit window closes (an *item* is a row; entries are admitted
+    /// whole, so a window closes at or just past this).
     /// See [`DEFAULT_COMMIT_WINDOW_MAX_ITEMS`]. `1` is the honest way to disable group commit.
     pub commit_window_max_items: usize,
-    /// **INERT** — parsed, validated, stored, and read by nothing. Task 7b declined to build an age
-    /// bound; see [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`] for the argument and
-    /// [`tests::the_commit_window_age_bound_is_inert`] for the mechanical assertion.
+    /// **INERT** — parsed, validated, stored, and read by nothing, because a commit window never
+    /// waits and so has no age to bound; see [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`] for the argument
+    /// and [`tests::the_commit_window_age_bound_is_inert`] for the mechanical assertion.
     pub commit_window_max_age_ms: u64,
-    /// **Task 6** — the bounded work queue's depth; full is a 429 with `retry_after_s`.
+    /// The bounded work queue's depth; full is a 429 with `retry_after_s`.
     /// See [`DEFAULT_INGEST_QUEUE_BOUND`]. The deny queue is unbounded and this never bounds it.
     pub ingest_queue_bound: usize,
-    /// **Task 6** — concurrent `/control/ingest` handlers admitted; over is 429. See
+    /// Concurrent `/control/ingest` handlers admitted; over is 429. See
     /// [`DEFAULT_INGEST_ADMISSION`]. Distinct from [`Config::ingest_queue_bound`], which bounds
     /// *queued commands*: the two bound different resources and move independently.
     pub ingest_admission: usize,
-    /// **Task 6** — per-request row cap on `/control/ingest`; over is 422 (contracts §3.1).
+    /// Per-request row cap on `/control/ingest`; over is 422 (contracts §3.1).
     /// See [`DEFAULT_INGEST_MAX_BATCH_ROWS`].
     pub ingest_max_batch_rows: usize,
-    /// **Task 6** — per-request body-byte cap on `/control/ingest`; over is 422. This is the
-    /// operand of the headroom assertion (see [`DEFAULT_WAL_HARD_LIMIT_BYTES`]), because a queue
-    /// bounded in *entries* bounds nothing without it. See [`DEFAULT_INGEST_MAX_BATCH_BYTES`].
+    /// Per-request body-byte cap on `/control/ingest`; over is 422. This is the operand of the
+    /// headroom assertion (see [`DEFAULT_WAL_HARD_LIMIT_BYTES`]), because a queue bounded in
+    /// *entries* bounds nothing without it. See [`DEFAULT_INGEST_MAX_BATCH_BYTES`].
     pub ingest_max_batch_bytes: usize,
-    /// **Task 6** — the WAL's byte ceiling *as a startup relation between config values*, and the
-    /// right-hand side of the headroom assertion. **Not a runtime ceiling: appends do not stop
-    /// here** (Task 0 gate, F10) — `Wal` has no length accessor, so nothing compares the live log
-    /// against this number. See [`DEFAULT_WAL_HARD_LIMIT_BYTES`] for what would be needed to make
-    /// the name true.
+    /// The WAL's byte ceiling *as a startup relation between config values*, and the right-hand
+    /// side of the headroom assertion. **Not a runtime ceiling: appends do not stop here** — `Wal`
+    /// has no length accessor, so nothing compares the live log against this number. See
+    /// [`DEFAULT_WAL_HARD_LIMIT_BYTES`] for what would be needed to make the name true.
     pub wal_hard_limit_bytes: u64,
-    /// **Task 6** — overlay depth at which an alarm is raised. See
-    /// [`DEFAULT_OVERLAY_SOFT_LIMIT`]. **Alarms only**: there is no fold until stage 2.3, so
-    /// crossing it gets an operator a signal, never relief.
+    /// Overlay depth at which an alarm is raised. See [`DEFAULT_OVERLAY_SOFT_LIMIT`].
+    /// **Alarms only** — ⊘ no compaction fold exists, so crossing it gets an operator a signal,
+    /// never relief.
     pub overlay_soft_limit: usize,
-    /// **Stage 2.2 — INERT.** Parsed, validated, stored, read by nothing: its consumer is flush,
-    /// which does not exist yet. See [`DEFAULT_FLUSH_MAX_ITEMS`].
+    /// **INERT.** ⊘ Parsed, validated, stored, read by nothing: its consumer is flush, which does
+    /// not exist. See [`DEFAULT_FLUSH_MAX_ITEMS`].
     pub flush_max_items: usize,
-    /// **Stage 2.2 — INERT.** Parsed, validated, stored, read by nothing: its consumer is flush,
-    /// which does not exist yet. See [`DEFAULT_FLUSH_MAX_AGE_SECS`].
+    /// **INERT.** ⊘ Parsed, validated, stored, read by nothing: its consumer is flush, which does
+    /// not exist. See [`DEFAULT_FLUSH_MAX_AGE_SECS`].
     pub flush_max_age_secs: u64,
-    /// **Task 5** — byte bound on the row-projection cache. See
-    /// [`DEFAULT_ROW_PROJECTION_CACHE_BYTES`], and [`MEASURED_PROJECTION_BYTES_AT_1E9`] for the
-    /// per-entry size the startup validation weighs it against.
+    /// Byte bound on the row-projection cache. See [`DEFAULT_ROW_PROJECTION_CACHE_BYTES`], and
+    /// [`MEASURED_PROJECTION_BYTES_AT_1E9`] for the per-entry size the startup validation weighs it
+    /// against.
     pub row_projection_cache_bytes: u64,
-    /// **Task 5** — byte bound on the *in-memory* fragment tier. See
-    /// [`DEFAULT_FRAGMENT_CACHE_BYTES`]. The `.frag` sidecar tier is untouched by it.
+    /// Byte bound on the *in-memory* fragment tier. See [`DEFAULT_FRAGMENT_CACHE_BYTES`]. The
+    /// `.frag` sidecar tier is untouched by it.
     pub fragment_cache_bytes: u64,
-    /// **Task 5** — the concurrency the projection cache must not collapse at; the startup
-    /// validation is that [`Config::row_projection_cache_bytes`] admits at least this many
-    /// entries. See [`DEFAULT_EXPECTED_CONCURRENT_SESSIONS`].
+    /// The concurrency the projection cache must not collapse at; the startup validation is that
+    /// [`Config::row_projection_cache_bytes`] admits at least this many entries. See
+    /// [`DEFAULT_EXPECTED_CONCURRENT_SESSIONS`].
     pub expected_concurrent_sessions: usize,
-    /// **Task 4** — pin TTL (lifecycle §2.2). See [`DEFAULT_PIN_TTL_SECS`].
+    /// Pin TTL (lifecycle §2.2). See [`DEFAULT_PIN_TTL_SECS`].
     pub pin_ttl_secs: u64,
-    /// **Task 4** — per-session pin cap (lifecycle §2.2). See
-    /// [`DEFAULT_PINS_PER_SESSION_MAX`].
+    /// Per-session pin cap (lifecycle §2.2). See [`DEFAULT_PINS_PER_SESSION_MAX`].
     pub pins_per_session_max: usize,
 }
 
 /// The machine ceiling on a viewport's `k` — GPU, transport, handle table.
 ///
-/// **A working value, not a calibration** *(owner, 2026-07-30; was 200)*. The drawn-mark budget
-/// spec's probes P1–P3 are what calibrate this number, and they have not run; the identity plan
-/// blocks committing a *calibrated* value until its own rebuild lands, because a `k` measured
-/// against the pre-rebuild bundle would be measured against the wrong box and the wrong identity
-/// width. Nothing about that blocks setting a sane working default in the meantime, and 200 was
-/// itself never calibrated either.
+/// **A working value, not a calibration.** The drawn-mark budget spec's probes P1–P3 are what
+/// would calibrate this number and they have not run — a `k` measured against the current bundle
+/// would be measured against the wrong identity width. So this is a sane working default, and it is
+/// labelled as one rather than presented as a measurement.
 ///
 /// Deliberately **above** [`DEFAULT_K_MAX_MARKS`]: the machine ceiling should not be the binding one
 /// — the overplot ceiling should be — so that raising what a screen can legibly show does not also
@@ -683,16 +678,15 @@ const DEFAULT_K_MIN: usize = 2;
 /// §7.2's cap clause: the most marks any one tile draws. **The overplot ceiling** — sized by what a
 /// screen can legibly show, not by machine limits.
 ///
-/// *(owner, 2026-07-30; was 128)*. Density memo §4 argued 128 from ink coverage at ~80x80 px per
-/// tile, on the premise that a viewport draws a few hundred tiles and that mark count stops reading
-/// as density somewhere around 50–100 marks per tile. That premise is **untested** — the memo says
-/// so itself, and it is exactly what the drawn-mark budget's P1 probe exists to settle — and it sits
-/// against an owner decision that the drawn-mark budget should be the largest a client can render.
-/// This value takes the owner's side of that pending the probe.
+/// Density memo §4 argues 128 from ink coverage at ~80x80 px per tile, on the premise that a
+/// viewport draws a few hundred tiles and that mark count stops reading as density somewhere around
+/// 50–100 marks per tile. That premise is **untested** — the memo says so itself, and it is exactly
+/// what the drawn-mark budget's P1 probe exists to settle — and it sits against the standing
+/// position that the drawn-mark budget should be the largest a client can render. 500 takes the
+/// latter side pending the probe ([decision 0007](../../../docs/decisions/0007-k-max-marks-500.md)).
 ///
 /// It is the number that actually binds: with `k` defaulting to the same value, the effective cap is
-/// this. Raising it widens §7.2's proportional window, which is `cap / k_min`, from 64 at the old
-/// pair to 250 here.
+/// this, and §7.2's proportional window `cap / k_min` is 250.
 const DEFAULT_K_MAX_MARKS: usize = 500;
 
 /// The MACHINE ceiling must sit at or above the OVERPLOT ceiling, so the overplot one is what binds.
@@ -726,7 +720,7 @@ const DEFAULT_MAX_UNDERLAY_CELLS: usize = 8192;
 /// functionality regression.
 const DEFAULT_MAX_TILES_PER_REQUEST: usize = 262_144;
 
-/// D-B: the compute pool should fill the machine. `available_parallelism` fails only when the OS
+/// The compute pool should fill the machine. `available_parallelism` fails only when the OS
 /// genuinely cannot answer the question (SA has no fallback story for that host); treated as 1
 /// rather than propagated, since a single-threaded fallback still starts the server, and the
 /// `ComputeThreadsZero` refusal exists for the case an operator's *explicit* `0` needs catching,
@@ -752,48 +746,47 @@ fn default_compute_threads() -> usize {
     )
 }
 
-/// D-E: 25× the 10 ms p99 target — a request that cannot even *start* in 250 ms is better shed
+/// 25× the 10 ms p99 target — a request that cannot even *start* in 250 ms is better shed
 /// with `Retry-After: 1` than served at the measured 1.04 s worst case.
 const DEFAULT_ADMISSION_TIMEOUT_MS: u64 = 250;
 
-/// `compute_admission`'s default multiplier over `compute_threads` (resolved, D-B). **Retuned
-/// 2026-07-31** (was 1×, "one CPU-bound request per core") on the calibrated-viewport measurement
-/// that requests at this corpus scale are ~0.3 ms and mostly memory-bound: `compute_admission`
+/// `compute_admission`'s default multiplier over `compute_threads`.
+///
+/// **Not "one CPU-bound request per core".** The calibrated-viewport measurement is that requests at
+/// this corpus scale are ~0.3 ms and mostly memory-bound: `compute_admission`
 /// bounds in-flight *requests*, not runnable CPU — the rayon pool (`compute_threads`) still bounds
 /// the parallel-sweep CPU each admitted request may fan out across, and the serialise phase
 /// deliberately oversubscribes up to `compute_admission`, because small requests are latency-bound
 /// on scheduling, not CPU, and a 1× gate left cores idle waiting on the next request rather than
 /// running the one already queued.
 ///
-/// Measured (`.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/admission-4x-report.md`, 12-core
-/// WSL2 box, 2.42M-row fixture, Arm B): at 1× (`compute_admission=12`) closed-loop throughput was
+/// Measured on a 12-core WSL2 box over a 2.42 M-row fixture: at 1× (`compute_admission=12`)
+/// closed-loop throughput was
 /// c=5 11,771 / c=100 31,248 / c=1000 28,929 rps against a pre-gate baseline of 15,277 / 48,588 /
 /// 49,475 rps, with shed% at c=100/c=1000 around 40%. At 4×, c=100 improves to 35,448 rps
 /// (shed% collapses to ~0.1%) and c=1000 to 32,645 rps (shed% to ~1.9%) — a real but partial
 /// recovery, not a full one; c=5 is essentially unchanged (11,515 rps) because that cell is
 /// latency-/generator-bound, not gate-bound, so a wider gate has nothing to admit that wasn't
 /// already getting in. p99 grew 1.02–1.47× over the 1× run across every cell measured, well inside
-/// the ~2× bound treated as the retune's own regression limit — the trade this constant makes is
-/// real (some tail risk under sustained oversubscription, since the queue is `2 × compute_admission`
-/// = 8× cores) but it stayed bounded at this measurement.
+/// the ~2× bound treated as the regression limit — the trade this constant makes is real (some tail
+/// risk under sustained oversubscription, since the queue is `2 × compute_admission` = 8× cores) but
+/// it stayed bounded at this measurement.
 const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;
 
 // ---------------------------------------------------------------------------------------------
-// Phase 2 stage 2.1 (Task 0b) — the fourteen knobs, and the argument for each default.
+// The write-path and admission knobs, and the argument for each default.
 //
-// The set is chosen as a *consistent* set, not fourteen independent numbers: two of the
-// assertions later tasks add are relations between them (Task 6's WAL headroom, Task 5's cache
-// admission), and a default configuration that could not start is not a default.
-// `defaults_satisfy_task_6s_headroom_relation` and `defaults_satisfy_task_5s_cache_relation`
-// pin both relations now, so a later edit to one constant cannot silently make the shipped
-// default config refuse to start once those assertions land.
+// The set is chosen as a *consistent* set, not as independent numbers: two of the startup
+// assertions are relations between them (the WAL headroom relation, and the cache-admission one),
+// and a default configuration that could not start is not a default.
+// `defaults_satisfy_task_6s_headroom_relation` and `defaults_satisfy_task_5s_cache_relation` pin
+// both, so an edit to one constant cannot silently make the shipped default config refuse to start.
 // ---------------------------------------------------------------------------------------------
 
-/// Task 7a: the **row** count at which a commit window closes.
+/// The **row** count at which a commit window closes.
 ///
-/// **Rows, not submissions, and the arithmetic below is why** *(Task 7a; the stage-2.1 plan's
-/// sketch says `entries.len() >= commit_window_max_items` and is the thing that is wrong)*. Every
-/// quantity this number is sized from — the run length, the heap the window holds, the latency it
+/// **Rows, not submissions, and the arithmetic below is why.** Every quantity this number is sized
+/// from — the run length, the heap the window holds, the latency it
 /// costs — scales in rows. Read as submissions it would admit 10 000 × `ingest_max_batch_rows` =
 /// 10⁸ rows in one window, four orders of magnitude past the resident ceiling
 /// [`INGEST_RESIDENT_CEILING_BYTES`] allows, and the run-length figure below would be 2 000 000
@@ -803,14 +796,14 @@ const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;
 /// **Sized from the compression arithmetic, which is the window's whole purpose — but do not size a
 /// deployment from the headline.** The probes' 8.9–36.7× posting compression was measured under a
 /// *full-corpus* signature sort. `run ≈ commit_window_max_items × term_density` — 10 k rows at the
-/// corpus's 2% giving ~200 (plan Task 7a, review M1) — is an **upper bound**, not an expectation:
+/// corpus's 2% giving ~200 — is an **upper bound**, not an expectation:
 /// entity ids are sorted by an item's whole term *signature*, so a term's ids run contiguously only
 /// where that term is effectively the signature. The measured corpus is not shaped that way (probes
 /// results §3: 54,791 signatures over 2.42 M items, mean group 44, rank-100 group 4,213 and
 /// rank-1,000 group 158), so a 10 k window holds ~17 rows of the hundredth-largest group and under
 /// one of the thousandth — **runs of order 10¹, one to two orders of magnitude below the 200**. Size
-/// from that, and re-measure before trusting either figure (CLAUDE.md's standing caveat on
-/// policy-dependent headlines; the per-window re-permutation was not run — Task 7a fix round 1, F2).
+/// from that, and re-measure before trusting either figure. The probes' headline is
+/// policy-dependent, and the per-window re-permutation that would settle it was not run.
 ///
 /// **The instrument that settles it is on `/control/status`.** `fragmentation.run_ratio`
 /// (contracts §3.4) is measured at every window close, over the windows a deployment actually
@@ -834,9 +827,9 @@ const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;
 /// costs.
 ///
 /// **The window adds no residency term, and the argument is worth writing down because it reads the
-/// other way round.** Task 6's relation 3 bounds resident ingest bytes by `ingest_admission ×
-/// ingest_max_batch_rows`, and a window looks like a fourth term outside it — a reviewer of this task
-/// concluded exactly that. It is not: every entry in an open window has a handler blocked on its
+/// other way round.** Relation 3 bounds resident ingest bytes by `ingest_admission ×
+/// ingest_max_batch_rows`, and a window looks like a fourth term outside it. It is not: every entry
+/// in an open window has a handler blocked on its
 /// receipt, and `control.rs`'s ingest path takes the `IngestAdmission` permit **before**
 /// `spawn_blocking` and moves it *into* the closure, so the permit is held until the ack. In-window
 /// entries are therefore ≤ `ingest_admission`, and their bytes are the ones relation 3 already
@@ -851,8 +844,8 @@ const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;
 /// window collects — and an operator who raises `ingest_max_batch_rows` without raising this gets
 /// one-entry windows.
 ///
-/// **`1` is how you disable group commit**, and Task 10's A/B (one large window versus a hundred
-/// small ones) needs that spelling to exist. `0` is refused: a window that closes at zero rows
+/// **`1` is how you disable group commit**, and an A/B between one large window and a hundred small
+/// ones needs that spelling to exist. `0` is refused: a window that closes at zero rows
 /// is not "off", it is group commit silently doing nothing while the code that implements it
 /// still runs.
 const DEFAULT_COMMIT_WINDOW_MAX_ITEMS: usize = 10_000;
@@ -862,12 +855,12 @@ const DEFAULT_COMMIT_WINDOW_MAX_ITEMS: usize = 10_000;
 /// (`tests::the_commit_window_age_bound_is_inert` fails the moment anything outside this module
 /// uses the key).
 ///
-/// **Task 7b's ruling, because the previous text here described a system that was never built.**
-/// Three of its claims were false of the code: that denies share the window (they do not in stage
-/// 2.1 — the window is ingest-only and denies ride the never-shed lane); that the honest worst-case
-/// deny starvation is `2 ×` this value (that arithmetic needs both an age bound and a deny in the
-/// window, and has neither); and that "both queues empty" is a close trigger (the trigger is the
-/// **work** queue observed empty; `run_work_pass` never looks at the deny lane).
+/// **Three plausible claims about it are all false of the code**, and are worth naming because each
+/// would be a reason to wire the key up: denies do *not* share the window (it is ingest-only, and
+/// denies ride the never-shed lane); the worst-case deny starvation is *not* `2 ×` this value (that
+/// arithmetic needs both an age bound and a deny in the window, and has neither); and "both queues
+/// empty" is *not* the close trigger (the trigger is the **work** queue observed empty —
+/// `run_work_pass` never looks at the deny lane).
 ///
 /// **What an age bound would buy: nothing.** It is the safety cap on a *linger* — "having drained
 /// the queue empty, wait for company" — and the executor has no linger. A `CommitWindow` is a local
@@ -882,21 +875,18 @@ const DEFAULT_COMMIT_WINDOW_MAX_ITEMS: usize = 10_000;
 ///
 /// **The key is kept rather than deleted** because every raw config section is
 /// `deny_unknown_fields`: removing it would turn any existing `tessera.toml` that sets
-/// `ingest.commit_window_max_age_ms` into a start-up refusal. That is the same trade the seam
-/// already made for the two `flush_*` knobs — an inert key that says so beats a compatibility
-/// break. If a later stage builds a linger and gives this key a consumer, delete this paragraph,
-/// the `Config` field's INERT note and `the_commit_window_age_bound_is_inert` in the same commit.
-///
-/// The number itself is the seam's, carried across unchanged so that a future consumer does not
-/// inherit a value chosen by nobody.
+/// `ingest.commit_window_max_age_ms` into a start-up refusal. That is the same trade the two
+/// `flush_*` knobs make — an inert key that says so beats a compatibility break. Anything that
+/// builds a linger and gives this key a consumer must delete this paragraph, the `Config` field's
+/// INERT note and `the_commit_window_age_bound_is_inert` in the same commit.
 const DEFAULT_COMMIT_WINDOW_MAX_AGE_MS: u64 = 200;
 
-/// Task 6: the bounded work queue's depth. Full is a 429 with `retry_after_s`; the deny queue is
+/// The bounded work queue's depth. Full is a 429 with `retry_after_s`; the deny queue is
 /// separate and unbounded, and this never bounds it (lifecycle §1.3's deny priority lane).
 ///
 /// **Bounded by heap, not by taste.** A queued `Command` holds its rows in memory, so the queue's
 /// worst case is `ingest_queue_bound × ingest_max_batch_bytes` = 32 × 16 MiB = **512 MiB**. Memory
-/// is already the binding constraint at 10⁹ (the Phase 1 build was OOM-killed at 46.4 GB RSS), so
+/// is already the binding constraint at 10⁹ (a build was OOM-killed at 46.4 GB RSS), so
 /// this is deliberately a small number: backpressure that arrives early is a working queue,
 /// backpressure that arrives at the OOM killer is not. It is only *half* the ingest path's resident
 /// worst case — the other half is [`DEFAULT_INGEST_ADMISSION`]'s, and
@@ -904,15 +894,14 @@ const DEFAULT_COMMIT_WINDOW_MAX_AGE_MS: u64 = 200;
 ///
 /// # Why it is strictly below [`DEFAULT_INGEST_ADMISSION`], and which 429 that makes live
 ///
-/// This was `64`, equal to the admission bound, and at that setting **the queue-full 429 was
-/// unreachable in any operator-legal configuration**. `Engine::accept_ingest` blocks on its receipt,
-/// so an admitted handler holds at most one work-queue entry at a time and outstanding entries are
-/// bounded by admitted handlers: with `A = Q = 64` the queue peaked at 63 (the executor holds one
-/// in flight) and `try_send` could never observe `Full`. `SubmitError::QueueFull`,
-/// `estimate_retry_after_s(depth, ..)` for any `depth > 0`, and D3's whole wire surface were dead
-/// code at the shipped defaults, reachable only through `start_write_executor(0)`, a spelling
-/// `non_zero_usize` refuses to an operator. The old doc argued that `A = Q` "truncates that second
-/// term to zero" — i.e. it stated the defect and then shipped it.
+/// Set equal to the admission bound, **the queue-full 429 is unreachable in any operator-legal
+/// configuration**. `Engine::accept_ingest` blocks on its receipt, so an admitted handler holds at
+/// most one work-queue entry at a time and outstanding entries are bounded by admitted handlers:
+/// with `A = Q = 64` the queue peaks at 63 (the executor holds one in flight) and `try_send` can
+/// never observe `Full`. `SubmitError::QueueFull`, `estimate_retry_after_s(depth, ..)` for any
+/// `depth > 0`, and the whole `retry_after_s` wire surface would be dead code at the shipped
+/// defaults, reachable only through `start_write_executor(0)` — a spelling `non_zero_usize` refuses
+/// to an operator.
 ///
 /// So `Q < A`, and the consequence is worth stating rather than leaving to be re-derived:
 ///
@@ -926,21 +915,21 @@ const DEFAULT_COMMIT_WINDOW_MAX_AGE_MS: u64 = 200;
 ///   exist.
 const DEFAULT_INGEST_QUEUE_BOUND: usize = 32;
 
-/// Task 6: concurrent `/control/ingest` handlers admitted at once. Over is a 429 with its own
+/// Concurrent `/control/ingest` handlers admitted at once. Over is a 429 with its own
 /// derived `retry_after_s`; the refusal costs no blocking thread, no queue slot and no WAL byte.
 ///
 /// **It bounds blocking-pool threads. It does not bound queued commands.**
 /// [`DEFAULT_INGEST_QUEUE_BOUND`] does that. The distinction is the whole reason this is a separate
 /// key.
 ///
-/// **It is, however, a heap operand, and the fix round added the relation that says so.** An
-/// admitted handler holds a fully decoded batch from the Arrow decode until its receipt returns —
-/// the window this constant's own argument below enumerates — so `ingest_admission ×
-/// ingest_max_batch_bytes` is resident *beside* the queue's own worst case, not inside it. The
-/// startup arithmetic bounded threads and WAL bytes and left that term out entirely, which is how
-/// `compute_admission = 8, ingest_admission = 4000` passed both relations while admitting four
-/// thousand concurrent 16 MiB batches. [`INGEST_RESIDENT_CEILING_BYTES`] is the relation; it is a
-/// machine-scale refusal, not a memory budget.
+/// **It is, however, a heap operand, and [`INGEST_RESIDENT_CEILING_BYTES`] is the relation that
+/// says so.** An admitted handler holds a fully decoded batch from the Arrow decode until its
+/// receipt returns — the window this constant's own argument below enumerates — so
+/// `ingest_admission × ingest_max_batch_bytes` is resident *beside* the queue's own worst case, not
+/// inside it. Bounding only threads and WAL bytes leaves that term out entirely, which is how
+/// `compute_admission = 8, ingest_admission = 4000` passes those two relations while admitting four
+/// thousand concurrent 16 MiB batches. The resident relation is a machine-scale refusal, not a
+/// memory budget.
 ///
 /// # Why this is not derived from `ingest_queue_bound`
 ///
@@ -954,10 +943,10 @@ const DEFAULT_INGEST_QUEUE_BOUND: usize = 32;
 ///   because the executor has dequeued the command and is running it.
 ///
 /// So the useful concurrency is the queue's depth **plus** the handlers doing pre-submit work, and
-/// setting this equal to the queue bound truncates that second term to zero — which is exactly what
-/// the shipped `64 = 64` did, and it killed the queue-full 429 outright.
-/// [`DEFAULT_INGEST_QUEUE_BOUND`]'s doc has that finding and says which 429 is live at these
-/// defaults now. Tying the two would also mean an operator raising `ingest_queue_bound` for burst
+/// setting this equal to the queue bound truncates that second term to zero — which kills the
+/// queue-full 429 outright. [`DEFAULT_INGEST_QUEUE_BOUND`]'s doc has that argument and says which
+/// 429 is live at these defaults. Tying the two would also mean an operator raising
+/// `ingest_queue_bound` for burst
 /// tolerance — a *heap* decision — silently raising blocking-thread demand and moving
 /// [`serving_blocking_threads`]'s arithmetic under their feet.
 ///
@@ -965,12 +954,12 @@ const DEFAULT_INGEST_QUEUE_BOUND: usize = 32;
 /// construction rather than by luck — see [`serving_blocking_threads`].
 const DEFAULT_INGEST_ADMISSION: usize = 64;
 
-/// Task 6 (fix round 1): the ceiling on the ingest path's worst-case **resident** bytes, and the
-/// right-hand side of the third startup relation.
+/// The ceiling on the ingest path's worst-case **resident** bytes, and the right-hand side of the
+/// third startup relation.
 ///
 /// `(ingest_queue_bound + ingest_admission) × ingest_max_batch_bytes`. Both terms, because both are
-/// real and only the first was ever written down: a queued `Command` holds its rows, and so does
-/// every admitted handler between its Arrow decode and its receipt.
+/// real and the second is the easy one to miss: a queued `Command` holds its rows, and so does every
+/// admitted handler between its Arrow decode and its receipt.
 ///
 /// **What it is not.** It is not a memory budget, it does not measure heap, and nothing observes
 /// RSS. It is the same shape as [`SERVING_BLOCKING_THREAD_CEILING`] — a refusal of the configuration
@@ -1058,7 +1047,7 @@ const INGEST_MAX_BATCH_BYTES_CEILING: usize = 64 * 1024 * 1024;
 /// build.
 const _: () = assert!(INGEST_MAX_BATCH_BYTES_CEILING == 4 * DEFAULT_INGEST_MAX_BATCH_BYTES);
 
-/// Task 6: the WAL bytes reserved for change records above the ingest queue's own worst case.
+/// The WAL bytes reserved for change records above the ingest queue's own worst case.
 ///
 /// **Argued from the record, not chosen for roundness.** A change record is an op, an entity id and
 /// a caller-supplied external id capped at 64 bytes (`control.rs`'s `EXTERNAL_ID_MAX_LEN`) plus its
@@ -1068,7 +1057,7 @@ const _: () = assert!(INGEST_MAX_BATCH_BYTES_CEILING == 4 * DEFAULT_INGEST_MAX_B
 /// relation and not a comment beside it (lifecycle §4's headroom rule).
 const RESERVED_DENY_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Task 6: blocking threads held back for work that is not one of the two admission-bounded
+/// Blocking threads held back for work that is not one of the two admission-bounded
 /// consumers [`serving_blocking_threads`] enumerates.
 ///
 /// The one such consumer *in this workspace* is [`crate::control`]'s `spawn_on_deny_lane`
@@ -1081,8 +1070,8 @@ const RESERVED_DENY_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
 /// scoped to the workspace precisely because this reserve is what stands behind the rest.
 const BLOCKING_THREAD_RESERVE: usize = 32;
 
-/// Task 6: the ceiling on the serving runtime's blocking pool, and the right-hand side of the
-/// second startup relation.
+/// The ceiling on the serving runtime's blocking pool, and the right-hand side of the second
+/// startup relation.
 ///
 /// **This is not a bound the arithmetic has to fit under by luck** — [`serving_blocking_threads`]
 /// *derives* the pool from its declared consumers, so there is no configuration in which an
@@ -1099,7 +1088,7 @@ pub const SERVING_BLOCKING_THREAD_CEILING: usize = 4096;
 /// The serving runtime's `max_blocking_threads`, derived from the config's declared consumers.
 ///
 /// **Every consumer *in this workspace* is one of these, and that list is an enumeration rather than
-/// an estimate** — verified by grep at Task 6. It is deliberately not a claim about the process:
+/// an estimate.** It is deliberately not a claim about the process:
 /// tokio dispatches its own work onto the same pool, DNS resolution being the one this crate's own
 /// test fixtures already rely on. [`BLOCKING_THREAD_RESERVE`] is what covers everything outside the
 /// enumeration, which is why the pool is `consumers + reserve` and not `consumers`:
@@ -1108,15 +1097,15 @@ pub const SERVING_BLOCKING_THREAD_CEILING: usize = 4096;
 ///   awaits `ComputeGate::admit` **before** `spawn_blocking`, so at most `compute_admission` of them
 ///   hold a thread. `compute_queue` is deliberately **not** a term: a queued request is parked on a
 ///   semaphore and holds no thread;
-/// - `/control/ingest`, at most `ingest_admission` as of Task 6;
+/// - `/control/ingest`, at most `ingest_admission`;
 /// - `/control/changes`, which contributes **zero** because it runs on its own runtime with its own
-///   pool (Task 3b) — except on that lane's alarmed fallback, which [`BLOCKING_THREAD_RESERVE`]
-///   covers.
+///   pool (`control::DENY_RUNTIME`) — except on that lane's alarmed fallback, which
+///   [`BLOCKING_THREAD_RESERVE`] covers.
 ///
-/// **Called by `tessera-cli`'s runtime builder, which is the only reason this is `pub`.** Before
-/// Task 6 no line of this repository stated the pool's size at all: it was tokio's undeclared
-/// default, which a tokio upgrade or an embedder's own builder invalidates in silence. Deriving it
-/// from the consumers is stronger than asserting a constant covers them — an operator who raises
+/// **Called by `tessera-cli`'s runtime builder, which is the only reason this is `pub`.** The
+/// alternative is tokio's undeclared default, which a tokio upgrade or an embedder's own builder
+/// invalidates in silence. Deriving the pool from its consumers is also stronger than asserting a
+/// constant covers them — an operator who raises
 /// `compute_admission` gets a pool that fits, rather than a refusal telling them to lower it again.
 ///
 /// Embedders and every integration test build their own runtime and get none of this. What they
@@ -1129,85 +1118,85 @@ pub fn serving_blocking_threads(config: &Config) -> usize {
         .saturating_add(BLOCKING_THREAD_RESERVE)
 }
 
-/// Task 6: per-request row cap on `/control/ingest`; over is 422 (contracts §3.1).
+/// Per-request row cap on `/control/ingest`; over is 422 (contracts §3.1).
 ///
 /// Matched to [`DEFAULT_COMMIT_WINDOW_MAX_ITEMS`] deliberately — one maximal batch is one maximal
-/// window's worth of rows, so a single client cannot define the window's size by picking a
-/// chunk size, which is exactly the property design §11.1 r23 wants when it moves the sort scope
-/// to the server. The `rows` cap is the one that binds for ordinary point data; the byte cap
+/// window's worth of rows, so a single client cannot define the window's size by picking a chunk
+/// size, which is exactly the property design §11.1 wants when it puts the sort scope on the
+/// server. The `rows` cap is the one that binds for ordinary point data; the byte cap
 /// below catches unusually wide rows.
 const DEFAULT_INGEST_MAX_BATCH_ROWS: usize = 10_000;
 
-/// Task 6: per-request body-byte cap on `/control/ingest`; over is 422.
+/// Per-request body-byte cap on `/control/ingest`; over is 422.
 ///
 /// 16 MiB is ~1.6 KB per row at the row cap above — comfortable headroom over the ~1 KB/row the
-/// plan's queue arithmetic assumes, so the row cap is what a normal caller meets and this one
-/// only catches pathological rows. **Without a byte cap the queue bound bounds nothing** (plan
-/// review I-2/I3: a queue bounded in entries let one ten-million-row batch walk straight past
-/// it), which is why this key exists at all rather than the row cap alone.
+/// queue arithmetic assumes, so the row cap is what a normal caller meets and this one only catches
+/// pathological rows. **Without a byte cap the queue bound bounds nothing**: a queue bounded in
+/// entries lets one ten-million-row batch walk straight past it, which is why this key exists at all
+/// rather than the row cap alone.
 const DEFAULT_INGEST_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
-/// Task 6: the WAL's byte ceiling, and the right-hand side of the startup headroom assertion
-/// (`ingest_queue_bound × ingest_max_batch_bytes` + reserved deny headroom must sit strictly
-/// below it). **No WAL bound existed before this key** — the WAL grew until the filesystem said
-/// no, at which point every append fails and, per `WalError::Poisoned`, the handle is dead.
+/// The WAL's byte ceiling, and the right-hand side of the startup headroom assertion
+/// (`ingest_queue_bound × ingest_max_batch_bytes` + reserved deny headroom must sit strictly below
+/// it). Without it nothing bounds the WAL at all: it grows until the filesystem says no, at which
+/// point every append fails and, per `WalError::Poisoned`, the handle is dead.
 ///
 /// 8 GiB leaves 7 GiB of headroom above the queue's 1 GiB worst case, so denies — which are never
 /// refused for load and therefore have no admission control of their own to fall back on — have
 /// somewhere to go even with the ingest queue completely full. It is also small enough to fit the
 /// NVMe cache directory SA §7 describes without an operator thinking about it.
 ///
-/// **It bounds a startup relation; it does not stop appends** *(Task 0 gate, F10, in the spirit of
-/// [`DEFAULT_OVERLAY_SOFT_LIMIT`]'s "it alarms; it does not act")*. The name reads as a runtime
+/// **It bounds a startup relation; it does not stop appends** — in the spirit of
+/// [`DEFAULT_OVERLAY_SOFT_LIMIT`]'s "it alarms; it does not act". ⊘ The name reads as a runtime
 /// ceiling and is not one: `Wal` exposes no length accessor, so nothing can compare the live WAL
-/// against this number. Task 6 consumes it in exactly one place — the startup assertion that the
+/// against this number. It is consumed in exactly one place — the startup assertion that the
 /// queue's worst case plus reserved deny headroom sits strictly below it — and past that point the
 /// WAL grows until the filesystem refuses, at which point `WalError::Poisoned` makes the handle
-/// dead. Runtime enforcement needs a `Wal::len()` and a ruling on what "at the limit" should do
-/// (refusing ingest is straightforward; refusing a *deny* is fail-open), and neither is scheduled.
+/// dead. Runtime enforcement would need a `Wal::len()` and a ruling on what "at the limit" should do
+/// (refusing ingest is straightforward; refusing a *deny* is fail-open), and neither exists.
 const DEFAULT_WAL_HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
-/// Task 6: overlay depth at which an alarm is raised. **SA §7's own default**, carried across
-/// unchanged.
+/// Overlay depth at which an alarm is raised. **SA §7's own default**, carried across unchanged.
 ///
-/// **It alarms; it does not act.** There is no fold until stage 2.3, so an operator who sets this
-/// today gets a signal that the overlay is deep, not a mechanism that makes it shallower. The
+/// **It alarms; it does not act.** ⊘ Specified, not implemented: no compaction fold exists, so an
+/// operator who sets this gets a signal that the overlay is deep, not a mechanism that makes it
+/// shallower. The
 /// depth matters beyond memory: every deny acceptance clones the overlay inside the WAL critical
 /// section, so overlay depth is a term in the deny-ack latency that
 /// [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`] budgets against.
 const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 
-/// **INERT this stage.** Stage 2.2's flush trigger by buffered-item count. **SA §7's own
-/// default**, carried across unchanged.
+/// **INERT.** The flush trigger by buffered-item count. **SA §7's own default**, carried across
+/// unchanged.
 ///
-/// *Its consumer is flush, and flush does not exist yet* — nothing in the process reads this
-/// value, and an operator who sets it changes nothing at all. It is landed now only so that
-/// stage 2.2 finds the key already parsed, validated and documented rather than adding it to a
-/// file four tracks are editing. [`tests::the_flush_knobs_are_inert`] fails the moment anything
-/// outside this module names it, which is the moment this paragraph must be deleted.
+/// ⊘ Specified, not implemented: its consumer is flush, which does not exist, so nothing in the
+/// process reads this value and an operator who sets it changes nothing at all. It is parsed,
+/// validated and documented so that whatever builds flush finds the key already settled.
+/// [`tests::the_flush_knobs_are_inert`] fails the moment anything outside this module names it,
+/// which is the moment this paragraph must be deleted.
 const DEFAULT_FLUSH_MAX_ITEMS: usize = 100_000;
 
-/// **INERT this stage.** Stage 2.2's flush trigger by age — SA §7's `flush_max_age = "60s"`,
-/// carried across with the unit moved into the key name.
+/// **INERT.** The flush trigger by age — SA §7's `flush_max_age = "60s"`, carried across with the
+/// unit moved into the key name.
 ///
-/// *Its consumer is flush, and flush does not exist yet.* See [`DEFAULT_FLUSH_MAX_ITEMS`]. Worth
-/// knowing when 2.2 does wire it: lifecycle §1.2 r4 makes this the bound on **how stale an
-/// acknowledged item's absence may be** — a buffered item contributes to no viewport, count or
-/// density until flush gives it a row — so it becomes a visibility-latency control, not merely a
-/// segment-count one. That is an argument for revisiting the number then, not for pretending it
-/// does something now.
+/// ⊘ Specified, not implemented: its consumer is flush, which does not exist. See
+/// [`DEFAULT_FLUSH_MAX_ITEMS`]. Worth knowing whenever it is wired: lifecycle §1.2 makes this the
+/// bound on **how stale an acknowledged item's absence may be** — a buffered item contributes to no
+/// viewport, count or density until flush gives it a row — so it becomes a visibility-latency
+/// control, not merely a segment-count one. That is an argument for revisiting the number then, not
+/// for pretending it does something now.
 const DEFAULT_FLUSH_MAX_AGE_SECS: u64 = 60;
 
 /// The **measured** serialised size of one row projection at the 10⁹ operating point: every
 /// mask at ≥25% coverage serialises to a 125.12 MB dense bound (design Appendix A quotes the
-/// same 125 MB unsharded figure). Exposed rather than private because it is the operand of Task
-/// 5's startup validation, not a documentation flourish.
+/// same 125 MB unsharded figure). Exposed rather than private because it is the operand of
+/// [`crate::validate_cache_bounds`]'s startup validation, not a documentation flourish.
 ///
 /// Three caveats belong wherever this number is used.
 ///
 /// 1. It is the *serialised* size. `get_serialized_size_in_bytes` can underestimate the in-memory
-///    footprint — but **not at this operating point**, and the previous phrasing of this caveat
-///    was wrong about why *(Task 0 gate, F12)*. The ~2× gap is an **array-container** property:
+///    footprint — but **not at this operating point**. The ~2× gap is an **array-container**
+///    property:
 ///    a `Vec<u16>` of values carries capacity slack that the serialised form does not. A mask that
 ///    serialises to the 125.12 MB dense bound is by construction dominated by **bitmap**
 ///    containers, whose in-memory size *is* their serialised size (8 KB, a fixed 2¹⁶-bit block) —
@@ -1221,10 +1210,10 @@ const DEFAULT_FLUSH_MAX_AGE_SECS: u64 = 60;
 ///    false the moment a build emits two: the same eight sessions then occupy sixteen entries.
 pub const MEASURED_PROJECTION_BYTES_AT_1E9: u64 = 125_120_000;
 
-/// Task 5: byte bound on the row-projection cache.
+/// Byte bound on the row-projection cache.
 ///
 /// **Sized so the cache cannot collapse at the expected concurrency, because plain LRU does not
-/// degrade in this regime — it collapses** (plan Task 5, review perf C1). A projection miss is
+/// degrade in this regime — it collapses.** A projection miss is
 /// `RowProjection::new`, measured in *seconds* (the 10⁹ warm-up viewport is 10.7 s), so the
 /// miss/hit cost ratio is 10⁵–10⁷; and because the single-flight miss path returns
 /// `ProjectionBuilding` to every racer, a working set that does not fit presents as a permanent
@@ -1233,20 +1222,19 @@ pub const MEASURED_PROJECTION_BYTES_AT_1E9: u64 = 125_120_000;
 /// 2 GiB is `2 ×` [`DEFAULT_EXPECTED_CONCURRENT_SESSIONS`] × [`MEASURED_PROJECTION_BYTES_AT_1E9`]
 /// (8 × 125 MB ≈ 1 GiB working set).
 ///
-/// **The factor of two is headroom, and the reason previously given for it was wrong** *(Task 0
-/// gate, F12; the number is unchanged, only its justification)*. It was described as the
-/// serialised-size accounting's ~2× underestimate — but that underestimate is an array-container
-/// property and does not apply at the dense bound this cache is sized against, where the mask is
-/// bitmap-container dominated and in-memory size equals serialised size. What the margin actually
-/// buys is the two ways the entry count exceeds the session count: **more than one slice per
-/// session** (the key is `(token_id, slice, segments_version)`, so a two-slice bundle doubles the
-/// entries at unchanged concurrency), and **a generation swap**, during which a pinned request's
-/// old-`segments_version` entry coexists with the new one until Task 5's `prune_generation` runs
-/// at drain-list reclaim. Both are entry-count effects, and at this bound either one alone still
-/// fits.
+/// **The factor of two is entry-count headroom, and specifically *not* a correction for the
+/// serialised-size accounting.** That ~2× underestimate is an array-container property and does not
+/// apply at the dense bound this cache is sized against, where the mask is bitmap-container
+/// dominated and in-memory size equals serialised size — so anyone reaching for that justification
+/// is reaching for the wrong one. What the margin buys is the two ways the entry count exceeds the
+/// session count: **more than one slice per session** (the key is
+/// `(token_id, slice, segments_version)`, so a two-slice bundle doubles the entries at unchanged
+/// concurrency), and **a generation swap**, during which a pinned request's old-`segments_version`
+/// entry coexists with the new one until `prune_generation` runs at drain-list reclaim. Both are
+/// entry-count effects, and at this bound either one alone still fits.
 const DEFAULT_ROW_PROJECTION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Task 5: byte bound on the **in-memory** fragment tier. The digest-verified `.frag` sidecar
+/// Byte bound on the **in-memory** fragment tier. The digest-verified `.frag` sidecar
 /// tier is untouched by it.
 ///
 /// Deliberately half [`DEFAULT_ROW_PROJECTION_CACHE_BYTES`], and the asymmetry is the point: a
@@ -1255,21 +1243,20 @@ const DEFAULT_ROW_PROJECTION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// grant set rather than by session, so principals with equal grants share one entry and the
 /// working set grows with *policy* cardinality, not with concurrency.
 ///
-/// **The margin its sibling carries is dropped here deliberately** *(Task 0 gate, F11)*. Both
+/// **The margin its sibling carries is dropped here deliberately.** Both
 /// bounds hold the same-shaped Roaring object at the same measured per-entry size, so `1 ×` here
 /// against `2 ×` there is a real difference and needs its reason stated rather than inferred: this
 /// cache's entry count is bounded by **distinct grant sets in flight**, not by sessions, so the
 /// row-projection margin's two justifications (a slice multiplier per session, and a generation
 /// swap's transient duplicate) do not apply — a slice does not appear in this key at all, and a
-/// fragment outlives a bundle swap. Eight *entries* here is therefore eight distinct policies,
-/// which is a deployment with more compartmentation than Phase 1 can express.
+/// fragment outlives a bundle swap. Eight *entries* here is therefore eight distinct policies.
 ///
 /// A deployment whose principals genuinely span more than eight distinct grant sets should raise
-/// this, and Task 5's startup validation covers this cache with the same relation it applies to
+/// this, and [`crate::validate_cache_bounds`] covers this cache with the same relation it applies to
 /// the projection cache, so the failure is a refusal to start rather than a thrash.
 const DEFAULT_FRAGMENT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Task 5: the session concurrency the projection cache must not collapse at — the startup
+/// The session concurrency the projection cache must not collapse at — the startup
 /// validation is that `row_projection_cache_bytes` admits at least this many entries at
 /// [`MEASURED_PROJECTION_BYTES_AT_1E9`].
 ///
@@ -1281,7 +1268,7 @@ const DEFAULT_FRAGMENT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 /// numbers.
 const DEFAULT_EXPECTED_CONCURRENT_SESSIONS: usize = 8;
 
-/// Task 4: how long a session pin stays resolvable (lifecycle §2.2).
+/// How long a session pin stays resolvable (lifecycle §2.2).
 ///
 /// **A pin is expensive in a way its holder cannot see.** A drained generation is held alive by
 /// its pin, and at the measured 47.02 GB bundle with a 22.5 GB viewport-hot set, one slow client
@@ -1295,18 +1282,18 @@ const DEFAULT_EXPECTED_CONCURRENT_SESSIONS: usize = 8;
 /// of this being too short is a retry, while the cost of it being too long is the cliff above.
 const DEFAULT_PIN_TTL_SECS: u64 = 300;
 
-/// Task 4: the most pins one session may hold at once (lifecycle §2.2).
+/// The most pins one session may hold at once (lifecycle §2.2).
 ///
 /// Four is one pin per concurrently-open frozen view, with room to spare.
 ///
-/// **This knob does NOT bound retention, and an earlier draft of this comment claimed it did**
-/// *(controller, 2026-07-31, on Track C's Task 4 gate — `tessera_engine::pins`' module doc refutes
-/// the claim and asks that it not be reintroduced; this is where it survived)*. A drain entry
-/// holds its `Arc<Bundle>` from retirement until the TTL or the depth ceiling releases it,
+/// **This knob does NOT bound retention**, however much it looks as though it should —
+/// `tessera_engine::pins`' module doc refutes that reading and asks that it not be reintroduced. A
+/// drain entry holds its `Arc<Bundle>` from retirement until the TTL or the depth ceiling releases
+/// it,
 /// **whether or not any session ever presents a pin naming it** — the cap is consulted only when
 /// one is presented. And a client that wants N superseded geometries simply opens N sessions:
 /// `Engine::authorise` mints a fresh `token_id` per call against a cached fragment, so the
-/// rotation costs it nothing. What actually bounds retention is `DEFAULT_PIN_TTL_SECS` above and
+/// rotation costs it nothing. What actually bounds retention is [`DEFAULT_PIN_TTL_SECS`] above and
 /// the engine's own `DRAIN_DEPTH_MAX`; see `tessera_engine::pins` for the page-cache argument
 /// that sizes them.
 ///
@@ -1316,7 +1303,7 @@ const DEFAULT_PIN_TTL_SECS: u64 = 300;
 /// not hold would compose against geometry it did not ask for.
 const DEFAULT_PINS_PER_SESSION_MAX: usize = 4;
 
-/// Refuses a zero for one of the Task 0b knobs, naming the silent failure that zero would cause.
+/// Refuses a zero for one of the write-path knobs, naming the silent failure zero would cause.
 /// See [`ConfigError::MustBeNonZero`] for why these refuse rather than clamp.
 fn non_zero_usize(key: &'static str, value: usize, consequence: &'static str) -> Result<usize> {
     if value == 0 {
@@ -1424,12 +1411,11 @@ fn parse(text: &str) -> Result<Config> {
         return Err(ConfigError::UnderlayOffsetTooDeep(max_underlay_offset));
     }
 
-    // D-B/D-E's admission knobs. Same refuse-not-clamp discipline as the selection clause above:
-    // each of `compute_threads`/`compute_admission`/`admission_timeout_ms` at 0 has a distinct
+    // The admission knobs. Same refuse-not-clamp discipline as the selection clause above: each of
+    // `compute_threads`/`compute_admission`/`admission_timeout_ms` at 0 has a distinct
     // silent-failure mode (an empty pool, a gate that sheds everything, a queue wait that never
-    // actually waits) and a typo must not quietly produce any of them. `compute_queue = 0` is
-    // legal (D-B) — it means "shed the instant every compute permit is busy" — so it alone is
-    // never checked.
+    // actually waits) and a typo must not quietly produce any of them. `compute_queue = 0` is legal
+    // — it means "shed the instant every compute permit is busy" — so it alone is never checked.
     let compute_threads = raw
         .serve
         .compute_threads
@@ -1502,10 +1488,9 @@ fn parse(text: &str) -> Result<Config> {
         return Err(ConfigError::AdmissionTimeoutZero);
     }
 
-    // The Phase 2 stage-2.1 knobs (Task 0b, plus `ingest_admission` at Task 6). All fifteen
-    // default (SA §7: performance knobs default, disclosure controls do not — none of these is a
-    // disclosure control); all fifteen refuse a zero, each with its own silent failure named. Two
-    // of them (`flush_*`) are still read by nothing until stage 2.2.
+    // The write-path knobs. All of them default (SA §7: performance knobs default, disclosure
+    // controls do not — none of these is a disclosure control); all of them refuse a zero, each with
+    // its own silent failure named. Two of them (`flush_*`) are read by nothing.
     let commit_window_max_items = non_zero_usize(
         "ingest.commit_window_max_items",
         raw.ingest
@@ -1519,9 +1504,9 @@ fn parse(text: &str) -> Result<Config> {
         raw.ingest
             .commit_window_max_age_ms
             .unwrap_or(DEFAULT_COMMIT_WINDOW_MAX_AGE_MS),
-        // The key is INERT (Task 7b) — no window is ever aged out — so this refusal guards a future
-        // consumer rather than a live mechanism, and says so rather than describing a behaviour the
-        // build does not have.
+        // The key is INERT — no window is ever aged out — so this refusal guards a future consumer
+        // rather than a live mechanism, and says so rather than describing a behaviour the build
+        // does not have.
         "this key is inert (nothing reads it; see DEFAULT_COMMIT_WINDOW_MAX_AGE_MS), and zero is \
          still refused so that no configuration reaches a future consumer already meaning \
          \"close before anything can join\" — set ingest.commit_window_max_items = 1 to disable \
@@ -1532,12 +1517,11 @@ fn parse(text: &str) -> Result<Config> {
         raw.ingest
             .ingest_queue_bound
             .unwrap_or(DEFAULT_INGEST_QUEUE_BOUND),
-        // **Corrected at Task 6 against the code.** This string used to say a zero-depth queue
-        // makes submissions "block until the executor picks them up instead of being shed with
-        // 429". It does the opposite: `LifecycleHandle::submit` uses `try_send` and
-        // `Executor::run` takes work with `try_recv`, never blocking in `work.recv()`, so a
-        // rendezvous channel has no waiting receiver ever and EVERY ingest is refused. That is
-        // worse than the stated failure and it is what an operator needs to be told.
+        // The plausible reading — that a zero-depth queue makes submissions block until the
+        // executor picks them up — is the opposite of what happens. `LifecycleHandle::submit` uses
+        // `try_send` and `Executor::run` takes work with `try_recv`, never blocking in
+        // `work.recv()`, so a rendezvous channel has no waiting receiver ever and EVERY ingest is
+        // refused. That is the worse failure, and it is what the message tells an operator.
         "a zero-depth work queue is a rendezvous with nobody waiting at it: the executor takes \
          work with try_recv, so a zero bound refuses EVERY ingest with 429 while denies continue \
          normally — indistinguishable from ingest being switched off, but silently",
@@ -1590,16 +1574,16 @@ fn parse(text: &str) -> Result<Config> {
         raw.ingest
             .flush_max_items
             .unwrap_or(DEFAULT_FLUSH_MAX_ITEMS),
-        "a zero item trigger asks flush to run before there is anything to flush (INERT this \
-         stage — validated now so stage 2.2 inherits the guard rather than adding it)",
+        "a zero item trigger asks flush to run before there is anything to flush (INERT — nothing \
+         reads this key; validated so that whatever builds flush inherits the guard)",
     )?;
     let flush_max_age_secs = non_zero_u64(
         "ingest.flush_max_age_secs",
         raw.ingest
             .flush_max_age_secs
             .unwrap_or(DEFAULT_FLUSH_MAX_AGE_SECS),
-        "a zero age trigger asks flush to run continuously (INERT this stage — validated now so \
-         stage 2.2 inherits the guard rather than adding it)",
+        "a zero age trigger asks flush to run continuously (INERT — nothing reads this key; \
+         validated so that whatever builds flush inherits the guard)",
     )?;
     let row_projection_cache_bytes = non_zero_u64(
         "serve.row_projection_cache_bytes",
@@ -1642,7 +1626,7 @@ fn parse(text: &str) -> Result<Config> {
     )?;
 
     // ---------------------------------------------------------------------------------------
-    // Task 6: the two startup relations (D4). Both refuse naming both sides.
+    // The three startup relations. Each refuses naming both of its sides.
     //
     // They live here rather than in `prepare` for the reason the `compute_admission + \
     // compute_queue` check above does: cross-key validation is this function's job, and a refusal
@@ -1690,8 +1674,8 @@ fn parse(text: &str) -> Result<Config> {
         });
     }
 
-    // Relation 3 — resident bytes (fix round 1). Relations 1 and 2 bound WAL bytes and OS threads;
-    // heap is the resource that actually binds at 10⁹ and nothing weighed it. **Both** admission and
+    // Relation 3 — resident bytes. Relations 1 and 2 bound WAL bytes and OS threads; heap is the
+    // resource that actually binds at 10⁹, and neither of them weighs it. **Both** admission and
     // the queue bound multiply the byte cap, because a decoded batch is resident from the Arrow
     // decode until the receipt returns, and only part of that window holds a queue slot.
     // `checked_*` for `WalHeadroomOverflow`'s reason verbatim: a wrap produces a *small* left-hand
@@ -1887,7 +1871,7 @@ mod tests {
         assert_eq!(config.admission_timeout_ms, DEFAULT_ADMISSION_TIMEOUT_MS);
     }
 
-    /// D-B: `compute_admission` defaults to `COMPUTE_ADMISSION_MULTIPLIER × compute_threads`, not
+    /// `compute_admission` defaults to `COMPUTE_ADMISSION_MULTIPLIER × compute_threads`, not
     /// to a separate constant — an explicit `compute_threads` must change the default admission
     /// bound too, or the measured small-request throughput argument silently stops holding.
     #[test]
@@ -1900,7 +1884,7 @@ mod tests {
         assert_eq!(config.compute_queue, 56);
     }
 
-    /// D-B: `compute_queue = 0` is explicitly legal — it means "shed the instant every compute
+    /// `compute_queue = 0` is explicitly legal — it means "shed the instant every compute
     /// permit is busy" — so it must load, not refuse.
     #[test]
     fn a_zero_compute_queue_is_legal() {
@@ -1910,7 +1894,7 @@ mod tests {
         assert_eq!(config.compute_queue, 0);
     }
 
-    /// D-B: `compute_threads = 0` refuses to start rather than silently running a zero-width
+    /// `compute_threads = 0` refuses to start rather than silently running a zero-width
     /// pool — the same refuse-not-clamp discipline as the selection clause's `k_min = 0`.
     #[test]
     fn a_zero_compute_threads_refuses_to_start() {
@@ -1920,7 +1904,7 @@ mod tests {
         assert!(matches!(err, ConfigError::ComputeThreadsZero), "{err}");
     }
 
-    /// D-B: an explicit `compute_threads` large enough that `COMPUTE_ADMISSION_MULTIPLIER *
+    /// an explicit `compute_threads` large enough that `COMPUTE_ADMISSION_MULTIPLIER *
     /// compute_threads` overflows `usize` refuses to start rather than silently wrapping to a
     /// small, wrong `compute_admission` — release builds have overflow checks off, so an
     /// unchecked multiply would produce a bogus-but-plausible value with no error raised anywhere.
@@ -1942,7 +1926,7 @@ mod tests {
         );
     }
 
-    /// D-B: `compute_admission = 0` refuses to start — a zero-permit compute semaphore sheds
+    /// `compute_admission = 0` refuses to start — a zero-permit compute semaphore sheds
     /// every gated request unconditionally, indistinguishable from the server being down.
     #[test]
     fn a_zero_compute_admission_refuses_to_start() {
@@ -1952,7 +1936,7 @@ mod tests {
         assert!(matches!(err, ConfigError::ComputeAdmissionZero), "{err}");
     }
 
-    /// D-E: `admission_timeout_ms = 0` refuses to start — that would silently disable the bounded
+    /// `admission_timeout_ms = 0` refuses to start — that would silently disable the bounded
     /// queue wait; `compute_queue = 0` is the correct, explicit way to disable queueing.
     #[test]
     fn a_zero_admission_timeout_refuses_to_start() {
@@ -1962,7 +1946,7 @@ mod tests {
         assert!(matches!(err, ConfigError::AdmissionTimeoutZero), "{err}");
     }
 
-    /// D-B: `compute_admission + compute_queue` at an absurd (but syntactically valid) size
+    /// `compute_admission + compute_queue` at an absurd (but syntactically valid) size
     /// refuses to start rather than panicking inside `Semaphore::new` during server startup —
     /// these two knobs together size the outer slots semaphore, and `Semaphore::new` panics past
     /// `MAX_PERMITS`. Both values here fit comfortably in TOML's i64 range but their sum exceeds
@@ -2050,7 +2034,7 @@ mod tests {
         assert!(matches!(err, ConfigError::ThetaTargetZero), "{err}");
     }
 
-    /// MVP client spec §3: the browser seam is off unless typed.
+    /// The dev-only browser seam is off unless typed.
     ///
     /// This is the one knob in this file that is **not** a performance knob, so SA §7's "knobs
     /// default, disclosure controls do not" would ordinarily require it to be stated. It defaults
@@ -2078,19 +2062,19 @@ mod tests {
         assert_eq!(config.dev_cors_origins, vec!["http://localhost:5173"]);
     }
 
-    // ---- Phase 2 stage 2.1 (Task 0b) --------------------------------------------------------
+    // ---- The write-path and admission knobs --------------------------------------------------
 
     /// **SA §7's rule, pinned as a test.** "Performance knobs default; disclosure controls do
-    /// not" — and not one of the fourteen stage-2.1 knobs is a disclosure control: they size
-    /// queues, windows, caches and pin lifetimes, and none of them changes what any principal may
-    /// see. So a `tessera.toml` that mentions **none** of them — no `[ingest]` section at all —
-    /// must load, with the documented defaults.
+    /// not" — and not one of the write-path knobs is a disclosure control: they size queues,
+    /// windows, caches and pin lifetimes, and none of them changes what any principal may see. So a
+    /// `tessera.toml` that mentions **none** of them — no `[ingest]` section at all — must load,
+    /// with the documented defaults.
     ///
-    /// The reading matters because the opposite reading is also plausible and is wrong: several
-    /// of these knobs *bound* memory, and a reviewer who classes "bounds memory" as "must be
-    /// stated explicitly" would make every deployment carry fourteen lines of boilerplate that
-    /// SA §7 exists to prevent. If a later stage decides one of these really is a disclosure
-    /// control, it must fail this test on the way to moving it — which is the point.
+    /// The reading matters because the opposite reading is also plausible and is wrong: several of
+    /// these knobs *bound* memory, and classing "bounds memory" as "must be stated explicitly"
+    /// would make every deployment carry fifteen lines of boilerplate that SA §7 exists to prevent.
+    /// Anything that decides one of these really is a disclosure control must fail this test on the
+    /// way to moving it — which is the point.
     #[test]
     fn every_stage_2_1_knob_defaults() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
@@ -2100,7 +2084,7 @@ mod tests {
             !toml.contains("[ingest]"),
             "this test is only meaningful against a config with no [ingest] section"
         );
-        let config = parse(&toml).expect("a config naming none of the stage-2.1 knobs must load");
+        let config = parse(&toml).expect("a config naming none of the write-path knobs must load");
 
         assert_eq!(
             config.commit_window_max_items,
@@ -2143,9 +2127,9 @@ mod tests {
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
         let config = parse(&valid_toml_with(
             "pin_ttl_secs = 42\nrow_projection_cache_bytes = 777000000",
-            // 3 GiB + a bit: this key is now an operand of Task 6's startup relation, so a value
-            // chosen only for legibility (it was 999000000) makes the whole config refuse to
-            // start. Kept above `queue worst case + reserved deny headroom` at the defaults.
+            // 3 GiB + a bit. This key is an operand of the WAL headroom relation, so a value
+            // chosen only for legibility would make the whole config refuse to start; it is kept
+            // above `queue worst case + reserved deny headroom` at the defaults.
             "commit_window_max_items = 7\nwal_hard_limit_bytes = 3000000000",
         ))
         .expect("must load");
@@ -2155,7 +2139,7 @@ mod tests {
         assert_eq!(config.wal_hard_limit_bytes, 3_000_000_000);
     }
 
-    /// Every stage-2.1 knob refuses a zero, and refuses it by *name*. Zero is degenerate for all
+    /// Every write-path knob refuses a zero, and refuses it by *name*. Zero is degenerate for all
     /// fifteen — never "off" — and the failure modes are silent ones: a window that batches
     /// nothing, a queue that blocks instead of shedding, an alarm that never stops firing, a
     /// cache that turns every request into a 429. Same discipline as `k_min = 0`.
@@ -2190,8 +2174,7 @@ mod tests {
         assert_eq!(
             ingest_keys.len() + serve_keys.len(),
             15,
-            "the plan lands fourteen keys and Task 6 adds ingest_admission; this table must cover \
-             all of them"
+            "there are fifteen write-path and admission knobs; this table must cover all of them"
         );
 
         for key in ingest_keys {
@@ -2210,14 +2193,14 @@ mod tests {
         }
     }
 
-    /// A misspelt key or section is **refused**, not defaulted *(Task 0 gate, F13)*.
+    /// A misspelt key or section is **refused**, not defaulted.
     ///
     /// The three cases are the three an operator actually hits: a key typo'd inside a real section
     /// (`wal_hard_limit` for `wal_hard_limit_bytes`), a key put in the *wrong* section (a `serve`
     /// key under `[ingest]` — the two-section split makes this the easy mistake), and a typo'd
-    /// section header (`[ingestion]`). Before `deny_unknown_fields` all three parsed clean and
-    /// silently defaulted, so an operator tuning the write path got the shipped behaviour and no
-    /// signal at all.
+    /// section header (`[ingestion]`).
+    /// Without `deny_unknown_fields` all three parse clean and silently default, so an operator
+    /// tuning the write path gets the shipped behaviour and no signal at all.
     #[test]
     fn a_misspelt_key_or_section_refuses_to_start() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
@@ -2237,28 +2220,17 @@ mod tests {
         }
     }
 
-    /// **The inertness assertion.** `flush_max_items` and `flush_max_age_secs` are parsed,
-    /// validated and stored, and *nothing reads them* — their consumer is flush, which does not
-    /// exist until stage 2.2. An operator must not be able to set one and believe it works, so
-    /// the claim is checked mechanically rather than promised in a doc comment: no `.rs` file in
-    /// the workspace outside this module may **use** either key.
-    ///
-    /// **Comments are stripped before the scan** *(Task 0 gate, F9)*. As written it matched any
-    /// mention, including prose, and had already forced `tessera-bench/src/arms/ingest.rs` to
-    /// carry a caveat about two config keys that was forbidden from naming them — a test making
-    /// documentation worse to keep itself green. A mention is not a consumer; only a *use* is, and
-    /// after comment-stripping any surviving occurrence is one.
-    ///
-    /// When stage 2.2 wires flush, this test fails. That is the intended design: the failure is
-    /// the prompt to delete the INERT paragraphs from both `DEFAULT_FLUSH_*` constants and both
-    /// `Config` fields in the same commit that gives them a consumer. Deleting this test without
-    /// doing that is the failure mode it exists to prevent, so it says so here.
     /// Every `.rs` file under `crates/` — other than this module, the one legitimate mention —
     /// that **uses** any of `keys` after comments are stripped.
     ///
-    /// Extracted at Task 7b so a second inert key could get its own test with its own failure
-    /// message rather than being folded into `the_flush_knobs_are_inert`, whose message is a
-    /// specific instruction to whoever wires flush.
+    /// **Comments are stripped before the scan**, and that is not an incidental detail: a scan over
+    /// raw text matches prose too, which forces every doc comment in the tree that explains why a
+    /// key does nothing to avoid naming it — a test making documentation worse to keep itself green.
+    /// A mention is not a consumer; only a *use* is, and after comment-stripping any surviving
+    /// occurrence is one.
+    ///
+    /// Shared by the two inertness tests rather than inlined into either, so each can carry its own
+    /// failure message: they are instructions to different readers.
     fn files_using(keys: &[&str]) -> Vec<String> {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -2297,13 +2269,23 @@ mod tests {
         offenders
     }
 
+    /// **The inertness assertion.** `flush_max_items` and `flush_max_age_secs` are parsed,
+    /// validated and stored, and *nothing reads them* — their consumer is flush, which does not
+    /// exist. An operator must not be able to set one and believe it works, so the claim is checked
+    /// mechanically rather than promised in a doc comment: no `.rs` file in the workspace outside
+    /// this module may **use** either key.
+    ///
+    /// Whatever wires flush fails this test, which is the design: the failure is the prompt to
+    /// delete the INERT paragraphs from both `DEFAULT_FLUSH_*` constants and both `Config` fields in
+    /// the same commit that gives them a consumer. Deleting this test without doing that is the
+    /// failure mode it exists to prevent, so its message says so.
     #[test]
     fn the_flush_knobs_are_inert() {
         let offenders = files_using(&["flush_max_items", "flush_max_age_secs"]);
         assert!(
             offenders.is_empty(),
-            "flush_max_items / flush_max_age_secs are documented as INERT until stage 2.2, but \
-             are USED (outside a comment) in: {offenders:?}. Naming either key in prose — a doc \
+            "flush_max_items / flush_max_age_secs are documented as INERT, but are USED \
+             (outside a comment) in: {offenders:?}. Naming either key in prose — a doc \
              comment, a caveat, a TODO — is fine and always was intended to be; comments are \
              stripped before this scan. If flush now consumes them, delete this test AND the \
              INERT paragraphs on DEFAULT_FLUSH_MAX_ITEMS, DEFAULT_FLUSH_MAX_AGE_SECS and both \
@@ -2312,28 +2294,28 @@ mod tests {
         );
     }
 
-    /// **The second inertness assertion** (Task 7b). `commit_window_max_age_ms` is parsed,
-    /// validated and stored, and *nothing reads it* — the plan gave it a consumer (a third window
-    /// close trigger) and Task 7b established that the consumer has no subject: a `CommitWindow` is
-    /// a local of `Executor::run_work_pass` that every exit disposes of, so no window ever waits and
-    /// there is no interval for an age bound to end. The full argument is at
-    /// [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`] and at `Executor::run_work_pass`.
+    /// **The second inertness assertion.** `commit_window_max_age_ms` is parsed, validated and
+    /// stored, and *nothing reads it*: the consumer it would have — a third window-close trigger —
+    /// has no subject, because a `CommitWindow` is a local of `Executor::run_work_pass` that every
+    /// exit disposes of, so no window ever waits and there is no interval for an age bound to end.
+    /// The full argument is at [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`] and at
+    /// `Executor::run_work_pass`.
     ///
     /// It is a **separate test** from [`the_flush_knobs_are_inert`] rather than a third key added to
     /// it, because that test's failure message is a specific instruction to whoever wires flush and
     /// this key's is a different instruction to a different reader. They share only the scan.
     ///
-    /// **This test is the deliverable, not a decoration.** The alternative deliverable for Task 7b
-    /// was a timer; "no timer" is only honest if an operator cannot set the key and believe one
-    /// exists. Comments are stripped before the scan, so the prose above — and every doc block in
-    /// the tree that names this key to explain why it does nothing — is deliberately fine.
+    /// **This test is what makes "there is no timer" honest**, rather than a decoration: the claim
+    /// only holds if an operator cannot set the key and believe one exists. Comments are stripped
+    /// before the scan, so the prose above — and every doc block in the tree that names this key to
+    /// explain why it does nothing — is deliberately fine.
     #[test]
     fn the_commit_window_age_bound_is_inert() {
         let offenders = files_using(&["commit_window_max_age_ms"]);
         assert!(
             offenders.is_empty(),
-            "commit_window_max_age_ms is documented as INERT (Task 7b: the commit window never \
-             waits, so an age bound has no subject), but is USED (outside a comment) in: \
+            "commit_window_max_age_ms is documented as INERT (the commit window never waits, so \
+             an age bound has no subject), but is USED (outside a comment) in: \
              {offenders:?}. Naming the key in prose is fine — comments are stripped before this \
              scan. If something now consumes it, that something is a *linger* and it needs the \
              argument at DEFAULT_COMMIT_WINDOW_MAX_AGE_MS answered first; then delete this test AND \
@@ -2389,14 +2371,15 @@ mod tests {
         out
     }
 
-    /// The defaults are a *consistent set*, not fifteen independent numbers. Task 6 refuses to
+    /// The defaults are a *consistent set*, not fifteen independent numbers. `parse` refuses to
     /// start unless `ingest_queue_bound × ingest_max_batch_bytes`, plus
     /// [`RESERVED_DENY_HEADROOM_BYTES`], sits strictly below `wal_hard_limit_bytes` — so if the
-    /// defaults did not satisfy it, the *default* configuration would refuse to start, which is
-    /// not a default. Checked here so a later edit to one constant cannot break the relation
-    /// silently, and against **the constant the check uses**: the earlier version of this test
-    /// asserted `queue_worst_case × 2 < ceiling` as "the shape of the choice Task 6 will make",
-    /// which would have gone on passing had Task 6 reserved something else.
+    /// defaults did not satisfy it, the *default* configuration would refuse to start, which is not
+    /// a default.
+    ///
+    /// Asserted against **the constant the check uses**, not against a proxy for it: a test that
+    /// asserted `queue_worst_case × 2 < ceiling` — the same shape, a different operand — would go on
+    /// passing if the reserve ever changed.
     #[test]
     fn defaults_satisfy_task_6s_headroom_relation() {
         let queue_worst_case =
@@ -2615,7 +2598,7 @@ mod tests {
         );
     }
 
-    /// **Task 6, D4.** Both relations refuse, and each refusal names both of its operands.
+    /// Both relations refuse, and each refusal names both of its operands.
     ///
     /// Two legs in one test deliberately: the deliverable is "*the* startup headroom assertion",
     /// and a reader checking it should see both halves and their two different shapes — one is a
@@ -2746,7 +2729,7 @@ mod tests {
         assert!(
             pool >= config.compute_admission + config.ingest_admission,
             "the pool ({pool}) must cover both admission bounds, or an admitted request can find \
-             no blocking thread — the failure Task 6's D2 exists to prevent"
+             no blocking thread"
         );
         assert!(
             pool > 512,
@@ -2754,12 +2737,11 @@ mod tests {
         );
     }
 
-    /// The other cross-knob relation, for the same reason. Task 5 refuses to start unless each
-    /// cache bound admits at least `expected_concurrent_sessions` entries at the measured
-    /// per-entry size — so the defaults must admit that many. **Both** caches, not just the
-    /// projection one (Task 0 gate, F11): they hold the same-shaped Roaring object at the same
-    /// measured size, and a validation that covered one of them would leave the other free to be
-    /// set to a value that collapses.
+    /// The other cross-knob relation, for the same reason. [`crate::validate_cache_bounds`] refuses
+    /// to start unless each cache bound admits at least `expected_concurrent_sessions` entries at
+    /// the measured per-entry size — so the defaults must admit that many. **Both** caches, not just
+    /// the projection one: they hold the same-shaped Roaring object at the same measured size, and a
+    /// validation covering one would leave the other free to be set to a value that collapses.
     #[test]
     fn defaults_satisfy_task_5s_cache_relation() {
         let working_set =
@@ -2781,7 +2763,7 @@ mod tests {
         // The projection cache carries a further 2× (the fragment cache deliberately does not —
         // see both constants). It is entry-count headroom, NOT a correction for a serialised-size
         // underestimate: that underestimate is an array-container property and does not apply at
-        // the bitmap-dominated dense bound this figure describes (Task 0 gate, F12).
+        // the bitmap-dominated dense bound this figure describes.
         assert!(
             DEFAULT_ROW_PROJECTION_CACHE_BYTES >= 2 * working_set,
             "the projection bound must carry its 2× entry-count headroom: the key is \
