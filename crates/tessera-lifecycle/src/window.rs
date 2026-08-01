@@ -91,6 +91,13 @@
 //! drained to empty before each window is filled, so a deny waits at most for the window in front of
 //! it. That bound comes from the executor yielding at every window close, not from the order of the
 //! two drains — see `Executor::run_work_pass`.
+//!
+//! ## The fragmentation tally
+//!
+//! [`CommitWindow::allocate`] also measures the assignment it just made, which is what
+//! `/control/status`'s `fragmentation` reports (contracts §3.4). See [`FragmentationTally`] for what
+//! the numbers mean, what they deliberately do not, and why this is the site that has the
+//! information.
 
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
@@ -157,6 +164,198 @@ impl<W> ClosedEntry<W> {
             _ => unreachable!("a ClosedEntry's record is always an IngestBatch"),
         }
     }
+}
+
+/// What one allocation run collected, in **entity space** — the operator figure behind
+/// `/control/status`'s `fragmentation` (contracts §3.4).
+///
+/// # The entity-space quantity, not the row-space one
+///
+/// Contracts §3.4 warns about exactly one confusion, and it is worth repeating where the numbers
+/// are produced: this is **posting run length in entity space** (the probes' results §2), **not**
+/// the row-space mask run ratio of their §5. The two normalise the same way over different sets and
+/// are not comparable. `tessera_bench::metrics::run_ratio` is the row-space one — it takes a Roaring
+/// bitmap of *row* ids and a *row* universe, and its callers pass masks and fragments. It is
+/// deliberately not reused here; sharing one function between the two would be the fastest route to
+/// quoting one as the other.
+///
+/// # What is measured, and where
+///
+/// Design §11.1 spends entity-ID ordering on posting compression, and [`CommitWindow::allocate`] is
+/// where that ordering is decided. Immediately after [`assign_sorted`] returns, every row carries
+/// its assigned id and its resolved term list, so posting runs are fully determined *before a
+/// posting byte is written* — which matters, because nothing in the serving process writes postings
+/// at all: flush is a later capability, so there is no flush-time or fold-time statistic to take.
+/// The build pipeline does write postings, but its sort is global by construction and would show no
+/// window effect whatever.
+///
+/// So these counters cover the ingest stream this process has allocated, and nothing else. A
+/// bundle's own postings are not in them.
+///
+/// # `run_ratio` is within-window sort quality, and that is a real limit
+///
+/// For one term with `k` postings among a window's `W` rows, the expected number of runs of a
+/// uniformly random `k`-subset of a `W`-universe is `k·(W − k + 1)/W`. Its mean run length is
+/// `W/(W − k + 1)`, which is the probes' `1/(1 − p)` baseline up to the `+1` — and the `+1` is what
+/// makes `k = W` give one run rather than a division by zero.
+///
+/// Because both the measurement and its baseline are taken at window scope, **the ratio reports how
+/// much run length one allocation run collected relative to a random assignment of that same
+/// window** — not how fragmented the stream is overall. Two consequences a reader must have:
+///
+/// * At `W = 1` (group commit disabled) the ratio is **identically 1.0** for every corpus. That is
+///   a fact about the formula, not a measurement — and it is the right reading, since a window of
+///   one row collects nothing.
+/// * Fragmentation *between* allocation runs is invisible here by construction. That is the part
+///   §11.1 records as permanent: compaction leaves the entity axis untouched and ids are stable
+///   across rebuilds, so nothing repairs it.
+///
+/// This is therefore **not** a lower bound on stream-scope fragmentation and must not be reported as
+/// one. What it does do is scale with the scope actually achieved — a contiguous term reports
+/// ≈ `k(1 − p)` — so a deployment whose windows are tiny (clients trickling, or
+/// [`CommitWindow::holds_external_id_of`] forcing early closes) reports ≈ 1.0 while one with fat
+/// windows reports hundreds. The raw counters are published beside the ratios so that
+/// `postings / runs` — mean run length with no window-local normalisation — is available to whoever
+/// wants it.
+///
+/// # `postings_per_container` reduces to something smaller than its name
+///
+/// A container is a 2¹⁶ block of entity ids, and this module's header has the arithmetic: design
+/// §11.1's container model gives `p·B < 2¹⁶` for every `p ≤ 1` once `B ≲ 6·10⁴`, and every window
+/// size a heap budget permits is below that. So a window spans **one** container, or two when it
+/// straddles a boundary, and `postings / containers` is in practice mean postings per term per
+/// window. It is emitted because contracts §3.4 specifies it; it must not be read as the
+/// container-count figure the union cost model is about, because a window collects none of that win.
+///
+/// # Aggregation
+///
+/// Summing over terms and over windows, `run_ratio = (Σpostings/Σruns) / (Σpostings/Σbaseline)` =
+/// **`Σbaseline / Σruns`** — so no per-term state survives a window, and no weighting scheme needs
+/// arguing separately. `baseline_runs_milli` is that sum in thousandths, because the per-term
+/// expectation is fractional while the counters it folds into are integers; the reported ratio
+/// carries two significant figures, against which a rounding of 0.0005 runs per window is nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FragmentationTally {
+    /// Distinct `(row, term)` pairs. A term repeated within one row is one posting.
+    pub postings: u64,
+    /// Maximal ascending consecutive id sequences within one term's postings.
+    pub runs: u64,
+    /// Distinct 2¹⁶ blocks of entity id touched, per term.
+    pub containers: u64,
+    /// `Σ_t k_t·(W − k_t + 1)/W` over the terms in this window, in thousandths of a run.
+    pub baseline_runs_milli: u64,
+    /// Rows in the window — the universe the baseline is taken over.
+    pub rows: u64,
+}
+
+impl FragmentationTally {
+    /// Fold another window's tally in. Saturating: a counter that has run out of `u64` stopped being
+    /// a useful figure long before, and an operator gauge must not be the thing that panics the
+    /// write executor.
+    pub fn merge(&mut self, other: FragmentationTally) {
+        self.postings = self.postings.saturating_add(other.postings);
+        self.runs = self.runs.saturating_add(other.runs);
+        self.containers = self.containers.saturating_add(other.containers);
+        self.baseline_runs_milli = self
+            .baseline_runs_milli
+            .saturating_add(other.baseline_runs_milli);
+        self.rows = self.rows.saturating_add(other.rows);
+    }
+}
+
+/// Measure the assignment `pending` has just been given.
+///
+/// **The cost, stated because it sits on the executor's hot path.** One hash probe per
+/// `(row, term)` pair — of order four or five per row — with no allocation per row. It is not free,
+/// and it is small against the work already here: [`assign_sorted`] is `n log n` over the same rows
+/// with a `Vec<u32>` key allocation per item and a lexicographic compare per comparison. There is
+/// deliberately **no configuration gate**: a gate is a second thing to get wrong for a cost that is
+/// a fraction of the sort beside it, and a figure that is off by default is a figure nobody has.
+///
+/// **The per-term state is bounded by the window, not by the corpus.** `last` is a local, keyed only
+/// on terms present in this window, and dropped at every close. Its size is bounded by the term
+/// occurrences the window is *already* holding — the `Vec<TermId>` per row — so it is a bounded
+/// constant factor on memory already paid for, and it disappears with it. That is what keeps this
+/// clear of the corpus-cardinality scaling that makes a per-term map over a large descriptor
+/// vocabulary a multi-gigabyte structure.
+fn tally(pending: &[PendingItem]) -> FragmentationTally {
+    let rows = pending.len() as u64;
+    if rows == 0 {
+        return FragmentationTally::default();
+    }
+    // `assign_sorted` issues one contiguous id block and assigns `start + rank`, so walking ranks
+    // ascending is walking ids ascending. `lo` is taken from the items rather than from the
+    // allocator: nothing here should depend on `Allocator`'s internals.
+    let lo = pending
+        .iter()
+        .filter_map(|p| p.entity_id)
+        .map(|e| e.raw())
+        .min()
+        .expect("every pending item is assigned an id before the tally runs");
+
+    let mut by_rank: Vec<usize> = vec![usize::MAX; pending.len()];
+    for (index, item) in pending.iter().enumerate() {
+        let id = item
+            .entity_id
+            .expect("every pending item is assigned an id before the tally runs")
+            .raw();
+        by_rank[(id - lo) as usize] = index;
+    }
+
+    // `(last id seen, postings so far)` per term. The second half is `k_t`, and it counts **rows**,
+    // never occurrences: a plugin may return one term twice for one item (the built-in passthrough
+    // splits `access` on commas and does not deduplicate), and a `k_t` above `W` would make the
+    // baseline below negative.
+    let mut last: FxHashMap<TermId, (u64, u64)> = FxHashMap::default();
+    let mut t = FragmentationTally {
+        rows,
+        ..Default::default()
+    };
+
+    for &index in &by_rank {
+        let item = &pending[index];
+        let id = item.entity_id.expect("assigned above").raw();
+        for term in &item.terms {
+            match last.get_mut(term) {
+                // Already counted for this row. Reached by a repeated term whether or not the
+                // repetitions are adjacent in the row's term list.
+                Some((seen, _)) if *seen == id => {}
+                Some((seen, k)) => {
+                    // Two INDEPENDENT predicates, deliberately not cascaded. `65_535 → 65_536`
+                    // continues a run *and* opens a container, and testing contiguity first would
+                    // credit neither — which is the case a long, well-compressed run hits.
+                    if *seen + 1 != id {
+                        t.runs += 1;
+                    }
+                    if *seen >> 16 != id >> 16 {
+                        t.containers += 1;
+                    }
+                    t.postings += 1;
+                    *k += 1;
+                    *seen = id;
+                }
+                None => {
+                    t.postings += 1;
+                    t.runs += 1;
+                    t.containers += 1;
+                    last.insert(*term, (id, 1));
+                }
+            }
+        }
+    }
+
+    let w = rows as f64;
+    let mut baseline = 0.0f64;
+    for (_, k) in last.values() {
+        debug_assert!(
+            *k <= rows,
+            "a term's posting count counts rows, so it can never exceed the window's row count"
+        );
+        let k = *k as f64;
+        baseline += k * (w - k + 1.0) / w;
+    }
+    t.baseline_runs_milli = (baseline * 1000.0).round() as u64;
+    t
 }
 
 /// The open commit window.
@@ -339,11 +538,16 @@ impl<W> CommitWindow<W> {
     /// "this may have been applied in full" (`SubmitError::ReceiptLost`) — the exact opposite of the
     /// truth here, where the high-water mark did not move and nothing was appended. The rows are not
     /// handed back: the batch has no effect, and they are hollow by then.
+    ///
+    /// **Also returns what the assignment collected** ([`FragmentationTally`]), measured here
+    /// because this is the only site in the serving process that knows it — see that type for what
+    /// the numbers mean and what they do not. The error path returns none: a window that could not
+    /// allocate made no assignment to measure, which is the same statement as "no effect at all".
     #[allow(clippy::type_complexity)]
     pub fn allocate(
         self,
         alloc: &mut Allocator,
-    ) -> Result<Vec<ClosedEntry<W>>, (AllocError, Vec<Vec<W>>)> {
+    ) -> Result<(Vec<ClosedEntry<W>>, FragmentationTally), (AllocError, Vec<Vec<W>>)> {
         let mut entries = self.entries;
 
         let mut pending: Vec<PendingItem> = Vec::with_capacity(self.rows);
@@ -356,6 +560,10 @@ impl<W> CommitWindow<W> {
         if let Err(e) = assign_sorted(&mut pending, alloc) {
             return Err((e, entries.into_iter().map(|e| e.waiters).collect()));
         }
+
+        // Between the assignment and the scatter is the one moment the whole window's ids and terms
+        // are in hand together.
+        let tally = tally(&pending);
 
         let mut scattered = pending.into_iter();
         let mut closed = Vec::with_capacity(entries.len());
@@ -384,7 +592,7 @@ impl<W> CommitWindow<W> {
                 waiters: entry.waiters,
             });
         }
-        Ok(closed)
+        Ok((closed, tally))
     }
 }
 
@@ -437,7 +645,7 @@ mod tests {
             ));
         }
         let mut alloc_split = Allocator::new(100);
-        let closed = split.allocate(&mut alloc_split).unwrap();
+        let (closed, _) = split.allocate(&mut alloc_split).unwrap();
         let split_ids: Vec<u64> = closed
             .iter()
             .flat_map(|e| e.entity_ids.iter().map(|i| i.raw()))
@@ -451,7 +659,7 @@ mod tests {
         }
         whole.push(entry("one", rows));
         let mut alloc_whole = Allocator::new(100);
-        let whole_ids: Vec<u64> = whole.allocate(&mut alloc_whole).unwrap()[0]
+        let whole_ids: Vec<u64> = whole.allocate(&mut alloc_whole).unwrap().0[0]
             .entity_ids
             .iter()
             .map(|i| i.raw())
@@ -478,7 +686,7 @@ mod tests {
             vec![row(Some("a0"), &[5]), row(Some("a1"), &[0])],
         ));
         w.push(entry("b", vec![row(Some("b0"), &[3])]));
-        let closed = w.allocate(&mut Allocator::new(0)).unwrap();
+        let (closed, _) = w.allocate(&mut Allocator::new(0)).unwrap();
 
         let mut framed = Vec::new();
         for e in &closed {
@@ -565,7 +773,7 @@ mod tests {
             "a join registers no external id"
         );
 
-        let closed = w.allocate(&mut Allocator::new(0)).unwrap();
+        let (closed, _) = w.allocate(&mut Allocator::new(0)).unwrap();
         assert_eq!(closed.len(), 1);
         assert_eq!(
             closed[0].waiters,
@@ -573,6 +781,114 @@ mod tests {
             "both callers are owed the same ids off the one allocation"
         );
         assert_eq!(closed[0].entity_ids.len(), 1, "one row, one id — not two");
+    }
+
+    /// **The tally, on a layout whose every counter is worked out by hand below.**
+    ///
+    /// The arithmetic is written out rather than recomputed, because a test that re-implements the
+    /// loop it is testing agrees with any bug that loop has.
+    ///
+    /// Six rows in one window, allocated from id 0. `assign_sorted` orders on the sorted,
+    /// deduplicated signature, then on `external_id`:
+    ///
+    /// | signature | rows | ids |
+    /// |---|---|---|
+    /// | `[1]`     | `a`, `b` | 0, 1 |
+    /// | `[1, 2]`  | `c`, `d` | 2, 3 |
+    /// | `[2]`     | `e`, `f` | 4, 5 |
+    ///
+    /// So the postings are `term 1 → {0,1,2,3}` and `term 2 → {2,3,4,5}`, and by hand:
+    ///
+    /// * `postings` = 4 + 4 = **8**
+    /// * `runs` = 1 + 1 = **2** (both lists are contiguous)
+    /// * `containers` = 1 + 1 = **2** (`W = 6`, so everything is in block 0)
+    /// * baseline, `k·(W − k + 1)/W` with `W = 6, k = 4`: `4·3/6 = 2` per term → **4.000**
+    /// * `run_ratio` = 4.000 / 2 = **2.0**
+    ///
+    /// The corpus is deliberately **two** terms with `k < W`. A one-term-per-row corpus makes
+    /// `k = W`, where the baseline is `W·1/W = 1` and a perfect run is 1, so the ratio pins at 1.0
+    /// whatever the assignment does — an arrangement in which every assertion below holds vacuously.
+    #[test]
+    fn the_tally_matches_the_arithmetic_worked_out_by_hand() {
+        let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
+        w.push(entry(
+            "b1",
+            vec![
+                row(Some("e"), &[2]),
+                row(Some("c"), &[1, 2]),
+                row(Some("a"), &[1]),
+                row(Some("f"), &[2]),
+                row(Some("d"), &[1, 2]),
+                row(Some("b"), &[1]),
+            ],
+        ));
+        let (_, t) = w.allocate(&mut Allocator::new(0)).unwrap();
+
+        assert_eq!(t.rows, 6);
+        assert_eq!(t.postings, 8, "four postings for each of the two terms");
+        assert_eq!(t.runs, 2, "each term's ids are one contiguous block");
+        assert_eq!(t.containers, 2, "six ids all sit in entity-id block 0");
+        assert_eq!(t.baseline_runs_milli, 4_000, "4·3/6 = 2 runs per term");
+        // And the ratio the endpoint publishes, from those two numbers alone.
+        assert_eq!(t.baseline_runs_milli as f64 / 1000.0 / t.runs as f64, 2.0);
+    }
+
+    /// A term repeated within one row is **one** posting, and it is found however far apart the
+    /// repetitions sit in the row's term list.
+    ///
+    /// Reachable from the wire: the built-in passthrough plugin splits `access` on commas and does
+    /// not deduplicate, so `access = "a,b,a"` arrives here as `[a, b, a]`. Were the repetition
+    /// counted, a term's `k` could exceed the window's row count and its baseline
+    /// `k·(W − k + 1)/W` would go negative — which, cast to the unsigned counter, saturates to zero
+    /// silently rather than failing.
+    #[test]
+    fn a_term_repeated_within_one_row_is_one_posting() {
+        let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
+        w.push(entry(
+            "b1",
+            vec![row(Some("a"), &[7, 9, 7]), row(Some("b"), &[7, 9, 7])],
+        ));
+        let (_, t) = w.allocate(&mut Allocator::new(0)).unwrap();
+
+        assert_eq!(t.rows, 2);
+        assert_eq!(t.postings, 4, "two rows x two DISTINCT terms, not six");
+        // k = 2 = W for both terms, so each baseline is 2·1/2 = 1.
+        assert_eq!(t.baseline_runs_milli, 2_000);
+    }
+
+    /// A run that crosses a 2¹⁶ entity-id boundary continues the run **and** opens a container.
+    ///
+    /// The two predicates are independent, and cascading them — testing `last + 1 == id` first and
+    /// treating a hit as "same container" — silently under-counts containers on exactly the long,
+    /// well-compressed runs the figure exists to detect. Nothing aligns a window's first id to a
+    /// container boundary, so this is an ordinary case rather than a contrived one.
+    #[test]
+    fn a_run_across_a_container_boundary_opens_a_container() {
+        const LO: u64 = 65_534;
+        let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
+        w.push(entry(
+            "b1",
+            vec![
+                row(Some("a"), &[1]),
+                row(Some("b"), &[1]),
+                row(Some("c"), &[1]),
+                row(Some("d"), &[1]),
+            ],
+        ));
+        let (closed, t) = w.allocate(&mut Allocator::new(LO)).unwrap();
+
+        assert_eq!(
+            closed[0]
+                .entity_ids
+                .iter()
+                .map(|e| e.raw())
+                .collect::<Vec<_>>(),
+            vec![65_534, 65_535, 65_536, 65_537],
+            "the fixture must actually straddle the boundary, or it tests nothing"
+        );
+        assert_eq!(t.postings, 4);
+        assert_eq!(t.runs, 1, "the ids are consecutive, so it is one run");
+        assert_eq!(t.containers, 2, "65_535 -> 65_536 crosses into block 1");
     }
 
     /// A window that cannot allocate has no effect: the high-water mark does not move (I9).

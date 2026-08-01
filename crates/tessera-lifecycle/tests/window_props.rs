@@ -14,7 +14,7 @@ use proptest::prelude::*;
 use tessera_lifecycle::alloc::Allocator;
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::WalRecord;
-use tessera_lifecycle::window::{CommitWindow, WindowEntry};
+use tessera_lifecycle::window::{CommitWindow, FragmentationTally, WindowEntry};
 use tessera_types::TermId;
 
 fn row(key: &str, terms: &[u32]) -> UnallocatedRow {
@@ -75,7 +75,7 @@ proptest! {
                 });
             }
             let rows_in_window = window.rows();
-            let closed = window.allocate(&mut alloc).expect("the id space is not exhausted");
+            let (closed, _) = window.allocate(&mut alloc).expect("the id space is not exhausted");
 
             let mut issued: Vec<u64> = Vec::new();
             for entry in &closed {
@@ -127,6 +127,7 @@ proptest! {
         let chunked_ids: Vec<u64> = chunked
             .allocate(&mut Allocator::new(9))
             .unwrap()
+            .0
             .iter()
             .flat_map(framed_ids_of)
             .collect();
@@ -141,6 +142,7 @@ proptest! {
         let whole_ids: Vec<u64> = whole
             .allocate(&mut Allocator::new(9))
             .unwrap()
+            .0
             .iter()
             .flat_map(framed_ids_of)
             .collect();
@@ -194,7 +196,7 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
                 body_hash: [0u8; 32],
                 waiters: vec![()],
             });
-            for entry in window.allocate(&mut alloc).unwrap() {
+            for entry in window.allocate(&mut alloc).unwrap().0 {
                 for (row, id) in group.iter().zip(entry.entity_ids.iter()) {
                     postings[row.terms[0].raw() as usize].push(id.raw());
                 }
@@ -234,5 +236,96 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
     assert!(
         window_scoped < full_sort,
         "and it must stay openly below the full-sort ceiling: {window_scoped} vs {full_sort}"
+    );
+}
+
+/// **The figure `/control/status` publishes, over one corpus assigned at three scopes.**
+///
+/// This is what the fragmentation emitter exists for: group commit disabled, group commit at a
+/// window, and one full-corpus sort — the ceiling the probes' 8.9–36.7× posting compression was
+/// measured under. The quantity is the emitted one (`Σbaseline / Σruns` over
+/// `FragmentationTally`), not a second implementation of it in the test, so a change to the
+/// emitter's arithmetic shows up here.
+///
+/// **The corpus carries two terms per row and `k < W`, and that is load-bearing.** With one term
+/// per row a term's `k` equals its window's `W`, where the baseline `k·(W − k + 1)/W` is `1` and a
+/// perfect run is `1` — so every arm reports exactly `1.0` and every assertion below passes while
+/// measuring nothing. `the_window_run_ratio_against_the_full_sort_ceiling` above uses exactly that
+/// one-term corpus for a different purpose and says so.
+///
+/// **Its numbers are not comparable with that test's.** This is the pooled, posting-weighted
+/// estimator the endpoint publishes; that one is an unweighted mean over terms of `postings/runs`.
+///
+/// And the ratio at `chunk = 1` is `1.0` **identically**, for every corpus — see
+/// `FragmentationTally`'s doc. That is the correct reading of "group commit disabled collects
+/// nothing", not a measurement, and the assertion below says so rather than treating it as one.
+#[test]
+fn the_emitted_run_ratio_rises_with_the_window_and_stays_under_the_full_sort_ceiling() {
+    const ROWS: usize = 4_000;
+    const SIGNATURES: u32 = 20;
+
+    // Two terms per row drawn from a small signature vocabulary: a term's postings therefore split
+    // across every signature carrying it, exactly as they do on a real corpus, and no term reaches
+    // k = W in any window.
+    let corpus: Vec<UnallocatedRow> = (0..ROWS)
+        .map(|i| {
+            let s = (i as u32 * 7) % SIGNATURES;
+            row(&format!("r{i:05}"), &[s, (s + 1) % SIGNATURES])
+        })
+        .collect();
+
+    let ratio_at = |chunk: usize| -> (f64, u64, u64) {
+        let mut alloc = Allocator::new(0);
+        let mut total = FragmentationTally::default();
+        for group in corpus.chunks(chunk) {
+            let mut window: CommitWindow<()> = CommitWindow::new(0);
+            window.push(WindowEntry {
+                rows: group.to_vec(),
+                batch_id: "b".into(),
+                body_hash: [0u8; 32],
+                waiters: vec![()],
+            });
+            let (_, tally) = window.allocate(&mut alloc).unwrap();
+            total.merge(tally);
+        }
+        (
+            total.baseline_runs_milli as f64 / 1000.0 / total.runs as f64,
+            total.postings,
+            total.runs,
+        )
+    };
+
+    let (disabled, _, disabled_runs) = ratio_at(1); // commit_window_max_items = 1
+    let (windowed, _, windowed_runs) = ratio_at(500);
+    let (ceiling, _, ceiling_runs) = ratio_at(ROWS); // one full-corpus sort
+
+    println!(
+        "emitted run_ratio (Sum baseline / Sum runs): grouping disabled {disabled:.2} \
+         ({disabled_runs} runs), 500-row window {windowed:.2} ({windowed_runs} runs), \
+         full-sort ceiling {ceiling:.2} ({ceiling_runs} runs). The window reaches \
+         {:.0}% of the ceiling. Both figures are WITHIN-WINDOW sort quality against a \
+         within-window random baseline (see FragmentationTally); neither is a stream-scope \
+         fragmentation figure and neither is comparable with the probes' full-corpus numbers.",
+        100.0 * windowed / ceiling
+    );
+
+    assert_eq!(
+        disabled, 1.0,
+        "a one-row window has baseline 1 and one run, for every corpus — identically 1.0, which \
+         is the reading 'group commit disabled collects nothing', not a measurement"
+    );
+    assert!(
+        windowed > disabled * 4.0,
+        "a window must collect materially more run length than no grouping at all: {windowed} vs \
+         {disabled}"
+    );
+    assert!(
+        windowed < ceiling,
+        "and must stay openly below the full-sort ceiling: {windowed} vs {ceiling}"
+    );
+    assert!(
+        windowed_runs < disabled_runs,
+        "the raw run count is the un-normalised half of the same statement and must move with it: \
+         {windowed_runs} vs {disabled_runs}"
     );
 }

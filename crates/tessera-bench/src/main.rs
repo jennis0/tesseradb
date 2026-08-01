@@ -208,6 +208,25 @@ enum Command {
         seed: u64,
     },
 
+    /// Update ingest, concurrent submitters: what group commit collects when submissions overlap.
+    ///
+    /// The `ingest-batch` arm submits sequentially and blocks on each receipt, so every window it
+    /// builds holds one entry and reports group commit's amortisation as 1.0 by construction. This
+    /// arm is the one that can answer the question.
+    IngestConcurrent {
+        /// Concurrent submitter threads — one per would-be `/control/ingest` handler.
+        #[arg(long, value_delimiter = ',', default_values_t = [1usize, 2, 4, 8, 16])]
+        submitters: Vec<usize>,
+        /// Rows per submission.
+        #[arg(long, default_value_t = 100)]
+        batch: usize,
+        /// `ingest.commit_window_max_items`. `1` is the honest way to disable group commit.
+        #[arg(long, default_value_t = 10_000)]
+        window: usize,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+    },
+
     /// Update ingest, continuous single writes, with a reader drawing a fixed viewport as the
     /// overlay grows. Reports the write-ack curve (F3) and `compose_ns` against buffer depth (F2).
     IngestContinuous {
@@ -439,6 +458,12 @@ fn main() -> std::process::ExitCode {
             data_root,
         } => arms::ingest::run_build(&ctx, &scale, &label_set, &data_root),
         Command::IngestBatch { batch, seed } => arms::ingest::run_batch(&ctx, &batch, seed),
+        Command::IngestConcurrent {
+            submitters,
+            batch,
+            window,
+            seed,
+        } => arms::ingest::run_concurrent(&ctx, &submitters, batch, window, seed),
         Command::IngestContinuous {
             checkpoint,
             k,
