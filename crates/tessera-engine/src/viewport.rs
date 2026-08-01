@@ -938,10 +938,33 @@ fn should_fold_serially(total_rows_in_ranges: u64, threshold: u64, tiles: usize)
 /// what addresses it. Everything this arm itself introduces is <= 1.57x and <= 0.21 ms absolute, in
 /// six cells, all at exactly 4,225 tiles.
 ///
-/// **Calibrated on one label configuration** (`categories-subclass`). Contiguity — `probes/`
-/// measures run ratio spanning 1.00-5.11 across label sets at equal coverage — feeds per-tile work
-/// directly and was sampled at one value. A materially more contiguous deployment wants this
-/// re-derived; see the plan's per-deployment-calibration item.
+/// **The label axis was then tested too, and it does not move this number** *(2026-08-01;
+/// `probes/2026-08-01-label-contiguity/`, memo "Follow-up 4, addendum: the label axis")*. The
+/// original sweep used one label configuration, and contiguity — measured run ratio spanning
+/// 1.00-5.11 across label sets at equal coverage — feeds per-tile work directly, so it was the
+/// obvious way for a single constant to be wrong. Re-swept at 2.42M across `surnames`,
+/// `categories-subclass` and `categories-archive` at matched coverage (measured row-space run ratio
+/// **1.05 / 1.89 / 4.03**, spanning the whole published range): the crossover is **identical in
+/// every cell**, highest serial-favouring tile count 4,225 in all three, nothing at or above 8,281
+/// serial-favouring anywhere. Over 315 cells, 4,096 is the optimum on this axis as well — 12.7x
+/// less regret than the one-term predictor, and the only candidate with a worst case under 4x.
+///
+/// **A hypothesis was falsified on the way, and it is worth stating because it is the intuitive
+/// one.** The prediction was that a *more contiguous* mask means fewer containers, so less work per
+/// tile, so the floor dominates longer and the crossover rises — making `categories-archive` the
+/// risk case and implying a higher threshold. Measured, the opposite: at fixed grant width the most
+/// contiguous mask had the *lowest* crossover, and both movements vanished once coverage was
+/// matched. **What moves the crossover is coverage, not contiguity.** 8,192 — the threshold that
+/// hypothesis implied — measures 1.80x *worse* on `categories-archive`, the very set it would have
+/// been protecting.
+///
+/// Related, and why fixed-width grants mislead here: a fixed `w` is not a fixed principal. `w = 10`
+/// buys 47.8% of the corpus on archive's 38-term dictionary and **0.0051%** on surnames' 404,104-term
+/// one, varying coverage and contiguity together and in opposite directions.
+///
+/// **Still untested:** contiguity at 1e8/1e9. At 2.42M the corpus spans 37 containers total and
+/// every non-degenerate mask touches all of them, so containers-touched never varied — contiguity
+/// showed up only as run structure *within* containers. If it bites anywhere it is at scale.
 pub const TILE_PAR_MIN_TILES: usize = 4_096;
 
 /// D-F's per-tile scheduling grain: the number of tiles rayon hands to one worker before it will
