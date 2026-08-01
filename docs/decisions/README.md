@@ -33,3 +33,4 @@ prevent.
 | [0013](0013-mark-specified-vs-implemented.md) | 2026-08-01 | Specified-but-unbuilt machinery is marked per claim |
 | [0014](0014-i10-weakened-to-construction.md) | 2026-08-01 | I10 is weakened to what the construction defends |
 | [0015](0015-plans-retired-for-epics.md) | 2026-08-01 | Plans are retired; work is tracked as capability epics in GitHub issues |
+| [0016](0016-segments-filename-unpadded.md) | 2026-08-01 | The `SEGMENTS-<n>.json` filename grammar is unpadded, and a reader must refuse other forms |

@@ -1,59 +1,123 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Status
-
-**Phase 1 — implementation.** Phase 0 is complete: measurements over the synthetic 10⁹ corpus are in [probes/](probes/) (`dataset.md`, `results.md`, `optimisations.md`, `phase0-memo.md`), the verdict is go, and their conclusions are folded into the design corpus. There will be **no real-label rerun** — this is a personal project with no real access-labelled corpus available; synthetic-corpus evidence is accepted as final (design r18), and the caveat survives only as deployment guidance: any future deployment with real labels should re-run the Phase 0 measurements before trusting the policy-dependent headlines (signature alignment, posting compression, union cost).
-
-Scaffolding the Cargo workspace and writing Phase 1 code is now the job. Phase 1 scope is the walking skeleton (plan §5): the tiler, the WAL and its ack contract, the entity-ID allocator **with signature-sorted assignment from day one** (permanent under I9 — cannot be retrofitted), the segment loader, term index and mask build, the viewport query, the handle allocator, and the differential oracle scaffolding. Crate layout is system architecture §3; bundle and API byte formats are the contracts spec; runnable analysis models are in [docs/evidence/analysis/](docs/evidence/analysis/) and the probe scripts in [probes/](probes/).
-
-## The documents
-
-All design docs in [docs/design/](docs/design/); supporting evidence — prior art, the scaling analysis and its models — in [docs/evidence/](docs/evidence/). **Precedence:** the architecture design is the specification; the mechanism documents implement it and defer to it; where the contracts spec and the system architecture's sketches differ, the contracts spec's §0.3 deviations govern. Every document carries its review trail in an Appendix R — read it before re-litigating a decision.
-
-| | |
-|---|---|
-| [README.md](docs/design/README.md) | Start here. Reading order, what is settled, what was measured |
-| [architecture.md](docs/design/architecture.md) | **The specification** (r24). §2.6 walks a request end to end; §4 is the thirteen invariants; Appendix C is the leak register; Appendix G the revision history |
-| [system-architecture.md](docs/design/system-architecture.md) | The built system (r5): processes and planes, crate decomposition, lifecycle, config, packaging; decisions D1–D16 |
-| [contracts.md](docs/design/contracts.md) | Byte level (r11): bundle format, service API, plugin ABI, wire |
-| [concurrency-lifecycle.md](docs/design/concurrency-lifecycle.md) | Mechanisms (r4): generations, pins, the **three** retirement rules, WAL, merge-vs-snapshot, router/worker protocol |
-| [conformance.md](docs/design/conformance.md) | The suite (r3): definitions-oracle, canonicalised canaries, byte-scanner, eight interleaving scripts |
-| [implementation-plan.md](docs/design/implementation-plan.md) | Phases, conformance matrix (§10), effort sizing |
-| [visualisation.md](docs/archive/visualisation.md) | The client: two profiles, one data contract (deferred; backend first) |
-| [docs/evidence/](docs/evidence/) | Non-normative evidence: [scaling-analysis.md](docs/evidence/analysis/scaling-analysis.md) with its runnable models, and the five [prior-art](docs/evidence/prior-art/) reviews behind the build-vs-buy verdict |
-| [probes/](probes/) | Phase 0 corpus, measurements, engineering distillation — real numbers; re-run before trusting any figure quoted from them |
-
-`§n` in any document refers to the architecture design unless prefixed (SA §n, contracts §n). Read the relevant section before changing anything it governs; these documents argue their decisions, and most obvious objections are already answered in them.
+Guidance for Claude Code working in this repository.
 
 ## What this is
 
-A permission-masked point service: a pannable, zoomable map over a document corpus where what a viewer may see determines not just which items they retrieve but **every count, density, cluster and summary they are shown**. A viewer's visible set is materialised once per session as a Roaring bitmap; geometry is stored in Morton order so a tile is a contiguous row-ID range and masked counts are bitmap arithmetic. The differentiator is the access control, not the scatterplot.
+A permission-masked point service: a pannable, zoomable map over a document corpus where what a
+viewer may see determines not just which items they retrieve but **every count, density, cluster
+and summary they are shown**. A viewer's visible set is materialised once per session as a Roaring
+bitmap; geometry is stored in Morton order so a tile is a contiguous row-ID range and masked
+counts are bitmap arithmetic. The differentiator is the access control, not the scatterplot.
+
+## Where to look
+
+| | |
+|---|---|
+| [docs/design/](docs/design/) | **The specification.** Start at its [README](docs/design/README.md) — reading order, precedence, and which claims are specified but not yet built |
+| [docs/decisions/](docs/decisions/) | Settled decisions, one per file, immutable. Read before re-litigating |
+| [docs/agents/](docs/agents/) | **How work is done here** — routing, the design process, the epic lifecycle, parallel work, and the house style |
+| [docs/evidence/](docs/evidence/) | Measurements, investigations, prior art. Never normative |
+| [probes/](probes/) | Raw measurement campaigns. Re-run before trusting a quoted figure |
+| [docs/archive/](docs/archive/) | Frozen. Never cite as authority; never execute |
+| GitHub issues | The only authority on what is being worked on |
+
+**A document's standing is its `Status:` line, not its location.** `docs/design/` holds both
+normative and provisional documents; the provisional ones say so and name what remains.
+
+**Precedence:** `architecture.md` is the specification and wins. `system-architecture.md` and the
+mechanism documents defer to it. Where `contracts.md` and `system-architecture.md` differ, the
+eleven deviations in contracts §0.3 govern. `§n` unprefixed means the architecture design.
+
+Every corpus document carries a review trail in its Appendix R.
 
 ## Non-negotiables
 
-§4's thirteen invariants are the spec — read them, don't work from memory. The ones most often broken by a plausible-looking change:
+§4's thirteen invariants are the spec — read them, don't work from memory. The ones most often
+broken by a plausible-looking change:
 
-- **I2** — every aggregate must be computable from inside `M_auth` alone. A quantity derived from the full dataset and then *gated* is a disclosure, not a filtered view. Accepted exceptions are enumerated in Appendix C (C1–C16); anything not in that table is a bug.
-- **I7** — sampling happens after masking. Direct evaluation is the **main** selection route (measured), not a fallback; deleting it "to simplify" blanks the sparsest principals' maps silently.
-- **I3 / I12** — labels gate on `M_auth`, never on the filtered mask; filters may move the frontier up, never down.
-- **I10** — entity IDs never cross the trust boundary. Clients get per-session opaque handles and never evaluate a visibility rule.
-- **Deny handling is fail-closed with three distinct retirement rules** (lifecycle §3): deletion denies retire by the epoch ledger; suppressions retire *only* on unsuppress (they never touch postings); predicate-change entries retire at their compaction fold. Conflating them is fail-open — this was caught in review twice; do not rediscover it.
-- **Pins fix geometry, never authorisation** (lifecycle §2.3). A suppression applies to a pinned request the moment it is accepted.
+- **I2** — every aggregate must be computable from inside `M_auth` alone. A quantity derived from
+  the full dataset and then *gated* is a disclosure, not a filtered view. Accepted exceptions are
+  enumerated in Appendix C (C1–C16); anything not in that table is a bug.
+- **I7** — sampling happens after masking. Direct evaluation is the **only** selection route: the
+  candidate-list alternative was declined ([decision 0008](docs/decisions/0008-candidate-list-route-declined.md))
+  and `check-layers.sh` fails if its marker is removed. Deleting the direct path "to simplify"
+  blanks the sparsest principals' maps silently.
+- **I3 / I12** — labels gate on `M_auth`, never on the filtered mask; filters may move the
+  frontier up, never down.
+- **I10** — entity IDs never cross the trust boundary. Clients receive an opaque `tessera_id` and
+  never evaluate a visibility rule. That identifier is a **blinding permutation, not encryption**
+  ([decision 0014](docs/decisions/0014-i10-weakened-to-construction.md)) — do not describe it as a
+  cryptographic guarantee, and do not treat it as a defence against a bundle-holder.
+- **Deny handling is fail-closed with three distinct retirement rules** (lifecycle §3): deletion
+  denies retire by the epoch ledger; suppressions retire *only* on unsuppress (they never touch
+  postings); predicate-change entries retire at their compaction fold. Conflating them is
+  fail-open — caught in review twice; do not rediscover it. **Two of the three are specified but
+  not built**, and are safe today only because nothing retires at all.
+- **Pins fix geometry, never authorisation** (lifecycle §2.3). A suppression applies to a pinned
+  request the moment it is accepted.
 
-The conformance suite is the deliverable (plan §10.1, conformance design): an implementation that keeps the Morton and Roaring machinery while quietly dropping I2, I7 or I13 passes every functional test while leaking.
+The conformance suite is the deliverable: an implementation that keeps the Morton and Roaring
+machinery while quietly dropping I2, I7 or I13 passes every functional test while leaking. Three
+of the thirteen invariants are currently covered as designed.
 
 ## Working method
 
-**Rust is the implementation language** — engine, build pipeline (`tessera build`) and serving alike; one binary. Python is a first-class *consumer* (SDK, supervisor, the test-only reference oracle) and never a component: no Python in any request path, in artifact production, or in the trusted computing base. TypeScript/JavaScript is the (deferred) frontend.
+**Rust is the implementation language** — engine, build pipeline and serving alike; one binary.
+Python is a first-class *consumer* (SDK, supervisor, the test-only reference oracle) and never a
+component: no Python in any request path, in artifact production, or in the trusted computing
+base. TypeScript is the frontend.
 
-**Design for audit before performance.** Prefer the construction that is obviously correct; keep modules readable in isolation; keep the query surface narrow (five viewer verbs — the leak register is exhaustive *because* the surface is enumerable). New capability enters through the filter contract (§8.2). An optimisation that costs reviewability needs an argument, not just a benchmark. The measured cost model to design against: **bitmap operations cost O(containers touched), not O(cardinality)** — contiguity in entity space is the highest-leverage property in the index.
+**Design for audit before performance.** Prefer the construction that is obviously correct; keep
+modules readable in isolation; keep the query surface narrow — the leak register is exhaustive
+*because* the surface is enumerable. New capability enters through the filter contract (§8.2). An
+optimisation that costs reviewability needs an argument, not just a benchmark. The measured cost
+model to design against: **bitmap operations cost O(containers touched), not O(cardinality)** —
+contiguity in entity space is the highest-leverage property in the index.
 
-**Dispatch plans for independent review before implementing.** For anything non-trivial, write the plan first and hand it to a subagent to review against the design documents and the invariants, with no stake in the plan being right. Act on that review before code is written. This method caught four fail-open paths and two unimplementable mechanisms during the design phase alone — it works; keep it.
+**Dispatch plans for independent review before implementing.** Hand the plan to a subagent with no
+stake in it being right, and act on the review before code is written. This caught four fail-open
+paths and two unimplementable mechanisms during design alone.
 
-**Decompose implementation across subagents; direct and review rather than write.** Verify a subagent's work rather than accepting its summary — invariant-bearing decisions stay with the reviewer, not the worker.
+**Decompose across subagents; direct and review rather than write.** Verify a subagent's work
+rather than accepting its summary — invariant-bearing decisions stay with the reviewer.
 
-## Conventions
+**Stop and report** rather than guessing, when the answer would set an invariant, a guarantee, or
+something the owner has not decided. Full procedures in [docs/agents/](docs/agents/).
 
-British spelling (*authorisation*, *visualisation*, *licence*) and the established security vocabulary from the synthesis's terminology table — *conservative label join*, *boolean expression indexing*, *partial evaluation*, *Non-Truman model*, *compartmented MAC* — in preference to invented terms. Each brings a literature with it, and a security reviewer will find the lineage anyway.
+## House style
+
+Full guide in [docs/agents/writing.md](docs/agents/writing.md). The rules that matter most:
+
+- **Describe the system, not its construction.** What it is and why — not which revision changed
+  it or which phase built it. That archaeology belongs in `docs/decisions/` and git.
+- **Module docs carry the design argument**, and run long here where that is warranted: an
+  invariant upheld in a way the code does not show, an obvious construction rejected for a
+  non-obvious reason, a measurement driving a shape that otherwise looks arbitrary, or a
+  deliberate duplication a reader would otherwise "fix". Restating the code is never warranted.
+- **Comments record decisions and evidence, not backlog.** There are essentially no `TODO` or
+  `FIXME` markers here. Open work is an issue.
+- **State negative results.** "F3: NOT confirmed by measurement — do not claim it is" is the form.
+  Distinguish measured from modelled from assumed, every time.
+- **Mark specified-but-unbuilt machinery at the claim**, with what happens instead. Present tense
+  about absent machinery reads as an assurance
+  ([decision 0013](docs/decisions/0013-mark-specified-vs-implemented.md)).
+- **Prefer stable citations** — `§4`, `contracts §2.5` — over `file.rs:184`, which drifts.
+  `scripts/check-doc-links.py` warns on the ones that have visibly rotted.
+- **State load-bearing assumptions at the site**, and prefer a test to a comment.
+- **Keep emphasis proportionate.** If everything is critical, the reader cannot tell which things
+  are — and a small number here genuinely are.
+- British spelling, and the established security vocabulary — *conservative label join*, *boolean
+  expression indexing*, *partial evaluation*, *Non-Truman model*, *compartmented MAC* — over
+  invented terms.
+
+## The gate
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+bash scripts/check-layers.sh
+python3 scripts/check-doc-links.py
+```
+
+Run them and read the output before claiming anything passes.
