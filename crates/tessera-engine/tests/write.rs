@@ -41,7 +41,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{AcceptError, Engine, ExecutorPosture};
+use tessera_engine::{AcceptError, Engine, ExecutorPosture, DENY_DURABILITY_ATTEMPTS};
 use tessera_lifecycle::command::{SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
 use tessera_lifecycle::ChangeOp;
@@ -577,8 +577,13 @@ fn a_deny_is_never_queued_behind_a_conflict_forced_window_split() {
 // WAL failure
 // =================================================================================================
 
-/// **Lifecycle §4: never a refusal that leaves a deny unapplied.** An injected disk-full on a
-/// suppress returns an error *and* the item is gone.
+/// **Lifecycle §4: never a refusal that leaves a deny unapplied.** A durability failure the
+/// executor cannot repair returns an error *and* the item is gone.
+///
+/// Every attempt is armed to fail — `DENY_DURABILITY_ATTEMPTS`, not a hard-coded number — because
+/// this case is about the *exhausted* path. Arming one failure now exercises recovery instead
+/// (`a_deny_whose_first_sync_fails_is_retried_into_durability`), and a test hard-coding the count
+/// would silently change subject the day the retry schedule does, while staying green either way.
 ///
 /// The pre-assertion that the item is visible first is not ceremony: without it a fixture that
 /// never contained the item would satisfy "no longer shows the item" and this would pass vacuously.
@@ -594,7 +599,7 @@ fn deny_append_failure_still_applies() {
         "the item must be visible before the suppression"
     );
 
-    faults.fail_next_fsyncs(1);
+    faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
     let err = engine
         .accept_change(source_id_key(3), entity, ChangeOp::Suppress, None)
         .expect_err("a failed durability write must be reported, never silently swallowed");
@@ -608,6 +613,104 @@ fn deny_append_failure_still_applies() {
         engine.write_executor_posture(),
         ExecutorPosture::WalPoisoned,
         "durability is owed, so the node must stop claiming it is ready"
+    );
+}
+
+/// **A deny whose first sync fails is retried into durability, and answered 200.**
+///
+/// The whole point of the retry: durability that was still reachable is reached, so the caller is
+/// told the truth — the disposition *is* durable — instead of being handed a 500 and an obligation
+/// it does not owe. One failure is armed, so the first repair attempt succeeds.
+///
+/// **The reopen is the assertion, not the 200.** A success receipt is a claim about the live node;
+/// only a fresh `Engine` — which replays the WAL's durable prefix and rebuilds the overlay from it —
+/// says whether the suppression outlived the process. Without that half this test would pass over an
+/// implementation that acked 200 and wrote nothing, which is the fail-open the whole ack contract
+/// exists to prevent.
+#[test]
+fn a_deny_whose_first_sync_fails_is_retried_into_durability() {
+    let tmp = TempDir::new().unwrap();
+    let wal_path = tmp.path().join("wal.log");
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+
+    let entity = entity_of(&engine, 3);
+    let before = visible(&engine);
+    assert_eq!(
+        before, N_ITEMS,
+        "the item is visible before the suppression"
+    );
+
+    faults.fail_next_fsyncs(1);
+    engine
+        .accept_change(source_id_key(3), entity, ChangeOp::Suppress, None)
+        .expect("the retry reached durability, so the honest answer is a success, not a 500");
+
+    assert_eq!(visible(&engine), before - 1, "and the item is hidden");
+    assert_eq!(
+        engine.write_executor_posture(),
+        ExecutorPosture::Running,
+        "durability was reached, so nothing is owed and the node may still claim ready"
+    );
+    drop(engine);
+
+    let mut reopened = open_engine(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache-reopened"),
+        &wal_path,
+    );
+    reopened
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    assert_eq!(
+        visible(&reopened),
+        before - 1,
+        "the suppression must survive the restart — that is what the 200 promised"
+    );
+}
+
+/// **And the residual, stated as a test rather than as a caveat.** When every attempt fails the old
+/// behaviour stands in full: applied in memory, 500, and gone after a restart.
+///
+/// This is the case contracts §3.1's retry clause exists for. It is not a leak — the item returns to
+/// exactly the visibility it had before the request — but it is a divergence between what a live node
+/// shows and what a restarted one shows, and the only thing that closes it is the caller retrying.
+///
+/// Two assertions, because either alone passes over the wrong implementation: the *in-memory* hide
+/// (which a refusal would skip, leaving the item visible — lifecycle §4's third forbidden answer)
+/// and the *absence after reopen* (which a replay past the durable prefix would undo).
+#[test]
+fn a_deny_whose_retries_are_exhausted_is_hidden_now_and_visible_after_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let wal_path = tmp.path().join("wal.log");
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+
+    let entity = entity_of(&engine, 3);
+    let before = visible(&engine);
+
+    faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
+    engine
+        .accept_change(source_id_key(3), entity, ChangeOp::Suppress, None)
+        .expect_err("every attempt failed, so durability is owed and the answer is an error");
+    assert_eq!(
+        visible(&engine),
+        before - 1,
+        "the item is hidden anyway for as long as this process lives"
+    );
+    drop(engine);
+
+    let mut reopened = open_engine(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache-reopened"),
+        &wal_path,
+    );
+    reopened
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    assert_eq!(
+        visible(&reopened),
+        before,
+        "nothing was ever made durable, so replay cannot reinstate it — the caller was told to \
+         retry, and this is what it costs if they do not"
     );
 }
 
@@ -731,7 +834,7 @@ fn an_unsuppress_append_failure_applies_nothing() {
         "the item must be hidden before the unsuppress, or this test asserts nothing"
     );
 
-    faults.fail_next_fsyncs(1);
+    faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
     let err = engine
         .accept_change(source_id_key(3), entity, ChangeOp::Unsuppress, None)
         .expect_err("a failed durability write must be reported, never silently swallowed");
@@ -764,7 +867,7 @@ fn a_poisoned_wal_trips_the_not_ready_posture() {
     let (engine, faults) = engine_with_faults(&tmp, 8);
 
     let doomed = entity_of(&engine, 3);
-    faults.fail_next_fsyncs(1);
+    faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
     let _ = engine.accept_change(source_id_key(3), doomed, ChangeOp::Suppress, None);
     assert_eq!(
         engine.write_executor_posture(),

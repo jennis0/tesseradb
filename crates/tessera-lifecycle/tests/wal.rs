@@ -449,6 +449,118 @@ fn a_real_fsync_failure_poisons_the_handle() {
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// **A durability failure that leaves the bytes on disk is repairable, and the repair is what makes
+/// a deny survive a restart.**
+///
+/// The same genuine `EACCES` as the test above — a read-only WAL directory, which fails the
+/// sidecar's write-tmp-then-rename while `sync_data` has already returned. The condition is then
+/// cleared and `retry_durability` is asked to finish the job. What it must produce is a log whose
+/// durable prefix contains the record: an operator whose disk problem lasted two hundred
+/// milliseconds must not lose an accepted suppression to it.
+///
+/// The reopen is the assertion that matters. `retry_durability` returning `Ok` is a claim about the
+/// handle; only a fresh `Wal::open` — which resolves the sidecar and replays the prefix — says
+/// whether the record is durable in the sense the acknowledgement contract means.
+///
+/// Skipped under uid 0: `chmod` does not bind root, so on a root CI runner this would silently
+/// assert nothing rather than fail.
+#[test]
+fn a_real_fsync_failure_is_repaired_by_retrying_durability() {
+    if unsafe { geteuid() } == 0 {
+        eprintln!("skipped: running as root, where a read-only directory is not read-only");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wal.log");
+    {
+        let (mut wal, _) = Wal::open(&path).unwrap();
+        wal.append(&sample_record(0)).unwrap();
+        wal.fsync().unwrap();
+
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        wal.append(&sample_record(1)).unwrap();
+        assert!(
+            matches!(wal.fsync(), Err(WalError::Io(_))),
+            "the fsync must genuinely fail, or this test asserts nothing"
+        );
+        assert!(wal.is_poisoned(), "and it must refuse further writes");
+        assert!(
+            wal.is_recoverable(),
+            "a sync failure wrote no bytes, so `len` still names a record boundary and the handle \
+             is repairable — a torn append would not be"
+        );
+
+        // The transient condition clears.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        wal.retry_durability(&[sample_record(1)])
+            .expect("the condition is gone, so the repair must succeed");
+        assert!(
+            !wal.is_poisoned(),
+            "durability was reached, so the handle is healthy again and the node may claim ready"
+        );
+    }
+
+    let (_wal, records) = Wal::open(&path).unwrap();
+    assert_eq!(
+        records,
+        vec![sample_record(0), sample_record(1)],
+        "the repaired record must be inside the durable prefix, exactly once"
+    );
+}
+
+/// The repair refuses records that are not the ones the undurable region holds.
+///
+/// `retry_durability` writes over `[durable_len, len)`, so being handed the wrong set would mean
+/// writing a region whose extent it cannot predict — leaving the log's tail neither the old records
+/// nor the new ones. The framed-length check is what turns that from a caller obligation into a
+/// refusal, and the handle stays poisoned afterwards rather than being left half-repaired.
+#[test]
+fn a_repair_offered_the_wrong_records_refuses() {
+    if unsafe { geteuid() } == 0 {
+        eprintln!("skipped: running as root, where a read-only directory is not read-only");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wal.log");
+    let (mut wal, _) = Wal::open(&path).unwrap();
+    wal.append(&sample_record(0)).unwrap();
+    wal.fsync().unwrap();
+
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    wal.append(&sample_record(1)).unwrap();
+    wal.append(&sample_record(2)).unwrap();
+    assert!(matches!(wal.fsync(), Err(WalError::Io(_))));
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+    // One record short of what the region holds.
+    assert!(
+        matches!(
+            wal.retry_durability(&[sample_record(1)]),
+            Err(WalError::Poisoned)
+        ),
+        "a repair whose records do not reproduce the undurable region must refuse"
+    );
+    assert!(
+        wal.is_poisoned(),
+        "and the handle must stay poisoned — a refused repair repairs nothing"
+    );
+
+    // Offered the right set, it still works: the refusal is about the argument, not a latch.
+    wal.retry_durability(&[sample_record(1), sample_record(2)])
+        .expect("the correct records repair the same handle");
+    drop(wal);
+
+    let (_wal, records) = Wal::open(&path).unwrap();
+    assert_eq!(
+        records,
+        vec![sample_record(0), sample_record(1), sample_record(2)]
+    );
+}
+
 /// The injected fault reproduces that sequence exactly: `Io` on the failing call, `Poisoned` on
 /// every call after, and `is_poisoned()` true throughout.
 ///
@@ -494,6 +606,88 @@ fn an_injected_failure_is_indistinguishable_from_a_real_one() {
         (2, 1),
         "the failed fsync must not be counted"
     );
+
+    // **And it must be repairable, because a real one is.** The deny lane's retry is reachable only
+    // from a recoverable poison, so an injection that poisoned terminally would make every test of
+    // that retry describe a failure mode the real WAL never produces — the same defect, one axis
+    // over, that this test's original form exists to prevent.
+    assert!(
+        wal.is_recoverable(),
+        "an injected SYNC failure must be repairable, exactly as `Wal`'s own is"
+    );
+}
+
+/// The retry sequence, through the injected arm: a repair fails while a failure is still armed and
+/// succeeds once the arming runs out.
+///
+/// This is what lets `tessera-engine`'s deny-lane tests distinguish recovery from exhaustion by
+/// arming a count. Without it the switchboard could clear its poison on the first repair attempt —
+/// making every armed count beyond the first inert, and turning the exhaustion tests green while
+/// they measured recovery.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_injected_sync_failure_is_repaired_only_once_the_arming_runs_out() {
+    use std::sync::Arc;
+    use tessera_lifecycle::faults::{FaultSwitchboard, WalMeter};
+    use tessera_lifecycle::wal::ExecutorWal;
+
+    let dir = tempdir().unwrap();
+    let (wal, _) = Wal::open(dir.path().join("wal.log")).unwrap();
+    let faults = Arc::new(FaultSwitchboard::new());
+    let meter = Arc::new(WalMeter::new());
+    let mut wal = ExecutorWal::new(wal, Arc::clone(&meter)).with_faults(Arc::clone(&faults));
+
+    faults.fail_next_fsyncs(2);
+    wal.append(&sample_record(1)).unwrap();
+    assert!(matches!(wal.fsync(), Err(WalError::Io(_))));
+
+    assert!(
+        matches!(
+            wal.retry_durability(&[sample_record(1)]),
+            Err(WalError::Io(_))
+        ),
+        "the second armed failure must take the first repair attempt"
+    );
+    assert!(wal.is_poisoned() && wal.is_recoverable());
+
+    wal.retry_durability(&[sample_record(1)])
+        .expect("with the arming exhausted, the repair reaches the real WAL and succeeds");
+    assert!(!wal.is_poisoned());
+    assert_eq!(
+        meter.fsyncs(),
+        1,
+        "exactly one durability was achieved, however many attempts it took"
+    );
+}
+
+/// An injected **append** failure is not repairable, because a real one is not: a partial
+/// `write_all` leaves no record boundary to rewind to.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_injected_append_failure_is_not_repairable() {
+    use std::sync::Arc;
+    use tessera_lifecycle::faults::{FaultSwitchboard, WalMeter};
+    use tessera_lifecycle::wal::ExecutorWal;
+
+    let dir = tempdir().unwrap();
+    let (wal, _) = Wal::open(dir.path().join("wal.log")).unwrap();
+    let faults = Arc::new(FaultSwitchboard::new());
+    let mut wal = ExecutorWal::new(wal, Arc::new(WalMeter::new())).with_faults(Arc::clone(&faults));
+
+    faults.fail_next_appends(1);
+    assert!(matches!(
+        wal.append(&sample_record(1)),
+        Err(WalError::Io(_))
+    ));
+    assert!(wal.is_poisoned());
+    assert!(
+        !wal.is_recoverable(),
+        "a torn append has no boundary to repair from"
+    );
+    assert!(matches!(
+        wal.retry_durability(&[sample_record(1)]),
+        Err(WalError::Poisoned)
+    ));
 }
 
 /// The **append** injection arm, which nothing else exercises.

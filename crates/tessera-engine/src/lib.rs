@@ -76,7 +76,7 @@ pub use tessera_store::manifest::DeclaredScalar;
 // `ExecutorPosture`/`ExecutorStats` for `readyz` and `/control/status`.
 pub use write::{
     AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, PendingChange,
-    DENY_WINDOW_MAX_ENTRIES,
+    DENY_DURABILITY_ATTEMPTS, DENY_WINDOW_MAX_ENTRIES,
 };
 // Task 6: the queue's own `retry_after_s` derivation. Exported because `tessera-server` derives a
 // *second* 429 subject's value from the same estimator over a different depth (contracts §0.3

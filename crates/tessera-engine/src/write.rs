@@ -1695,6 +1695,48 @@ enum Admission {
 /// tens of thousands of fsyncs the per-item path charged for the same request.
 pub const DENY_WINDOW_MAX_ENTRIES: usize = 1_000;
 
+/// How long the executor waits before each re-attempt at making a deny window durable, and
+/// therefore how many attempts there are: the first sync, plus one per entry here.
+///
+/// ## What bounds this, and why it is not the write-latency budget
+///
+/// Design §3's write-latency budget permits a deny to take seconds — up to a minute is acceptable —
+/// so there is room. The bound is **not** taken from it, for a reason the budget does not express:
+/// the executor is a single thread and the deny lane is FIFO, so this delay is paid by *every* deny
+/// queued behind the failing window, not once by the caller who hit the failure. A schedule sized
+/// to the budget would let one failing device convert the whole budget into the lane's per-window
+/// cost, and the lane's guarantee — never starved beyond one window — is measured in exactly that.
+///
+/// So the bound is taken from the lane's own observed latency instead. A deny acks in ~3.2 ms
+/// quiescent and 165 ms p50 / 346 ms max under sustained ingest
+/// (`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`, measured). At 250 ms of added delay a
+/// failing window stays inside the range the lane already exhibits under load, so nothing queued
+/// behind it waits longer than a busy node already makes it wait.
+///
+/// **Two re-attempts, not ten**, because of what the repair is: re-dirtying the pages and syncing
+/// again (`tessera_lifecycle::wal::Wal::retry_durability`). That converts a transient writeback
+/// error; it does nothing about a device that is actually failing. If the third attempt is refused,
+/// further attempts are a cost with no mechanism behind them.
+///
+/// **The delays are not zero**, because the other failure a retry plausibly converts is a
+/// short-lived `ENOSPC` — for which an immediate re-attempt is the one schedule guaranteed not to
+/// help.
+///
+/// *Chosen against a measurement, not itself measured: no campaign has established how often a
+/// second attempt succeeds, because that is a property of the device rather than of this code.*
+const DENY_DURABILITY_BACKOFF: [std::time::Duration; 2] = [
+    std::time::Duration::from_millis(50),
+    std::time::Duration::from_millis(200),
+];
+
+/// How many durability attempts one deny window gets in total — the original sync plus one per
+/// [`DENY_DURABILITY_BACKOFF`] entry.
+///
+/// Public because a test that wants to observe the *exhausted* path has to arm exactly this many
+/// failures, and a test that hard-codes the number silently stops testing exhaustion the day the
+/// schedule changes — it starts testing recovery instead, and passes either way.
+pub const DENY_DURABILITY_ATTEMPTS: usize = DENY_DURABILITY_BACKOFF.len() + 1;
+
 /// One deny in an open window: its record, and everything needed to apply it and answer its caller.
 ///
 /// `record` is built at the drain rather than at the append so the window is a list of things that
@@ -1886,9 +1928,22 @@ impl Executor {
     /// commands. This is why denies need none of the ordering machinery a *mixed* window would
     /// (`tessera_lifecycle::window` argues why the two windows stay separate).
     ///
+    /// ## A failed sync is retried before it is a failure
+    ///
+    /// A sync failure and an append failure are different events, and the window treats them so.
+    /// Every append having landed means the window's records are exactly the log's undurable region,
+    /// which is the precondition for repairing it: the executor re-writes them and syncs again, a
+    /// bounded number of times ([`Executor::retry_deny_durability`]). If a re-attempt succeeds the
+    /// window is durable and takes the ordinary path — apply, one swap, **200** to every waiter,
+    /// because the dispositions genuinely are durable and any other answer would be a lie in the
+    /// direction that costs a caller a retry it does not owe.
+    ///
+    /// The fold below is therefore what happens when the retries are **exhausted**, or when an
+    /// *append* failed and there was never anything to repair.
+    ///
     /// ## The failure fold, which is the part to get right
     ///
-    /// On an append or fsync failure anywhere in the window:
+    /// On an unrepaired append or fsync failure anywhere in the window:
     ///
     /// - every [`ChangeOp::Delete`] and [`ChangeOp::Suppress`] **in the window** is applied anyway —
     ///   the items are hidden immediately — and every waiter still gets an error;
@@ -1910,10 +1965,12 @@ impl Executor {
     /// discarded: the `Unsuppress` that was correctly refused stays refused, and the `Suppress` that
     /// was applied in memory comes back **unhidden**. That is the honest reading of the 500 the
     /// waiters received — durability was not achieved, it is owed, and the caller must retry
-    /// (lifecycle §4) — and it is what the append-failure case has always done anyway, since a
-    /// `Suppress` whose *append* failed leaves no bytes to replay. Making the two adjacent failure
-    /// points agree is the point: a hiding that survives a restart only when the failure happened to
-    /// land on the fsync rather than on the append is not a guarantee anyone can reason about.
+    /// (contracts §3.1, lifecycle §4) — and it is what the append-failure case has always done
+    /// anyway, since a `Suppress` whose *append* failed leaves no bytes to replay. The two adjacent
+    /// failure points agree, which is what lets an operator reason about the answer at all: a hiding
+    /// that survived a restart only when the failure happened to land on the fsync rather than on
+    /// the append would be a guarantee nobody could state. The retry above is what makes this the
+    /// last resort rather than the first response; it does not change what the resort is.
     ///
     /// **The in-memory rule above is untouched by that**, and must stay so. The item is hidden from
     /// the moment the disposition is accepted until the process ends, which is the whole interval a
@@ -1934,10 +1991,14 @@ impl Executor {
         // **One fsync for the whole window.** Every entry is durable when it returns, or none is.
         if failed_at.is_none() {
             if let Err(e) = self.wal.fsync() {
-                // Every append landed cleanly, so there is no "the entry whose append failed" — the
-                // first waiter gets the real error and the rest `Poisoned`, exactly as the ingest
-                // window does, and for the same reason: no wire behaviour distinguishes them.
-                failed_at = Some((0, e));
+                // Every append landed cleanly, so the window's records are exactly the undurable
+                // region and the sync can be attempted again — see `retry_deny_durability`. Only if
+                // that gives up does this become a failure: the first waiter then gets the real
+                // error and the rest `Poisoned`, exactly as the ingest window does, and for the same
+                // reason: no wire behaviour distinguishes them.
+                if let Err(e) = self.retry_deny_durability(&entries, e) {
+                    failed_at = Some((0, e));
+                }
             }
         }
         self.observe_wal();
@@ -1993,6 +2054,58 @@ impl Executor {
         for entry in entries {
             self.ack(&entry.respond, Ack::Changed, &published);
         }
+    }
+
+    /// A deny window's sync failed. Re-write its records and sync again, up to
+    /// [`DENY_DURABILITY_ATTEMPTS`] times in total, and report whether durability was reached.
+    ///
+    /// ## Why the deny lane retries and the ingest lane does not
+    ///
+    /// The two lanes' failure paths are not symmetric, and the asymmetry is the whole justification.
+    /// An ingest window whose durability fails **applies nothing** — no effect exists anywhere, the
+    /// caller is told so, and a restart agrees with the caller. Nothing diverges, so there is
+    /// nothing for a retry to rescue. A deny window's failure applies its deletions and
+    /// suppressions anyway (lifecycle §4), so the live node hides an item that a restart un-hides:
+    /// the *only* case in the write path where reaching durability late changes what the system is,
+    /// rather than only what it says. [`tessera_lifecycle::wal::Wal::retry_durability`] is
+    /// lane-agnostic and the ingest window could adopt it; it has no reason to.
+    ///
+    /// ## Why re-writing is the retry, and why it duplicates nothing
+    ///
+    /// A bare second `fsync` is not a retry on Linux: after a writeback error the kernel may mark
+    /// the page clean and report the error exactly once, so the second call returns success with the
+    /// data gone. `Wal::retry_durability` therefore rewinds to the last durable offset and writes
+    /// the window's records again, re-dirtying exactly the pages that may have been dropped — and
+    /// because that region is by construction the region no caller was ever told about, the repair
+    /// leaves one copy of each record rather than two. (Two copies would replay correctly as well,
+    /// since a disposition is idempotent; that is the fallback argument, not the mechanism.)
+    ///
+    /// ## What it costs, stated because it is a real regression on one axis
+    ///
+    /// The apply-anyway rule fires up to ~250 ms later than it did, because the retry runs
+    /// **before** the window is applied rather than after. Applying first and retrying second would
+    /// keep the hiding immediate, but it would split one window's application in two — the deny ops
+    /// now, the rest after the retry — and this window's ordering guarantee is that entries order is
+    /// apply order, which a `suppress D` followed by an `unsuppress D` in one window depends on. The
+    /// added delay is inside the range the lane already exhibits under sustained ingest (165 ms p50,
+    /// 346 ms max, measured); the ordering is not negotiable.
+    fn retry_deny_durability(
+        &mut self,
+        entries: &[DenyEntry],
+        first: WalError,
+    ) -> std::result::Result<(), WalError> {
+        // Cloned only on the failure path, and this is the one place the executor needs the window's
+        // records as a slice. A window is at most `DENY_WINDOW_MAX_ENTRIES` small records.
+        let records: Vec<WalRecord> = entries.iter().map(|e| e.record.clone()).collect();
+        let mut last = first;
+        for delay in DENY_DURABILITY_BACKOFF {
+            std::thread::sleep(delay);
+            match self.wal.retry_durability(&records) {
+                Ok(_) => return Ok(()),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
     }
 
     /// **The commit window** (Task 7a; lifecycle §5.1): drain the work queue into one window and
