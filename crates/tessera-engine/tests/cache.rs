@@ -2,7 +2,8 @@
 //! bundle `tests/pins.rs` uses (Phase 2 stage 2.1, Task 5).
 //!
 //! **These cases go through the real request path on purpose.** The single-flight state machine,
-//! the four eviction rules and the lock accounting are unit-tested in `src/single_flight.rs`, where
+//! the four eviction rules and the lock accounting are unit-tested in
+//! `crates/tessera-engine/src/single_flight.rs`, where
 //! a synthetic `V` makes every interleaving schedulable. What cannot be tested there is the thing
 //! that matters most here: that a *rebuilt* projection is the same projection. A test that
 //! constructed two `RowProjection`s in-process and compared them would never exercise the hit path
