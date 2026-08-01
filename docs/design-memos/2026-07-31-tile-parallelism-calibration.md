@@ -252,7 +252,7 @@ never measured above 1,024. This is the regression memo's recommendation 4, minu
 - **`TILE_PAR_MIN_LEN` was not re-swept** at the new tile counts. If a tile arm lands, shapes in the
   4,096–65,536-tile range start reaching the pool for the first time, and `min_len_sweep.rs`'s
   §14.5 table covers only `full-extent` z1–z5 and `natural/z4`. Re-run it before trusting 8 there.
-- **The label axis was not varied — all 210 cells are `categories-subclass`, one point on a
+- **The label axis was not varied** — all 210 cells are `categories-subclass`, one point on a
   contiguity range `probes/results.md` §5 measures at 1.00 → 5.11. *Closed 2026-08-01: see
   "Follow-up 4, addendum: the label axis" below. 4,096 survives.*
 
