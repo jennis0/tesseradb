@@ -1,12 +1,11 @@
-//! Task 13, Step 1: the three HTTP planes, end to end, spawned in-process on port 0 against a
-//! small synthetic bundle (the same fixture pattern Task 11's `tests/viewport.rs` uses).
+//! The viewer plane, the session plane, config, byte shape and the compute-admission gate, end to
+//! end — spawned in-process on port 0 against a small synthetic bundle (the same fixture pattern
+//! `tessera-engine`'s `tests/viewport.rs` uses).
 //!
-//! Task 0c (Phase 2 stage 2.1) moved the **write-path** cases out of this file into
-//! `tests/http_write.rs` — `/control/ingest`, `/control/changes`, `/control/status`, batch-id
-//! idempotency, allocation and the health endpoints — so stage 2.1's parallel tracks own disjoint
-//! files. What remains here is the viewer plane, the session plane, config, byte shape and the
-//! compute-admission gate. Shared fixtures live in [`common`]; some doc comments below refer to
-//! tests that now live in `tests/http_write.rs`.
+//! The **write-path** cases live in `tests/http_write.rs` — `/control/ingest`, `/control/changes`,
+//! `/control/status`, batch-id idempotency, allocation and the health endpoints — and pins and
+//! session revocation in `tests/http_engine_state.rs`. Shared fixtures live in [`common`]; some doc
+//! comments below refer to tests in the sibling files.
 
 mod common;
 
@@ -28,14 +27,13 @@ use common::*;
 /// shared, matching this file's own existing "same fixture pattern" duplication of
 /// `tests/viewport.rs`'s fixture builder (this file's module doc).
 ///
-/// **§14 note.** `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 post-B9 (three-scale
-/// re-calibration; see that constant's doc in `tessera-engine`) — comfortably above this fixture's
-/// item count, by design (see the assertion below), so item count alone no longer reaches the
-/// parallel branch. **§14 fix round 1**: the two tests below instead force it directly via
-/// `Engine::set_serial_fallback_max_rows_for_test` (`bench-timing`-gated, test-only) on each
-/// server's `Engine` before it starts serving — see either test's own doc. This constant still
-/// matters independent of that override: it is what gives the request a genuinely multi-tile,
-/// multi-thousand-row shape (cross-tile ordering, the underlay path) rather than a token one.
+/// **Item count alone does not reach the parallel branch.** `SERIAL_FALLBACK_MAX_ROWS` sits at
+/// 500,000,000 (see that constant's doc in `tessera-engine` for the calibration), comfortably above
+/// this fixture — which the assertion below pins. The two tests below therefore force the branch
+/// directly via `Engine::set_serial_fallback_max_rows_for_test` (`bench-timing`-gated, test-only) on
+/// each server's `Engine` before it starts serving. This constant still matters independent of that
+/// override: it is what gives the request a genuinely multi-tile, multi-thousand-row shape
+/// (cross-tile ordering, the underlay path) rather than a token one.
 const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
 
 /// Sanity check that [`PARALLEL_HEADLINE_ITEMS`] stays deliberately unit-test-scale small relative
@@ -295,10 +293,10 @@ async fn h_config_missing_disclosure_refuses_to_start() {
     );
 }
 
-// --- Fix-report regression tests (reviewer findings on the first Task 13 pass) ---
+// --- Authentication and disclosure regressions ---
 
-/// Important 1: `GET /v1/meta` must require a valid session token — it discloses bundle
-/// extents/slices/declared-scalar schema.
+/// `GET /v1/meta` must require a valid session token — it discloses bundle extents, slices and the
+/// declared-scalar schema.
 #[tokio::test]
 async fn viewer_meta_requires_bearer() {
     let tmp = TempDir::new().unwrap();
@@ -430,10 +428,7 @@ async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
     assert_eq!(stale.status(), 409);
     let body: serde_json::Value = stale.json().await.unwrap();
     assert_eq!(body["error"], "conflict");
-    assert_eq!(
-        body["detail"],
-        "stale idset; re-resolve by external_id"
-    );
+    assert_eq!(body["detail"], "stale idset; re-resolve by external_id");
 
     // The matching idset is a no-op: same 200, same body as the idset-less request.
     let matching = server
@@ -566,7 +561,7 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
 }
 
 // ---------------------------------------------------------------------------------------------
-// Task 4 (D-B/D-E): the two-stage admission gate, the 429 `backpressure` contract, and the
+// The two-stage admission gate, the 429 `backpressure` contract, and the
 // x-tessera-server-us / x-tessera-admission-us timing split.
 // ---------------------------------------------------------------------------------------------
 
@@ -624,8 +619,8 @@ async fn poll_until_in_flight(server: &TestServer, want: u64) {
     );
 }
 
-/// D-B: with `compute_admission = 1, compute_queue = 0` (the deterministic configuration this
-/// task's brief names), a second concurrent `/v1/viewport` while the first is still running gets
+/// With `compute_admission = 1, compute_queue = 0` — the deterministic configuration — a second
+/// concurrent `/v1/viewport` while the first is still running gets
 /// an immediate 429 — `try_acquire` on the outer slots semaphore fails synchronously, so this
 /// does not even need `admission_timeout_ms` to elapse. Verifies the full 429 contract: status,
 /// `Retry-After: 1` header, and `{"error": "backpressure", "retry_after_s": 1}` body.
@@ -697,11 +692,11 @@ async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
     );
 }
 
-/// D-B/D13: `/healthz`, `/v1/meta`, `/session/revoke`, and a `/control/changes` suppress must all
-/// succeed while the viewer/session gate is fully saturated by a slow viewport — none of them is
-/// a gated path (D-B's gated-paths list is exactly `/v1/viewport`, `/v1/items`,
-/// `/session/authorise`), and the deny priority lane (lifecycle §1.3) must never be blocked by
-/// compute-admission pressure on an unrelated plane.
+/// `/healthz`, `/v1/meta`, `/session/revoke`, and a `/control/changes` suppress must all succeed
+/// while the viewer/session gate is fully saturated by a slow viewport. None of them is a gated
+/// path — the gate's list is exactly `/v1/viewport`, `/v1/items` and `/session/authorise` — and the
+/// deny priority lane (lifecycle §1.3) must never be blocked by compute-admission pressure on an
+/// unrelated plane.
 #[tokio::test]
 async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     let tmp = TempDir::new().unwrap();
@@ -720,8 +715,8 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     )
     .await;
 
-    // Both sessions are minted BEFORE the gate is saturated below: `/session/authorise` IS one of
-    // D-B's gated paths (it shares the viewer/session compute budget), so acquiring a *second*
+    // Both sessions are minted BEFORE the gate is saturated below: `/session/authorise` IS a gated
+    // path (it shares the viewer/session compute budget), so acquiring a *second*
     // session token during saturation would itself race the gate rather than testing the
     // never-gated routes this test is actually about.
     let auth = authorise(&server, &["0"]).await;
@@ -753,7 +748,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
         .unwrap();
     assert_eq!(healthz_resp.status(), 200, "/healthz must never be gated");
 
-    // `/v1/meta`: viewer-plane bearer, but never gated (D-B's gated-paths list is exact).
+    // `/v1/meta`: viewer-plane bearer, but never gated (the gated-paths list is exact).
     let meta_resp = server
         .client
         .get(server.viewer_url("/v1/meta"))
@@ -781,8 +776,8 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
         "/session/revoke must never be gated"
     );
 
-    // `/control/changes` suppress: the D13 test proper. The entire control plane is off the
-    // viewer/session gate (D-B); a deny op must reach the WAL regardless.
+    // `/control/changes` suppress: the case this test exists for. The entire control plane is off
+    // the viewer/session gate; a deny op must reach the WAL regardless.
     const SUPPRESS_SOURCE_ID: u64 = 3;
     let external_id =
         base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
@@ -797,7 +792,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     assert_eq!(
         suppress_resp.status(),
         200,
-        "D13: a suppress must succeed while the viewer gate is fully saturated"
+        "a suppress must succeed while the viewer gate is fully saturated"
     );
 
     let slow_resp = slow_task.await.unwrap();
@@ -893,7 +888,7 @@ async fn no_permit_leak_after_a_shed_or_a_completion() {
     );
 }
 
-/// D-E: `x-tessera-server-us`'s clock starts AFTER admission, so it stays close to what an
+/// `x-tessera-server-us`'s clock starts AFTER admission, so it stays close to what an
 /// unqueued request measures even when this request was forced to queue for a long time; the
 /// queueing itself shows up only in `x-tessera-admission-us`, which must grow to reflect it.
 ///
@@ -1004,11 +999,11 @@ fn header_u64(resp: &reqwest::Response, name: &str) -> u64 {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Task 5 (D-C): cooperative cancellation wired to client disconnect (the rapid-pan case).
+// Cooperative cancellation wired to client disconnect (the rapid-pan case).
 // ---------------------------------------------------------------------------------------------
 
 /// A slow viewport request engineered to spread its cost across MANY tiles rather than
-/// [`slow_viewport_body`]'s one giant tile. D-C's per-tile cancellation check sits at the top of
+/// [`slow_viewport_body`]'s one giant tile. The per-tile cancellation check sits at the top of
 /// the tile loop — it is deliberately not checked mid-tile (a tile's own underlay sweep is
 /// bounded, in-flight work, same as every other per-tile stage) — so a single-tile fixture like
 /// `slow_viewport_body` (`zoom = 0`) cannot demonstrate early interruption at all: cancellation
@@ -1024,18 +1019,17 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
     })
 }
 
-/// D-C, warm-session scope: a client that drops its connection mid-viewport — the rapid-pan case
+/// Warm-session scope: a client that drops its connection mid-viewport — the rapid-pan case
 /// — releases the compute-admission gate's permit well before the full service time an
 /// uncancelled request of the same shape takes. Observed two ways: directly, via `/control/
 /// status`'s `compute.in_flight` gauge dropping back to 0 promptly rather than only once the full
 /// sweep would naturally finish; and indirectly, via a follow-up request being admitted at once
 /// instead of shed.
 ///
-/// **Warm-session scope, deliberately.** A slot-state row-projection build (Tasks 1-2, D-G) is
-/// non-cancellable bounded work by design — D-C's scope note: its result serves later arrivals,
-/// so it always runs to completion. A COLD first viewport's build cost would dominate this test's
-/// timing regardless of cancellation and would prove nothing about the per-tile checks this task
-/// adds. A fast warm-up request first, on the SAME token, gets this token/slice's row projection
+/// **Warm-session scope, deliberately.** A single-flight row-projection build is non-cancellable
+/// bounded work by design: its result serves later arrivals, so it always runs to completion. A
+/// COLD first viewport's build cost would dominate this test's timing regardless of cancellation
+/// and would prove nothing about the per-tile checks. A fast warm-up request first, on the SAME token, gets this token/slice's row projection
 /// to `Ready` before either slow request below, so the slow request's cost is entirely its
 /// (cancellation-interruptible, per-tile) [`slow_multi_tile_viewport_body`] sweep.
 ///
@@ -1061,8 +1055,8 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
 /// gotten by the time `abort()` fires. The disconnect could equally land at the pre-compose
 /// checkpoint, before any tile. This test's value is observing permit release end to end (the
 /// drop-guard flips, SOME checkpoint catches it, the gate frees up) rather than proving the
-/// per-tile check specifically fires mid-sweep; per-tile placement is a code-review concern, per
-/// the D-C design brief.
+/// per-tile check specifically fires mid-sweep. Where in the sweep the check sits is a code-review
+/// concern, not one this test can settle.
 #[tokio::test]
 async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() {
     let tmp = TempDir::new().unwrap();
@@ -1139,7 +1133,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
     // state below, so the client-side outcome is discarded either way.
     let _ = slow_task.await;
 
-    // D-C: the drop-guard flips the token when axum drops the handler future on disconnect; the
+    // The drop-guard flips the token when axum drops the handler future on disconnect; the
     // engine's per-tile check observes it and aborts; the `spawn_blocking` closure returns `Err`
     // and drops `_gate_permits` -- releasing both `OwnedSemaphorePermit`s well before the full
     // sweep would naturally finish.
@@ -1171,10 +1165,10 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
 }
 
 // ---------------------------------------------------------------------------------------------
-// Concurrency — D-D/D-F intra-request rayon parallelism (Task 6)
+// Concurrency — intra-request rayon parallelism
 // ---------------------------------------------------------------------------------------------
 
-/// THE HEADLINE TEST, server-side (D-D/D-F): the full Arrow response **body** `POST /v1/viewport`
+/// THE HEADLINE TEST, server-side: the full Arrow response **body** `POST /v1/viewport`
 /// returns is byte-for-byte identical whether `serve.compute_threads` is 1 or 8 — the same claim
 /// `tessera-engine`'s own
 /// `viewport_output_is_byte_identical_at_compute_threads_1_and_8` pins at the engine level,
@@ -1189,7 +1183,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
 /// of them are part of this byte-equality claim. `x-tessera-pin` IS compared -- it is derived from
 /// the bundle's own `(prefix, segments_version)`, not from timing, so it must agree too.
 ///
-/// **§14 fix round 1 note.** Uses `PARALLEL_HEADLINE_ITEMS` (300,000), not this file's default
+/// Uses `PARALLEL_HEADLINE_ITEMS` (300,000), not this file's default
 /// `N_ITEMS` (1,000), for a genuinely multi-tile, multi-thousand-row request. But item count alone
 /// no longer gets this test to the parallel branch at all: `SERIAL_FALLBACK_MAX_ROWS` rose to
 /// 500,000,000 in the post-B9 three-scale re-calibration, and a fixture that reaches it is
@@ -1238,7 +1232,7 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
         config_8,
     )
     .expect("engine should open against a freshly built bundle");
-    // §14 fix round 1: force the genuine parallel branch on both — see this test's doc.
+    // Force the genuine parallel branch on both — see this test's doc.
     #[cfg(feature = "bench-timing")]
     {
         engine_1.set_serial_fallback_max_rows_for_test(0);
@@ -1330,7 +1324,7 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
 /// every tile non-empty, but at `zoom = 8` (up to 65,536 candidate tiles) sparse enough that most
 /// candidate tiles are genuinely empty while a real minority are not.
 ///
-/// **§14 fix round 1 note.** Same fix as the headline test above: each server's `Engine` has its
+/// Same arrangement as the headline test above: each server's `Engine` has its
 /// threshold forced to 0 (`Engine::set_serial_fallback_max_rows_for_test`, `bench-timing`-gated)
 /// before being handed to `spawn_server_from_engine`, so both genuinely take `pool.install`. The
 /// occupied/empty tile mix this test is actually for (still 1,000 distinct locations, more items

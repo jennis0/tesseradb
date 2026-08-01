@@ -1,5 +1,6 @@
-//! Shared server state: the engine, and the per-token session registry Task 11's report flags as
-//! the server's (not the engine's) responsibility to own.
+//! Shared server state: the engine, and the per-token session registry. The registry is the
+//! server's responsibility rather than the engine's — the engine mints a [`Session`] and never
+//! checks its deadline again, so retention, expiry refusal and revocation all live here.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -17,8 +18,9 @@ use crate::error::ApiError;
 /// One authorised session: the engine's [`Session`], and nothing else.
 ///
 /// **No per-session handle table is held here.** The viewer plane carries `tessera_id` directly
-/// and mints no handles, so there is nothing to put in one. Phase 3's node handles are genuinely
-/// per-session and want exactly this seam — held alongside, not inside, `Session`, because
+/// and mints no handles, so there is nothing to put in one
+/// (docs/decisions/0032-delete-the-dead-handle-table.md). Node handles, which genuinely are
+/// per-session, want exactly this seam — held alongside, not inside, `Session`, because
 /// `tessera-wire` must not depend on `tessera-engine`'s `EntityId` — and the type they need, with
 /// the constraint it records, is `tessera_wire::handles::HandleTable`.
 pub struct SessionEntry {
@@ -256,7 +258,7 @@ impl SessionRegistry {
 }
 
 /// Both `OwnedSemaphorePermit`s a successful [`ComputeGate::admit`] call returns, held together
-/// so a caller can move one value into a `spawn_blocking` closure (D-B). Dropping this — which
+/// so a caller can move one value into a `spawn_blocking` closure. Dropping this — which
 /// happens when the closure returns, panics, or is otherwise finished — is what releases both
 /// permits, so accounting stays correct even if the client has disconnected: a permit tracks
 /// compute completion, never caller interest. Fields are private; a caller has no reason to touch
@@ -266,7 +268,7 @@ pub struct GatePermits {
     _compute: OwnedSemaphorePermit,
 }
 
-/// D-B: the two-stage admission gate in front of the viewer/session planes' CPU-bound closures
+/// The two-stage admission gate in front of the viewer/session planes' CPU-bound closures
 /// (`/v1/viewport`, `/v1/items`, `/session/authorise`). `compute_admission` is DEFINED as a bound
 /// on in-flight *requests*, not on runnable CPU: the rayon pool (`compute_threads`) is what bounds
 /// the parallel-sweep CPU any one admitted request may fan out across, and this gate deliberately
@@ -274,7 +276,8 @@ pub struct GatePermits {
 /// `compute_threads` — `tessera-server::config::COMPUTE_ADMISSION_MULTIPLIER`'s doc has the
 /// measurement) because small requests at this corpus scale are latency-bound on scheduling, not
 /// CPU. Never wraps `/healthz`, `/readyz`, `/v1/meta`, `/session/revoke`, or any control-plane
-/// route (D13: a suppression must always reach the WAL, gate saturated or not).
+/// route — a suppression must always reach the WAL, gate saturated or not, so the control plane
+/// carries its own bound (see [`IngestAdmission`]) rather than sharing this one.
 ///
 /// Two semaphores, not one, because they bound two different things: `slots` bounds *admitted*
 /// requests (running + queued) and is acquired non-blocking, so a caller arriving once every slot
@@ -291,18 +294,16 @@ pub struct ComputeGate {
     /// slots semaphore and the inner compute-timeout semaphore). No per-principal label (SA §9) —
     /// a single process-wide counter, `/control/status`'s `shed_total`.
     ///
-    /// **Does not count every 429 the server can return.** D-G's single-flight builders
-    /// (`EngineError::ProjectionBuilding`/`FragmentBuilding`, Tasks 1-2) also map to 429
-    /// `backpressure` at `map_engine_error`, but those sheds happen *after* this gate has already
-    /// admitted the request — they are a distinct mechanism this counter has no visibility into.
-    /// A caller correlating `shed_total` against the client-observed 429 rate should expect the
-    /// latter to be equal or higher, never a mismatch to chase as a bug (see Task 9's bench report
-    /// for a worked example of this exact confusion, isolated via a direct `shed_total`-vs-observed
-    /// delta).
+    /// **Does not count every 429 the server can return.** The engine's single-flight builders
+    /// (`EngineError::ProjectionBuilding`/`FragmentBuilding`) also map to 429 `backpressure` at
+    /// `map_engine_error`, but those sheds happen *after* this gate has already admitted the
+    /// request — a distinct mechanism this counter has no visibility into. A caller correlating
+    /// `shed_total` against the client-observed 429 rate should expect the latter to be equal or
+    /// higher; the gap is the single-flight sheds, not a bug to chase.
     shed_total: AtomicU64,
 }
 
-/// `/control/status`'s `compute` block (D-B). `in_flight`/`waiting` are derived from the
+/// `/control/status`'s `compute` block. `in_flight`/`waiting` are derived from the
 /// semaphores' `available_permits` at read time, not tracked separately, so they can never drift
 /// from what the gate itself believes.
 pub struct ComputeGateStatus {
@@ -310,8 +311,8 @@ pub struct ComputeGateStatus {
     pub queue: usize,
     pub in_flight: usize,
     pub waiting: usize,
-    /// See [`ComputeGate::shed_total`]'s doc: this gate's own two shed paths only, not the D-G
-    /// single-flight builders' 429s.
+    /// See [`ComputeGate::shed_total`]'s doc: this gate's own two shed paths only, not the
+    /// engine's single-flight builders' 429s.
     pub shed_total: u64,
 }
 
@@ -327,9 +328,9 @@ impl ComputeGate {
         }
     }
 
-    /// The two-stage acquire (D-B). On success, returns the held permits — move them into the
+    /// The two-stage acquire. On success, returns the held permits — move them into the
     /// `spawn_blocking` closure alongside the engine call — and the queue wait in microseconds,
-    /// which becomes the `x-tessera-admission-us` header (D-E). Every shed path increments
+    /// which becomes the `x-tessera-admission-us` header. Every shed path increments
     /// `shed_total` before returning `ApiError::Backpressure`, so every 429 this gate produces is
     /// counted exactly once.
     pub async fn admit(&self) -> Result<(GatePermits, u64), crate::error::ApiError> {
@@ -392,27 +393,26 @@ impl ComputeGate {
     }
 }
 
-/// Task 6 (D2): the bound on **concurrent `/control/ingest` handlers**, which is the bound on how
-/// many blocking-pool threads ingest can hold.
+/// The bound on **concurrent `/control/ingest` handlers**, which is the bound on how many
+/// blocking-pool threads ingest can hold.
 ///
 /// # The failure it exists to prevent
 ///
 /// `spawn_blocking` dispatches onto a process-wide **unbounded FIFO** served by a fixed number of
-/// threads. Before this, nothing bounded concurrent `/control/ingest` handlers, and each one holds
-/// a thread across the Arrow decode, the plugin's `terms_of_label` loop, the external-ID sidecar IO
-/// **and** its whole blocking wait on the executor's receipt. Task 3b closed the deny lane's
-/// exposure to that by giving `/control/changes` its own runtime; it did not close the class. The
-/// viewer plane still shared the FIFO with unbounded ingest and had **no timeout on the wait**, so
-/// an admitted viewport — one that `ComputeGate` had already let through — would *hang* rather than
-/// shed. That is what this closes, and `ingest_admission_sheds_before_the_blocking_pool_fills` is
-/// what asserts it.
+/// threads, and an ingest handler holds one of those threads across the Arrow decode, the plugin's
+/// `terms_of_label` loop, the external-ID sidecar IO **and** its whole blocking wait on the
+/// executor's receipt. Unbounded, ingest can therefore occupy the whole pool. The deny lane is
+/// insulated from that by its own runtime (`control::DENY_RUNTIME`), but the viewer plane shares
+/// the FIFO and has **no timeout on the wait**, so an admitted viewport — one `ComputeGate` had
+/// already let through — would *hang* rather than shed. This bound is what prevents that, and
+/// `ingest_admission_sheds_before_the_blocking_pool_fills` is what asserts it.
 ///
 /// # Not a second `ComputeGate`
 ///
-/// One semaphore, `try_acquire` only: no queue and no timeout. A queued ingest handler is exactly
-/// the parked submitter Task 3b's ruling established is *not* the problem — the problem is an
-/// *admitted* one. So the control plane either takes the work now or refuses it, and the refusal
-/// costs no blocking thread, no queue slot and no WAL byte.
+/// One semaphore, `try_acquire` only: no queue and no timeout. A submitter parked waiting for
+/// admission costs nothing; an *admitted* one holds a blocking thread. Queueing would convert the
+/// first into the second, so the control plane either takes the work now or refuses it, and the
+/// refusal costs no blocking thread, no queue slot and no WAL byte.
 ///
 /// # Not a `OnceLock`
 ///
@@ -474,16 +474,15 @@ pub struct AppState {
     pub engine: Engine,
     pub sessions: Mutex<SessionRegistry>,
     pub max_k: usize,
-    /// D-B: the viewer/session admission gate. Never touched by the control plane (D13).
+    /// The viewer/session admission gate. Never touched by the control plane.
     pub compute_gate: ComputeGate,
-    /// Task 6 (D2): the control plane's own admission bound. Deliberately **not** `compute_gate` —
-    /// D13 keeps the control plane out of the viewer gate, because an ingest batch durability-
-    /// syncing must not be throttled by the budget a slow viewport consumes.
+    /// The control plane's own admission bound. Deliberately **not** `compute_gate`: an ingest
+    /// batch durability-syncing must not be throttled by the budget a slow viewport consumes.
     pub ingest_admission: IngestAdmission,
-    /// Task 6 (D1): per-request row cap on `/control/ingest`; over is 422. Checked after the Arrow
-    /// decode, which is the earliest point the row count is knowable.
+    /// Per-request row cap on `/control/ingest`; over is 422. Checked after the Arrow decode, which
+    /// is the earliest point the row count is knowable.
     pub ingest_max_batch_rows: usize,
-    /// Task 6 (D1): per-request body-byte cap on `/control/ingest`; over is 422.
+    /// Per-request body-byte cap on `/control/ingest`; over is 422.
     ///
     /// **Enforced by a `DefaultBodyLimit` layer on the route, not by a length check in the
     /// handler** — see `control::router`. Carried here so the layer and the 422's detail string
@@ -492,7 +491,11 @@ pub struct AppState {
     /// Runtime half of the `x-tessera-stage-ns` gate (see `Config::stage_timing`). The other half
     /// is the `bench-timing` compile feature; both must hold.
     pub stage_timing: bool,
-    /// Parsed and stored (design §7.5/§2.3's startup rule); not consumed by any Phase 1 handler.
+    /// The disclosure floor: the smallest group whose existence may be reflected in a response.
+    /// Parsed and stored because design §7.5/§2.3 makes a missing `[disclosure]` section a
+    /// refusal to start.
+    /// ⊘ Specified, not implemented: no handler reads this, so no aggregate is suppressed for
+    /// being below the floor. The value is enforced as a *configuration* obligation only.
     #[allow(dead_code)]
     pub min_visible_members: u64,
     pub session_credential: String,
@@ -506,8 +509,7 @@ pub struct AppState {
 impl AppState {
     /// Bearer-token lookup for the viewer plane: an unrecognised token is `bad-credential` (401);
     /// a recognised-but-expired one is `expired-token` (403) — the engine itself never checks
-    /// `expires_at` (Task 11's report flags this as a server obligation this method exists to
-    /// discharge).
+    /// `expires_at`, so enforcing the deadline is this method's job and nothing else's.
     pub fn authenticated_session(
         &self,
         token: &str,
@@ -526,15 +528,14 @@ impl AppState {
     /// Bearer check for the session and control planes' shared-secret credentials, in time
     /// independent of *where* a wrong guess diverges.
     ///
-    /// **The previous implementation was `token == expected`, and its doc called that
-    /// "constant-time-ish". That claim was false** (Task 5): `str` equality short-circuits on the
-    /// first differing byte *and* on a length mismatch, which is a prefix oracle over the operator
-    /// and session credentials — an attacker who can time this recovers the secret byte by byte in
-    /// linear rather than exponential guesses. The scoping excuse ("Phase 1 does not harden against
-    /// timing side channels") did not survive contact with the fact that these two secrets are the
-    /// whole of the admin and session planes' authentication.
+    /// **`token == expected` is not admissible here, however obvious it looks.** `str` equality
+    /// short-circuits on the first differing byte *and* on a length mismatch, which is a prefix
+    /// oracle over the operator and session credentials — an attacker who can time it recovers the
+    /// secret byte by byte, in linear rather than exponential guesses. These two shared secrets are
+    /// the whole of the admin and session planes' authentication, so that is not a side channel
+    /// worth deferring.
     ///
-    /// **How this is fixed, and what it still does not claim.** Both sides are hashed to 32 bytes
+    /// **What this does instead, and what it still does not claim.** Both sides are hashed to 32 bytes
     /// and the digests compared with a fixed-length XOR-accumulate that has no early exit. Hashing
     /// first is what makes the comparison independent of the credential's *length* as well as its
     /// content — a fold over two byte strings of unequal length cannot be. It is not a defence
@@ -598,9 +599,9 @@ mod session_registry_tests {
 mod compute_gate_tests {
     use super::*;
 
-    /// D-B stage 1: with `compute_admission = 1, compute_queue = 0` (the deterministic
-    /// configuration this task's brief names), a second concurrent `admit()` while the first
-    /// permit is still held sheds via `try_acquire` — no waiting, no timeout elapsed.
+    /// Stage 1 of the gate: with `compute_admission = 1, compute_queue = 0` — the deterministic
+    /// configuration — a second concurrent `admit()` while the first permit is still held sheds via
+    /// `try_acquire`, with no waiting and no timeout elapsed.
     #[tokio::test]
     async fn a_second_admit_sheds_immediately_when_slots_are_exhausted() {
         let gate = ComputeGate::new(1, 0, 250);
@@ -616,7 +617,7 @@ mod compute_gate_tests {
         drop(first_permits);
     }
 
-    /// D-B stage 2: a slot is available (queue has room) but the compute semaphore is fully
+    /// Stage 2 of the gate: a slot is available (queue has room) but the compute semaphore is fully
     /// held, so the second caller waits and is shed only once `admission_timeout_ms` elapses —
     /// exercised with a near-zero timeout so this test does not depend on wall-clock timing to
     /// pass reliably.
@@ -635,7 +636,7 @@ mod compute_gate_tests {
         drop(first_permits);
     }
 
-    /// No permit leak (spec constraint): after a shed, both the slot and compute permits the
+    /// No permit leak: after a shed, both the slot and compute permits the
     /// shed attempt failed to fully acquire are returned — a fresh `admit()` must succeed again
     /// once the original holder releases, not stay wedged.
     #[tokio::test]
@@ -679,7 +680,7 @@ mod compute_gate_tests {
         assert!(fourth.is_ok(), "a slot leak would make this admit shed too");
     }
 
-    /// `/control/status`'s gauges (D-B): `in_flight` and `waiting` are derived from the
+    /// `/control/status`'s gauges: `in_flight` and `waiting` are derived from the
     /// semaphores' own permit counts, so they must reflect an admitted-and-running permit as
     /// in_flight = 1, waiting = 0, and go back to 0/0 once released.
     #[tokio::test]

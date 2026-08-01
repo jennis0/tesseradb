@@ -2,10 +2,9 @@
 //! `/control/status`, batch-id idempotency, external-id duplicate detection, entity allocation,
 //! WAL behaviour and the health/readiness endpoints.
 //!
-//! Split out of `tests/http.rs` by Task 0c (Phase 2 stage 2.1) so that stage 2.1's write-path
-//! track owns this file outright. **No test moved here was otherwise changed** — same names, same
-//! assertions, same fixture values; only the binary they live in. Shared fixtures live in
-//! [`common`]; a few doc comments below refer to tests that stayed in `tests/http.rs`.
+//! The viewer and session planes are in `tests/http.rs`, and pins and session revocation in
+//! `tests/http_engine_state.rs`. Shared fixtures live in [`common`]; a few doc comments below refer
+//! to tests in those files.
 
 mod common;
 
@@ -57,7 +56,7 @@ fn build_ingest_batch(rows: &[(u64, f32, f32, &str)]) -> Vec<u8> {
 }
 
 /// Like [`build_ingest_batch`], but takes the raw `external_id` bytes directly rather than
-/// deriving them from a source id — needed for Task 11's duplicate-detection and cap tests, which
+/// deriving them from a source id — needed for the duplicate-detection and cap tests, which
 /// must construct exact byte strings (repeats across rows, or a specific length) that
 /// `external_id_of`'s 8-byte little-endian convention cannot express.
 fn build_ingest_batch_raw(rows: &[(&[u8], f32, f32, &str)]) -> Vec<u8> {
@@ -286,12 +285,11 @@ async fn ingest_rejects_duplicate_external_ids_within_one_batch() {
     );
 }
 
-/// Important I-8: dedup must consult `Engine::established`, not only the bundle's external-id
-/// sidecar. The sidecar covers only the bundle built at open time; an id ingested five minutes
-/// ago in a *separate*, already-accepted batch lives only in the live map, and a dedup check
-/// that misses it would silently allocate a second entity and orphan the first
-/// (`write.rs`'s `WritePath::accept_ingest` doc — the acceptance path moved out of `session.rs`
-/// behind the Task 0a seam).
+/// Dedup must consult `Engine::established`, not only the bundle's external-id sidecar. The
+/// sidecar covers only the bundle built at open time; an id ingested five minutes ago in a
+/// *separate*, already-accepted batch lives only in the live map, and a dedup check that misses it
+/// would silently allocate a second entity and orphan the first (see `write.rs`'s
+/// `WritePath::accept_ingest` doc).
 #[tokio::test]
 async fn ingest_rejects_an_external_id_ingested_after_the_build() {
     let tmp = TempDir::new().unwrap();
@@ -539,7 +537,7 @@ async fn a_batch_resolution_opens_each_extent_at_most_once() {
     assert_eq!(json["accepted"], 2_000);
 }
 
-/// Important 1: `GET /control/status` must require the operator bearer credential — it discloses
+/// `GET /control/status` must require the operator bearer credential — it discloses
 /// `entity_id_high_water`, a global unmasked corpus-size fact, and the control listener may be
 /// plain loopback TCP, not only a unix socket.
 #[tokio::test]
@@ -585,7 +583,7 @@ async fn control_status_requires_bearer() {
     assert_eq!(resp.status(), 200);
 }
 
-/// Important 2: a `/control/changes` batch whose *later* item fails validation (unknown external
+/// A `/control/changes` batch whose *later* item fails validation (unknown external
 /// id) must leave every earlier item in the same batch unapplied — validate-first, not
 /// apply-then-abort. Suppresses a real item first in the batch, then names a nonexistent external
 /// id second; the whole request must 404, and the real item's count must be unaffected.
@@ -656,20 +654,19 @@ async fn changes_batch_validates_before_applying_anything() {
     );
 }
 
-/// Critical 1: two concurrent acceptances (one `/control/ingest`, one `/control/changes`) must
-/// both survive — Phase 1's unlocked apply+swap allowed a lost-update race where whichever
-/// `store()` won silently discarded the other's already-fsynced, already-acked change. Runs the
-/// engine's `accept_ingest`/`accept_change` directly (not through HTTP) on two OS threads, synced
-/// to start together, so both race for the executor.
+/// Two concurrent acceptances (one `/control/ingest`, one `/control/changes`) must both survive.
+/// An unlocked apply+swap admits a lost-update race in which whichever `store()` wins silently
+/// discards the other's already-fsynced, already-acked change. Runs the engine's
+/// `accept_ingest`/`accept_change` directly (not through HTTP) on two OS threads, synced to start
+/// together, so both race for the executor.
 ///
-/// **Kept even though Task 3a makes the race structurally impossible.** There is now exactly one
-/// thread that can publish a generation, so there is no second `store()` to lose to — the mutex
-/// this test was written against has been deleted along with the hazard. What it still buys is a
-/// regression alarm on the *property* rather than on the mechanism: any future change that
-/// reintroduced a second publisher (stage 2.2's flush is the obvious candidate, and lifecycle
-/// §1.3 requires it to submit rather than store) would show up here as a silently lost
-/// suppression. That is Track C's S2, and this is the behavioural half of the guard —
-/// `scripts/check-layers.sh`'s `.store(Arc::new(` rule is the mechanical half.
+/// **The race is structurally impossible today**, because exactly one thread can publish a
+/// generation, so there is no second `store()` to lose to. What this test still buys is a
+/// regression alarm on the *property* rather than on the mechanism: anything that reintroduced a
+/// second publisher — flush is the obvious candidate, and lifecycle §1.3 requires it to submit
+/// rather than store — would show up here as a silently lost suppression. This is the behavioural
+/// half of that guard; `scripts/check-layers.sh`'s `.store(Arc::new(` rule is the mechanical
+/// half.
 #[test]
 fn concurrent_ingest_and_change_both_survive() {
     let tmp = TempDir::new().unwrap();
@@ -731,8 +728,8 @@ fn concurrent_ingest_and_change_both_survive() {
     let barrier_b = Arc::clone(&barrier);
     let ingest_thread = std::thread::spawn(move || {
         let new_external_id = external_id_of(N_ITEMS + 100);
-        // Unallocated: Task 3a moved signature-sorted assignment onto the executor, so a caller no
-        // longer names the entity id at all.
+        // Unallocated: signature-sorted assignment happens on the executor, so a caller does not
+        // name the entity id at all.
         let row = tessera_lifecycle::UnallocatedRow {
             external_id: Some(new_external_id.clone()),
             descriptors: vec![b"0".to_vec()],
@@ -748,12 +745,12 @@ fn concurrent_ingest_and_change_both_survive() {
     });
 
     change_thread.join().unwrap();
-    // The id the EXECUTOR assigned, not one this test chose: Task 3a moved assignment off the
-    // caller, so the identity to assert against is the one that comes back.
+    // The id the EXECUTOR assigned, not one this test chose: assignment is off the caller, so the
+    // identity to assert against is the one that comes back.
     let ingested_entity = ingest_thread.join().unwrap();
 
     // The suppression's effect: a viewport count one lower than the full-coverage baseline.
-    // (Phase 1's ingested/buffered items have no row geometry yet — no flush — so the ingested
+    // (A buffered item has no row geometry — there is no flush — so the ingested
     // item contributes nothing to any tile's count regardless of correctness; its effect is
     // checked separately below, via the established external-id map a lost swap would revert.)
     let session = engine
@@ -787,16 +784,16 @@ fn concurrent_ingest_and_change_both_survive() {
     );
 }
 
-/// Contracts §3.4 (r6): an item ingested with no external id at all is still accepted, and the
+/// Contracts §3.4: an item ingested with no external id at all is still accepted, and the
 /// `tessera_id` the 200 response returns for it is a genuine, correctly-shard-scoped identity for
 /// the entity that was actually allocated — the only way the item is addressable at all, since it
 /// has no external id.
 ///
-/// This does not assert a `200` from `/v1/items`: Phase 1 has no flush yet, so *any* freshly
-/// ingested item — with or without an external id — has no row geometry until the next
-/// `tessera build`, and `Engine::item`'s own doc records that a visible-but-geometryless entity
-/// is a `404`, identical to an unknown one. That is a pre-existing Phase 1 limitation, orthogonal
-/// to this feature. What this test checks instead is the thing this feature actually promises:
+/// This does not assert a `200` from `/v1/items`. ⊘ There is no flush, so *any* freshly ingested
+/// item — with or without an external id — has no row geometry until the next `tessera build`, and
+/// `Engine::item`'s own doc records that a visible-but-geometryless entity is a `404`, identical to
+/// an unknown one. That limitation is the absent flush, not this path. What this test checks instead
+/// is what the path does promise:
 /// inverting the returned `tessera_id` with the deployment's own identity key yields the right
 /// shard and a freshly-allocated entity id (at or past the bundle's `N_ITEMS` high-water mark),
 /// so the caller genuinely learned a working identity for its item, not a decoy.
@@ -844,17 +841,17 @@ async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_i
          collide with a built-in item"
     );
 
-    // Phase 1's documented limitation, not a defect this feature introduces: no flush yet means
-    // no row geometry for any freshly-ingested item, so `/v1/items` 404s identically to an
-    // unknown id (`Engine::item`'s doc).
+    // ⊘ The absent flush, not a defect in this path: with no flush there is no row geometry for a
+    // freshly-ingested item, so `/v1/items` 404s identically to an unknown id (`Engine::item`'s
+    // doc).
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
     let resp = post_item(&server, token, tessera_id).await;
     assert_eq!(
         resp.status(),
         404,
-        "a buffered (unflushed) item 404s on /v1/items regardless of external id, per Phase 1's \
-         documented row-geometry limitation"
+        "a buffered (unflushed) item 404s on /v1/items regardless of external id — there is no \
+         flush, so it has no row geometry"
     );
 }
 
@@ -959,13 +956,13 @@ async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
     );
 }
 
-/// Task 3 (D-A): `/healthz` must stay prompt while a viewport request runs, even on this test's
-/// single-threaded (`#[tokio::test]` default, current-thread) runtime — the strongest possible
-/// demonstration of the bug this task fixes. Pre-refactor, `viewport`'s whole body (the engine
-/// call through Arrow IPC framing) is synchronous Rust with no `.await` inside it; once tokio's
-/// one worker thread starts polling that task it cannot be interrupted, so a concurrent
-/// `/healthz` task cannot even be *polled* — let alone answered — until the viewport handler
-/// returns. `spawn_blocking` gives the viewport task a genuine `.await` point: the blocking work
+/// `/healthz` must stay prompt while a viewport request runs, even on this test's single-threaded
+/// (`#[tokio::test]` default, current-thread) runtime — the strongest available demonstration.
+/// `viewport`'s whole body (the engine call through Arrow IPC framing) is synchronous Rust with no
+/// `.await` inside it; run directly on the reactor, once tokio's one worker thread starts polling
+/// that task it cannot be interrupted, so a concurrent `/healthz` task cannot even be *polled* — let
+/// alone answered — until the viewport handler returns. `spawn_blocking` gives the viewport task a
+/// genuine `.await` point: the blocking work
 /// moves to tokio's separate blocking-thread pool (a real OS thread, regardless of runtime
 /// flavor), freeing the one reactor thread to service `/healthz` while it runs.
 ///
@@ -1089,21 +1086,18 @@ const CONCURRENT_INGEST_BASE_ID: u64 = 50_000_000;
 const CONCURRENT_INGEST_BATCHES: u64 = 8;
 const CONCURRENT_INGEST_ROWS_PER_BATCH: u64 = 40_000;
 
-/// Task 3 (D-A), review finding 7: a `/control/changes` suppression must not queue behind N
-/// concurrent `/control/ingest` batches durability-syncing (lifecycle §1.3's deny priority lane,
-/// reached through the reactor) — and this must hold even though `/control/ingest` and
-/// `/control/changes` are NEVER behind the Task 4 admission gate (that gate is viewer/session
-/// only). Same single-threaded-runtime argument as
-/// `healthz_stays_prompt_while_a_long_viewport_runs`: pre-refactor, each ingest handler's Arrow
-/// decode, term resolution and WAL append/fsync run synchronously with no `.await`, so once the
-/// reactor thread starts executing one, it cannot service any other task — including accepting
-/// or reading the suppress request's own connection — until that handler returns. Post-refactor,
-/// both handlers do only their bearer check and header/body parse on the reactor, then hand off
-/// to `spawn_blocking`'s separate thread pool — so the suppress request's own closure only has to
-/// wait, at most, for whichever ONE ingest the single write executor happens to be executing at
-/// that instant (Task 3a deleted the WAL mutex this comment used to name: the WAL now moves by
-/// value onto one thread, so serialisation is a consequence of ownership rather than of a lock.
-/// The bug this task closed is reactor-thread occupation, not that serialisation).
+/// A `/control/changes` suppression must not queue behind N concurrent `/control/ingest` batches
+/// durability-syncing (lifecycle §1.3's deny priority lane, reached through the reactor) — and this
+/// must hold even though `/control/ingest` and `/control/changes` are NEVER behind the
+/// compute-admission gate, which is viewer/session only. Same single-threaded-runtime argument as
+/// `healthz_stays_prompt_while_a_long_viewport_runs`: each ingest handler's Arrow decode, term
+/// resolution and WAL append/fsync are synchronous with no `.await`, so run on the reactor thread
+/// they would stop it servicing any other task — including accepting or reading the suppress
+/// request's own connection — until the handler returned. Both handlers therefore do only their
+/// header/body parse on the reactor and hand off to `spawn_blocking`, so the suppress request's own
+/// closure waits at most for whichever ONE ingest the single write executor happens to be executing
+/// at that instant. (That last serialisation is a consequence of the executor owning the WAL by
+/// value, and is not what this test is about: the hazard here is reactor-thread occupation.)
 ///
 /// **Why this is unflaky despite real TCP connections being involved.** Unlike the single
 /// `/healthz` race above, this test cannot rely on "the one other task must already be running
@@ -1114,13 +1108,12 @@ const CONCURRENT_INGEST_ROWS_PER_BATCH: u64 = 40_000;
 /// requests are constructed and hand off to `tokio::spawn` before the suppress request is ever
 /// sent, so it always races genuinely in-flight ingests, not hypothetical future ones.
 ///
-/// **The passing (post-refactor) bound is self-scaling, not a fixed wall-clock bet** — this was
-/// flagged in review: a fixed `suppress_elapsed < 1s` assumes this debug-profile binary's absolute
-/// speed, but post-refactor the suppress closure still contends with up to `CONCURRENT_INGEST_
-/// BATCHES` blocking-pool threads for CPU and for the single write executor, which serialises
-/// every append+fsync onto one thread by owning the WAL outright (Task 3a) — on a
-/// slow-fsync or few-core runner that contention genuinely grows, and a fixed 1s bound could trip
-/// for reasons that have nothing to do with this task's bug. So this asserts
+/// **The bound is self-scaling, not a fixed wall-clock bet.** A fixed `suppress_elapsed < 1s` would
+/// assume this debug-profile binary's absolute speed, and the suppress closure still contends with
+/// up to `CONCURRENT_INGEST_BATCHES` blocking-pool threads for CPU and for the single write
+/// executor, which serialises every append+fsync onto one thread by owning the WAL outright — on a
+/// slow-fsync or few-core runner that contention genuinely grows, and a fixed 1 s bound could trip
+/// for reasons that have nothing to do with the hazard. So this asserts
 /// `suppress_elapsed < total_ingest_elapsed / 2`, where `total_ingest_elapsed` is this same run's
 /// own wall-clock time for every concurrent ingest batch to complete (measured from the same
 /// `Instant` the batches were spawned from, to the last one's `JoinHandle` resolving). That is a
@@ -1224,7 +1217,7 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
 }
 
 // =================================================================================================
-// Task 3b — the readiness posture, and the status a partly-applied change batch reports
+// The readiness posture, and the status a partly-applied change batch reports
 // =================================================================================================
 
 /// Provoke a **real** WAL failure by making the WAL's directory read-only.
@@ -1244,7 +1237,7 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
 /// **Restored by `Drop`, not by a trailing statement.** A failing assertion unwinds, and a
 /// `TempDir` cannot delete the contents of a directory it may not write — so a bare restore at the
 /// end of the test leaks a directory on exactly the runs where a test fails. This box runs near a
-/// full disk (Task 3a's A6), which makes that a real cost rather than a tidiness point.
+/// full disk, which makes that a real cost rather than a tidiness point.
 struct ReadOnlyWalDir<'a>(&'a std::path::Path);
 
 impl<'a> ReadOnlyWalDir<'a> {
@@ -1295,15 +1288,15 @@ async fn readyz_status(server: &TestServer, url: String) -> u16 {
 /// bounded poll of `/readyz` after inducing a panic is sound, and is exactly the form
 /// `tessera-engine`'s `an_executor_panic_is_reported_dead` uses. What this crate's test binary
 /// cannot do is **induce** the panic — that needs `tessera-engine/fault-injection` as a
-/// `tessera-server` dev-dependency, declined at Task 3b's design gate (report D4). The `Dead` row is
+/// `tessera-server` dev-dependency, which this crate deliberately does not take. The `Dead` row is
 /// asserted exactly instead, in `health.rs`'s `only_a_running_executor_is_ready`.
 ///
 /// **What this leaves uncovered, stated rather than counted as coverage:** no test drives a
 /// panicked executor through the HTTP readiness surface. Taking the dev-dependency is the whole of
 /// what it costs.
 ///
-/// Mutations this kills: `readyz` returning `OK` unconditionally (its Phase 1 body); and
-/// `is_ready` written as `p != Dead`, which this catches and a `Dead`-only test could not.
+/// Mutations this kills: `readyz` returning `OK` unconditionally; and `is_ready` written as
+/// `p != Dead`, which this catches and a `Dead`-only test could not.
 #[tokio::test]
 async fn an_engine_without_a_write_executor_is_not_ready() {
     let tmp = TempDir::new().unwrap();
@@ -1339,8 +1332,9 @@ async fn an_engine_without_a_write_executor_is_not_ready() {
         "healthz is liveness, not readiness — a writer fault must not make the process look dead"
     );
 
-    // And the control listener serves neither probe, ready or not (owner decision, 2026-08-01):
-    // it is uniformly authenticated, so both spellings meet the credential layer.
+    // And the control listener serves neither probe, ready or not
+    // (docs/decisions/0011-health-probes-off-control-plane.md): it is uniformly authenticated, so
+    // both spellings meet the credential layer.
     for url in [
         server.control_url("/readyz"),
         server.control_url("/healthz"),
@@ -1550,7 +1544,7 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
     );
 }
 
-/// **What a partly-applied change batch reports** — the second Task 3a gate finding.
+/// **What a partly-applied change batch reports.**
 ///
 /// `[suppress A, predicate B, suppress C]` with the WAL poisoned mid-batch. A's fsync fails, so A
 /// is applied anyway and the handle poisons; B is a **non**-deny, so its refused append applies
@@ -1571,8 +1565,8 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
 ///   saying a third of the batch did not take hold.
 /// - **aborting the ENQUEUE loop → green, everywhere, and that is the point.** An enqueue can only
 ///   fail with `ExecutorDead`/`ReceiptLost`, never on a poisoned WAL, so the failure this test
-///   induces is not observable until every item is already queued. Task 3a's "submit every item
-///   even after one fails" rule is structurally satisfied rather than merely obeyed.
+///   induces is not observable until every item is already queued. The "submit every item even
+///   after one fails" rule is therefore structurally satisfied rather than merely obeyed.
 /// - **widening the failure fold's op filter → RED**, on the body's "NOT applied" half.
 ///
 /// The item assertion below therefore now discriminates the **apply-anyway rule** rather than the
@@ -1680,13 +1674,13 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
 }
 
 // =================================================================================================
-// Task 6 — the admission bound, the batch caps, and the never-shed asymmetry
+// The admission bound, the batch caps, and the never-shed asymmetry
 // =================================================================================================
 
 /// A `Passthrough` that can be made to **park inside `terms_of_label`**, on command.
 ///
 /// `terms_of_label` is called from inside `/control/ingest`'s `spawn_blocking` closure
-/// (`control::run_ingest`), which is precisely the blocking-pool thread Task 6's admission bound
+/// (`control::run_ingest`), which is precisely the blocking-pool thread the ingest admission bound
 /// exists to ration — so parking here holds exactly the resource under test, with no
 /// `fault-injection` dependency and no sleep anywhere.
 ///
@@ -1877,23 +1871,22 @@ async fn post_ingest(
     (status, body)
 }
 
-/// Fresh source ids for Task 6's fixtures. Offset well clear of `N_ITEMS`, or every batch here
+/// Fresh source ids for the bound fixtures below. Offset well clear of `N_ITEMS`, or every batch here
 /// collides with the bundle's own external ids and answers 409 before any bound is consulted.
 fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
-    const TASK_6_ID_BASE: u64 = 1_000_000;
+    const INGEST_BOUND_ID_BASE: u64 = 1_000_000;
     (0..n)
-        .map(|i| (TASK_6_ID_BASE + base + i, i as f32, i as f32, "0"))
+        .map(|i| (INGEST_BOUND_ID_BASE + base + i, i as f32, i as f32, "0"))
         .collect()
 }
 
-/// **The class Task 3b left open, closed and demonstrated rather than argued.**
+/// **Unbounded ingest hangs the viewer plane rather than shedding it, and this closes that.**
 ///
-/// Task 3b's own deferral, verbatim: *"the viewer plane still shares the blocking FIFO with
-/// unbounded ingest, with no timeout on the wait, so an admitted viewport hangs rather than
-/// shedding."* `ComputeGate::admit` is `async` and awaited **before** `spawn_blocking`, so viewer
-/// *demand* is bounded — but an admitted viewport's closure still queues behind ingest closures in
-/// tokio's shared, unbounded FIFO, and there is no timeout on that queue. The failure is a hang,
-/// not a shed, and it is invisible to every gauge the viewer plane has.
+/// `ComputeGate::admit` is `async` and awaited **before** `spawn_blocking`, so viewer *demand* is
+/// bounded — but an admitted viewport's closure still queues behind ingest closures in tokio's
+/// shared, unbounded FIFO, and there is no timeout on that queue. So without a bound on concurrent
+/// ingest handlers the failure is a hang, not a shed, and it is invisible to every gauge the viewer
+/// plane has.
 ///
 /// The construction: a 4-thread blocking pool, `ingest_admission = 2`, and two ingest handlers
 /// parked *inside* `terms_of_label` — i.e. holding two of the four threads as a **fact**, since
@@ -1906,8 +1899,8 @@ fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
 /// build every one of these resolves in milliseconds.
 ///
 /// There is deliberately no assertion that the surplus requests *did not* run: a negative statement
-/// about another thread's progress is not establishable without waiting (Task 3a fix round 1,
-/// CRITICAL 1). What is asserted is that they were refused with the admission body, and that the
+/// about another thread's progress is not establishable without waiting. What is asserted is that
+/// they were refused with the admission body, and that the
 /// viewer plane was still served while the pool was demonstrably occupied.
 #[test]
 fn ingest_admission_sheds_before_the_blocking_pool_fills() {
@@ -1967,8 +1960,8 @@ fn ingest_admission_sheds_before_the_blocking_pool_fills() {
             .await
             .expect(
                 "a surplus ingest request did not answer within 20s: it is holding a blocking \
-                 thread instead of being refused, which is the unbounded-ingest shape Task 3b left \
-                 open",
+                 thread instead of being refused, which is the unbounded-ingest shape this bound \
+                 exists to prevent",
             );
             assert_eq!(code, 429, "surplus ingest must be shed, not queued");
             assert_eq!(body["error"], "backpressure");
@@ -2113,7 +2106,7 @@ fn changes_never_429s() {
     });
 }
 
-/// **The queue-full 429, end to end** — Task 3b deferred this here by name.
+/// **The queue-full 429, end to end.**
 ///
 /// The queue is made full **deterministically, with no sleep and no fault injection**: a work queue
 /// of bound `0` is a `std::sync::mpsc::sync_channel(0)`, a rendezvous, and `Executor::run` takes
@@ -2122,12 +2115,11 @@ fn changes_never_429s() {
 /// operator, so this spelling is reachable only through `mount_server`, which is what that seam was
 /// split out for.
 ///
-/// **And that spelling is a test device, not a description of the shipped state — which it was.**
-/// At the defaults this task first shipped (`ingest_admission = ingest_queue_bound = 64`) the state
-/// under test here was unreachable in *every* operator-legal configuration: `accept_ingest` blocks
-/// on its receipt, so an admitted handler holds at most one queue entry and outstanding entries were
-/// bounded by admitted handlers. `SubmitError::QueueFull` was dead in production and this test was
-/// the only thing that reached it. `DEFAULT_INGEST_QUEUE_BOUND` is now strictly below
+/// **And that spelling is a test device, not a description of the shipped state.** With
+/// `ingest_admission = ingest_queue_bound`, the state under test here is unreachable in *every*
+/// operator-legal configuration: `accept_ingest` blocks on its receipt, so an admitted handler holds
+/// at most one queue entry and outstanding entries are bounded by admitted handlers, making
+/// `SubmitError::QueueFull` dead in production and this test the only thing that reaches it. `DEFAULT_INGEST_QUEUE_BOUND` is now strictly below
 /// `DEFAULT_INGEST_ADMISSION` and `config::tests::the_default_admission_bound_exceeds_the_default_
 /// queue_bound` pins that; the state is now reachable at the shipped defaults by 33 concurrent
 /// submitters.
@@ -2330,19 +2322,20 @@ async fn an_oversized_batch_is_422_not_a_queue_slot() {
     );
 }
 
-/// **The byte cap answers 422, not axum's 413** — the finding that made D1 reachable at all.
+/// **The byte cap answers 422, not axum's 413** — which is also what makes the configured cap
+/// reachable at all.
 ///
 /// axum applies a 2 MiB default body limit to the `Bytes` extractor, well under the 16 MiB
-/// `ingest_max_batch_bytes` defaults to, so before Task 6 the configured cap could never be the
-/// refusal a caller met and an over-2-MiB batch got a **413**, a status outside contracts §3.1's
-/// closed code list. `control::router` now sets the limit to the configured cap and the handler
+/// `ingest_max_batch_bytes` defaults to. Left at that default the configured cap could never be the
+/// refusal a caller met, and an over-2-MiB batch would get a **413**, a status outside contracts
+/// §3.1's closed code list. `control::router` sets the limit to the configured cap and the handler
 /// maps the rejection itself.
 ///
 /// The cap is derived from a real body rather than guessed, so the two legs cannot drift with
 /// Arrow's framing overhead.
 ///
 /// **Mutation:** remove the `DefaultBodyLimit` layer from `control::router` and the over-cap leg
-/// gets **200** — the cap is then enforced nowhere at all, which is the pre-Task-6 state.
+/// gets **200** — the cap is then enforced nowhere at all.
 #[tokio::test]
 async fn an_oversized_body_is_422_not_413() {
     let tmp = TempDir::new().unwrap();
@@ -2416,18 +2409,19 @@ async fn an_oversized_body_is_422_not_413() {
 /// `max_batch_rows` from 2 to 200 000 left that leg green. The row-cap leg now runs on server B,
 /// where a permit is available and the row check is genuinely what answers.
 ///
-/// **The 401 halves are now a property of the router, not of five handler bodies** (owner decision,
-/// 2026-08-01). `control::require_operator_credential` is a `tower` layer over the whole control
-/// router, so it answers before any handler and before any extractor; this test exercises each state
-/// through the socket rather than asserting the layer directly, and
+/// **The 401 halves are a property of the router, not of five handler bodies.**
+/// `control::require_operator_credential` is a `tower` layer over the whole control router, so it
+/// answers before any handler and before any extractor; this test exercises each state through the
+/// socket rather than asserting the layer directly, and
 /// `every_control_route_not_exempt_requires_the_operator_credential` is where the layer's own
 /// coverage lives. What this still earns on top of that is the *authenticated* half of each leg: the
 /// signal must genuinely exist to be hidden, and each pressure state must be the one that answers.
 ///
-/// The **byte cap** leg is the one `body: Result<Bytes, _>` still earns, in its authenticated half.
-/// Before the layer, this leg's *unauthenticated* half was the load-bearing one — a plain `Bytes`
-/// extractor rejected ahead of `check_bearer` and answered 413 to a caller with no credential. The
-/// layer closes that outright. What `Result<Bytes, _>` still buys is the mapping: with plain `Bytes`
+/// The **byte cap** leg is the one `body: Result<Bytes, _>` earns, in its authenticated half. With
+/// a per-handler `check_bearer` this leg's *unauthenticated* half would be the load-bearing one — a
+/// plain `Bytes` extractor rejects ahead of it and answers 413 to a caller with no credential — and
+/// the layer closes that outright. What `Result<Bytes, _>` buys on top is the mapping: with plain
+/// `Bytes`
 /// an authenticated over-cap caller gets axum's 413, outside contracts §3.1's closed code list, and
 /// that is what goes red now.
 ///
@@ -2587,9 +2581,9 @@ async fn backpressure_is_invisible_before_auth() {
     );
 }
 
-/// **`overlay_soft_limit` alarms, and it does not act** (Task 6, D5). There is no fold until stage
-/// 2.3, so an operator who sets this today gets a signal that the overlay is deep, never a
-/// mechanism that makes it shallower — and this test asserts exactly that much and no more.
+/// **`overlay_soft_limit` alarms, and it does not act.** ⊘ No compaction fold exists, so an
+/// operator who sets this gets a signal that the overlay is deep, never a mechanism that makes it
+/// shallower — and this test asserts exactly that much and no more.
 ///
 /// Two properties, because the check has two sites and only one of them is the executor's:
 ///
@@ -2602,12 +2596,11 @@ async fn backpressure_is_invisible_before_auth() {
 ///    arrive. Asserted here by moving the limit under a live overlay, which is the same state
 ///    replay produces and the only one a server test can construct.
 ///
-/// **And it is edge-triggered** (fix round 1, F5). `Overlay::len` never decreases in this build, so
-/// a level-triggered alarm emitted one four-line WARN per deny, forever, with no path back —
-/// flooding the log precisely while the node is under deny pressure. The counter therefore counts
-/// **crossings**: the second suppression below is over the limit and must NOT alarm again. The
-/// earlier version of this test could not distinguish the two, because both of its legs were single
-/// crossings; the third leg here is the one that can.
+/// **And it is edge-triggered.** `Overlay::len` never decreases in this build, so a level-triggered
+/// alarm would emit one four-line WARN per deny, forever, with no path back — flooding the log
+/// precisely while the node is under deny pressure. The counter therefore counts **crossings**: the
+/// second suppression below is over the limit and must NOT alarm again. That is what the third leg
+/// discriminates; two single-crossing legs alone could not.
 ///
 /// **Mutations this kills:** deleting `apply_change`'s check (leg 1 stays at 0); deleting
 /// `set_overlay_soft_limit`'s one-shot evaluation (leg 2 stays at its leg-1 value); dropping the
@@ -2699,21 +2692,19 @@ async fn the_overlay_soft_limit_alarms_and_does_not_act() {
     );
 }
 
-/// **`/control/changes` answers 422, not axum's 413, and never before the bearer check** (fix round
-/// 1, F6).
+/// **`/control/changes` answers 422, not axum's 413, and never before the bearer check.**
 ///
-/// The route carried a bare `post(changes)` with a `Json(items)` extractor, so axum's default body
-/// limit rejected inside the extractor and answered a plain **413** — a status outside contracts
-/// §3.1's closed code list — with axum's own body and **no credential check at all**. An operator
-/// submitting ~20 000 suppressions (≈2 MiB of JSON) met it, on the never-shed lane, which is where
-/// an out-of-list status is least defensible. The remedy is the one `/control/ingest` already had:
-/// `Result<Json<..>, JsonRejection>`, mapped rather than escaping.
+/// A bare `post(changes)` with a `Json(items)` extractor rejects inside the extractor and answers a
+/// plain **413** — a status outside contracts §3.1's closed code list — with axum's own body. An
+/// operator submitting tens of thousands of suppressions (a couple of MiB of JSON) meets it, on the
+/// never-shed lane, which is where an out-of-list status is least defensible. The remedy is the one
+/// `/control/ingest` uses: `Result<Json<..>, JsonRejection>`, mapped rather than escaping.
 ///
 /// Three legs, because the rejection has two shapes and the ordering rule is a third property:
 /// oversize, malformed JSON, and the same oversize body without a credential.
 ///
-/// **Leg 3's refuser changed on 2026-08-01 and the leg is kept for what it still shows.** The 401
-/// now comes from `control::require_operator_credential`, a layer over the whole control router,
+/// **Leg 3's refuser is the router layer, and the leg is kept for what it shows.** The 401 comes
+/// from `control::require_operator_credential`, a layer over the whole control router,
 /// rather than from this handler's first statement — so leg 3 no longer discriminates
 /// `Result<Json<..>, _>` from `Json(items)` (the layer answers first either way). It still asserts
 /// the property that matters on the wire: an unauthenticated caller cannot learn this endpoint's
@@ -2815,7 +2806,7 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
     );
 }
 
-// --- The control plane's credential gate, at the router (owner decision, 2026-08-01) ---
+// --- The control plane's credential gate, at the router ---
 
 /// **Every route on the control plane answers 401 without a credential — asserted over the route
 /// list, not over three hand-written cases, and now with no exceptions at all.**
@@ -2823,9 +2814,9 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
 /// This is the inverse of the usual auth test. `control_status_requires_bearer` names one endpoint
 /// and would stay green forever while a fourth control route shipped wide open; that is exactly how
 /// `/control/status` itself shipped returning `entity_id_high_water` unauthenticated. This iterates
-/// [`CONTROL_PLANE_ROUTES`] and requires **every** entry to refuse. Until 2026-08-01 the loop
-/// skipped an exemption list holding `/healthz` and `/readyz`; those routes are gone from this plane
-/// and the exemption with them, so the skip is gone too — the rule under test is now the stronger
+/// [`CONTROL_PLANE_ROUTES`] and requires **every** entry to refuse, with no exemption list to skip:
+/// `/healthz` and `/readyz` are not on this plane at all
+/// (docs/decisions/0011-health-probes-off-control-plane.md), so the rule under test is the stronger
 /// unconditional one.
 ///
 /// **What it does and does not guarantee, stated because the difference is the whole design.** The
@@ -2905,15 +2896,14 @@ async fn every_control_route_requires_the_operator_credential() {
 }
 
 /// **No path on the control listener answers without the credential — routed, unrouted, or a health
-/// probe.** The successor to `near_misses_of_the_exemption_are_authenticated`, which lost its
-/// subject when the exemption was deleted (owner decision, 2026-08-01).
+/// probe.**
 ///
-/// The old test pinned a weaker property: that paths *nearly* spelled `/healthz` fell through to the
-/// credential check rather than out of it. There is no exemption left to be nearly-matched, so what
-/// is asserted now is the stronger rule directly — an arbitrary path answers 401. The near-miss
-/// spellings are kept in the list anyway, not because matching is still a risk but because they are
-/// the exact strings a reintroduced exemption would be written against; and `/healthz` and `/readyz`
-/// themselves are now *in* the list, where they used to be the two exceptions to it.
+/// The weaker property worth naming, because it is what an exemption list would reduce this to: that
+/// paths *nearly* spelled `/healthz` fall through to the credential check rather than out of it.
+/// There is no exemption to be nearly-matched, so what is asserted is the stronger rule directly —
+/// an arbitrary path answers 401. The near-miss spellings are in the list anyway, not because
+/// matching is a risk but because they are the exact strings a reintroduced exemption would be
+/// written against; and `/healthz` and `/readyz` are themselves *in* the list.
 ///
 /// The unrouted paths carry the second half: the layer sits ahead of the router's 404, so probing
 /// the plane's surface unauthenticated yields nothing — an unauthenticated caller cannot even
@@ -2965,8 +2955,8 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
 }
 
 /// **No request body is buffered on behalf of an unauthenticated caller** — the first and largest of
-/// the three things the router-level credential layer buys (Task 6 gate, F11: security IMPORTANT 1 +
-/// performance I4), demonstrated rather than argued from where the code sits.
+/// the three things the router-level credential layer buys, demonstrated rather than argued from
+/// where the code sits.
 ///
 /// The ordering legs in `backpressure_is_invisible_before_auth` show only that the 401 *wins* over
 /// the body's rejection; both would be true of a server that read 16 MiB and then discarded it. This

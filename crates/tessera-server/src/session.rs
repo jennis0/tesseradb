@@ -17,8 +17,9 @@ use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    // MVP client spec §3. The browser calls `/session/authorise` before it can call anything on
-    // the viewer plane, so the seam has to cover this plane too or it covers nothing.
+    // The dev-only browser seam covers this plane as well as the viewer plane: a browser calls
+    // `/session/authorise` before it can call anything on the viewer plane, so a seam that missed
+    // this plane would cover nothing.
     let dev_cors = crate::cors::dev_layer(&state.dev_cors_origins);
     let router = Router::new()
         .route("/session/authorise", post(authorise))
@@ -62,17 +63,18 @@ async fn authorise(
         .decode(&req.auth_data)
         .map_err(|e| ApiError::Contract(format!("auth_data is not valid base64: {e}")))?;
 
-    // D-B: gated the same way as the viewer plane's closures — `admit()` sheds with 429
-    // `backpressure` on either stage of the two-stage semaphore.
+    // Gated the same way as the viewer plane's closures — `admit()` sheds with 429 `backpressure`
+    // on either stage of the two-stage semaphore.
     let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
 
-    // D-A: `engine.authorise` resolves the credential's granted terms and unions them into a
-    // fragment (I2) — on a fragment-cache miss this builds and writes the frozen fragment to
-    // disk (file IO), and either way is CPU work with no `.await` of its own. Moved off the
+    // `engine.authorise` resolves the credential's granted terms and unions them into a fragment
+    // (I2: every aggregate must be computable from inside the viewer's own mask, so the mask is
+    // materialised here once) — on a fragment-cache miss this builds and writes the frozen fragment
+    // to disk (file IO), and either way is CPU work with no `.await` of its own. Moved off the
     // reactor so a cold `authorise` cannot starve concurrent requests on this process's tokio
     // worker threads. Closure capture: `state` is a cloned `Arc<AppState>` (cheap; sound because
-    // `Engine: Send + Sync`), `auth_data` is moved (owned `Vec<u8>`, only ever borrowed above),
-    // `gate_permits` (D-B) moves in so both permits release only when this closure returns.
+    // `Engine: Send + Sync`), `auth_data` is moved (owned `Vec<u8>`, only ever borrowed above), and
+    // `gate_permits` moves in so both permits release only when this closure returns.
     let closure_state = Arc::clone(&state);
     let session = tokio::task::spawn_blocking(move || {
         let _gate_permits = gate_permits;
@@ -110,9 +112,9 @@ async fn revoke(
 ) -> Result<StatusCode, ApiError> {
     state.check_bearer(bearer_token(&headers), &state.session_credential)?;
     state.sessions.lock().revoke(req.token_id);
-    // Task 5: drop the revoked session's row projections. The registry removal above is what makes
-    // the session unusable (`authenticated_session` now returns `BadCredential`); this is memory
-    // hygiene behind it, closing the Phase 1 deferral "revoke does not prune the projection cache".
+    // Drop the revoked session's row projections. The registry removal above is what makes the
+    // session unusable (`authenticated_session` now returns `BadCredential`); this is memory hygiene
+    // behind it, so a revoked session's masks do not hold cache capacity against live ones.
     // Deliberately *after* the revoke, not before: a request that authenticated before this handler
     // ran can still re-publish its key, and doing the prune first would widen that window for no
     // benefit. See `RowProjectionCache::prune_token` for why the residue is bounded and benign.
