@@ -313,6 +313,65 @@ mod tests {
         );
     }
 
+    /// **A disposition is idempotent under replay, and this is where that is established rather
+    /// than assumed.**
+    ///
+    /// The deny lane's durability retry (`tessera-engine`'s `Executor::retry_deny_durability`)
+    /// re-writes a window's records in place, so it leaves one copy — but it is safe to re-write
+    /// only because replaying a disposition twice is indistinguishable from replaying it once, and
+    /// that is a property of *this* function, not of the retry. Any future repair that appends a
+    /// second copy instead of rewinding depends on it directly.
+    ///
+    /// Three pieces of replayed state could have carried the difference, and each is checked here or
+    /// named: the **overlay** (below, by comparing against the single-copy replay), the
+    /// **external-id map** (below — `Change` records never write to it; only `IngestBatch` rows do),
+    /// and the **allocator seed**, which `high_water_from` derives from `IngestBatch` and `Lease`
+    /// records alone — pinned by `alloc.rs`'s `high_water_from_takes_the_max_of_rows_and_leases`.
+    #[test]
+    fn a_disposition_replayed_twice_is_the_same_as_replayed_once() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let writer = tessera_authz::DictWriter::new(temp.path());
+        let paths = writer.finish().unwrap();
+        let dict = Dict::load(&paths).unwrap();
+
+        let entity = EntityId::new(7);
+        let suppress = WalRecord::Change {
+            external_id: b"twice".to_vec(),
+            op: ChangeOp::Suppress,
+            descriptors: None,
+        };
+        let resolve = |external_id: &[u8]| {
+            Ok::<_, std::convert::Infallible>(if external_id == b"twice" {
+                Some(entity)
+            } else {
+                None
+            })
+        };
+
+        let (once, _, established_once, _) =
+            replay(std::slice::from_ref(&suppress), &dict, resolve).unwrap();
+        let (twice, _, established_twice, _) =
+            replay(&[suppress.clone(), suppress], &dict, resolve).unwrap();
+
+        assert_eq!(
+            once.get(entity),
+            twice.get(entity),
+            "a second copy of a disposition record must fold to the same overlay entry — the \
+             durability retry's safety net rests on exactly this"
+        );
+        assert!(
+            twice.get(entity).unwrap().suppressed,
+            "and the entry must actually be a suppression, or this compares two absences"
+        );
+        assert_eq!(
+            (established_once.len(), established_twice.len()),
+            (0, 0),
+            "a Change record establishes no external id, so a second copy cannot double-register one"
+        );
+    }
+
     #[test]
     fn replay_resolves_change_against_bundle_when_not_established_by_this_wal() {
         use tempfile::TempDir;
