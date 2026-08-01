@@ -68,7 +68,10 @@ pub use viewport::{
 // `Engine::accept_change` — blocking calls, hence inside `spawn_blocking`. What it needs from here
 // is how to answer: `AcceptError` for the status mapping (Task 3b owns the table) and
 // `ExecutorPosture`/`ExecutorStats` for `readyz` and `/control/status`.
-pub use write::{AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats};
+pub use write::{
+    AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, PendingChange,
+    DENY_WINDOW_MAX_ENTRIES,
+};
 // Task 6: the queue's own `retry_after_s` derivation. Exported because `tessera-server` derives a
 // *second* 429 subject's value from the same estimator over a different depth (contracts §0.3
 // deviation 11: the value is per-subject), and two independent implementations of one estimator is

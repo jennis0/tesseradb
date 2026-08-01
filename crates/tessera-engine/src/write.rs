@@ -286,13 +286,14 @@ pub struct ExecutorStats {
     /// defined in ("one fsync per window") and the one the ingest baseline memo's ~3.2 ms floor is
     /// a cost per.
     ///
-    /// **`wal_appends / wal_fsyncs` is the production measurement of Task 7a's amortisation**, and
-    /// the reason no window-size gauge was added: one append per entry and one fsync per window make
-    /// that ratio the mean entries per window, over the whole life of the executor. Both are already
-    /// on `/control/status`. It is the *ingest* mean only where ingest dominates: every `Change`
-    /// contributes one of each and pulls the ratio towards 1, because a deny is appended and fsynced
-    /// alone in `execute_change` and does not join the window (`tessera_lifecycle::window` argues
-    /// why). Read it when diagnosing
+    /// **`wal_appends / wal_fsyncs` is the production measurement of group commit's amortisation**,
+    /// and the reason no window-size gauge was added: one append per entry and one fsync per window
+    /// make that ratio the mean entries per window, over the whole life of the executor. Both are
+    /// already on `/control/status`. It is a mean over **both** windows — the ingest one
+    /// ([`Executor::run_work_pass`]) and the deny one ([`Executor::commit_denies`]), which are
+    /// separate windows with separate close policies (`tessera_lifecycle::window` argues why they
+    /// are not one), so a ratio that mixes a deny-heavy and an ingest-heavy period says nothing
+    /// about either. Read it when diagnosing
     /// ingest throughput — a ratio pinned at ~1.0 under
     /// concurrent load means every window is closing with one entry in it, which is what a workload
     /// that re-ingests the same `external_id`s does (`CommitWindow::holds_external_id_of` closes the window
@@ -1240,6 +1241,10 @@ impl WritePath {
     /// `Delete`/`Suppress`, the change is still applied — the item hidden immediately — before this
     /// returns `Err`. Never a refusal that leaves a deny unapplied. So an `Err` here does **not**
     /// mean "nothing happened"; see [`ExecError::Wal`].
+    ///
+    /// **This is the one-item shape.** A caller with a whole request's worth of changes wants
+    /// [`WritePath::submit_change`], because waiting here between items is what reduces the deny
+    /// lane's group commit to one entry per window.
     pub(crate) fn accept_change(
         &self,
         external_id: Vec<u8>,
@@ -1247,13 +1252,49 @@ impl WritePath {
         op: ChangeOp,
         raw_descriptors: Option<Vec<Vec<u8>>>,
     ) -> Result<(), AcceptError> {
-        let receipt = self.handle()?.submit(Command::Change {
+        self.submit_change(external_id, entity, op, raw_descriptors)?
+            .wait()
+    }
+
+    /// Enqueue one `/control/changes` entry **without waiting for its receipt**.
+    ///
+    /// The point of the separation is at [`LifecycleHandle::enqueue`]: a caller that enqueues a
+    /// whole request and only then collects gives the executor the queue depth its deny window
+    /// needs, and one request of N denies costs one fsync instead of N. Read that doc before
+    /// treating either half's `Err` as "nothing happened" — the boundary is not the proven
+    /// non-enqueue boundary.
+    pub(crate) fn submit_change(
+        &self,
+        external_id: Vec<u8>,
+        entity: EntityId,
+        op: ChangeOp,
+        raw_descriptors: Option<Vec<Vec<u8>>>,
+    ) -> Result<PendingChange, AcceptError> {
+        let pending = self.handle()?.enqueue(Command::Change {
             external_id,
             entity,
             op,
             descriptors: raw_descriptors,
         })?;
-        match receipt.outcome {
+        Ok(PendingChange(pending))
+    }
+}
+
+/// An enqueued `/control/changes` entry, awaiting its receipt.
+///
+/// Deliberately **not** a re-export of [`Pending`]: a change's receipt carries no ids, so the only
+/// thing a caller can do with it is learn whether the change took hold, and this type says exactly
+/// that in its `wait` signature. `Ack::Ingested` reaching a change's caller would be a bug the
+/// wider type would not catch.
+pub struct PendingChange(Pending);
+
+impl PendingChange {
+    /// Block until the executor answers this change.
+    ///
+    /// `Err` does **not** mean "nothing happened" — for `Delete`/`Suppress` see [`ExecError::Wal`],
+    /// and for [`SubmitError::ReceiptLost`] see [`Pending::wait`].
+    pub fn wait(self) -> Result<(), AcceptError> {
+        match self.0.wait()?.outcome {
             Ok(_) => Ok(()),
             Err(e) => Err(AcceptError::Exec(e)),
         }
@@ -1347,7 +1388,43 @@ impl LifecycleHandle {
     /// nothing left to apply the write to.
     ///
     /// [`Command::is_never_shed`] is the rule, and this is the only place it is consulted.
+    ///
+    /// **Enqueue and wait are separable, and for denies they must be** — see [`Self::enqueue`].
+    /// This is the one-command convenience over the two.
     pub(crate) fn submit(&self, command: Command) -> std::result::Result<Receipt, SubmitError> {
+        self.enqueue(command)?.wait()
+    }
+
+    /// Hand `command` to the executor and return **without waiting for its receipt**.
+    ///
+    /// This is what makes group commit reachable for a caller with several commands. A caller that
+    /// enqueues N commands and only then waits gives the executor N queued jobs to gather into one
+    /// window; a caller that waits between each gives it one, and the window it can build has one
+    /// entry in it. `/control/changes` is exactly that caller, and one fsync per item was the whole
+    /// of its cost.
+    ///
+    /// ## What an `Err` from this function does and does not prove
+    ///
+    /// **It does not prove that nothing happened**, and a caller that treats it that way is
+    /// fail-open on the deny lane. Two variants come out of here and they mean opposite things:
+    ///
+    /// - [`SubmitError::ExecutorDead`] — the `send` failed, and `send` hands the value back on
+    ///   failure, so non-enqueue is **proven**.
+    /// - [`SubmitError::ReceiptLost`] — the doorbell was disconnected, which happens only *after*
+    ///   the job is already in a queue. [`Executor::run`]'s shutdown pass drains the deny lane and
+    ///   **executes** it before it observes the disconnect, so the command may be durably in force.
+    ///
+    /// So the enqueue/wait boundary is not the proven/unproven boundary, and no caller may use
+    /// "which half returned this" as the discriminator. [`SubmitError::may_have_taken_effect`] is
+    /// the discriminator, and it is the same one `tessera-server`'s batch fold uses.
+    ///
+    /// The doorbell stays **here** rather than moving into [`Pending::wait`], which would remove
+    /// the head-of-request race in which the executor commits a small first window while the caller
+    /// is still enqueueing. It would also mean a `Pending` dropped without being waited on leaves
+    /// its job queued with nothing to wake it — on an idle node, indefinitely. A deny that is
+    /// silently never applied is a worse outcome than an extra fsync, so the ring stays at the
+    /// enqueue and the residual race is measured rather than designed away.
+    pub(crate) fn enqueue(&self, command: Command) -> std::result::Result<Pending, SubmitError> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let job = Job {
             command,
@@ -1393,15 +1470,31 @@ impl LifecycleHandle {
             return Err(SubmitError::ReceiptLost);
         }
 
-        // A dropped responder means the executor died **holding this job** — never `Ok`. Answering
-        // anything else here is the false-202 `SubmitError`'s own doc calls the worst available
-        // outcome.
-        //
-        // `ReceiptLost` because the ack is the **last** step: `append → fsync → apply → swap → ack`
-        // (`execute_change`), so a death after the swap leaves a durable, in-force suppression with
-        // no receipt. Reporting that as "nothing was submitted" is how an operator comes to believe
-        // an item is still visible when it is not — the Task 3b design gate's unanimous CRITICAL.
-        rx.recv().map_err(|_| SubmitError::ReceiptLost)
+        Ok(Pending(rx))
+    }
+}
+
+/// An enqueued command whose receipt has not been collected yet.
+///
+/// Holding one of these is what lets a caller with N commands have all N in the executor's queue at
+/// once, which is the only condition under which the deny lane's group commit has anything to
+/// gather ([`LifecycleHandle::enqueue`]).
+pub(crate) struct Pending(Receiver<Receipt>);
+
+impl Pending {
+    /// Block until the executor answers.
+    ///
+    /// A dropped responder means the executor died **holding this job** — never `Ok`. Answering
+    /// anything else here is the false-202 [`SubmitError`]'s own doc calls the worst available
+    /// outcome.
+    ///
+    /// [`SubmitError::ReceiptLost`] because the ack is the **last** step:
+    /// `append → fsync → apply → swap → ack` ([`Executor::commit_denies`]), so a death after the
+    /// swap leaves a durable, in-force suppression with no receipt. Reporting that as "nothing was
+    /// submitted" is how an operator comes to believe an item is still visible when it is not — the
+    /// Task 3b design gate's unanimous CRITICAL.
+    pub(crate) fn wait(self) -> std::result::Result<Receipt, SubmitError> {
+        self.0.recv().map_err(|_| SubmitError::ReceiptLost)
     }
 }
 
@@ -1509,6 +1602,41 @@ enum Admission {
     YieldedAfterClose,
 }
 
+/// The most entries one deny window may hold, and the most changes `/control/changes` enqueues
+/// before it collects.
+///
+/// **It bounds two things and trades nothing.** Below it, a larger value only ever reduces fsyncs
+/// and overlay clones; the only things a larger value costs are the size of a failed window's fold
+/// and the pending receipts a caller holds. So this is not a knob an operator has a decision to
+/// make about, and it is deliberately a constant rather than a configuration key.
+///
+/// The two bounds, in the order they bind:
+///
+/// 1. **The drain terminates.** Every entry the deny drain pulls is one a concurrent submitter can
+///    replace, so a window with no bound need never close while denies keep arriving — and a window
+///    that never closes is not a large window, it is no deny ever being acked. See
+///    [`Executor::run_deny_pass`].
+/// 2. **Pending receipts stay bounded.** `/control/changes` enqueues in chunks of this size, so the
+///    deny runtime's pool (`DENY_MAX_BLOCKING_THREADS` handlers) holds at most that many times this
+///    many one-slot channels, rather than that many times whatever fits in a request body.
+///
+/// One chunk covers the overwhelming majority of revocation requests, so the common case is one
+/// window and one fsync. A maximal request body splits into a few tens of windows — against the
+/// tens of thousands of fsyncs the per-item path charged for the same request.
+pub const DENY_WINDOW_MAX_ENTRIES: usize = 1_000;
+
+/// One deny in an open window: its record, and everything needed to apply it and answer its caller.
+///
+/// `record` is built at the drain rather than at the append so the window is a list of things that
+/// are ready to be written — the append loop does no work that can be got wrong per entry.
+struct DenyEntry {
+    record: WalRecord,
+    entity: EntityId,
+    op: ChangeOp,
+    raw_descriptors: Option<Vec<Vec<u8>>>,
+    respond: Responder,
+}
+
 /// The single writer. One per partition, on its own thread, owning the WAL by value.
 struct Executor {
     wal: ExecutorWal,
@@ -1570,15 +1698,218 @@ impl Executor {
     /// its `try_recv`, so a token is still only ever discarded while a job is still visible.
     fn run(&mut self) {
         loop {
-            while let Ok(job) = self.queues.deny.try_recv() {
-                self.execute(job);
-            }
+            while self.run_deny_pass() {}
             if self.run_work_pass() {
                 continue;
             }
             if self.queues.bell.recv().is_err() {
                 break;
             }
+        }
+    }
+
+    /// **The deny window**: gather the queued denies into one committable unit and commit it.
+    /// Returns whether anything was found, which is what keeps [`Executor::run`] draining before it
+    /// blocks.
+    ///
+    /// ## Why this exists
+    ///
+    /// One `/control/changes` request of N denies used to cost N `append → fsync → apply → swap`
+    /// cycles — measured at one fsync per item and ~300 denies/second, i.e. tens of minutes for a
+    /// bulk revocation, with every other deny behind it and ingest starved throughout. The fsync is
+    /// only half of it: the per-item path clones the whole [`Overlay`] each time, and the overlay
+    /// never shrinks in this build (there is no fold until stage 2.3 ⊘), so an N-item revocation
+    /// also copied Θ(N²) entries. A window pays both once.
+    ///
+    /// It takes **two** halves to get that, and neither works alone. This is the executor half; the
+    /// other is that `/control/changes` enqueues its whole request before collecting any receipt
+    /// ([`LifecycleHandle::enqueue`]). With a caller that waits between items the queue never holds
+    /// more than one job per requesting thread, and this function gathers exactly one entry.
+    ///
+    /// ## The close policy
+    ///
+    /// **The queue observed empty, or [`DENY_WINDOW_MAX_ENTRIES`] entries, whichever comes first.**
+    /// No linger, no age bound, no timer.
+    ///
+    /// The bound is checked **inside** the drain and is not optional. Every entry pulled is one a
+    /// concurrent submitter can replace, so "drain until the queue is empty" terminates only when
+    /// the arrival rate drops — under sustained deny load from several requests it need not
+    /// terminate at all, and an unbounded window is not "a big window", it is **no deny ever being
+    /// acked**. That is the same failure the ingest window's row bound exists for, and the same
+    /// remedy.
+    ///
+    /// **A linger — holding the window open to gather company — is declined.** Its whole benefit is
+    /// gathering more denies, and after the enqueue split a request's denies are *already* in the
+    /// queue with nothing to wait for; what a linger would additionally gather is denies from a
+    /// *different* request that happens to be milliseconds behind. The cost is paid by every
+    /// single-deny revocation on an idle node, which is the case the deny lane's latency exists for.
+    /// A linger is also the one mechanism here that can make a deny wait for a deny that never
+    /// comes.
+    ///
+    /// **What that leaves, stated because it is measured rather than argued away**: the executor can
+    /// wake on the first item's doorbell and commit a window of one or two while the caller is still
+    /// enqueueing the rest. The caller enqueues at memory speed and the first window costs an fsync,
+    /// so this is a small constant number of extra windows at the head of a request, not N of them.
+    /// `a_change_batch_of_n_costs_one_fsync` asserts the bound it produces rather than assuming it
+    /// is zero.
+    ///
+    /// ## What this does not change
+    ///
+    /// The lane. It is still unbounded, still drained to empty before any work, still never refused
+    /// for load, and there is still no route from it to a 429. The bound above closes a window; it
+    /// refuses nothing.
+    fn run_deny_pass(&mut self) -> bool {
+        let mut entries: Vec<DenyEntry> = Vec::new();
+
+        while entries.len() < DENY_WINDOW_MAX_ENTRIES {
+            let Ok(job) = self.queues.deny.try_recv() else {
+                break;
+            };
+            let Job { command, respond } = job;
+            let Command::Change {
+                external_id,
+                entity,
+                op,
+                descriptors,
+            } = command
+            else {
+                // Unreachable while the lane follows the command (`Command::is_never_shed`): only a
+                // `Change` rides the deny queue. Executed rather than dropped, so a future variant
+                // that lands here is answered instead of silently losing its waiter — and the
+                // window gathered so far is committed **first**, because this arm applies
+                // immediately and would otherwise be applied ahead of denies that arrived before
+                // it. Append order must equal apply order (lifecycle §4).
+                if !entries.is_empty() {
+                    self.commit_denies(std::mem::take(&mut entries));
+                }
+                self.execute(Job { command, respond });
+                return true;
+            };
+            entries.push(DenyEntry {
+                record: WalRecord::Change {
+                    external_id,
+                    op,
+                    descriptors: descriptors.clone(),
+                },
+                entity,
+                op,
+                raw_descriptors: descriptors,
+                respond,
+            });
+        }
+
+        if entries.is_empty() {
+            return false;
+        }
+        self.commit_denies(entries);
+        true
+    }
+
+    /// `append × k → one fsync → apply → one swap → ack × k`, with lifecycle §4's deny-op
+    /// exception folded per entry.
+    ///
+    /// ## Order
+    ///
+    /// Append order is entries order is apply order, and entries order is the deny lane's FIFO
+    /// arrival order. One vector, built once and iterated forwards, so a `suppress D` and a later
+    /// `unsuppress D` in the same window resolve exactly as they would have as two separate
+    /// commands. This is why denies need none of the ordering machinery a *mixed* window would
+    /// (`tessera_lifecycle::window` argues why the two windows stay separate).
+    ///
+    /// ## The failure fold, which is the part to get right
+    ///
+    /// On an append or fsync failure anywhere in the window:
+    ///
+    /// - every [`ChangeOp::Delete`] and [`ChangeOp::Suppress`] **in the window** is applied anyway —
+    ///   the items are hidden immediately — and every waiter still gets an error;
+    /// - every [`ChangeOp::Unsuppress`] and [`ChangeOp::Predicate`] applies **nothing**.
+    ///
+    /// The scope is lifecycle §4's and it is not uniform, which is what distinguishes this from the
+    /// ingest window's failure path (`Executor::fail_window_wal` applies nothing at all). Making it
+    /// uniform in *either* direction is a defect: applying everything re-exposes an item that replay
+    /// still hides, behind a 500 whose body says nothing was applied; applying nothing leaves a
+    /// requested suppression unapplied, which is the one thing this lane may never do.
+    ///
+    /// **Position in the window is not a term.** §4's rule is about the op, not about whether this
+    /// particular record happened to be appended before the failure — and making visibility depend
+    /// on where in an arbitrary drain order an item landed would be the less fail-closed reading of
+    /// the two.
+    ///
+    /// **What the fold does not fix.** `wal::replay` reinstates every well-framed record, including
+    /// records past the last fsync point, so an appended-but-unfsynced `Unsuppress` is re-applied on
+    /// restart even though its caller was correctly told it was not applied. That is a WAL replay
+    /// property and it is true of a single command too (`append` succeeding and `fsync` failing
+    /// leaves exactly this record in the file); a window widens it from one record to at most k,
+    /// the same proportional widening the ingest window carries at `Executor::close_window`.
+    fn commit_denies(&mut self, entries: Vec<DenyEntry>) {
+        let mut failed_at: Option<(usize, WalError)> = None;
+        for (i, entry) in entries.iter().enumerate() {
+            if let Err(e) = self.wal.append(&entry.record) {
+                failed_at = Some((i, e));
+                break;
+            }
+        }
+        // **One fsync for the whole window.** Every entry is durable when it returns, or none is.
+        if failed_at.is_none() {
+            if let Err(e) = self.wal.fsync() {
+                // Every append landed cleanly, so there is no "the entry whose append failed" — the
+                // first waiter gets the real error and the rest `Poisoned`, exactly as the ingest
+                // window does, and for the same reason: no wire behaviour distinguishes them.
+                failed_at = Some((0, e));
+            }
+        }
+        self.observe_wal();
+
+        if let Some((index, error)) = failed_at {
+            // Lifecycle §4's exception, per entry — see this function's doc for why the fold is not
+            // uniform and why position is not a term in it.
+            let applied: Vec<(EntityId, ChangeOp, Option<Vec<TermId>>)> = entries
+                .iter()
+                .filter(|e| matches!(e.op, ChangeOp::Delete | ChangeOp::Suppress))
+                .map(|e| (e.entity, e.op, None))
+                .collect();
+            if !applied.is_empty() {
+                let _published = self.apply_changes(applied);
+            }
+            let mut real = Some(error);
+            for (i, entry) in entries.into_iter().enumerate() {
+                let e = if i == index {
+                    real.take().unwrap_or(WalError::Poisoned)
+                } else {
+                    WalError::Poisoned
+                };
+                self.ack_failed(&entry.respond, ExecError::Wal(e));
+            }
+            return;
+        }
+
+        // Durable, not yet in force. See `pause_point`.
+        self.pause_point(PauseSiteArg::AfterFsync);
+
+        // Resolution is deferred to **after** the append succeeds: a change's resolved terms are
+        // needed only for the apply below, so there is no reason to mint an extension id for a
+        // record that might never become durable. `Delete`/`Suppress`/`Unsuppress` carry no
+        // descriptors, so a window of pure denies resolves nothing at all.
+        let applied: Vec<(EntityId, ChangeOp, Option<Vec<TermId>>)> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e.entity,
+                    e.op,
+                    e.raw_descriptors
+                        .as_ref()
+                        .map(|ds| self.live.resolve_terms(ds)),
+                )
+            })
+            .collect();
+        // One overlay clone, one generation, **one swap** for every entry in the window.
+        let published = self.apply_changes(applied);
+
+        // **k waiters, one proof.** A death partway through this loop leaves some waiters acked and
+        // some not; every un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead`
+        // → 503, because its change is durably in force.
+        for entry in entries {
+            self.ack(&entry.respond, Ack::Changed, &published);
         }
     }
 
@@ -2139,61 +2470,24 @@ impl Executor {
                     self.close_window(window);
                 }
             }
+            // A window of one entry is exactly the per-command semantics this path used to have,
+            // which is why there is no second deny implementation to keep in step with the first.
             Command::Change {
                 external_id,
                 entity,
                 op,
                 descriptors,
-            } => self.execute_change(&respond, external_id, entity, op, descriptors),
-        }
-    }
-
-    /// `append → fsync → apply → swap → ack`, with lifecycle §4's deny-op exception.
-    fn execute_change(
-        &mut self,
-        respond: &Responder,
-        external_id: Vec<u8>,
-        entity: EntityId,
-        op: ChangeOp,
-        raw_descriptors: Option<Vec<Vec<u8>>>,
-    ) {
-        let record = WalRecord::Change {
-            external_id,
-            op,
-            descriptors: raw_descriptors.clone(),
-        };
-        let appended = self.wal.append(&record).and_then(|()| self.wal.fsync());
-        self.observe_wal();
-
-        match appended {
-            Ok(_) => {
-                // Resolution is deferred to **after** the append succeeds: unlike ingest, a
-                // change's resolved terms are needed only for the `Overlay::apply` below, so there
-                // is no reason to mint an extension id for a record that might never become
-                // durable. `Delete`/`Suppress`/`Unsuppress` carry no descriptors, so the deny path
-                // below resolves nothing either.
-                let terms = raw_descriptors
-                    .as_ref()
-                    .map(|ds| self.live.resolve_terms(ds));
-                // Durable, not yet in force. See `pause_point`.
-                self.pause_point(PauseSiteArg::AfterFsync);
-                let published = self.apply_change(entity, op, terms);
-                self.ack(respond, Ack::Changed, &published);
-            }
-            Err(e) => {
-                // Lifecycle §4, and the rule most easily broken by a plausible tidy-up: a
-                // `Delete`/`Suppress` whose append failed is applied **anyway** — the item is
-                // hidden immediately — and the caller gets 500 plus an alarm. Never a refusal that
-                // leaves a deny unapplied. Deliberately scoped to those two ops: an `Unsuppress`
-                // applied without durability would re-expose an item that replay still hides.
-                //
-                // This keeps working while the WAL is poisoned, which is the whole reason
-                // `WalPoisoned` is a posture rather than a shutdown.
-                if matches!(op, ChangeOp::Delete | ChangeOp::Suppress) {
-                    let _published = self.apply_change(entity, op, None);
-                }
-                self.ack_failed(respond, ExecError::Wal(e));
-            }
+            } => self.commit_denies(vec![DenyEntry {
+                record: WalRecord::Change {
+                    external_id,
+                    op,
+                    descriptors: descriptors.clone(),
+                },
+                entity,
+                op,
+                raw_descriptors: descriptors,
+                respond,
+            }]),
         }
     }
 
@@ -2270,21 +2564,33 @@ impl Executor {
         self.publish(next, started)
     }
 
-    /// Clone the overlay, apply the change, publish.
+    /// Clone the overlay **once**, apply every change in the window, publish **once**.
+    ///
+    /// The amortisation this buys is the one that grows. [`Overlay`] never shrinks in this build —
+    /// entries survive `suppress → unsuppress` and there is no fold until stage 2.3 ⊘ — so the clone
+    /// is O(overlay depth) and the depth rises by one per new item denied. Applying an N-item
+    /// revocation one command at a time therefore copies Θ(N²) entries; a window of k pays the clone
+    /// once for the k. The clone is also every deny's ack-latency floor
+    /// ([`ExecutorHealth::apply_nanos_total`], already on `/control/status`, so no counter is added
+    /// for this).
+    ///
+    /// Changes are applied in slice order, which is the window's entries order, which is the deny
+    /// lane's FIFO arrival order — so a `suppress` and a later `unsuppress` of the same item resolve
+    /// as they would have as two separate commands. The slice is iterated once, forwards.
     ///
     /// Pins are never invalidated by this (I11): a pin fixes `(prefix, segments_version)`, and this
     /// bumps `overlay_version`. That is lifecycle §2.3's rule that a suppression applies to a
     /// pinned request the moment it is accepted, without expiring the pin.
-    fn apply_change(
-        &self,
-        entity: EntityId,
-        op: ChangeOp,
-        terms: Option<Vec<TermId>>,
-    ) -> Published {
+    fn apply_changes(&self, changes: Vec<(EntityId, ChangeOp, Option<Vec<TermId>>)>) -> Published {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let mut overlay: Overlay = (*generation.overlay).clone();
-        overlay.apply(entity, op, terms);
+        // `terms` is **moved** into the overlay rather than borrowed: a predicate change's resolved
+        // term set is per entry and cloning it here would be a per-entry cost on the one thread
+        // every write is serialised through.
+        for (entity, op, terms) in changes {
+            overlay.apply(entity, op, terms);
+        }
 
         // Task 6 (D5). **It alarms; it does not act** — there is no fold until stage 2.3, so an
         // operator who sets `overlay_soft_limit` today gets a signal that the overlay is deep, not

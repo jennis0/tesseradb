@@ -28,7 +28,7 @@ use base64::Engine as _;
 use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
-use tessera_engine::AcceptError;
+use tessera_engine::{AcceptError, DENY_WINDOW_MAX_ENTRIES};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow, WalScalar};
 use tessera_types::{EntityId, TermId};
 
@@ -211,8 +211,15 @@ where
 /// it changes no behaviour; what changes is that a tokio release cannot move it in silence.
 ///
 /// **Deliberately not small**, and [`DENY_RUNTIME`]'s "Why it is NOT small" section is the
-/// argument: isolation comes from the pool being *separate*, and `run_changes` submits and awaits
-/// each item individually, so one caller-sized batch occupies one thread for N sequential fsyncs.
+/// argument: isolation comes from the pool being *separate*, not from starving it. A thread here is
+/// held for a whole request — external-id resolution, the enqueue, and the wait on the last
+/// receipt — so the pool bounds concurrent `/control/changes` requests, and a small pool would make
+/// one bulk revocation delay every other operator's suppression. Group commit shortened what a
+/// thread waits for; it did not change what a thread is held across.
+///
+/// This number is also an operand of the pending-receipt bound: a handler holds at most
+/// `DENY_WINDOW_MAX_ENTRIES` one-slot channels at a time (`run_changes` chunks its enqueue), so the
+/// pool's worst case is that product rather than that many whole request bodies.
 const DENY_MAX_BLOCKING_THREADS: usize = 512;
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -890,6 +897,18 @@ struct ChangeItem {
     access: Option<String>,
 }
 
+/// One `/control/changes` item whose shape is validated but whose external id is not yet resolved.
+///
+/// The intermediate exists because resolution is done for the **whole request in one call**: the
+/// batch form of external-id resolution opens each bundle extent at most once, where the per-item
+/// form opens one per item and was the largest remaining per-item cost of a change request once the
+/// WAL fsyncs were amortised.
+struct DecodedChange {
+    external_id: Vec<u8>,
+    op: ChangeOp,
+    raw_descriptors: Option<Vec<Vec<u8>>>,
+}
+
 /// One `/control/changes` item, fully validated but not yet applied — see [`changes`]'s doc.
 struct ValidatedChange {
     external_id: Vec<u8>,
@@ -914,9 +933,24 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     // batch is rejected wholesale, with no side effect at all. (A WAL I/O failure partway through
     // the second, apply-only loop below is a different class of failure — an infrastructure
     // fault, not a client-correctable validation error — and is not, and cannot be, rolled back:
-    // each item's `Engine::accept_change` call is its own complete ack-contract unit, exactly as
-    // `/control/ingest`'s batches are. Nor does it abort the second loop; see the comment there.)
-    let mut validated = Vec::with_capacity(items.len());
+    // each item's WAL record is durable or it is not, exactly as `/control/ingest`'s batches are.
+    // Nor does it abort the loops below; see the comment there.)
+    //
+    // **External ids are resolved for the WHOLE request in one call**, the same way
+    // `/control/ingest`'s duplicate check does it. `Engine::resolve_external_id` consults the live
+    // map and then the bundle's external-id sidecar, and the single-key form opens a bundle extent
+    // per call — so resolving per item made a request of N denies N sidecar traversals, which once
+    // the WAL fsyncs were amortised was the largest remaining per-item term in the request. The
+    // batch form (`resolve_external_ids`) opens each extent at most once regardless of N and
+    // answers in the caller's order, so the 404 below still names the first unresolved item.
+    //
+    // **What that reorders, stated because it is a wire-visible difference and nothing else
+    // changes.** For a request that is invalid in two ways at once — say item 3 names an unknown
+    // external id and item 5 is not valid base64 — the answer is now item 5's 422 where it was
+    // item 3's 404. Both are wholesale refusals with no side effect at all, and contracts §3.1
+    // orders neither against the other; what is preserved is the property the ordering existed
+    // for, which is that an invalid request applies nothing.
+    let mut decoded: Vec<DecodedChange> = Vec::with_capacity(items.len());
     for item in &items {
         let op = match item.op.as_str() {
             "predicate" => ChangeOp::Predicate,
@@ -931,16 +965,11 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
         let external_id_bytes = base64::engine::general_purpose::STANDARD
             .decode(&item.external_id)
             .map_err(|e| ApiError::Contract(format!("external_id is not valid base64: {e}")))?;
-        let entity = state
-            .engine
-            .resolve_external_id(&external_id_bytes)
-            .map_err(map_store_error)?
-            .ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
 
         // `terms_of_label` only maps `access` bytes to descriptor *bytes* (deterministic, no
-        // persistent state touched) — validating this here is safe and does not pre-empt
-        // `Engine::accept_change`'s deferred `resolve_terms` (Important 3 fix), which is the step
-        // that actually interns novel descriptors into the process-lifetime extension state.
+        // persistent state touched) — validating this here is safe and does not pre-empt the
+        // executor's deferred `resolve_terms` (Important 3 fix), which is the step that actually
+        // interns novel descriptors into the process-lifetime extension state.
         let raw_descriptors: Option<Vec<Vec<u8>>> = match &item.access {
             Some(access) => Some(
                 state
@@ -952,16 +981,48 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
             None => None,
         };
 
-        validated.push(ValidatedChange {
+        decoded.push(DecodedChange {
             external_id: external_id_bytes,
-            entity,
             op,
             raw_descriptors,
         });
     }
 
-    // **Every item is submitted, even after one fails.** The obvious `?` here aborts the batch at
-    // the first failure, and that is fail-open at batch scope now that Task 3a made a WAL failure a
+    let keys: Vec<Vec<u8>> = decoded.iter().map(|d| d.external_id.clone()).collect();
+    let resolved = state
+        .engine
+        .resolve_external_ids(&keys)
+        .map_err(map_store_error)?;
+    let mut validated = Vec::with_capacity(decoded.len());
+    for (d, entity) in decoded.into_iter().zip(resolved) {
+        let entity = entity.ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
+        validated.push(ValidatedChange {
+            external_id: d.external_id,
+            entity,
+            op: d.op,
+            raw_descriptors: d.raw_descriptors,
+        });
+    }
+
+    // **Enqueue the whole chunk, then collect it — never one item at a time.**
+    //
+    // This is the difference between one fsync per request and one fsync per item. The executor
+    // gathers the denies it finds queued into a single commit window (`Executor::run_deny_pass`):
+    // k WAL appends, one fsync, one overlay clone, one generation swap, k acks. A loop that waited
+    // for each item's receipt before submitting the next never lets more than one job be queued,
+    // so the window it can build has one entry in it and the amortisation is unreachable. Measured
+    // before the split: one fsync per item, ~300 denies/second, i.e. tens of minutes for a bulk
+    // revocation with every other deny queued behind it.
+    //
+    // **Chunked at `DENY_WINDOW_MAX_ENTRIES`**, which is also the window's own bound, so chunking
+    // costs no extra fsyncs — the executor would have closed a window at that count anyway. What it
+    // buys is a bound on pending receipts: this handler runs on a pool of `DENY_MAX_BLOCKING_THREADS`
+    // threads and the request body admits far more items than that constant, so an unchunked
+    // enqueue would let the pool hold (threads × body) one-slot channels on the one lane that
+    // structurally cannot refuse.
+    //
+    // **Every item is submitted, even after one fails.** The obvious `?` in either loop aborts the
+    // batch at the first failure, and that is fail-open at batch scope now that a WAL failure is a
     // sustained *posture* rather than a one-off: `WalPoisoned` refuses every subsequent append, so
     // an aborting loop applies exactly the first item of a multi-item change batch, on every retry,
     // until the WAL is reopened — every other suppression in the request silently unapplied behind
@@ -970,16 +1031,20 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     // remaining `Delete`/`Suppress` is applied to the live overlay by the executor even though its
     // append fails, so the items are hidden and the caller still gets a 500.
     //
+    // The split makes that rule structurally stronger rather than merely preserving it. A WAL
+    // failure can now only be observed in the *collect* loop, by which point every item in the chunk
+    // is already enqueued and the executor will answer for all of them — so no abort can un-submit
+    // anything, and what an aborting collect loop would lose is dispositions, not effects.
+    //
     // Validation is already wholesale above, so nothing reached here can be a client-correctable
     // fault: everything below is an infrastructure failure and every one of them is alarmed
     // individually.
     //
-    // **The batch's answer is a FOLD over dispositions, not the first item's status.** Task 3a
-    // reported `first_error`, which is wrong in a way that matters now that the mapping table
-    // distinguishes 503 from 500: an item's status describes an item. The constructible bad case is
-    // "item 1 applied successfully, the executor then died, item 2 refused" — first-error reporting
-    // has no error at all for item 1 and answers item 2's **503 `not-ready`**, i.e. "this node did
-    // not take your write", for a batch containing a durable, in-force suppression.
+    // **The batch's answer is a FOLD over dispositions, not the first item's status.** An item's
+    // status describes an item. The constructible bad case is "item 1 applied successfully, the
+    // executor then died, item 2 refused" — first-error reporting has no error at all for item 1 and
+    // answers item 2's **503 `not-ready`**, i.e. "this node did not take your write", for a batch
+    // containing a durable, in-force suppression.
     //
     // So every failure is collected with the count that succeeded, and `map_change_batch_error`
     // decides once, over all of them. See its doc for the rules and for why 500 dominates 503.
@@ -988,37 +1053,34 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     // `Delete`/`Suppress` and the executor applies exactly that scope, so "did this failure leave an
     // effect in force?" cannot be answered from the error alone — a `Predicate` whose append failed
     // was refused without applying, and an op-blind fold reported it as possibly in force *and*
-    // omitted it from the "not applied" half. The op is already in hand here, one line below, so it
-    // is carried rather than re-derived at the fold.
+    // omitted it from the "not applied" half. The op is already in hand at the enqueue, so it is
+    // carried rather than re-derived at the fold.
     let mut failures: Vec<(ChangeOp, AcceptError)> = Vec::new();
     let mut applied = 0usize;
-    for change in validated {
-        let op = change.op;
-        match state.engine.accept_change(
-            change.external_id,
-            change.entity,
-            op,
-            change.raw_descriptors,
-        ) {
-            Ok(()) => applied += 1,
-            Err(e) => {
-                if matches!(op, ChangeOp::Delete | ChangeOp::Suppress) {
-                    // Deny-op append failure (lifecycle §4): the executor already applied the
-                    // change to the live overlay before returning this error — never a refusal
-                    // that leaves a deny unapplied.
-                    tracing::error!(
-                        op = ?op,
-                        "ALARM: wal append/fsync failed for a deny-op change; applied to the \
-                         in-memory overlay anyway (item hidden immediately) and returning 500 — \
-                         durability is owed, caller must retry"
-                    );
-                } else {
-                    tracing::error!(
-                        op = ?op,
-                        "wal append/fsync failed for a non-deny change; refusing without applying"
-                    );
+    for chunk in validated.chunks_mut(DENY_WINDOW_MAX_ENTRIES) {
+        let mut pending = Vec::with_capacity(chunk.len());
+        for change in chunk.iter_mut() {
+            let op = change.op;
+            match state.engine.submit_change(
+                std::mem::take(&mut change.external_id),
+                change.entity,
+                op,
+                change.raw_descriptors.take(),
+            ) {
+                Ok(p) => pending.push((op, p)),
+                Err(e) => {
+                    alarm_change_failure(op, &e);
+                    failures.push((op, e));
                 }
-                failures.push((op, e));
+            }
+        }
+        for (op, p) in pending {
+            match p.wait() {
+                Ok(()) => applied += 1,
+                Err(e) => {
+                    alarm_change_failure(op, &e);
+                    failures.push((op, e));
+                }
             }
         }
     }
@@ -1026,6 +1088,37 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     match map_change_batch_error(&failures, applied) {
         Some(e) => Err(e),
         None => Ok(()),
+    }
+}
+
+/// Alarm one failed `/control/changes` item, saying which of the two things happened to it.
+///
+/// **Keyed on the disposition, never on the variant or on which loop produced it.** The enqueue
+/// half and the collect half are not the "nothing happened" / "something might have" boundary:
+/// `Engine::submit_change` can return `SubmitError::ReceiptLost` from the doorbell, *after* the job
+/// is queued, and the executor's shutdown pass drains and executes the deny lane before it observes
+/// the disconnect — so a `Suppress` that failed at the enqueue may nonetheless be hidden. Asking
+/// `may_have_taken_effect` is asking the same question `map_change_batch_error` folds, so the log
+/// and the status can never disagree about an item.
+fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
+    let in_force = match e {
+        AcceptError::Submit(s) => s.may_have_taken_effect(),
+        // Lifecycle §4: a `Delete`/`Suppress` whose append failed was applied to the live overlay
+        // anyway before the error was returned — never a refusal that leaves a deny unapplied.
+        AcceptError::Exec(_) => matches!(op, ChangeOp::Delete | ChangeOp::Suppress),
+    };
+    if in_force {
+        tracing::error!(
+            op = ?op,
+            "ALARM: a change failed with its effect possibly IN FORCE (item hidden immediately) \
+             and returning 500 — durability is owed, and the caller must not read this as a \
+             no-op; re-issuing is safe, treating the item as visible is not"
+        );
+    } else {
+        tracing::error!(
+            op = ?op,
+            "a change failed and nothing was applied for it; it must be re-issued"
+        );
     }
 }
 
