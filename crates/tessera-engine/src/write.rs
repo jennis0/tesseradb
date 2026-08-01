@@ -2013,7 +2013,7 @@ impl Executor {
     ///    10⁹ rows in maximal batches is 10⁵ submissions each cloning a buffer growing towards
     ///    10⁹ — **O(N²/B)** — and *only stage 2.2's flush bounds it*. Measured today:
     ///    `apply_nanos_max` 210–437 ms at ~1.34 M buffered items
-    ///    (`docs/design-memos/2026-08-01-deny-ack-baseline.md`, result 3). It is the *small*
+    ///    (`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`, result 3). It is the *small*
     ///    batches the window collects. Task 7a did not fix this and did not claim to.
     /// 2. **Stage 2.2 makes the buffer chunked or persistent** when it rewrites buffer handling for
     ///    flush. So 2.1's O(B) clone is a **known temporary**, not an inherited posture — do not
