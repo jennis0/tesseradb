@@ -67,8 +67,11 @@ mod tests {
         let r = RowId::new(7);
         assert_eq!(e.raw(), 7u64);
         assert_eq!(r.raw(), 7u32);
-        // The next line MUST NOT compile if uncommented — I4:
-        // let _: RowId = e.into();
+        // The I4 claim that used to sit here as a commented-out line — `let _: RowId = e.into();`,
+        // annotated "MUST NOT compile" — is now checked, in `tests/ui/entity_id_into_row_id.rs`.
+        // A comment cannot fail; that one was written when the conversion was already absent and
+        // would have gone on reading as an assurance for as long as nobody added the conversion.
+        // Adding a `From<EntityId> for RowId` makes the compile-fail row fail, measured.
     }
     #[test]
     fn constants() {

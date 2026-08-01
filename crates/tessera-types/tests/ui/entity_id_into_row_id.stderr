@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `RowId: From<EntityId>` is not satisfied
+ --> tests/ui/entity_id_into_row_id.rs:8:22
+  |
+8 |     let _: RowId = e.into();
+  |                      ^^^^ the trait `From<EntityId>` is not implemented for `RowId`
+  |
+  = note: required for `EntityId` to implement `Into<RowId>`

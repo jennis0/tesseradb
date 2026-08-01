@@ -10,6 +10,9 @@ serde = { workspace = true, optional = true }
 # Test-only: parses reference/vectors/tessera_id.json against the known-answer vectors
 # (Task 5). The crate itself remains dependency-free of serde_json.
 serde_json = { workspace = true }
+# Test-only: the I4 compile-fail rows (conformance §4.1). `cargo build` does not build
+# dev-dependencies, so nothing a release binary carries can reach this.
+trybuild = { workspace = true }
 
 [features]
 # Off by default: only tessera-lifecycle (the WAL) needs ID newtypes to serialise. Every other
