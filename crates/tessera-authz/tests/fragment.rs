@@ -1,9 +1,9 @@
-//! Task 6: mask fragment build and the frozen cache. `build_fragment` is the authorise path
+//! Mask fragment build and the frozen cache. `build_fragment` is the authorise path
 //! (measured as postings union) — tested here against a brute-force `HashSet<u32>` union.
 //! `FragmentCache` is a directory-backed frozen-bitmap cache, keyed on
 //! `bundle_identity ‖ auth_plugin_hash ‖ sorted term ids`, so a cache dir reused across bundle
-//! rebuilds cannot serve a fragment naming a different entity set (a disclosure bug, not a perf
-//! bug — Reference Sheet R4, brief §Task 6).
+//! rebuilds cannot serve a fragment naming a different entity set — a disclosure bug, not a perf
+//! bug.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -225,8 +225,8 @@ fn stale_auth_plugin_hash_misses_the_cache() {
     }
 }
 
-/// Task 6's deferred check, closed out here (cheap enough not to need the conformance suite,
-/// task-15-brief): a bit-flipped `.frag` file must be treated as a cache miss (rebuild), never as
+/// Corruption is checked here rather than in the conformance suite, because it is cheap enough to
+/// need no bundle: a bit-flipped `.frag` file must be treated as a cache miss (rebuild), never as
 /// a successful-but-wrong open, and never a panic/crash. `FrozenFragment::open`'s sidecar digest
 /// check (fragment.rs module doc: "a parseable-but-wrong fragment would be a silent disclosure,
 /// not merely a crash") is exactly the mechanism under test.

@@ -532,8 +532,8 @@ impl ExternalIdSidecar {
     }
 
     /// How many extents have been fully opened (mapped, digest- and sortedness-verified) so far
-    /// — for the residency test and Task 15's memo, which must report steady state as *base +
-    /// one extent*, not the whole family.
+    /// — the observable behind the residency claim, which is that steady state is *base + one
+    /// extent* rather than the whole family.
     pub fn open_extents(&self) -> usize {
         self.extents.iter().filter(|e| e.is_open()).count()
     }

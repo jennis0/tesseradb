@@ -17,8 +17,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
-#[allow(clippy::large_enum_variant)] // `Build` carries the identity-key flags (Task 7); the
-                                     // enum is parsed once per process invocation, never hot.
+#[allow(clippy::large_enum_variant)] // `Build` carries the identity-key flags; the enum is
+                                     // parsed once per process invocation, never hot.
 enum Command {
     /// Build a bundle from a points file and a `(entity_id, term_id)` pairs file.
     Build {
@@ -103,7 +103,7 @@ enum Command {
         idset: Option<u32>,
     },
     /// Verify a bundle: the read protocol (digests, manifests) plus permutation bijectivity and
-    /// the identity column (contracts §2.6 r6: `tessera_id` re-derived from the key).
+    /// the identity column (contracts §2.6: `tessera_id` re-derived from the key).
     Verify {
         /// Bundle root (the directory containing `CURRENT`).
         bundle: PathBuf,
@@ -171,11 +171,11 @@ fn read_carried_identity(bundle_root: &Path) -> Result<(String, u32, String, u32
         .map_err(|e| format!("--carry-id-key-from {}: {e}", current_path.display()))?;
     let current: tessera_store::manifest::CurrentPointer = serde_json::from_slice(&current_bytes)
         .map_err(|e| {
-            format!(
-                "--carry-id-key-from {}: CURRENT is not valid JSON: {e}",
-                current_path.display()
-            )
-        })?;
+        format!(
+            "--carry-id-key-from {}: CURRENT is not valid JSON: {e}",
+            current_path.display()
+        )
+    })?;
     let manifest_path = bundle_root.join(&current.prefix).join("MANIFEST.json");
     let manifest_bytes = std::fs::read(&manifest_path)
         .map_err(|e| format!("--carry-id-key-from {}: {e}", manifest_path.display()))?;
@@ -308,11 +308,11 @@ fn read_carried_batch_items(bundle_root: &Path) -> Result<Option<u64>, String> {
         .map_err(|e| format!("--carry-id-key-from {}: {e}", current_path.display()))?;
     let current: tessera_store::manifest::CurrentPointer = serde_json::from_slice(&current_bytes)
         .map_err(|e| {
-            format!(
-                "--carry-id-key-from {}: CURRENT is not valid JSON: {e}",
-                current_path.display()
-            )
-        })?;
+        format!(
+            "--carry-id-key-from {}: CURRENT is not valid JSON: {e}",
+            current_path.display()
+        )
+    })?;
     let manifest_path = bundle_root.join(&current.prefix).join("MANIFEST.json");
     let manifest_bytes = std::fs::read(&manifest_path)
         .map_err(|e| format!("--carry-id-key-from {}: {e}", manifest_path.display()))?;
@@ -475,7 +475,7 @@ fn resolve_identity(
     // NOT IMPLEMENTED, deliberately, and flagged rather than built: contracts §2.2 also requires
     // a build whose **partitioning or sharding differs** from the bundle it carried the key from
     // to advance the idset *or refuse*. Nothing here checks that, because nothing here can
-    // differ: Phase 1 emits exactly one partition (`default`) and shard 0, both hard-coded in
+    // differ: this build emits exactly one partition (`default`) and shard 0, both hard-coded in
     // `tessera_build` (`PHASH`, `shard_id`). The refusal becomes reachable — and required — the
     // moment either becomes a build input; it belongs next to this idset resolution, comparing
     // this build's partition/shard plan against `--carry-id-key-from`'s manifest and refusing
@@ -637,16 +637,15 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            // Phase 2 stage 2.1, Task 6 (D4): **the blocking pool is sized here, from the config's
-            // declared consumers**, and it is the only place in the process where that number
-            // exists.
+            // **The blocking pool is sized here, from the config's declared consumers**, and this
+            // is the only place in the process where that number exists.
             //
-            // Before this it was tokio's undeclared default (512), which two things depend on and
-            // neither states: the viewer plane's `spawn_blocking` closures, bounded by
-            // `compute_admission`, and `/control/ingest`'s, bounded by `ingest_admission`. A tokio
-            // release or an embedder's own builder could move it in silence, and an admitted
-            // viewport would then queue behind ingest closures in the shared FIFO with no timeout —
-            // hanging rather than shedding.
+            // It is sized explicitly rather than left at tokio's default (512) because two things
+            // depend on it and neither states it: the viewer plane's `spawn_blocking` closures,
+            // bounded by `compute_admission`, and `/control/ingest`'s, bounded by
+            // `ingest_admission`. A tokio release or an embedder's own builder could move that
+            // default in silence, and an admitted viewport would then queue behind ingest closures
+            // in the shared FIFO with no timeout — hanging rather than shedding.
             //
             // Derived rather than asserted-against: `serving_blocking_threads` covers both bounds
             // plus a reserve, so there is no configuration in which an admitted request finds no

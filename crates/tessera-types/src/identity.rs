@@ -307,13 +307,13 @@ mod tests {
     #[test]
     fn it_matches_the_shared_known_answer_vectors() {
         // reference/vectors/tessera_id.json was generated from the spec text before either
-        // implementation existed (Task 3). The Python oracle tests against the same file.
-        // Disagreement here means the Rust is wrong; agreement between two independent
-        // implementations and the file is the evidence the construction is reproducible.
+        // implementation existed. The Python oracle tests against the same file. Disagreement
+        // here means the Rust is wrong; agreement between two independent implementations and
+        // the file is the evidence the construction is reproducible.
         let doc = load_vectors_doc();
 
-        // Catches the file being swapped to a different construction (task-5 review
-        // minor): neither implementation's tests previously asserted these two top-level
+        // Catches the file being swapped to a different construction: without this, neither
+        // implementation's tests would assert these two top-level
         // fields against anything.
         assert_eq!(doc["construction"].as_str().unwrap(), IDENTITY_CONSTRUCTION);
         assert_eq!(doc["rounds"].as_u64().unwrap(), IDENTITY_ROUNDS as u64);
@@ -433,8 +433,8 @@ mod tests {
         // shard 0 and shard 1 must not map any entity to the same u64 -- guaranteed by
         // bijectivity over the full 64-bit input, asserted because a dropped shard term in
         // the input encoding would silently collapse them and would pass every other test.
-        // Phase 1 values shard_id 0 always, so this is the ONLY thing keeping a reserved,
-        // never-exercised field from being tidied out of the input encoding.
+        // Every caller in this build passes shard_id 0, so this is the ONLY thing keeping a
+        // reserved, never-exercised field from being tidied out of the input encoding.
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
         for e in 0u32..1000 {
             let id0 = key.forward(0, EntityId::new(e as u64)).unwrap();
@@ -447,8 +447,8 @@ mod tests {
     fn forward_refuses_an_entity_above_u32_max_rather_than_truncating() {
         // IMPORTANT I-1. A truncating cast makes "collision-free by construction" FALSE:
         // 0x1_0000_0000 and 0x0 would share a tessera_id, and `invert` would name the wrong
-        // entity -- a /control/changes suppression against the wrong item. The allocator cap
-        // (Task 7) makes this unreachable; this makes a bypass loud.
+        // entity -- a /control/changes suppression against the wrong item. The allocator's
+        // u32 cap makes this unreachable; this makes a bypass loud.
         let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
         assert!(matches!(
             key.forward(0, EntityId::new(1u64 << 32)),

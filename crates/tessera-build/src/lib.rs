@@ -1,9 +1,9 @@
-//! `tessera build` — the batch build (plan §5, Task 8).
+//! `tessera build` — the batch build.
 //!
 //! Composes the tiler, the dictionary, the postings writer and the segment writers into one
-//! verifiable bundle (Reference Sheet R4). The pipeline is deliberately linear and in-memory:
-//! at the Phase 1 scales (250k / 2.4M items) it fits comfortably, and an obviously-correct
-//! construction is worth more here than a streaming one (design-for-audit).
+//! verifiable bundle whose layout is contracts §2.1. Two builds live here and must agree
+//! byte-for-byte: [`build`], the streaming one that ships (see [`mod@pipeline`]), and
+//! [`build_in_memory`], the linear one retained as its oracle.
 //!
 //! ## Entity-ID assignment is permanent
 //!
@@ -14,10 +14,10 @@
 //! This is not an optimisation that can be retrofitted. Entity IDs are append-only and never
 //! reused (I9), so the ordering chosen at the first build is the ordering the corpus keeps
 //! forever; a later build cannot re-sort entity space without invalidating every posting,
-//! permutation and handle ever issued. Phase 0 measured 8.9–36.7x posting compression from
-//! this ordering (probes/results.md) — the reason it ships in the walking skeleton rather than
-//! waiting for a performance phase. The rule lives in [`signature_sort_key`] as a free
-//! function so the serving allocator (Task 9) applies exactly the same rule to appended items.
+//! permutation and handle ever issued. The measured posting compression from this ordering is
+//! 8.9–36.7x (`probes/results.md`) — the reason it must be in the first build rather than an
+//! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
+//! serving allocator applies exactly the same rule to appended items.
 
 pub mod error;
 pub mod input;
@@ -60,9 +60,9 @@ pub use observer::{BuildObserver, BuildStage, NoopObserver};
 /// The single bundle prefix a batch build writes. Later publications get their own prefix; the
 /// batch build always starts a bundle from scratch.
 const PREFIX: &str = "v00000";
-/// Phase 1 has exactly one partition (no compartments — scope constraint 11).
+/// This build writes exactly one partition: there are no compartments.
 const PHASH: &str = "default";
-/// Phase 1 has exactly one segment per (partition, slice) at build (R4).
+/// One segment per (partition, slice) at build (contracts §2.1).
 const SEG_ID: &str = "seg-0";
 
 /// Arguments to [`build`].
@@ -94,20 +94,20 @@ pub struct BuildArgs {
     /// passes `--bump-idset` or rotates the key, carried forward verbatim on a normal
     /// rebuild, reset to 1 by `--mint-id-key`.
     pub idset: u32,
-    /// The §13.3 row-range shard this build produces. Phase 1: 0.
+    /// The §13.3 row-range shard this build produces. Always 0: there is no sharding.
     pub shard_id: u32,
     /// Mint an external ID for every item from its source entity id (8 bytes LE), and write
     /// the external-id extents and `ext-locator.u32`.
     ///
     /// **Off by default, deliberately** (2026-07-30 memo §3.2 D1; CLI `--mint-external-ids`):
     /// contracts §2.4 forbids manufacturing an external ID for an item whose caller supplied
-    /// none, and the Phase 0 corpus supplies none — so the conformant default build writes no
+    /// none, and the probe corpus supplies none — so the conformant default build writes no
     /// sidecar at all (the reader is built for that: no extents, no locator, every resolve is
     /// `None`). Bench fixtures pass the flag so they keep carrying the family's cost
     /// realistically, per the owner ruling that made it a representative cost rather than a
     /// reduction target.
     pub mint_external_ids: bool,
-    /// Write `pairs.parquet` (R4). On by default; `--no-oracle-pairs` clears it.
+    /// Write `pairs.parquet` (contracts §2.4). On by default; `--no-oracle-pairs` clears it.
     ///
     /// The file is read by nothing on any request path — its consumers are the test-only
     /// Python reference oracle and build-cadence tooling — so a deployment that runs no
@@ -189,8 +189,7 @@ pub struct BuildReport {
 /// new entity ID is its position in that order. Items with identical term sets therefore occupy
 /// a contiguous entity-ID range, which is what turns their postings into runs — the measured
 /// 8.9–36.7x compression. **Permanent under I9:** entity IDs are never reused, so this ordering
-/// cannot be changed after the first build. The serving allocator (Task 9) calls this same
-/// function.
+/// cannot be changed after the first build. The serving allocator calls this same function.
 pub fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
     let mut key: Vec<u32> = terms.iter().map(|t| t.raw()).collect();
     key.sort_unstable();
@@ -267,7 +266,7 @@ pub fn build_observed(
     pipeline::build(args, observer)
 }
 
-/// The original linear, fully in-memory build (Task 8).
+/// The linear, fully in-memory build.
 ///
 /// Superseded by [`build`] for anything but small inputs — it materialises one [`StagedItem`]
 /// per point and the whole `per_term` posting relation before writing a byte, which at 10⁹
@@ -308,9 +307,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let mut over_bound_items = 0u64;
     for point in &points {
         let source_terms = pairs_by_source.remove(&point.source_id).unwrap_or_default();
-        // The Phase 0 corpus carries integer term IDs; the item's `access` label is the
+        // The probe corpus carries integer term IDs; the item's `access` label is the
         // comma-joined decimal source term IDs, so `builtin:passthrough` yields decimal-string
-        // descriptors (R6).
+        // descriptors.
         let mut access = String::new();
         for (i, t) in source_terms.iter().enumerate() {
             if i > 0 {
@@ -704,10 +703,9 @@ pub fn verify(root: &Path) -> Result<VerifyReport> {
                 )));
             }
 
-            // Phase 1 has exactly one segment per (partition, slice) at build (contracts
-            // §2.1), so its rows are `columns.arrow` row 0..row_count directly; a future
-            // streamed segment would need its own row-range offset, which does not exist yet
-            // (Phase 2).
+            // A build writes exactly one segment per (partition, slice) (contracts §2.1), so
+            // its rows are `columns.arrow` row 0..row_count directly. A streamed segment would
+            // need its own row-range offset, which does not exist.
             for segment in &slice.segments {
                 let ids = segment.columns.tessera_id();
                 for (row, id) in ids.iter().enumerate() {
@@ -803,8 +801,7 @@ impl PairsParquetWriter {
             let take = (Self::BATCH - self.entities.len()).min(rest.len());
             let (now, later) = rest.split_at(take);
             self.entities.extend(now.iter().map(|&e| e as u64));
-            self.terms
-                .extend(std::iter::repeat_n(term_id, now.len()));
+            self.terms.extend(std::iter::repeat_n(term_id, now.len()));
             if self.entities.len() == Self::BATCH {
                 self.flush()?;
             }

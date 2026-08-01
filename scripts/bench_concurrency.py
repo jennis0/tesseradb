@@ -27,7 +27,7 @@ The generator's own ceiling is measured first, against `/healthz`, and any viewp
 3x of it is flagged `generator_bound`: proving the client is not the bottleneck rather than
 assuming it.
 
-## Task 9 additions
+## Beyond the Arm A/B matrix
 
 The Arm A/B matrix above is `--criteria matrix` and covers exit criteria 1 (F4 gone) and, via the
 `--admission-timeout-ms`-derived hang watchdog now wired into every load call, criterion 2 (no
@@ -668,9 +668,8 @@ def main() -> int:
     ap.add_argument("--rss-abort-gib", type=float, default=30.0)
     ap.add_argument("--run-dir", type=Path, default=Path("/tmp/tessera-bench/runs/concurrency"))
 
-    # Task 9: which of the seven-criterion cells to run. `matrix` alone reproduces the original
-    # Arm A/B sweep byte-for-byte in shape (just with the shed-rate column and hang watchdog
-    # added); the other four are new, separately-booted cells.
+    # Which cells to run. `matrix` is the Arm A/B sweep, with the shed-rate column and the hang
+    # watchdog; the other four each boot their own server.
     ap.add_argument("--criteria", default="matrix,cpu,shed,panstorm,coldbuild",
                      help="comma-separated subset of: matrix,cpu,shed,panstorm,coldbuild")
 

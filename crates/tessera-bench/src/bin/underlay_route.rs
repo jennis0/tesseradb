@@ -1,4 +1,4 @@
-//! Task 5 of the viewport/underlay plan: **how does the underlay scale toward full resolution?**
+//! **How does the density underlay scale toward full resolution?**
 //!
 //! The density underlay is capped at `max_underlay_offset = 4` — 16 × 16 sub-cells per tile, i.e.
 //! 32-pixel blocks under individually-placed marks. Client-interaction §9's annotation records the
@@ -152,9 +152,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, terms) in &principals {
         let session = engine.authorise(auth_json(terms).as_bytes())?;
         // Warm the row projection outside every sample (see `viewport_sweep`).
-        let warm = engine.viewport(&session, ViewportRequest::new(&slice_id, 0, full, K_MAX_MARKS))?;
+        let warm = engine.viewport(
+            &session,
+            ViewportRequest::new(&slice_id, 0, full, K_MAX_MARKS),
+        )?;
         let visible_total: u64 = warm.tiles.iter().map(|t| t.visible).sum();
-        eprintln!("{name}: visible {visible_total}, warm-up {:.1} ms", warm.timings.total_ns as f64 / 1e6);
+        eprintln!(
+            "{name}: visible {visible_total}, warm-up {:.1} ms",
+            warm.timings.total_ns as f64 / 1e6
+        );
 
         // A single tile at a few depths, so cost-per-tile is the unit and the tile count does not
         // confound the offset scaling. Depth 6 is the depth the mark-budget work wants.
@@ -212,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // decision: "full resolution" is a property of the VIEWPORT, not of a tile. A view showing
     // `T` tiles over a ~10⁶-pixel screen needs ~10⁶/T sub-cells per tile, so the offset that
     // matters falls as the tile count rises. This section measures the whole-viewport request at
-    // the depths the budget selects, which is the only number Phase 2 can be decided on.
+    // the depths the budget selects, which is the number a resolution increase turns on.
     println!();
     println!(
         "principal,visible_total,depth,tiles,offset,cells_per_tile,total_cells_evaluated,\
@@ -220,7 +226,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     for (name, terms) in &principals {
         let session = engine.authorise(auth_json(terms).as_bytes())?;
-        let _warm = engine.viewport(&session, ViewportRequest::new(&slice_id, 0, full, K_MAX_MARKS))?;
+        let _warm = engine.viewport(
+            &session,
+            ViewportRequest::new(&slice_id, 0, full, K_MAX_MARKS),
+        )?;
 
         for depth in [5u8, 6, 7] {
             for offset in [0u8, 2, 3, 4, 5] {

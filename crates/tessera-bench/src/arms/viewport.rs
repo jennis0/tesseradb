@@ -202,7 +202,7 @@ pub fn run(
                     for &k in ks {
                         // **The row-projection cache fill must not land in a sample.** The first
                         // viewport of a session crosses entity space into row space over the whole
-                        // fragment; Phase 0 measured 8.8 s for a 69M-item mask and the 10^9 k-sweep
+                        // fragment; it was measured at 8.8 s for a 69M-item mask, and the 10^9 k-sweep
                         // recorded a 9.46 s warm-up. Every existing harness excludes it and reports
                         // it separately; so does this one.
                         let warm = engine.viewport(

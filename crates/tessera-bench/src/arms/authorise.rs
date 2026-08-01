@@ -8,7 +8,7 @@
 //! criterion bench documents the same trap and takes the same way out.
 //!
 //! **Swept over `w` and shape, not only over point count.** The owner's ask was "authorisation
-//! performance as a function of point count", but Phase 0 measured the drivers as grant width and
+//! performance as a function of point count", but the probes measured the drivers as grant width and
 //! *posting shape*: at 10⁹, equal-coverage principals ranged 21.7 ms to 2,885 ms — ~130x — purely
 //! on entity-space contiguity, while dictionary scale was free (117M terms cost the same as 10M).
 //! Point count is still an axis (it is the fixture tier), but sweeping it alone would produce a

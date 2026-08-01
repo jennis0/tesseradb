@@ -4,8 +4,8 @@
 //! `count_range`, which is design §2.6's retrieve steps 5 and 6. The *k* half lives in the gather
 //! probe, where access pattern rather than sampler identity is the axis.
 //!
-//! **Zoom 0..=3 is included deliberately.** Every existing harness sweeps 4..12. Phase 0 measured
-//! counting as nearly free at depth 0 (a billion rows in 191 us) because bitmap cost is
+//! **Zoom 0..=3 is included deliberately.** Every existing harness sweeps 4..12. The probes
+//! measured counting as nearly free at depth 0 (a billion rows in 191 us) because bitmap cost is
 //! O(containers touched) rather than O(cardinality) — but that was the *count*, and the whole
 //! selection path below it was never measured at all. The coarse zooms are where a tile holds the
 //! most points, so they are where the "points in cell" axis is actually exercised.
@@ -69,8 +69,8 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
             }
 
             // The mask is built ONCE, outside every timed loop. `RowProjection::new` crosses
-            // entity space into row space over the whole fragment (I4's only bridge) and Phase 0
-            // measured it at 8.8 s for a 69M-item mask — if it ever drifts onto a per-viewport
+            // entity space into row space over the whole fragment (I4's only bridge) and was
+            // measured at 8.8 s for a 69M-item mask — if it ever drifts onto a per-viewport
             // path the system is dead (probes/optimisations.md §3.2). It gets its own arm; it
             // does not get to contaminate this one.
             let fragment = crate::postings::union(&postings, &grant.terms)?;

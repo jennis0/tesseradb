@@ -1,5 +1,5 @@
-//! Round-trip test for the tiler + segment writers (Task 3, Step 1; schema updated to
-//! `tessera_id`/`priority` in Task 6, contracts §2.6 r6): sort a batch, write
+//! Round-trip test for the tiler + segment writers over the `tessera_id`/`priority` schema
+//! (contracts §2.6): sort a batch, write
 //! `columns.arrow` / `morton.u32` / `permutation.bin`, and read every byte back.
 
 use std::fs;
@@ -23,8 +23,8 @@ use tessera_types::{EntityId, TesseraId};
 
 /// A synthetic `tessera_id`-shaped value for test fixtures: full splitmix64 output over a
 /// seed, so its top 16 bits are a `priority` prefix like any real `tessera_id` (contracts
-/// §2.6), without claiming this is the actual Feistel construction (Task 5's own tests cover
-/// that separately).
+/// §2.6), without claiming this is the actual Feistel construction — `tessera-types`'s identity
+/// tests cover that separately.
 fn synthetic_tessera_id(seed: u64) -> TesseraId {
     let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
@@ -503,8 +503,14 @@ fn write_columns_from_parts_rejects_short_and_misaligned_buffers_without_panicki
     let y = Buffer::from_vec(vec![0f32; 4]);
 
     // Too short: 3 u64s cannot back 4 rows.
-    let err = write_columns_from_parts(&path, Buffer::from_vec(vec![0u64; 3]), x.clone(), y.clone(), 4)
-        .expect_err("a buffer shorter than `rows` values must be a typed error");
+    let err = write_columns_from_parts(
+        &path,
+        Buffer::from_vec(vec![0u64; 3]),
+        x.clone(),
+        y.clone(),
+        4,
+    )
+    .expect_err("a buffer shorter than `rows` values must be a typed error");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 
     // Misaligned: slicing a u64 buffer at byte 4 moves it off 8-byte alignment. Arrow's own

@@ -1,11 +1,11 @@
-//! Arrow IPC payload construction for the viewer plane (Reference Sheet R5).
+//! Arrow IPC payload construction for the viewer plane (contracts §3.2).
 //!
 //! `viewport_ipc` builds the two record batches a `POST /v1/viewport` response carries — tile
 //! counts, then sampled points — and never touches the underlying entity-ID type: it accepts a
 //! caller-supplied `tessera_id: u64` column and plain scalar slices exclusively (I10; enforced by
 //! `scripts/check-layers.sh`, which greps this file for the forbidden identity type by name). No
 //! engine or store type crosses into this module either — `tessera-server` reads `tessera_id`
-//! straight off the engine's `PointOut` (contracts r6, owner decision 2026-07-29) and passes the
+//! straight off the engine's `PointOut` (contracts §2.6) and passes the
 //! resulting plain slice here; there is no per-session translation left to do on this path (see
 //! `crate::handles` for why the module that used to do that translation is retained, not deleted).
 //!

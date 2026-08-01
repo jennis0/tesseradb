@@ -9,8 +9,8 @@ use croaring::Bitmap;
 ///
 /// **Min-of-N is the reporting convention, and the repetition is not optional.**
 /// `probes/results.md` §6 records the reason in one line: *"a single-shot first pass reported
-/// figures 5-10x higher and was noise — repeat before believing."* Phase 0 used N=3 generally and
-/// N=5 at the largest scale. Every sample is returned rather than only the minimum so the spread
+/// figures 5-10x higher and was noise — repeat before believing."* The probes used N=3 generally
+/// and N=5 at the largest scale. Every sample is returned rather than only the minimum so the spread
 /// stays inspectable — a cell whose min and max differ by 10x is telling you something even when
 /// its min looks fine.
 pub fn repeat<T, F: FnMut() -> T>(reps: u32, mut f: F) -> Vec<u64> {
@@ -29,12 +29,12 @@ pub fn repeat<T, F: FnMut() -> T>(reps: u32, mut f: F) -> Vec<u64> {
 
 /// Roaring containers a bitmap spans: the count of distinct high 16 bits among its values.
 ///
-/// **This is the cost model's unit.** Phase 0 measured union cost as linear in containers spanned
+/// **This is the cost model's unit.** The probes measured union cost as linear in containers spanned
 /// with only ~2x per-container drift across 400x of scale, and found two regimes differing 13x in
 /// per-container constant (sparse/array ~114 ns, dense/bitmap ~1.54 us). A latency reported
 /// without this number cannot be told apart from a workload that simply moved.
 ///
-/// Mirrors the Phase 0 probes' own definition (`containers(bm) = len(unique(asarray(bm) >> 16))`)
+/// Mirrors the probes' own definition (`containers(bm) = len(unique(asarray(bm) >> 16))`)
 /// so figures are comparable with `probes/results.md`.
 pub fn containers(bitmap: &Bitmap) -> u64 {
     let mut count = 0u64;

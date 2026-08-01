@@ -944,7 +944,7 @@ artifacts; shared styles go through caller metadata.
 **Two expectations the embedding-viewer lineage has already set, which this document
 should answer rather than let users discover** *(survey, 2026-08-01)*. TensorBoard
 Projector, WizMap and Latent Scope taught this audience what a data map does, and two of
-their signature interactions are currently unaddressed.
+their signature interactions are unaddressed here.
 
 *Click a point, see its nearest neighbours.* **Available now, in the plane, without the
 vector store** *(owner, 2026-08-01, revising the 2026-07-31 scoping which had excluded
@@ -1048,7 +1048,7 @@ transfer, computed client-side from served counts; it is their hard-won answer t
 multi-decade distributions and beats a fixed log transfer.
 
 **Annotated 2026-08-01 — "expected default" is right and unreachable at the resolution the
-mechanism currently offers** *(MVP viewer; owner observation: "waaaay too low resolution —
+mechanism offers** *(MVP viewer; owner observation: "waaaay too low resolution —
 ideally we want it full res from day one")*. The argument above says mark-count-as-density must
 not carry the load alone. It cannot be relieved by an underlay that is *blockier than the thing it
 is relieving*: at `serve.max_underlay_offset = 4` a 512-px tile carries 16 × 16 sub-cells — **32-px
@@ -1098,7 +1098,7 @@ architectural status here rather than being tooling concerns.
 
 **There is a fourth state, created by §4's own staleness ruling and previously unnamed**
 *(third review, 2026-08-01)*: **shown-but-stale** — drawn under view key *E* while the
-change signal reports *E′ > E*. The ruling makes this legitimate; nothing currently makes it
+change signal reports *E′ > E*. The ruling makes this legitimate; nothing makes it
 *visible*, and an unmarked stale display is the truthfulness failure the staleness
 concession quietly buys. The fields that handle this honestly are the regulated ones —
 delayed market data must carry a delay badge — and the general pattern is an "as of"
@@ -1280,7 +1280,7 @@ permutation each, one range structure each"*, a consequence of I4.
 *1-D (timelines).* A second row space ranked by the temporal quantity; tiles are dyadic
 prefixes, where the prefix property is trivial; density is count per interval; §7.2
 transfers unchanged except that θ's per-depth factor becomes ×2 rather than ×4. The
-actionable consequence for now is to **generalise the sampler's branching factor**
+actionable consequence is to **generalise the sampler's branching factor**
 rather than hard-code 4, which also makes the client's zoom semantics
 geometry-independent. Keep this distinct from Appendix F, which is the *filter* form of
 time; a timeline view is the *ordering* form. The overview strip is not a new verb at
@@ -1389,7 +1389,7 @@ archive is forbidden.*
   | **B — fused** `u64` | high half at stride 8 | **1** |
   | **C — fused + sparse index** | index of every *n*-th code | **1** |
 
-  The **gather is neutral between today and A** — Morton is not currently read per
+  The **gather is neutral between today and A** — Morton is not read per
   served row, so A trades two touches for two — which is what makes B interesting: one
   fused code halves the gather's random touches. B's cost is exactly the argument §2.6
   makes for the `priority` column one level down — *"a cheap prefix must be physically

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Task 2: discriminate the constant ~42-47 ms viewport tail: cold page faults, or not?
+"""Discriminate the constant ~42-47 ms viewport tail: cold page faults, or not?
 
 Four arms over the same workload, same bundle, same principal, same viewports:
 

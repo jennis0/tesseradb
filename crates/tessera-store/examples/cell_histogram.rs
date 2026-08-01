@@ -134,7 +134,7 @@ fn run(args: &Args) -> Result<(), String> {
         opened_at.elapsed().as_secs_f64()
     );
 
-    // Phase 1 has exactly one segment per (partition, slice) and this tool's single-pass
+    // A build writes exactly one segment per (partition, slice) and this tool's single-pass
     // run-length scan is only meaningful over one sorted column, so anything else is refused
     // rather than silently merged (concatenating segments would fabricate runs at the seams).
     let mut segments: Vec<(&str, &str, &SegmentData)> = Vec::new();

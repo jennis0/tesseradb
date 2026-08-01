@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Sweep viewport latency over k = {50, 500, 1000, 2500, 5000} against a pre-built 10^9 bundle.
 
-Sibling to `bench_p99.py` (Task 16's exit-criteria script): same boot recipe, same w=10^4
+Sibling to `bench_p99.py`: same boot recipe, same w=10^4
 authorise recipe, same seeded viewport geometry (mixed zooms 4..12, ~300-tile spans) -- but
 boots the server ONCE and reuses it across every k value, since boot at 10^9 costs ~177s
 (`verify_files` digesting all 51 GB) and paying that five times is wasted. One warm-up viewport
 (row-projection cache fill) is fired before the first measured k and excluded from every sample.
 
-`[serve] max_k` defaults to 200 (Reference Sheet R1) and `Engine::viewport` clamps k to it
+`[serve] max_k` defaults to 200 and `Engine::viewport` clamps k to it
 (crates/tessera-engine/src/viewport.rs) -- this script's generated config raises `max_k` to
 comfortably above the largest k swept, and the per-k report includes mean/max points actually
 returned so a plateau (== clamp still firing) is visible directly in the output, not inferred.
@@ -70,11 +70,11 @@ def write_config_with_max_k(
     otherwise `Engine::viewport` silently clamps every k > 200 and the sweep is measuring the
     same 200-per-tile budget five times over.
 
-    Task 9: the four `compute_*` knobs (D-B/D-E's admission gate) are optional overrides, `None`
-    by default -- omitted from the written config, so every existing caller keeps getting the
+    The four `compute_*` knobs (D-B/D-E's admission gate) are optional overrides, `None` by
+    default -- omitted from the written config, so a caller that does not set them gets the
     server's own defaults (`compute_threads` = available parallelism, `compute_admission` =
-    `COMPUTE_ADMISSION_MULTIPLIER` (4) x `compute_threads` -- retuned 2026-07-31, was 1x --,
-    `compute_queue` = 2x that, `admission_timeout_ms` = 250) exactly as before this task.
+    `COMPUTE_ADMISSION_MULTIPLIER` (4) x `compute_threads`, `compute_queue` = 2x that,
+    `admission_timeout_ms` = 250).
     `scripts/bench_concurrency.py` is the only caller that passes them explicitly, to force a low
     admission bound for its shed cell (criterion 3) or a shorter timeout for its cold-build cell
     (criterion 6).

@@ -1,7 +1,6 @@
-//! D-G's slot-state single-flight cache, fallible form (lifecycle §3.3), with Task 5's byte bound.
+//! D-G's slot-state single-flight cache, fallible form (lifecycle §3.3), with a byte bound.
 //!
-//! Same shape as `tessera-engine::single_flight::SingleFlightCache` (commit d9baada, Task 1 of the
-//! concurrency workstream; Task 5 of Phase 2 stage 2.1 for the bound): a slot per key is either
+//! Same shape as `tessera-engine::single_flight::SingleFlightCache`: a slot per key is either
 //! [`Slot::Building`] or [`Slot::Ready`], the map's mutex is held only for the O(1) transition
 //! between those states — never across the build itself — and a concurrent arrival on the same key
 //! does not wait for an in-flight build: it gets [`SingleFlightError::Building`] immediately (D-G's
@@ -23,13 +22,12 @@
 //! measurement this pattern answers, and the four eviction rules, argued once there and referred to
 //! by number here.
 //!
-//! **That claim was made before it was true, which is why the table below exists.** The round-1
-//! review reverted [`RemoveUnlessReady`]'s `seq` comparison to a key-only match and
-//! `cargo test -p tessera-authz` stayed green, while the identical mutation in the engine killed
-//! its named test. Three of this module's tests were simply missing. The consequence is worse here
-//! than there: [`crate::fragment::FragmentCache::evict`] is `pub` (stage 2.4's conformance command
-//! is its intended caller) and this build is fallible, so the mid-build removal the guard has to
-//! survive needs no panic at all — an `io::Error` from the postings read suffices.
+//! **The table below is what keeps that claim honest.** Reverting [`RemoveUnlessReady`]'s `seq`
+//! comparison to a key-only match is the demonstration: in the engine that mutation kills a named
+//! test, and a copy missing the twin test stays green under it. The consequence of getting it wrong
+//! is worse here than there — [`crate::fragment::FragmentCache::evict`] is `pub` and this build is
+//! fallible, so the mid-build removal the guard has to survive needs no panic at all: an
+//! `io::Error` from the postings read suffices.
 //!
 //! # Which test covers which rule in which crate
 //!
@@ -516,8 +514,9 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// `is_locked_now`'s `try_lock` is the one deliberate, uncounted exception.
     ///
     /// A poisoned mutex is recovered from rather than propagated. The discharge is restated rather
-    /// than inherited, because Task 5 made the guarded value richer: [`Slots`] now holds a map, a
-    /// recency index and a byte counter, and the claim is that no critical section here can panic
+    /// than inherited from the engine twin, because the guarded value is rich: [`Slots`] holds a
+    /// map, a recency index and a byte counter, and the claim is that no critical section here can
+    /// panic
     /// *between* two of their updates. [`Slots::remove`] is the only function that touches all
     /// three, and it performs no allocation and calls no user code between them; the publish path's
     /// inserts likewise cannot unwind partway. So a poisoning leaves the three consistent, and
@@ -543,8 +542,7 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
 ///
 /// **Compares `seq`, not just state**, for the reason the engine twin's guard gives: once a pruner
 /// or an `evict` can remove a slot mid-build, a guard that removed by key alone would delete a
-/// *later* builder's slot. Unreachable before Task 5 gave this cache [`SingleFlightCache::evict`];
-/// hardened in the same change that makes it reachable.
+/// *later* builder's slot. [`SingleFlightCache::evict`] is what makes that reachable here.
 struct RemoveUnlessReady<'a, K: Eq + Hash + Clone, V: CacheWeight> {
     cache: &'a SingleFlightCache<K, V>,
     key: Arc<K>,
