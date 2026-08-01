@@ -391,6 +391,7 @@ def write_config(
     k_min: int = 2,
     k_max_marks: int | None = None,
     max_k: int | None = None,
+    max_underlay_cells: int | None = None,
 ) -> Path:
     """Write a `tessera.toml`.
 
@@ -409,6 +410,11 @@ def write_config(
         k_max_marks = 1_000_000
     if max_k is None:
         max_k = 1_000_000
+    # Left at the server's own default unless a caller asks. The §3.3 underlay multiplies the tile
+    # count by 4^offset, and the deployment default (8192 cells) refuses a wide bbox at a deep zoom
+    # with a 422 rather than truncating — correct for a deployment, and a suite that means to sweep
+    # the underlay across a zoom range has to raise it deliberately rather than discover it as an
+    # unexplained 422.
     config_text = f"""
 [bundle]
 path = "{bundle_root}"
@@ -433,6 +439,8 @@ k_min = {k_min}
 k_max_marks = {k_max_marks}
 theta_target_marks = {theta_target_marks}
 """
+    if max_underlay_cells is not None:
+        config_text += f"max_underlay_cells = {max_underlay_cells}\n"
     config_path = tmp_dir / "tessera.toml"
     config_path.write_text(config_text)
     return config_path
@@ -449,6 +457,7 @@ def spawn_server(
     max_k: int | None = None,
     k_max_marks: int | None = None,
     theta_target_marks: int | None = None,
+    max_underlay_cells: int | None = None,
 ) -> tuple[Server, subprocess.Popen]:
     """Start `tessera serve` against `bundle_root`, using `cache_dir`/`wal_path` (defaulting to
     `tmp_dir/cache`, `tmp_dir/wal.log`) for its durable state. Passing the SAME `cache_dir`/
@@ -481,6 +490,7 @@ def spawn_server(
         max_k=max_k,
         k_max_marks=k_max_marks,
         theta_target_marks=theta_target_marks,
+        max_underlay_cells=max_underlay_cells,
     )
 
     env = os.environ.copy()

@@ -115,9 +115,11 @@ property as delivered:
 - **Two of the three deny-retirement rules are unbuilt.** A suppression retires only when lifted,
   as specified. Deletion's stamp ledger and the predicate-change fold have no code — they are safe
   today only because nothing retires at all, which is fail-closed but is not the mechanism.
-- **The conformance suite covers three of thirteen invariants as designed.** Two more are covered
-  in substance but in Rust rather than the suite. None of the eight scripted interleavings exist,
-  and there is no CI.
+- **The conformance suite covers five of thirteen invariants as designed.** Two more are covered
+  in substance but in Rust rather than the suite; six have no coverage, four of them for want of an
+  implementation to test. None of the eight scripted interleavings exist. CI runs the suite and the
+  rest of the gate per pull request; conformance §6's nightly and release tiers do not exist, and
+  durability ordering is still not established end to end (#71).
 - **I13b and I13c are unimplemented.** A partition not consulted must fail closed (I13b), and one
   unreachable through outage is an error rather than an empty contribution (I13c). There is one
   partition, no required-set gate and no test for either. They are lettered apart from I13a — which

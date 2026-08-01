@@ -1,7 +1,10 @@
-"""The I2 canary fixture: two bundles differing only in one item nobody can see.
+"""The I2 canary fixture: three bundles differing only in one item, and in who can see it.
 
-Synthesises a tiny points+pairs parquet pair for `test_canary.py`, and builds the canary /
-canary-free pair from them via the CLI. Deliberately independent of the 250k Phase 0 corpus: a
+Synthesises tiny points+pairs parquet sets for `test_canary.py` and builds three bundles from them
+via the CLI: **canary-free** (the corpus alone), **canary** (plus one item carrying a term nobody
+tested holds), and **visible** (plus the same item carrying a term they do). The third is the
+comparator's positive control — §4.4 — and without it the canary comparison is pass-only with no
+proof it can fail. Deliberately independent of the 250k Phase 0 corpus: a
 small, from-scratch synthetic dataset makes it easy to reason that the canary's term is genuinely
 held by *no* tested principal, and keeps both builds fast enough to run twice in one test.
 
@@ -75,6 +78,15 @@ CANARY_ID_KEY_HEX = "000102030405060708090a0b0c0d0e0f"
 # session `test_canary.py` authorises.
 CANARY_TERM_ID = N_TERMS
 
+# The **visible** state's extra item carries a base term instead, so a tested principal can see it.
+# That single change is what makes the comparator's positive control a control: the visible state is
+# built exactly like the canary state — same corner, same commit window, same key, allocated last —
+# so the only thing that differs between "the comparator must agree" and "the comparator must
+# disagree" is whether the extra item is inside the principal's `M_auth`. A control that also
+# differed in placement or allocation would prove the comparator notices *something*, which is not
+# the claim; the claim is that it notices a visible item.
+VISIBLE_TERM_ID = 0
+
 # Extreme corner of the quantisation extent (contracts §2.5: v == max lands in the top cell).
 CANARY_X = 65535.9
 CANARY_Y = 65535.9
@@ -116,10 +128,17 @@ def _write_pairs(path: Path, pairs: list[tuple[int, int]]) -> None:
     pq.write_table(table, path)
 
 
-def build_canary_pair(work_dir: Path) -> tuple[Path, Path]:
-    """Write the two synthetic input pairs and build both bundles under `work_dir`.
+def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
+    """Write the three synthetic input sets and build all three bundles under `work_dir`.
 
-    Returns `(canary_free_bundle, canary_bundle)`.
+    Returns `(canary_free, canary, visible)`.
+
+    **Three states, because two cannot prove a comparator works.** The first two are the pair
+    conformance §4.2 describes: identical but for one item carrying a term no tested principal
+    holds, which every response must be blind to. The third is §4.4's positive control — the same
+    construction with the extra item carrying a term principals *do* hold, so every comparison it
+    takes part in must **fail**. Without it the comparator is pass-only: broken in any way that
+    makes it always agree, it would report green for ever and nothing would notice.
     """
     ensure_cli_built()
     rng = random.Random(SEED)
@@ -130,21 +149,29 @@ def build_canary_pair(work_dir: Path) -> tuple[Path, Path]:
     _write_points(free_points_path, points)
     _write_pairs(free_pairs_path, pairs)
 
-    canary_points = points + [(N_BASE_ITEMS, CANARY_X, CANARY_Y)]
-    canary_pairs = pairs + [(N_BASE_ITEMS, CANARY_TERM_ID)]
+    extra_point = (N_BASE_ITEMS, CANARY_X, CANARY_Y)
     canary_points_path = work_dir / "canary-points.parquet"
     canary_pairs_path = work_dir / "canary-pairs.parquet"
-    _write_points(canary_points_path, canary_points)
-    _write_pairs(canary_pairs_path, canary_pairs)
+    _write_points(canary_points_path, points + [extra_point])
+    _write_pairs(canary_pairs_path, pairs + [(N_BASE_ITEMS, CANARY_TERM_ID)])
+
+    # The visible state differs from the canary state in exactly one cell of one input file: the
+    # term the extra item carries.
+    visible_points_path = work_dir / "visible-points.parquet"
+    visible_pairs_path = work_dir / "visible-pairs.parquet"
+    _write_points(visible_points_path, points + [extra_point])
+    _write_pairs(visible_pairs_path, pairs + [(N_BASE_ITEMS, VISIBLE_TERM_ID)])
 
     free_bundle = work_dir / "bundle-free"
     canary_bundle = work_dir / "bundle-canary"
+    visible_bundle = work_dir / "bundle-visible"
 
     import subprocess
 
     for points_path, pairs_path, out_dir in (
         (free_points_path, free_pairs_path, free_bundle),
         (canary_points_path, canary_pairs_path, canary_bundle),
+        (visible_points_path, visible_pairs_path, visible_bundle),
     ):
         subprocess.run(
             [
@@ -192,7 +219,7 @@ def build_canary_pair(work_dir: Path) -> tuple[Path, Path]:
             check=True,
         )
 
-    return free_bundle, canary_bundle
+    return free_bundle, canary_bundle, visible_bundle
 
 
 def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]:
@@ -212,6 +239,12 @@ def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]
 
     Rule 4 is not checked because in Phase 1 there is nothing to check: no cluster memberships and
     no generating sets are built. See the module doc.
+
+    **Applies to the visible state too, and must.** `canary_bundle` names the argument for the case
+    it was written for, but the positive control is only a control if its extra item displaces
+    nothing either — a visible state that also perturbed allocation would make the comparator
+    disagree for a reason that has nothing to do with visibility, which is the same fixture-
+    perturbation failure in the opposite direction.
     """
     from .bundle import Bundle  # local: this module is imported by fixture builders that must not
     # pay for a bundle read they are not doing.

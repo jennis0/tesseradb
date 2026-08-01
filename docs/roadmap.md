@@ -50,13 +50,16 @@ filters, clusters and their labels, and [#56]. The reference viewer ([#46]) can 
 The conformance suite is the deliverable. An implementation that keeps Morton ordering, Roaring
 masks and tiered decode while quietly dropping I2, I7 or I13b passes every functional test and
 leaks; the suite is what distinguishes the two, and at release it is the only thing standing
-between a security claim and a reader's trust in it. Three of thirteen invariants are covered as
-designed. Six have no coverage.
+between a security claim and a reader's trust in it. Five of thirteen invariants are covered as
+designed. Six have no coverage, four of them for want of an implementation to test.
 
-All three epics share one missing prerequisite: **there is no CI**. [#11] says so, [#45] says so,
-and [#14] says its two checkers do not run automatically *because* of [#11]. Nothing else in the
-release is blocked by CI's absence, and everything in the release is worth less without it. It is
-the first thing.
+**CI exists as of [#69]** — the per-PR gate runs the workspace tests, clippy, both checker scripts
+and the conformance suite, so [#14]'s two checkers now run automatically and a regression cannot
+merge. What that unblocked, it unblocked; what remains is narrower and worth naming rather than
+leaving inside a closed prerequisite. [#45] still has no nightly tier and no criterion budgets, so
+performance regressions are not gated. The eight scripted interleavings still do not exist, and
+they need the `conformance` feature and pause points that [#11] left unbuilt. And durability
+ordering is still not falsifiable end to end ([#71]).
 
 Two other epics reach back into this theme. [#11] cannot close its I5 coverage until [#6] ships a
 non-trivial plugin, and the slices epic has a working suite as its stated adoption gate — so the

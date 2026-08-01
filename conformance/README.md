@@ -1,4 +1,4 @@
-# `conformance/` — Phase 1 invariant conformance suite (Task 15)
+# `conformance/` — the invariant conformance suite
 
 Pytest, same venv as `reference/` (`reference/.venv`, Python 3.12). Drives the release `tessera`
 binary as a real subprocess — never calls into `tessera-engine` directly — using the same
@@ -11,9 +11,14 @@ Run it:
 reference/.venv/bin/pytest conformance/tests -v
 ```
 
-(`reference/.venv/bin/pytest reference/tests -v` must also stay green — this suite's refactor
-touched `reference/tests/conftest.py` and `reference/tests/wire.py`, both now thin wrappers over
-shared `oracle` modules, but their fixtures/behaviour are unchanged.)
+CI runs it on every pull request and every push to `main`, alongside the rest of CLAUDE.md's gate
+(`.github/workflows/ci.yml`). That is conformance §6's per-PR tier; the nightly and release tiers
+it also specifies do not exist.
+
+(`reference/.venv/bin/pytest reference/tests -v` must also stay green. It is **not** run in CI:
+two of its five modules build from the Phase 0 corpus, which is not in the repository, and
+repointing them would cost the viewport differential its realistic term distribution. Run it
+locally on a machine that has the corpus.)
 
 Lint, if you have `ruff`, from the repository root — the configuration lives with the package it
 governs and covers both suites:
@@ -29,16 +34,16 @@ deliberately *not* selected and why.
 
 | File | Invariant | What it proves |
 |---|---|---|
-| `tests/test_byte_scan.py` | I10 | No 8-byte LE entity-id encoding appears in any viewport response's points batch, or in the server's `RUST_LOG=info` log, across a zoom range — for both the mask's admitted entities and its denied ones. See the file's module doc for why the scan is restricted to a "safe" high entity-id range (the fixture's dense, small entity-id space is otherwise structurally indistinguishable, by raw integer value, from `tessera-wire`'s deliberately sequential per-session handles and the tile stream's I2-legitimate aggregate counts — scanning the full universe would produce constant, meaningless matches, not real ones). |
-| `tests/test_restart_replay.py` | WAL/deny-survival (plan §10.3) | An ingest, two suppressions and a delete all survive a `SIGKILL` (not a graceful stop) and a restart on the *same* WAL/cache/bundle with nothing re-submitted: the denies stay applied, the entity-id allocator's high-water mark is unchanged (evidence the ingested batch replayed with its original allocated ids, not fresh ones — see the file's doc on why this stands in for the brief's "status shows buffered rows", which Phase 1's actual `/control/status` shape doesn't expose directly), and replaying the *same* ingest batch id/body again is still idempotent. |
-| `tests/test_canary.py` | I2 (scaffold) | A synthetic bundle pair (`reference/oracle/canary_fixture.py`) — identical except one extra item, at an extreme corner of the extent, carrying a term no tested grant set holds — produces byte-for-byte-equivalent *decoded* responses (tile counts, tile list, point multisets) between the two bundles, across zooms and grant sets, and the canary's own tile never appears in either. Also checks the **five canary allocation rules** as one property: the canary bundle's stored rows are the canary-free bundle's rows plus exactly one at the end. This is the scaffold Phase 2 extends to centroids/hulls; Phase 1 has no other derived aggregate to check. |
+| `tests/test_byte_scan.py` | I10 | No encoding of any entity id — admitted or denied — appears in a viewport response's points batch, its sub-cell stream, a `/v1/items` body, or the server's `RUST_LOG=info` log, across a zoom range; nor does the deployment identity key, nor a caller external id outside the one designed exception. See the module doc for the scan widths, the `SAFE_ID_FLOOR` reasoning, and why the corpus moved. Carries **two controls**: a real transmitted `tessera_id` the byte-window mechanism must recover, and a **planted** entity id every sweep mechanism must flag — the second catches a scanner that works on real traffic but ignores the value class I10 is about. |
+| `tests/test_restart_replay.py` | WAL/deny survival; durability ordering (conformance §5) | Two tests. An ingest, two suppressions and a delete survive a `SIGKILL` and a restart on the same WAL/cache/bundle with nothing re-submitted. And, separately, they survive a **truncation of the WAL to its last-synced offset** — what a power loss would have done — which is the variant that falsifies an engine acking before it fsyncs; a SIGKILL alone loses nothing, because the page cache outlives the process. The offset comes from the WAL's own `.sync` sidecar, so no introspection command was needed. |
+| `tests/test_canary.py` | I2 | Three synthetic states (`reference/oracle/canary_fixture.py`) built under one identity key, differing in one item at the extreme corner of the extent: the base corpus; the base plus an item carrying a term no tested grant set holds; the base plus an item carrying a term they do. One comparator runs over all of them, comparing **canonicalised bytes** on three separately-addressable surfaces — the tile batch sorted by tile id, the points batch as served (contracts §3.2 orders it by `tessera_id` within each tile), and the §3.3 underlay's masked per-cell counts. The canary state must agree on all three; the visible state must disagree on all three, which is §4.4's positive control and what stops a canonicalisation that silently dropped a surface from reading green. Also checks the **five allocation rules** for both extra-item states, and that nothing session-dependent remains in the response body. |
 | `tests/test_mask_catalogue.py` | fixture integrity | The adversarial mask catalogue (`reference/oracle/catalogue.py`) is the shape it claims: eight cases, each named for the property it attacks, each reaching exactly its declared entity set by two independent routes (postings union, pairs semi-join). Includes the container-boundary and ~5%-crossover claims, which are the two that stop being true silently. Carries a **strict xfail** for `fx_key` in the points batch — see "Known limitations". |
 | `tests/test_i7_selection.py` | I7 | §7.2's served set, engine against the literal definition in `reference/oracle/viewport.py`, over the catalogue × depths `{0,2,4,6}` × `k` `{2,30,500}`, against both a θ-saturated and a θ-live server, compared as **ordered lists** (contracts §2.6 makes the order contract). Plus cross-zoom nesting into *the child that contains the point*; the **cap**, against a server with `k_max_marks = 128` so `cap = min(k, K_max)` actually binds; and **the negative control**: a first-`k` stub that serves §7.2's count in storage order instead of `tessera_id` order, with the assertion that the differential disagrees with it on most tiles. A differential that passes against a deliberately wrong implementation is testing nothing. |
 | `tests/test_overlay_journal.py` | I1, I7, I2 | The overlay-heavy catalogue state: acked control operations (deletes, suppressions, predicate-narrows, and predicate-widens onto entities *outside* the token's mask) composed in entity space by `oracle.journal.AckedJournal` and in row space by the engine. Counts **and served points**, the latter against a **θ-live** server — the combination that catches an engine sampling from the pre-overlay mask (which serves denied items as marks while every count stays right) and one anchoring θ on the pre-overlay projection (§7.2's own I2 leak). Its negative control builds both of those engines out of the oracle and shows the comparison rejects them. Plus the journal's rules: a refused operation enters no composition and moves nothing, and an acked ingest is not an applied one. |
 
 ## Fixtures
 
-Two corpora, both cached at a fixed `/tmp` path and rebuilt whenever the **stamped recipe** beside
+The catalogue is cached at a fixed `/tmp` path and rebuilt whenever the **stamped recipe** beside
 the bundle is not the input set the builder wants now (`<bundle>.FIXTURE.json`; see
 `oracle/harness.py`'s "Fixture reuse" section). Reuse used to be decided by a predicate over the
 bundle — an allowlist that had to be extended in step with every new build input, and twice was
@@ -46,10 +51,15 @@ not, which is how the suite came to be green as a function of `(checkout, /tmp s
 of the checkout. Delete the stamp to force a rebuild; no manual cache wipe is needed for a changed
 seed, layout, extent or identity key.
 
+**Every fixture is synthesised from a seed. Nothing here reads the Phase 0 corpus**, which is what
+lets the suite run from a clean checkout and therefore in CI. The byte-scan and restart-replay
+modules used to build from a 250k prefix of it; each module's own doc records what moving off it
+cost. `reference/tests` still uses that corpus and is a separate question.
+
 | Fixture | Path | What it is for |
 |---|---|---|
-| `bundle_root` | `/tmp/tessera-250k` | A 250k prefix of the Phase 0 corpus, built by `oracle.harness.ensure_fixture_bundle`. Realistic term distribution; random grant sets. |
-| `catalogue_bundle_root` | `/tmp/tessera-catalogue` | 150,000 synthetic items designed **backwards from the adversarial mask catalogue** (`oracle.catalogue`), so each mask shape is reachable as a grant set. Three Roaring containers, a block placed astride 65,536, a pair straddling §7.2's ~5% crossover, and a block confined to one depth-6 tile. |
+| `catalogue_bundle_root` | `/tmp/tessera-catalogue` | 150,000 synthetic items designed **backwards from the adversarial mask catalogue** (`oracle.catalogue`), so each mask shape is reachable as a grant set. Three Roaring containers, a block placed astride 65,536, a pair straddling §7.2's ~5% crossover, a block confined to one depth-6 tile, and a `high_tail` block placed entirely above the byte-scan's floor. |
+| canary states | per-test tmp dir | Three tiny corpora from `oracle.canary_fixture`, built under one identity key: the base corpus, the same plus an item carrying a term nobody holds, and the same plus an item carrying a term principals do hold. The third is the comparator's positive control. |
 
 ## Known limitations / explicitly out of scope
 
@@ -72,9 +82,11 @@ seed, layout, extent or identity key.
   `tessera-wire/src/handles.rs` (`HandleTable` mints an independent per-session counter, never a
   transform of `EntityId` — read that module's own doc, which already discusses the sequential-
   mint disclosure it deliberately accepts).
-- **Deny-op WAL-append-failure fault injection** (`test_restart_replay.py`'s docstring): Task 13
-  left this out of scope for Phase 1 (no fault-injection plumbing exists yet to force a real fsync
-  failure); not tested here either.
+- **Deny-op WAL-append-failure fault injection**: forcing a real fsync failure needs the write
+  path's fault switchboard (lifecycle §7.3), which is reachable from Rust tests and not from here.
+  Not tested in this suite. Note this is a *different* property from the durability ordering
+  `test_restart_replay.py` now covers: that one asks what survives when unsynced bytes are lost,
+  this one asks what the engine does when the sync itself fails.
 - **`x-tessera-slice`**: unimplemented per the ledger note (Phase 1 ships exactly one slice); not
   exercised.
 - **Task 6's bit-flipped-`.frag`-is-a-cache-miss check**: added as a Rust unit test,
@@ -84,5 +96,18 @@ seed, layout, extent or identity key.
   mode (a corrupted, right-length `.frag` sidecar) than driving it through the whole stack would
   be. Kept alongside Task 6's existing fixture-cache tests rather than invented as a new
   conformance file.
-- **Wall-clock**: see `.superpowers/sdd/2026-07-28-phase1-walking-skeleton/task-15-report.md` for
-  the measured run time of `pytest conformance/tests -v`.
+- **The I4 compile-fail rows are in Rust, not here**: `crates/tessera-types/tests/ui/`, driven by
+  `trybuild`. They assert that code does *not* compile, which no pytest module can do. `cargo test
+  --workspace` runs them.
+- **Five of conformance §5's eight interleaving scripts cannot be written yet** (scripts 2–6) —
+  they test a stamp ledger, a retirement floor and a compaction fold that do not exist. Script 7,
+  the positional CRC rule, is covered in substance by `crates/tessera-lifecycle/tests/wal.rs` in
+  both directions. Script 8 needs a `before_fragment_acquire` pause point, and §5 is emphatic that
+  it must be built by extending the write path's existing fault switchboard rather than beside it.
+- **Durability ordering is not established here** — see `test_restart_replay.py`'s module doc and
+  issue #71. The truncating test proves replay under discard of the unsynced tail; an engine that
+  published its sync offset without ever fsyncing passes it. The property is held in Rust by the
+  write path's `Published` token type.
+- **Wall-clock**: 24 s from deleted fixtures, including the 150,000-item catalogue build, measured
+  2026-08-01. `.github/workflows/ci.yml` records it alongside the Rust gate's figure, since runner
+  time is what decides whether a gate stays enabled.

@@ -9,7 +9,6 @@ root.
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -18,31 +17,18 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "reference"))
 
-from oracle.harness import ensure_fixture_bundle  # noqa: E402
-
-# Task 16, Step 4: `TESSERA_BUNDLE_ROOT` override for the one-off 10^9 exit-criteria run — see
-# `reference/tests/conftest.py`'s matching comment. Unset, this is unchanged: the same 250k
-# fixture `reference/tests` uses, reused not rebuilt.
-_ENV_BUNDLE_ROOT = os.environ.get("TESSERA_BUNDLE_ROOT")
-BUNDLE_ROOT = Path(_ENV_BUNDLE_ROOT) if _ENV_BUNDLE_ROOT else Path("/tmp/tessera-250k")
-
-
-@pytest.fixture(scope="session")
-def bundle_root() -> Path:
-    if _ENV_BUNDLE_ROOT:
-        assert BUNDLE_ROOT.joinpath("CURRENT").exists(), (
-            f"TESSERA_BUNDLE_ROOT={BUNDLE_ROOT} set but no bundle found there"
-        )
-        return BUNDLE_ROOT
-    ensure_fixture_bundle(BUNDLE_ROOT)
-    return BUNDLE_ROOT
-
-
-# NB: deliberately no shared session-scoped `server` fixture over `bundle_root` (code review
-# flagged the previous one as dead weight — nothing in this suite used it). Every test module
-# against that fixture needs a server spawned with non-default arguments (a file-backed log for
-# the byte-scan, a private fixed cache/WAL path for restart-replay, two independent bundles for
-# the canary scaffold), so each defines its own.
+# **Every fixture in this suite is synthesised from a seed.** Nothing here reads the Phase 0
+# corpus, so the suite runs from a clean checkout with no external data — which is what lets it run
+# in CI at all. The byte-scan and the restart-replay module used to build from a 250,000-item
+# prefix of that corpus; both now use the catalogue below, and each states in its own module doc
+# what the change cost it. `reference/tests` still uses the Phase 0 corpus and is a separate
+# question.
+#
+# There is deliberately no shared session-scoped `server` fixture (code review flagged the previous
+# one as dead weight — nothing used it). Every module needing a non-catalogue server needs it
+# spawned with non-default arguments — a file-backed log for the byte-scan, a private fixed
+# cache/WAL path for restart-replay, two independent bundles for the canary — so each defines its
+# own.
 #
 # The **catalogue** fixtures below are shared, and for the opposite reason: the adversarial mask
 # catalogue is one designed corpus with one designed entity-ID layout, and two modules asking for

@@ -14,6 +14,28 @@ stdout/stderr redirected to a file, so nothing is lost to an unread pipe) must c
 of any admitted or denied entity id, no encoding of the deployment identity key, and no caller
 external id anywhere except the one designed exception — within the scan scope described below.
 
+**Which corpus, and what changing it cost.** This scan ran against a 250,000-item prefix of the
+Phase 0 corpus, which lives outside the repository and runs to tens of gigabytes — so the suite
+could not run from a clean checkout and could not run in CI at all. It now runs against the
+synthetic adversarial mask catalogue (`oracle.catalogue`, 150,000 items), which is generated from a
+seed.
+
+**What it costs, measured rather than waved past.** Two things, and the second is the one that
+matters. A realistic term distribution, which this test does not depend on: the scan is about
+**encodings crossing the boundary**, not about how terms are distributed, and the target-id set is
+every entity the segment carries either way. But `SAFE_ID_FLOOR` stayed at 100,000 while the corpus
+shrank from 250,000 entities to 150,000 — so the *floor-filtered* sweeps, which are every sweep
+except the `tessera_id` column's, went from seeing **60% of the entity-id space to 33%**. A leak of
+an id below the floor was invisible to them before and still is; what changed is how many ids that
+covers. The floor was left at 100,000 deliberately: the only route to more reach is lowering it, and
+the residual this module already records — process ids, which `pid_max` can push well above 65,535 —
+gets worse as it falls. Coverage was traded for a scan that does not manufacture its own failures.
+
+The arithmetic below is restated at 150,000 rather than assumed to carry over. What the move gains
+is a designed entity-ID layout: `SAFE_ID_FLOOR`'s preconditions are satisfied by the catalogue's
+`high_tail` block **by construction and checked by `catalogue.verify()`**, where on the Phase 0
+prefix they held by accident of which terms happened to be granted.
+
 **Contracts r6 rewrote the wire's identity column** (`docs/evidence/memos/2026-07-30-tessera-id-
 construction.md`; contracts §2.6, §3.2): `columns.arrow`/the points batch no longer carry
 `entity_id` at all — the gather cannot produce one — and the per-session `handle: u32` this test
@@ -43,14 +65,15 @@ counter — a 4-byte-aligned scan against it was exact signal, not noise (see th
 reasoning below for `x`/`y`). `tessera_id` is different in kind: it is a keyed permutation output,
 essentially uniform over `2^64`, and a 4-byte-aligned scan would inspect each 32-bit half of that
 uniform value *on its own* — a quantity with no special relationship to the entity-id space at
-all. Against this fixture's ~250,000-entity target-id set, the *expected number of coincidental
+all. Against this fixture's 150,000-entity target-id set, the *expected number of coincidental
 32-bit matches* from scanning every row's low and high 32-bit half across this test's zoom/`k`
-budget (order 10,000-15,000 distinct halves observed) is `~13,000 * 150,000 / 2^32 ≈ tens of
-hits per run` — the same order of magnitude the original module doc computed for the "don't 4-byte
+budget (order 10,000-15,000 distinct halves observed) is `~13,000 * 150,000 / 2^32 ≈ 0.5 hits per
+run` — order-one, not order-zero, and the figure was quoted as "tens" for as long as this paragraph
+has existed, which overstated the noise that argues against scanning more — the same order of magnitude the original module doc computed for the "don't 4-byte
 -scan `x`/`y`" case, and for the same underlying reason: a pseudorandom 32-bit quantity compared
 against a large, dense target-id set produces chance matches at a rate the 8-byte-aligned,
 per-element scan does not, because the *whole* 64-bit value is astronomically unlikely to
-coincide with a value `< 250,000` (see `SAFE_ID_FLOOR`'s section below for the arithmetic).
+coincide with a value `< 150,000` (see `SAFE_ID_FLOOR`'s section below for the arithmetic).
 **Rule, stated explicitly (brief step 1.2): the `tessera_id` column's own buffer never gets a
 narrower-than-8-byte scan; every other buffer, every metadata field and every log line is swept
 at whatever width is safe for its own shape.** Retiring `handle`'s 4-byte pass therefore does not
@@ -69,10 +92,12 @@ implementation bug bad enough to smuggle a raw entity id into only half of it, n
 is a stranger and less likely failure mode than the direct zero-extension case this scan does
 catch, and `test_identity.py`'s known-answer vectors and `Bundle.verify_identity_cross_check`
 (Task 12) independently scrutinise the identity construction itself — the latter **is actually
-run** against the fixture bundle by
-`reference/tests/test_identity.py::test_fixture_bundle_identity_column_agrees_with_the_key`, which
-is what makes this citation load-bearing rather than a reference to an uncalled method (it was the
-latter until the seam review caught it; do not remove that test without revisiting this paragraph). The `tessera_id` column
+run** against the bundle this module scans by
+`test_the_catalogue_bundles_identity_column_agrees_with_its_key` below, which is what makes this
+citation load-bearing rather than a reference to an uncalled method (it was the latter until the
+seam review caught it; and it became a reference to a check performed on a *different* bundle when
+this module moved off the Phase 0 corpus, which is why the check now runs here. Do not remove it
+without revisiting this paragraph). The `tessera_id` column
 remains the one place I10 is actually at risk on the wire, and it gets the width that matters most.
 
 **Why `x`/`y` keep exactly the pre-r6 scan shape (8-byte scan across all three columns, no 4-byte
@@ -107,11 +132,11 @@ its job changes completely, because its old job no longer exists.
   some configurations. This was true of the pre-r6 design too and is not re-litigated here; stated
   as an honest residual, matching this file's practice of naming what it does not cover.)
 - *What no longer needs a floor at all:* the **binary, per-element-aligned** entity-id scan of the
-  `tessera_id` column, and *only* that column. Entity ids are `< 250,000`; `tessera_id` values are
+  `tessera_id` column, and *only* that column. Entity ids are `< 150,000`; `tessera_id` values are
   uniform over `2^64`. The chance any single stored `tessera_id` value coincides with *any* member
-  of a ~250,000-entity target set is `250,000 / 2^64 ≈ 1.4e-14` — summed over every row this
-  fixture could ever produce (250,000 of them), the expected number of coincidental full-width
-  matches across the *entire* fixture is `250,000 * 250,000 / 2^64 ≈ 3.4e-9`, i.e. it will not
+  of a 150,000-entity target set is `150,000 / 2^64 ≈ 8.1e-15` — summed over every row this
+  fixture could ever produce (150,000 of them), the expected number of coincidental full-width
+  matches across the *entire* fixture is `150,000 * 150,000 / 2^64 ≈ 1.2e-9`, i.e. it will not
   happen. The `tessera_id`-column scan below therefore runs against the **full, unfiltered**
   admitted/denied sets — no floor applied — which is *strictly stronger* coverage than the pre-r6
   test had for its equivalent column (that test could only ever check ids `>= SAFE_ID_FLOOR`).
@@ -131,7 +156,8 @@ its job changes completely, because its old job no longer exists.
   reason: it retains a stride-1 (unstructured-bytes) 4-byte pass — the log is text, not a typed
   column, so no alignment can be assumed, and a stride-1 4-byte scan over `L` bytes of log against
   a target set of size `T` produces an expected `L * T / 2^32` chance hits. `SAFE_ID_FLOOR` bounds
-  `T` down to only the high half of the fixture's dense id space, keeping this in the same
+  `T` down to only the top third of the fixture's dense id space (50,000 of 150,000; it was the
+  high half at the old corpus size, and the sentence was restated rather than left to drift), keeping this in the same
   low-single-digits territory the pre-r6 design already accepted for the same scan (this risk is
   orthogonal to the handle-vs-`tessera_id` question — it was already here, unchanged by this
   revision).
@@ -213,9 +239,12 @@ import io
 import re
 from pathlib import Path
 
+import numpy as np
+import pyarrow as pa
 import pyarrow.ipc as ipc
 import pytest
 
+from oracle import catalogue
 from oracle import mask as mask_mod
 from oracle.bundle import Bundle
 from oracle.harness import spawn_server, stop_server
@@ -377,14 +406,181 @@ def _decode_tessera_ids(points_bytes: bytes) -> list[int]:
         return ids
 
 
+# A real `high_tail` member, and above SAFE_ID_FLOOR — both asserted in the plant test rather than
+# left to this comment. Resize `high_tail` and an unasserted constant would silently start
+# exercising the sweeps against a value the real scan's target set does not contain: the control
+# would still pass and would still prove the mechanisms fire, but no longer that they fire on a
+# value class the real scan is watching for.
+PLANTED_ENTITY_ID = 145_000
+
+
+def test_the_catalogue_bundles_identity_column_agrees_with_its_key(catalogue_bundle):
+    """The structural half of I10's assurance, against **the bundle this module scans**.
+
+    The module doc leans on `Bundle.verify_identity_cross_check` as the thing that scrutinises the
+    identity construction itself, so that the byte-scan does not have to. That citation was
+    load-bearing because `reference/tests/test_identity.py` actually ran the check — against the
+    Phase 0 fixture, which this module no longer uses. Repointing the scan at the catalogue would
+    otherwise have quietly turned a live citation into a reference to a check nobody performs on
+    the bundle under test. It runs here instead.
+    """
+    catalogue_bundle.verify_identity_cross_check(SLICE)
+
+
+def _points_stream(tessera_ids: list[int], xs: list[float], ys: list[float]) -> bytes:
+    """A points batch in the wire's own schema (contracts §2.6), built by the harness."""
+    schema = pa.schema(
+        [
+            pa.field("tessera_id", pa.uint64()),
+            pa.field("x", pa.float32()),
+            pa.field("y", pa.float32()),
+        ]
+    )
+    batch = pa.record_batch(
+        [
+            pa.array(tessera_ids, type=pa.uint64()),
+            pa.array(np.array(xs, dtype=np.float32)),
+            pa.array(np.array(ys, dtype=np.float32)),
+        ],
+        schema=schema,
+    )
+    sink = io.BytesIO()
+    with ipc.new_stream(sink, schema) as writer:
+        writer.write_batch(batch)
+    return sink.getvalue()
+
+
+def _subcell_stream(cells: list[int], counts: list[int]) -> bytes:
+    schema = pa.schema([pa.field("cell", pa.uint64()), pa.field("count", pa.uint64())])
+    batch = pa.record_batch(
+        [pa.array(cells, type=pa.uint64()), pa.array(counts, type=pa.uint64())], schema=schema
+    )
+    sink = io.BytesIO()
+    with ipc.new_stream(sink, schema) as writer:
+        writer.write_batch(batch)
+    return sink.getvalue()
+
+
+def _f32_from_u32(value: int) -> float:
+    """The `float32` whose raw little-endian bytes are `value`'s."""
+    return float(np.frombuffer(value.to_bytes(4, "little"), dtype=np.float32)[0])
+
+
+def test_every_scan_mechanism_catches_a_planted_entity_id():
+    """The negative control conformance §4.3 asks for: **a planted emission the scanner must
+    flag.**
+
+    The scan above is pass-only in the direction that matters. It asserts that no entity id appears
+    anywhere, and a scan mechanism broken so that it never returns anything — a mis-parsed buffer,
+    a wrong stride, a decoder that silently yields no batches — reports exactly the same green. The
+    existing control (`known_tessera_id in tessera_id_windows`) proves the byte-window mechanism
+    against **real traffic**, which is worth having and is a different claim: it shows the scan can
+    recover a value that really was transmitted. It does not show the scan fires on an **entity
+    id**, which is the value it exists to catch and the one that never legitimately appears.
+
+    **The gap between the two controls is not hypothetical, and was measured rather than argued.**
+    Filtering `_le_windows` to values `>= 2^32` — the shape of a plausible "suppress obviously
+    spurious small windows" change, offered as noise reduction — leaves the scan above **passing**,
+    because every real `tessera_id` is a uniform 64-bit value and sails over the filter. The plant
+    below fails immediately, because an entity id is exactly the small value such a filter discards
+    and exactly the value I10 is about. That sabotage was run on 2026-08-01: one passed, one failed,
+    and the one that passed is the one that was there before.
+
+    So each mechanism is handed a synthetic payload carrying `PLANTED_ENTITY_ID` in the encoding
+    that mechanism is responsible for, and must return it. The plant lives here rather than in the
+    server: making the real wire carry an entity id would mean building a route capable of emitting
+    one, which is the leak this invariant forbids, gated behind a feature that must then never
+    reach a release binary. The falsifiability question is a question about the scanner, and it is
+    answerable where the scanner is.
+
+    Each mechanism is also handed a clean payload and must return **nothing** from the target set.
+    A scan that flagged everything would satisfy the plant while making the real assertions
+    unfalsifiable in the other direction.
+    """
+    planted = PLANTED_ENTITY_ID
+    assert planted in catalogue.BLOCKS["high_tail"].entities, (
+        "the planted id is no longer a member of the catalogue's high_tail block, so it is not in "
+        "the target set the real scan checks against and this control has drifted off it"
+    )
+    assert planted >= SAFE_ID_FLOOR
+    targets = {planted}
+    clean_ids = [0xDEAD_BEEF_1234_5678, 0x0BAD_C0DE_9876_5432]
+
+    # 1. The `tessera_id` column, at the column's own 8-byte stride. This is the bug shape the
+    #    module doc names: a server minting `tessera_id = entity_id as u64` instead of applying the
+    #    keyed permutation, so the raw id sits zero-extended in the identity lane.
+    tid_w, _xy = _points_value_buffer_windows(_points_stream([planted], [1.0], [2.0]))
+    assert tid_w & targets, "the tessera_id column sweep did not catch a raw entity id in it"
+    tid_clean, _ = _points_value_buffer_windows(_points_stream(clean_ids, [1.0, 2.0], [3.0, 4.0]))
+    assert not (tid_clean & targets), "the tessera_id column sweep flagged a clean batch"
+
+    # 2. The `x`/`y` columns, whose 8-byte window spans two adjacent 4-byte lanes — so the plant is
+    #    the id's two halves in consecutive rows, which is what a leak smuggled through a
+    #    coordinate buffer would look like.
+    #
+    #    **The halves sit at lanes 1 and 2, not 0 and 1, and that is the whole point of this case.**
+    #    A plant at lane 0 is caught by any stride dividing 8, so it does not pin the stride it
+    #    exists to justify: changing the sweep from `stride=4` to `stride=8` deletes precisely the
+    #    odd-offset straddling window the module doc calls the reason for scanning x/y at native
+    #    element width, and a lane-0 plant goes on passing. Measured — that sabotage passed before
+    #    the halves moved. Straddling lanes 1|2 can only be seen by a window starting at byte 4.
+    #
+    #    Planted into `x` **and** into `y` in separate calls, because dropping `y` from the sweep
+    #    entirely also passed while only `x` carried a plant.
+    lo = _f32_from_u32(planted & 0xFFFF_FFFF)
+    hi = _f32_from_u32(planted >> 32)
+    for column in ("x", "y"):
+        xs = [0.0, lo, hi] if column == "x" else [0.0, 0.0, 0.0]
+        ys = [0.0, lo, hi] if column == "y" else [0.0, 0.0, 0.0]
+        _tid, xy_w = _points_value_buffer_windows(_points_stream([1, 2, 3], xs, ys))
+        assert xy_w & targets, (
+            f"the x/y column sweep did not catch an entity id straddling two lanes of `{column}`"
+        )
+    clean_xy = _points_value_buffer_windows(_points_stream([1, 2, 3], [1.0, 2.0, 3.0], [4.0, 5.0, 6.0]))[1]
+    assert not (clean_xy & targets), "the x/y column sweep flagged a clean batch"
+
+    # 3. The §3.3 underlay's appended sub-cell stream.
+    sub_w = _subcell_value_buffer_windows(_subcell_stream([planted], [7]))
+    assert sub_w & targets, "the sub-cell sweep did not catch a raw entity id in the cell column"
+    assert not (_subcell_value_buffer_windows(_subcell_stream([1 << 40], [7])) & targets), (
+        "the sub-cell sweep flagged a clean batch"
+    )
+
+    # 4/5. The log and the drill-down body: text, so both an ASCII decimal run and a raw LE integer
+    #      at each width the real sweep uses. Note the decimal plant is embedded in a realistic log
+    #      line rather than standing alone, so the digit-run regex is exercised on the shape it
+    #      actually meets — a bare `str(planted)` would pass a scanner that only matched whole
+    #      buffers.
+    log_line = f"2026-08-01T00:00:00Z INFO tessera_engine: gathered entity_id={planted} rows=1\n"
+    log_bytes = log_line.encode() + b"prefix" + planted.to_bytes(8, "little") + b"suffix"
+    assert _decimal_windows(log_bytes, SAFE_ID_FLOOR) & targets, (
+        "the decimal-text sweep did not catch an entity id written into a log line"
+    )
+    assert _le_windows(log_bytes, 8) & targets, "the 8-byte binary log sweep did not catch a plant"
+    assert _le_windows(log_bytes, 4) & targets, "the 4-byte binary log sweep did not catch a plant"
+
+    clean_log = b"2026-08-01T00:00:00Z INFO tessera_server: served zoom=4 k=20 status=200\n"
+    assert not (_decimal_windows(clean_log, SAFE_ID_FLOOR) & targets), (
+        "the decimal-text sweep flagged a clean log line"
+    )
+    assert not (_le_windows(clean_log, 8) & targets), "the binary log sweep flagged a clean line"
+
+    # The floor is what keeps the text sweeps from flagging the harness's own small integers. An
+    # id below it is invisible to them by construction, which is a real and stated limit of the
+    # text half — asserted, so that lowering the floor without revisiting the reasoning fails here.
+    assert not (_decimal_windows(b"served k=500 zoom=6 status=200\n", SAFE_ID_FLOOR)), (
+        "SAFE_ID_FLOOR no longer excludes the legitimate small integers this harness emits"
+    )
+
+
 @pytest.fixture(scope="module")
-def byte_scan_server(tmp_path_factory, bundle_root):
+def byte_scan_server(tmp_path_factory, catalogue_bundle_root):
     """A dedicated server instance for this module, logging to a file (not an unread pipe) so the
     full RUST_LOG=info output can be scanned after the run."""
     tmp_dir = tmp_path_factory.mktemp("byte-scan-server")
     log_path = tmp_dir / "server.log"
     srv, proc = spawn_server(
-        bundle_root,
+        catalogue_bundle_root,
         tmp_dir,
         log_path=log_path,
         env_extra={"RUST_LOG": "info"},
@@ -394,18 +590,23 @@ def byte_scan_server(tmp_path_factory, bundle_root):
 
 
 def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_in_logs(
-    byte_scan_server, bundle_root: Path
+    byte_scan_server, catalogue_bundle_root: Path
 ):
     server, log_path = byte_scan_server
-    oracle_bundle = Bundle(bundle_root)
+    oracle_bundle = Bundle(catalogue_bundle_root)
     assert oracle_bundle.identity_key is not None, "fixture must be a post-r6 bundle"
 
-    # A genuine subset: enough terms to admit a substantial fraction of the fixture (so there is
-    # plenty to find if something leaks), but not every term (so a real "denied" set exists too).
-    dictionary = oracle_bundle.dictionary
-    granted_descriptors = dictionary[: max(1, len(dictionary) // 2)]
-    granted_terms = {oracle_bundle.term_id_of(d) for d in granted_descriptors}
-    granted_terms.discard(None)
+    # The grant set is **named, not sliced**. A "first half of the dictionary" grant admits and
+    # denies whatever the corpus happens to lay out first, and on this corpus that puts every
+    # entity id above `SAFE_ID_FLOOR` on one side of the grant — which fails the floor
+    # preconditions below for a reason that reads as a fixture accident rather than as the
+    # deliberate layout property it is. `high_tail` is granted and `filler_tail` is not, so ids
+    # above the floor exist on both sides; `boundary` and `cross_hi` come along to keep the
+    # admitted set substantial (so there is plenty to find if something leaks) and to keep the mask
+    # spanning more than one Roaring container.
+    granted_blocks = ("boundary", "cross_hi", "high_tail")
+    granted_descriptors = [catalogue.BLOCKS[n].descriptor.encode("ascii") for n in granted_blocks]
+    granted_terms = {catalogue.BLOCKS[n].term_id for n in granted_blocks}
 
     auth = server.authorise([d.decode("ascii") for d in granted_descriptors])
     token = auth["token"]
@@ -428,6 +629,10 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     denied_high = {e for e in denied if e >= SAFE_ID_FLOOR}
     assert admitted_high, "fixture/grant choice must admit >= SAFE_ID_FLOOR entities"
     assert denied_high, "fixture/grant choice must deny >= SAFE_ID_FLOOR entities"
+    # Both preconditions above are properties of the catalogue's layout, guaranteed by its
+    # `high_tail` block and checked by `catalogue.verify()`. This equality is what stops the two
+    # from drifting apart — the layout would go on satisfying a floor this scan no longer uses.
+    assert SAFE_ID_FLOOR == catalogue.HIGH_ID_FLOOR
     target_ids_high = admitted_high | denied_high
 
     identity_key = oracle_bundle.identity_key
@@ -439,7 +644,6 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     sampled_ids: set[int] = set()
     all_raw_responses: list[bytes] = []
     bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
-    requests_made = 0
     subcell_windows: set[int] = set()
     subcell_rows_seen = 0
     for zoom in ZOOM_RANGE:
@@ -455,9 +659,21 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
         subcell_rows_seen += len(sub_cells)
         consumed = _points_stream_length(points_bytes)
         subcell_windows |= _subcell_value_buffer_windows(points_bytes[consumed:])
-        # Nothing may sit unscanned between the two: if a fourth stream is ever appended, this
-        # fails rather than letting it arrive unswept.
-        assert consumed <= len(points_bytes)
+        # Nothing may sit unscanned after the sub-cell stream. The check that used to be here —
+        # `consumed <= len(points_bytes)` — could not fail: `BytesIO.tell()` after `open_stream`
+        # can never exceed the buffer, so a fourth appended stream would have arrived unswept while
+        # the assertion reported that it could not. Parse the sub-cell stream too, and require the
+        # payload to end there.
+        if subcell_bytes := points_bytes[consumed:]:
+            sub_buf = io.BytesIO(subcell_bytes)
+            with ipc.open_stream(sub_buf) as sub_reader:
+                for _ in sub_reader:
+                    pass
+            assert sub_buf.tell() == len(subcell_bytes), (
+                f"{len(subcell_bytes) - sub_buf.tell()} bytes follow the sub-cell stream and are "
+                f"swept by nothing — a fourth appended stream must be added to this scan before it "
+                f"can be served"
+            )
         # Scope decision (module doc): the tile batch (visible/matched counts) is deliberately
         # excluded from the scan — those are I2-legitimate aggregates, not a surface I10 governs.
         # Only the points batch's decoded column *value buffers* are scanned.
@@ -465,8 +681,6 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
         tessera_id_windows |= tid_w
         xy_windows |= xy_w
         sampled_ids.update(_decode_tessera_ids(points_bytes))
-        requests_made += 1
-    assert requests_made == len(ZOOM_RANGE)
     # Used for checks (identity key, external ids) that need to look at the whole points batch,
     # not just the entity-id sweep's column-specific split above.
     all_points_windows = tessera_id_windows | xy_windows
