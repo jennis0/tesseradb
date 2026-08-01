@@ -1,5 +1,5 @@
-//! Task 11, Step 1: the masked viewport query, end to end over a ~10k-item synthetic bundle
-//! built through `tessera-build`'s library API (Task 8's smoke-test pattern).
+//! The masked viewport query, end to end over a ~10k-item synthetic bundle built through
+//! `tessera-build`'s library API.
 //!
 //! Every item carries `ALL_TERM` ("0"); every third item (`source_id % 3 == 0`) additionally
 //! carries `SUBSET_TERM` ("1"). Most tests below query at `zoom = 0`, where `tiles_for_bbox`
@@ -11,8 +11,7 @@
 //! `zoom = 4` with a bbox covering a strict subset of tiles, cross-checked against an independent
 //! per-item Morton-prefix oracle.
 //!
-//! Task 0c (Phase 2 stage 2.1) moved the pin cases out of this file into `tests/pins.rs`, and the
-//! shared fixture block into [`common`], so stage 2.1's parallel tracks own disjoint files.
+//! The pin cases live in `tests/pins.rs` and the shared fixture block in [`common`].
 
 mod common;
 
@@ -40,29 +39,28 @@ use common::*;
 /// sparse-empty-tile mix) — larger than the file's default `N_ITEMS` (10,000) so they exercise a
 /// genuinely multi-tile, multi-thousand-row request, not a token one.
 ///
-/// **§14 note, read before trusting what these tests exercise.** `SERIAL_FALLBACK_MAX_ROWS` rose
-/// from 200,000 to 500,000,000 in the post-B9 three-scale re-calibration (`viewport.rs`'s doc on
-/// that constant has the full argument). A fixture that reaches 500,000,000 rows is impractical to
-/// build inside a unit test (real minutes even on the fast pipeline), so `PARALLEL_HEADLINE_ITEMS`
-/// is deliberately NOT raised to match — these two tests now exercise the SERIAL branch on BOTH
-/// `compute_threads` configs, same as the file's dedicated
+/// **Read this before trusting what these tests exercise.** `SERIAL_FALLBACK_MAX_ROWS` is
+/// 500,000,000 (`viewport.rs`'s doc on that constant has the argument), and a fixture that reaches
+/// it is impractical to build inside a unit test — real minutes even on the fast pipeline — so
+/// `PARALLEL_HEADLINE_ITEMS` is deliberately NOT raised to match. **These two tests exercise the
+/// SERIAL branch on BOTH `compute_threads` configs**, same as the file's dedicated
 /// `..._below_the_serial_fallback_threshold` test, just at a different (still below-threshold)
-/// item count and tile shape. That is still a real, useful claim (engine wiring — mask, segment,
-/// underlay, cross-tile concatenation — behaves identically regardless of the configured thread
-/// count), just no longer "the parallel fan-out specifically", which is what their names and
-/// original docs claimed. The narrower property that DOES need re-proof at any new threshold value
+/// item count and tile shape. That is a real claim — engine wiring (mask, segment,
+/// underlay, cross-tile concatenation) behaves identically regardless of the configured thread
+/// count — but it is **not** "the parallel fan-out specifically", whatever their names suggest.
+/// The narrower property that does need re-proof at any new threshold value
 /// — that rayon's indexed collect preserves tile order regardless of pool size — is covered
 /// separately and cheaply by `viewport::tests::indexed_collect_of_tile_shaped_results_preserves_order_at_any_pool_size`
 /// in `src/viewport.rs`, decoupled from fixture size entirely.
 const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
 
-/// Compile-time check on the OPPOSITE relationship from before §14: these two tests deliberately
-/// stay below the (now much higher) threshold, so this catches either constant drifting past the
+/// These two tests deliberately stay **below** the threshold, so this catches either constant
+/// drifting past the
 /// other without the doc above being updated to match.
 const _: () = assert!(PARALLEL_HEADLINE_ITEMS < SERIAL_FALLBACK_MAX_ROWS);
 
 /// (a) A full-coverage session sees every point of the bbox; a small `k` caps the sampled points
-/// but never the count. (e) `matched == visible` everywhere (Phase 1 has no filters).
+/// but never the count. (e) `matched == visible` everywhere, there being no filter contract (⊘).
 #[test]
 fn a_full_coverage_session_sees_every_point_small_k_caps_sampling() {
     let tmp = TempDir::new().unwrap();
@@ -214,7 +212,7 @@ fn d_suppressing_an_item_drops_the_count_by_one() {
         .unwrap();
 
     // A WAL pre-populated with a suppression of source item 5 (established in the bundle, not
-    // the WAL — exercising `resolve_from_bundle`, the seam Task 10 left open).
+    // the WAL — exercising `resolve_from_bundle`).
     const SUPPRESS_SOURCE_ID: u64 = 5;
     let wal_path_b = tmp.path().join("wal_b.log");
     {
@@ -659,7 +657,7 @@ fn engine_open_seeds_the_allocator_from_the_manifest_high_water() {
     assert_eq!(engine.allocator_high_water(), N_ITEMS);
 }
 
-/// Task 9, Step 1: `Engine::item` inverts the wire `tessera_id` and locates its row via
+/// `Engine::item` inverts the wire `tessera_id` and locates its row via
 /// `Permutation::row_of` — an O(1) bijection lookup, never a linear scan of an identity column
 /// (contracts r6 replaced that column's contents with the opaque `tessera_id`, so a scan of it
 /// would search the wrong space entirely). Asserted against a source item whose signature-sorted
@@ -699,7 +697,7 @@ fn item_lookup_goes_through_the_permutation_not_a_column_scan() {
     );
 }
 
-/// Fix wave, Task 2: `Engine::item`'s `idset` argument is checked against the ONE generation this
+/// `Engine::item`'s `idset` argument is checked against the ONE generation this
 /// call loads, before inversion, and identically for every `id` — a real, visible id and one
 /// naming nothing both take the same `Err(StaleIdSet)` for the same mismatched idset
 /// (mirrors `item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing` in
@@ -835,8 +833,9 @@ fn an_unknown_id_and_an_invisible_one_are_indistinguishable() {
     assert_eq!(engine.item(&session, invisible_id, None).unwrap(), None);
 }
 
-/// CRITICAL C-5, closed rather than narrowed: the entity-space visibility test never constructs
-/// a `RowProjection` (the cached artefact that costs 9.5-19.3s at 10^9), for an unknown id or an
+/// The timing channel is closed rather than narrowed: the entity-space visibility test never
+/// constructs a `RowProjection` (the cached artefact that costs 9.5-19.3s at 10^9), for an unknown
+/// id or an
 /// invisible one, on a session that has never drawn a viewport.
 #[test]
 fn the_item_path_never_constructs_a_row_projection() {
@@ -910,7 +909,7 @@ fn drill_down_works_on_a_session_that_has_never_drawn_a_viewport() {
     );
 }
 
-/// CRITICAL N-3: a corrupt sidecar must surface as `Err`, never fold into `Ok(None)` (which
+/// A corrupt sidecar must surface as `Err`, never fold into `Ok(None)` (which
 /// would report "this item has no external id" for one that does, at a `200`). The digest check
 /// runs before Arrow decoding (`tessera_store::sidecar`'s `load_validated`), so corrupting any
 /// byte of the extent is sufficient to trip it, regardless of where in the file it lands.
@@ -941,7 +940,7 @@ fn a_sidecar_error_on_drill_down_is_an_error_not_a_missing_external_id() {
     );
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
-    // Now corrupt the extent's bytes on disk — the sidecar's lazy open (Task 8) verifies digest
+    // Now corrupt the extent's bytes on disk — the sidecar's lazy open verifies digest
     // and sortedness on first touch, so this failure is deferred until `item()` actually
     // resolves the visible entity's external id.
     let bundle = open_bundle(&bundle_root).unwrap();
@@ -963,8 +962,9 @@ fn a_sidecar_error_on_drill_down_is_an_error_not_a_missing_external_id() {
 }
 
 // `drill_down_resolves_an_external_id_for_a_post_build_entity` moved to `tests/write.rs` — see
-// that file's module doc. It was this file's only `accept_ingest` call site, and Task 3a changes
-// that method's shape; leaving it here would have obliged Track B to edit a file frozen for every
+// that file's module doc. It was this file's only `accept_ingest` call site, and the acceptance
+// API's shape belongs beside the rest of the write path rather than here — leaving it would put a
+// write-path assertion in a file frozen for every
 // track. The subject moved; the shared fixtures did not.
 
 /// S6: `Allocator::try_new`'s own doc calls it "the check that belongs at open", and `Engine::open`
@@ -1011,15 +1011,14 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
     );
 }
 
-/// Residency proxy: `Engine::open` must never touch the external-id sidecar (Task 8's per-extent
-/// laziness guarantee, contracts §0.3 deviation 9) — the real memory-residency measurement is
-/// Task 15's memo.
+/// Residency proxy: `Engine::open` must never touch the external-id sidecar (the per-extent
+/// laziness guarantee, contracts §0.3 deviation 9) — this is a proxy, not the memory-residency
+/// measurement itself.
 ///
-/// **The files are removed from disk before the engine opens.** `is_open()` alone was not a test
-/// of this: it only reports the sidecar's own `OnceLock` state, and `open_bundle`'s `verify_files`
-/// pass — which read and SHA-256'd every extent and the locator, the whole 18.9 GB sequential read
-/// the deviation exists to remove — never sets it. That defect was green under an `is_open()`
-/// assertion for a whole commit sequence. Deleting the files makes any read of them, at any layer,
+/// **The files are removed from disk before the engine opens**, and `is_open()` alone would not be
+/// a test of this: it reports only the sidecar's own `OnceLock` state, which a `verify_files` pass
+/// reading and SHA-256'ing every extent and the locator — the whole 18.9 GB sequential read the
+/// deviation exists to remove — never sets. Deleting the files makes any read of them, at any layer,
 /// a hard failure of `Engine::open`, which is the property actually claimed.
 #[test]
 fn engine_open_does_not_touch_the_sidecar() {
@@ -1085,7 +1084,7 @@ fn engine_open_does_not_touch_the_sidecar() {
 }
 
 /// Step 3: latency sanity at 2.4M items — a generous local gate (p99 < 50ms); the real 10ms gate
-/// is Task 16, at 10⁹. Builds `/tmp/tessera-2m4` from the real corpus if it is not already there
+/// is the exit measurement, at 10⁹. Builds `/tmp/tessera-2m4` from the real corpus if it is not already there
 /// (disk is tight — this bundle is meant to be reused across runs, not deleted after each one).
 ///
 /// `#[ignore]`d: this is a real-corpus, multi-second build plus a real timing measurement, not a
@@ -1107,7 +1106,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             pairs: PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet"),
             out: bundle_root.clone(),
             // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes, not
-            // coordinates (Task 8's `read_points` Morton branch requires this exact extent).
+            // coordinates (`read_points`'s Morton branch requires this exact extent).
             extent: Extent {
                 x_min: 0.0,
                 x_max: 65536.0,
@@ -1907,7 +1906,7 @@ fn warm_row_projection_cache_serves_output_identical_to_cold() {
     );
 }
 
-/// **The F1 canary — repaired, having been briefly worthless.**
+/// **The selection-overdraw canary.**
 ///
 /// Origin: `docs/evidence/memos/2026-07-30-f1-selection-overdraw.md`. The retired placeholder sampler
 /// asked `iter_range` for a tile's visible rows and kept the first `k`, and `iter_range` was eager —
@@ -1919,12 +1918,11 @@ fn warm_row_projection_cache_serves_output_identical_to_cold() {
 /// suggested replacement (`<= tiles_nonempty * k`) would be wrong: §7.2's served set is not a
 /// per-tile prefix of size `k`, and no *exact* evaluation of the threshold clause is O(k).
 ///
-/// **And the first re-pointing was a tautology**, which is why this comment is long. It asserted
-/// `select_rows_materialised == sigma_visible` while `viewport.rs` incremented *both* counters from
-/// the same `visible` variable, twenty lines apart, with `select.rs` having no knowledge of the
-/// probe at all. It could not fail for any behavioural change to selection. The counter is now
-/// incremented by `Selection::of` inside the loops that read rows, so the comparison is an
-/// observation against a reference rather than a variable against itself.
+/// **The available tautology, and why this comment is long.** Asserting
+/// `select_rows_visited == sigma_visible` proves nothing if `viewport.rs` increments *both*
+/// counters from the same `visible` variable — it cannot fail for any behavioural change to
+/// selection. The counter is incremented by `Selection::of` inside the loops that read rows, so the
+/// comparison is an observation against a reference rather than a variable against itself.
 ///
 /// **The fixture must be partial-coverage.** Under a full-coverage credential
 /// `sigma_visible == rows_in_ranges`, so "walked the mask" and "walked the raw row range" produce
@@ -1994,7 +1992,7 @@ fn f1_selection_visits_exactly_the_visible_set() {
     );
 }
 
-/// **§14.2 calibration report: `rows_in_ranges` must be mask-independent, and Task 6's tile-loop
+/// **`rows_in_ranges` must be mask-independent, and a tile-loop
 /// restructure silently broke that.**
 ///
 /// `rows_in_ranges`'s own doc (`timing.rs`) says it is `Σ range.len()` over resolved tiles —
@@ -2013,7 +2011,7 @@ fn f1_selection_visits_exactly_the_visible_set() {
 /// which tiles the grant leaves empty — and regardless of whether the request took the serial fold
 /// or the `pool.install` fan-out (`Engine::set_serial_fallback_max_rows_for_test` forces the
 /// latter on this otherwise-far-below-threshold fixture). `tiles_resolved` is checked alongside it
-/// per the same defect's "CHECK" brief — it turns out NOT to share the bug: it is counted once
+/// — it turns out NOT to share the bug: it is counted once
 /// over `tiles_for_bbox`'s output, in the serial prefix, before any per-tile mask check, so it was
 /// already mask-independent by construction.
 #[cfg(feature = "bench-timing")]
@@ -2108,7 +2106,7 @@ fn rows_in_ranges_is_mask_independent() {
 // made, so the outcome does not depend on scheduling at all. Genuinely interrupting a request
 // *mid-flight* inherently needs a second thread racing the engine call, and the engine call
 // itself is synchronous with no hook to pause it at a specific tile — adding one purely for a
-// test is exactly what the design brief calls out as not worth it. The second test instead
+// test is not worth what it costs. The second test instead
 // proves interruption indirectly and robustly: it compares the wall-clock time of a genuinely
 // interrupted run against this same run's own baseline for the full (uncancelled) sweep,
 // following the self-scaling wall-clock-ratio pattern this file and `tessera-server`'s test suite
@@ -2208,7 +2206,7 @@ fn absent_cancel_token_never_aborts() {
 /// bias, not a guarantee, and the assertions below hold either way — `cancelled_elapsed` is small
 /// whether the flip is caught pre-compose or mid-sweep. Proving the per-tile check specifically
 /// exists and is correctly placed is left to code review of `Engine::viewport`'s call sites, which
-/// the D-C design brief explicitly sanctions ("a unit-level check that the per-tile check exists
+/// is the accepted form here ("a unit-level check that the per-tile check exists
 /// ... is NOT worth adding API for ... rely on code review for the per-tile placement").
 ///
 /// **Self-scaling, not a sleep-based guess.** `baseline_elapsed` is this run's own measured time
@@ -2290,7 +2288,7 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Concurrency — D-D/D-F intra-request rayon parallelism (Task 6)
+// Concurrency — intra-request rayon parallelism
 // ---------------------------------------------------------------------------------------------
 
 /// THE HEADLINE TEST (D-D/D-F): the same fixture and the same request produce a byte-for-byte
@@ -2308,7 +2306,7 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 /// the serve-all and the heap/threshold branch, since θ is saturated but many tiles exceed the
 /// `k = 50` cap — gather, underlay) runs across more than one tile.
 ///
-/// **§14 fix round 1 note.** `SERIAL_FALLBACK_MAX_ROWS` rose to 500,000,000 in the post-B9
+/// **Threshold note.** `SERIAL_FALLBACK_MAX_ROWS` is 500,000,000 after the post-B9
 /// three-scale re-calibration; a fixture that reaches it is impractical to build at unit-test
 /// scale (`PARALLEL_HEADLINE_ITEMS`'s doc). Review correctly caught that this left the parallel
 /// branch with NO test coverage at all — a fixture-size argument that only reaches the serial
@@ -2316,7 +2314,7 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 /// `Engine::set_serial_fallback_max_rows_for_test` (`bench-timing`-gated, test-only, per-`Engine`
 /// — see that method's doc for the full argument): both engines below have their threshold forced
 /// to 0 before the request is issued, so BOTH genuinely take `pool.install`, differing only in
-/// worker count — exactly Task 6's original claim, restored. Under a build without
+/// worker count. Under a build without
 /// `bench-timing` (the override does not exist there at all, not even as an unreachable symbol)
 /// this test still runs and still asserts byte-equality, just of the serial fold on both configs
 /// — weaker, but not silently wrong, and every guard-rail invocation that matters for this claim
@@ -2366,7 +2364,7 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
         },
     );
 
-    // §14 fix round 1: force BOTH engines to take the genuine `pool.install` branch regardless of
+    // Force BOTH engines to take the genuine `pool.install` branch regardless of
     // this fixture's actual row count, by setting each one's threshold to 0
     // (`should_fold_serially(_, 0)` is unconditionally `false` — pinned directly by
     // `viewport::tests::should_fold_serially_honours_an_arbitrary_threshold_not_just_the_constant`
@@ -2420,7 +2418,7 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
 /// are genuinely empty while a real minority are not — the mix this test needs, produced by
 /// changing only the requested zoom, not by hand-building a new sparse corpus.
 ///
-/// **§14 fix round 1 note.** Same reasoning and the same fix as the headline test above: both
+/// **Threshold note.** Same reasoning and the same override as the headline test above: both
 /// engines' threshold is forced to 0 via `Engine::set_serial_fallback_max_rows_for_test` so both
 /// genuinely take `pool.install`, restoring "serial vs parallel", not "serial vs serial" — see the
 /// headline test's doc for the full argument. `PARALLEL_HEADLINE_ITEMS` (300,000) still matters
@@ -2459,7 +2457,7 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empt
         },
     );
 
-    // §14 fix round 1: force the genuine parallel branch — see the headline test's identical
+    // Force the genuine parallel branch — see the headline test's identical
     // comment for the full argument.
     #[cfg(feature = "bench-timing")]
     {

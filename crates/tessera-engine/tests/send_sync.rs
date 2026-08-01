@@ -1,6 +1,6 @@
-//! Task 3 (D-A) acceptance item: `tessera-server`'s viewer/session/control handlers now move
-//! their engine calls into `tokio::task::spawn_blocking`, whose closure bound is `'static +
-//! Send`. That makes `Engine: Send + Sync` load-bearing for the first time — every closure
+//! `tessera-server`'s viewer/session/control handlers move their engine calls into
+//! `tokio::task::spawn_blocking`, whose closure bound is `'static + Send`. That is what makes
+//! `Engine: Send + Sync` load-bearing — every closure
 //! captures a cloned `Arc<AppState>` (or an `Arc<SessionEntry>` wrapping a `Session`), and an
 //! `Arc<T>` is `Send` only if `T: Send + Sync`.
 //!

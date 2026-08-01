@@ -1,11 +1,11 @@
-//! Task 16, Step 1: criterion micro-benches at 2.4M items — the regression gate ahead of the
+//! Criterion micro-benches at 2.4M items — the regression gate ahead of the
 //! 10⁹ exit measurement (`scripts/bench_p99.py`, run once, out of scope for `cargo bench`).
 //!
 //! Reuses `/tmp/tessera-2m4` (built by `tessera-engine/tests/viewport.rs`'s ignored
 //! `latency_sanity_at_2_4m_p99_under_50ms` test, or rebuilt here if missing — shared-context
-//! constraint 7: 2.4M is the "validate" scale, 10⁹ is exit-only).
+//! 2.4M is the "validate" scale; 10⁹ is exit-only).
 //!
-//! Four groups, matching the brief:
+//! Four groups:
 //! 1. `fragment_build` — `tessera_authz::build_fragment` directly against the real postings, for
 //!    w ∈ {10², 10⁴} terms (the build path itself, not `Engine::authorise`'s cache wrapper —
 //!    `FragmentCache::get_or_build` memoises by (terms, auth hash), which would only measure the
@@ -196,11 +196,11 @@ fn bench_viewport(c: &mut Criterion) {
     // `tile_ranges_all` on this fixture (`docs/evidence/memos/2026-07-31-viewport-bench-regression.md`,
     // reproduced as the `f35/z8` cell of `probes/2026-08-01-two-axis-sweep/`).
     //
-    // The comment here used to claim "on the order of 300 tiles ... matching the brief's ~300 tiles
-    // sweep", which is wrong by 28x: 289 tiles is the *calibration sweep's* z8 shape (span 4,096),
-    // not this one. The error mattered — this bench is accidentally the only high-tile-count probe
-    // the project has, and while it was mislabelled as a ~300-tile shape nobody noticed that the
-    // serial/parallel calibration had never measured above 1,024 tiles. Keep the shape.
+    // **Not a ~300-tile shape**, however much it resembles the calibration sweep's z8 cell (289
+    // tiles, span 4,096) — this one is 28x that. The distinction is load-bearing: this bench is the
+    // only high-tile-count probe in the tree, and mislabelling it as ~300 tiles is how the
+    // serial/parallel calibration came to have measured nothing above 1,024 tiles unnoticed. Keep
+    // the shape.
     const ZOOM: u8 = 8;
     let bbox = [0.0, 0.0, 23170.0, 23170.0];
 

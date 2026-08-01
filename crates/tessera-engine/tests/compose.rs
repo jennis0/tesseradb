@@ -1,11 +1,11 @@
-//! Task 10, Step 1: I1 composition tests over a 10k(+5)-entity in-memory-ish fixture.
+//! I1 composition tests over a 10k(+5)-entity in-memory-ish fixture.
 //!
 //! Fixture: an identity permutation over `[0, 10_005)` (rows == entity ids, so row-space
 //! assertions can be read directly against entity ids), two granted terms (0, 1) whose postings
 //! cover entities `[0, 510)` — the base fragment — and entity ids `[10_000, 10_005)` reserved,
 //! unpermutted-in-the-bundle-sense but *do* have rows in this synthetic permutation, standing in
-//! for buffered entities that the brief asks to exercise against a synthetic permutation even
-//! though Phase 1 buffered items never really have one.
+//! for buffered entities. They are exercised against a synthetic permutation even though real
+//! buffered items never have a row, so that the branch that would handle one is covered.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -123,7 +123,7 @@ fn fragment_for(fx: &Fixture) -> Arc<FrozenFragment> {
 }
 
 /// Build a `FrozenFragment` handle and compose against `overlay`/`buffer`. Kept as a free
-/// function so every test composes through the exact same call the brief specifies.
+/// function so every test composes through the exact same call.
 fn compose_with(fx: &Fixture, overlay: &Overlay, buffer: &IngestBuffer) -> EffectiveMask {
     let fragment = fragment_for(fx);
 
@@ -461,7 +461,10 @@ fn g2_visible_runs_flatten_to_rows_in_range_on_both_routes() {
     diff_mask.for_each_visible_run(widen_row..widen_row + 1, |run| {
         saw_widen = saw_widen || (run.start..run.end).contains(&widen_row);
     });
-    assert!(saw_widen, "the widened (plus) row must be yielded by the fallback route");
+    assert!(
+        saw_widen,
+        "the widened (plus) row must be yielded by the fallback route"
+    );
 }
 
 #[test]
@@ -507,9 +510,9 @@ fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
     buffer.insert_row_with_terms(&row, terms);
 }
 
-/// Task 10, Step 3: restart-replay. Two entities are established purely through the WAL (ids
+/// Restart-replay. Two entities are established purely through the WAL (ids
 /// `10_002`/`10_003`, inside the synthetic permutation's buffered-with-a-row range), then driven
-/// through the exact cross-cause sequences the brief calls out — `delete → suppress →
+/// through the two cross-cause sequences that matter — `delete → suppress →
 /// unsuppress` and `delete → predicate` (with a term the session satisfies) — all *through the
 /// WAL*, not by calling `Overlay::apply` directly. The WAL handle is dropped and reopened (the
 /// "restart"), so the `Overlay`/`IngestBuffer` this test composes against are rebuilt from a
@@ -708,7 +711,7 @@ fn extension_only_term_never_passes_compose() {
     assert!(mask.check_structural_invariants());
 }
 
-/// Task 9, Step 1: the equivalence `visible_to` rests on, asserted rather than argued. For a
+/// The equivalence `visible_to` rests on, asserted rather than argued. For a
 /// fixture exercising every precedence branch — deleted, suppressed, evaluate pass, evaluate
 /// fail, a neutral overlay entry (delete → suppress → unsuppress leaves an entry present but not
 /// currently suppressed), a deny outside the fragment (no-op), buffered pass/fail, and plain

@@ -165,7 +165,13 @@ fn fold(c_theta: u64, heap: BinaryHeap<(u64, u32)>) -> u64 {
 }
 
 /// The retired mechanism: per-value iteration over the materialised range bitmap.
-fn general_per_value(mask: &EffectiveMask, ids: &[u64], r: Range<u32>, cut: u64, cap: usize) -> u64 {
+fn general_per_value(
+    mask: &EffectiveMask,
+    ids: &[u64],
+    r: Range<u32>,
+    cut: u64,
+    cap: usize,
+) -> u64 {
     let mut c_theta = 0u64;
     let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(cap + 1);
     for row in mask.rows_in_range(r).iter() {
@@ -207,7 +213,13 @@ fn general_runs(mask: &EffectiveMask, ids: &[u64], r: Range<u32>, cut: u64, cap:
 /// The rejected candidate: `next_many` into a stack buffer, then scan the buffer. Implemented
 /// locally — the engine deliberately carries no batch decoder, and this function is the evidence
 /// for why.
-fn general_batches(bitmap: &croaring::Bitmap, ids: &[u64], r: Range<u32>, cut: u64, cap: usize) -> u64 {
+fn general_batches(
+    bitmap: &croaring::Bitmap,
+    ids: &[u64],
+    r: Range<u32>,
+    cut: u64,
+    cap: usize,
+) -> u64 {
     const BUF: usize = 1024; // 256 and 4096 were also tried; the ordering never changed
     let mut c_theta = 0u64;
     let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(cap + 1);
@@ -288,7 +300,13 @@ fn general_mask_batches(
 /// A rejected tier-2 candidate: per-value cursor walk (`next()` per value, no buffer) over the
 /// decode source. Loses to the batch loop at every density — kept so the rejection stays
 /// re-runnable.
-fn general_cursor_values(mask: &EffectiveMask, ids: &[u64], r: Range<u32>, cut: u64, cap: usize) -> u64 {
+fn general_cursor_values(
+    mask: &EffectiveMask,
+    ids: &[u64],
+    r: Range<u32>,
+    cut: u64,
+    cap: usize,
+) -> u64 {
     let mut c_theta = 0u64;
     let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(cap + 1);
     let source = mask.decode_source(r.clone());

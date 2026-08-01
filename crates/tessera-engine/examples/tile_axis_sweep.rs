@@ -117,7 +117,7 @@ fn all_descriptors(bundle_root: &Path) -> Vec<String> {
 }
 
 /// `calibration_sweep`'s `--dense` grant, which is the bench's own `GrantShape::Random`
-/// construction (`tessera_bench::corpus::build_grant`) — the realistic one per §13/fix round 1.
+/// construction (`tessera_bench::corpus::build_grant`) — the realistic one.
 /// Duplicated rather than imported for the same layering reason `calibration_sweep` duplicates it.
 fn random_grant(all: &[String], w: usize, seed: u64) -> Vec<String> {
     use rand::seq::SliceRandom;
@@ -141,7 +141,7 @@ fn spread_descriptors(all: &[String], w: usize) -> Vec<String> {
 ///
 /// **The cost model's unit** ("O(containers touched), not O(cardinality)"). Transcribed from
 /// `tessera_bench::metrics::containers`, which is the canonical implementation and itself mirrors
-/// the Phase 0 probes' `containers(bm) = len(unique(asarray(bm) >> 16))`; duplicated here for the
+/// the probes' `containers(bm) = len(unique(asarray(bm) >> 16))`; duplicated here for the
 /// same layering reason `random_grant` above is duplicated — `tessera-bench` is a binary crate
 /// above this one and nothing may depend on it (`scripts/check-layers.sh`).
 fn containers(bitmap: &Bitmap) -> u64 {
