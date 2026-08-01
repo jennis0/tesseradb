@@ -290,8 +290,9 @@ pub struct ExecutorStats {
     /// the reason no window-size gauge was added: one append per entry and one fsync per window make
     /// that ratio the mean entries per window, over the whole life of the executor. Both are already
     /// on `/control/status`. It is the *ingest* mean only where ingest dominates: every `Change`
-    /// contributes one of each and pulls the ratio towards 1, since a deny is appended and fsynced
-    /// alone (`execute_change`) and stays out of the window until Task 9. Read it when diagnosing
+    /// contributes one of each and pulls the ratio towards 1, because a deny is appended and fsynced
+    /// alone in `execute_change` and does not join the window (`tessera_lifecycle::window` argues
+    /// why). Read it when diagnosing
     /// ingest throughput — a ratio pinned at ~1.0 under
     /// concurrent load means every window is closing with one entry in it, which is what a workload
     /// that re-ingests the same `external_id`s does (`CommitWindow::holds_external_id_of` closes the window
@@ -654,7 +655,8 @@ mod ack {
     /// Proof that a generation carrying a command's effect is live.
     ///
     /// [`super::Responder::ack`] cannot send a *successful* receipt without one, and the only
-    /// producers are the three named constructors below.
+    /// producers are the **two** named constructors below — the same two `scripts/check-layers.sh`
+    /// pins to this file.
     #[must_use = "a Published token exists to be handed to `ack`; dropping it discards the proof"]
     pub(super) struct Published(());
 
@@ -1546,6 +1548,14 @@ impl Executor {
     /// yet, and an item is established only at apply. So no deny naming a still-queued ingest's
     /// item can be submitted at all, and WAL append order still equals apply order.
     ///
+    /// **The cost of that, stated because it is a real operator-visible gap and nothing closes it.**
+    /// An operator issuing `suppress D` while D's ingest is still held gets **404 unknown external
+    /// id**; D then becomes visible, unsuppressed, and the operator has to notice and retry. The
+    /// commit window widened that interval from one command's fsync to a whole window. Putting deny
+    /// dispositions in the window would not close it either — the deny is refused in the handler and
+    /// never reaches a lane — so this is not an argument for the mixed window; it is an argument for
+    /// an operator who is revoking during a bulk load to verify rather than to trust a 404.
+    ///
     /// **Shutdown drains and executes; it does not discard.** The loop leaves only from
     /// `bell.recv()`, which sits *after* both `try_recv`s, so the disconnect iteration has already
     /// drained deny to empty and run one work item. Anything genuinely left behind — work queued
@@ -1635,10 +1645,9 @@ impl Executor {
     /// ## Deny priority is unchanged
     ///
     /// The deny lane is drained to empty before this is called and again as soon as it returns, and
-    /// **stage 2.1's window holds ingest only** (see `tessera_lifecycle::window`): lifecycle §5.1
-    /// permits denies to share the window, the plan assigns that to **Task 9**, and it cannot land
-    /// before Task 7b's partial-failure split, since a failed mixed window must apply its denies and
-    /// drop its ingest.
+    /// **the window holds ingest only**. Lifecycle §5.1 permits deny dispositions to share it; the
+    /// permission is declined, and the argument is at `tessera_lifecycle::window`'s module doc,
+    /// where a reader considering the mixed window will meet it.
     ///
     /// So a deny waits at most for the window in front of it — but only because **every close in
     /// this function yields**. The bound is not "the deny lane is drained around this call": this
@@ -1646,6 +1655,12 @@ impl Executor {
     /// by returning at each close. `a_deny_is_never_queued_behind_work_with_group_commit_disabled`
     /// holds the row-bound path (red the moment that arm loops instead) and
     /// `a_deny_is_never_queued_behind_a_conflict_forced_window_split` holds the conflict path.
+    ///
+    /// **Measured, because it is easy to attribute the bound to the wrong line**: swapping the two
+    /// drains in `Executor::run` so the deny lane is visited *after* the work pass rather than
+    /// before leaves all three of those tests green, and is not a defect — a deny still waits at
+    /// most one window either way. Draining the deny lane only once the work queue has gone *empty*
+    /// reds all three. The yield is the mechanism; the drain order is not.
     ///
     /// **The honest bound, stated in full** (Task 7b, replacing the plan's "≈ 2 ×
     /// `commit_window_max_age_ms`", whose two premises — an age bound, and denies joining the
@@ -1946,10 +1961,12 @@ impl Executor {
     ///
     /// An append or fsync failure **applies nothing**, in deliberate contrast to the deny path:
     /// applying un-fsynced ingest would make items appear and vanish across a crash, and lifecycle
-    /// §4's apply-anyway rule is written for `Delete`/`Suppress` only. Task 7b's rule 2 restates it
-    /// per window; the window here is ingest-only, so the rule is uniform over it and 7b's
-    /// *split* — denies apply, ingest does not — has no subject until Task 9 puts denies in the
-    /// window.
+    /// §4's apply-anyway rule is written for `Delete`/`Suppress` only. The window carries ingest
+    /// alone, so this rule is uniform over every entry in it and there is no per-entry split by
+    /// disposition to get wrong. That is one of the reasons deny dispositions stay out of the
+    /// window — see `tessera_lifecycle::window`'s module doc for the rest.
+    /// `an_ingest_append_failure_applies_nothing` holds this rule and
+    /// `an_unsuppress_append_failure_applies_nothing` holds the deny lane's op scope beside it.
     ///
     /// *One pre-existing property this widens and does not fix:* `wal::replay` replays every
     /// well-framed record, including records written **past** the last-fsynced offset — it does not
@@ -2220,9 +2237,12 @@ impl Executor {
         // Updated together in one critical section, so a `/control/changes` lookup and a
         // `/v1/items` drill-down can never disagree about the same item.
         let mut established_inverse = lock_recover(&self.live.established_inverse);
-        // Entries in vec order = append order = apply order (Task 7b rule 1): a mixed window must
-        // not replay in a different order than it applied, and the single vec is what makes that
-        // true by construction rather than by discipline.
+        // Entries are appended and applied in the same order, and nothing observable depends on
+        // which order that is. `CommitWindow::holds_external_id_of` forces a close rather than admit
+        // a second entry naming an external id the window already holds, and a row with no external
+        // id establishes nothing (the `if let Some` below), so no two entries in one window can
+        // write the same key. That is a stronger statement than "one vector, iterated once": it
+        // survives a refactor that reorders the vector, where the shape argument does not.
         for entry in closed.iter_mut() {
             let terms = std::mem::take(&mut entry.terms);
             for (row, row_terms) in entry.rows().iter().zip(terms) {

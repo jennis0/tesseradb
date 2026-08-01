@@ -55,16 +55,42 @@
 //! (`bitmap operations cost O(containers touched), not O(cardinality)`). Nothing here is wrong about
 //! that; it is simply not what this lever reaches.
 //!
-//! ## Ingest only, in stage 2.1
+//! ## The window carries ingest, and deny dispositions stay out of it
 //!
-//! Lifecycle §5.1 *permits* deny dispositions to share the window ("**may** share"); the stage-2.1
-//! plan assigns that to **Task 9**, and it cannot land before Task 7b's partial-failure split, since
-//! a failed mixed window applies its denies and drops its ingest — two dispositions, one swap. So
-//! this type carries ingest entries only, and the deny lane keeps its own path in the executor:
-//! drained to empty before each window is filled, so a deny still waits at most the window in front
-//! of it. [`WindowEntry`] becomes an enum when Task 9 gives it a second arm; landing an
-//! unconstructed `Change` variant now would assert in the type that denies are windowed when they
-//! are not, and leave a reader to guess which failure rule covers it.
+//! Lifecycle §5.1 *permits* deny dispositions to share the window — "**may** share", a permission
+//! rather than a requirement. **The permission is declined**, and the reason is that it buys almost
+//! nothing and is paid for in the machinery that keeps denies fail-closed. A reader who thinks the
+//! mixed window is the obvious next step should read this before building it.
+//!
+//! **What it would buy.** One fsync, and only for the deny. A deny concurrent with ingest pays its
+//! own append and fsync today; folded into a window it would ride the window's single fsync. The
+//! *ingest* path saves nothing at all — a change record joins an fsync that was going to happen
+//! anyway, so the write path's fsync count per ingested row is unchanged. Against measured deny
+//! acknowledgement latency (`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`) the saving is
+//! zero on a quiescent node, because there is no concurrent ingest to share a window with, and a few
+//! per cent under sustained ingest, where the wait is dominated by the in-flight work item.
+//!
+//! **What it would cost.** Three things, and each is larger than the fsync.
+//!
+//! 1. **A per-entry durability fold.** §4's apply-anyway rule — a deny whose durability write failed
+//!    is applied regardless, because a refusal that leaves an item visible is worse than an
+//!    under-durable hide — is scoped to `Delete` and `Suppress`. An `Unsuppress` applied without
+//!    durability re-exposes an item that replay still hides. A mixed window's failure handler must
+//!    therefore answer for every operation at once, per entry, over a log whose poisoning makes
+//!    "which entries reached the file" a position question rather than a batch one.
+//! 2. **An intra-window ordering hazard that does not exist otherwise.** A live `suppress` followed
+//!    by its `unsuppress` must not replay inverted. Both ride one first-in-first-out lane and are
+//!    each executed to completion with their own append, fsync, apply and swap, so submission order
+//!    is apply order at every step and there is no sequence to reorder. A window is what would
+//!    introduce one.
+//! 3. **A type that stops saying what is true.** [`WindowEntry`] is a struct. An unconstructed
+//!    `Change` variant would assert in the type that deny dispositions are windowed when they are
+//!    not, and leave a reader to guess which failure rule covers it.
+//!
+//! So this type carries ingest entries only, and the deny lane keeps its own path in the executor:
+//! drained to empty before each window is filled, so a deny waits at most for the window in front of
+//! it. That bound comes from the executor yielding at every window close, not from the order of the
+//! two drains — see `Executor::run_work_pass`.
 
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
