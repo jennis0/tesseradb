@@ -4,7 +4,7 @@
 
 **Goal:** Make the client issue one viewport-addressed request per view at a depth chosen to hit a global mark budget, and make the density underlay reach screen resolution — so that marks-on-screen is roughly constant across zoom, one client cannot shed itself with 429s, and the underlay is a density field rather than a mosaic.
 
-**Architecture:** Two workstreams that share one cause. **A** replaces deck.gl's `TileLayer` (tile-addressed, one fetch per tile) with a custom layer issuing one `POST /v1/viewport` per view, choosing depth from `d = log₄(B / (m_target · f))`; this is client-only and needs no server change. **B** raises the underlay to screen resolution, which needs an engine algorithm that is not per-sub-cell, a raster wire encoding, and a re-shaped availability guard. Both begin with measurement, because the two decisions that matter — the largest affordable viewport request, and the underlay route crossover — are currently unknown numbers.
+**Architecture:** Two workstreams that share one cause. **A** replaces deck.gl's `TileLayer` (tile-addressed, one fetch per tile) with a custom layer issuing one `POST /v1/viewport` per view, choosing depth from `d = log₄(B / (m_target · f))`; client-only, no server change. **B** raises the underlay to screen resolution — which Phase 0 showed needs **no new engine algorithm**, only a guard sized 128× larger and a negotiated dense-raster encoding, because "full resolution" is a property of the viewport and A is what supplies the tiles. Phase 0 measured both premises rather than assuming them, and cancelled a third of the plan.
 
 **Tech Stack:** Rust (`tessera-engine`, `tessera-server`, `tessera-wire`, `tessera-bench`), TypeScript (`clients/ts/core`, `clients/ts/viewer`), deck.gl 9.3, Arrow.
 
@@ -18,6 +18,50 @@
 - **British spelling.** Measurements go in `probes/`, not in prose from memory.
 - **Current constants**, read 2026-08-01: `k_min = 2`, `k_max_marks = 500`, `max_k = 5000`, `theta_target_marks = 16`, `max_underlay_offset = 4`, `max_underlay_cells = 8192`, `max_tiles_per_request = 262_144`.
 - **Fixtures**: `data/bench-fixtures/{2m4,1e8,1e9}`. The 1e9 opens in ~35 s.
+
+---
+
+## Phase 0 is complete, and it changed this plan. Read this first.
+
+Both measurement tasks ran on 2026-08-01 against all three fixtures.
+Results: `probes/2026-08-02-viewport-and-underlay/{viewport_cost,underlay_route}.md`.
+
+**Task 1 (viewport cost) — Phase 1 proceeds, with three corrections.**
+
+- The stop-condition was "≥500 tiles in under 150 ms". **4,096 tiles cost 7 ms at 2m4, 42 ms at
+  1e8, 227 ms at 1e9** for the broadest principal. Survives with 8× margin.
+- **Cost tracks the visible set touched, not the tile count — and falls by 6× from 1 tile to 256.**
+  More, finer tiles is *cheaper*. This inverts the intuition the tile-addressed design encodes and
+  means depth choice should prefer deeper for cost as well as for marks.
+- **`marks ≈ m_target · f · 4^d` holds to ~1%**, and is independent of corpus size — 66 k marks at
+  depth 6 whether the corpus is 2.4 M or 10⁹. A mark budget is a portable constant.
+- **150 ms is not universally achievable**: at 10⁹ with the broadest principal the floor is ~200 ms
+  at any depth. Do not promise it. Read it against the MVP's 1,276 ms for a *single* depth-0 tile.
+
+**Task 5 (underlay) — Tasks 5 and 6 are cancelled; the premise was wrong.**
+
+- **"Full resolution" is a property of the viewport, not the tile.** A view of *T* tiles over a
+  10⁶-pixel screen needs `10⁶/T` sub-cells per tile. At Phase 1's operating point (4,096 tiles)
+  that is **256 — offset 4, today's cap.** The MVP looked blocky because it fetched *one* tile, not
+  because the cap is wrong. **Phase 1 fixes the underlay's resolution as a side effect.**
+- **The per-sub-cell algorithm is affordable.** Full resolution on one tile is **4.9 ms, not the
+  0.5 s** the annotation extrapolated — and cost per cell *falls* 18× from offset 3 to 9, because
+  empty cells are nearly free. **No route chooser, no second algorithm, no `underlay.rs`.**
+- **A whole-screen underlay costs 179 ms against 74 ms without, at 1e8** — in the same request.
+- **A whole-screen underlay costs 466 ms against 222 ms without, at 1e9** — it roughly doubles the
+  request. Quarter resolution costs 287 ms, so resolution-versus-latency is a real trade the client
+  should expose rather than hard-code.
+- **The one thing that must change is `max_underlay_cells = 8,192`**, 128× too small for a screen's
+  worth (1,048,576). Both 1e8 and 1e9 sustain that cell count in one request, so it is supportable.
+- **The sparse encoding loses badly at scale, which settles it**: fill is 53% at 1e8 and **99.2% at
+  1e9**, so `(cell u64, count u64)` costs 16.6 MB where a dense `u16` raster costs 2.1 MB — 8×, and
+  growing with scale. But fill is **0.3%** for a narrow principal at high offset, so the encoding
+  must be **negotiated, not switched**: a dense raster would ship megabytes of zeros to the viewer
+  that needs them least.
+
+**Consequently:** Task 1 and Task 5 are done. Tasks 5–6 as originally written are **withdrawn**.
+Phase 2 is now Task 7 (guard + encoding) and Task 8 (client), and is much smaller than drafted.
+Two findings not previously in the plan are folded in as Task 2a and Task 7's sizing rule.
 
 ---
 
@@ -49,15 +93,14 @@ crates/tessera-bench/src/
   bin/viewport_sweep.rs           Task 1 harness
   bin/underlay_route.rs           Task 5 harness
 crates/tessera-engine/src/
-  underlay.rs                     NEW: both routes + the chooser (Task 6)
-  viewport.rs                     MODIFY: call into underlay.rs
+  viewport.rs                     MODIFY: encoding-selection plumbing only (Task 7)
 crates/tessera-wire/src/
   payload.rs                      MODIFY: raster sub-cell stream (Task 7)
 crates/tessera-server/src/
   config.rs                       MODIFY: max_underlay_cells reshaped (Task 7)
   viewer.rs                       MODIFY: pass the raster through
 clients/ts/core/src/
-  budget.ts                       NEW: depth choice from a mark budget (Task 2)
+  budget.ts                       NEW: depth choice + calibration (Tasks 2, 2a)
   types.ts, decode.ts             MODIFY: raster sub-cells (Task 8)
 clients/ts/viewer/src/
   viewportLayer.ts                NEW: the custom layer (Task 3)
@@ -68,9 +111,9 @@ clients/ts/viewer/src/
 
 ---
 
-## Phase 0 — Measure, because two decisions depend on numbers nobody has
+## Phase 0 — COMPLETE (2026-08-01). Retained for the harnesses and the method; rulings are summarised above.
 
-### Task 1: What does one large viewport request cost?
+### Task 1: What does one large viewport request cost? — **DONE**
 
 Workstream A is only viable if a single request carrying `B / m_target` tiles is fast enough to
 pan on. Nothing measured so far exceeds one tile per request.
@@ -287,6 +330,44 @@ and depth is the only lever. Tile count comes out independent of zoom and of how
 much is in view. Selects the request, never the response — I7."
 ```
 
+### Task 2a: Close the loop on the measured mark count
+
+Phase 0 found `marks ≈ m_target · f · 4^d` holds to ~1% at 2m4 and 1e9 but runs 8–18% under at 1e8,
+because clustering leaves tiles empty. The client should not carry a clustering model; it already
+has the true figure in every response.
+
+**Files:** `clients/ts/core/src/budget.ts`, `clients/ts/core/test/budget.test.ts`
+
+**Interfaces:** Produces `calibrate(previous: {predictedMarks: number; actualMarks: number}, next: BudgetInputs): BudgetInputs` — a proportional correction to `mTarget`, clamped and damped.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+it('corrects mTarget toward what the server actually served', () => {
+  // Predicted 65,536 but only 55,000 arrived: the effective per-tile yield is lower.
+  const next = calibrate({predictedMarks: 65_536, actualMarks: 55_000}, {...base, worldBbox: full});
+  expect(next.mTarget).toBeLessThan(base.mTarget);
+  expect(next.mTarget).toBeGreaterThan(base.mTarget * 0.5); // damped, not a jump
+});
+
+it('is a no-op when the prediction was right', () => {
+  const next = calibrate({predictedMarks: 65_536, actualMarks: 65_536}, {...base, worldBbox: full});
+  expect(next.mTarget).toBeCloseTo(base.mTarget, 6);
+});
+
+it('never lets a pathological response drive mTarget to zero or infinity', () => {
+  const starved = calibrate({predictedMarks: 65_536, actualMarks: 0}, {...base, worldBbox: full});
+  expect(starved.mTarget).toBeGreaterThan(0);
+  const flooded = calibrate({predictedMarks: 1, actualMarks: 10 ** 7}, {...base, worldBbox: full});
+  expect(Number.isFinite(flooded.mTarget)).toBe(true);
+});
+```
+
+- [ ] **Step 2: Run it, watch it fail. Step 3: implement with damping and clamps. Step 4: green. Step 5: commit.**
+
+Damping matters: depth is an integer, so an undamped correction oscillates between two depths on
+alternate frames — visible as the map flickering between densities while the user does nothing.
+
 ### Task 3: The viewport layer
 
 Replaces `TileLayer`. One request per view.
@@ -326,7 +407,13 @@ Behaviour:
 
 1. Debounce `onViewStateChange` by ~120 ms (a pan emits per frame; the request must not).
 2. Compute the world bbox from the viewport, clamp to `[0, WORLD_SIZE]²`.
-3. `chooseDepth({budget, mTarget: meta.selection.thetaTargetMarks, worldBbox, maxTiles})`.
+3. `chooseDepth({budget, mTarget: meta.selection.thetaTargetMarks, worldBbox, maxTiles})`, with
+   `mTarget` carried forward through `calibrate` (Task 2a) rather than re-read each time.
+3a. **Never request depth < 3.** Phase 0's decisive cost finding: at 10⁹ depths 0–2 cost
+   0.8–1.3 s *regardless of how few tiles they ask for*, because cost tracks the visible set and
+   not the tile count — while depth 4–6 costs ~200 ms and returns three orders of magnitude more
+   marks. There is nothing to lose by skipping the shallow end and ~1 s per request to gain. A
+   floor of 3 is not a tuning choice; it is avoiding the only expensive region measured.
 4. Abort the in-flight request; issue one `client.viewport(token, {slice, zoom: depth, bbox: dataBbox, underlayOffset})`.
 5. On success, store the whole result; render one `ScatterplotLayer` over `worldPositions`.
 6. On abort, do nothing. On failure, record it (the existing failure surface).
@@ -363,87 +450,76 @@ what a user will notice first.
 
 ## Phase 2 — Workstream B: the full-resolution underlay
 
-Gated on Task 5's ruling. Engine and wire changes; do not start before Phase 1 lands, because the
-raster's natural shape is per-viewport and Phase 1 is what makes requests per-viewport.
+**Much smaller than drafted.** Phase 0 cancelled the algorithm work: the existing per-sub-cell
+route is affordable at full resolution, and the resolution problem is caused by the tile count,
+which Phase 1 fixes. What remains is a guard and an encoding.
 
-### Task 5: Which underlay algorithm, and where do they cross?
+Do not start before Phase 1 lands — the raster's natural shape is per-viewport, and Phase 1 is what
+makes requests per-viewport.
 
-**Files:**
-- Create: `crates/tessera-bench/src/bin/underlay_route.rs`
-- Create: `probes/2026-08-02-viewport-and-underlay/underlay_route.md`
+### Task 5: ~~Which underlay algorithm~~ — **DONE**; see `probes/2026-08-02-viewport-and-underlay/underlay_route.md`
 
-Two candidate routes for computing a tile's sub-cell counts at offset *s*:
+### Task 6: ~~Implement the chosen route~~ — **WITHDRAWN**
 
-- **A — per-cell (today).** `count_range` per sub-cell, `4^s` of them. Cost ≈ `4^s ×` (containers
-  touched per cell). Independent of how many items are visible; grows exponentially in *s*.
-- **B — single-pass histogram.** Iterate the mask's set bits (or containers) over the tile's row
-  range once, bucketing each row into its sub-cell by Morton prefix. Cost ≈ O(cardinality in
-  range), or O(containers) if a container can be bucketed wholesale. Independent of *s*; grows
-  with the visible count.
+Task 5 measured the existing route at full resolution and found it affordable: 4.9 ms per tile at
+offset 9, and 179 ms (1e8) / 466 ms (1e9) for a whole screen's worth. There is no second algorithm
+to write, no route chooser, and no `underlay.rs`.
+
+The differential-test requirement is withdrawn with the task it guarded — but its *reasoning* moves
+to Task 7: **a density field that is subtly wrong still looks like a density field**, so any change
+to what the underlay emits needs exact-equality against the current output, never an eyeball.
+
+### Task 7: Raise the guard, and add a negotiated dense raster
+
+**Files:** `crates/tessera-server/src/config.rs`, `crates/tessera-wire/src/payload.rs`,
+`crates/tessera-server/src/viewer.rs`, `crates/tessera-engine/src/viewport.rs` (request plumbing only).
 
 **Interfaces:**
-- Produces: a crossover surface over `(visible_in_tile, offset)` and a ruling on the chooser
-  predicate — which must be computable **before** doing the work, from quantities the engine
-  already has (`range_cardinality` is free per §2.6 step 6).
+- Consumes: `SubCellCount` as today.
+- Produces: a request field selecting the sub-cell encoding (`sparse` default, `raster` opt-in), and a raster stream `(cell_origin u64, offset u8, counts u32[])` with geometry implied by `(origin, offset)`.
 
-- [ ] **Step 1: Implement both routes behind one function, measure both on the same inputs**
+- [ ] **Step 1: Raise `max_underlay_cells`, and say what it does not bound**
 
-Sweep `offset ∈ {2,3,4,6,8,9}` × `visible_in_tile ∈ {10, 10², …, 10⁷}`, on real fixture tiles
-rather than synthetic masks — Roaring's container structure is the whole cost model and a
-synthetic bitmap will not reproduce it.
+Default to **1,048,576** (one screen's worth; both 1e8 and 1e9 sustain it in one request). The doc
+comment must carry the finding that makes it dangerous to read as a cost bound: **the same cell
+budget costs `medium` 46 ms of CPU and `everything` 2.9 s at 1e9.** The guard bounds cells, not
+cost, and sizing it is a deployment decision about the broadest principal served — §8.1's
+per-principal support surprise in a third place. Refuse rather than clamp, per `config.rs`'s
+discipline. Test the default and the refusal.
 
-- [ ] **Step 2: Write the ruling**
+- [ ] **Step 2: Write the failing byte-identity test first**
 
-`underlay_route.md` answers:
-1. The crossover curve, and whether it is monotone enough to express as a predicate on
-   `(visible, offset)`.
-2. **Is full resolution (offset 9) affordable at all** on a dense 1e9 tile, by either route? If
-   neither is, say so plainly and propose the fallback: a **capped** resolution tied to screen
-   pixels rather than a fixed offset — which is still a large improvement on 32-px blocks.
-3. What the total-cells guard should count once the encoding is a raster.
+The un-negotiated payload must stay byte-identical, including the zero-trailing-bytes case. Assert
+it against a golden captured before the change.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Add the raster encoding behind negotiation**
 
-### Task 6: Implement the chosen route in the engine
+Sparse stays the default and the only thing an existing client can receive. `u16` counts saturate
+rather than wrap, and saturation must be *reported* — a silently clamped count is a wrong masked
+aggregate, which is an I2 problem, not a rendering one. If saturation cannot be reported cleanly,
+use `u32` and accept 4.2 MB.
 
-**Files:** Create `crates/tessera-engine/src/underlay.rs`; modify `viewport.rs`.
+- [ ] **Step 4: Exact-equality test across encodings**
 
-- [ ] Move today's per-cell loop out of `viewport.rs` into `underlay.rs` **unchanged first**, with
-  its existing tests still green — a pure refactor commit, so the algorithm change is reviewable
-  on its own.
-- [ ] Add route B behind the chooser from Task 5.
-- [ ] **A differential test is mandatory**: both routes must produce byte-identical sub-cell
-  output on every fixture tile tested. This is the one place a wrong answer is invisible — a
-  density field that is subtly wrong still looks like a density field.
-- [ ] Commit.
+Sparse and raster must describe the identical multiset of `(cell, count)` for the same request.
+This is Task 6's withdrawn differential requirement, relocated.
 
-### Task 7: The raster wire encoding
+- [ ] **Step 5: Commit**
 
-**Files:** `crates/tessera-wire/src/payload.rs`, `crates/tessera-server/src/{config,viewer}.rs`.
-
-- [ ] Add a raster sub-cell stream: schema `(cell_origin u64, offset u8, counts uint32[])` with
-  geometry implied, negotiated by a request field so **the sparse encoding stays byte-identical
-  for anyone who does not ask** (the module's own additive rule).
-- [ ] Reshape `max_underlay_cells`: it currently guards a sparse pair count. Decide from Task 5's
-  ruling (3) whether it becomes a byte bound or a per-request cell bound, and refuse rather than
-  clamp, per `config.rs`'s established discipline.
-- [ ] Tests: byte-identity of the un-negotiated payload; the raster round-trips; the guard refuses.
-- [ ] Commit.
-
-### Task 8: Client raster decode and texture upload
+### Task 8: Client raster decode and viewport-wide colouring
 
 **Files:** `clients/ts/core/src/{types,decode}.ts`, `clients/ts/viewer/src/underlay.ts`.
 
-- [ ] Decode the raster into a typed array; keep the sparse path for compatibility.
-- [ ] Upload as a texture with **nearest** filtering (already the rule — interpolating exact
-  counts invents densities), `eq_hist` applied over the whole viewport raster rather than per tile,
-  which also removes the per-tile colour discontinuity the current build has.
+- [ ] Decode the raster into a typed array; keep the sparse path.
+- [ ] Upload as a texture with **nearest** filtering (interpolating exact counts invents densities).
+- [ ] Apply `eq_hist` over the **whole viewport raster** rather than per tile — which also removes
+  the per-tile colour discontinuity the MVP has, since each tile currently equalises against its own
+  distribution.
+- [ ] Expose the resolution/latency trade measured in Phase 0 (offset 3 ≈ 287 ms, offset 4 ≈ 466 ms
+  at 1e9) as a control, rather than hard-coding one of them.
 - [ ] Re-run the orientation check from the MVP (correlate the underlay grid against the served
-  points' own grid; as-is must beat transposed) — cheap, and it is what caught the bit order last
-  time.
+  points' grid; as-is must beat transposed). Cheap, and it is what caught the bit order last time.
 - [ ] Commit.
-
----
 
 ## Self-Review
 
@@ -458,11 +534,21 @@ the constraint that θ is untouched is stated in the Global Constraints.
 per-view caching; epochs; the tile-addressed GET alias's scale caveat, which is a documentation
 change to make once Task 3 has proved the alternative.
 
-**Known risk, stated rather than hidden.** Task 1 can kill Phase 1's design — if a large viewport
-request is slow, one-request-per-view trades 429s for a stalled pan. Task 1 Step 3 names the
-threshold (500 tiles / 150 ms) and the fallback (coalesced tile groups) rather than leaving the
-implementer to discover it. Similarly Task 5 Step 2 (2) allows the honest answer "full resolution
-is not affordable" and names the fallback.
+**The known risk was retired by measurement.** As drafted, Task 1 could have killed Phase 1 (a slow
+large request trades 429s for a stalled pan) and Task 5 could have answered "full resolution is not
+affordable". Both ran: the first survives with 8× margin, the second cancelled its own follow-on
+task. What replaces the risk is a scoping correction — **~200 ms, not 150 ms, is the floor at 10⁹
+for the broadest principal**, and the client should show that latency rather than promise it away.
+
+**Residual risks now that Phase 0 is in.**
+- *The underlay doubles the request at 10⁹* (222 → 466 ms at full resolution). Task 8 exposes the
+  resolution control rather than hard-coding it, but a deployment serving broad principals may want
+  the underlay off by default at that scale. Not decided here.
+- *`max_underlay_cells` bounds cells, not cost*, and the same budget differs by ~60× in CPU between
+  a narrow and a broad principal. Task 7 Step 1 documents it; it is not solved by it.
+- *`u16` raster counts can saturate.* Task 7 Step 3 requires saturation be reported or the type
+  widened — a silently clamped count is a wrong masked aggregate, an I2 problem rather than a
+  rendering one.
 
 **Type consistency.** `chooseDepth`/`tilesInBbox`/`BudgetInputs`/`DepthChoice` are defined once in
 `budget.ts` and used under those names in Tasks 3 and 4. `tileToRequestBbox` is *not* used by the
