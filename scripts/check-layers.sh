@@ -119,12 +119,34 @@ fi
 #    "properly fixing" the race. `.swap(` on a slice or a `Vec` would false-positive here; there is
 #    no such call in this crate today, and a mechanical `.swap(i, j)` is a one-line exclusion to
 #    argue at review, which is the right cost for keeping the publishing form covered.
+#    ONE EXEMPTION, AND IT COUNTS ITSELF (controller, 2026-08-01, integrating Tracks B and C).
+#    Track C's `Engine::publish_geometry` lands a CAS in `session.rs` in the same stage that this
+#    rule forbids one. Both are right: C needs a publication seam because nothing else in 2.1 moves
+#    `segments_version`, so without it the drain list is untestable; B needs the rule because a
+#    second *unconditional* publisher is S2. Rather than exempt the file — which would cover every
+#    future line in it, including the `store` form that is the actual defect — the exemption is a
+#    marker on the single line, and the rule FAILS ON A SECOND MARKER. So the cheap escape (add
+#    another) is exactly as visible as the honest fix, which is what an exemption has to be to not
+#    become a precedent. Lifecycle §1.3 already requires 2.2's flush to publish through the
+#    lifecycle thread; the marker names that as its own retirement condition.
 if grep -rnE '\.(store|swap|rcu|compare_and_swap)\(' --include=*.rs crates/tessera-engine/src/ \
      | grep -v '^crates/tessera-engine/src/write\.rs:' \
-     | grep -v 'Ordering::'; then
+     | grep -v 'Ordering::' \
+     | grep -v 'PUBLISHER-EXEMPT'; then
   echo "FAIL: a generation is published outside crates/tessera-engine/src/write.rs."
   echo "      Stage 2.1 made the executor thread the sole publisher (Track C finding S2); a second"
   echo "      publisher reintroduces the lost-update race. Submit a Command instead (lifecycle §1.3)."
+  fail=1
+fi
+
+exempt_count=$(grep -rc 'PUBLISHER-EXEMPT' --include=*.rs crates/tessera-engine/src/ \
+                 | awk -F: '{n+=$2} END {print n+0}')
+if [ "$exempt_count" -ne 1 ]; then
+  echo "FAIL: expected exactly 1 PUBLISHER-EXEMPT marker in tessera-engine/src, found $exempt_count."
+  echo "      The single exemption is Engine::publish_geometry's CAS (session.rs), and it retires"
+  echo "      when stage 2.2's flush publishes through the lifecycle thread (§1.3). A second marker"
+  echo "      is a second publisher: submit a Command instead. Removing the last one means the"
+  echo "      exemption is spent -- delete this check with it."
   fail=1
 fi
 

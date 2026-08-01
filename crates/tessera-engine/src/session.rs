@@ -711,7 +711,28 @@ impl Engine {
                 overlay: Arc::clone(&live.overlay),
                 buffer: Arc::clone(&live.buffer),
             });
-            let seen = arc_swap::Guard::into_inner(self.generation.compare_and_swap(&live, next));
+            // The one generation publication outside `write.rs`, and it is temporary. Task 3a made
+            // the executor thread the sole publisher — structurally, to close Track C's own finding
+            // S2, where a `load_full` + `store` loses a concurrent geometry publication and strands
+            // the LIVE generation on the drain list. `check-layers.sh` rule 1 enforces that, and
+            // the marker on the statement below is its single permitted exception. The rule
+            // **counts** those markers and fails on a second, so the cheap escape (add another) is
+            // exactly as visible as the honest fix.
+            //
+            // **Why it is tolerable in 2.1, and only in 2.1.** Nothing in `tessera-server` calls
+            // `publish_geometry`; it exists because nothing else in this stage moves
+            // `segments_version`, so without it Task 4's drain list is untestable. It is a CAS in a
+            // retry loop, not an unconditional store, so it cannot itself *lose* a publication —
+            // but `WritePath`'s stores can still clobber it, which is S2 exactly, and is why the
+            // retire below reads the identity observed live rather than trusting this swap.
+            //
+            // **The 2.2 obligation.** Lifecycle §1.3 already requires the flush's swap-only
+            // publication step to run on the lifecycle thread. When flush lands, this becomes a
+            // `Command` the executor performs and the marker retires with it. Leaving a second
+            // publisher in place because "the CAS is safe" reintroduces the race against every
+            // publication the executor makes concurrently — the failure S2 named, and the one this
+            // exemption is borrowing against.
+            let seen = arc_swap::Guard::into_inner(self.generation.compare_and_swap(&live, next)); // PUBLISHER-EXEMPT(2.2)
             if Arc::ptr_eq(&live, &seen) {
                 break live;
             }
