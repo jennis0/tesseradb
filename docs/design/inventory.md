@@ -73,5 +73,5 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
 | `slices-and-multi-table.md` | Provisional — under review |  |
-| `system-architecture.md` | Normative — r7 | 17 |
+| `system-architecture.md` | Normative — r8 | 25 |
 | `tile-addressed-integration.md` | Provisional — under review |  |

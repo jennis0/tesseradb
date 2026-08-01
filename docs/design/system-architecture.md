@@ -225,8 +225,9 @@ bundle/
       terms/postings.arrow         CSR: one tagged record per term, portable Roaring
       terms/deltas-<n>.arrow       per-flush posting deltas
       terms/pairs.parquet          the exploded (entity_id, term_id) relation; optional,
-                                   off by default, read only by build machinery and the
-                                   DuckDB oracle
+                                   off by default, read only by build machinery and by
+                                   the reference oracle, which derives masks from it by
+                                   direct scan rather than from postings
       entities/external-ids-<k>.arrow   caller external ID → entity, byte-sorted extents
       entities/ext-locator.u32          entity → ordinal in the above, for drill-down
       slices/<slice_id>/
@@ -612,5 +613,7 @@ r1 was reviewed by two independent reviewers with no stake in the draft — one 
 - **Three obligations the rewrite dropped.** Removing r5's sealed maintenance reader was right — it does not exist — but compaction is still specified, still rewrites columns unmasked, and the rule that its output may never reach a response left the document with it; it returns as a forward obligation inside §6.7's marker, to be proved by test. `/v1/meta`'s label vocabulary regains its **C11** citation, the leak-register row justifying the one data-derived field on the one untrusted metadata verb. The decision list regains a provenance line.
 - **A dangling dependency and a misleading example.** §4.1's rollback story and §6.2's WAL-retirement rule both rest on a retention window that has no knob and no mechanism; the config regeneration correctly dropped `wal_retention`, leaving the reliance unmarked. §4.1 now marks it and §6.2 cites that marker. The example's `max_k = 500` is labelled illustrative against a default of 1000.
 - **A deferral restored.** The mask-build tier alternative — plan §14's entity index-ordinal split — left the deferral list while §9's fragmentation metric, which exists to detect its trigger, stayed and said so.
+
+**r8** folds the dependency register into §3 from the implementation plan, which is being retired. This document owns crates, packaging and dependencies, so the register belongs with the component structure rather than in a plan. Every row was checked against the workspace manifests and `clients/ts/` before it was written down, and six of the eleven turned out to be choices rather than dependencies: `wasmtime`, OPA/Cedar, the label grammar, the JVM label oracle, the DuckDB mask oracle and the thin-client tile grid are marked ⊘. The plan's frozen-view *verification obligation* on the `croaring` binding is **discharged** and now reads as a requirement met, with the FFI-shim fallback kept because it is what makes the dependency survivable rather than critical. The plan's deepscatter rejection is not folded in — it is [decision 0022](../decisions/0022-deepscatter-rejected.md), cited from the renderer row where a reader would otherwise ask.
 
 *Raised, not settled.* Three items want an owner's ruling and are deliberately left as they stand: the presence registry and the session pin's rate of change each want an Appendix C row; `README.md`'s marker table needs this document's ⊘ markers folded in, which is an edit to a file this revision did not touch.
