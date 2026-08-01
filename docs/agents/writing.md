@@ -10,7 +10,7 @@ argument, an engineer evaluating the approach, a contributor arriving cold. Writ
 
 Write what the system **is** and **why it is that way**. Not how it came to be that way.
 
-A reader wants to know that deletion denies retire on an epoch ledger and suppressions never
+A reader wants to know that deletion denies retire against a stamp ledger and suppressions never
 retire at all, and why those differ. They do not want to know that this was revision 3's
 correction to revision 1, that it was found in review, or which phase built it.
 
@@ -18,10 +18,10 @@ On the rare occasions that history is worth keeping, it belongs in `docs/decisio
 interleaved with the explanation. A document whose paragraphs are half archaeology forces every
 reader to separate the two, every time.
 
-> ✗ "r3 replaced r1's blanket retirement epoch, because for suppressions that was fail-open. §5.1
+> ✗ "r3 replaced r1's blanket retirement stamp, because for suppressions that was fail-open. §5.1
 > was then amended in r4 once flush became the visibility mechanism."
 >
-> ✓ "A suppression retires only when it is lifted. Assigning it a retirement epoch — as deletion
+> ✓ "A suppression retires only when it is lifted. Assigning it a retirement stamp — as deletion
 > denies have — would eventually expire the entry and make the item visible again."
 
 The second sentence keeps the whole reason. It just does not narrate.

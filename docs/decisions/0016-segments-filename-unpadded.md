@@ -30,12 +30,15 @@ exactly the combination that turns a malformed name into a silent step-past inst
 
 ## What remains
 
-One code change, on the fail-closed side: the reader must reject a non-canonical name. Tracked as
-an issue against the serving-surface epic.
+One code change, on the fail-closed side: the reader must reject a non-canonical name — issue #57.
 
 Note the bound on this whole class of failure is §2.3's `readyz` freshness gate, which is
 specified and unbuilt — so a replica stepped down for any reason currently serves stale
-indefinitely with no signal. That is tracked separately.
+indefinitely with no signal. That is issue #58.
+
+*(Both issue numbers were added on 2026-08-01. This decision originally said the work was
+"tracked", which was not yet true — the issues did not exist. Recorded rather than quietly
+corrected, because a decision asserting tracking that does not exist is how work disappears.)*
 
 ## Evidence
 

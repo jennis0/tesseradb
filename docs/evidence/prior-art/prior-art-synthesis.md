@@ -1,6 +1,6 @@
 # Prior Art: Synthesis and Build-vs-Buy Verdict
 
-**Companion to** `architecture.md` (current at r14; written against r5, with a second research pass on 2026-07-26 — see section 9).
+**Companion to** `architecture.md` (written against r5 and current at r14 when this survey was made; the design is now well beyond it — written against r5, with a second research pass on 2026-07-26 — see section 9).
 **Based on** four independent research reviews: `prior-art-1-search-engines.md`, `prior-art-2-visual-analytics.md`, `prior-art-3-databases.md`, `prior-art-4-authorization-disclosure.md`.
 **Date:** 2026-07-25.
 
