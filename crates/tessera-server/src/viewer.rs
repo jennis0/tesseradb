@@ -1,5 +1,6 @@
 //! The viewer plane (R5): `GET /v1/meta`, `POST /v1/viewport`, `POST /v1/items/{tessera_id}`,
-//! plus `/healthz`/`/readyz`. Bearer auth is a session token (Task 11's `Session::token`).
+//! plus `/healthz`/`/readyz`. Bearer auth is a session token (`Session::token`), minted by the
+//! session plane's `/session/authorise`.
 
 use std::sync::Arc;
 
@@ -23,7 +24,7 @@ use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    // MVP client spec §3: absent `serve.dev_cors_origins` mounts nothing, so the seam is
+    // The dev-only browser seam: absent `serve.dev_cors_origins` mounts nothing, so the seam is
     // structurally absent from this router rather than present and configured empty.
     let dev_cors = crate::cors::dev_layer(&state.dev_cors_origins);
     let router = Router::new()
@@ -73,12 +74,12 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
-/// D-C: flips a [`CancelToken`] on drop. Created before the admission-gate acquire so it lives
+/// Flips a [`CancelToken`] on drop. Created before the admission-gate acquire so it lives
 /// for the whole `viewport` handler body, and held as a local there — axum dropping the handler's
 /// future (the only signal this transport gives for "the client went away": there is no explicit
 /// disconnect callback) drops this guard too, which is what flips the flag the `spawn_blocking`
-/// closure's engine call is polling. Only a *clone* of the token moves into that closure (D-C);
-/// this guard keeps the original.
+/// closure's engine call is polling. Only a *clone* of the token moves into that closure; this
+/// guard keeps the original.
 ///
 /// **Disarmed on the normal path**, just before the handler constructs its response, so a
 /// completed request's own guard drop (at function return) does not flip a token nobody is
@@ -112,10 +113,11 @@ async fn meta(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Important 1 fix: this handler previously had no bearer check at all, against R5's "Bearer
-    // auth on every plane" — it disclosed bundle extents/slices/declared-scalar schema to anyone
-    // who could reach the viewer listener. The viewer plane's bearer is a session token (this
-    // module's doc), so a valid, unexpired session is required here exactly as for `/v1/viewport`.
+    // Authenticated like every other route on this plane (R5: bearer auth on every plane). It is
+    // not a public endpoint: it discloses the bundle's extents, slices and declared-scalar schema,
+    // so an unauthenticated `/v1/meta` would hand the corpus shape to anyone who can reach the
+    // viewer listener. The bearer here is a session token, so a valid, unexpired session is
+    // required exactly as for `/v1/viewport`.
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
     state.authenticated_session(token)?;
 
@@ -124,7 +126,7 @@ async fn meta(
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
-        // contracts §2.2/§2.6 r6: the idset. The identity KEY never appears
+        // contracts §2.2/§2.6: the idset. The identity KEY never appears
         // in any response, log line or metric label (I10, Appendix C C17) -- this is the idset
         // only, which is meaningless without the key and is what `POST /v1/items` checks against.
         "idset": meta.idset,
@@ -136,8 +138,9 @@ async fn meta(
             "y_max": meta.quantisation.y_max,
         },
         "declared_scalars": meta.declared_scalars.iter().map(|s| serde_json::json!({"name": s.name, "arrow_type": s.arrow_type})).collect::<Vec<_>>(),
-        // Reference Sheet R5: filter operand names are `[]` in Phase 1 (no filters — scope
-        // constraint 11).
+        // Reference Sheet R5: the filter operand names a client may use.
+        // ⊘ Specified, not implemented: no filter contract exists yet, so this is always `[]` and a
+        // client must not read an empty list as "this deployment declined to expose its filters".
         "filter_operands": Vec::<String>::new(),
         // §7.2's selection constants. A client cannot read mark count as density without knowing
         // where the floor and the cap sit, so these are a genuine client need rather than test
@@ -149,22 +152,21 @@ async fn meta(
         // `zoom = 0`, full-bbox request already returns as `visible` in a single call (§7.1).
         // Already obtainable, exactly.
         //
-        // `max_k` is published for the same reason and was missing *(owner decision, 2026-08-01,
-        // on a finding from the conformance track)*. Contracts §3.2 tells the client the effective
-        // cap is `min(k, max_k, k_max_marks)` and then handed it only one of the two ceilings, so a
-        // client could not learn its own request bound, and an independent implementation could not
-        // tell a **cap-clause** refusal from a **machine-ceiling** one. That distinction is exactly
-        // the one §7.2 insists on keeping -- the overplot ceiling and the machine ceiling are
-        // deliberately not the same knob, because raising the machine ceiling on transport evidence
-        // must not silently dissolve §7.2's cap clause. A client that cannot see both cannot honour
-        // it either.
+        // `max_k` is published for the same reason. Contracts §3.2 tells the client the effective
+        // cap is `min(k, max_k, k_max_marks)`, so publishing only one of the two ceilings would
+        // leave a client unable to learn its own request bound, and an independent implementation
+        // unable to tell a **cap-clause** refusal from a **machine-ceiling** one. That distinction
+        // is exactly the one §7.2 insists on keeping -- the overplot ceiling and the machine
+        // ceiling are deliberately not the same knob, because raising the machine ceiling on
+        // transport evidence must not silently dissolve §7.2's cap clause. A client that cannot see
+        // both cannot honour it either.
         "selection": {
             "k_min": selection.k_min,
             "k_max_marks": selection.k_max_marks,
             "max_k": state.max_k,
             "theta_target_marks": selection.theta_target_marks,
             "max_underlay_offset": selection.max_underlay_offset,
-            // Published for exactly the reason `max_k` was (owner decision, 2026-08-01): a client
+            // Published for exactly the reason `max_k` is: a client
             // that chooses its own request *depth* — the mark-budget work — is choosing a tile
             // count, and without this it cannot tell whether a refusal was its own arithmetic or
             // the deployment's ceiling. It discloses nothing: a deployment constant, identical for
@@ -197,7 +199,8 @@ struct ViewportReq {
 /// already framed by `viewport_ipc`, the pin to echo in `x-tessera-pin`, and the timing figures
 /// `x-tessera-stage-ns` needs — computed inside the closure since they describe work done there
 /// (`arrow_serialise_ns`) or by the engine call it wraps (`timings`). Response/header
-/// construction is deliberately NOT here (D-A): that stays on the reactor.
+/// construction is deliberately NOT here: that stays on the reactor, since it neither blocks nor
+/// costs measurable CPU.
 struct ViewportOutcome {
     bytes: Vec<u8>,
     pin: PinId,
@@ -205,8 +208,8 @@ struct ViewportOutcome {
     arrow_serialise_ns: u64,
 }
 
-/// The engine call through Arrow IPC framing (D-A scope for this handler): everything CPU-bound
-/// or file-IO-bearing, run inside `spawn_blocking`. Takes `&AppState`/`&Session` by reference —
+/// The engine call through Arrow IPC framing: everything CPU-bound or file-IO-bearing in this
+/// handler, run inside `spawn_blocking`. Takes `&AppState`/`&Session` by reference —
 /// the caller owns both as `'static` values moved into the closure, so a reference borrowed for
 /// the closure's own body lifetime is all this needs.
 fn run_viewport(
@@ -242,17 +245,18 @@ fn run_viewport(
     let mut xs = Vec::with_capacity(n);
     let mut ys = Vec::with_capacity(n);
     for point in &out.points {
-        // I10, strengthened (contracts r6): no entity id is available to leak here — the engine
-        // never gathers one on this path (see `tessera_engine::viewport::PointOut`'s doc). The
-        // wire identity is `tessera_id` directly, carried through unchanged; there is no
-        // per-session translation left to do (`tessera-wire`'s `HandleTable` is retained for
-        // Phase 3's node handles, not this path — see its module doc).
+        // I10 (entity ids never cross the trust boundary) is upheld structurally: no entity id is
+        // available to leak here, because the engine never gathers one on this path (see
+        // `tessera_engine::viewport::PointOut`'s doc). The wire identity is `tessera_id` directly,
+        // carried through unchanged; there is no per-session translation left to do
+        // (`tessera-wire`'s `HandleTable` is retained for node handles, which are not on this path
+        // — docs/decisions/0032-delete-the-dead-handle-table.md).
         point_ids.push(point.tessera_id.raw());
         xs.push(point.x);
         ys.push(point.y);
     }
 
-    // Task 8: names come from `out.scalar_names`, populated by `Engine::viewport` from the SAME
+    // Names come from `out.scalar_names`, populated by `Engine::viewport` from the SAME
     // generation it already loaded for this request — not a second `state.engine.meta()` call.
     // That second call would `load_full()` the generation pointer again, against lifecycle
     // §1.1's "exactly once, at request start"; the names are identical either way (same
@@ -325,49 +329,46 @@ async fn viewport(
         return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
     }
 
-    // D-C: the cancellation token and its drop-guard, created before the admission-gate acquire
-    // below so the guard's lifetime spans the whole handler — a disconnect during the (D-B) queue
+    // The cancellation token and its drop-guard, created before the admission-gate acquire below
+    // so the guard's lifetime spans the whole handler — a disconnect during the queue
     // wait is already free (dropping the `admit().await` future releases nothing that was ever
     // acquired), but creating the guard here rather than after admission keeps one token identity
     // for the entire request and costs nothing extra.
     let cancel = CancelToken::new();
     let mut cancel_guard = CancelGuard::new(cancel.clone());
 
-    // D-B: the two-stage admission gate. `admit()` sheds with `ApiError::Backpressure` (429) if
-    // the outer slots semaphore has no permit to `try_acquire`, or if the inner compute semaphore
-    // does not free one within `admission_timeout_ms`. `admission_us` is the queue wait —
-    // `x-tessera-admission-us` below (D-E).
+    // The two-stage admission gate. `admit()` sheds with `ApiError::Backpressure` (429) if the
+    // outer slots semaphore has no permit to `try_acquire`, or if the inner compute semaphore does
+    // not free one within `admission_timeout_ms`. `admission_us` is the queue wait, reported below
+    // as `x-tessera-admission-us`.
     let (gate_permits, admission_us) = state.compute_gate.admit().await?;
 
-    // Task 16: server-side timing for the exit-criteria measurement (bench_p99.py, plan §5).
-    // Not a wire-format field — an observability-only response header, reported to microseconds
-    // so the <10ms exit gate can be checked without relying on end-to-end (client-observed)
-    // latency, which also includes HTTP/TCP/loopback overhead outside the engine's control.
+    // Server-side timing, for the latency gate `scripts/bench_p99.py` checks. Not a wire-format
+    // field — an observability-only response header, reported to microseconds so the gate can be
+    // checked without relying on end-to-end (client-observed) latency, which also includes
+    // HTTP/TCP/loopback overhead outside the engine's control.
     //
-    // D-E: this clock starts AFTER admission, so it keeps its pre-Task-4 meaning of "server
-    // compute, excluding queueing" — bench baselines and the <10 ms exit gate both read it that
-    // way. Note: pre-Task-4 (Task 3, D-A) the value could include a real blocking-pool scheduling
-    // wait, because nothing bounded how many closures could be in flight on tokio's (512-thread)
-    // blocking pool at once. `start` is still taken here, before `spawn_blocking` — a scheduling
-    // wait still lands inside `server_us`, not `x-tessera-admission-us` — but the gate now BOUNDS
-    // that wait rather than removing it from this measurement: at most `compute_admission`
-    // closures are ever admitted at a time, far under the pool's size, so in practice the wait is
-    // ~0 and this header is effectively compute-only again. `admission_us` carries only the gate
-    // wait itself (`admit()`'s own two-stage acquire), never any blocking-pool scheduling delay.
+    // **The clock starts AFTER admission**, so `x-tessera-server-us` means "server compute,
+    // excluding queueing"; bench baselines read it that way. `start` is nonetheless taken before
+    // `spawn_blocking`, so a blocking-pool scheduling wait lands inside `server_us` rather than in
+    // `x-tessera-admission-us`. The gate bounds that wait rather than removing it: at most
+    // `compute_admission` closures are admitted at a time, far under the blocking pool's
+    // 512-thread size, so in practice it is ~0 and this header is effectively compute-only.
+    // `admission_us` carries only the gate wait itself (`admit()`'s own two-stage acquire).
     let start = std::time::Instant::now();
 
-    // D-A: the engine call through Arrow IPC framing is CPU-bound (and, on a cold row-projection
+    // The engine call through Arrow IPC framing is CPU-bound (and, on a cold row-projection
     // or fragment build, file-IO-bearing) with no `.await` of its own — run synchronously here it
     // would monopolise this reactor thread for the whole viewport, starving every other request
     // sharing this process's tokio worker threads, `/healthz` included. `spawn_blocking` moves it
     // to tokio's blocking-thread pool instead.
     //
     // Closure capture: `state` is a cloned `Arc<AppState>` (cheap; `Engine: Send + Sync` is what
-    // makes this sound — see this task's report), `entry` is the already-cloned
-    // `Arc<SessionEntry>` `authenticated_session` returned, `req` is moved in whole (its fields
-    // were only ever borrowed above), and `gate_permits` (D-B) moves in so both permits release
+    // makes this sound), `entry` is the already-cloned `Arc<SessionEntry>`
+    // `authenticated_session` returned, `req` is moved in whole (its fields were only ever
+    // borrowed above), and `gate_permits` moves in so both permits release
     // only when this closure returns — correct accounting even if the client has disconnected.
-    // D-C: only a *clone* of `cancel` moves in — `cancel_guard` keeps the original outside the
+    // Only a *clone* of `cancel` moves in — `cancel_guard` keeps the original outside the
     // closure, on the reactor, where a client disconnect can flip it. If the client disconnects
     // (axum drops this whole handler future), `cancel_guard` drops and flips the flag; the engine
     // call inside the closure observes it at its next checkpoint and returns
@@ -383,7 +384,7 @@ async fn viewport(
     .await
     .map_err(map_join_error)??;
 
-    // D-C: normal path reached — disarm the guard so its own drop (at this function's return,
+    // Normal path reached — disarm the guard so its own drop (at this function's return,
     // whichever branch below) does not pointlessly flip a token nobody downstream is reading any
     // more. See `CancelGuard`'s doc for why leaving it armed here would be harmless, not merely
     // wrong-looking.
@@ -428,23 +429,19 @@ async fn viewport(
 /// Field order is part of the contract with `scripts/bench_*.py` and `tessera-bench`; append
 /// only, never reorder.
 ///
-/// **D-D/D-E (Task 6): several of these fields changed meaning, not shape.** The header's byte
-/// format, field order and count are unchanged (out of contract, free to redefine per this
-/// module's doc, but there was no need to). What changed is what the per-tile fields —
-/// `count_ns`, `select_ns`, `gather_ns`, `underlay_ns`, and the row counters alongside them —
-/// **represent** once `serve.compute_threads > 1`: cross-worker CPU-time sums over the parallel
-/// tile sweep, not a partition of this response's wall clock — see
+/// **The per-tile fields are CPU-time sums, not a partition of wall clock.** Once
+/// `serve.compute_threads > 1`, `count_ns`, `select_ns`, `gather_ns`, `underlay_ns` and the row
+/// counters alongside them are summed across the workers of the parallel tile sweep — see
 /// `tessera_engine::StageTimings`'s doc for the full reasoning. A consumer summing this row's
 /// duration fields and comparing the total against `x-tessera-server-us` will see the sum run
-/// *ahead* of wall time under real parallelism, by roughly the achieved concurrency — that is
-/// correct, not a discrepancy to chase. `arrow_serialise_ns` itself is unaffected: response
-/// assembly (this handler) stays serial regardless of the engine's own `compute_threads`.
+/// *ahead* of wall time under real parallelism, by roughly the achieved concurrency: that is
+/// correct, not a discrepancy to chase. `arrow_serialise_ns` is unaffected — response assembly
+/// (this handler) stays serial regardless of the engine's `compute_threads`.
 ///
-/// **That cross-worker-sum behaviour only holds above the calibration serial fallback.** Below
-/// `tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS`, the tile sweep folds serially at ANY
-/// `compute_threads` value — the `pool.install` fan-out this paragraph describes does not run at
-/// all for those requests — so below that line, these per-tile fields still partition the
-/// request's own wall clock, exactly as before D-D/D-F.
+/// **That only holds above the calibrated serial fallback.** Below
+/// `tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS` the tile sweep folds serially at ANY
+/// `compute_threads` value — the `pool.install` fan-out does not run at all for those requests —
+/// so below that line these per-tile fields do partition the request's own wall clock.
 #[cfg(feature = "bench-timing")]
 fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Option<String> {
     // **Append-only.** This is a positional CSV, so inserting a field anywhere but the end silently
@@ -503,10 +500,10 @@ impl ColumnBuf {
 }
 
 /// Transpose each point's `Vec<ScalarOut>` (row-major, per `tessera_engine::viewport`'s doc) into
-/// column-major buffers named from the bundle's declared-scalar schema. Phase 1's build always
-/// writes every declared scalar for every row, so this alignment-by-position holds; if it didn't,
-/// there is nothing authorisation-relevant at stake in getting a name wrong here (scalars are
-/// disclosed to a viewer only after the mask has already admitted the row).
+/// column-major buffers named from the bundle's declared-scalar schema. The build always writes
+/// every declared scalar for every row, so this alignment-by-position holds; if it didn't, there is
+/// nothing authorisation-relevant at stake in getting a name wrong here (scalars are disclosed to a
+/// viewer only after the mask has already admitted the row).
 fn build_scalar_columns(
     points: &[tessera_engine::PointOut],
     declared_names: &[String],
@@ -560,7 +557,7 @@ struct ItemReq {
     #[allow(dead_code)]
     #[serde(default)]
     pin: Option<PinDto>,
-    /// Optional (contracts §2.2/§2.6 r6, owner ruling): the durable identifier is `external_id`,
+    /// Optional (contracts §2.2/§2.6): the durable identifier is `external_id`,
     /// so a conforming consumer has no stale `tessera_id` to present in the first place, and
     /// rotation/repartitioning are deliberate breaking changes rather than scheduled hygiene. A
     /// caller that omits this accepts that a `tessera_id` from a past idset may now name a
@@ -573,40 +570,39 @@ struct ItemReq {
 struct ItemResp {
     scalars: Vec<serde_json::Value>,
     /// Base64, present only when the item has a caller-supplied external id. This is the only
-    /// place a caller external id appears on the viewer plane (D4, D6) — the conformance
-    /// byte-scanner's viewer-plane sweep must be scoped to exclude this endpoint's response.
+    /// place a caller external id appears on the viewer plane — the conformance byte-scanner's
+    /// viewer-plane sweep must be scoped to exclude this endpoint's response.
     #[serde(skip_serializing_if = "Option::is_none")]
     external_id: Option<String>,
 }
 
-/// `POST /v1/items/{tessera_id}`.
+/// `engine.item`'s sidecar read plus the scalar/external-id shaping that follows it — the CPU-bound
+/// and file-IO-bearing part of `/v1/items/{tessera_id}`, run inside `spawn_blocking`.
+///
+/// ## The three ordering rules this arm structure encodes
 ///
 /// **The idset check runs before inversion and is entity-independent** — identical work and an
-/// identical `409` for every presented `tessera_id`, so it opens no channel (contracts §2.2, C4).
-/// Fix wave, Task 2 finding: the check itself now runs *inside* `Engine::item`, against the same
-/// generation snapshot that call already loads for the lookup that follows — not a separate
-/// `state.engine.meta()` call ahead of it, which cost this request a second, independent
-/// `generation.load_full()` (lifecycle §1.1). See [`tessera_engine::Engine::item`]'s doc for the
-/// full argument; the observable ordering (before inversion, entity-independent, same 409 body)
-/// is unchanged by moving where in the call stack it runs.
+/// identical `409` for every presented `tessera_id`, so it opens no channel (contracts §2.2, and C4
+/// in the architecture's leak register). It runs *inside* `Engine::item`, against the same
+/// generation snapshot that call already loads for the lookup that follows, rather than against a
+/// separate `state.engine.meta()` ahead of it: lifecycle §1.1 requires exactly one
+/// `generation.load_full()` per request, and a second one for a request that is nominally one
+/// lookup breaks it. See [`tessera_engine::Engine::item`]'s doc for the full argument.
 ///
 /// **`404 unknown` is returned identically** for "no such id" and "exists but is not visible to
-/// this principal" (owner ruling; contracts §3.2): one `Ok(None)` arm, one `ApiError::Unknown`
-/// construction, no branch-dependent logging or metrics anywhere on this path — a second
-/// construction site with a different detail string, or a `tracing`/metric call inside only one
-/// of the two `None`-shaped cases, would be exactly the oracle this rule exists to prevent.
+/// this principal" (contracts §3.2): one `Ok(None)` arm, one `ApiError::Unknown` construction, no
+/// branch-dependent logging or metrics anywhere on this path — a second construction site with a
+/// different detail string, or a `tracing`/metric call inside only one of the two `None`-shaped
+/// cases, would be exactly the oracle this rule exists to prevent.
 ///
 /// **The store-backed `Err` arm can never be reached by anything an attacker chooses.**
-/// `Engine::item` inverts `id` (a pure function, no I/O) and tests visibility in entity space —
-/// the *same* O(1) work for an id naming nothing and an id naming an invisible item (Critical
-/// C-5, closed not narrowed) — before it ever touches the external-ID sidecar. A store/IO failure
-/// can therefore only be raised for an item already established visible, so a probing client can
-/// see a `500` only for an item it can already see; it can never use `500` vs `404` to learn
-/// whether an id exists. **A future edit that moves the sidecar read earlier than the visibility
-/// test would silently turn this status into a visibility oracle — don't.**
-/// `engine.item`'s sidecar read plus the scalar/external-id shaping that follows it (D-A scope
-/// for this handler) — run inside `spawn_blocking`. See [`item`]'s doc for why the ordering
-/// (visibility test before any sidecar touch) must not move.
+/// `Engine::item` inverts `id` (a pure function, no I/O) and tests visibility in entity space — the
+/// *same* O(1) work for an id naming nothing and an id naming an invisible item — before it ever
+/// touches the external-ID sidecar. A store/IO failure can therefore only be raised for an item
+/// already established visible, so a probing client can see a `500` only for an item it can already
+/// see; it can never use `500` vs `404` to learn whether an id exists. **A future edit that moves
+/// the sidecar read earlier than the visibility test would silently turn this status into a
+/// visibility oracle — don't.**
 fn run_item(
     state: &AppState,
     session: &tessera_engine::Session,
@@ -618,10 +614,10 @@ fn run_item(
         // moved inside `Engine::item`. A corrupt or unreadable sidecar (`Store`/`Io`) is a SERVER
         // fault, not "no such item" -- `.ok().flatten()` here would serve a 200 with
         // `external_id: null` and call a digest mismatch a missing field -- fail-open, and
-        // precisely what Task 8's typed errors exist to prevent (Critical N-3). See this
-        // function's doc for why the store-backed arm is unreachable by identifier choice.
+        // precisely what the typed error surface exists to prevent. See this function's doc for
+        // why the store-backed arm is unreachable by identifier choice.
         Err(e) => return Err(map_engine_error(e)),
-        // Owner ruling: identical 404 for "no such ID" and "exists but not visible". ONE arm, one
+        // Identical 404 for "no such ID" and "exists but not visible". ONE arm, one
         // message, no branch above it -- a second construction site with a different detail
         // string would be the oracle this rule prevents.
         Ok(None) => return Err(ApiError::Unknown("unknown".to_string())),
@@ -657,23 +653,24 @@ async fn item(
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
     let entry = state.authenticated_session(token)?;
 
-    // D-B: gated the same way as `/v1/viewport` (see its handler's comment) — `admit()` sheds
-    // with 429 `backpressure` on either stage.
+    // Gated the same way as `/v1/viewport` (see its handler's comment) — `admit()` sheds with 429
+    // `backpressure` on either stage.
     let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
 
-    // D-A: `engine.item` checks `req.idset` (if the caller sent one) against the ONE generation
-    // it loads, inverts the id (pure, no IO), then reads the external-id sidecar for a visible
-    // item — file IO, moved off the reactor. Fix wave, Task 2 finding: the idset check used to
-    // run here, on the reactor, before `admit()`, against a SEPARATE `state.engine.meta()` call
-    // — a second, independent `generation.load_full()` ahead of `engine.item`'s own (lifecycle
-    // §1.1's one-load-per-request invariant, broken for a request that is nominally one lookup).
-    // Moving it inside `engine.item` costs this one check its previous free ride ahead of the
-    // compute-admission gate — a stale-idset request now holds a gate permit for the length of
-    // the `spawn_blocking` call rather than being rejected before `admit()` runs — which is the
-    // trade lifecycle §1.1's invariant asks for; see `Engine::item`'s doc for the full argument.
+    // `engine.item` checks `req.idset` (if the caller sent one) against the ONE generation it
+    // loads, inverts the id (pure, no IO), then reads the external-id sidecar for a visible item —
+    // file IO, moved off the reactor.
+    //
+    // The idset check is inside that call rather than here on the reactor ahead of `admit()`,
+    // because checking it here would need a second, independent `generation.load_full()` via
+    // `state.engine.meta()`, against lifecycle §1.1's one-load-per-request rule. The cost of
+    // keeping the rule is that a stale-idset request holds a gate permit for the length of the
+    // `spawn_blocking` call rather than being rejected before `admit()` runs; see `Engine::item`'s
+    // doc for the full argument.
+    //
     // Closure capture: `state` moved in directly (nothing after this `.await` needs the handler's
     // own copy), `entry` moved (already an `Arc<SessionEntry>`), `raw`/`req.idset` are `Copy`,
-    // `gate_permits` (D-B) moves in so both permits release only when this closure returns.
+    // `gate_permits` moves in so both permits release only when this closure returns.
     let resp = tokio::task::spawn_blocking(move || {
         let _gate_permits = gate_permits;
         run_item(&state, &entry.session, raw, req.idset)

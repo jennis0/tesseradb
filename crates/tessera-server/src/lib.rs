@@ -1,5 +1,5 @@
 //! `tessera-server` — the three HTTP planes (viewer/session/control), fail-closed config, and the
-//! `tessera serve` entry point (task-13 brief).
+//! `tessera serve` entry point.
 //!
 //! [`prepare`] does everything that can fail *before* any listener is bound: load `tessera.toml`
 //! (fail-closed on a missing `[disclosure]` section — design §7.5/§2.3), open the engine (bundle
@@ -36,8 +36,8 @@ pub struct Prepared {
     pub config: Config,
 }
 
-/// Task 5: refuse to start unless each cache bound admits at least `expected_concurrent_sessions`
-/// entries at the measured per-entry size.
+/// Refuse to start unless each cache bound admits at least `expected_concurrent_sessions` entries
+/// at the measured per-entry size.
 ///
 /// **Why a refusal and not a warning.** The miss/hit cost ratio here is 10⁵–10⁷: a projection miss
 /// is `RowProjection::new`, *measured* in seconds (the 10⁹ warm-up viewport is 10.7 s), and every
@@ -47,25 +47,18 @@ pub struct Prepared {
 /// multi-second build the gate saturates and *warm* requests are shed too. So the bound has to be
 /// right, and the only place to insist on it is before the listener binds.
 ///
-/// **A policy correction, because the earlier version of this comment was written to be cited and
-/// was wrong.** It claimed "there is no policy that fixes that (random replacement gets ≈ C/N and
-/// nothing gets more)" — i.e. that no policy which caches each miss beats zero under a pure cycle.
-/// That is false. LRU (and FIFO) get exactly zero because the victim is always the very next key to
-/// be requested; but **MRU**, and the cold-end/midpoint insertion the Task 5 design considered and
-/// declined, both cache each miss and still retain a *fixed* resident set of about `C − 1` of the
-/// `N` keys, because the entries at the protected end are never chosen as victims. Simulate cold-
-/// end insertion at `C = 3`, `N = 5`: keys 1 and 2 survive every cycle and the hit rate settles at
-/// 2/5, against LRU's exactly 0.
-///
-/// **The refusal still stands, on grounds that do not depend on the wrong claim.** `(C − 1)/N` is
+/// **A replacement policy is not the alternative to this refusal, and the arithmetic is worth
+/// stating so it is not proposed as one.** LRU (and FIFO) get exactly zero on a cycle longer than
+/// the cache because the victim is always the very next key to be requested. **MRU**, and the
+/// cold-end/midpoint insertion this cache declines, do better: both cache each miss and retain a
+/// *fixed* resident set of about `C − 1` of the `N` keys, because entries at the protected end are
+/// never chosen as victims — simulate cold-end insertion at `C = 3`, `N = 5` and keys 1 and 2
+/// survive every cycle, settling at a hit rate of 2/5 against LRU's exactly 0. But `(C − 1)/N` is
 /// not a rescue at this cost ratio: the unlucky `N − C + 1` keys pay the full multi-second rebuild
 /// on *every* pan, holding an admission permit while they do it, so the gate saturation this
 /// refusal exists to prevent happens anyway — it merely spares some sessions. A configuration whose
 /// defence is "most sessions are fine" is one to refuse at startup, not to soften with a policy,
-/// and `CacheStats::young_evictions` alarms if the regime is entered another way. The correction is
-/// recorded rather than dropped because the design records this as a deliberate non-choice "with
-/// its arithmetic, so it is not rediscovered as an oversight", and arithmetic that is wrong is
-/// worse than none.
+/// and `CacheStats::young_evictions` alarms if the regime is entered another way.
 ///
 /// The relation is asserted in two places for two different reasons, which is deliberate rather
 /// than duplication: `config::defaults_satisfy_task_5s_cache_relation` pins it for the *defaults*
@@ -73,10 +66,10 @@ pub struct Prepared {
 /// *operator's* file at startup. Both read [`config::MEASURED_PROJECTION_BYTES_AT_1E9`], which is
 /// where the figure's provenance is documented.
 ///
-/// **Both caches, not just the projection one** (Task 0 gate, F11): they hold the same-shaped
-/// Roaring object at the same measured size, and a validation covering one leaves the other free to
-/// be set to a collapsing value. The two bounds' entry counts are governed by different quantities
-/// — sessions against distinct grant sets — and their constants say so.
+/// **Both caches, not just the projection one**: they hold the same-shaped Roaring object at the
+/// same measured size, and a validation covering one leaves the other free to be set to a
+/// collapsing value. The two bounds' entry counts are governed by different quantities — sessions
+/// against distinct grant sets — and their constants say so.
 ///
 /// **This is a floor, not a sizing.** `DEFAULT_ROW_PROJECTION_CACHE_BYTES` carries a further 2× for
 /// entry-count headroom (a second slice, or a generation swap's transient duplicate); passing this
@@ -140,9 +133,6 @@ fn validate_cache_bounds(config: &Config) -> Result<(), BoxError> {
 /// Load config and open the engine. Fails closed: a missing `[disclosure]` section, an
 /// unreadable bundle, or a WAL that fails the positional CRC rule all return `Err` here, before
 /// any socket is ever bound.
-///
-/// (This doc belongs to `prepare`. Task 5 inserted [`validate_cache_bounds`] between the two and
-/// left it heading that private function, so the crate's entry point had no doc at all.)
 pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     let config = config::load(config_path)?;
     validate_cache_bounds(&config)?;
@@ -156,20 +146,16 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         max_underlay_offset: config.max_underlay_offset,
         max_underlay_cells: config.max_underlay_cells,
         max_tiles_per_request: config.max_tiles_per_request,
-        // D-D: the same knob D-B validated at parse time (`serve.compute_threads`, refused at
-        // `0` — `ConfigError::ComputeThreadsZero`) sizes `Engine::open`'s shared rayon pool —
-        // the parallel-sweep CPU bound. Distinct from `compute_admission` (below), which bounds
-        // in-flight *requests*, not CPU, and defaults to a multiple of this number (D-B retune,
-        // `COMPUTE_ADMISSION_MULTIPLIER`): admitted requests may now oversubscribe this pool
-        // during their serialise phase, deliberately, because small requests are latency-bound on
+        // `serve.compute_threads` — validated at parse time, refused at `0`
+        // (`ConfigError::ComputeThreadsZero`) — sizes `Engine::open`'s shared rayon pool, the
+        // parallel-sweep CPU bound. Distinct from `compute_admission` (below), which bounds
+        // in-flight *requests*, not CPU, and defaults to a multiple of this number
+        // (`COMPUTE_ADMISSION_MULTIPLIER`): admitted requests may oversubscribe this pool during
+        // their serialise phase, deliberately, because small requests are latency-bound on
         // scheduling rather than CPU.
         compute_threads: config.compute_threads,
-        // Lifecycle §2.2's two pin bounds, landed as config keys by the seam (Task 0b) and given
-        // their consumer's constructor by the Task 0 gate (F3): `Engine::open` hands both to
-        // `PinManager::new`, which holds them until Task 4 builds the drain list they bound.
-        // Wired now rather than at Task 4 because Track C owns `pins.rs` and this file is
-        // `[shared]` — a knob that reaches its consumer only via a later track's edit to a shared
-        // construction site is a knob that quietly does nothing in the meantime.
+        // Lifecycle §2.2's two pin bounds. `Engine::open` hands both to `PinManager::new`, which
+        // holds them for the drain list they bound.
         pin_ttl_secs: config.pin_ttl_secs,
         pins_per_session_max: config.pins_per_session_max,
     };
@@ -180,58 +166,52 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         Passthrough::new(),
         engine_config,
     )?;
-    // Phase 2 stage 2.1, Task 3a: move the WAL onto its own thread and open the two write queues.
-    // Started here rather than inside `Engine::open` so that an engine which never ingests — every
-    // read-only test, bench, example and embedder — starts no thread at all; see
-    // `Engine::start_write_executor` for why the config-field and open-parameter routes are closed
-    // by the stage's frozen files. `ingest_queue_bound` was landed by the seam (`config.rs`) and
-    // this is its only consumer; Task 6 adds the startup headroom assertion over it.
+    // Move the WAL onto its own thread and open the two write queues. Started here rather than
+    // inside `Engine::open` so that an engine which never ingests — every read-only test, bench,
+    // example and embedder — starts no thread at all. This is `ingest_queue_bound`'s only consumer.
     //
     // Nothing is stored in `AppState`: the engine owns the handle, so `/control/*` reaches the
     // executor through `state.engine` exactly as it reached the WAL before.
     engine.start_write_executor(config.ingest_queue_bound)?;
-    // Phase 2 stage 2.1, Task 5: the two cache bounds, validated above. Set here through a method
-    // rather than carried in `EngineConfig` for the same reason `ingest_queue_bound` is — three
-    // exhaustive `EngineConfig` literals live in `crates/tessera-engine/tests/viewport.rs`, which
-    // this stage's allowlist freezes for every track, so a new field would make the workspace
-    // uncompilable with no in-allowlist repair. See `Engine::set_cache_bounds`.
+    // The two cache bounds, validated above.
     engine.set_cache_bounds(
         config.row_projection_cache_bytes,
         config.fragment_cache_bytes,
     );
-    // Phase 2 stage 2.1, Task 6 (D5): `overlay_soft_limit`'s consumer. Additive for the same
-    // reason `set_cache_bounds` is — widening `start_write_executor` would touch two crates'
-    // call sites outside this stage's allowlist. **It alarms; it does not act**: there is no fold
-    // until stage 2.3. Set after replay, and the setter evaluates the predicate once as it lands,
-    // so a node that replayed a WAL already over the limit alarms at startup rather than waiting
-    // for the next deny.
+    // `overlay_soft_limit`'s consumer. **It alarms; it does not act.**
+    // ⊘ Specified, not implemented: the compaction fold that would bring an over-limit overlay back
+    // down does not exist, so crossing the limit raises a counter and a log line and nothing else —
+    // an operator who sees the alarm has to act on it. Set after replay, and the setter evaluates
+    // the predicate once as it lands, so a node that replayed a WAL already over the limit alarms
+    // at startup rather than waiting for the next deny.
     engine.set_overlay_soft_limit(config.overlay_soft_limit);
-    // Phase 2 stage 2.1, Task 7a: `commit_window_max_items`' consumer — the row count at which a
-    // commit window closes, and with it the scope of design §11.1's signature sort. Additive for
-    // the same reason as the two above.
+    // `commit_window_max_items`' consumer — the row count at which a commit window closes, and with
+    // it the scope of design §11.1's signature sort.
     engine.set_commit_window_max_rows(config.commit_window_max_items);
     let engine = engine;
 
-    // Phase 2 stage 2.1, Task 3b: the deny lane's own blocking runtime, built here so a runtime
-    // that cannot be constructed is a fail-to-start rather than a panic discovered by the first
-    // suppression — the same rule Task 3a applied when it replaced the executor's spawn `expect`
-    // with a typed `ExecutorStartError::Spawn`. See `control::init_deny_runtime` for why
-    // `/control/changes` does not share tokio's blocking pool at all.
+    // The deny lane's own blocking runtime, built here so a runtime that cannot be constructed is a
+    // fail-to-start rather than a panic discovered by the first suppression — the same rule that
+    // makes the write executor's spawn failure a typed `ExecutorStartError::Spawn`. See
+    // `control::init_deny_runtime` for why `/control/changes` does not share tokio's blocking pool
+    // at all.
     control::init_deny_runtime()?;
 
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         max_k: config.max_k,
-        // D-B: gates only /v1/viewport, /v1/items and /session/authorise (each handler wraps its
-        // own closure); never the control plane, never /healthz/readyz/meta/revoke (D13).
+        // Gates only /v1/viewport, /v1/items and /session/authorise (each handler wraps its own
+        // closure); never the control plane, and never /healthz, /readyz, /meta or /revoke — the
+        // probes are deliberately off the control plane and outside every gate
+        // (docs/decisions/0011-health-probes-off-control-plane.md).
         compute_gate: ComputeGate::new(
             config.compute_admission,
             config.compute_queue,
             config.admission_timeout_ms,
         ),
-        // Task 6 (D2/D1): the control plane's own bounds. Deliberately separate from
-        // `compute_gate` — D13 keeps the control plane out of the viewer gate.
+        // The control plane's own bounds, deliberately separate from `compute_gate`: the viewer
+        // gate never covers the control plane, so writes need a limiter of their own.
         ingest_admission: state::IngestAdmission::new(config.ingest_admission),
         ingest_max_batch_rows: config.ingest_max_batch_rows,
         ingest_max_batch_bytes: config.ingest_max_batch_bytes,
@@ -242,10 +222,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         dev_cors_origins: config.dev_cors_origins.clone(),
     });
 
-    // MVP client spec §3. Loud, and at `warn`, because the key's effect is to let a page from
-    // another origin present a session token and the session credential to this process. It is a
-    // development affordance; T2 with verified assertions remains the documented integration
-    // topology (client-interaction §7).
+    // Loud, and at `warn`, because the key's effect is to let a page from another origin present a
+    // session token and the session credential to this process. It is a development affordance;
+    // T2 (server-mediated, with verified assertions) remains the documented integration topology —
+    // client-interaction §7 tabulates the four topologies and names the two anti-patterns.
     if !config.dev_cors_origins.is_empty() {
         tracing::warn!(
             origins = ?config.dev_cors_origins,
