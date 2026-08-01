@@ -1,0 +1,16 @@
+fragment_build/100      time:   [110.41 µs 111.22 µs 112.11 µs]
+                        change: [+1.6871% +3.1168% +4.3827%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+fragment_build/176      time:   [272.46 µs 274.70 µs 276.83 µs]
+                        change: [+2.4441% +3.7762% +4.8861%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+compose                 time:   [68.685 ns 69.106 ns 69.706 ns]
+                        change: [+0.2964% +1.1842% +2.1332%] (p = 0.02 < 0.05)
+viewport/tile_sweep_k0  time:   [2.3020 ms 2.3208 ms 2.3467 ms]
+                        change: [+0.8373% +1.7045% +2.6329%] (p = 0.00 < 0.05)
+viewport/gather_k30     time:   [3.2869 ms 3.3214 ms 3.3672 ms]
+                        change: [+1.2515% +2.6331% +4.0832%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+viewport/gather_k500    time:   [3.9053 ms 3.9359 ms 3.9705 ms]
+                        change: [+1.8821% +3.0068% +4.2685%] (p = 0.00 < 0.05)
+                        Performance has regressed.

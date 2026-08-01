@@ -191,8 +191,16 @@ fn bench_viewport(c: &mut Criterion) {
         .authorise(auth.as_bytes())
         .expect("authorise should succeed");
 
-    // zoom 8 gives a 256x256 tile grid; a bbox covering roughly one eighth of the extent touches
-    // on the order of 300 tiles at this zoom, matching the brief's "~300 tiles" sweep.
+    // zoom 8 gives a 256x256 tile grid, and 23,170 of 65,536 units covers tile coordinates 0..=90
+    // per axis — **8,281 tiles spanning 242,221 rows**, measured directly with `tiles_for_bbox` +
+    // `tile_ranges_all` on this fixture (`docs/design-memos/2026-07-31-viewport-bench-regression.md`,
+    // reproduced as the `f35/z8` cell of `probes/2026-08-01-two-axis-sweep/`).
+    //
+    // The comment here used to claim "on the order of 300 tiles ... matching the brief's ~300 tiles
+    // sweep", which is wrong by 28x: 289 tiles is the *calibration sweep's* z8 shape (span 4,096),
+    // not this one. The error mattered — this bench is accidentally the only high-tile-count probe
+    // the project has, and while it was mislabelled as a ~300-tile shape nobody noticed that the
+    // serial/parallel calibration had never measured above 1,024 tiles. Keep the shape.
     const ZOOM: u8 = 8;
     let bbox = [0.0, 0.0, 23170.0, 23170.0];
 

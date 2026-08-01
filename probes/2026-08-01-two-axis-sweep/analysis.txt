@@ -1,0 +1,140 @@
+210 measured cells from 6 runs
+
+Tile crossover per (scale, grant, family): last SERIAL tile count -> first PAR
+  1e8/dense  f01      last_serial=4225  first_par=16641
+  1e8/dense  f04      last_serial=2116  first_par=8281
+  1e8/dense  f100     last_serial=256  first_par=16
+  1e8/dense  f12      last_serial=1089  first_par=4225
+  1e8/dense  f35      last_serial=2116  first_par=8281
+  1e8/dense  natural  last_serial=289  first_par=None
+  1e8/sparse f01      last_serial=4225  first_par=16641
+  1e8/sparse f04      last_serial=2116  first_par=8281
+  1e8/sparse f100     last_serial=None  first_par=16
+  1e8/sparse f12      last_serial=4225  first_par=16641
+  1e8/sparse f35      last_serial=529  first_par=2116
+  1e8/sparse natural  last_serial=289  first_par=None
+  1e9/dense  f01      last_serial=4225  first_par=16641
+  1e9/dense  f04      last_serial=2116  first_par=8281
+  1e9/dense  f100     last_serial=None  first_par=16
+  1e9/dense  f12      last_serial=1089  first_par=4225
+  1e9/dense  f35      last_serial=2116  first_par=8281
+  1e9/dense  natural  last_serial=289  first_par=None
+  1e9/sparse f01      last_serial=4225  first_par=16641
+  1e9/sparse f04      last_serial=2116  first_par=8281
+  1e9/sparse f100     last_serial=None  first_par=16
+  1e9/sparse f12      last_serial=4225  first_par=16641
+  1e9/sparse f35      last_serial=529  first_par=2116
+  1e9/sparse natural  last_serial=289  first_par=None
+  2m4/dense  f01      last_serial=4225  first_par=16641
+  2m4/dense  f04      last_serial=2116  first_par=8281
+  2m4/dense  f100     last_serial=None  first_par=16
+  2m4/dense  f12      last_serial=4225  first_par=16641
+  2m4/dense  f35      last_serial=2116  first_par=8281
+  2m4/dense  natural  last_serial=289  first_par=None
+  2m4/sparse f01      last_serial=4225  first_par=16641
+  2m4/sparse f04      last_serial=2116  first_par=8281
+  2m4/sparse f100     last_serial=None  first_par=16
+  2m4/sparse f12      last_serial=4225  first_par=16641
+  2m4/sparse f35      last_serial=529  first_par=2116
+  2m4/sparse natural  last_serial=289  first_par=None
+
+Global bracket over every measured cell:
+  highest tile count that measured SERIAL-favouring: 4225
+  lowest  tile count that measured PAR-favouring   : 16
+  highest row  count that measured SERIAL-favouring: 130921716
+  lowest  row  count that measured PAR-favouring   : 0
+
+Candidate rules (parallel iff the predicate holds):
+always serial (pre-parallel)       total_regret=   302.09 ms  misclassified= 87/210  worst_ratio=  4.09x (2m4/sparse f100/z7 t=16384 r=2422486)  worst_abs= 39.206 ms (2m4/sparse f100/z8 t=65536)
+always parallel                    total_regret=    66.81 ms  misclassified=123/210  worst_ratio= 62.35x (2m4/sparse f01/z9 t=81 r=0)  worst_abs=  1.198 ms (1e9/sparse f01/z11 t=1089)
+rows >= 500M  [status quo]         total_regret=   244.47 ms  misclassified= 73/210  worst_ratio=  4.09x (2m4/sparse f100/z7 t=16384 r=2422486)  worst_abs= 39.206 ms (2m4/sparse f100/z8 t=65536)
+rows >= 500M OR tiles >= 1024      total_regret=    20.91 ms  misclassified= 41/210  worst_ratio=  9.23x (2m4/dense f01/z11 t=1089 r=0)  worst_abs=  1.751 ms (1e8/sparse f100/z4 t=256)
+rows >= 500M OR tiles >= 2048      total_regret=    20.37 ms  misclassified= 33/210  worst_ratio=  3.81x (2m4/sparse f04/z10 t=2116 r=0)  worst_abs=  3.148 ms (2m4/sparse f100/z5 t=1024)
+rows >= 500M OR tiles >= 4096      total_regret=    18.38 ms  misclassified= 27/210  worst_ratio=  2.81x (2m4/sparse f100/z5 t=1024 r=2422486)  worst_abs=  3.148 ms (2m4/sparse f100/z5 t=1024)
+rows >= 500M OR tiles >= 8192      total_regret=    34.55 ms  misclassified= 23/210  worst_ratio=  3.47x (2m4/sparse f100/z6 t=4096 r=2422486)  worst_abs=  7.633 ms (2m4/sparse f100/z6 t=4096)
+rows >= 500M OR tiles >= 16384     total_regret=    44.13 ms  misclassified= 35/210  worst_ratio=  3.47x (2m4/sparse f100/z6 t=4096 r=2422486)  worst_abs=  7.633 ms (2m4/sparse f100/z6 t=4096)
+tiles >= 4096 only                 total_regret=    28.68 ms  misclassified= 35/210  worst_ratio=  2.81x (2m4/sparse f100/z5 t=1024 r=2422486)  worst_abs=  3.247 ms (1e9/sparse f100/z5 t=1024)
+tiles >= 8192 only                 total_regret=    51.75 ms  misclassified= 33/210  worst_ratio=  3.47x (2m4/sparse f100/z6 t=4096 r=2422486)  worst_abs=  7.633 ms (2m4/sparse f100/z6 t=4096)
+oracle (per-cell best)             total_regret=     0.00 ms  misclassified=  0/210
+
+Every cell misclassified by `rows >= 500M OR tiles >= 4096` (ratio > 1.05):
+  2m4/sparse f100/z5    tiles=  1024 rows=   2422486  chose=SERIAL   2.81x  + 3.148 ms  (serial=4.884 par=1.736)
+  2m4/dense  f100/z5    tiles=  1024 rows=   2422486  chose=SERIAL   2.11x  + 1.598 ms  (serial=3.042 par=1.444)
+  2m4/sparse f100/z4    tiles=   256 rows=   2422486  chose=SERIAL   2.06x  + 1.483 ms  (serial=2.881 par=1.398)
+  1e8/sparse f100/z5    tiles=  1024 rows= 100000000  chose=SERIAL   1.97x  + 2.398 ms  (serial=4.867 par=2.470)
+  1e8/sparse f100/z4    tiles=   256 rows= 100000000  chose=SERIAL   1.95x  + 1.751 ms  (serial=3.597 par=1.847)
+  2m4/sparse f100/z3    tiles=    64 rows=   2422486  chose=SERIAL   1.82x  + 0.898 ms  (serial=1.995 par=1.096)
+  1e8/sparse f100/z3    tiles=    64 rows= 100000000  chose=SERIAL   1.79x  + 1.314 ms  (serial=2.987 par=1.673)
+  2m4/dense  f100/z4    tiles=   256 rows=   2422486  chose=SERIAL   1.64x  + 0.745 ms  (serial=1.907 par=1.162)
+  2m4/dense  f12/z9     tiles=  4225 rows=        43  chose=PAR   1.57x  + 0.211 ms  (serial=0.373 par=0.583)
+  2m4/dense  f100/z2    tiles=    16 rows=   2422486  chose=SERIAL   1.54x  + 0.392 ms  (serial=1.114 par=0.722)
+  2m4/sparse f35/z7     tiles=  2116 rows=    249405  chose=SERIAL   1.47x  + 0.800 ms  (serial=2.499 par=1.699)
+  2m4/sparse f12/z9     tiles=  4225 rows=        43  chose=PAR   1.42x  + 0.173 ms  (serial=0.411 par=0.584)
+  2m4/sparse f100/z2    tiles=    16 rows=   2422486  chose=SERIAL   1.41x  + 0.480 ms  (serial=1.646 par=1.167)
+  2m4/dense  f100/z3    tiles=    64 rows=   2422486  chose=SERIAL   1.39x  + 0.337 ms  (serial=1.200 par=0.863)
+  1e8/sparse f01/z12    tiles=  4225 rows=   2420839  chose=PAR   1.35x  + 0.182 ms  (serial=0.523 par=0.705)
+  1e8/dense  f100/z5    tiles=  1024 rows= 100000000  chose=SERIAL   1.32x  + 0.462 ms  (serial=1.891 par=1.428)
+  1e9/sparse f01/z12    tiles=  4225 rows=   3349145  chose=PAR   1.31x  + 0.176 ms  (serial=0.576 par=0.752)
+  2m4/dense  f01/z12    tiles=  4225 rows=         0  chose=PAR   1.29x  + 0.138 ms  (serial=0.477 par=0.615)
+  2m4/sparse f01/z12    tiles=  4225 rows=         0  chose=PAR   1.27x  + 0.137 ms  (serial=0.501 par=0.638)
+  1e9/sparse f35/z7     tiles=  2116 rows= 119228691  chose=SERIAL   1.24x  + 0.441 ms  (serial=2.269 par=1.828)
+  1e9/sparse f12/z9     tiles=  4225 rows=  44925702  chose=PAR   1.21x  + 0.286 ms  (serial=1.387 par=1.673)
+  1e8/dense  f01/z12    tiles=  4225 rows=   2420839  chose=PAR   1.20x  + 0.110 ms  (serial=0.551 par=0.661)
+  1e8/sparse f12/z9     tiles=  4225 rows=   7196581  chose=PAR   1.20x  + 0.130 ms  (serial=0.658 par=0.788)
+  1e8/sparse f100/z2    tiles=    16 rows= 100000000  chose=SERIAL   1.15x  + 0.351 ms  (serial=2.715 par=2.365)
+  1e8/dense  f100/z2    tiles=    16 rows= 100000000  chose=SERIAL   1.15x  + 0.091 ms  (serial=0.716 par=0.625)
+  1e9/dense  f01/z12    tiles=  4225 rows=   3349145  chose=PAR   1.10x  + 0.065 ms  (serial=0.660 par=0.725)
+  1e8/sparse f35/z7     tiles=  2116 rows=  11807967  chose=SERIAL   1.06x  + 0.078 ms  (serial=1.467 par=1.388)
+
+Every cell misclassified by `rows >= 500M OR tiles >= 8192` (ratio > 1.05):
+  2m4/sparse f100/z6    tiles=  4096 rows=   2422486  chose=SERIAL   3.47x  + 7.633 ms  (serial=10.719 par=3.086)
+  2m4/sparse f100/z5    tiles=  1024 rows=   2422486  chose=SERIAL   2.81x  + 3.148 ms  (serial=4.884 par=1.736)
+  2m4/dense  f100/z6    tiles=  4096 rows=   2422486  chose=SERIAL   2.78x  + 4.445 ms  (serial=6.943 par=2.498)
+  2m4/dense  f100/z5    tiles=  1024 rows=   2422486  chose=SERIAL   2.11x  + 1.598 ms  (serial=3.042 par=1.444)
+  2m4/sparse f100/z4    tiles=   256 rows=   2422486  chose=SERIAL   2.06x  + 1.483 ms  (serial=2.881 par=1.398)
+  1e8/sparse f100/z5    tiles=  1024 rows= 100000000  chose=SERIAL   1.97x  + 2.398 ms  (serial=4.867 par=2.470)
+  1e8/sparse f100/z4    tiles=   256 rows= 100000000  chose=SERIAL   1.95x  + 1.751 ms  (serial=3.597 par=1.847)
+  2m4/sparse f100/z3    tiles=    64 rows=   2422486  chose=SERIAL   1.82x  + 0.898 ms  (serial=1.995 par=1.096)
+  1e8/sparse f100/z3    tiles=    64 rows= 100000000  chose=SERIAL   1.79x  + 1.314 ms  (serial=2.987 par=1.673)
+  1e8/sparse f100/z6    tiles=  4096 rows= 100000000  chose=SERIAL   1.75x  + 3.763 ms  (serial=8.755 par=4.992)
+  2m4/dense  f100/z4    tiles=   256 rows=   2422486  chose=SERIAL   1.64x  + 0.745 ms  (serial=1.907 par=1.162)
+  1e8/dense  f100/z6    tiles=  4096 rows= 100000000  chose=SERIAL   1.55x  + 1.457 ms  (serial=4.101 par=2.644)
+  2m4/dense  f100/z2    tiles=    16 rows=   2422486  chose=SERIAL   1.54x  + 0.392 ms  (serial=1.114 par=0.722)
+  2m4/sparse f35/z7     tiles=  2116 rows=    249405  chose=SERIAL   1.47x  + 0.800 ms  (serial=2.499 par=1.699)
+  2m4/sparse f100/z2    tiles=    16 rows=   2422486  chose=SERIAL   1.41x  + 0.480 ms  (serial=1.646 par=1.167)
+  2m4/dense  f100/z3    tiles=    64 rows=   2422486  chose=SERIAL   1.39x  + 0.337 ms  (serial=1.200 par=0.863)
+  1e8/dense  f12/z9     tiles=  4225 rows=   7196581  chose=SERIAL   1.34x  + 0.351 ms  (serial=1.384 par=1.033)
+  1e8/dense  f100/z5    tiles=  1024 rows= 100000000  chose=SERIAL   1.32x  + 0.462 ms  (serial=1.891 par=1.428)
+  1e9/sparse f35/z7     tiles=  2116 rows= 119228691  chose=SERIAL   1.24x  + 0.441 ms  (serial=2.269 par=1.828)
+  1e8/sparse f100/z2    tiles=    16 rows= 100000000  chose=SERIAL   1.15x  + 0.351 ms  (serial=2.715 par=2.365)
+  1e8/dense  f100/z2    tiles=    16 rows= 100000000  chose=SERIAL   1.15x  + 0.091 ms  (serial=0.716 par=0.625)
+  1e9/dense  f12/z9     tiles=  4225 rows=  44925702  chose=SERIAL   1.09x  + 0.132 ms  (serial=1.543 par=1.411)
+  1e8/sparse f35/z7     tiles=  2116 rows=  11807967  chose=SERIAL   1.06x  + 0.078 ms  (serial=1.467 par=1.388)
+
+The `natural` family (289 tiles at every zoom) under every candidate:
+  1e8/dense  natural/z6   tiles=289 rows=   9717466 ratio= 2.81 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  1e8/dense  natural/z8   tiles=289 rows=   2422510 ratio= 9.30 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  1e8/dense  natural/z10  tiles=289 rows=   2420948 ratio= 7.87 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  1e8/sparse natural/z6   tiles=289 rows=   9717466 ratio=12.36 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  1e8/sparse natural/z8   tiles=289 rows=   2422510 ratio=19.62 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  1e8/sparse natural/z10  tiles=289 rows=   2420948 ratio=25.64 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  1e9/dense  natural/z6   tiles=289 rows=  82938003 ratio= 3.67 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  1e9/dense  natural/z8   tiles=289 rows=  18728780 ratio= 3.90 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  1e9/dense  natural/z10  tiles=289 rows=   3374745 ratio=17.20 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  1e9/sparse natural/z6   tiles=289 rows=  82938003 ratio= 5.56 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  1e9/sparse natural/z8   tiles=289 rows=  18728780 ratio=10.00 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  1e9/sparse natural/z10  tiles=289 rows=   3374745 ratio=17.74 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  2m4/dense  natural/z6   tiles=289 rows=     27522 ratio=11.21 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  2m4/dense  natural/z8   tiles=289 rows=         0 ratio=26.51 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  2m4/dense  natural/z10  tiles=289 rows=         0 ratio=32.45 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  2m4/sparse natural/z6   tiles=289 rows=     27522 ratio= 4.48 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  2m4/sparse natural/z8   tiles=289 rows=         0 ratio=33.70 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+  2m4/sparse natural/z10  tiles=289 rows=         0 ratio=34.04 -> serial is correct; tile arm fires at >= 290, so no threshold >= 1024 touches it
+
+Serial ns per tile, by scale/grant, for the low-row families (mask-independent part):
+  1e8/dense  n=17  min=  107.4  median=  188.1  max= 1846.2
+  1e8/sparse n=17  min=   99.3  median=  155.5  max= 4753.4
+  1e9/dense  n=17  min=  140.6  median=  486.6  max= 4486.3
+  1e9/sparse n=17  min=  136.3  median=  328.2  max= 7123.8
+  2m4/dense  n=17  min=   85.0  median=  112.8  max= 2970.5
+  2m4/sparse n=17  min=   87.1  median=  122.8  max= 4769.4
