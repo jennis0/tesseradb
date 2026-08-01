@@ -963,6 +963,50 @@ Per-viewer-recomputed artifacts are safe by construction, and the failure to avo
 full membership, shown to someone who sees 5% of it, points at where the invisible
 members are.
 
+**What the class actually is** *(owner, 2026-08-01)*. A cluster has no inherent geometry:
+each point is a member of some cluster set, and the cluster's shape is *derived* from that
+membership. Generalising — **every member of this class is a named subset of the point
+set, plus an attachment**:
+
+| Artifact | Subset | Attachment |
+|---|---|---|
+| Cluster node | membership bitmap | geometry, **derived** per viewer |
+| Boundary polygon | points inside it, resolved at build | geometry, **supplied** and corpus-independent |
+| Label | generating set | content, **derived** from the corpus |
+| Aggregation cell | a Morton range | nothing — the range is the subset |
+
+The engine already has this machinery: §7.5 specifies a membership bitmap per node plus a
+bounding box per slice for pruning, with geometry recomputed from masked membership. So
+the class needs no new mechanism, only a gate.
+
+**And the gate is chosen by whether the attachment is corpus-derived**, which is sharper
+than "how it was produced". A city boundary exists independently of the data, so its
+*shape* needs no gate at all and only the count within it is masked. Label text derives
+from documents, so it takes containment. A cluster hull derives from membership, so it is
+recomputed rather than gated.
+
+**A second, orthogonal axis: disclosure sets the gate, cardinality sets the mechanism.**
+Clusters and labels top out around 10⁵; boundary polygons are similar — *"city, town,
+postcode level, rather than per point"* (owner) — so all three are **artifact-scale**,
+where a per-item test against the mask is affordable and membership bitmaps are the right
+representation. **Edges are the exception and are point-scale or larger**: a sparse graph
+over 10⁹ points is 10⁹–10¹⁰ edges, so a per-item containment test is impossible however
+correct it is, and edges need the points' machinery instead — an ordering, contiguous
+ranges, bitmap arithmetic, and a priority prefix. Structurally, with edges sorted by
+`(source, target)`, the visible set is the adjacency runs of visible sources intersected
+with visible targets: O(visible edges), bounded by the mask rather than the corpus. **The
+gating rule for edges is right and the mechanism is not** — that is what the cardinality
+axis catches.
+
+*Polygons, consequently.* Rare boundary polygons need **no new spatial index** for the
+query that matters: "how many points in this postcode" is a build-time membership bitmap
+and one `and_cardinality`, with no query-time spatial join. Only "which polygons intersect
+this viewport" wants a structure, and at these cardinalities that is the bounding-box
+prune §7.5 already performs for nodes. Administrative boundaries are also naturally
+hierarchical, so the frontier machinery applies unchanged. *Context* polygons — reference
+outlines the client simply draws — need none of this, and the only rule they carry is that
+they never contribute to a displayed quantity.
+
 **The threshold tier has a fifty-year literature and a named attack we have not checked
 against** *(survey, 2026-08-01)*. `min_visible_members` is **small-cell suppression**
 from statistical disclosure control — the census-table field — and that field's central
