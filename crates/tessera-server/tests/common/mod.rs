@@ -27,7 +27,7 @@ use parquet::arrow::ArrowWriter;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
-use tessera_server::state::{AppState, ComputeGate, SessionRegistry};
+use tessera_server::state::{AppState, ComputeGate, IngestAdmission, SessionRegistry};
 use tessera_spatial::Extent;
 use tessera_types::IdentityKey;
 
@@ -289,11 +289,53 @@ pub async fn spawn_server_from_engine(
 /// panic on `AlreadyStarted` if a test started its own first). Purely additive — that function keeps
 /// its name, its bound and its behaviour, so the frozen `tests/http.rs` is untouched by this split.
 pub async fn mount_server(engine: Engine, max_k: usize, compute_gate: ComputeGate) -> TestServer {
+    mount_server_with_ingest_limits(engine, max_k, compute_gate, generous_ingest_limits()).await
+}
+
+/// Task 6's control-plane bounds, as a caller-supplied set.
+///
+/// `admission` bounds concurrent `/control/ingest` handlers (and therefore the blocking-pool
+/// threads ingest can hold); `max_batch_rows` and `max_batch_bytes` are the two 422 caps. They are
+/// *different quantities* from the write executor's `ingest_queue_bound`, which is chosen at
+/// `start_write_executor` — a handler holds a thread through a window in which it holds no queue
+/// slot at all — so a test that wants one of the two 429s must set both deliberately.
+pub struct IngestLimits {
+    pub admission: usize,
+    pub max_batch_rows: usize,
+    pub max_batch_bytes: usize,
+}
+
+/// Generous enough that no test written before Task 6's bounds existed can observe them — the same
+/// principle as [`generous_test_gate`]. Only the bound-specific tests set their own.
+pub fn generous_ingest_limits() -> IngestLimits {
+    IngestLimits {
+        admission: 64,
+        // Above the *production* default of 10 000, deliberately:
+        // `concurrent_ingests_do_not_delay_a_control_changes_suppress` posts 40 000-row batches to
+        // make the ingest side genuinely heavy, and it was written before this cap existed. A
+        // harness default that silently turned that test's premise into a 422 would be measuring
+        // the harness.
+        max_batch_rows: 200_000,
+        max_batch_bytes: 64 * 1024 * 1024,
+    }
+}
+
+/// As [`mount_server`], with Task 6's control-plane bounds chosen by the caller. Purely additive:
+/// `mount_server` keeps its name, its signature and its behaviour.
+pub async fn mount_server_with_ingest_limits(
+    engine: Engine,
+    max_k: usize,
+    compute_gate: ComputeGate,
+    ingest_limits: IngestLimits,
+) -> TestServer {
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         max_k,
         compute_gate,
+        ingest_admission: IngestAdmission::new(ingest_limits.admission),
+        ingest_max_batch_rows: ingest_limits.max_batch_rows,
+        ingest_max_batch_bytes: ingest_limits.max_batch_bytes,
         // On, so the header assertions below exercise the emission path rather than only its
         // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
         stage_timing: true,

@@ -198,6 +198,13 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         config.row_projection_cache_bytes,
         config.fragment_cache_bytes,
     );
+    // Phase 2 stage 2.1, Task 6 (D5): `overlay_soft_limit`'s consumer. Additive for the same
+    // reason `set_cache_bounds` is — widening `start_write_executor` would touch two crates'
+    // call sites outside this stage's allowlist. **It alarms; it does not act**: there is no fold
+    // until stage 2.3. Set after replay, and the setter evaluates the predicate once as it lands,
+    // so a node that replayed a WAL already over the limit alarms at startup rather than waiting
+    // for the next deny.
+    engine.set_overlay_soft_limit(config.overlay_soft_limit);
     let engine = engine;
 
     // Phase 2 stage 2.1, Task 3b: the deny lane's own blocking runtime, built here so a runtime
@@ -218,6 +225,11 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
             config.compute_queue,
             config.admission_timeout_ms,
         ),
+        // Task 6 (D2/D1): the control plane's own bounds. Deliberately separate from
+        // `compute_gate` — D13 keeps the control plane out of the viewer gate.
+        ingest_admission: state::IngestAdmission::new(config.ingest_admission),
+        ingest_max_batch_rows: config.ingest_max_batch_rows,
+        ingest_max_batch_bytes: config.ingest_max_batch_bytes,
         stage_timing: config.stage_timing,
         min_visible_members: config.min_visible_members,
         session_credential: config.session_credential.clone(),

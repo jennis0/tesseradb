@@ -59,7 +59,7 @@
 //! suppression on the bounded queue would 429 a security operation, which contracts §3.1 forbids.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -177,6 +177,77 @@ pub struct ExecutorHealth {
     /// "never queued behind work of unbounded duration" first becomes a claim made in code.
     apply_nanos_total: AtomicU64,
     apply_nanos_max: AtomicU64,
+    /// Work-lane jobs whose `execute` has returned. **The other half of the queue-depth gauge**:
+    /// `work_submitted - work_completed` is what [`ExecutorStats::work_depth`] reports and what
+    /// Task 6's `retry_after_s` is derived from. Deny-lane jobs are deliberately not counted here
+    /// — they ride an unbounded queue that has no depth to report and no 429 to derive.
+    work_completed: AtomicU64,
+    /// An **exponentially-weighted** mean of one work-lane job's whole service time (append +
+    /// fsync + apply + swap + ack), in nanoseconds. Written only by the executor thread.
+    ///
+    /// **Why not a cumulative mean over `total / completed`.** That was this field's first shape and
+    /// it is wrong in the one case the estimate exists for. Service time is dominated by an
+    /// `IngestBuffer` clone that is O(total buffered items) and grows monotonically while flush is
+    /// inert (`apply_nanos_total`'s doc has the measurements), so a server that ingested 10⁶ fast
+    /// batches and has since risen to seconds per batch still reports the fast mean — the old
+    /// samples swamp the recent ones — and a caller is told to come back in one second against a
+    /// queue that needs three minutes. An estimate that is wrong in the unsafe direction *and*
+    /// carries the authority of a derivation is worse than the hard-coded `1` it replaces.
+    ///
+    /// `x += (sample - x) / 8` — integer, one atomic, no allocation, O(1) on the 10⁹ write path.
+    ///
+    /// **It is written only when a job *finishes*, which makes it blind in exactly the state that
+    /// produces the 429** — see [`Self::work_started_nanos`], which is the correction.
+    work_service_nanos_ewma: AtomicU64,
+    /// When the work item currently executing started, as nanoseconds since [`Self::base`], **plus
+    /// one**; `0` means no work item is in flight. Written only by the executor thread.
+    ///
+    /// # Why this exists (fix round 1, F7)
+    ///
+    /// [`Self::record_work_service`] runs *after* `execute` returns, so while one long job is in
+    /// flight the EWMA still reports the previous, faster regime. That is the 10⁹ shape: an
+    /// `IngestBuffer` clone is O(total buffered items) and flush is inert until stage 2.2, so the
+    /// first job at a new buffer depth is the slow one, and it is precisely while it runs that the
+    /// queue fills and callers are shed. Every one of them was told to come back in 1 s against a
+    /// drain measured in minutes, and an obedient caller then re-establishes a connection and
+    /// re-uploads up to `ingest_max_batch_bytes` per second, per client. **The estimator's error was
+    /// on the load-amplifying side**, which none of its three stated caveats covered.
+    ///
+    /// [`ExecutorStats::service_nanos_for_estimate`] takes `max(ewma, elapsed-of-current-job)`,
+    /// which is the cheapest correction that cannot under-report: whatever the recent regime was,
+    /// the job running *now* has already taken this long, and a caller behind it waits at least that.
+    ///
+    /// The `+1` is what distinguishes "started at zero nanoseconds" from "idle" without a second
+    /// atomic.
+    work_started_nanos: AtomicU64,
+    /// The origin [`Self::work_started_nanos`] is measured from. An `Instant` is not storable in an
+    /// atomic; a fixed origin plus an atomic offset is, and the executor's `Instant::now()` is
+    /// already taken for the service sample, so this costs no extra clock read on the write path.
+    base: std::time::Instant,
+    /// Task 6 (D5): overlay depth at which [`Executor::apply_change`] raises an alarm.
+    /// [`usize::MAX`] means **no limit configured**, which is what every embedder and every test
+    /// that never calls `Engine::set_overlay_soft_limit` gets.
+    ///
+    /// Deliberately not `0` for "unset": `tessera-server`'s config refuses `0` as degenerate for
+    /// this key, so one value would have to mean "off" on one side of the crate boundary and
+    /// "alarm on everything" on the other. That is how a knob comes to be silently inert.
+    overlay_soft_limit: AtomicUsize,
+    /// Times the overlay has **crossed** into being at or above [`Self::overlay_soft_limit`]. **It
+    /// alarms; it does not act** — there is no fold until stage 2.3, so this counter and its log
+    /// line are the whole of the mechanism.
+    ///
+    /// **Crossings, not publications** (fix round 1, F5). This counted every `apply_change` at or
+    /// above the limit, i.e. it was level-triggered on a quantity that never decreases: `Overlay`
+    /// entries survive `suppress → unsuppress`, and nothing shrinks the overlay until stage 2.3. A
+    /// node that crossed 500 000 therefore emitted one four-line WARN **per deny, forever**, with no
+    /// path back — flooding the log precisely while the node was under deny pressure. `control.rs`
+    /// states that exact standard itself ("an ERROR per occurrence is an alarm flood rather than a
+    /// signal") one file over. [`Self::overlay_soft_limit_latched`] is the edge.
+    overlay_soft_limit_alarms: AtomicU64,
+    /// Whether the overlay is currently *known* to be at or above the soft limit — the edge
+    /// trigger's memory. Set when [`Self::note_overlay_depth`] observes a crossing, cleared when it
+    /// observes a depth below the limit or when the limit itself is re-set.
+    overlay_soft_limit_latched: AtomicBool,
     /// The executor's WAL counters. A **clone** of the meter the [`ExecutorWal`] holds, kept here
     /// so the numbers have a reader: `/control/status` (Task 3b) and Task 7a's
     /// `one_fsync_per_window`, whose whole subject is `wal_fsyncs` not rising with the number of
@@ -200,6 +271,43 @@ pub struct ExecutorStats {
     /// defined in ("one fsync per window") and the one the ingest baseline memo's ~3.2 ms floor is
     /// a cost per.
     pub wal_fsyncs: u64,
+    /// Work-lane jobs whose `execute` has returned (Task 6).
+    pub work_completed: u64,
+    /// `work_submitted - work_completed`, saturating.
+    ///
+    /// **A snapshot of two independently-advancing counters, not an instantaneous truth.** They are
+    /// read separately and `work_submitted` is bumped *after* the `try_send`
+    /// ([`LifecycleHandle::submit`]), so the executor can complete a job before its submitter has
+    /// recorded it and `completed > submitted` is transiently legal. `saturating_sub` is why that
+    /// is harmless rather than an underflow.
+    pub work_depth: u64,
+    /// The EWMA of one work-lane job's whole service time — see
+    /// [`ExecutorHealth::work_service_nanos_ewma`]. `0` means nothing has completed yet.
+    pub work_service_nanos_ewma: u64,
+    /// How long the work item currently executing has been running, in nanoseconds; `0` when the
+    /// executor is idle. See [`ExecutorHealth::work_started_nanos`].
+    pub work_in_flight_nanos: u64,
+    /// Times the overlay crossed to at or above the configured soft limit (Task 6, D5). **It alarms;
+    /// it does not act**, and it counts **crossings**, not publications above the limit — see
+    /// [`ExecutorHealth::overlay_soft_limit_alarms`].
+    pub overlay_soft_limit_alarms: u64,
+}
+
+impl ExecutorStats {
+    /// The service figure a `retry_after_s` derivation must use: `max(ewma, in-flight elapsed)`.
+    ///
+    /// **Never the raw EWMA.** [`ExecutorHealth::work_started_nanos`] has the argument in full: the
+    /// EWMA is written only when a job finishes, so during the one long job that is filling the
+    /// queue it still reports the previous fast regime — and telling every shed caller to come back
+    /// in a second against a drain measured in minutes amplifies exactly the load the 429 exists to
+    /// shed.
+    ///
+    /// It remains an **estimator**, and this correction does not change that; it removes one
+    /// specific error whose direction was known and unsafe. `estimate_retry_after_s`'s own doc has
+    /// the three reasons that remain.
+    pub fn service_nanos_for_estimate(&self) -> u64 {
+        self.work_service_nanos_ewma.max(self.work_in_flight_nanos)
+    }
 }
 
 impl ExecutorHealth {
@@ -210,6 +318,13 @@ impl ExecutorHealth {
             deny_submitted: AtomicU64::new(0),
             apply_nanos_total: AtomicU64::new(0),
             apply_nanos_max: AtomicU64::new(0),
+            work_completed: AtomicU64::new(0),
+            work_service_nanos_ewma: AtomicU64::new(0),
+            work_started_nanos: AtomicU64::new(0),
+            base: std::time::Instant::now(),
+            overlay_soft_limit: AtomicUsize::new(usize::MAX),
+            overlay_soft_limit_alarms: AtomicU64::new(0),
+            overlay_soft_limit_latched: AtomicBool::new(false),
             wal: Arc::new(WalMeter::new()),
         }
     }
@@ -223,22 +338,186 @@ impl ExecutorHealth {
     }
 
     pub fn stats(&self) -> ExecutorStats {
+        let work_submitted = self.work_submitted.load(Ordering::Relaxed);
+        let work_completed = self.work_completed.load(Ordering::Relaxed);
         ExecutorStats {
             posture: self.posture(),
-            work_submitted: self.work_submitted.load(Ordering::Relaxed),
+            work_submitted,
             deny_submitted: self.deny_submitted.load(Ordering::Relaxed),
             apply_nanos_total: self.apply_nanos_total.load(Ordering::Relaxed),
             apply_nanos_max: self.apply_nanos_max.load(Ordering::Relaxed),
             wal_appends: self.wal.appends(),
             wal_fsyncs: self.wal.fsyncs(),
+            work_completed,
+            work_depth: work_submitted.saturating_sub(work_completed),
+            work_service_nanos_ewma: self.work_service_nanos_ewma.load(Ordering::Relaxed),
+            work_in_flight_nanos: self.work_in_flight_nanos(),
+            overlay_soft_limit_alarms: self.overlay_soft_limit_alarms.load(Ordering::Relaxed),
         }
+    }
+
+    /// How long the work item currently executing has been running; `0` when idle.
+    ///
+    /// One clock read, taken only when a snapshot is asked for — the 429 paths and
+    /// `/control/status`, never per row. `saturating_sub` because the two reads are not atomic
+    /// together: the executor can finish and clear the marker between the load and the elapsed, and
+    /// a job that started "in the future" relative to a stale `base.elapsed()` must report zero
+    /// rather than wrap to an enormous drain estimate.
+    fn work_in_flight_nanos(&self) -> u64 {
+        match self.work_started_nanos.load(Ordering::Relaxed) {
+            0 => 0,
+            started_plus_one => (self.base.elapsed().as_nanos() as u64)
+                .saturating_sub(started_plus_one.saturating_sub(1)),
+        }
+    }
+
+    /// An otherwise-fresh health block whose clock origin is in the past, so a test can construct a
+    /// job that has been in flight for a stated duration without waiting for one. Test-only, and it
+    /// touches nothing but [`Self::base`] — every counter starts where `new` puts it.
+    #[cfg(test)]
+    fn with_base(base: std::time::Instant) -> Self {
+        let mut health = Self::new();
+        health.base = base;
+        health
+    }
+
+    /// Mark the work item that is about to run. Executor thread only.
+    fn mark_work_started(&self, at: std::time::Instant) {
+        let offset = at.saturating_duration_since(self.base).as_nanos() as u64;
+        self.work_started_nanos
+            .store(offset.saturating_add(1), Ordering::Relaxed);
     }
 
     fn record_apply(&self, nanos: u64) {
         self.apply_nanos_total.fetch_add(nanos, Ordering::Relaxed);
         self.apply_nanos_max.fetch_max(nanos, Ordering::Relaxed);
     }
+
+    /// One work-lane job finished. Called from [`Executor::run`], on the executor thread and
+    /// nowhere else, which is what lets the EWMA be a plain load/store rather than a CAS loop.
+    ///
+    /// `sample` is the **whole** `execute` call — append, fsync, apply, swap and ack — because that
+    /// is what a queued job waits for. `apply_nanos_total` is the wrong operand for a drain
+    /// estimate and its own doc says why: it sums both lanes and excludes the fsync, and the fsync
+    /// is the term the drain is paced by.
+    fn record_work_service(&self, sample_nanos: u64) {
+        // Cleared **first**: between this and the EWMA store, a concurrent `stats()` should see the
+        // stale (smaller) EWMA rather than an in-flight elapsed for a job that has finished. Both
+        // orderings are honest; this one cannot over-report a drain that is already over.
+        self.work_started_nanos.store(0, Ordering::Relaxed);
+        self.work_completed.fetch_add(1, Ordering::Relaxed);
+        let prev = self.work_service_nanos_ewma.load(Ordering::Relaxed);
+        let next = if prev == 0 {
+            // First observation: seed rather than decay towards a fictitious zero, which would
+            // otherwise take eight jobs to reach the truth and under-report for all of them.
+            sample_nanos
+        } else {
+            let p = prev as i128;
+            let s = sample_nanos as i128;
+            (p + (s - p) / 8).max(1) as u64
+        };
+        self.work_service_nanos_ewma.store(next, Ordering::Relaxed);
+    }
+
+    /// Task 6 (D5): the overlay depth at which `apply_change` alarms. `usize::MAX` disables it.
+    ///
+    /// **Re-arms the edge trigger.** Setting the limit is a configuration act, so the next
+    /// [`Self::note_overlay_depth`] must evaluate it afresh — otherwise lowering the limit under an
+    /// already-latched overlay would be silent, which is the one moment an operator most wants the
+    /// alarm.
+    pub fn set_overlay_soft_limit(&self, limit: usize) {
+        self.overlay_soft_limit.store(limit, Ordering::Relaxed);
+        self.overlay_soft_limit_latched
+            .store(false, Ordering::Relaxed);
+    }
+
+    pub fn overlay_soft_limit(&self) -> usize {
+        self.overlay_soft_limit.load(Ordering::Relaxed)
+    }
+
+    /// Evaluate an overlay depth against the soft limit, **edge-triggered**, and report whether this
+    /// observation is a crossing worth alarming on.
+    ///
+    /// One function rather than a check plus a counter bump, because the edge is the whole content:
+    /// a caller that could ask "am I over?" and then bump would reintroduce the level-triggered
+    /// flood one call site at a time. Both evaluation sites — `Executor::apply_change` at runtime,
+    /// `Engine::set_overlay_soft_limit` for the overlay a WAL replay produced before any executor
+    /// existed — go through here, so they share the counter *and* the edge.
+    ///
+    /// Returns `true` at most once per crossing. Depth falling back below the limit re-arms it, as
+    /// does re-setting the limit; neither happens in this build (overlay entries survive
+    /// `unsuppress` and nothing folds until stage 2.3), and the trigger is written for the mechanism
+    /// rather than for the current absence of one.
+    pub fn note_overlay_depth(&self, depth: usize) -> bool {
+        if depth >= self.overlay_soft_limit.load(Ordering::Relaxed) {
+            if self
+                .overlay_soft_limit_latched
+                .swap(true, Ordering::Relaxed)
+            {
+                return false;
+            }
+            self.overlay_soft_limit_alarms
+                .fetch_add(1, Ordering::Relaxed);
+            true
+        } else {
+            self.overlay_soft_limit_latched
+                .store(false, Ordering::Relaxed);
+            false
+        }
+    }
 }
+
+/// Contracts §3.1's 429 row and §0.3 **deviation 11** (r10): every 429 carries `Retry-After` and an
+/// agreeing body `retry_after_s`, and **the value is per-subject** — the fixed `1` belongs to the
+/// compute-admission gate alone. This is the ingest queue's own figure.
+///
+/// `depth` jobs ahead of the caller, each taking about `service_nanos` to drain.
+///
+/// # This is an estimator, and here is exactly what makes it one
+///
+/// 1. **Service time is not stationary.** One work-lane job costs one fsync plus an `IngestBuffer`
+///    clone that is O(total buffered items), and `flush_max_items` is inert until stage 2.2, so the
+///    buffer only grows. Measured (`docs/design-memos/2026-08-01-deny-ack-baseline.md`): ~3.0–3.5 ms
+///    quiescent even at 1 M buffered, but 67–167 ms p50 and up to 666 ms under six concurrent
+///    submitters. The EWMA tracks the recent regime; it does not predict the next one.
+/// 2. **The deny lane is in the real drain and not in this figure.** `Executor::run` drains the
+///    deny queue **to empty** before taking a single work item, so a burst of suppressions delays
+///    every queued ingest by time this estimate cannot see. Denies are never shed for load, so this
+///    is by design, and it means the answer is a floor on a busy node rather than a bound.
+/// 3. **`depth` is a snapshot of two independently-advancing counters** — see
+///    [`ExecutorStats::work_depth`].
+///
+/// No caller may treat the result as a bound. What it is good for is the thing a fixed `1` gets
+/// wrong: a caller retrying every second against a queue draining in thirty manufactures exactly the
+/// load the 429 exists to shed, which is deviation 11's own argument.
+///
+/// `service_nanos == 0` means **nothing has completed yet**, so there is no observation at all;
+/// the answer is [`RETRY_AFTER_MIN_SECS`], and that is a floor chosen for lack of evidence, never a
+/// measurement.
+pub fn estimate_retry_after_s(depth: u64, service_nanos: u64) -> u64 {
+    if service_nanos == 0 {
+        return RETRY_AFTER_MIN_SECS;
+    }
+    // `u128` throughout: `depth` is bounded by the queue bound but `service_nanos` is not bounded
+    // by anything, and a wrap here would produce a *small* retry hint — i.e. it would silently
+    // answer "come back immediately" for the deepest queue, which is the one case the whole
+    // mechanism exists for.
+    let nanos = (depth as u128).saturating_mul(service_nanos as u128);
+    let secs = nanos.div_ceil(1_000_000_000);
+    (secs.max(RETRY_AFTER_MIN_SECS as u128) as u64).min(RETRY_AFTER_MAX_SECS)
+}
+
+/// The floor under every derived `retry_after_s`. Zero would tell a client to retry immediately,
+/// which is a busy-wait dressed as backpressure.
+pub const RETRY_AFTER_MIN_SECS: u64 = 1;
+
+/// The ceiling under every derived `retry_after_s`.
+///
+/// Argued rather than picked: past a few minutes every client library treats `Retry-After` as "go
+/// away", so a larger number buys no additional client behaviour while making the header look
+/// broken. The operator's signal for a queue that deep is `work_depth` on `/control/status`, which
+/// is not clamped.
+pub const RETRY_AFTER_MAX_SECS: u64 = 300;
 
 // =================================================================================================
 // The ack channel, and the proof it demands
@@ -976,9 +1255,21 @@ impl LifecycleHandle {
             self.health.deny_submitted.fetch_add(1, Ordering::SeqCst);
         } else {
             self.work.try_send(job).map_err(|e| match e {
-                // `retry_after_s` is a placeholder until Task 6 derives it from window age and
-                // observed drain rate; the variant, which is what 3b maps to 429, is already right.
-                TrySendError::Full(_) => SubmitError::QueueFull { retry_after_s: 1 },
+                // Task 6: derived, not a placeholder — see [`estimate_retry_after_s`], which also
+                // states what makes it an estimator rather than a bound. Both operands are plain
+                // atomic loads on a path that must sustain 10⁹-scale ingest.
+                TrySendError::Full(_) => {
+                    let stats = self.health.stats();
+                    SubmitError::QueueFull {
+                        retry_after_s: estimate_retry_after_s(
+                            stats.work_depth,
+                            // Not the raw EWMA — see `ExecutorStats::service_nanos_for_estimate`.
+                            // This is the shed path, so the in-flight job is precisely the one the
+                            // caller is queued behind.
+                            stats.service_nanos_for_estimate(),
+                        ),
+                    }
+                }
                 TrySendError::Disconnected(_) => SubmitError::ExecutorDead,
             })?;
             self.health.work_submitted.fetch_add(1, Ordering::SeqCst);
@@ -1073,7 +1364,20 @@ impl Executor {
                 self.execute(job);
             }
             if let Ok(job) = self.queues.work.try_recv() {
+                // Timed **around the whole `execute`**, not around the apply: a queued job waits
+                // for append, fsync, apply, swap and ack, and Task 6 derives `retry_after_s` from
+                // this. The deny lane above is deliberately not timed — it has no bounded queue,
+                // so it has no depth to drain and no 429 to derive.
+                let started = std::time::Instant::now();
+                // Published **before** the job runs, which is the whole of F7: `record_work_service`
+                // below writes the EWMA only when `execute` returns, so without this the estimator
+                // reports the previous, faster regime for the entire duration of the one long job
+                // that is filling the queue. Derived from the `Instant` already taken, so no extra
+                // clock read on the write path.
+                self.health.mark_work_started(started);
                 self.execute(job);
+                self.health
+                    .record_work_service(started.elapsed().as_nanos() as u64);
                 continue;
             }
             if self.queues.bell.recv().is_err() {
@@ -1289,6 +1593,32 @@ impl Executor {
         let mut overlay: Overlay = (*generation.overlay).clone();
         overlay.apply(entity, op, terms);
 
+        // Task 6 (D5). **It alarms; it does not act** — there is no fold until stage 2.3, so an
+        // operator who sets `overlay_soft_limit` today gets a signal that the overlay is deep, not
+        // a mechanism that makes it shallower.
+        //
+        // This is the only place the overlay grows **at runtime**; it is not the only place it
+        // grows. `WritePath::reconstruct` builds one from WAL replay before this executor exists,
+        // so a node restarting already over the limit is caught by
+        // `Engine::set_overlay_soft_limit`'s own one-shot evaluation instead.
+        // **Edge-triggered** (fix round 1, F5). The depth never decreases in this build, so a
+        // level-triggered check emitted this four-line WARN on every subsequent deny, forever, with
+        // no path back — an alarm flood at exactly the moment the node is under deny pressure.
+        // `note_overlay_depth` returns `true` only on a crossing.
+        let depth = overlay.len();
+        let limit = self.health.overlay_soft_limit();
+        if self.health.note_overlay_depth(depth) {
+            tracing::warn!(
+                overlay_depth = depth,
+                overlay_soft_limit = limit,
+                "ALARM: the overlay has crossed its configured soft limit. Nothing acts on this: \
+                 there is no fold until stage 2.3, so the depth will not come down on its own — and \
+                 this line is edge-triggered, so it will NOT repeat while the overlay stays over. \
+                 Overlay depth is a term in I1's composition cost and in every deny's ack latency \
+                 (each acceptance clones the overlay); watch overlay.depth on /control/status"
+            );
+        }
+
         let next = Generation {
             overlay_version: generation.overlay_version + 1,
             overlay: Arc::new(overlay),
@@ -1397,4 +1727,198 @@ type PauseSiteArg = tessera_lifecycle::faults::PauseSite;
 enum PauseSiteArg {
     AfterFsync,
     BeforeAck,
+}
+
+#[cfg(test)]
+mod retry_after_tests {
+    use super::*;
+
+    /// **Nothing has completed, so there is no observation at all.** The answer is the floor, and
+    /// the floor is a floor chosen for lack of evidence — never a measurement dressed as one.
+    ///
+    /// Reachable in production and not a corner case: a queue bound of `n` can be filled by the
+    /// first `n + 1` requests a freshly-started server ever receives.
+    ///
+    /// **Mutation:** delete the `service_nanos == 0` guard and this returns 0 (`depth × 0`), i.e.
+    /// "retry immediately", which is a busy-wait dressed as backpressure.
+    #[test]
+    fn no_observation_yields_the_floor_not_a_zero() {
+        assert_eq!(estimate_retry_after_s(64, 0), RETRY_AFTER_MIN_SECS);
+        assert_eq!(estimate_retry_after_s(0, 0), RETRY_AFTER_MIN_SECS);
+    }
+
+    /// The derivation itself: a deep queue draining slowly gets a number that is neither `1` nor
+    /// the clamp. This is what contracts §0.3 deviation 11 exists for — "a caller that retries at
+    /// 1 s against a queue draining in 30 s manufactures exactly the load the 429 exists to shed".
+    ///
+    /// **Mutation:** return a constant `RETRY_AFTER_MIN_SECS` and this goes red on the first
+    /// assertion, which is exactly the pre-Task-6 behaviour (`retry_after_s: 1`, hard-coded).
+    #[test]
+    fn a_deep_queue_draining_slowly_asks_for_more_than_one_second() {
+        // 64 queued jobs at 500 ms each = 32 s.
+        assert_eq!(estimate_retry_after_s(64, 500_000_000), 32);
+        // Rounds **up**: 3 jobs at 400 ms is 1.2 s, and answering 1 sends the caller back early.
+        assert_eq!(estimate_retry_after_s(3, 400_000_000), 2);
+        // A fast queue still gets the floor rather than a fractional second.
+        assert_eq!(estimate_retry_after_s(64, 3_200_000), RETRY_AFTER_MIN_SECS);
+    }
+
+    /// The clamp, both ends. Past a few minutes every client library reads `Retry-After` as "go
+    /// away", so a larger number buys no client behaviour; the operator's unclamped signal is
+    /// `work_depth` on `/control/status`.
+    ///
+    /// **Mutation:** drop the `.min(RETRY_AFTER_MAX_SECS)` and the first assertion reports 6400.
+    #[test]
+    fn the_estimate_is_clamped_at_both_ends() {
+        assert_eq!(
+            estimate_retry_after_s(64, 100_000_000_000),
+            RETRY_AFTER_MAX_SECS
+        );
+        // And it cannot overflow into a *small* number, which would be the unsafe direction: the
+        // deepest, slowest queue must never answer "come back immediately".
+        assert_eq!(
+            estimate_retry_after_s(u64::MAX, u64::MAX),
+            RETRY_AFTER_MAX_SECS
+        );
+    }
+
+    /// The EWMA tracks the **recent** regime, which is the whole reason it is not a cumulative
+    /// mean. A server that ingested a long run of fast batches and has since slowed — the shape a
+    /// growing `IngestBuffer` produces, since its clone is O(total buffered items) and flush is
+    /// inert until stage 2.2 — must not keep quoting the fast figure.
+    ///
+    /// **Mutation:** replace `record_work_service`'s EWMA with a cumulative mean
+    /// (`total / completed`) and the final assertion fails: 1000 samples at 3 ms swamp 40 at 3 s,
+    /// so the estimate stays at the floor while the real drain is minutes.
+    #[test]
+    fn the_service_estimate_follows_the_recent_regime_not_the_whole_history() {
+        let health = ExecutorHealth::new();
+        for _ in 0..1000 {
+            health.record_work_service(3_000_000); // 3 ms, buffer small
+        }
+        assert_eq!(
+            estimate_retry_after_s(64, health.stats().work_service_nanos_ewma),
+            RETRY_AFTER_MIN_SECS,
+            "a fast queue is a one-second queue"
+        );
+        for _ in 0..40 {
+            health.record_work_service(3_000_000_000); // 3 s, buffer deep
+        }
+        let ewma = health.stats().work_service_nanos_ewma;
+        assert!(
+            ewma > 1_000_000_000,
+            "the EWMA must have followed the new regime; got {ewma} ns"
+        );
+        assert!(
+            estimate_retry_after_s(64, ewma) > 60,
+            "64 jobs at seconds apiece is minutes, not one second"
+        );
+    }
+
+    /// `work_depth` is `submitted - completed`, **saturating**, and the saturation is not defensive
+    /// programming: `work_submitted` is bumped *after* the `try_send` in
+    /// [`LifecycleHandle::submit`], so the executor can complete a job before its submitter has
+    /// recorded it and `completed > submitted` is transiently legal.
+    #[test]
+    fn work_depth_saturates_rather_than_underflowing() {
+        let health = ExecutorHealth::new();
+        health.record_work_service(1);
+        assert_eq!(health.stats().work_completed, 1);
+        assert_eq!(health.stats().work_depth, 0);
+    }
+
+    /// **The estimator was blind in exactly the state that produces the 429** (fix round 1, F7).
+    ///
+    /// `record_work_service` runs only when `execute` returns, so while one long job is in flight
+    /// the EWMA still reports the previous regime. That is the 10⁹ shape — the first job at a new
+    /// `IngestBuffer` depth is the slow one, and it is *while it runs* that the queue fills and
+    /// callers are shed — and the resulting error is on the load-amplifying side: every shed caller
+    /// is told to come back in a second and re-uploads up to `ingest_max_batch_bytes`.
+    ///
+    /// The construction is the real one: a thousand fast samples establish a fast EWMA, then a job
+    /// is marked started and never completed, which is what "in flight" *is*.
+    ///
+    /// **Mutation:** make `service_nanos_for_estimate` return `self.work_service_nanos_ewma` and
+    /// the second assertion drops to the floor, which is the shipped behaviour this replaces.
+    #[test]
+    fn a_long_job_in_flight_raises_the_estimate_before_it_completes() {
+        // The clock origin is put 90 s in the past rather than waiting 90 s; a job marked as
+        // starting *at* the origin has then been in flight for 90 s, which is the state under test.
+        let ninety_seconds_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(90))
+            .expect("this test needs a host that has been up for at least 90 s");
+        let health = ExecutorHealth::with_base(ninety_seconds_ago);
+        for _ in 0..1000 {
+            health.record_work_service(3_000_000); // 3 ms: a fast, established regime
+        }
+        assert_eq!(
+            estimate_retry_after_s(64, health.stats().service_nanos_for_estimate()),
+            RETRY_AFTER_MIN_SECS,
+            "with nothing in flight the estimate is the EWMA's"
+        );
+
+        // A job that started 90 s ago and has not finished. Nothing has been recorded, so the EWMA
+        // is untouched and still says 3 ms.
+        health.mark_work_started(ninety_seconds_ago);
+        let stats = health.stats();
+        assert_eq!(
+            stats.work_service_nanos_ewma, 3_000_000,
+            "the EWMA is deliberately untouched — this is the blindness, not a fix to it"
+        );
+        assert!(
+            stats.work_in_flight_nanos >= 89_000_000_000,
+            "the in-flight job's own elapsed must be visible; got {} ns",
+            stats.work_in_flight_nanos
+        );
+        assert!(
+            estimate_retry_after_s(1, stats.service_nanos_for_estimate()) >= 90,
+            "a caller queued behind a 90 s job must not be told to come back in one second"
+        );
+
+        // And it clears: the marker is dropped when the job completes, so a finished long job does
+        // not go on inflating every later estimate.
+        health.record_work_service(90_000_000_000);
+        assert_eq!(health.stats().work_in_flight_nanos, 0);
+    }
+
+    /// **The soft-limit alarm is edge-triggered** (fix round 1, F5). `Overlay::len` never decreases
+    /// in this build — entries survive `suppress → unsuppress` and nothing folds until stage 2.3 —
+    /// so a level-triggered check emitted a four-line WARN per deny, forever, with no path back,
+    /// precisely while the node was under deny pressure.
+    ///
+    /// **Mutation:** make `note_overlay_depth` return `depth >= limit` unconditionally (dropping the
+    /// latch) and the "does not re-fire" assertion goes red.
+    #[test]
+    fn the_overlay_alarm_fires_once_per_crossing_not_once_per_change() {
+        let health = ExecutorHealth::new();
+        health.set_overlay_soft_limit(3);
+
+        assert!(!health.note_overlay_depth(1));
+        assert!(!health.note_overlay_depth(2));
+        assert_eq!(health.stats().overlay_soft_limit_alarms, 0);
+
+        assert!(health.note_overlay_depth(3), "the crossing must alarm");
+        assert_eq!(health.stats().overlay_soft_limit_alarms, 1);
+
+        // The state this test exists for: the depth only ever rises from here.
+        for depth in 4..1000 {
+            assert!(
+                !health.note_overlay_depth(depth),
+                "depth {depth} is over the limit but is not a CROSSING; alarming here is the flood"
+            );
+        }
+        assert_eq!(health.stats().overlay_soft_limit_alarms, 1);
+
+        // Re-arming, both ways it can happen. Falling back below the limit does not occur in this
+        // build, and the trigger is written for the mechanism rather than for its current absence.
+        assert!(!health.note_overlay_depth(0));
+        assert!(health.note_overlay_depth(3));
+        assert_eq!(health.stats().overlay_soft_limit_alarms, 2);
+
+        // Re-setting the limit re-arms too, which is what makes "lower the limit under a live
+        // overlay" — the WAL-replay shape `Engine::set_overlay_soft_limit` handles — audible.
+        health.set_overlay_soft_limit(2);
+        assert!(health.note_overlay_depth(3));
+        assert_eq!(health.stats().overlay_soft_limit_alarms, 3);
+    }
 }

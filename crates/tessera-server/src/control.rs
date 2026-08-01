@@ -1,5 +1,7 @@
 //! The control (admin) plane (R5): `POST /control/ingest`, `POST /control/changes`,
-//! `GET /control/status`, plus `/healthz`/`/readyz`. Bearer auth is the operator credential.
+//! `GET /control/status`, plus `/healthz`/`/readyz`. Bearer auth is the operator credential, applied
+//! **once, at the router** by [`require_operator_credential`] rather than by each handler — see its
+//! doc for what that buys and for the two-path exemption the health probes need.
 //!
 //! This module owns the **ack contract**: parse -> allocate ids (`assign_sorted`) -> WAL append
 //! -> fsync -> apply to buffer/overlay + generation swap -> 200. Never a 200 without fsync. For
@@ -36,34 +38,51 @@ use crate::state::AppState;
 /// # Why `/control/changes` does not share tokio's blocking pool
 ///
 /// `spawn_blocking` dispatches onto a process-wide **unbounded FIFO** served by at most
-/// `max_blocking_threads` threads (512 by default). Three facts compose badly:
+/// `max_blocking_threads` threads. An ingest closure holds its thread across the Arrow decode, the
+/// plugin's `terms_of_label` loop, the external-ID sidecar IO **and** its whole blocking wait on the
+/// executor's receipt, and frees it only when all of that completes — an fsync plus an
+/// `IngestBuffer` clone that is O(total buffered items).
 ///
-/// - `/control/ingest` is behind **no admission bound at all** — the control plane is deliberately
-///   never gated by `ComputeGate` (D13), so concurrent ingest handlers are bounded by nothing;
-/// - an ingest closure holds its blocking thread across the Arrow decode, the plugin's
-///   `terms_of_label` loop, the external-ID sidecar IO **and** its whole blocking wait on the
-///   executor's receipt;
-/// - a thread frees only when one of those completes, which costs an fsync plus an `IngestBuffer`
-///   clone that is O(total buffered items).
+/// **The original finding (Task 3b), and what Task 6 changed about it.** When this runtime was
+/// built, `/control/ingest` was behind *no admission bound at all* and the pool was tokio's
+/// undeclared 512, so above ~512 in-flight ingest requests a suppression's closure queued behind
+/// ingest closures **inside tokio**, before it could reach the prioritised deny queue — lifecycle
+/// §1.3's forbidden shape reintroduced one layer above the priority lane, where the executor cannot
+/// see it. Task 6 (D2/D4) closed both of those operands: `ingest_admission` bounds concurrent ingest
+/// handlers, and `config::serving_blocking_threads` *derives* the pool as `compute_admission +
+/// ingest_admission + BLOCKING_THREAD_RESERVE` rather than inheriting tokio's default. **Every
+/// sentence in the paragraph above is therefore false of the shipped binary, and this section
+/// records the history rather than the state.**
 ///
-/// So above ~512 in-flight ingest requests a suppression's closure queues **behind ingest closures,
-/// inside tokio**, before it can reach the prioritised deny queue at all. That is exactly lifecycle
-/// §1.3's forbidden shape — a deny queued behind work of unbounded duration — reintroduced one
-/// layer *above* the priority lane, where the executor cannot see it. No test observed it: the
-/// existing `concurrent_ingests_do_not_delay_a_control_changes_suppress` runs eight batches.
+/// The viewer plane was never part of the problem in the same way, and it is worth saying why
+/// because the asymmetry is the reason this fix is on the deny side: `ComputeGate::admit` is `async`
+/// and is awaited **before** `spawn_blocking`, so a queued viewport holds no blocking thread.
 ///
-/// The viewer plane is not part of the problem in the same way and it is worth saying why, because
-/// the asymmetry is the reason this fix is on the deny side: `ComputeGate::admit` is `async` and is
-/// awaited **before** `spawn_blocking`, so a queued viewport holds no blocking thread and viewer
-/// demand is bounded by `compute_admission`.
+/// # Why the separate runtime is still right after D2 — the live argument
 ///
-/// # Why a separate runtime rather than a bound on ingest
+/// D2 makes the shared pool *sufficient by arithmetic*: the pool covers both admission bounds by
+/// construction, so an admitted request can never find no thread. That is a statement about a
+/// derived number, and it is exactly the kind of statement this lane must not depend on:
 ///
-/// Bounding ingest needs an arithmetic over `max_blocking_threads` (tokio's default, set outside
-/// this crate), `compute_admission` (config) and a new ingest bound — three operands, two of which
-/// someone can move without touching this reasoning, and it is Task 6's arithmetic by charter.
-/// A separate resource needs to know none of them and cannot be invalidated by a change to any:
-/// CLAUDE.md's "structural, not disciplinary" test.
+/// 1. **The arithmetic holds only where `tessera-cli` builds the runtime.** Embedders,
+///    `mount_server`, `spawn_server_from_engine` and every integration test run under an ambient
+///    runtime this crate did not size — `config::serving_blocking_threads`'s own doc says so. On
+///    those, the pool is whatever the host chose, and the deny lane is the one thing that must not
+///    degrade with it.
+/// 2. **`BLOCKING_THREAD_RESERVE` is a reserve, not an enumeration.** tokio dispatches its own
+///    blocking work (DNS, most visibly) onto the same pool, and nothing in this workspace can
+///    enumerate what a future dependency adds. A shared pool is sufficient *on current evidence*;
+///    a separate one needs no evidence.
+/// 3. **Sufficiency is not isolation.** Even with a thread always available, a deny on the shared
+///    pool takes its place in one FIFO behind up to `ingest_admission` closures, each of which is
+///    holding a receipt open. Denies are never refused for load (contracts §3.1) and so have no
+///    admission control of their own to fall back on; the owner's latency principle (under a minute)
+///    is satisfied either way, but the *structural* guarantee that a deny is never queued behind
+///    work of unbounded duration is not a property the arithmetic can give.
+///
+/// CLAUDE.md's "structural, not disciplinary" test, and D2 does not retire it: D2 bounds a resource,
+/// this separates one. Deleting this runtime on the ground that ingest is now bounded would trade a
+/// structural property for a derived one, on the one lane where that trade is not available.
 ///
 /// # Why it is NOT small
 ///
@@ -135,6 +154,9 @@ pub fn init_deny_runtime() -> std::io::Result<()> {
         // Named so the lane is legible in a thread dump — an operator diagnosing deny latency must
         // be able to tell these apart from tokio's shared pool.
         .thread_name("tessera-deny")
+        // See [`DENY_MAX_BLOCKING_THREADS`]: tokio's own default, stated here so it is not an
+        // undeclared figure the process's thread demand rests on.
+        .max_blocking_threads(DENY_MAX_BLOCKING_THREADS)
         .build()?;
     if let Err(loser) = DENY_RUNTIME.set(rt) {
         discard_losing_runtime(loser);
@@ -175,15 +197,174 @@ where
     }
 }
 
+/// The deny runtime's own blocking-pool bound.
+///
+/// **Stated rather than inherited.** Task 6 made the serving runtime's `max_blocking_threads` a
+/// derived, declared number (`config::serving_blocking_threads`); this runtime was still taking
+/// tokio's undeclared default, so the process's thread demand would have gone on resting on a
+/// figure no line of this repository states — just a different one. 512 is that default, so setting
+/// it changes no behaviour; what changes is that a tokio release cannot move it in silence.
+///
+/// **Deliberately not small**, and [`DENY_RUNTIME`]'s "Why it is NOT small" section is the
+/// argument: isolation comes from the pool being *separate*, and `run_changes` submits and awaits
+/// each item individually, so one caller-sized batch occupies one thread for N sequential fsyncs.
+const DENY_MAX_BLOCKING_THREADS: usize = 512;
+
 pub fn router(state: Arc<AppState>) -> Router {
+    // Task 6 (D1): the byte cap, enforced **here** rather than by a `body.len()` check in the
+    // handler, and the difference is not stylistic.
+    //
+    // axum applies a default request-body limit of 2 MiB to the `Bytes` extractor, well under this
+    // deployment's `ingest_max_batch_bytes` (16 MiB by default) — so before this layer existed the
+    // configured cap could never be the refusal a caller met, and an over-2-MiB batch got a **413**,
+    // a status outside contracts §3.1's closed code list. Both halves of that are closed by setting
+    // the limit to the configured cap and mapping the rejection ourselves: buffering is bounded at
+    // exactly the number the operator set, and the answer is the 422 §3.1's "bounds exceeded" row
+    // calls for.
+    //
+    // The handler takes `Result<Bytes, _>` rather than `Bytes` so the rejection is **mapped** to
+    // that 422 instead of escaping as axum's own 413. Until [`require_operator_credential`] existed
+    // it carried a second, larger duty — keeping `check_bearer` ahead of the extractor — and that
+    // duty has moved to the layer; see the auth layer's doc for what changed and what did not.
+    let ingest_route = post(ingest).layer(axum::extract::DefaultBodyLimit::max(
+        state.ingest_max_batch_bytes,
+    ));
+    // Fix round 1 (F6): the same remedy, transferred. `post(changes)` with a bare `Json<..>`
+    // extractor answered axum's own **413** — outside contracts §3.1's closed code list — with
+    // axum's own body, on the never-shed lane, to an operator submitting ~20 000 suppressions. The
+    // limit is stated here rather than inherited so the 422's detail can name a number that is true.
+    let changes_route =
+        post(changes).layer(axum::extract::DefaultBodyLimit::max(CHANGES_MAX_BODY_BYTES));
     Router::new()
-        .route("/control/ingest", post(ingest))
-        .route("/control/changes", post(changes))
+        .route("/control/ingest", ingest_route)
+        .route("/control/changes", changes_route)
         .route("/control/status", get(status))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        // **The whole plane's credential check, in one place** — see
+        // [`require_operator_credential`]. `Router::layer` rather than a `route_layer` per route:
+        // the point of this construction is that a route added below inherits the check without
+        // anyone remembering to ask for it, and a `route_layer` per route is the same discipline
+        // this replaces, spelled differently.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_operator_credential,
+        ))
         .with_state(state)
 }
+
+/// **The control plane's operator-credential gate, at the router rather than in each handler.**
+///
+/// Until 2026-08-01 each of `ingest`, `changes` and `status` opened with its own
+/// `state.check_bearer(bearer_token(&headers), &state.operator_credential)`. That is a rule spread
+/// across call sites, which CLAUDE.md's "structural, not disciplinary" test rejects, and it had
+/// already failed once on this exact plane: `status`'s doc records that it *previously returned
+/// `entity_id_high_water`* — a global, unmasked corpus-size fact — to anyone who could reach the
+/// control listener, for no reason other than that the handler did not call `check_bearer`. A
+/// handler that forgets is unauthenticated; a handler under this layer cannot forget.
+///
+/// Three things this buys, in the order they matter:
+///
+/// 1. **No request body is buffered for an unauthenticated caller.** axum extractors run *inside*
+///    the handler service, so with a per-handler check a 16 MiB `/control/ingest` body was resident
+///    in full before `check_bearer` ever executed (`ingest_max_batch_bytes`, raised from axum's
+///    2 MiB default by Task 6 D1, widening that window 8×). A `tower` layer runs *outside* the
+///    extractors: this returns 401 with the body still an unconsumed stream. That is the
+///    unauthenticated half of the Task 6 gate's F11 (security IMPORTANT 1 + performance I4), closed
+///    in code rather than by deployment posture.
+///
+///    **What it does NOT close, stated because it is still open.** A caller holding a *valid*
+///    operator credential still buffers up to `ingest_max_batch_bytes` per in-flight request, and
+///    `axum::serve` still applies no connection or concurrency cap, so the *count* of connections
+///    remains unbounded. `config`'s relation 3 caps the size of one window; nothing caps how many
+///    there are. That residue is unchanged by this layer and remains an owner item.
+/// 2. **A control route cannot be added unauthenticated by omission.** The layer wraps the whole
+///    router, so a `.route(..)` added to [`router`] tomorrow is behind the credential the moment it
+///    exists. Opting *out* requires editing [`UNAUTHENTICATED_CONTROL_PATHS`], which is a deliberate
+///    act with a test over it.
+/// 3. **401 ahead of every 422 and 429 is now a property of the router.** `control::ingest`'s doc
+///    enumerates that ordering and `backpressure_is_invisible_before_auth` exercised it one handler
+///    at a time; the ordering no longer depends on where each handler happens to put its check.
+///
+/// # The exemption, and why matching is exact
+///
+/// `/healthz` and `/readyz` are mounted on this same router and **must stay unauthenticated on every
+/// listener** (SA §9; `health.rs`). `/readyz` being a bare unauthenticated boolean is the deliberate
+/// half of a pair: the posture *string* lives behind the bearer on `/control/status`, which is why
+/// this layer must not simply cover everything it is mounted over.
+///
+/// The comparison is exact equality against the request's raw path. Not a prefix match, not a
+/// normalising one: `/healthz/../control/status` and `/healthz/` are not `/healthz`, so they fall
+/// through to the credential check. Every way of being *nearly* an exempt path is therefore
+/// authenticated, which is the direction a mistake here has to fail in.
+///
+/// The layer also sits ahead of the router's 404, so an unrouted path on the control listener
+/// answers 401 rather than 404 — `near_misses_of_the_exemption_are_authenticated` pins that
+/// alongside the near-miss spellings. It is not the reason for this design, but it is the right way
+/// round: an unauthenticated caller cannot map the plane's surface by probing.
+///
+/// # Scope: this plane only
+///
+/// **Deliberately not applied to the session or viewer routers, and they are not oversights.** They
+/// authenticate against different secrets with different exemptions — `session::router` gates on
+/// `state.session_credential`, and `viewer::router` on per-session tokens looked up by value in the
+/// registry (`AppState::authenticated_session`, which also owns the 403-on-expiry that a
+/// shared-secret check has no equivalent of). One layer over all three would have to carry three
+/// credential sources and three exemption lists, which is a policy table — the thing this change was
+/// explicitly not to build. Each plane keeps its own arrangement; only the control plane's moves.
+async fn require_operator_credential(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    if !UNAUTHENTICATED_CONTROL_PATHS.contains(&request.uri().path()) {
+        state.check_bearer(bearer_token(request.headers()), &state.operator_credential)?;
+    }
+    Ok(next.run(request).await)
+}
+
+/// The **only** paths on the control router that [`require_operator_credential`] lets through
+/// without a credential. Adding to this list is how a route becomes public, and it is meant to be a
+/// visible, arguable act rather than an omission.
+///
+/// Both entries are required to be here by SA §9 and by `health.rs`'s doc: a liveness and a
+/// readiness probe are consumed by orchestration that holds no operator secret, on all three
+/// listeners. `readyz` is a bare boolean precisely *so* that it can be public.
+pub const UNAUTHENTICATED_CONTROL_PATHS: &[&str] = &["/healthz", "/readyz"];
+
+/// Every route [`router`] mounts, as `(method, path)` — the subject of
+/// `every_control_route_not_exempt_requires_the_operator_credential`.
+///
+/// **This list is the test's mechanism, and it is weaker than the layer it tests. Say so rather than
+/// claim otherwise.** axum 0.8's `Router` exposes no route enumeration — there is no public iterator
+/// over its `Method`/path table and no way to derive one — so a test cannot ask the router what it
+/// serves. A hard-coded list is what is available, and its limitation is exactly what you would
+/// expect: a route added to [`router`] and *not* added here is not covered by that test.
+///
+/// What makes that acceptable, and why this is not the discipline it replaces: the *layer* is
+/// router-wide, so an unlisted new route is authenticated anyway. The two mechanisms cover each
+/// other's gap — the layer makes a forgotten route safe, and this list makes a *removed or narrowed
+/// layer* fail the build. Neither alone would do; the pairing is the argument. If axum ever exposes
+/// its route table, this constant is the thing to delete.
+pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/control/ingest"),
+    ("POST", "/control/changes"),
+    ("GET", "/control/status"),
+    ("GET", "/healthz"),
+    ("GET", "/readyz"),
+];
+
+/// `/control/changes`'s request-body limit.
+///
+/// **Deliberately not a config key, and deliberately axum's own default value.** 2 MiB is what this
+/// endpoint has always enforced — it just enforced it as an untyped 413 from inside the extractor,
+/// before the bearer check. Stating it here changes no behaviour except the answer: the limit is now
+/// a number this crate owns, so the 422 can name it, and a future decision to raise it is a decision
+/// rather than an inherited default. It is **not** sized against `ingest_max_batch_bytes`: a change
+/// item is order 200 B (see `config::RESERVED_DENY_HEADROOM_BYTES`), so this admits roughly ten
+/// thousand suppressions in one request, and a caller with more than that has to split — which is
+/// a latency cost on a batch, not a refusal of any individual deny.
+const CHANGES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -358,6 +539,32 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
 
     let items = parse_ingest_batch(body)?;
 
+    // Task 6 (D1): the row cap. 422 per contracts §3.1's "bounds exceeded" row, naming the bound
+    // and the batch's own size.
+    //
+    // **What is already spent when this fires, stated rather than implied**: the whole Arrow
+    // decode, because the row count is not knowable before it. That is the cost of the cap and it
+    // is why the *byte* cap is enforced a layer earlier, on the route, where nothing has been
+    // decoded at all.
+    //
+    // **Placed before the `terms_of_label`/`resolve_terms` loop below, which narrows a known
+    // consequence without closing it.** Task 3a recorded that `resolve_terms` runs pre-submit, so
+    // extension-id dictionary state grows on refused batches; putting this check first means an
+    // over-large batch no longer contributes to that. A batch that is *under* the row cap and
+    // fails later still does. This comment says which of those two it is on purpose — the check
+    // does not close the path.
+    if items.len() > state.ingest_max_batch_rows {
+        return Err(ApiError::Contract(format!(
+            "ingest batch has {} rows, exceeding the {}-row per-batch cap \
+             (ingest.ingest_max_batch_rows); refused before ENTITY-ID allocation, so it cost no \
+             entity id, no queue slot and no WAL append. The body was hashed and decoded in full \
+             before this fired — the row count is not knowable earlier — so it is not free; the \
+             byte cap on the route is the refusal that costs nothing",
+            items.len(),
+            state.ingest_max_batch_rows
+        )));
+    }
+
     // Resolve each item's descriptors and terms up front — idempotent even on a replayed
     // request, since `resolve_terms` looks up already-interned descriptors without reassigning
     // (see `Engine::resolve_terms`'s doc).
@@ -473,17 +680,27 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
     // Task 7a. That is what makes design §11.1's signature-sort scope the *server's* window rather
     // than whatever chunk size a client happened to pick — and it is why this handler no longer
     // calls `allocate_sorted` at all. Calling it here after this change would double-allocate.
+    //
+    // **The three decoded intermediates are CONSUMED here, not cloned** (fix round 1, F2). This was
+    // `items.iter().zip(&terms_per_item).zip(descriptor_lists.iter())` cloning `external_id`,
+    // `descriptors`, `scalars` and `terms` out of them — so `items`, `descriptor_lists`,
+    // `terms_per_item` *and* `rows` were all live simultaneously, and `accept_ingest` then blocks on
+    // its receipt with all four in scope. At `ingest_admission` concurrent handlers that doubling is
+    // multiplied by the admission bound, which is the term `INGEST_RESIDENT_CEILING_BYTES`'s
+    // arithmetic is about. Moving instead of cloning also deletes four per-row allocations on the
+    // path that must sustain 10⁹-scale ingest; the three source vectors drop at the end of this
+    // statement.
     let rows: Vec<UnallocatedRow> = items
-        .iter()
-        .zip(&terms_per_item)
-        .zip(descriptor_lists.iter())
+        .into_iter()
+        .zip(terms_per_item)
+        .zip(descriptor_lists)
         .map(|((item, terms), descriptors)| UnallocatedRow {
-            external_id: item.external_id.clone(),
-            descriptors: descriptors.clone(),
+            external_id: item.external_id,
+            descriptors,
             x: item.x,
             y: item.y,
-            scalars: item.scalars.clone(),
-            terms: terms.clone(),
+            scalars: item.scalars,
+            terms,
         })
         .collect();
 
@@ -514,12 +731,86 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
     })
 }
 
+/// **The ordering here is the whole of `backpressure_is_invisible_before_auth`, and it is
+/// load-bearing.** An unauthenticated caller must not be able to learn anything about this server's
+/// ingest pressure — or about its configured batch cap — by reading a status code. So:
+///
+/// 1. the operator credential → **401**, in [`require_operator_credential`], which is a router
+///    layer and therefore runs before this function and before its extractors;
+/// 2. the body's own rejection (over `ingest_max_batch_bytes`) → **422**;
+/// 3. the missing batch-id header → **422**;
+/// 4. the admission bound → **429**, evaluated before `spawn_blocking` because the resource it
+///    bounds is the thing `spawn_blocking` takes;
+/// 5. the row cap, inside `run_ingest` after the Arrow decode → **422**;
+/// 6. the queue bound, inside the executor's `submit` → **429**.
+///
+/// **Step 1 used to be the first statement of this function, and moving it to the router changed
+/// what `body: Result<Bytes, _>` is for.** It was doing two jobs: keeping `check_bearer` ahead of
+/// the extractor, and turning the extractor's rejection into a mapped 422 instead of axum's own 413.
+/// The layer discharges the first outright — an extractor rejection can no longer precede the
+/// credential, because the credential is checked one service out. The second job is unchanged and is
+/// why the signature stays: with plain `Bytes`, an *authenticated* over-cap caller would still get a
+/// 413, outside contracts §3.1's closed code list. Its rejection type is `Infallible`, so this is
+/// total.
+///
+/// # The buffered body: what the layer closed, and what it did not
+///
+/// **Closed for an unauthenticated caller.** This paragraph used to say the opposite, and it was
+/// true when it was written: extractors run inside the handler service, so with `check_bearer` as
+/// this function's first statement the body was already resident in full — up to
+/// `ingest_max_batch_bytes`, 16 MiB by default since Task 6 D1 raised it from axum's 2 MiB, an 8×
+/// widening — before the credential was seen. [`require_operator_credential`] runs *outside* the
+/// extractors, so a caller with no credential now meets a 401 while the body is still an unconsumed
+/// stream. Nothing is buffered on their behalf.
+///
+/// **Not closed for a valid-credentialed caller, and not closed for connection count.** An
+/// authenticated request still buffers up to `ingest_max_batch_bytes` before `ingest_admission` is
+/// consulted, and `axum::serve` applies no connection or concurrency cap, so N authenticated
+/// connections still pin `N × ingest_max_batch_bytes`. `config`'s third startup relation —
+/// `(ingest_queue_bound + ingest_admission) × ingest_max_batch_bytes ≤ INGEST_RESIDENT_CEILING_BYTES`
+/// — caps the *size* of one window (roughly 170 MiB at the default bounds, refusing the
+/// `ingest_queue_bound = 1, ingest_max_batch_bytes = 1 GiB` configuration every earlier relation
+/// admitted). It does not cap the *count*, because nothing in this crate can. **That residual is an
+/// open owner decision** and is on the stage ledger.
+///
+/// **A `tower` concurrency-limit layer was assessed as a close for the count and declined** (Task 6
+/// gate, F11), and this layer does not revisit it — it is an *authentication* layer, not a
+/// concurrency bound, and it adds no per-request wait. The declined assessment stands: on the
+/// *whole* control router a concurrency limit is disqualified outright, since it would put
+/// `/control/changes` behind an in-flight bound shared with ingest handlers that block on receipts,
+/// which is lifecycle §1.3's "a deny queued behind work of unbounded duration" reintroduced at the
+/// router — the exact shape [`DENY_RUNTIME`] exists to prevent, given up to close a memory window.
+/// On the *ingest route alone* it is technically available but not proportionate: `tower::limit`
+/// **queues** rather than sheds, so sized at or below `ingest_admission` it swallows D2's prompt 429
+/// (requests wait for a layer permit instead of being refused), and sized above it, it needs a
+/// second bound nobody has argued — while still leaving `limit × ingest_max_batch_bytes` resident.
 async fn ingest(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<IngestResp>, ApiError> {
-    state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
+    // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**, unknown filter operand",
+    // and a `BytesRejection` is either of the first two. **Branched on the rejection's own status,
+    // not collapsed**: this arm used to report every `BytesRejection` as "your batch is too big",
+    // and the variant also covers a client disconnecting mid-upload and a malformed transfer
+    // encoding — so an operator whose 4 KB batch was truncated by a flaky link was told to shrink
+    // their batches. The rejection's `Display` is still never forwarded (this module's rule).
+    let body = body.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::Contract(format!(
+                "ingest body exceeds the {}-byte per-batch cap (ingest.ingest_max_batch_bytes); \
+                 refused before decoding, so it cost no queue slot and no WAL append",
+                state.ingest_max_batch_bytes
+            ))
+        } else {
+            ApiError::Contract(
+                "the ingest request body could not be read to completion — the connection failed \
+                 mid-upload, or the transfer encoding is malformed. This is NOT the per-batch cap; \
+                 nothing was decoded, queued or appended"
+                    .to_string(),
+            )
+        }
+    })?;
 
     let batch_id = headers
         .get("x-tessera-batch-id")
@@ -527,13 +818,40 @@ async fn ingest(
         .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
         .to_string();
 
+    // Task 6 (D2): the admission bound, **before** `spawn_blocking`. See `IngestAdmission`.
+    let Some(permit) = state.ingest_admission.try_admit() else {
+        // `debug!`, not `warn!` and certainly not `error!`. This was a `warn!`, which is a
+        // synchronous formatted write **on the reactor, per refused request** — under a sustained
+        // shed at 10⁹ ingest rates the log becomes a second bottleneck on exactly the path that
+        // exists to be cheap. `tracing`'s macros check interest before evaluating their fields, so
+        // at any level above DEBUG this costs a load and a branch.
+        //
+        // **The operator signal is the counter, not the line**: `ingest.shed_total` on
+        // `/control/status` counts every one of these, and `ingest.in_flight` says why. A per-event
+        // line adds nothing a counter does not, which is the same argument `map_accept_error`
+        // already makes for the queue's 429 one level down.
+        tracing::debug!("the ingest admission bound is saturated; answering 429 backpressure");
+        return Err(ApiError::IngestAdmissionBackpressure {
+            retry_after_s: crate::error::admission_retry_after_s(
+                &state.engine.write_executor_stats(),
+            ),
+        });
+    };
+
     // D-A / review finding 7: closure capture is `state` (moved in directly — nothing after this
     // `.await` needs the handler's own copy), `body` (an owned `Bytes` — cheap, refcounted clone
     // of the request body already read off the socket, not a copy) and `batch_id` (owned
-    // `String`). Never gated (see `run_ingest`'s doc).
-    let resp = tokio::task::spawn_blocking(move || run_ingest(&state, &body, batch_id))
-        .await
-        .map_err(map_join_error)??;
+    // `String`). Never gated by `ComputeGate` (see `run_ingest`'s doc).
+    //
+    // The permit is **moved in**, not held across the `.await`: a disconnected client's handler
+    // future is dropped while this closure keeps running and keeps its thread, so releasing on
+    // handler-drop would under-count exactly when the pool is under pressure.
+    let resp = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        run_ingest(&state, &body, batch_id)
+    })
+    .await
+    .map_err(map_join_error)??;
 
     Ok(Json(resp))
 }
@@ -705,16 +1023,42 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     }
 }
 
+/// **The credential first, then the body's own rejection** — the same ordering `ingest` has, and by
+/// the same mechanism: [`require_operator_credential`] is a router layer, so it answers 401 before
+/// this function or its extractors run at all. That also keeps the unauthenticated flood off
+/// [`spawn_on_deny_lane`]'s threads — the resource that lane exists to keep free — and now keeps it
+/// off the JSON decode too, which used to run ahead of the check.
+///
+/// `body: Result<Json<..>, JsonRejection>` rather than `Json(items)` remains, for the surviving half
+/// of its original reason: an extractor that rejects on its own answers a bare **413**, outside
+/// contracts §3.1's closed code list, on the lane where an out-of-list status is least defensible.
+/// The layer no longer lets that happen *pre-authentication*; this signature is what stops it
+/// happening at all. Body decoding stays on the reactor, bounded by [`CHANGES_MAX_BODY_BYTES`].
 async fn changes(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(items): Json<Vec<ChangeItem>>,
+    body: Result<Json<Vec<ChangeItem>>, axum::extract::rejection::JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
-    // **Deliberately outside the deny lane.** The bearer check stays on the reactor so an
-    // unauthenticated flood cannot occupy `spawn_on_deny_lane`'s threads — the resource that fix
-    // exists to keep free. Body decoding is likewise on the reactor, ahead of this check (an axum
-    // extractor), which is pre-existing and bounded by axum's default body limit.
-    state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
+    // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**, unknown filter operand",
+    // which covers both shapes a `JsonRejection` carries. They are distinguished by the rejection's
+    // own status rather than collapsed, because "your batch is too large" and "your JSON is
+    // malformed" send an operator to different places. The rejection's `Display` is never forwarded
+    // — this module's rule.
+    let Json(items) = body.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::Contract(format!(
+                "the change request body exceeds the {CHANGES_MAX_BODY_BYTES}-byte per-request \
+                 cap; split it into smaller requests. Nothing in this request was applied — and \
+                 note that this is a cap on one REQUEST, never on a deny: /control/changes is never \
+                 load-shed (contracts §3.1)"
+            ))
+        } else {
+            ApiError::Contract(
+                "the change request body is not a valid JSON array of {external_id, op, access?} \
+                 items; nothing in it was applied"
+                    .to_string(),
+            )
+        }
+    })?;
 
     // **No readiness gate here, and that is load-bearing** (lifecycle §4; Task 3a's D6). A
     // `WalPoisoned` node still applies `Delete`/`Suppress` to the live overlay before returning its
@@ -734,15 +1078,16 @@ async fn changes(
     Ok(StatusCode::OK)
 }
 
-async fn status(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    // Important 1 fix: R5 requires bearer auth on every plane, including this one — this handler
-    // previously returned `entity_id_high_water` (a global, unmasked corpus-size fact) to anyone
-    // who could reach the control listener at all, which may be loopback TCP, not only a unix
-    // socket (config.rs's `ControlListen::Tcp`).
-    state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
+/// **The precedent for [`require_operator_credential`], and the reason it is a layer.** R5 requires
+/// bearer auth on every plane, including this one; this handler nevertheless *shipped* returning
+/// `entity_id_high_water` — a global, unmasked corpus-size fact — to anyone who could reach the
+/// control listener, which may be loopback TCP and not only a unix socket
+/// (`config::ControlListen::Tcp`). Nothing was wrong with the check; there simply was not one, and
+/// no reviewer noticed because "every control handler calls `check_bearer`" was a convention rather
+/// than a construction. Its own `check_bearer` call, added as "Important 1 fix", is now redundant
+/// and has been deleted: the layer refuses this route before the handler is entered, and a redundant
+/// copy would only make the layer's mutation tests pass for the wrong reason.
+async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiError> {
     // D-B: the viewer/session admission gate's gauges. `in_flight`/`waiting` are read live off
     // the semaphores; `shed_total` is a single process-wide counter — no per-principal labels
     // anywhere on this plane (SA §9). `shed_total` counts only this gate's own two shed paths —
@@ -765,6 +1110,15 @@ async fn status(
     // `DRAIN_DEPTH_ALARM` is the operator alarm, and `oldest_retired_secs` is what distinguishes
     // "deep because busy" from "deep because reclaim is not running".
     let pins = state.engine.pin_stats();
+    // Task 6 (D6): Task 4's and Task 5's counters, wired here now that both have landed.
+    //
+    // **`tessera_engine::FragmentCacheStats`, never `tessera_authz::...`** — `check-layers.sh`
+    // denies a `tessera-server → tessera-authz` edge (SA §3), and the re-export at
+    // `tessera-engine`'s crate root exists precisely so this call site has a nameable type.
+    let projection_cache: tessera_engine::CacheStats = state.engine.row_projection_cache_stats();
+    let fragment_cache: tessera_engine::FragmentCacheStats = state.engine.fragment_cache_stats();
+    let ingest = state.ingest_admission.status();
+    let sessions_retained = state.sessions.lock().len();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
         "compute": {
@@ -783,10 +1137,85 @@ async fn status(
             "wal_fsyncs": executor.wal_fsyncs,
             "apply_nanos_total": executor.apply_nanos_total,
             "apply_nanos_max": executor.apply_nanos_max,
+            // Task 6: the queue-depth gauge and the drain estimate `retry_after_s` is derived
+            // from. `work_depth` is a snapshot of two independently-advancing counters — see
+            // `ExecutorStats::work_depth` — and `work_service_nanos_ewma` is an estimator, not a
+            // bound; `estimate_retry_after_s`'s doc says what makes it one.
+            "work_completed": executor.work_completed,
+            "work_depth": executor.work_depth,
+            "work_service_nanos_ewma": executor.work_service_nanos_ewma,
+            // Published beside the EWMA rather than folded into it: the EWMA is written only when a
+            // job finishes, so during one long job it reports the previous regime. The 429
+            // derivations take `max` of the two (`ExecutorStats::service_nanos_for_estimate`); an
+            // operator gets both numbers because "the last ten jobs took 3 ms and this one has been
+            // running for 90 s" is the diagnosis, and either figure alone hides it.
+            "work_in_flight_nanos": executor.work_in_flight_nanos,
+        },
+        // Task 6 (D2/D1). `admission` is the bound, `in_flight` is read live off the semaphore.
+        // `shed_total` counts **this bound's** 429s only — the queue-full 429 is produced inside
+        // the engine and is not counted here; `work_depth` above is its gauge.
+        "ingest": {
+            "admission": ingest.admission,
+            "in_flight": ingest.in_flight,
+            "shed_total": ingest.shed_total,
+            "max_batch_rows": state.ingest_max_batch_rows,
+            "max_batch_bytes": state.ingest_max_batch_bytes,
+        },
+        // Task 6 (D5). **It alarms; it does not act** — there is no fold until stage 2.3, so
+        // `soft_limit_alarms` rising is a signal that the overlay is deep, never a mechanism that
+        // makes it shallower. `depth` is read off the live generation, so it cannot drift from
+        // what a request composes against.
+        "overlay": {
+            "depth": state.engine.overlay_depth(),
+            "soft_limit_alarms": executor.overlay_soft_limit_alarms,
         },
         "pins": {
             "drain_depth": pins.drain_depth,
             "oldest_retired_secs": pins.oldest_retired_secs,
+        },
+        // Task 5's two caches (Task 3b deferred this to here by name, because Task 5 was not
+        // merged on that branch).
+        //
+        // **`young_evictions` is an alarm, not an undifferentiated counter, and `thrashing` is the
+        // predicate spelled out.** `> 0` is the argued threshold, not an arbitrary one: `prepare`
+        // refuses at startup any bound below `expected_concurrent_sessions × the measured
+        // per-entry size (see `validate_cache_bounds`), so a young eviction means the collapsing
+        // regime was entered *another* way — a second slice per session, a generation swap's
+        // transient duplicate, or entries larger than the measured figure. That is precisely what
+        // `validate_cache_bounds`' own doc says this counter is for.
+        "row_projection_cache": {
+            "entries": projection_cache.entries,
+            "bytes": projection_cache.bytes,
+            "bound_bytes": projection_cache.bound_bytes,
+            "hits": projection_cache.hits,
+            "misses": projection_cache.misses,
+            "building_refusals": projection_cache.building_refusals,
+            "evictions": projection_cache.evictions,
+            "young_evictions": projection_cache.young_evictions,
+            "thrashing": projection_cache.young_evictions > 0,
+            "oversized_admissions": projection_cache.oversized_admissions,
+        },
+        "fragment_cache": {
+            "entries": fragment_cache.entries,
+            "bytes": fragment_cache.bytes,
+            "bound_bytes": fragment_cache.bound_bytes,
+            "hits": fragment_cache.hits,
+            "misses": fragment_cache.misses,
+            "building_refusals": fragment_cache.building_refusals,
+            "evictions": fragment_cache.evictions,
+            "young_evictions": fragment_cache.young_evictions,
+            "thrashing": fragment_cache.young_evictions > 0,
+            "oversized_admissions": fragment_cache.oversized_admissions,
+            // The observable that separates an in-memory eviction from a genuinely cold rebuild.
+            "rebuilds": state.engine.fragment_cache_rebuilds(),
+        },
+        // The gauge only. **S17 — the expiry sweep — is out of scope** and remains an open owner
+        // decision: an expired session is 403'd but never removed, and each retained one pins an
+        // `Arc<FrozenFragment>`, so `fragment_cache.bytes` falling does not mean that memory was
+        // released. Publishing the number is what makes that visible to whoever rules on it; a
+        // count that only ever rises while `young_evictions` stays quiet is the signature.
+        "sessions": {
+            "retained": sessions_retained,
         },
     })))
 }

@@ -844,6 +844,44 @@ impl Engine {
         self.fragment_cache.set_memory_bound(fragment_bytes);
     }
 
+    /// Task 6 (D5): the overlay depth at which the executor raises an alarm.
+    ///
+    /// **Additive, on [`Engine::set_cache_bounds`]' precedent, and for the same reason.** Widening
+    /// `start_write_executor` would touch `crates/tessera-engine/tests/pins.rs` — outside Track B's
+    /// allowlist — and four `tessera-bench` call sites, for a knob that has this route.
+    ///
+    /// **The predicate is evaluated once, here, as well as on every later `apply_change`.** The
+    /// executor's check covers the only place the overlay grows *at runtime*, but a WAL replay
+    /// builds an overlay before any executor exists (`WritePath::reconstruct`), so a node
+    /// restarting with more suppressions than the limit would otherwise be over it from its first
+    /// instruction with the alarm counter at zero, and silent until the next deny arrived.
+    ///
+    /// `usize::MAX` is the unset value and disables the alarm; `tessera-server`'s config refuses
+    /// `0`, so the two sides of the boundary never disagree about what "off" means.
+    pub fn set_overlay_soft_limit(&self, limit: usize) {
+        self.write.health().set_overlay_soft_limit(limit);
+        let depth = self.overlay_depth();
+        // Same edge trigger as the executor's, through the same function: setting the limit re-arms
+        // it, so a limit landing under a live overlay alarms exactly once here and the next
+        // `apply_change` does not repeat it.
+        if self.write.health().note_overlay_depth(depth) {
+            tracing::warn!(
+                overlay_depth = depth,
+                overlay_soft_limit = limit,
+                "ALARM: this node replayed a WAL whose overlay is already at or above the \
+                 configured soft limit. It alarms; it does not act — there is no fold until stage \
+                 2.3"
+            );
+        }
+    }
+
+    /// The live overlay's entry count — the gauge `/control/status` publishes beside the soft
+    /// limit's alarm counter. Read straight off the current generation, so it needs no counter of
+    /// its own and cannot drift from what a request would compose against.
+    pub fn overlay_depth(&self) -> usize {
+        self.generation.load().overlay.len()
+    }
+
     /// The row-projection cache's operator gauges (Task 5).
     ///
     /// Wiring these onto `/control/status` needs `tessera-server/src/control.rs`, which stage 2.1's
