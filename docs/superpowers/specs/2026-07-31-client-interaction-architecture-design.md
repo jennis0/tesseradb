@@ -1008,6 +1008,31 @@ viewer-independent, free — or gate them on `min_visible_members` like every ot
 structure-revealing artifact. Gating on non-emptiness is the option that must not be taken
 by default.
 
+**The two kinds coexist, and mixing them needs no new mechanism** *(owner, 2026-08-01)*.
+A deployment may hold boundaries tied to point visibility by a threshold *and* boundaries
+under independent term-based control — and the same boundary may be both. If a boundary
+carries its own terms it is an item, so it lives in entity space and the existing mask
+covers it: one token, one satisfied-term set, two populations. `M_auth ∩ boundary_ids`
+gives the boundaries a viewer may see; `and_cardinality(members(B), M_auth ∩ point_ids)`
+gives the masked count within one. The induced-membership relation is §7.5's node
+membership bitmap under another name.
+
+Two composition rules follow.
+
+*Terms first, always.* The boundary's own mask decides whether the viewer learns of it at
+all; the threshold applies only after. **The fail-open to name is the reverse** — a
+healthy induced count surfacing a boundary whose terms the viewer does not satisfy, which
+is contained data granting access to its own container. Conjunction, never disjunction,
+in the same shape as `M_sel = M_auth ∧ filters`.
+
+*Where the geometry is independently authorised, the threshold governs the count, not the
+shape.* For a cluster the hull **is** corpus-derived, so a threshold must suppress the
+geometry — the shape is the disclosure. For a boundary the viewer is cleared for, the
+shape discloses nothing they are not already entitled to, so withholding it achieves
+nothing and costs the map: what must be withheld is the **number**. That is §7.5's
+rollup-rather-than-suppression applied to a second object — a boundary with no count, or
+a count at a coarser level of the administrative hierarchy, rather than a hole.
+
 **And the gate is chosen by whether the attachment is corpus-derived**, which is sharper
 than "how it was produced". A city boundary exists independently of the data, so its
 *shape* needs no gate at all and only the count within it is masked. Label text derives
