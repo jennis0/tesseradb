@@ -1,0 +1,104 @@
+# The per-PR gate of conformance design §6 — and only that tier.
+#
+# §6 specifies three: per-PR, nightly, and a release gate. The other two carry things this one
+# deliberately does not — rotating seeds over the full mask catalogue, time-boxed fuzzing of the
+# wire decoder and manifest parser, external oracles, criterion budgets, and the dependency-graph
+# assertions that keep a `conformance` feature out of a release binary. They are marked in §6 as
+# specified-but-unbuilt and are left that way rather than half-built, because a nightly that runs
+# one seed batch is this gate with a worse schedule.
+#
+# What runs is exactly the gate CLAUDE.md defines, plus the conformance suite. Nothing here builds
+# from the Phase 0 corpus: every fixture the suite uses is synthesised from a seed, which is what
+# makes a hosted runner possible at all. `reference/tests` is NOT run here — three of its five
+# modules build from that corpus, and repointing them would cost the viewport differential its
+# realistic term distribution. I1 keeps CI coverage through the overlay-journal differential and
+# its two defective engines; what CI does not see is the differential against real term skew.
+# Recorded so the omission reads as a decision rather than an oversight.
+#
+# Measured wall-clock on a developer machine, 2026-08-01, so that a runner that turns out much
+# slower is recognisable as a difference rather than as normal: `cargo test --workspace` 94 s;
+# `pytest conformance/tests` 24 s from deleted fixtures, including the 150,000-item catalogue
+# build. Runner time is the constraint that decides whether a gate stays enabled, so it is a
+# figure to keep an eye on rather than a one-off curiosity.
+
+name: gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A force-push or a second push to the same PR makes the earlier run's answer worthless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the channel; the action reads it rather than being told twice.
+      # The `.stderr` fixtures under crates/tessera-types/tests/ui are compiler output, so that
+      # pin is what keeps them from being a moving target.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The grep-based half of the architecture: forbidden dependency edges, the
+      # no-tokio-in-engine-or-store rule, I4's cross-space conversions, and I10's EntityId in the
+      # wire payload. Necessary and nowhere near sufficient — it runs here because locally it runs
+      # from an opt-in pre-commit hook that is skipped in any worktree without a track marker,
+      # which is not a gate.
+      - run: bash scripts/check-layers.sh
+      - run: python3 scripts/check-doc-links.py
+
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The suite spawns the real `tessera` binary as a subprocess and speaks the real API — it
+      # never calls into the engine directly. So the release binary is a prerequisite, not an
+      # optimisation, and building it as its own step keeps a compile failure legible as a compile
+      # failure rather than as a suite error.
+      - run: cargo build --release -p tessera-cli
+      # The dependency list is **read from `reference/pyproject.toml`**, not restated here. That
+      # file argues the point at its own site: an undeclared dependency is a suite that runs on the
+      # machine it was written on, and it has already been bitten twice by one. A second copy of
+      # the list in this file would drift the same way.
+      #
+      # The package itself is deliberately not installed. It has no `[build-system]`, and both
+      # suites reach `oracle` by the `sys.path` insert their conftests make — which is how the
+      # suite runs locally, so it is how it should run here. Installing it would mean CI exercising
+      # a different import path from every developer.
+      - name: install the oracle's dependencies
+        run: |
+          python3 -m venv reference/.venv
+          reference/.venv/bin/pip install --upgrade pip
+          reference/.venv/bin/pip install $(reference/.venv/bin/python -c "
+          import tomllib
+          d = tomllib.load(open('reference/pyproject.toml', 'rb'))
+          print(' '.join(d['project']['dependencies'] + d['project']['optional-dependencies']['dev']))
+          ")
+      - run: reference/.venv/bin/ruff check --config reference/pyproject.toml reference conformance
+      # Fixtures are built once and cached in /tmp by a stamped recipe; on a fresh runner every one
+      # of them is built from scratch, which is most of this job's wall-clock.
+      - run: reference/.venv/bin/pytest conformance/tests -v
