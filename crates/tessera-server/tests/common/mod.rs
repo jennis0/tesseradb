@@ -289,7 +289,14 @@ pub async fn spawn_server_from_engine(
 /// panic on `AlreadyStarted` if a test started its own first). Purely additive — that function keeps
 /// its name, its bound and its behaviour, so the frozen `tests/http.rs` is untouched by this split.
 pub async fn mount_server(engine: Engine, max_k: usize, compute_gate: ComputeGate) -> TestServer {
-    mount_server_with_ingest_limits(engine, max_k, compute_gate, generous_ingest_limits()).await
+    mount_server_with(
+        engine,
+        max_k,
+        compute_gate,
+        generous_ingest_limits(),
+        Vec::new(),
+    )
+    .await
 }
 
 /// Task 6's control-plane bounds, as a caller-supplied set.
@@ -328,6 +335,48 @@ pub async fn mount_server_with_ingest_limits(
     compute_gate: ComputeGate,
     ingest_limits: IngestLimits,
 ) -> TestServer {
+    mount_server_with(engine, max_k, compute_gate, ingest_limits, Vec::new()).await
+}
+
+/// Like [`spawn_server`], but with `serve.dev_cors_origins` set — `tests/cors.rs` only.
+///
+/// A separate entry point rather than a parameter on the existing ones: `Engine` is not `Clone`,
+/// so a test cannot re-mount an already-serving one, and widening `mount_server`'s signature would
+/// churn every call site in `tests/http.rs` and `tests/http_write.rs` for a key none of them care
+/// about.
+pub async fn spawn_server_with_cors(
+    bundle_root: &Path,
+    cache_dir: &Path,
+    wal_path: &Path,
+    dev_cors_origins: Vec<String>,
+) -> TestServer {
+    let config = default_engine_config();
+    let max_k = config.max_k;
+    let engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+        .expect("engine should open against a freshly built bundle");
+    mount_server_with(
+        engine,
+        max_k,
+        generous_test_gate(),
+        generous_ingest_limits(),
+        dev_cors_origins,
+    )
+    .await
+}
+
+/// The shared body of the three entry points above, with **both** parameter sets explicit.
+///
+/// Task 6 (ingest bounds) and the MVP client work (`serve.dev_cors_origins`) each added a
+/// parameterised variant of `mount_server` on their own branch, and they conflicted here. Rather
+/// than nest one inside the other, both delegate to this: each named entry point stays additive
+/// and keeps its own defaults, and a test that needs both can call this directly.
+async fn mount_server_with(
+    engine: Engine,
+    max_k: usize,
+    compute_gate: ComputeGate,
+    ingest_limits: IngestLimits,
+    dev_cors_origins: Vec<String>,
+) -> TestServer {
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
@@ -342,6 +391,7 @@ pub async fn mount_server_with_ingest_limits(
         min_visible_members: 10,
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
+        dev_cors_origins,
     });
 
     let viewer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

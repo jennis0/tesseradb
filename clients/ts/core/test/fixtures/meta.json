@@ -1,0 +1,26 @@
+{
+  "api_version": 1,
+  "bundle_format": 1,
+  "declared_scalars": [],
+  "filter_operands": [],
+  "identity_epoch": 1,
+  "quantisation": {
+    "x_max": 65536,
+    "x_min": 0,
+    "y_max": 65536,
+    "y_min": 0
+  },
+  "selection": {
+    "k_max_marks": 500,
+    "k_min": 2,
+    "max_k": 5000,
+    "max_underlay_offset": 4,
+    "theta_target_marks": 16
+  },
+  "slices": [
+    {
+      "display_name": "s0",
+      "id": "s0"
+    }
+  ]
+}

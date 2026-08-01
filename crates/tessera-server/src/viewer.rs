@@ -23,13 +23,20 @@ use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    // MVP client spec §3: absent `serve.dev_cors_origins` mounts nothing, so the seam is
+    // structurally absent from this router rather than present and configured empty.
+    let dev_cors = crate::cors::dev_layer(&state.dev_cors_origins);
+    let router = Router::new()
         .route("/v1/meta", get(meta))
         .route("/v1/viewport", post(viewport))
         .route("/v1/items/{tessera_id}", post(item))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .with_state(state)
+        .with_state(state);
+    match dev_cors {
+        Some(layer) => router.layer(layer),
+        None => router,
+    }
 }
 
 /// The wire shape of a pin, both in `POST /v1/viewport`'s request body and the `x-tessera-pin`
@@ -157,6 +164,12 @@ async fn meta(
             "max_k": state.max_k,
             "theta_target_marks": selection.theta_target_marks,
             "max_underlay_offset": selection.max_underlay_offset,
+            // Published for exactly the reason `max_k` was (owner decision, 2026-08-01): a client
+            // that chooses its own request *depth* — the mark-budget work — is choosing a tile
+            // count, and without this it cannot tell whether a refusal was its own arithmetic or
+            // the deployment's ceiling. It discloses nothing: a deployment constant, identical for
+            // every principal, and the tile grid is public.
+            "max_tiles_per_request": selection.max_tiles_per_request,
         },
     })))
 }

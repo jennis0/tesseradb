@@ -1,0 +1,5 @@
+{
+  "extends": "../tsconfig.base.json",
+  "include": ["src", "presets.json"],
+  "compilerOptions": {"noEmit": true, "types": ["vite/client"]}
+}

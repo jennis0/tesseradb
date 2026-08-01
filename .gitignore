@@ -18,3 +18,8 @@ analysis-models/
 reference/.venv/
 reference/.pytest_cache/
 **/__pycache__/
+node_modules/
+clients/ts/**/dist/
+clients/ts/.dev/
+clients/ts/dev-server.toml
+*.env.local
