@@ -1100,9 +1100,10 @@ const CONCURRENT_INGEST_ROWS_PER_BATCH: u64 = 40_000;
 /// or reading the suppress request's own connection — until that handler returns. Post-refactor,
 /// both handlers do only their bearer check and header/body parse on the reactor, then hand off
 /// to `spawn_blocking`'s separate thread pool — so the suppress request's own closure only has to
-/// wait, at most, for whichever ONE ingest happens to be inside `Engine::accept_ingest`'s WAL
-/// critical section at that instant (the WAL mutex is real and intentional — Critical 1's
-/// atomicity fix — the bug this task closes is reactor-thread occupation, not that lock).
+/// wait, at most, for whichever ONE ingest the single write executor happens to be executing at
+/// that instant (Task 3a deleted the WAL mutex this comment used to name: the WAL now moves by
+/// value onto one thread, so serialisation is a consequence of ownership rather than of a lock.
+/// The bug this task closed is reactor-thread occupation, not that serialisation).
 ///
 /// **Why this is unflaky despite real TCP connections being involved.** Unlike the single
 /// `/healthz` race above, this test cannot rely on "the one other task must already be running
@@ -1116,8 +1117,8 @@ const CONCURRENT_INGEST_ROWS_PER_BATCH: u64 = 40_000;
 /// **The passing (post-refactor) bound is self-scaling, not a fixed wall-clock bet** — this was
 /// flagged in review: a fixed `suppress_elapsed < 1s` assumes this debug-profile binary's absolute
 /// speed, but post-refactor the suppress closure still contends with up to `CONCURRENT_INGEST_
-/// BATCHES` blocking-pool threads for CPU and for the (real, intentional, unfair
-/// `std::sync::Mutex`) WAL lock each `accept_ingest` holds across its append+fsync — on a
+/// BATCHES` blocking-pool threads for CPU and for the single write executor, which serialises
+/// every append+fsync onto one thread by owning the WAL outright (Task 3a) — on a
 /// slow-fsync or few-core runner that contention genuinely grows, and a fixed 1s bound could trip
 /// for reasons that have nothing to do with this task's bug. So this asserts
 /// `suppress_elapsed < total_ingest_elapsed / 2`, where `total_ingest_elapsed` is this same run's
@@ -1219,5 +1220,387 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
          {total_ingest_elapsed:?} the {CONCURRENT_INGEST_BATCHES} concurrent ingest batches took \
          to all complete -- it queued behind them on the reactor instead of reaching its own \
          spawn_blocking call promptly"
+    );
+}
+
+// =================================================================================================
+// Task 3b — the readiness posture, and the status a partly-applied change batch reports
+// =================================================================================================
+
+/// Provoke a **real** WAL failure by making the WAL's directory read-only.
+///
+/// `Wal::fsync` writes a sidecar tmp-then-rename, whose `open` needs write permission on the
+/// *directory*, so this fails with a genuine `EACCES` and sets the real poison flag —
+/// `tessera-lifecycle`'s `a_real_fsync_failure_poisons_the_handle` is the unit test that pins the
+/// exact branch and its `Io`-then-`Poisoned` sequence.
+///
+/// **Deliberately not fault injection.** `tessera-lifecycle`'s `faults` module is gated behind a
+/// feature whose own module doc says nothing outside that crate and `tessera-engine`'s tests may
+/// depend on it, and reaching it from here would have meant a new dev-dependency plus falsifying
+/// three in-tree statements to buy two tests. A real `EACCES` needs none of that and is a stronger
+/// witness besides: these tests exercise the failure the WAL actually produces, not a switchboard's
+/// imitation of it.
+///
+/// **Restored by `Drop`, not by a trailing statement.** A failing assertion unwinds, and a
+/// `TempDir` cannot delete the contents of a directory it may not write — so a bare restore at the
+/// end of the test leaks a directory on exactly the runs where a test fails. This box runs near a
+/// full disk (Task 3a's A6), which makes that a real cost rather than a tidiness point.
+struct ReadOnlyWalDir<'a>(&'a std::path::Path);
+
+impl<'a> ReadOnlyWalDir<'a> {
+    fn new(dir: &'a std::path::Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        ReadOnlyWalDir(dir)
+    }
+}
+
+impl Drop for ReadOnlyWalDir<'_> {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// `chmod` does not bind uid 0, so under root these tests would assert nothing rather than fail.
+fn skip_under_root() -> bool {
+    // SAFETY: `geteuid` is always safe; it takes no arguments and cannot fail.
+    let root = unsafe { libc_geteuid() } == 0;
+    if root {
+        eprintln!("skipped: running as root, where a read-only directory is not read-only");
+    }
+    root
+}
+
+extern "C" {
+    #[link_name = "geteuid"]
+    fn libc_geteuid() -> u32;
+}
+
+async fn readyz_status(server: &TestServer, url: String) -> u16 {
+    server
+        .client
+        .get(url)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+/// **The readiness wiring**: `/readyz` reports the write executor's posture, on every listener.
+///
+/// Driven with `NotStarted` rather than `Dead`, and the choice is the point. Reaching `Dead`
+/// through this surface means killing the executor and then probing, and there is no condition
+/// published *after* the panic to wait on — the in-flight `Responder` drops before the executor's
+/// death guard, so the caller's error can be observed while the posture still reads `Running`. That
+/// race is recorded in `write.rs`'s drop-guard comment. The `Dead` row is asserted exactly instead,
+/// in `health.rs`'s `only_a_running_executor_is_ready`, and `tessera-engine`'s
+/// `an_executor_panic_is_reported_dead` covers the engine half.
+///
+/// **What this leaves uncovered, stated rather than counted as coverage:** no test drives a
+/// panicked executor through the HTTP readiness surface.
+///
+/// Mutations this kills: `readyz` returning `OK` unconditionally (its Phase 1 body); and
+/// `is_ready` written as `p != Dead`, which this catches and a `Dead`-only test could not.
+#[tokio::test]
+async fn an_engine_without_a_write_executor_is_not_ready() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    // `mount_server`, not `spawn_server_from_engine`: the latter starts an executor unconditionally.
+    let engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        default_engine_config(),
+    )
+    .unwrap();
+    let server = mount_server(engine, 200, generous_test_gate()).await;
+
+    for url in [
+        server.control_url("/readyz"),
+        server.viewer_url("/readyz"),
+        server.session_url("/readyz"),
+    ] {
+        assert_eq!(
+            readyz_status(&server, url.clone()).await,
+            503,
+            "a node with no write executor must not report ready on {url}"
+        );
+    }
+
+    // Liveness is a different question and must stay green: the process is up and answering.
+    assert_eq!(
+        readyz_status(&server, server.control_url("/healthz")).await,
+        200,
+        "healthz is liveness, not readiness — a writer fault must not make the process look dead"
+    );
+}
+
+/// A healthy server is ready on every listener. The anti-vacuity control for the two tests above
+/// and below: without it, a `readyz` that returned 503 unconditionally would pass both.
+#[tokio::test]
+async fn a_healthy_server_is_ready_on_every_listener() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    for url in [
+        server.control_url("/readyz"),
+        server.viewer_url("/readyz"),
+        server.session_url("/readyz"),
+    ] {
+        assert_eq!(readyz_status(&server, url.clone()).await, 200, "at {url}");
+    }
+}
+
+/// **The posture's whole justification.** A poisoned WAL makes the node not-ready *and* the node
+/// keeps accepting and applying denies.
+///
+/// Both halves are asserted, and the second is the one that matters. `WalPoisoned` is a posture
+/// rather than a shutdown precisely so that every subsequent suppression is still applied to the
+/// live overlay and 500'd (lifecycle §4: never a refusal that leaves a deny unapplied). A build
+/// that gated `/control/changes` on readiness would apply the first failing suppression and then
+/// refuse every later one **without applying it** — refused *and* unapplied, the fail-open this
+/// posture exists to prevent.
+///
+/// Mutations this kills:
+/// - add a readiness gate to `changes()` → the **second** suppress answers 503 and item B stays
+///   visible → RED. No engine-level test can see this, because the gate would live in `control.rs`.
+/// - in `execute_change`, drop the apply-anyway arm (skip the *apply*, not the WAL call — skipping
+///   only `wal.append` still lands in that arm and hides the item either way) → both items stay
+///   visible → RED.
+/// - `readyz` returning `OK` unconditionally → RED at the posture assertion.
+#[tokio::test]
+async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
+    if skip_under_root() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    // The WAL gets its own directory: `chmod` is applied to the *directory*, and the bundle and
+    // cache must stay writable.
+    let wal_dir = tmp.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &wal_dir.join("wal.log"),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let viewport_req = serde_json::json!({
+        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+    });
+    let visible = |token: String, req: serde_json::Value| {
+        let client = server.client.clone();
+        let url = server.viewer_url("/v1/viewport");
+        async move {
+            let bytes = client
+                .post(url)
+                .bearer_auth(token)
+                .json(&req)
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            decode_viewport(&bytes).0[0].1
+        }
+    };
+
+    let before = visible(token.to_string(), viewport_req.clone()).await;
+    assert_eq!(
+        readyz_status(&server, server.control_url("/readyz")).await,
+        200,
+        "the node must start ready, or every assertion below passes vacuously"
+    );
+
+    let suppress = |id: u64| {
+        let client = server.client.clone();
+        let url = server.control_url("/control/changes");
+        let external_id = base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
+        async move {
+            client
+                .post(url)
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+
+    let _read_only = ReadOnlyWalDir::new(&wal_dir);
+
+    // (1) The first suppress: its fsync genuinely fails, so it is applied anyway and 500s.
+    assert_eq!(
+        suppress(5).await,
+        500,
+        "a deny whose append failed is 500, not 2xx"
+    );
+    assert_eq!(
+        visible(token.to_string(), viewport_req.clone()).await,
+        before - 1,
+        "lifecycle §4: the item is hidden immediately even though durability failed"
+    );
+
+    // (2) The node is now not-ready — on every listener, and the operator plane says why.
+    assert_eq!(
+        readyz_status(&server, server.control_url("/readyz")).await,
+        503,
+        "a poisoned WAL must trip the readiness posture"
+    );
+    let status: serde_json::Value = server
+        .client
+        .get(server.control_url("/control/status"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["write_executor"]["posture"], "wal-poisoned");
+    assert_eq!(status["write_executor"]["ready"], false);
+
+    // (3) **The half that matters.** A second suppress, submitted to the now-not-ready node, is
+    // still accepted and still applied. Never a 503 that leaves the deny unapplied.
+    assert_eq!(
+        suppress(11).await,
+        500,
+        "a not-ready node must still ACCEPT a deny — a 503 here would be refused AND unapplied"
+    );
+    assert_eq!(
+        visible(token.to_string(), viewport_req.clone()).await,
+        before - 2,
+        "the second suppression must be in force too; readiness governs routing, not deny \
+         acceptance"
+    );
+}
+
+/// **What a partly-applied change batch reports** — the second Task 3a gate finding.
+///
+/// `[suppress A, predicate B, suppress C]` with the WAL poisoned mid-batch. A's fsync fails, so A
+/// is applied anyway and the handle poisons; B is a **non**-deny, so its refused append applies
+/// nothing (lifecycle §4's apply-anyway rule is scoped to `Delete`/`Suppress`, deliberately — an
+/// unsuppress applied without durability would re-expose an item replay still hides); C's append is
+/// refused by the poison and is applied anyway.
+///
+/// So the caller gets **one** status for a batch in which some items took effect and one did not,
+/// and both the status and the body have to say what actually happened.
+///
+/// Mutation this kills: restore Task 3a's `?`-abort in `run_changes` → C is never submitted and
+/// stays visible → RED. (The *status* half is exercised exhaustively in `error.rs`'s fold tests,
+/// where the dispositions can be constructed directly; here all three failures are `Exec(Wal)`, so
+/// the status alone would not discriminate a fold from first-error reporting.)
+#[tokio::test]
+async fn a_partially_applied_change_batch_reports_one_honest_status() {
+    if skip_under_root() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let wal_dir = tmp.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &wal_dir.join("wal.log"),
+    )
+    .await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let viewport_req = serde_json::json!({
+        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+    });
+    let visible = |token: String, req: serde_json::Value| {
+        let client = server.client.clone();
+        let url = server.viewer_url("/v1/viewport");
+        async move {
+            let bytes = client
+                .post(url)
+                .bearer_auth(token)
+                .json(&req)
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            decode_viewport(&bytes).0[0].1
+        }
+    };
+    let before = visible(token.to_string(), viewport_req.clone()).await;
+
+    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
+    let _read_only = ReadOnlyWalDir::new(&wal_dir);
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([
+            { "external_id": b64(5),  "op": "suppress" },
+            { "external_id": b64(9),  "op": "predicate", "access": "0" },
+            { "external_id": b64(11), "op": "suppress" },
+        ]))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 500, "not durable, so never a 2xx");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "fail-closed");
+    let detail = body["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("may be in force"),
+        "the operator must be told the denies took hold; got: {detail}"
+    );
+    assert!(
+        !detail.contains("refused"),
+        "'refused' is false of the apply-anyway case and invites a retry of a suppression that has \
+         already taken hold; got: {detail}"
+    );
+
+    // **The item assertion is the one that discriminates.** C is the third item; a batch that
+    // aborted at A's failure would never have submitted it.
+    assert_eq!(
+        visible(token.to_string(), viewport_req.clone()).await,
+        before - 2,
+        "both suppressions must be in force — the batch continues past a WAL failure, or every \
+         deny after the first is silently unapplied while the WAL stays poisoned"
     );
 }

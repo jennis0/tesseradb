@@ -24,9 +24,120 @@ use sha2::{Digest, Sha256};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow, WalScalar};
 use tessera_types::{EntityId, TermId};
 
-use crate::error::{map_accept_error, map_join_error, map_store_error, ApiError};
-use crate::health::{healthz, readyz};
+use crate::error::{
+    map_accept_error, map_change_batch_error, map_join_error, map_store_error, ApiError,
+};
+use crate::health::{healthz, is_ready, readyz};
 use crate::state::AppState;
+
+/// The deny lane's own blocking execution resource (lifecycle §1.3).
+///
+/// # Why `/control/changes` does not share tokio's blocking pool
+///
+/// `spawn_blocking` dispatches onto a process-wide **unbounded FIFO** served by at most
+/// `max_blocking_threads` threads (512 by default). Three facts compose badly:
+///
+/// - `/control/ingest` is behind **no admission bound at all** — the control plane is deliberately
+///   never gated by `ComputeGate` (D13), so concurrent ingest handlers are bounded by nothing;
+/// - an ingest closure holds its blocking thread across the Arrow decode, the plugin's
+///   `terms_of_label` loop, the external-ID sidecar IO **and** its whole blocking wait on the
+///   executor's receipt;
+/// - a thread frees only when one of those completes, which costs an fsync plus an `IngestBuffer`
+///   clone that is O(total buffered items).
+///
+/// So above ~512 in-flight ingest requests a suppression's closure queues **behind ingest closures,
+/// inside tokio**, before it can reach the prioritised deny queue at all. That is exactly lifecycle
+/// §1.3's forbidden shape — a deny queued behind work of unbounded duration — reintroduced one
+/// layer *above* the priority lane, where the executor cannot see it. No test observed it: the
+/// existing `concurrent_ingests_do_not_delay_a_control_changes_suppress` runs eight batches.
+///
+/// The viewer plane is not part of the problem in the same way and it is worth saying why, because
+/// the asymmetry is the reason this fix is on the deny side: `ComputeGate::admit` is `async` and is
+/// awaited **before** `spawn_blocking`, so a queued viewport holds no blocking thread and viewer
+/// demand is bounded by `compute_admission`.
+///
+/// # Why a separate runtime rather than a bound on ingest
+///
+/// Bounding ingest needs an arithmetic over `max_blocking_threads` (tokio's default, set outside
+/// this crate), `compute_admission` (config) and a new ingest bound — three operands, two of which
+/// someone can move without touching this reasoning, and it is Task 6's arithmetic by charter.
+/// A separate resource needs to know none of them and cannot be invalidated by a change to any:
+/// CLAUDE.md's "structural, not disciplinary" test.
+///
+/// # Why it is NOT small
+///
+/// Isolation comes from the pool being *separate*, not from it being *small*, and making it small
+/// would recreate head-of-line blocking inside the never-shed lane itself: `run_changes` submits
+/// and awaits each item **individually**, so one caller-sized batch occupies one thread for N
+/// sequential fsyncs, and lifecycle §1.3's "queue-front + fsync" bound does **not** cover that (it
+/// is a bound over the *executor's* queue, where one entry is one append). So this takes tokio's
+/// default blocking bound. Blocking threads are spawned lazily and reaped when idle, so an unused
+/// dedicated pool costs nothing at rest.
+///
+/// # Failure and lifetime
+///
+/// Built fallibly by [`init_deny_runtime`] from `prepare`, so a runtime that cannot be constructed
+/// — `EAGAIN` under precisely the thread exhaustion this exists for — is a **fail-to-start**, not a
+/// panic discovered by the first suppression. (A panic in the async handler body is not caught by
+/// `map_join_error`; the connection would drop with no status at all, violating I13's "a panic is a
+/// failed request, never an empty one".) The `OnceLock` is never dropped, which also means
+/// `Runtime::drop` can never fire inside an async context.
+static DENY_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
+/// Build the deny lane's runtime, once. Called by `crate::prepare` so failure is a startup failure.
+///
+/// Idempotent: a second call is a no-op, so tests that build an `AppState` directly (without
+/// `prepare`) reach the same runtime through [`deny_runtime`]'s lazy path.
+pub fn init_deny_runtime() -> std::io::Result<()> {
+    if DENY_RUNTIME.get().is_some() {
+        return Ok(());
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        // One worker is enough and its only job is to exist: every unit of work here is a
+        // `spawn_blocking` closure, which the blocking pool runs on its own threads. A worker
+        // thread rather than `new_current_thread` so nothing depends on whether an undriven
+        // current-thread runtime services blocking joins.
+        .worker_threads(1)
+        // Named so the lane is legible in a thread dump — an operator diagnosing deny latency must
+        // be able to tell these apart from tokio's shared pool.
+        .thread_name("tessera-deny")
+        .build()?;
+    let _ = DENY_RUNTIME.set(rt);
+    Ok(())
+}
+
+/// Run one `/control/changes` body on the deny lane.
+///
+/// **The single route from a handler to that lane, and it exists to be exactly that.** A rule
+/// spread across call sites is a rule that gets half-applied by the next rewrite of this file;
+/// with one function, `a_deny_does_not_queue_behind_ingest_in_the_blocking_pool` has one body to
+/// mutate and the property is a fact about this function rather than about a convention.
+fn spawn_on_deny_lane<F, T>(f: F) -> tokio::task::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    // `prepare` has normally initialised this already; the lazy path is for embedders and for tests
+    // that construct an `AppState` without it. A failure here would mean the process cannot spawn
+    // threads at all, which `spawn_blocking` could not survive either.
+    match DENY_RUNTIME.get() {
+        Some(rt) => rt.spawn_blocking(f),
+        None => {
+            if init_deny_runtime().is_ok() {
+                if let Some(rt) = DENY_RUNTIME.get() {
+                    return rt.spawn_blocking(f);
+                }
+            }
+            // Last resort rather than a panic on the deny lane: the shared pool is what this
+            // function exists to avoid, but running there beats refusing a suppression outright.
+            tracing::error!(
+                "ALARM: the deny lane's runtime is unavailable; falling back to the shared \
+                 blocking pool, where a suppression can queue behind unbounded ingest work"
+            );
+            tokio::task::spawn_blocking(f)
+        }
+    }
+}
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -503,38 +614,49 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     // item happened to fail last. Validation is already wholesale above, so nothing reached here
     // can be a client-correctable fault: everything below is an infrastructure failure and every
     // one of them is alarmed individually.
-    let mut first_error = None;
+    // **The batch's answer is a FOLD over dispositions, not the first item's status.** Task 3a
+    // reported `first_error`, which is wrong in a way that matters now that the mapping table
+    // distinguishes 503 from 500: an item's status describes an item. The constructible bad case is
+    // "item 1 applied successfully, the executor then died, item 2 refused" — first-error reporting
+    // has no error at all for item 1 and answers item 2's **503 `not-ready`**, i.e. "this node did
+    // not take your write", for a batch containing a durable, in-force suppression.
+    //
+    // So every failure is collected with the count that succeeded, and `map_change_batch_error`
+    // decides once, over all of them. See its doc for the rules and for why 500 dominates 503.
+    let mut failures = Vec::new();
+    let mut applied = 0usize;
     for change in validated {
         let op = change.op;
-        if let Err(e) = state.engine.accept_change(
+        match state.engine.accept_change(
             change.external_id,
             change.entity,
             op,
             change.raw_descriptors,
         ) {
-            if matches!(op, ChangeOp::Delete | ChangeOp::Suppress) {
-                // Deny-op append failure (lifecycle §4): the executor already applied the
-                // change to the live overlay before returning this error — never a refusal
-                // that leaves a deny unapplied.
-                tracing::error!(
-                    op = ?op,
-                    "ALARM: wal append/fsync failed for a deny-op change; applied to the \
-                     in-memory overlay anyway (item hidden immediately) and returning 500 — \
-                     durability is owed, caller must retry"
-                );
-            } else {
-                tracing::error!(
-                    op = ?op,
-                    "wal append/fsync failed for a non-deny change; refusing without applying"
-                );
-            }
-            if first_error.is_none() {
-                first_error = Some(map_accept_error(e));
+            Ok(()) => applied += 1,
+            Err(e) => {
+                if matches!(op, ChangeOp::Delete | ChangeOp::Suppress) {
+                    // Deny-op append failure (lifecycle §4): the executor already applied the
+                    // change to the live overlay before returning this error — never a refusal
+                    // that leaves a deny unapplied.
+                    tracing::error!(
+                        op = ?op,
+                        "ALARM: wal append/fsync failed for a deny-op change; applied to the \
+                         in-memory overlay anyway (item hidden immediately) and returning 500 — \
+                         durability is owed, caller must retry"
+                    );
+                } else {
+                    tracing::error!(
+                        op = ?op,
+                        "wal append/fsync failed for a non-deny change; refusing without applying"
+                    );
+                }
+                failures.push(e);
             }
         }
     }
 
-    match first_error {
+    match map_change_batch_error(&failures, applied) {
         Some(e) => Err(e),
         None => Ok(()),
     }
@@ -545,12 +667,23 @@ async fn changes(
     headers: HeaderMap,
     Json(items): Json<Vec<ChangeItem>>,
 ) -> Result<StatusCode, ApiError> {
+    // **Deliberately outside the deny lane.** The bearer check stays on the reactor so an
+    // unauthenticated flood cannot occupy `spawn_on_deny_lane`'s threads — the resource that fix
+    // exists to keep free. Body decoding is likewise on the reactor, ahead of this check (an axum
+    // extractor), which is pre-existing and bounded by axum's default body limit.
     state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
 
+    // **No readiness gate here, and that is load-bearing** (lifecycle §4; Task 3a's D6). A
+    // `WalPoisoned` node still applies `Delete`/`Suppress` to the live overlay before returning its
+    // error, so gating this endpoint on `readyz` would apply the first failing suppression and then
+    // refuse every subsequent one *without applying it* — refused **and** unapplied, which is the
+    // fail-open the posture exists to prevent. Readiness governs routing, never deny acceptance.
+    //
     // D-A / review finding 7: closure captures `state` (moved in directly — nothing after this
     // `.await` needs the handler's own copy) and `items` (moved — the request body is already
     // fully decoded to owned `Vec<ChangeItem>` by this point, so there is nothing left to borrow).
-    tokio::task::spawn_blocking(move || run_changes(&state, items))
+    // `spawn_on_deny_lane`, not `tokio::task::spawn_blocking`: see its doc.
+    spawn_on_deny_lane(move || run_changes(&state, items))
         .await
         .map_err(map_join_error)??;
 
@@ -574,6 +707,21 @@ async fn status(
     // Tasks 1-2), which happen after admission and are invisible to this gate (see
     // `ComputeGate::shed_total`'s doc).
     let gate = state.compute_gate.status();
+    // The write executor's posture and counters. **This is where the posture string lives** — the
+    // bearer-gated plane — because `/readyz` is unauthenticated on every listener and must stay a
+    // bare boolean (SA §9; see `health.rs`). `ready` is computed by the *same* `is_ready` the probe
+    // calls, not a second predicate, so the two can never drift.
+    //
+    // Contracts §3.4 specifies `readiness` as a **per-partition** field, beside `segments_version`
+    // and `watermark`. This build has one partition and no per-partition status block yet, so the
+    // flag lives inside `write_executor` rather than claiming the top-level `readiness` key that
+    // stage 2.2 will need for the per-partition form.
+    let executor = state.engine.write_executor_stats();
+    // Track C's S1, deferred by Task 3a only because `Engine::pin_stats` did not exist on that
+    // branch (Task 4 has since landed it). Lifecycle §2.2's drain list: `drain_depth` above
+    // `DRAIN_DEPTH_ALARM` is the operator alarm, and `oldest_retired_secs` is what distinguishes
+    // "deep because busy" from "deep because reclaim is not running".
+    let pins = state.engine.pin_stats();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
         "compute": {
@@ -583,5 +731,94 @@ async fn status(
             "waiting": gate.waiting,
             "shed_total": gate.shed_total,
         },
+        "write_executor": {
+            "posture": executor.posture.as_str(),
+            "ready": is_ready(executor.posture),
+            "work_submitted": executor.work_submitted,
+            "deny_submitted": executor.deny_submitted,
+            "wal_appends": executor.wal_appends,
+            "wal_fsyncs": executor.wal_fsyncs,
+            "apply_nanos_total": executor.apply_nanos_total,
+            "apply_nanos_max": executor.apply_nanos_max,
+        },
+        "pins": {
+            "drain_depth": pins.drain_depth,
+            "oldest_retired_secs": pins.oldest_retired_secs,
+        },
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    /// **The deny lane does not share tokio's blocking pool** — the Task 3a security-lens finding,
+    /// closed and demonstrated rather than argued.
+    ///
+    /// The ambient pool is saturated *provably*, not hopefully: each parked closure publishes its
+    /// arrival before blocking, and the test waits on those arrivals. Then the deny lane is asked
+    /// to run something. If it shared the pool, its closure would sit in tokio's FIFO behind the
+    /// parked ones — which is exactly what happens to a suppression queued behind ingest closures
+    /// in production.
+    ///
+    /// **The mutation is [`spawn_on_deny_lane`]'s body** — replace it with
+    /// `tokio::task::spawn_blocking` and this test hangs, which is why the await is bounded. That
+    /// is the whole reason the lane is reached through one named function: `changes()` has exactly
+    /// one route to it, so a rewrite of this file that "simplifies away" the separate runtime lands
+    /// here and goes red, rather than quietly reinstating the starvation.
+    ///
+    /// The timeout is in the **failing** path only; on a healthy build the deny closure resolves in
+    /// microseconds. There is deliberately no assertion that the ambient probe *did not* run: a
+    /// negative statement about another thread's progress cannot be established without waiting
+    /// (Task 3a fix round 1, CRITICAL 1). The sound content is that the deny lane completed while
+    /// the ambient pool was demonstrably full, and that is what is asserted.
+    #[test]
+    fn a_deny_does_not_queue_behind_a_saturated_blocking_pool() {
+        const AMBIENT_BLOCKING_THREADS: usize = 2;
+
+        let ambient = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(AMBIENT_BLOCKING_THREADS)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        ambient.block_on(async {
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+            let (parked_tx, parked_rx) = mpsc::channel::<()>();
+
+            for _ in 0..AMBIENT_BLOCKING_THREADS {
+                let rx = Arc::clone(&release_rx);
+                let tx = parked_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    tx.send(()).unwrap();
+                    let _ = rx.lock().unwrap().recv();
+                });
+            }
+            // Every ambient blocking thread has published its arrival, so the pool is full as a
+            // fact rather than as a hope.
+            for _ in 0..AMBIENT_BLOCKING_THREADS {
+                parked_rx.recv().unwrap();
+            }
+
+            let ran = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                spawn_on_deny_lane(|| "the deny lane ran"),
+            )
+            .await
+            .expect(
+                "the deny lane did not run within 10s while tokio's blocking pool was saturated — \
+                 a suppression is queued behind unbounded ingest work, which is lifecycle §1.3's \
+                 forbidden shape one layer above the executor's priority lane",
+            )
+            .expect("the deny closure ran to completion");
+            assert_eq!(ran, "the deny lane ran");
+
+            for _ in 0..AMBIENT_BLOCKING_THREADS {
+                let _ = release_tx.send(());
+            }
+        });
+    }
 }
