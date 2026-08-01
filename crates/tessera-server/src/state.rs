@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
+use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use tessera_engine::{Engine, Session};
@@ -235,13 +236,44 @@ impl AppState {
         Ok(entry)
     }
 
-    /// Constant-time-ish (string equality; Phase 1 does not harden against timing side channels —
-    /// out of this phase's scope) bearer check for the session/control planes' shared-secret
-    /// credentials.
+    /// Bearer check for the session and control planes' shared-secret credentials, in time
+    /// independent of *where* a wrong guess diverges.
+    ///
+    /// **The previous implementation was `token == expected`, and its doc called that
+    /// "constant-time-ish". That claim was false** (Task 5): `str` equality short-circuits on the
+    /// first differing byte *and* on a length mismatch, which is a prefix oracle over the operator
+    /// and session credentials — an attacker who can time this recovers the secret byte by byte in
+    /// linear rather than exponential guesses. The scoping excuse ("Phase 1 does not harden against
+    /// timing side channels") did not survive contact with the fact that these two secrets are the
+    /// whole of the admin and session planes' authentication.
+    ///
+    /// **How this is fixed, and what it still does not claim.** Both sides are hashed to 32 bytes
+    /// and the digests compared with a fixed-length XOR-accumulate that has no early exit. Hashing
+    /// first is what makes the comparison independent of the credential's *length* as well as its
+    /// content — a fold over two byte strings of unequal length cannot be. It is not a defence
+    /// against an attacker who can measure the hash itself, and it does not pretend to be; what it
+    /// removes is the prefix oracle, which is the part that turns guessing into searching.
+    ///
+    /// **The viewer plane is deliberately not changed and is fine as it is.** A viewer token is
+    /// looked up in a `HashMap` by value ([`Self::authenticated_session`]) rather than compared
+    /// against a known secret, and it is 256 bits of `OsRng`, so there is no gradient for a
+    /// prefix-prober to climb. Stated here so the next reader does not "fix" it by symmetry.
     pub fn check_bearer(&self, presented: Option<&str>, expected: &str) -> Result<(), ApiError> {
-        match presented {
-            Some(token) if token == expected => Ok(()),
-            _ => Err(ApiError::BadCredential),
+        let Some(token) = presented else {
+            return Err(ApiError::BadCredential);
+        };
+        let presented_digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let expected_digest: [u8; 32] = Sha256::digest(expected.as_bytes()).into();
+        // No early exit, and no short-circuiting operator: every one of the 32 bytes is folded in
+        // before the single comparison. `|=` rather than `&&` is the whole point.
+        let mut diff = 0u8;
+        for (a, b) in presented_digest.iter().zip(expected_digest.iter()) {
+            diff |= a ^ b;
+        }
+        if diff == 0 {
+            Ok(())
+        } else {
+            Err(ApiError::BadCredential)
         }
     }
 }
@@ -301,7 +333,10 @@ mod compute_gate_tests {
         // The shed attempt above must not have left the slots semaphore permanently short a
         // permit -- a third admit, after the only holder releases, must succeed.
         let third = gate.admit().await;
-        assert!(third.is_ok(), "a permit leak would make this admit shed too");
+        assert!(
+            third.is_ok(),
+            "a permit leak would make this admit shed too"
+        );
     }
 
     /// No permit leak on the timeout path specifically: `try_acquire_owned` on the outer

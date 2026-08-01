@@ -1,44 +1,72 @@
-//! D-G's slot-state single-flight cache, fallible form (lifecycle §3.3).
+//! D-G's slot-state single-flight cache, fallible form (lifecycle §3.3), with Task 5's byte bound.
 //!
-//! Same shape as `tessera-engine::single_flight::SingleFlightCache` (commit d9baada, Task 1 of
-//! this concurrency workstream): a slot per key is either [`Slot::Building`] or [`Slot::Ready`],
-//! the map's mutex is held only for the O(1) transition between those states — never across the
-//! build itself — and a concurrent arrival on the same key does not wait for an in-flight build:
-//! it gets [`SingleFlightError::Building`] immediately (D-G's non-blocking-waiters rule: a parked
-//! waiter would hold the server's admission budget while burning zero CPU).
+//! Same shape as `tessera-engine::single_flight::SingleFlightCache` (commit d9baada, Task 1 of the
+//! concurrency workstream; Task 5 of Phase 2 stage 2.1 for the bound): a slot per key is either
+//! [`Slot::Building`] or [`Slot::Ready`], the map's mutex is held only for the O(1) transition
+//! between those states — never across the build itself — and a concurrent arrival on the same key
+//! does not wait for an in-flight build: it gets [`SingleFlightError::Building`] immediately (D-G's
+//! non-blocking-waiters rule: a parked waiter would hold the server's admission budget while
+//! burning zero CPU).
 //!
-//! **Duplicated here rather than reused**, deliberately: `tessera-authz` sits *below*
-//! `tessera-engine` in the crate graph (engine depends on authz, per `crates/tessera-engine/
-//! Cargo.toml`), and `scripts/check-layers.sh` enforces that direction, so this crate cannot take
-//! a dependency on `tessera-engine` to reuse its module. The two use sites also need different
-//! `get_or_build` signatures: the row-projection build engine's cache wraps is infallible, while
-//! the fragment build this cache wraps is `io::Result` — a shared module would need exactly the
-//! generalisation ([`get_or_try_build`](SingleFlightCache::get_or_try_build)) this module carries
-//! anyway. See `tessera-engine/src/single_flight.rs`'s module doc for the fuller design rationale
-//! (the F4 measurement — lock-held-across-build serialising every session's first request behind
-//! one mutex — this pattern answers) and its tests for the same interleavings reproduced there
-//! with an infallible builder.
+//! **Duplicated rather than reused**, deliberately: `tessera-authz` sits *below* `tessera-engine`
+//! in the crate graph (engine depends on authz, per `crates/tessera-engine/Cargo.toml`), and
+//! `scripts/check-layers.sh` enforces that direction, so this crate cannot take a dependency on
+//! `tessera-engine` to reuse its module. The two use sites also need different signatures: the
+//! row-projection build engine's cache wraps is infallible, while the fragment build this cache
+//! wraps is `io::Result` — a shared module would need exactly the generalisation
+//! ([`get_or_try_build`](SingleFlightCache::get_or_try_build)) this module carries anyway.
+//!
+//! **The duplication is now five rules deep, so both copies carry their own tests.** Byte bound,
+//! LRU, `CacheWeight`, the build sequence number and never-evict-`Building` can each be right in
+//! one crate and wrong in the other, and a test written once covers only the crate it lives in. See
+//! `tessera-engine/src/single_flight.rs`'s module doc for the fuller design rationale — the F4
+//! measurement this pattern answers, and the four eviction rules, argued once there and referred to
+//! by number here.
 
-use std::collections::hash_map::Entry;
+use std::collections::BTreeMap;
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rustc_hash::FxHashMap;
+
+/// What one cached value costs the byte bound. See the engine twin's trait of the same name.
+pub(crate) trait CacheWeight {
+    /// This value's contribution to the byte bound, **before** the per-entry floor. Computed once
+    /// per successful build, outside the lock.
+    fn cache_weight_bytes(&self) -> u64;
+}
+
+/// The minimum a cached entry is charged — **modelled, not measured**; see the engine twin's
+/// constant for the inventory it is built from and for why it is not derived from `size_of`.
+///
+/// A byte bound alone does not bound entry count, and this is what makes it do so. The engine
+/// twin's exposure is session rotation; this cache's is different in shape but not in kind — see
+/// `FragmentCache`'s `key_memo` bound, which closes the sibling path.
+pub(crate) const PER_ENTRY_FLOOR_BYTES: u64 = 512;
 
 /// One key's state. There is deliberately no third, "failed" state: a failed (`Err`-returning or
 /// panicking) build must remove the entry outright rather than cache anything for it, so the next
 /// arrival retries — caching a failure would be a permanent fail-closed wedge for that credential
 /// (I13).
-enum Slot<V> {
-    Building,
-    Ready(Arc<V>),
+enum Slot<K, V> {
+    /// A build is in flight. `seq` identifies *which* build — see the engine twin's rule 2, and
+    /// [`RemoveUnlessReady`] below.
+    Building { seq: u64 },
+    Ready {
+        value: Arc<V>,
+        key: Arc<K>,
+        charged: u64,
+        tick: u64,
+        uses: u32,
+    },
 }
 
 /// A losing (or unlucky) arrival's outcome.
 #[derive(Debug)]
 pub(crate) enum SingleFlightError<E> {
-    /// Another caller is already building this key right now; this call did not wait for it
-    /// (D-G). The caller decides what that means — `FragmentCache::get_or_build` surfaces it as
+    /// Another caller is already building this key right now; this call did not wait for it (D-G).
+    /// The caller decides what that means — `FragmentCache::get_or_build` surfaces it as
     /// `FragmentCacheError::Building`, which `Engine::authorise` turns into
     /// `EngineError::FragmentBuilding`.
     Building,
@@ -47,87 +75,261 @@ pub(crate) enum SingleFlightError<E> {
     Build(E),
 }
 
-/// A map of independently single-flighted slots. See the module doc for the concurrency shape.
-pub(crate) struct SingleFlightCache<K, V> {
-    slots: Mutex<FxHashMap<K, Slot<V>>>,
+/// Operator-facing cache gauges — the authz twin of `tessera_engine`'s `CacheStats`. Every field is
+/// read from an atomic without taking the slot lock, so [`Self::slot_locks`] measures this type's
+/// own locking rather than the caller's polling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CacheStats {
+    /// Slots currently held, `Building` and `Ready` both counted.
+    pub entries: usize,
+    /// **Charged** bytes resident: `Σ max(weight, PER_ENTRY_FLOOR_BYTES)` over `Ready` slots.
+    pub bytes: u64,
+    pub bound_bytes: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub building_refusals: u64,
+    pub evictions: u64,
+    pub evicted_bytes: u64,
+    /// Evictions of entries never reused — the thrash signature. See the engine twin.
+    pub young_evictions: u64,
+    pub oversized_admissions: u64,
+    /// Every acquisition of the slot mutex, from anywhere in this module. See
+    /// [`SingleFlightCache::lock_slots`]; `is_locked_now`'s `try_lock` is deliberately not counted.
+    pub slot_locks: u64,
 }
 
-impl<K: Eq + Hash + Clone, V> SingleFlightCache<K, V> {
-    pub(crate) fn new() -> Self {
-        SingleFlightCache {
-            slots: Mutex::new(FxHashMap::default()),
+/// The guarded state. One struct so the map, the recency index and the byte accounting cannot be
+/// updated apart — see [`Slots::remove`].
+struct Slots<K, V> {
+    map: FxHashMap<Arc<K>, Slot<K, V>>,
+    /// `Ready` entries only, oldest-use first. **`Building` slots are deliberately absent** (engine
+    /// twin, rule 1): an eviction pass that had to pop-then-skip one would leave a slot holding a
+    /// tick with no index entry, permanently unevictable while still charged — the bound stops
+    /// holding while the counters say it holds.
+    recency: BTreeMap<u64, Arc<K>>,
+    next_tick: u64,
+    next_seq: u64,
+    bytes: u64,
+}
+
+impl<K: Eq + Hash, V> Slots<K, V> {
+    /// **The one place a slot is removed** — map, recency index and `bytes` updated together.
+    /// Returns the value rather than dropping it, so the caller drops it after releasing the lock
+    /// (engine twin, rule 4).
+    fn remove(&mut self, key: &K) -> Option<Arc<V>> {
+        match self.map.remove(key) {
+            None | Some(Slot::Building { .. }) => None,
+            Some(Slot::Ready {
+                value,
+                charged,
+                tick,
+                ..
+            }) => {
+                self.recency.remove(&tick);
+                self.bytes -= charged;
+                Some(value)
+            }
         }
     }
 
-    /// Slots currently held, `Building` and `Ready` both counted — a diagnostic (fail-closed
-    /// tests confirm a failed build leaves this at the count it started at, never wedged), not a
-    /// capacity bound. `FragmentCache::slot_count` re-exports this publicly.
-    pub(crate) fn len(&self) -> usize {
-        self.slots.lock().unwrap().len()
+    fn check(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let ready = self
+                .map
+                .values()
+                .filter(|slot| matches!(slot, Slot::Ready { .. }))
+                .count();
+            debug_assert_eq!(
+                ready,
+                self.recency.len(),
+                "recency index desynchronised from the slot map"
+            );
+            let charged: u64 = self
+                .map
+                .values()
+                .map(|slot| match slot {
+                    Slot::Ready { charged, .. } => *charged,
+                    Slot::Building { .. } => 0,
+                })
+                .sum();
+            debug_assert_eq!(charged, self.bytes, "byte accounting desynchronised");
+        }
+    }
+}
+
+/// A map of independently single-flighted slots, bounded in bytes. See the module doc.
+pub(crate) struct SingleFlightCache<K, V> {
+    slots: Mutex<Slots<K, V>>,
+    bound_bytes: AtomicU64,
+    entries: AtomicUsize,
+    bytes: AtomicU64,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    building_refusals: AtomicU64,
+    evictions: AtomicU64,
+    evicted_bytes: AtomicU64,
+    young_evictions: AtomicU64,
+    oversized_admissions: AtomicU64,
+    slot_locks: AtomicU64,
+}
+
+#[derive(Default)]
+struct EvictionTally {
+    count: u64,
+    bytes: u64,
+    young: u64,
+}
+
+impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
+    /// `u64::MAX` means "no bound" — the pre-Task-5 behaviour, and what every construction site
+    /// that does not set one explicitly gets.
+    pub(crate) fn new(bound_bytes: u64) -> Self {
+        SingleFlightCache {
+            slots: Mutex::new(Slots {
+                map: FxHashMap::default(),
+                recency: BTreeMap::new(),
+                next_tick: 0,
+                next_seq: 0,
+                bytes: 0,
+            }),
+            bound_bytes: AtomicU64::new(bound_bytes),
+            entries: AtomicUsize::new(0),
+            bytes: AtomicU64::new(0),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            building_refusals: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+            evicted_bytes: AtomicU64::new(0),
+            young_evictions: AtomicU64::new(0),
+            oversized_admissions: AtomicU64::new(0),
+            slot_locks: AtomicU64::new(0),
+        }
     }
 
-    /// Look up `key`. A hit clones the `Arc` and returns without calling `build` at all — this is
-    /// the in-memory cache half of D-G. A miss makes this call the builder: publish `Building`,
-    /// drop the lock, run `build()` outside it, re-lock, publish `Ready` on `Ok`. A *different*
-    /// concurrent miss on the same key observed while this is in flight gets
-    /// `Err(SingleFlightError::Building)` immediately — see the module doc for why that is
-    /// correct rather than a shortcut. A re-entrant lookup during a build (the same thread calling
-    /// back in from inside its own `build`) sees the same `Building` state and errors rather than
-    /// deadlocking, for the same reason: the map lock is never held across `build`.
+    pub(crate) fn set_bound_bytes(&self, bound_bytes: u64) {
+        self.bound_bytes.store(bound_bytes, Ordering::Relaxed);
+    }
+
+    /// Slots currently held, `Building` and `Ready` both counted — a diagnostic (fail-closed tests
+    /// confirm a failed build leaves this at the count it started at, never wedged), not a capacity
+    /// bound. `FragmentCache::slot_count` re-exports this publicly.
+    pub(crate) fn len(&self) -> usize {
+        self.entries.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn stats(&self) -> CacheStats {
+        CacheStats {
+            entries: self.entries.load(Ordering::Relaxed),
+            bytes: self.bytes.load(Ordering::Relaxed),
+            bound_bytes: self.bound_bytes.load(Ordering::Relaxed),
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            building_refusals: self.building_refusals.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            evicted_bytes: self.evicted_bytes.load(Ordering::Relaxed),
+            young_evictions: self.young_evictions.load(Ordering::Relaxed),
+            oversized_admissions: self.oversized_admissions.load(Ordering::Relaxed),
+            slot_locks: self.slot_locks.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Remove one key, if present. Returns whether anything was removed.
     ///
-    /// **Fail-closed (I13).** If `build` returns `Err` or unwinds, a drop guard removes the
-    /// `Building` entry before this call returns (or the unwind propagates), so the key is left
-    /// absent — never wedged at `Building`, never a cached `Err` — and the next arrival sees a
-    /// plain miss and retries.
+    /// The in-memory tier only — see `FragmentCache::evict`, which is the caller and which carries
+    /// the argument about the `.frag` sidecar being untouched.
+    pub(crate) fn evict(&self, key: &K) -> bool {
+        let mut dead: Option<Arc<V>> = None;
+        let removed = {
+            let mut slots = self.lock_slots();
+            let present = slots.map.contains_key(key);
+            dead = slots.remove(key).or(dead);
+            self.entries.store(slots.map.len(), Ordering::Relaxed);
+            self.bytes.store(slots.bytes, Ordering::Relaxed);
+            slots.check();
+            present
+        };
+        drop(dead); // outside the lock (engine twin, rule 4)
+        removed
+    }
+
+    /// Look up `key`. A hit clones the `Arc`, touches the recency order and returns without calling
+    /// `build` at all — this is the in-memory cache half of D-G. A miss makes this call the
+    /// builder: publish `Building`, drop the lock, run `build()` outside it, re-lock, evict to fit,
+    /// publish `Ready` on `Ok`. A *different* concurrent miss on the same key observed while this
+    /// is in flight gets `Err(SingleFlightError::Building)` immediately. A re-entrant lookup during
+    /// a build (the same thread calling back in from inside its own `build`) sees the same
+    /// `Building` state and errors rather than deadlocking, for the same reason: the map lock is
+    /// never held across `build`.
+    ///
+    /// **Fail-closed (I13).** If `build` returns `Err` or unwinds, [`RemoveUnlessReady`] removes
+    /// *this build's* `Building` entry — identified by its sequence number — before this call
+    /// returns or the unwind propagates, so the key is left absent, never wedged at `Building` and
+    /// never a cached `Err`.
+    ///
+    /// **The builder always receives what it built** (engine twin, rule 3): a value that does not
+    /// fit the bound is returned to its caller and simply not retained.
     pub(crate) fn get_or_try_build<E>(
         &self,
         key: K,
         build: impl FnOnce() -> Result<V, E>,
     ) -> Result<Arc<V>, SingleFlightError<E>> {
-        {
-            let mut slots = self.slots.lock().unwrap();
-            match slots.entry(key.clone()) {
-                Entry::Occupied(occupied) => {
-                    return match occupied.get() {
-                        Slot::Ready(v) => Ok(Arc::clone(v)),
-                        Slot::Building => Err(SingleFlightError::Building),
-                    };
-                }
-                Entry::Vacant(vacant) => {
-                    vacant.insert(Slot::Building);
-                }
-            }
-        }
+        // Declared before any guard so it drops after one — engine twin, rule 4.
+        let mut dead: Vec<Arc<V>> = Vec::new();
 
-        // Armed for the whole build; disarmed only after `Ready` is published below. Both an
-        // `Err` return and an unwinding `build` leave `key` absent rather than stuck at
-        // `Building` or wrongly `Ready` — the removal happens through this guard's `Drop` on
-        // *any* early exit, not just the panic path (unlike the infallible engine cache, this one
-        // has two failure exits to cover with one mechanism).
-        struct RemoveUnlessReady<'a, K: Eq + Hash, V> {
-            slots: &'a Mutex<FxHashMap<K, Slot<V>>>,
-            key: K,
-            ready: bool,
-        }
-        impl<K: Eq + Hash, V> Drop for RemoveUnlessReady<'_, K, V> {
-            fn drop(&mut self) {
-                if !self.ready {
-                    // This guard's own `drop` can run while a panic is already unwinding through
-                    // it, so a poisoned mutex must not be treated as a second panic here — that
-                    // would abort the process instead of completing the unwind. The map's
-                    // invariants survive a poisoning (the writer that poisoned it panicked before
-                    // this `remove`, not mid-mutation of the map itself), so recovering the guard
-                    // and proceeding is sound.
-                    self.slots
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&self.key);
+        let (owned_key, seq) = {
+            let mut slots = self.lock_slots();
+            // `get_mut` by reference, never `entry(key.clone())`: with `Arc<K>` keys the entry API
+            // would allocate an `Arc` on every call including a warm hit, which is the hot path.
+            let hit = match slots.map.get_mut(&key) {
+                None => None,
+                Some(Slot::Building { .. }) => {
+                    self.building_refusals.fetch_add(1, Ordering::Relaxed);
+                    return Err(SingleFlightError::Building);
                 }
+                Some(Slot::Ready {
+                    value,
+                    key: slot_key,
+                    tick,
+                    uses,
+                    ..
+                }) => {
+                    *uses = uses.saturating_add(1);
+                    Some((Arc::clone(value), Arc::clone(slot_key), *tick))
+                }
+            };
+            if let Some((value, slot_key, old_tick)) = hit {
+                let new_tick = slots.next_tick;
+                slots.next_tick += 1;
+                if let Some(Slot::Ready { tick, .. }) = slots.map.get_mut(&key) {
+                    *tick = new_tick;
+                }
+                slots.recency.remove(&old_tick);
+                slots.recency.insert(new_tick, slot_key);
+                slots.check();
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                return Ok(value);
             }
-        }
+            let owned_key = Arc::new(key.clone());
+            let seq = slots.next_seq;
+            slots.next_seq += 1;
+            slots
+                .map
+                .insert(Arc::clone(&owned_key), Slot::Building { seq });
+            self.entries.store(slots.map.len(), Ordering::Relaxed);
+            slots.check();
+            (owned_key, seq)
+        };
+        self.misses.fetch_add(1, Ordering::Relaxed);
+
+        // Armed for the whole build; disarmed only after the publish below. Both an `Err` return
+        // and an unwinding `build` leave this build's key absent rather than stuck at `Building` or
+        // wrongly `Ready` — one mechanism covering two failure exits, which is why the sequence
+        // check lives in the guard rather than only at the publish.
         let mut guard = RemoveUnlessReady {
-            slots: &self.slots,
-            key: key.clone(),
+            cache: self,
+            key: Arc::clone(&owned_key),
+            seq,
             ready: false,
         };
 
@@ -135,15 +337,150 @@ impl<K: Eq + Hash + Clone, V> SingleFlightCache<K, V> {
             Ok(v) => v,
             Err(e) => return Err(SingleFlightError::Build(e)),
         };
-
         let value = Arc::new(built);
-        self.slots
-            .lock()
-            .unwrap()
-            .insert(key, Slot::Ready(Arc::clone(&value)));
+
+        // Outside the lock, deliberately — see the engine twin.
+        let charged = value.cache_weight_bytes().max(PER_ENTRY_FLOOR_BYTES);
+        let bound = self.bound_bytes.load(Ordering::Relaxed);
+
+        let tally = {
+            let mut slots = self.lock_slots();
+            let tally = self.publish(
+                &mut slots, &owned_key, seq, &value, charged, bound, &mut dead,
+            );
+            self.entries.store(slots.map.len(), Ordering::Relaxed);
+            self.bytes.store(slots.bytes, Ordering::Relaxed);
+            slots.check();
+            tally
+        };
         guard.ready = true;
 
+        self.evictions.fetch_add(tally.count, Ordering::Relaxed);
+        self.evicted_bytes.fetch_add(tally.bytes, Ordering::Relaxed);
+        self.young_evictions
+            .fetch_add(tally.young, Ordering::Relaxed);
+
+        // `dead` drops here, with the lock released.
         Ok(value)
+    }
+
+    /// The publish half of a miss. Runs with the lock held. See the engine twin's `publish` for the
+    /// three outcomes and why the oversized arm must *remove* the `Building` slot rather than leave
+    /// it (a `Building` slot with no builder is a permanent fail-closed wedge for that credential —
+    /// I13, and the precise thing this module's two-state `Slot` exists to prevent).
+    #[allow(clippy::too_many_arguments)]
+    fn publish(
+        &self,
+        slots: &mut Slots<K, V>,
+        key: &Arc<K>,
+        seq: u64,
+        value: &Arc<V>,
+        charged: u64,
+        bound: u64,
+        dead: &mut Vec<Arc<V>>,
+    ) -> EvictionTally {
+        match slots.map.get(&**key) {
+            Some(Slot::Building { seq: found }) if *found == seq => {}
+            _ => return EvictionTally::default(),
+        }
+
+        if charged > bound {
+            slots.remove(key);
+            self.oversized_admissions.fetch_add(1, Ordering::Relaxed);
+            return EvictionTally::default();
+        }
+
+        let mut tally = EvictionTally::default();
+        while slots.bytes + charged > bound {
+            let Some(victim) = slots.recency.values().next().map(Arc::clone) else {
+                break;
+            };
+            let (young, freed) = match slots.map.get(&*victim) {
+                Some(Slot::Ready { uses, charged, .. }) => (*uses == 0, *charged),
+                _ => (false, 0),
+            };
+            if let Some(evicted) = slots.remove(&victim) {
+                dead.push(evicted);
+            }
+            tally.count += 1;
+            tally.bytes += freed;
+            tally.young += u64::from(young);
+        }
+
+        let tick = slots.next_tick;
+        slots.next_tick += 1;
+        slots.recency.insert(tick, Arc::clone(key));
+        slots.map.insert(
+            Arc::clone(key),
+            Slot::Ready {
+                value: Arc::clone(value),
+                key: Arc::clone(key),
+                charged,
+                tick,
+                uses: 0,
+            },
+        );
+        slots.bytes += charged;
+        tally
+    }
+
+    /// **The only place this module takes the lock** — see the engine twin for the argument.
+    /// `is_locked_now`'s `try_lock` is the one deliberate, uncounted exception.
+    ///
+    /// A poisoned mutex is recovered from rather than propagated. The discharge is restated rather
+    /// than inherited, because Task 5 made the guarded value richer: [`Slots`] now holds a map, a
+    /// recency index and a byte counter, and the claim is that no critical section here can panic
+    /// *between* two of their updates. [`Slots::remove`] is the only function that touches all
+    /// three, and it performs no allocation and calls no user code between them; the publish path's
+    /// inserts likewise cannot unwind partway. So a poisoning leaves the three consistent, and
+    /// refusing every subsequent authorise because one unrelated thread unwound would fail closed
+    /// on availability while buying no safety.
+    fn lock_slots(&self) -> MutexGuard<'_, Slots<K, V>> {
+        self.slot_locks.fetch_add(1, Ordering::Relaxed);
+        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether the slot lock is held at this instant — the probe that makes "evicted `Arc`s drop
+    /// outside the lock" assertable. Same three caveats as the engine twin: single-threaded tests
+    /// only, a poisoned mutex reads as locked, and it is deliberately not counted in
+    /// [`CacheStats::slot_locks`].
+    #[cfg(test)]
+    pub(crate) fn is_locked_now(&self) -> bool {
+        self.slots.try_lock().is_err()
+    }
+}
+
+/// Removes *this build's* `Building` slot unless it published. Covers both early exits — the `Err`
+/// return and the unwind — with one mechanism.
+///
+/// **Compares `seq`, not just state**, for the reason the engine twin's guard gives: once a pruner
+/// or an `evict` can remove a slot mid-build, a guard that removed by key alone would delete a
+/// *later* builder's slot. Unreachable before Task 5 gave this cache [`SingleFlightCache::evict`];
+/// hardened in the same change that makes it reachable.
+struct RemoveUnlessReady<'a, K: Eq + Hash + Clone, V: CacheWeight> {
+    cache: &'a SingleFlightCache<K, V>,
+    key: Arc<K>,
+    seq: u64,
+    ready: bool,
+}
+
+impl<K: Eq + Hash + Clone, V: CacheWeight> Drop for RemoveUnlessReady<'_, K, V> {
+    fn drop(&mut self) {
+        if self.ready {
+            return;
+        }
+        // This guard's own `drop` can run while a panic is already unwinding through it, so a
+        // poisoned mutex must not be treated as a second panic here — that would abort the process
+        // instead of completing the unwind. `lock_slots` recovers, and its doc discharges why.
+        let mut slots = self.cache.lock_slots();
+        if matches!(slots.map.get(&*self.key), Some(Slot::Building { seq }) if *seq == self.seq) {
+            // A `Building` slot carries no value and no charged bytes, so this frees nothing that
+            // could convoy. If this guard ever becomes able to remove a `Ready` slot, the value
+            // must be carried out of the critical section like every other path.
+            slots.remove(&self.key);
+            self.cache.entries.store(slots.map.len(), Ordering::Relaxed);
+            slots.check();
+        }
     }
 }
 
@@ -152,71 +489,86 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::thread;
+    use std::time::Duration;
 
-    /// A hit must never call `build` — the closure panics if invoked, so any accidental rebuild
-    /// on a warm key fails the test loudly rather than merely wasting work.
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// A test value of a chosen weight — the eviction cases need entries whose sizes they control.
+    struct Weighed(u32, u64);
+
+    impl CacheWeight for Weighed {
+        fn cache_weight_bytes(&self) -> u64 {
+            self.1
+        }
+    }
+
+    const BIG: u64 = 10_000;
+
+    fn unbounded() -> SingleFlightCache<u32, Weighed> {
+        SingleFlightCache::new(u64::MAX)
+    }
+
+    /// A hit must never call `build` — the closure panics if invoked, so any accidental rebuild on
+    /// a warm key fails the test loudly rather than merely wasting work.
     #[test]
     fn a_ready_hit_never_calls_build_again() {
-        let cache: SingleFlightCache<u32, u32> = SingleFlightCache::new();
-        let first = cache.get_or_try_build(1, || Ok::<_, ()>(42)).unwrap();
-        assert_eq!(*first, 42);
+        let cache = unbounded();
+        let first = cache
+            .get_or_try_build(1, || Ok::<_, ()>(Weighed(42, BIG)))
+            .unwrap();
+        assert_eq!(first.0, 42);
 
         let second = cache
-            .get_or_try_build(1, || -> Result<u32, ()> { panic!("must not rebuild a Ready key") })
+            .get_or_try_build(1, || -> Result<Weighed, ()> {
+                panic!("must not rebuild a Ready key")
+            })
             .unwrap();
-        assert_eq!(*second, 42);
+        assert_eq!(second.0, 42);
         assert!(Arc::ptr_eq(&first, &second), "same Arc, not a fresh build");
     }
 
-    /// D-G's core claim, reproduced deterministically (no sleeps, no timing slack): a concurrent
-    /// arrival on the same key while a build is in flight gets `Building` immediately rather than
-    /// blocking, and once the build publishes `Ready`, both the retried loser and a fresh arrival
-    /// observe the built value without rebuilding.
+    /// D-G's core claim, reproduced deterministically: a concurrent arrival on the same key while a
+    /// build is in flight gets `Building` immediately rather than blocking, and once the build
+    /// publishes `Ready`, both the retried loser and a fresh arrival observe it without rebuilding.
     #[test]
     fn concurrent_miss_during_a_build_does_not_block_and_does_not_rebuild() {
-        let cache = Arc::new(SingleFlightCache::<u32, u32>::new());
+        let cache = Arc::new(unbounded());
         let (started_tx, started_rx) = mpsc::channel::<()>();
         let (release_tx, release_rx) = mpsc::channel::<()>();
 
         let builder_cache = Arc::clone(&cache);
         let builder = thread::spawn(move || {
             builder_cache.get_or_try_build(1, move || {
-                // `Building` is published (under the map lock) strictly before this closure
-                // runs, so by the time the main thread receives on `started_rx` the state this
-                // test wants to race against already exists.
                 started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                Ok::<_, ()>(99)
+                release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                Ok::<_, ()>(Weighed(99, BIG))
             })
         });
 
-        started_rx.recv().unwrap();
+        started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
 
-        // Non-blocking: this call returns immediately (it does not wait on `release_tx`) with
-        // `Building`, and its own closure must never run — there is already a builder for `1`.
-        let loser = cache.get_or_try_build(1, || -> Result<u32, ()> {
+        let loser = cache.get_or_try_build(1, || -> Result<Weighed, ()> {
             panic!("a losing arrival must not build")
         });
         assert!(matches!(loser, Err(SingleFlightError::Building)));
 
         release_tx.send(()).unwrap();
         let built = builder.join().unwrap().unwrap();
-        assert_eq!(*built, 99);
+        assert_eq!(built.0, 99);
 
-        // The retried loser, and any fresh arrival, now hit `Ready` without rebuilding.
         let retried = cache
-            .get_or_try_build(1, || -> Result<u32, ()> { panic!("must not rebuild once Ready") })
+            .get_or_try_build(1, || -> Result<Weighed, ()> {
+                panic!("must not rebuild once Ready")
+            })
             .unwrap();
-        assert_eq!(*retried, 99);
+        assert_eq!(retried.0, 99);
     }
 
-    /// The map lock is held only for the O(1) transition, never for the build — proven here by
-    /// having key `1`'s build block indefinitely (until released at the end of the test) while
-    /// key `2`'s build runs and completes on another thread. If the lock were held across the
-    /// build, key `2` would hang waiting for key `1`'s lock to be released.
+    /// The map lock is held only for the O(1) transition, never for the build — key `1`'s build
+    /// blocks while key `2`'s runs to completion on another thread.
     #[test]
     fn distinct_keys_never_contend_on_a_slow_build() {
-        let cache = Arc::new(SingleFlightCache::<u32, u32>::new());
+        let cache = Arc::new(unbounded());
         let (started_tx, started_rx) = mpsc::channel::<()>();
         let (release_tx, release_rx) = mpsc::channel::<()>();
 
@@ -224,30 +576,30 @@ mod tests {
         let slow = thread::spawn(move || {
             slow_cache.get_or_try_build(1, move || {
                 started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                Ok::<_, ()>(1)
+                release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                Ok::<_, ()>(Weighed(1, BIG))
             })
         });
 
-        started_rx.recv().unwrap();
+        started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
 
-        // A distinct key's build must complete without waiting on key 1's release.
-        let other = cache.get_or_try_build(2, || Ok::<_, ()>(2)).unwrap();
-        assert_eq!(*other, 2);
+        let other = cache
+            .get_or_try_build(2, || Ok::<_, ()>(Weighed(2, BIG)))
+            .unwrap();
+        assert_eq!(other.0, 2);
 
         release_tx.send(()).unwrap();
-        assert_eq!(*slow.join().unwrap().unwrap(), 1);
+        assert_eq!(slow.join().unwrap().unwrap().0, 1);
     }
 
     /// I13: a build returning `Err` must never leave a permanent `Building` wedge, and the error
-    /// must never be cached — the entry is absent afterwards, so the very next call retries
-    /// cleanly (and can succeed, unlike a cached failure, which would be a permanent fail-closed
-    /// wedge for that key).
+    /// must never be cached — the entry is absent afterwards, so the very next call retries cleanly
+    /// (and can succeed, unlike a cached failure, which would be a permanent fail-closed wedge).
     #[test]
     fn a_failed_build_leaves_the_key_absent_so_a_retry_rebuilds() {
-        let cache: SingleFlightCache<u32, u32> = SingleFlightCache::new();
+        let cache = unbounded();
 
-        let result = cache.get_or_try_build(7, || Err::<u32, _>("boom"));
+        let result = cache.get_or_try_build(7, || Err::<Weighed, _>("boom"));
         assert!(matches!(result, Err(SingleFlightError::Build("boom"))));
         assert_eq!(
             cache.len(),
@@ -255,19 +607,20 @@ mod tests {
             "a failed build must not leave a Building wedge, nor cache the Err (I13)"
         );
 
-        let rebuilt = cache.get_or_try_build(7, || Ok::<_, &str>(7)).unwrap();
-        assert_eq!(*rebuilt, 7);
+        let rebuilt = cache
+            .get_or_try_build(7, || Ok::<_, &str>(Weighed(7, BIG)))
+            .unwrap();
+        assert_eq!(rebuilt.0, 7);
         assert_eq!(cache.len(), 1);
     }
 
-    /// I13, panic form: same guarantee as the `Err` case above, but via unwinding rather than a
-    /// returned `Err` — both early-exit paths share the one drop-guard mechanism.
+    /// I13, panic form: same guarantee via unwinding rather than a returned `Err`.
     #[test]
     fn a_panicking_build_leaves_the_key_absent_so_a_retry_rebuilds() {
-        let cache: SingleFlightCache<u32, u32> = SingleFlightCache::new();
+        let cache = unbounded();
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cache.get_or_try_build(7, || -> Result<u32, ()> { panic!("boom") })
+            cache.get_or_try_build(7, || -> Result<Weighed, ()> { panic!("boom") })
         }));
         assert!(result.is_err(), "the panic must propagate to the caller");
         assert_eq!(
@@ -276,8 +629,242 @@ mod tests {
             "a panicked build must not leave a Building wedge (I13)"
         );
 
-        let rebuilt = cache.get_or_try_build(7, || Ok::<_, ()>(7)).unwrap();
-        assert_eq!(*rebuilt, 7);
+        let rebuilt = cache
+            .get_or_try_build(7, || Ok::<_, ()>(Weighed(7, BIG)))
+            .unwrap();
+        assert_eq!(rebuilt.0, 7);
         assert_eq!(cache.len(), 1);
+    }
+
+    /// The counted choke point, both paths. A warm hit is one acquisition (the LRU touch is inside
+    /// it); a miss is two (publish `Building`, publish `Ready`, eviction inside the second).
+    #[test]
+    fn a_hit_takes_one_lock_and_a_miss_takes_two() {
+        let cache = SingleFlightCache::<u32, Weighed>::new(BIG * 2);
+        cache
+            .get_or_try_build(1, || Ok::<_, ()>(Weighed(1, BIG)))
+            .unwrap();
+
+        let before = cache.stats().slot_locks;
+        cache
+            .get_or_try_build(1, || -> Result<Weighed, ()> { panic!("warm") })
+            .unwrap();
+        assert_eq!(cache.stats().slot_locks - before, 1, "a warm hit: one");
+
+        let before = cache.stats().slot_locks;
+        cache
+            .get_or_try_build(2, || Ok::<_, ()>(Weighed(2, BIG)))
+            .unwrap();
+        assert_eq!(cache.stats().slot_locks - before, 2, "a miss: two");
+    }
+
+    /// Rule 4, made assertable — the authz copy. A value whose `Drop` observes the lock state
+    /// records a violation if it is dropped inside the critical section.
+    #[test]
+    fn evicted_arcs_are_dropped_outside_the_lock() {
+        use std::cell::{Cell, RefCell};
+
+        thread_local! {
+            static PROBE: RefCell<Option<*const SingleFlightCache<u32, Tattle>>> =
+                const { RefCell::new(None) };
+            static VIOLATION: Cell<bool> = const { Cell::new(false) };
+        }
+
+        struct Tattle(u64);
+        impl CacheWeight for Tattle {
+            fn cache_weight_bytes(&self) -> u64 {
+                self.0
+            }
+        }
+        impl Drop for Tattle {
+            fn drop(&mut self) {
+                PROBE.with(|probe| {
+                    if let Some(cache) = *probe.borrow() {
+                        // SAFETY: set and cleared inside the test body; the cache outlives every
+                        // value it holds.
+                        if unsafe { &*cache }.is_locked_now() {
+                            VIOLATION.with(|v| v.set(true));
+                        }
+                    }
+                });
+            }
+        }
+
+        let cache = SingleFlightCache::<u32, Tattle>::new(BIG * 2);
+        PROBE.with(|probe| *probe.borrow_mut() = Some(&cache as *const _));
+
+        cache
+            .get_or_try_build(1, || Ok::<_, ()>(Tattle(BIG)))
+            .unwrap();
+        cache
+            .get_or_try_build(2, || Ok::<_, ()>(Tattle(BIG)))
+            .unwrap();
+        cache
+            .get_or_try_build(3, || Ok::<_, ()>(Tattle(BIG)))
+            .unwrap();
+
+        PROBE.with(|probe| *probe.borrow_mut() = None);
+        assert!(cache.stats().evictions >= 1, "the test must have evicted");
+        assert!(
+            !VIOLATION.with(Cell::get),
+            "an evicted value was dropped while the slot lock was held"
+        );
+    }
+
+    /// Rule 1 — the authz copy. A `Building` slot is never chosen as an eviction victim.
+    #[test]
+    fn a_building_slot_is_never_evicted() {
+        let cache = Arc::new(SingleFlightCache::<u32, Weighed>::new(BIG * 2));
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let slow_cache = Arc::clone(&cache);
+        let slow = thread::spawn(move || {
+            slow_cache.get_or_try_build(1, move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                Ok::<_, ()>(Weighed(1, BIG))
+            })
+        });
+        started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+
+        for key in 2..5u32 {
+            cache
+                .get_or_try_build(key, || Ok::<_, ()>(Weighed(key, BIG)))
+                .unwrap();
+        }
+
+        let racer = cache.get_or_try_build(1, || -> Result<Weighed, ()> {
+            panic!("key 1's Building slot was evicted")
+        });
+        assert!(matches!(racer, Err(SingleFlightError::Building)));
+
+        release_tx.send(()).unwrap();
+        assert_eq!(slow.join().unwrap().unwrap().0, 1);
+    }
+
+    /// The I13 wedge the oversized path would otherwise leave — the authz copy.
+    #[test]
+    fn an_entry_larger_than_the_bound_is_served_but_not_retained() {
+        let cache = SingleFlightCache::<u32, Weighed>::new(BIG);
+
+        let built = cache
+            .get_or_try_build(1, || Ok::<_, ()>(Weighed(5, BIG * 4)))
+            .unwrap();
+        assert_eq!(built.0, 5, "the builder receives what it built");
+        assert_eq!(cache.stats().oversized_admissions, 1);
+        assert_eq!(cache.stats().bytes, 0);
+        assert_eq!(
+            cache.len(),
+            0,
+            "the Building slot must be REMOVED: one with no builder is a permanent fail-closed \
+             wedge for that credential (I13)"
+        );
+
+        let again = cache.get_or_try_build(1, || Ok::<_, ()>(Weighed(6, BIG * 4)));
+        assert!(matches!(&again, Ok(v) if v.0 == 6));
+    }
+
+    /// Eviction takes the least recently *used*, not the least recently inserted.
+    #[test]
+    fn eviction_takes_the_least_recently_used() {
+        let cache = SingleFlightCache::<u32, Weighed>::new(BIG * 2);
+        cache
+            .get_or_try_build(1, || Ok::<_, ()>(Weighed(1, BIG)))
+            .unwrap();
+        cache
+            .get_or_try_build(2, || Ok::<_, ()>(Weighed(2, BIG)))
+            .unwrap();
+        cache
+            .get_or_try_build(1, || -> Result<Weighed, ()> { panic!("warm") })
+            .unwrap();
+        cache
+            .get_or_try_build(3, || Ok::<_, ()>(Weighed(3, BIG)))
+            .unwrap();
+
+        assert!(cache
+            .get_or_try_build(1, || -> Result<Weighed, ()> {
+                panic!("1 must be resident")
+            })
+            .is_ok());
+        let rebuilt = std::cell::Cell::new(false);
+        cache
+            .get_or_try_build(2, || {
+                rebuilt.set(true);
+                Ok::<_, ()>(Weighed(2, BIG))
+            })
+            .unwrap();
+        assert!(rebuilt.get(), "key 2 was the LRU victim");
+    }
+
+    /// `evict` removes one key and nothing else, in one acquisition.
+    #[test]
+    fn evict_removes_exactly_one_key() {
+        let cache = unbounded();
+        for key in 0..3u32 {
+            cache
+                .get_or_try_build(key, || Ok::<_, ()>(Weighed(key, BIG)))
+                .unwrap();
+        }
+
+        let before = cache.stats().slot_locks;
+        assert!(cache.evict(&1));
+        assert_eq!(cache.stats().slot_locks - before, 1);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.stats().bytes, 2 * BIG);
+        assert!(
+            !cache.evict(&1),
+            "a second evict of the same key removes nothing"
+        );
+
+        let rebuilt = std::cell::Cell::new(false);
+        cache
+            .get_or_try_build(1, || {
+                rebuilt.set(true);
+                Ok::<_, ()>(Weighed(1, BIG))
+            })
+            .unwrap();
+        assert!(rebuilt.get(), "the evicted key must rebuild");
+    }
+
+    /// Rule 2 — an `evict` landing mid-build must not be undone by the publish that follows it.
+    #[test]
+    fn an_evict_during_a_build_is_not_undone_by_the_publish() {
+        let cache = Arc::new(unbounded());
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let builder_cache = Arc::clone(&cache);
+        let builder = thread::spawn(move || {
+            builder_cache.get_or_try_build(1, move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                Ok::<_, ()>(Weighed(1, BIG))
+            })
+        });
+        started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+
+        cache.evict(&1);
+        release_tx.send(()).unwrap();
+
+        let built = builder.join().unwrap().unwrap();
+        assert_eq!(built.0, 1, "the builder still receives its value");
+        assert_eq!(
+            cache.len(),
+            0,
+            "the publish must not resurrect a key the evict removed"
+        );
+    }
+
+    /// Tiny entries are charged the floor, which is what turns a byte bound into an entry bound.
+    #[test]
+    fn tiny_entries_are_charged_the_floor() {
+        let cache = SingleFlightCache::<u32, Weighed>::new(u64::MAX);
+        for key in 0..10u32 {
+            cache
+                .get_or_try_build(key, || Ok::<_, ()>(Weighed(key, 1)))
+                .unwrap();
+        }
+        assert_eq!(cache.stats().bytes, 10 * PER_ENTRY_FLOOR_BYTES);
     }
 }

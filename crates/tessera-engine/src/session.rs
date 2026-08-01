@@ -516,7 +516,10 @@ impl Engine {
             dict: Arc::clone(&dict),
             postings,
             fragment_cache,
-            row_projection_cache: RowProjectionCache::new(),
+            // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
+            // after `open`, having validated the figure; every other embedder (tests, benches,
+            // examples) gets the pre-Task-5 behaviour, which is what they had and what they want.
+            row_projection_cache: RowProjectionCache::new(u64::MAX),
             pool,
             config,
             next_token_id: AtomicU64::new(0),
@@ -759,6 +762,10 @@ impl Engine {
         // Reclaim *after* retiring, so the list is self-bounding for as long as geometry keeps
         // moving. This is not a substitute for a periodic pass — see `reclaim_pins`.
         reclaimed.extend(self.pins.reclaim());
+        // Task 5: prune the projections of every geometry this call released — the trim above and
+        // the reclaim pass alike. Coupled to the `Reclaimed` values, never to the swap; see
+        // `Engine::prune_reclaimed`.
+        self.prune_reclaimed(&reclaimed);
         Ok(reclaimed)
     }
 
@@ -774,7 +781,81 @@ impl Engine {
     /// drain depth 1 — *at* `DRAIN_DEPTH_ALARM`, which alarms only above it. [`PinStats::oldest_retired_secs`]
     /// is the gauge that makes that state visible.
     pub fn reclaim_pins(&self) -> Vec<Reclaimed> {
-        self.pins.reclaim()
+        let reclaimed = self.pins.reclaim();
+        self.prune_reclaimed(&reclaimed);
+        reclaimed
+    }
+
+    /// Prune the row-projection cache for every geometry a reclaim pass released (Task 5).
+    ///
+    /// **The licence to prune is a [`Reclaimed`] value, not any particular method**, and that is
+    /// the whole of the coupling argument. `Reclaimed`s are produced at three sites — this
+    /// method's caller, [`Self::publish_geometry`]'s drain-depth trim, and the reclaim pass
+    /// `publish_geometry` runs itself — and the safety property is identical at all three: the
+    /// drain entry naming that `segments_version` is gone, so `PinManager::resolve_drained` now
+    /// returns `PinExpired` and no request can produce that key again. Hanging the prune off
+    /// `reclaim_pins` alone would leave the other two routes reclaiming geometries whose
+    /// projections are never freed — and since nothing calls `reclaim_pins` periodically yet
+    /// (see its doc), those are in practice the routes that fire.
+    ///
+    /// **Never from the swap.** Between a swap and the reclaim, the superseded geometry is still
+    /// resolvable from the drain list, so a swap-triggered prune deletes exactly the key an
+    /// outstanding pin is about to ask for. See `RowProjectionCache::prune_generation`.
+    ///
+    /// The window this does *not* close, stated rather than implied: a request that resolved its
+    /// pin before the drain entry was removed can construct that key after this prune and
+    /// re-publish it. That entry is that session's own projection over the geometry it pinned,
+    /// reachable by nobody else, and the byte bound reclaims it. It is a bounded memory effect,
+    /// never a disclosure — removal cannot widen a mask.
+    fn prune_reclaimed(&self, reclaimed: &[Reclaimed]) {
+        for entry in reclaimed {
+            self.row_projection_cache
+                .prune_generation(entry.segments_version);
+        }
+    }
+
+    /// Drop every cached row projection belonging to `token_id` — the revoke hook (Task 5).
+    ///
+    /// Returns how many entries were removed, which is what
+    /// `revoke_prunes_the_token` asserts on. See `RowProjectionCache::prune_token` for why this is
+    /// memory hygiene rather than a disclosure control, and for the cost of the pass.
+    pub fn prune_token(&self, token_id: u64) -> usize {
+        self.row_projection_cache.prune_token(token_id)
+    }
+
+    /// Bound both caches, and the only route by which the two config keys reach them.
+    ///
+    /// **Not an `EngineConfig` field, deliberately** *(and this cost a design revision)*.
+    /// `EngineConfig` is `Copy` with no `Default` and is built by *exhaustive* struct literal at
+    /// fifteen sites, three of which are in `crates/tessera-engine/tests/viewport.rs` — a file this
+    /// stage's allowlist marks `[frozen]` for every track. Adding a field there would have made the
+    /// workspace uncompilable with no in-allowlist repair. `Engine::start_write_executor` met the
+    /// same wall with `ingest_queue_bound` and answered it the same way; this follows that
+    /// precedent rather than inventing a second one.
+    ///
+    /// Called by `tessera_server::prepare` immediately after [`Self::open`], *after* it has
+    /// validated both figures against `expected_concurrent_sessions`. An embedder that never calls
+    /// this gets unbounded caches — the pre-Task-5 behaviour — which is stated here rather than
+    /// silently assumed, and is the same posture `EngineConfig::k_min` documents for a constraint
+    /// only the server's loader enforces.
+    pub fn set_cache_bounds(&self, row_projection_bytes: u64, fragment_bytes: u64) {
+        self.row_projection_cache
+            .set_bound_bytes(row_projection_bytes);
+        self.fragment_cache.set_memory_bound(fragment_bytes);
+    }
+
+    /// The row-projection cache's operator gauges (Task 5).
+    ///
+    /// Wiring these onto `/control/status` needs `tessera-server/src/control.rs`, which stage 2.1's
+    /// allowlist gives to another track; this track exposes them and reports the wiring. The
+    /// fragment tier's twin is `FragmentCache::stats`, reachable through [`Self::fragment_cache`].
+    pub fn row_projection_cache_stats(&self) -> crate::single_flight::CacheStats {
+        self.row_projection_cache.stats()
+    }
+
+    /// The fragment cache, for its `stats`/`evict`/`canonical_key_for` surface.
+    pub fn fragment_cache(&self) -> &Arc<FragmentCache> {
+        &self.fragment_cache
     }
 
     /// The pin drain-list gauges — see [`PinStats`]. Wiring these onto `/control/status` needs

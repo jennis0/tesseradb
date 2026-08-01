@@ -38,8 +38,61 @@ pub struct Prepared {
 /// Load config and open the engine. Fails closed: a missing `[disclosure]` section, an
 /// unreadable bundle, or a WAL that fails the positional CRC rule all return `Err` here, before
 /// any socket is ever bound.
+/// Task 5: refuse to start unless each cache bound admits at least `expected_concurrent_sessions`
+/// entries at the measured per-entry size.
+///
+/// **Why a refusal and not a warning.** The miss/hit cost ratio here is 10⁵–10⁷: a projection miss
+/// is `RowProjection::new`, *measured* in seconds (the 10⁹ warm-up viewport is 10.7 s), and every
+/// ≥25%-coverage mask at 10⁹ serialises to a *measured* 125.12 MB. A bound below the working set
+/// does not degrade the hit rate gently — under a cyclic access pattern LRU's hit rate is exactly
+/// zero, every request pays a rebuild, and because misses hold an admission permit for their whole
+/// multi-second build the gate saturates and *warm* requests are shed too. There is no policy that
+/// fixes that (random replacement gets ≈ C/N and nothing gets more), so the bound has to be right,
+/// and the only place to insist on it is before the listener binds.
+///
+/// The relation is asserted in two places for two different reasons, which is deliberate rather
+/// than duplication: `config::defaults_satisfy_task_5s_cache_relation` pins it for the *defaults*
+/// at build time, so an edit to one constant cannot silently break it; this pins it for the
+/// *operator's* file at startup. Both read [`config::MEASURED_PROJECTION_BYTES_AT_1E9`], which is
+/// where the figure's provenance is documented.
+///
+/// **Both caches, not just the projection one** (Task 0 gate, F11): they hold the same-shaped
+/// Roaring object at the same measured size, and a validation covering one leaves the other free to
+/// be set to a collapsing value. The two bounds' entry counts are governed by different quantities
+/// — sessions against distinct grant sets — and their constants say so.
+///
+/// **This is a floor, not a sizing.** `DEFAULT_ROW_PROJECTION_CACHE_BYTES` carries a further 2× for
+/// entry-count headroom (a second slice, or a generation swap's transient duplicate); passing this
+/// check at exactly 1× is admissible but leaves none. And neither bound is a memory *budget*: peak
+/// is `bound + compute_admission × per_entry`, which at 48-way admission is another ~6 GB — see
+/// `tessera_engine`'s `RowProjectionCache` doc, where that arithmetic lives with its operand.
+fn validate_cache_bounds(config: &Config) -> Result<(), BoxError> {
+    let per_entry = config::MEASURED_PROJECTION_BYTES_AT_1E9;
+    let working_set = config.expected_concurrent_sessions as u64 * per_entry;
+    for (key, value) in [
+        ("serve.row_projection_cache_bytes", config.row_projection_cache_bytes),
+        ("serve.fragment_cache_bytes", config.fragment_cache_bytes),
+    ] {
+        if value < working_set {
+            return Err(format!(
+                "{key} = {value} B admits fewer than serve.expected_concurrent_sessions = {} \
+                 entries at the measured {per_entry} B per entry ({working_set} B needed). \
+                 Refusing to start: a cache bound below the working set does not lower the hit \
+                 rate, it collapses it — every request pays a multi-second rebuild while holding \
+                 an admission permit, so the gate saturates and warm requests are shed too. Raise \
+                 {key} to at least {working_set}, or lower serve.expected_concurrent_sessions if \
+                 that is genuinely the concurrency you expect.",
+                config.expected_concurrent_sessions
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     let config = config::load(config_path)?;
+    validate_cache_bounds(&config)?;
 
     let engine_config = EngineConfig {
         token_max_lifetime_secs: config.token_max_lifetime_secs,
@@ -84,6 +137,12 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     // Nothing is stored in `AppState`: the engine owns the handle, so `/control/*` reaches the
     // executor through `state.engine` exactly as it reached the WAL before.
     engine.start_write_executor(config.ingest_queue_bound)?;
+    // Phase 2 stage 2.1, Task 5: the two cache bounds, validated above. Set here through a method
+    // rather than carried in `EngineConfig` for the same reason `ingest_queue_bound` is — three
+    // exhaustive `EngineConfig` literals live in `crates/tessera-engine/tests/viewport.rs`, which
+    // this stage's allowlist freezes for every track, so a new field would make the workspace
+    // uncompilable with no in-allowlist repair. See `Engine::set_cache_bounds`.
+    engine.set_cache_bounds(config.row_projection_cache_bytes, config.fragment_cache_bytes);
     let engine = engine;
 
     let state = Arc::new(AppState {

@@ -96,5 +96,12 @@ async fn revoke(
 ) -> Result<StatusCode, ApiError> {
     state.check_bearer(bearer_token(&headers), &state.session_credential)?;
     state.sessions.lock().revoke(req.token_id);
+    // Task 5: drop the revoked session's row projections. The registry removal above is what makes
+    // the session unusable (`authenticated_session` now returns `BadCredential`); this is memory
+    // hygiene behind it, closing the Phase 1 deferral "revoke does not prune the projection cache".
+    // Deliberately *after* the revoke, not before: a request that authenticated before this handler
+    // ran can still re-publish its key, and doing the prune first would widen that window for no
+    // benefit. See `RowProjectionCache::prune_token` for why the residue is bounded and benign.
+    state.engine.prune_token(req.token_id);
     Ok(StatusCode::NO_CONTENT)
 }

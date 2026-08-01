@@ -37,6 +37,10 @@ pub use pins::{
     GeometryRefused, GeometryRefusedReason, PinStats, Reclaimed, DRAIN_DEPTH_ALARM, DRAIN_DEPTH_MAX,
 };
 pub use session::{default_compute_threads, Engine, EngineConfig, EngineError, Session};
+// Task 5's cache gauges. `single_flight` itself stays private — the cache, its slot state
+// machine and its four eviction rules are engine-internal — but the numbers `/control/status`
+// publishes have to cross the crate boundary, exactly as `PinStats` does above.
+pub use single_flight::CacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
     EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,
