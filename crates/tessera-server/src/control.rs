@@ -1,5 +1,7 @@
 //! The control (admin) plane (R5): `POST /control/ingest`, `POST /control/changes`,
-//! `GET /control/status`, plus `/healthz`/`/readyz`. Bearer auth is the operator credential.
+//! `GET /control/status`, plus `/healthz`/`/readyz`. Bearer auth is the operator credential, applied
+//! **once, at the router** by [`require_operator_credential`] rather than by each handler — see its
+//! doc for what that buys and for the two-path exemption the health probes need.
 //!
 //! This module owns the **ack contract**: parse -> allocate ids (`assign_sorted`) -> WAL append
 //! -> fsync -> apply to buffer/overlay + generation swap -> 200. Never a 200 without fsync. For
@@ -220,18 +222,17 @@ pub fn router(state: Arc<AppState>) -> Router {
     // exactly the number the operator set, and the answer is the 422 §3.1's "bounds exceeded" row
     // calls for.
     //
-    // The handler takes `Result<Bytes, _>` so that `check_bearer` still runs **first** — an
-    // extractor that rejects on its own would answer an unauthenticated caller before the
-    // credential was ever checked, which is the one ordering rule this endpoint has.
+    // The handler takes `Result<Bytes, _>` rather than `Bytes` so the rejection is **mapped** to
+    // that 422 instead of escaping as axum's own 413. Until [`require_operator_credential`] existed
+    // it carried a second, larger duty — keeping `check_bearer` ahead of the extractor — and that
+    // duty has moved to the layer; see the auth layer's doc for what changed and what did not.
     let ingest_route = post(ingest).layer(axum::extract::DefaultBodyLimit::max(
         state.ingest_max_batch_bytes,
     ));
     // Fix round 1 (F6): the same remedy, transferred. `post(changes)` with a bare `Json<..>`
     // extractor answered axum's own **413** — outside contracts §3.1's closed code list — with
-    // axum's own body and **no bearer check**, on the never-shed lane, to an operator submitting
-    // ~20 000 suppressions. The handler takes `Result<Json<..>, JsonRejection>` so `check_bearer`
-    // still runs first, and the limit is stated here rather than inherited so the 422's detail can
-    // name a number that is true.
+    // axum's own body, on the never-shed lane, to an operator submitting ~20 000 suppressions. The
+    // limit is stated here rather than inherited so the 422's detail can name a number that is true.
     let changes_route =
         post(changes).layer(axum::extract::DefaultBodyLimit::max(CHANGES_MAX_BODY_BYTES));
     Router::new()
@@ -240,8 +241,118 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/control/status", get(status))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        // **The whole plane's credential check, in one place** — see
+        // [`require_operator_credential`]. `Router::layer` rather than a `route_layer` per route:
+        // the point of this construction is that a route added below inherits the check without
+        // anyone remembering to ask for it, and a `route_layer` per route is the same discipline
+        // this replaces, spelled differently.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_operator_credential,
+        ))
         .with_state(state)
 }
+
+/// **The control plane's operator-credential gate, at the router rather than in each handler.**
+///
+/// Until 2026-08-01 each of `ingest`, `changes` and `status` opened with its own
+/// `state.check_bearer(bearer_token(&headers), &state.operator_credential)`. That is a rule spread
+/// across call sites, which CLAUDE.md's "structural, not disciplinary" test rejects, and it had
+/// already failed once on this exact plane: `status`'s doc records that it *previously returned
+/// `entity_id_high_water`* — a global, unmasked corpus-size fact — to anyone who could reach the
+/// control listener, for no reason other than that the handler did not call `check_bearer`. A
+/// handler that forgets is unauthenticated; a handler under this layer cannot forget.
+///
+/// Three things this buys, in the order they matter:
+///
+/// 1. **No request body is buffered for an unauthenticated caller.** axum extractors run *inside*
+///    the handler service, so with a per-handler check a 16 MiB `/control/ingest` body was resident
+///    in full before `check_bearer` ever executed (`ingest_max_batch_bytes`, raised from axum's
+///    2 MiB default by Task 6 D1, widening that window 8×). A `tower` layer runs *outside* the
+///    extractors: this returns 401 with the body still an unconsumed stream. That is the
+///    unauthenticated half of the Task 6 gate's F11 (security IMPORTANT 1 + performance I4), closed
+///    in code rather than by deployment posture.
+///
+///    **What it does NOT close, stated because it is still open.** A caller holding a *valid*
+///    operator credential still buffers up to `ingest_max_batch_bytes` per in-flight request, and
+///    `axum::serve` still applies no connection or concurrency cap, so the *count* of connections
+///    remains unbounded. `config`'s relation 3 caps the size of one window; nothing caps how many
+///    there are. That residue is unchanged by this layer and remains an owner item.
+/// 2. **A control route cannot be added unauthenticated by omission.** The layer wraps the whole
+///    router, so a `.route(..)` added to [`router`] tomorrow is behind the credential the moment it
+///    exists. Opting *out* requires editing [`UNAUTHENTICATED_CONTROL_PATHS`], which is a deliberate
+///    act with a test over it.
+/// 3. **401 ahead of every 422 and 429 is now a property of the router.** `control::ingest`'s doc
+///    enumerates that ordering and `backpressure_is_invisible_before_auth` exercised it one handler
+///    at a time; the ordering no longer depends on where each handler happens to put its check.
+///
+/// # The exemption, and why matching is exact
+///
+/// `/healthz` and `/readyz` are mounted on this same router and **must stay unauthenticated on every
+/// listener** (SA §9; `health.rs`). `/readyz` being a bare unauthenticated boolean is the deliberate
+/// half of a pair: the posture *string* lives behind the bearer on `/control/status`, which is why
+/// this layer must not simply cover everything it is mounted over.
+///
+/// The comparison is exact equality against the request's raw path. Not a prefix match, not a
+/// normalising one: `/healthz/../control/status` and `/healthz/` are not `/healthz`, so they fall
+/// through to the credential check. Every way of being *nearly* an exempt path is therefore
+/// authenticated, which is the direction a mistake here has to fail in.
+///
+/// The layer also sits ahead of the router's 404, so an unrouted path on the control listener
+/// answers 401 rather than 404 — `near_misses_of_the_exemption_are_authenticated` pins that
+/// alongside the near-miss spellings. It is not the reason for this design, but it is the right way
+/// round: an unauthenticated caller cannot map the plane's surface by probing.
+///
+/// # Scope: this plane only
+///
+/// **Deliberately not applied to the session or viewer routers, and they are not oversights.** They
+/// authenticate against different secrets with different exemptions — `session::router` gates on
+/// `state.session_credential`, and `viewer::router` on per-session tokens looked up by value in the
+/// registry (`AppState::authenticated_session`, which also owns the 403-on-expiry that a
+/// shared-secret check has no equivalent of). One layer over all three would have to carry three
+/// credential sources and three exemption lists, which is a policy table — the thing this change was
+/// explicitly not to build. Each plane keeps its own arrangement; only the control plane's moves.
+async fn require_operator_credential(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    if !UNAUTHENTICATED_CONTROL_PATHS.contains(&request.uri().path()) {
+        state.check_bearer(bearer_token(request.headers()), &state.operator_credential)?;
+    }
+    Ok(next.run(request).await)
+}
+
+/// The **only** paths on the control router that [`require_operator_credential`] lets through
+/// without a credential. Adding to this list is how a route becomes public, and it is meant to be a
+/// visible, arguable act rather than an omission.
+///
+/// Both entries are required to be here by SA §9 and by `health.rs`'s doc: a liveness and a
+/// readiness probe are consumed by orchestration that holds no operator secret, on all three
+/// listeners. `readyz` is a bare boolean precisely *so* that it can be public.
+pub const UNAUTHENTICATED_CONTROL_PATHS: &[&str] = &["/healthz", "/readyz"];
+
+/// Every route [`router`] mounts, as `(method, path)` — the subject of
+/// `every_control_route_not_exempt_requires_the_operator_credential`.
+///
+/// **This list is the test's mechanism, and it is weaker than the layer it tests. Say so rather than
+/// claim otherwise.** axum 0.8's `Router` exposes no route enumeration — there is no public iterator
+/// over its `Method`/path table and no way to derive one — so a test cannot ask the router what it
+/// serves. A hard-coded list is what is available, and its limitation is exactly what you would
+/// expect: a route added to [`router`] and *not* added here is not covered by that test.
+///
+/// What makes that acceptable, and why this is not the discipline it replaces: the *layer* is
+/// router-wide, so an unlisted new route is authenticated anyway. The two mechanisms cover each
+/// other's gap — the layer makes a forgotten route safe, and this list makes a *removed or narrowed
+/// layer* fail the build. Neither alone would do; the pairing is the argument. If axum ever exposes
+/// its route table, this constant is the thing to delete.
+pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/control/ingest"),
+    ("POST", "/control/changes"),
+    ("GET", "/control/status"),
+    ("GET", "/healthz"),
+    ("GET", "/readyz"),
+];
 
 /// `/control/changes`'s request-body limit.
 ///
@@ -624,7 +735,8 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
 /// load-bearing.** An unauthenticated caller must not be able to learn anything about this server's
 /// ingest pressure — or about its configured batch cap — by reading a status code. So:
 ///
-/// 1. `check_bearer` → **401**, always first, before every other check in this function;
+/// 1. the operator credential → **401**, in [`require_operator_credential`], which is a router
+///    layer and therefore runs before this function and before its extractors;
 /// 2. the body's own rejection (over `ingest_max_batch_bytes`) → **422**;
 /// 3. the missing batch-id header → **422**;
 /// 4. the admission bound → **429**, evaluated before `spawn_blocking` because the resource it
@@ -632,47 +744,51 @@ fn run_ingest(state: &AppState, body: &[u8], batch_id: String) -> Result<IngestR
 /// 5. the row cap, inside `run_ingest` after the Arrow decode → **422**;
 /// 6. the queue bound, inside the executor's `submit` → **429**.
 ///
-/// `body: Result<Bytes, _>` rather than `body: Bytes` is what makes step 1 precede step 2: an
-/// extractor that rejected on its own would answer before this function ran at all. Its rejection
-/// type is `Infallible`, so this is total.
+/// **Step 1 used to be the first statement of this function, and moving it to the router changed
+/// what `body: Result<Bytes, _>` is for.** It was doing two jobs: keeping `check_bearer` ahead of
+/// the extractor, and turning the extractor's rejection into a mapped 422 instead of axum's own 413.
+/// The layer discharges the first outright — an extractor rejection can no longer precede the
+/// credential, because the credential is checked one service out. The second job is unchanged and is
+/// why the signature stays: with plain `Bytes`, an *authenticated* over-cap caller would still get a
+/// 413, outside contracts §3.1's closed code list. Its rejection type is `Infallible`, so this is
+/// total.
 ///
-/// # What is NOT behind the credential: the buffered body itself
+/// # The buffered body: what the layer closed, and what it did not
 ///
-/// **Stated because it is true, not because it is closed.** Extractors run before this function, so
-/// by the time `check_bearer` executes the request body is already resident in full — up to
-/// `ingest_max_batch_bytes`, which Task 6 raised from axum's 2 MiB default to 16 MiB, widening the
-/// pre-authentication window 8×. `ingest_admission` is consulted *after* and bounds none of it, and
-/// `axum::serve` applies no connection or concurrency cap, so N unauthenticated connections pin
-/// `N × ingest_max_batch_bytes`. `serve.control` is a required key with no default and TCP is a
-/// supported posture (`config::ControlListen::Tcp`), so this is a real exposure on a real
-/// deployment shape, not a hypothetical.
+/// **Closed for an unauthenticated caller.** This paragraph used to say the opposite, and it was
+/// true when it was written: extractors run inside the handler service, so with `check_bearer` as
+/// this function's first statement the body was already resident in full — up to
+/// `ingest_max_batch_bytes`, 16 MiB by default since Task 6 D1 raised it from axum's 2 MiB, an 8×
+/// widening — before the credential was seen. [`require_operator_credential`] runs *outside* the
+/// extractors, so a caller with no credential now meets a 401 while the body is still an unconsumed
+/// stream. Nothing is buffered on their behalf.
 ///
-/// **A `tower` concurrency-limit layer was assessed as the close and declined.** On the *whole*
-/// control router it is disqualified outright: it would put `/control/changes` behind an in-flight
-/// bound shared with ingest handlers that block on receipts, which is lifecycle §1.3's "a deny
-/// queued behind work of unbounded duration" reintroduced at the router — the exact shape
-/// [`DENY_RUNTIME`] exists to prevent, given up to close a memory window. On the *ingest route
-/// alone* it is technically available but not proportionate: `tower::limit` **queues** rather than
-/// sheds, so sized at or below `ingest_admission` it swallows D2's prompt 429 (requests wait for a
-/// layer permit instead of being refused), and sized above it, it needs a second bound nobody has
-/// argued — while still leaving `limit × ingest_max_batch_bytes` resident and unauthenticated. It
-/// converts an unbounded window into a bounded one at the cost of D2's shed semantics, which is a
-/// poor trade for a mechanism whose whole point is to refuse early and cheaply.
-///
-/// **What was taken instead:** `config`'s third startup relation. `(ingest_queue_bound +
-/// ingest_admission) × ingest_max_batch_bytes` must fit under `INGEST_RESIDENT_CEILING_BYTES`, which
-/// bounds `ingest_max_batch_bytes` at roughly 170 MiB at the default bounds and refuses the
-/// `ingest_queue_bound = 1, ingest_max_batch_bytes = 1 GiB` configuration that every earlier
-/// relation admitted. That caps the *size* of the window; it does not cap the *count* of
-/// unauthenticated connections holding one, because nothing in this crate can. **The residual is an
+/// **Not closed for a valid-credentialed caller, and not closed for connection count.** An
+/// authenticated request still buffers up to `ingest_max_batch_bytes` before `ingest_admission` is
+/// consulted, and `axum::serve` applies no connection or concurrency cap, so N authenticated
+/// connections still pin `N × ingest_max_batch_bytes`. `config`'s third startup relation —
+/// `(ingest_queue_bound + ingest_admission) × ingest_max_batch_bytes ≤ INGEST_RESIDENT_CEILING_BYTES`
+/// — caps the *size* of one window (roughly 170 MiB at the default bounds, refusing the
+/// `ingest_queue_bound = 1, ingest_max_batch_bytes = 1 GiB` configuration every earlier relation
+/// admitted). It does not cap the *count*, because nothing in this crate can. **That residual is an
 /// open owner decision** and is on the stage ledger.
+///
+/// **A `tower` concurrency-limit layer was assessed as a close for the count and declined** (Task 6
+/// gate, F11), and this layer does not revisit it — it is an *authentication* layer, not a
+/// concurrency bound, and it adds no per-request wait. The declined assessment stands: on the
+/// *whole* control router a concurrency limit is disqualified outright, since it would put
+/// `/control/changes` behind an in-flight bound shared with ingest handlers that block on receipts,
+/// which is lifecycle §1.3's "a deny queued behind work of unbounded duration" reintroduced at the
+/// router — the exact shape [`DENY_RUNTIME`] exists to prevent, given up to close a memory window.
+/// On the *ingest route alone* it is technically available but not proportionate: `tower::limit`
+/// **queues** rather than sheds, so sized at or below `ingest_admission` it swallows D2's prompt 429
+/// (requests wait for a layer permit instead of being refused), and sized above it, it needs a
+/// second bound nobody has argued — while still leaving `limit × ingest_max_batch_bytes` resident.
 async fn ingest(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<IngestResp>, ApiError> {
-    state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
-
     // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**, unknown filter operand",
     // and a `BytesRejection` is either of the first two. **Branched on the rejection's own status,
     // not collapsed**: this arm used to report every `BytesRejection` as "your batch is too big",
@@ -907,22 +1023,21 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     }
 }
 
-/// **`check_bearer` first, then the body's own rejection** — the same ordering `ingest` has, and for
-/// the same reason. `body: Result<Json<..>, JsonRejection>` rather than `Json(items)`: an extractor
-/// that rejects on its own answers before this function runs at all, which is how this endpoint came
-/// to answer a bare **413** — outside contracts §3.1's closed code list — pre-authentication, on the
-/// lane where an out-of-list status is least defensible.
+/// **The credential first, then the body's own rejection** — the same ordering `ingest` has, and by
+/// the same mechanism: [`require_operator_credential`] is a router layer, so it answers 401 before
+/// this function or its extractors run at all. That also keeps the unauthenticated flood off
+/// [`spawn_on_deny_lane`]'s threads — the resource that lane exists to keep free — and now keeps it
+/// off the JSON decode too, which used to run ahead of the check.
+///
+/// `body: Result<Json<..>, JsonRejection>` rather than `Json(items)` remains, for the surviving half
+/// of its original reason: an extractor that rejects on its own answers a bare **413**, outside
+/// contracts §3.1's closed code list, on the lane where an out-of-list status is least defensible.
+/// The layer no longer lets that happen *pre-authentication*; this signature is what stops it
+/// happening at all. Body decoding stays on the reactor, bounded by [`CHANGES_MAX_BODY_BYTES`].
 async fn changes(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     body: Result<Json<Vec<ChangeItem>>, axum::extract::rejection::JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
-    // **Deliberately outside the deny lane.** The bearer check stays on the reactor so an
-    // unauthenticated flood cannot occupy `spawn_on_deny_lane`'s threads — the resource that fix
-    // exists to keep free. Body decoding is likewise on the reactor, ahead of this handler (an axum
-    // extractor), bounded by [`CHANGES_MAX_BODY_BYTES`].
-    state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
-
     // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**, unknown filter operand",
     // which covers both shapes a `JsonRejection` carries. They are distinguished by the rejection's
     // own status rather than collapsed, because "your batch is too large" and "your JSON is
@@ -963,15 +1078,16 @@ async fn changes(
     Ok(StatusCode::OK)
 }
 
-async fn status(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    // Important 1 fix: R5 requires bearer auth on every plane, including this one — this handler
-    // previously returned `entity_id_high_water` (a global, unmasked corpus-size fact) to anyone
-    // who could reach the control listener at all, which may be loopback TCP, not only a unix
-    // socket (config.rs's `ControlListen::Tcp`).
-    state.check_bearer(bearer_token(&headers), &state.operator_credential)?;
+/// **The precedent for [`require_operator_credential`], and the reason it is a layer.** R5 requires
+/// bearer auth on every plane, including this one; this handler nevertheless *shipped* returning
+/// `entity_id_high_water` — a global, unmasked corpus-size fact — to anyone who could reach the
+/// control listener, which may be loopback TCP and not only a unix socket
+/// (`config::ControlListen::Tcp`). Nothing was wrong with the check; there simply was not one, and
+/// no reviewer noticed because "every control handler calls `check_bearer`" was a convention rather
+/// than a construction. Its own `check_bearer` call, added as "Important 1 fix", is now redundant
+/// and has been deleted: the layer refuses this route before the handler is entered, and a redundant
+/// copy would only make the layer's mutation tests pass for the wrong reason.
+async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiError> {
     // D-B: the viewer/session admission gate's gauges. `in_flight`/`waiting` are read live off
     // the semaphores; `shed_total` is a single process-wide counter — no per-principal labels
     // anywhere on this plane (SA §9). `shed_total` counts only this gate's own two shed paths —

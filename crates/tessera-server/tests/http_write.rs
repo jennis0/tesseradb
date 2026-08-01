@@ -2354,15 +2354,25 @@ async fn an_oversized_body_is_422_not_413() {
 /// `max_batch_rows` from 2 to 200 000 left that leg green. The row-cap leg now runs on server B,
 /// where a permit is available and the row check is genuinely what answers.
 ///
-/// The **byte cap** leg is the one a `body: Bytes` extractor would fail: axum's extractors run
-/// before the handler body, so a rejecting extractor answers before `check_bearer` is ever reached.
-/// `body: Result<Bytes, _>` is what moves that decision inside the handler and behind the
-/// credential — and its authenticated half is what shows the rejection is being *mapped* to 422
-/// rather than merely being ordered after the credential.
+/// **The 401 halves are now a property of the router, not of five handler bodies** (owner decision,
+/// 2026-08-01). `control::require_operator_credential` is a `tower` layer over the whole control
+/// router, so it answers before any handler and before any extractor; this test exercises each state
+/// through the socket rather than asserting the layer directly, and
+/// `every_control_route_not_exempt_requires_the_operator_credential` is where the layer's own
+/// coverage lives. What this still earns on top of that is the *authenticated* half of each leg: the
+/// signal must genuinely exist to be hidden, and each pressure state must be the one that answers.
 ///
-/// **Mutations these kill:** moving `check_bearer` below the body-rejection mapping, below the
-/// admission check, or below the batch-id header check; taking `body: Bytes` instead of
-/// `Result<Bytes, _>`; raising server B's `max_batch_rows` above the row-cap leg's batch.
+/// The **byte cap** leg is the one `body: Result<Bytes, _>` still earns, in its authenticated half.
+/// Before the layer, this leg's *unauthenticated* half was the load-bearing one — a plain `Bytes`
+/// extractor rejected ahead of `check_bearer` and answered 413 to a caller with no credential. The
+/// layer closes that outright. What `Result<Bytes, _>` still buys is the mapping: with plain `Bytes`
+/// an authenticated over-cap caller gets axum's 413, outside contracts §3.1's closed code list, and
+/// that is what goes red now.
+///
+/// **Mutations these kill:** deleting the credential layer from `control::router` (every
+/// unauthenticated leg turns into its pressure signal); taking `body: Bytes` instead of
+/// `Result<Bytes, _>` (leg 2's authenticated half becomes 413); raising server B's `max_batch_rows`
+/// above the row-cap leg's batch.
 #[tokio::test]
 async fn backpressure_is_invisible_before_auth() {
     let tmp = TempDir::new().unwrap();
@@ -2635,14 +2645,22 @@ async fn the_overlay_soft_limit_alarms_and_does_not_act() {
 /// §3.1's closed code list — with axum's own body and **no credential check at all**. An operator
 /// submitting ~20 000 suppressions (≈2 MiB of JSON) met it, on the never-shed lane, which is where
 /// an out-of-list status is least defensible. The remedy is the one `/control/ingest` already had:
-/// `Result<Json<..>, JsonRejection>`, mapped after `check_bearer`.
+/// `Result<Json<..>, JsonRejection>`, mapped rather than escaping.
 ///
 /// Three legs, because the rejection has two shapes and the ordering rule is a third property:
 /// oversize, malformed JSON, and the same oversize body without a credential.
 ///
+/// **Leg 3's refuser changed on 2026-08-01 and the leg is kept for what it still shows.** The 401
+/// now comes from `control::require_operator_credential`, a layer over the whole control router,
+/// rather than from this handler's first statement — so leg 3 no longer discriminates
+/// `Result<Json<..>, _>` from `Json(items)` (the layer answers first either way). It still asserts
+/// the property that matters on the wire: an unauthenticated caller cannot learn this endpoint's
+/// body cap by bisection. The layer's own coverage is
+/// `every_control_route_not_exempt_requires_the_operator_credential`.
+///
 /// **Mutations this kills:** taking `Json(items)` instead of `Result<Json<..>, _>` (leg 1 becomes
-/// 413 and leg 3 becomes 413 rather than 401); collapsing the two rejection shapes onto one detail
-/// (leg 2's assertion that it is *not* reported as an oversize batch goes red).
+/// 413); collapsing the two rejection shapes onto one detail (leg 2's assertion that it is *not*
+/// reported as an oversize batch goes red); deleting the credential layer (leg 3 becomes 422).
 #[tokio::test]
 async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
     let tmp = TempDir::new().unwrap();
@@ -2730,6 +2748,269 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
     assert_eq!(
         resp.status(),
         401,
-        "the bearer check must precede the body rejection, exactly as it does on /control/ingest"
+        "the credential check must precede the body rejection, exactly as it does on \
+         /control/ingest — it is the same router layer that does it for both"
+    );
+}
+
+// --- The control plane's credential gate, at the router (owner decision, 2026-08-01) ---
+
+/// **Every route on the control plane that is not on the exemption list answers 401 without a
+/// credential — asserted over the route list, not over three hand-written cases.**
+///
+/// This is the inverse of the usual auth test. `control_status_requires_bearer` names one endpoint
+/// and would stay green forever while a fourth control route shipped wide open; that is exactly how
+/// `/control/status` itself shipped returning `entity_id_high_water` unauthenticated. This iterates
+/// [`CONTROL_PLANE_ROUTES`] and requires each non-exempt entry to refuse.
+///
+/// **What it does and does not guarantee, stated because the difference is the whole design.** The
+/// list is hard-coded: axum 0.8 exposes no route enumeration, so a route added to `control::router`
+/// and not added to `CONTROL_PLANE_ROUTES` is invisible here. What covers *that* case is not this
+/// test but the layer's shape — `require_operator_credential` wraps the whole router, so an
+/// unlisted route is authenticated anyway. This test's job is the other half: it goes red if the
+/// layer is removed, narrowed, or if a path is added to `UNAUTHENTICATED_CONTROL_PATHS`.
+///
+/// **The 401 must be `ApiError::BadCredential`'s existing shape**, byte for byte — contracts §3.1's
+/// code list is closed, and a layer that invented its own body would be a wire change dressed as a
+/// refactor. Asserted here on `error`, `detail` and the absence of `retry_after_s`.
+///
+/// **Mutations this kills:** deleting the `.layer(from_fn_with_state(..))` call from
+/// `control::router`; adding any `/control/*` path to `UNAUTHENTICATED_CONTROL_PATHS`; returning a
+/// bare `StatusCode::UNAUTHORIZED` from the layer instead of `ApiError::BadCredential`.
+#[tokio::test]
+async fn every_control_route_not_exempt_requires_the_operator_credential() {
+    use tessera_server::control::{CONTROL_PLANE_ROUTES, UNAUTHENTICATED_CONTROL_PATHS};
+
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let mut checked = 0usize;
+    for (method, path) in CONTROL_PLANE_ROUTES {
+        if UNAUTHENTICATED_CONTROL_PATHS.contains(path) {
+            continue;
+        }
+        checked += 1;
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+        for credential in [None, Some("not-the-operator-credential")] {
+            let mut req = server
+                .client
+                .request(method.clone(), server.control_url(path));
+            if let Some(credential) = credential {
+                req = req.bearer_auth(credential);
+            }
+            let resp = req.send().await.unwrap();
+            assert_eq!(
+                resp.status(),
+                401,
+                "{method} {path} answered {} for credential {credential:?}; every control route \
+                 not on UNAUTHENTICATED_CONTROL_PATHS must be refused at the router",
+                resp.status()
+            );
+            let body: serde_json::Value = resp.json().await.unwrap();
+            assert_eq!(
+                body["error"], "bad-credential",
+                "{method} {path} must answer ApiError::BadCredential's own body, unchanged: {body}"
+            );
+            assert_eq!(body["detail"], "missing or invalid bearer credential");
+            assert!(
+                body.get("retry_after_s").is_none(),
+                "a 401 carries no retry hint: {body}"
+            );
+        }
+    }
+    assert!(
+        checked >= 3,
+        "the route list has lost its /control/* entries; it is the only thing this test enumerates"
+    );
+}
+
+/// **`/healthz` and `/readyz` stay unauthenticated on the control listener** — the exemption, and
+/// the reason the layer needs one at all.
+///
+/// They are mounted on the *same* router as `/control/*` (SA §9; `health.rs`), and `/readyz` being a
+/// bare unauthenticated boolean is deliberate: the posture *string* is what lives behind the bearer,
+/// on `/control/status`. A credential layer over the whole router without this exemption would break
+/// every orchestrator probe on every listener.
+///
+/// **The exemption list is pinned by value first, and that is not belt-and-braces.** Iterating the
+/// constant alone passes *vacuously* when the list is empty — demonstrated: emptying
+/// `UNAUTHENTICATED_CONTROL_PATHS` left this test green while three readiness tests went red, so the
+/// only thing that noticed was a test about something else. The equality assertion is what makes a
+/// shrunk list fail here, where the reason is written down.
+///
+/// **Mutations this kills:** emptying `UNAUTHENTICATED_CONTROL_PATHS`, dropping either entry, or
+/// adding a third without an argument for it.
+#[tokio::test]
+async fn the_health_probes_stay_unauthenticated_on_the_control_listener() {
+    assert_eq!(
+        tessera_server::control::UNAUTHENTICATED_CONTROL_PATHS,
+        &["/healthz", "/readyz"],
+        "these two, and only these two, are exempt from the control plane's credential layer \
+         (SA §9). A third entry is an owner decision, not a convenience"
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    for path in tessera_server::control::UNAUTHENTICATED_CONTROL_PATHS {
+        let resp = server
+            .client
+            .get(server.control_url(path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "{path} must answer without a credential on the control listener"
+        );
+    }
+}
+
+/// **Every way of being *nearly* an exempt path is authenticated.** The layer compares the request's
+/// raw path for exact equality, so a prefix, a trailing slash or a traversal that ends up spelled
+/// differently falls through to the credential check rather than out of it. Written as a test
+/// because "exact equality" is a one-word claim whose failure mode is silent.
+///
+/// The unrouted path is the same assertion from the other side: the layer sits ahead of the router's
+/// 404, so probing the plane's surface unauthenticated yields nothing. That is a consequence of
+/// `Router::layer` rather than a goal, and it is pinned here so a future change to how the layer is
+/// mounted cannot flip it to 404 unnoticed.
+#[tokio::test]
+async fn near_misses_of_the_exemption_are_authenticated() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    for path in [
+        "/healthz/",
+        "/healthzz",
+        "/readyz/x",
+        "/control/healthz",
+        "/no-such-route",
+    ] {
+        let resp = server
+            .client
+            .get(server.control_url(path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            401,
+            "{path} is not an exempt path and must meet the credential check, not the router's 404"
+        );
+    }
+}
+
+/// **No request body is buffered on behalf of an unauthenticated caller** — the first and largest of
+/// the three things the router-level credential layer buys (Task 6 gate, F11: security IMPORTANT 1 +
+/// performance I4), demonstrated rather than argued from where the code sits.
+///
+/// The ordering legs in `backpressure_is_invisible_before_auth` show only that the 401 *wins* over
+/// the body's rejection; both would be true of a server that read 16 MiB and then discarded it. This
+/// asserts the stronger property directly, and the only way to observe it is to promise a body and
+/// never send it: raw TCP, request headers announcing `Content-Length: 1 GiB`, then **zero body
+/// bytes**.
+///
+/// - With `check_bearer` as the handler's first statement, the `Bytes` extractor runs first and
+///   blocks reading a body that will never arrive. Nothing is answered; the test times out.
+/// - With `control::require_operator_credential` outside the extractors, the credential is missing,
+///   401 is written, and the promised gigabyte is never read. That is what "the body is still an
+///   unconsumed stream" means, stated as an observable.
+///
+/// The announced length is deliberately far over `ingest_max_batch_bytes`, so a server that *did*
+/// read would not even be able to answer the 422 body-cap refusal without first consuming past the
+/// cap.
+///
+/// **What this does NOT show, and is not claimed:** an *authenticated* caller still buffers up to
+/// `ingest_max_batch_bytes`, and the number of connections doing so is unbounded — `axum::serve`
+/// applies no connection cap. That residue is unchanged and is an open owner item.
+///
+/// The timeout is in the **failing** path only; on a healthy build the 401 arrives in microseconds.
+#[tokio::test]
+async fn an_unauthenticated_caller_never_gets_a_byte_of_body_buffered() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let mut sock = tokio::net::TcpStream::connect(server.control_addr)
+        .await
+        .unwrap();
+    // A gigabyte promised, no credential offered, and not one byte of body sent after the blank
+    // line. `x-tessera-batch-id` is present so that nothing but the credential can be the refusal.
+    sock.write_all(
+        format!(
+            "POST /control/ingest HTTP/1.1\r\nHost: {}\r\nx-tessera-batch-id: never-sent\r\n\
+             Content-Type: application/octet-stream\r\nContent-Length: 1073741824\r\n\r\n",
+            server.control_addr
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    sock.flush().await.unwrap();
+
+    let mut head = [0u8; 64];
+    let n = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sock.read(&mut head),
+    )
+    .await
+    .expect(
+        "no status line within 10s for a request that announced a body and sent none: the server \
+         is buffering a body BEFORE checking the credential, which is the pre-authentication \
+         window control::require_operator_credential exists to close",
+    )
+    .unwrap();
+
+    let head = String::from_utf8_lossy(&head[..n]);
+    assert!(
+        head.starts_with("HTTP/1.1 401 "),
+        "the answer must be the credential refusal, reached without reading the body: {head:?}"
     );
 }
