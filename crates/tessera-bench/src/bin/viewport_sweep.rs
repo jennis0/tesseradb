@@ -53,6 +53,21 @@ struct Args {
     /// Deepest depth to attempt. Cells exceeding `max_tiles_per_request` are recorded as refused.
     #[arg(long, default_value_t = 9)]
     max_depth: u8,
+    /// Run the **concurrency** mode instead of the depth sweep: N simultaneous sessions issuing
+    /// the same request, reporting per-request latency and aggregate throughput.
+    ///
+    /// This exists because the depth sweep measures a single client on an idle machine, and the
+    /// problem the whole workstream addresses is a *throughput* gate (429 backpressure). Wall-clock
+    /// falling with depth while CPU rises is only a win while there are spare cores; this mode is
+    /// what says whether it is still a win when there are not.
+    #[arg(long, value_delimiter = ',')]
+    concurrency: Vec<usize>,
+    /// Depths to compare in concurrency mode.
+    #[arg(long, value_delimiter = ',', default_value = "0,4,6")]
+    concurrency_depths: Vec<u8>,
+    /// Requests per thread in concurrency mode.
+    #[arg(long, default_value_t = 4)]
+    iterations: usize,
 }
 
 fn parse_terms(spec: &str) -> Vec<String> {
@@ -146,6 +161,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             measured.iter().map(|(t, _)| t.clone()).collect(),
         ),
     ];
+
+    // ---- Concurrency mode: does depth choice still win when the cores are busy?
+    if !args.concurrency.is_empty() {
+        let (_name, terms) = principals
+            .iter()
+            .find(|(n, _)| n == "everything")
+            .expect("the everything principal");
+        println!("depth,threads,requests,p50_ms,p95_ms,wall_s,requests_per_s,marks_per_s");
+        for &depth in &args.concurrency_depths {
+            for &threads in &args.concurrency {
+                // One session per thread: distinct sessions are the realistic shape, and they
+                // also keep the row-projection cache honest (each is warmed before timing).
+                let sessions: Vec<_> = (0..threads)
+                    .map(|_| {
+                        let s = engine.authorise(auth_json(terms).as_bytes()).expect("authorise");
+                        let _ = engine
+                            .viewport(&s, ViewportRequest::new(&slice_id, 0, full, K_MAX_MARKS))
+                            .expect("warm-up");
+                        s
+                    })
+                    .collect();
+
+                let started = Instant::now();
+                let results: Vec<(Vec<u64>, u64)> = std::thread::scope(|scope| {
+                    let handles: Vec<_> = sessions
+                        .iter()
+                        .map(|session| {
+                            let engine = &engine;
+                            let slice_id = &slice_id;
+                            scope.spawn(move || {
+                                let mut lat = Vec::with_capacity(args.iterations);
+                                let mut marks = 0u64;
+                                for _ in 0..args.iterations {
+                                    let t0 = Instant::now();
+                                    let out = engine
+                                        .viewport(
+                                            session,
+                                            ViewportRequest::new(&slice_id, depth, full, K_MAX_MARKS),
+                                        )
+                                        .expect("viewport");
+                                    lat.push(t0.elapsed().as_micros() as u64);
+                                    marks += out.points.len() as u64;
+                                }
+                                (lat, marks)
+                            })
+                        })
+                        .collect();
+                    handles.into_iter().map(|h| h.join().expect("thread")).collect()
+                });
+                let wall = started.elapsed().as_secs_f64();
+
+                let mut lat: Vec<u64> = results.iter().flat_map(|(l, _)| l.iter().copied()).collect();
+                lat.sort_unstable();
+                let marks: u64 = results.iter().map(|(_, m)| m).sum();
+                let n = lat.len();
+                println!(
+                    "{depth},{threads},{n},{:.1},{:.1},{wall:.2},{:.1},{:.0}",
+                    lat[n / 2] as f64 / 1000.0,
+                    lat[(n * 95 / 100).min(n - 1)] as f64 / 1000.0,
+                    n as f64 / wall,
+                    marks as f64 / wall,
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Ok(());
+    }
 
     println!(
         "principal,terms,visible_total,fraction,depth,tiles_resolved,tiles_nonempty,\

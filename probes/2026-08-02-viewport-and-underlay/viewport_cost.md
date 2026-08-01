@@ -33,30 +33,58 @@ That 227 ms should be read against the alternative rather than against zero. The
 MVP paid **1,276 ms for a single depth-0 tile** at the same scale, and needed one request per tile.
 One 227 ms request replaces thousands of those.
 
-### 2. Cost tracks the visible set touched, not the tile count
+### 2. Latency falls with depth; CPU rises. Both, and the distinction is load-bearing
 
-Decisively, and it is the most useful thing here. At 10⁹, `everything`, full extent:
+*Corrected 2026-08-01 after independent review. An earlier draft of this section read "cost falls
+by 6× going from 1 tile to 256 tiles — more tiles is cheaper", which is true of wall clock and
+false of work done. The problem this workstream exists to fix is a throughput gate, so the wrong
+half was emphasised.*
 
-| depth | tiles | marks | wall |
-|---|---|---|---|
-| 0 | 1 | 21 | **1,270 ms** |
-| 1 | 4 | 72 | 1,307 ms |
-| 2 | 16 | 269 | 794 ms |
-| 3 | 64 | 1,104 | 247 ms |
-| 4 | 256 | 4,227 | 202 ms |
-| 5 | 1,024 | 16,837 | 200 ms |
-| 6 | 4,096 | 66,398 | 227 ms |
-| 7 | 16,384 | 264,077 | 411 ms |
-| 8 | 65,536 | 1,040,729 | 820 ms |
+At 10⁹, `everything`, full extent. CPU is `count + select + gather`, which above the parallel
+threshold is a cross-worker sum rather than a partition of wall clock:
 
-**Cost falls by 6× going from 1 tile to 256 tiles.** More tiles is *cheaper*, up to a broad minimum
-around depths 4–6, after which the gather dominates and it climbs again. The shape is confirmed by
-the zoomed-in case: at *f* = 1/16, depth 8 asks for 4,225 tiles and costs **30 ms** — the cheapest
-cell measured for that principal — because the ranges touch a small part of the visible set.
+| depth | tiles | marks | **wall** | **CPU** |
+|---|---|---|---|---|
+| 0 | 1 | 21 | 1,270 ms | 1,267 ms |
+| 2 | 16 | 269 | 794 ms | 1,332 ms |
+| 3 | 64 | 1,104 | 247 ms | 1,648 ms |
+| 4 | 256 | 4,227 | **202 ms** | 2,087 ms |
+| 6 | 4,096 | 66,398 | 227 ms | 2,503 ms |
+| 8 | 65,536 | 1,040,729 | 820 ms | 8,372 ms |
 
-The consequence for the client is the opposite of the intuition the tile-addressed design encodes:
-**asking for more, finer tiles is not a cost to be rationed.** It buys marks and saves time
-simultaneously, until the payload becomes the constraint.
+**Wall falls 6×; CPU rises monotonically, 2× by depth 6 and 6.6× by depth 8.** The wall-clock fall
+is the parallel sweep engaging, not work disappearing. Any claim that deeper requests are
+"cheaper" without qualification is wrong.
+
+### 2b. Under concurrency — the measurement that decides it
+
+Single-client latency on idle cores cannot answer a throughput question. 1e8, `everything`, full
+extent, one session per thread (`concurrency1e8.csv`):
+
+| depth | threads | p50 | p95 | req/s | **marks/s** |
+|---|---|---|---|---|---|
+| 0 | 1 | 125 ms | 126 ms | 8.0 | 120 |
+| 0 | 8 | 151 ms | 177 ms | **49.6** | 744 |
+| 4 | 8 | 165 ms | 225 ms | 41.3 | 179,125 |
+| 6 | 1 | 37 ms | 40 ms | 27.5 | 1,662,380 |
+| 6 | 4 | 123 ms | 137 ms | 31.9 | 1,925,298 |
+| 6 | 8 | 172 ms | 454 ms | **31.2** | **1,886,349** |
+
+Two things are true at once, and both belong in the design:
+
+- **Depth 6 is CPU-saturating.** Throughput plateaus at ~31 req/s from two threads onward on 14
+  compute threads, and p50 degrades 4.7× from 37 ms to 172 ms as clients arrive. Depth 0 scales
+  almost linearly to 49.6 req/s instead — because a one-tile request is serial and eight of them
+  simply use eight cores.
+- **Normalised by work delivered, it is not close.** Depth 6 returns **1.9 M marks/s against depth
+  0's 744** — 2,500×. Depth 0's superior request throughput is throughput of requests that return
+  21 marks each.
+
+**The conclusion for the plan.** Viewport-addressed requests are right, and the reason is
+marks-per-second rather than latency. But a deployment serving many concurrent broad-principal
+viewers is sizing for CPU, not for request count, and the client should expect p50 to degrade under
+load rather than assume the single-client figure. **The depth floor should be argued from marks
+delivered, not from "deeper is cheaper", which is false.**
 
 ### 3. `marks ≈ m_target · f · 4^d` holds, to about 1%
 
@@ -69,18 +97,46 @@ The formula the depth-choice rests on. Predicted `16 · 4^d` against measured, f
 | 7 | 262,144 | 262,589 | 223,225 | 264,077 |
 | 8 | 1,048,576 | 1,025,467 | 855,098 | 1,040,729 |
 
-Within ~1% at 2m4 and 1e9; 1e8 runs 8–18% under, which is a clustering effect (fewer non-empty
-tiles), not a modelling error. **The count is independent of corpus size** — 66 k marks at depth 6
-whether the corpus holds 2.4 M items or 10⁹ — which is exactly what an anchor on `V_total`
-predicts, and it means a mark budget is a portable constant rather than a per-deployment tuning.
+Within ~1% at 2m4 and 1e9; 1e8 runs 8–18% under. **The count is independent of corpus size** —
+66 k marks at depth 6 whether the corpus holds 2.4 M items or 10⁹ — which is what an anchor on
+`V_total` predicts.
 
-Two riders worth carrying into the implementation:
+**But that table is one configuration, and the model degrades outside it.** *(Added 2026-08-01
+after review: the harness collected `f ∈ {1, 1/4, 1/16}` precisely to check the independence claim,
+and the first draft of this section reported only `f = 1`. The f-sweep was collected and not
+reported, which is the worst way to be wrong.)*
 
-- **Use non-empty tiles, not resolved tiles, when reasoning about marks.** At 2m4 depth 9, 262,144
-  tiles resolve but only 54,157 are non-empty. Marks track the latter.
-- **The client should close the loop rather than trust the formula.** It has the actual mark count
-  in every response; one proportional correction to the depth estimate absorbs clustering without
-  any model of it.
+Marks per resolved tile, 1e9, `everything`, depth 8:
+
+| *f* | tiles | marks | per tile |
+|---|---|---|---|
+| 1 | 65,536 | 1,040,729 | 15.88 |
+| 1/4 | 16,641 | 304,238 | 18.28 |
+| 1/16 | 4,225 | 46,265 | **10.95** |
+
+That is −32% to +14% around `m_target = 16`, systematic and monotone in *f* — not ~1%. **The
+independence claim holds for broad principals at full extent and degrades to −32% when zoomed in.**
+
+**And it fails outright once the budget exceeds the principal's visible set.** 1e9, `narrow`
+(`V_total` = 1,366), *f* = 1:
+
+| depth | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|
+| marks | 1,001 | 1,366 | 1,366 | 1,366 | 1,366 | 1,366 |
+
+Pinned from depth 4 onward. The model has no `min(·, V_total)` term and is off by three orders of
+magnitude here. Since `V_total` is in every response, the term is free to add — and these are
+exactly the sparse principals I7 exists to protect, so getting it wrong is not a rounding matter.
+
+Three riders for the implementation:
+
+- **Add the saturation term.** `marks ≈ min(m_target · f · 4^d, V_total_in_view)`.
+- **Neither tile denominator is right.** Resolved tiles run 8% under at 1e8 depth 6; non-empty tiles
+  run 19% *over* (3,159 non-empty, 60,366 marks = 19.1 each). §7.2's per-depth inflation term is the
+  reason. Do not "fix" the model by swapping denominators.
+- **Close the loop, but carefully.** The client has the true count in every response. See the plan's
+  Task 2a — and the constraint that calibration must never make the next request *shallower*, or it
+  serves a subset of what it just drew.
 
 ---
 

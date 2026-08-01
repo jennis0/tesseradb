@@ -1,7 +1,12 @@
 # How the density underlay scales toward full resolution
 
 **Date:** 2026-08-01 · **Harness:** `crates/tessera-bench/src/bin/underlay_route.rs`
-**Raw:** `ul2m4.csv`, `ul1e8.csv` · **Machine:** WSL2, 47 GB, 14 compute threads
+**Raw:** `ul2m4.csv` (single-tile), `ul1e8-full.csv` and `ul1e9.csv` (single-tile **and**
+whole-viewport blocks) · **Machine:** WSL2, 47 GB, 14 compute threads
+
+*A first draft of this document quoted whole-viewport figures for 1e8 and 1e9 that were never
+captured to a file — the harness prints two CSV blocks and only the first was saved. Independent
+review caught it. Both are now committed and every figure below is reproducible from them.*
 
 `max_underlay_offset` and `max_underlay_cells` are plain `EngineConfig` fields, so the **existing**
 per-sub-cell route can be driven past both guards with no engine change. That is what was measured:
@@ -31,9 +36,31 @@ The MVP looked blocky because it requested *one* tile at depth 0–3 and asked f
 the entire screen. The offset cap was never the binding constraint; the tile count was. **Fixing
 the depth choice fixes the underlay resolution as a side effect.**
 
-### 2. The per-sub-cell algorithm is affordable, and cost per cell *falls* with depth
+### 2. The per-sub-cell algorithm is affordable at the operating point — but the "100× pessimistic" claim was measuring a different regime
 
-Extrapolating from one point was the error. Measured, one tile, 2m4, `everything`:
+*Corrected 2026-08-01 after independent review.* The annotation being refuted (client-interaction
+§9) reasoned about **low zoom**, explicitly: *"loses badly at low zoom where the visible set is
+5 × 10⁸."* The table below is **zoom 6**, where a tile is 0.3% full. Compared like with like:
+
+| fixture | zoom | offset 9, underlay |
+|---|---|---|
+| 2m4 `everything` | 2 | **152 ms** |
+| 1e8 `everything` | 2 | **417 ms** |
+
+Against an extrapolation of ~0.5 s, the annotation was within ~20% **for the regime it was talking
+about**. It was not wrong by 100×; the first draft of this document compared a shallow-zoom
+prediction against a deep-zoom measurement and declared a 100× win. The "cost per cell falls 18×"
+claim has the same defect: 18× is the zoom-6 figure, and at zoom 2 the fall is 3.8× (2m4) and 2.2×
+(1e8) — because the saving *is* emptiness, which a deep tile has and a shallow one does not.
+
+**What survives is the conclusion, on different grounds.** The operating point Phase 1 creates is
+depth 6+, where tiles are sparse and the route is cheap; the expensive shallow regime is the one
+Phase 1 stops visiting anyway. So the existing route is affordable **where it will actually be
+used** — which is enough to withdraw the second algorithm, but is not the same as the route being
+cheap everywhere, and does not close the route-chooser question on its merits. **The alternative
+single-pass route was never measured**, so Task 6 is *deferred pending evidence*, not refuted.
+
+Measured, one tile, 2m4, `everything`, **zoom 6**:
 
 | offset | cells/tile | emitted | underlay | µs per cell evaluated |
 |---|---|---|---|---|
@@ -70,11 +97,14 @@ Underlay CPU at that cell is 1.52 s against 179 ms wall: the existing parallel s
 
 ## What survives, and what is withdrawn
 
-**Withdrawn — the annotation was wrong:**
+**Withdrawn — but on narrower grounds than the first draft claimed:**
 
-- *"the per-sub-cell evaluation breaks before full resolution"*. It does not. 4.9 ms/tile at offset
-  9; 179 ms for a screen's worth at 1e8. **No route chooser, no second algorithm, no
-  `underlay.rs`.** Plan Tasks 5 and 6 collapse to a configuration change.
+- *"the per-sub-cell evaluation breaks before full resolution"*. Not at the operating point: 179 ms
+  for a screen's worth at 1e8, 466 ms at 1e9. It **does** get expensive at shallow zoom (417 ms for
+  a single tile at 1e8 zoom 2), which is what the annotation actually said — see ruling (2). Since
+  Phase 1 stops requesting shallow depths, the route survives where it is used. **Task 6 is
+  deferred, not refuted**: the single-pass alternative was never measured, and at 1e9 the underlay
+  doubles the request, which is exactly the margin a route chooser would be for.
 - *"full resolution means offset 9"*. It means `screen_pixels / tiles`, which at the Phase 1
   operating point is offset 4 — the current cap.
 
