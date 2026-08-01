@@ -201,7 +201,7 @@ run_selftest() {
   for track in $(track_names); do
     check "$track" "crates/tessera-engine/src/session.rs" allowed
     check "$track" "Cargo.toml" allowed
-    check "$track" "docs/design-memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md" allowed
+    check "$track" "docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md" allowed
   done
   # 3. Each track's own files are accepted.
   check a "crates/tessera-store/src/read.rs" allowed

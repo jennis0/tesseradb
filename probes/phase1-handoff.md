@@ -31,12 +31,12 @@ scaffold one without being asked.
 
 1. **`probes/phase0-memo.md`** — start here; it points at everything else
    and states the scoped verdict.
-2. **`.ignore/tessera-implementation-plan.md` §5** — Phase 1 as originally
+2. **`docs/design/implementation-plan.md` §5** — Phase 1 as originally
    scoped (walking skeleton, exit criteria).
-3. **`.ignore/tessera-system-architecture.md` (r4)** — §3 crate
+3. **`docs/design/system-architecture.md` (r4)** — §3 crate
    decomposition, §4 the five contracts, §6 lifecycle. This is newer than
    the implementation plan and **amends it**; see §4 below.
-4. **`.ignore/tessera-architecture-design.md` §2.6 and §4** — the request
+4. **`docs/design/architecture.md` §2.6 and §4** — the request
    path end to end, and the thirteen invariants. Read §4 rather than
    working from memory of it.
 5. **`probes/optimisations.md`** — the engineering distillation: what

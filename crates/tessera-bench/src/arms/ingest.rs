@@ -82,7 +82,7 @@
 //!   visibility arithmetic against *overlay* depth. It never ingests, so its buffer is empty in
 //!   every cell — which left the deny-ack floor's actual drivers (buffered depth, and the
 //!   head-of-line wait behind an in-flight ingest) unmeasured until `arms::changes::run_deny_ack`
-//!   (`tessera-bench deny-ack`, `docs/design-memos/2026-08-01-deny-ack-baseline.md`). The original
+//!   (`tessera-bench deny-ack`, `docs/evidence/memos/2026-08-01-deny-ack-baseline.md`). The original
 //!   note read "not benchmarked at all", which was already stale when it was written.
 //!   predicate changes are the *other* write path, and the one with a security-relevant latency
 //!   bound (lifecycle §1.3: deny visibility is bounded by queue-front + fsync, and

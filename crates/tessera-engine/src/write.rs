@@ -156,7 +156,7 @@ pub struct ExecutorHealth {
     /// is why it is still the right operand for that sizing; but the name now says what was timed.
     ///
     /// **This bounds the deny-ack *wait*, not the deny's own cost — corrected 2026-08-01 against
-    /// measurement** (`docs/design-memos/2026-08-01-deny-ack-baseline.md`). A deny's wait is
+    /// measurement** (`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`). A deny's wait is
     /// bounded by "the work item currently executing", and *that* item's apply includes a clone
     /// that is O(total buffered items) — plan 7b sizes it at 100–300 ms per clone at 1 M buffered
     /// items and 1–3 s at 10 M — while `flush_max_items` is inert until stage 2.2, so the buffer
@@ -549,7 +549,7 @@ impl ExecutorHealth {
 ///
 /// 1. **Service time is not stationary.** One work-lane job costs one fsync plus an `IngestBuffer`
 ///    clone that is O(total buffered items), and `flush_max_items` is inert until stage 2.2, so the
-///    buffer only grows. Measured (`docs/design-memos/2026-08-01-deny-ack-baseline.md`): ~3.0–3.5 ms
+///    buffer only grows. Measured (`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`): ~3.0–3.5 ms
 ///    quiescent even at 1 M buffered, but 67–167 ms p50 and up to 666 ms under six concurrent
 ///    submitters. The EWMA tracks the recent regime; it does not predict the next one.
 /// 2. **The deny lane is in the real drain and not in this figure.** `Executor::run` drains the

@@ -1,7 +1,7 @@
 //! Cell-occupancy analysis of a built bundle's `morton.u32` column.
 //!
 //! Offline measurement tool for candidate B1 of
-//! `docs/design-memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md` (§2/B1): within a
+//! `docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md` (§2/B1): within a
 //! leaf Morton cell the identity column is sorted, so B1's search route replaces the per-row
 //! scan only where cells hold enough rows — the memo puts the warm scan-vs-search crossover
 //! near 25–75 rows per cell, and names the morton column's run-length distribution "the first

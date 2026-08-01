@@ -11,7 +11,7 @@
   "seed": 0,
   "cache_dropped": false,
   "verdict": "REFUTED",
-  "verdict_note": "Arm D (skip-id-index + prefaulted) shows majflt_delta=0 with the p99-p50 gap still at 43.86 ms at k=1000 -- a tail with zero major page faults cannot be attributed to page faults. Arm A's 2048 majflt across 6000 requests (~0.34/request) is, even at a generous 0.5ms/fault, two orders of magnitude short of the observed ~42ms gap. See docs/design-memos/2026-07-30-tail-discrimination.md for the full analysis.",
+  "verdict_note": "Arm D (skip-id-index + prefaulted) shows majflt_delta=0 with the p99-p50 gap still at 43.86 ms at k=1000 -- a tail with zero major page faults cannot be attributed to page faults. Arm A's 2048 majflt across 6000 requests (~0.34/request) is, even at a generous 0.5ms/fault, two orders of magnitude short of the observed ~42ms gap. See docs/evidence/memos/2026-07-30-tail-discrimination.md for the full analysis.",
   "terms_du": {
     "measured_on": "/tmp/tessera-1e9 (existing bundle, before any rebuild)",
     "whole_bundle_bytes": 51142099202,
@@ -22,7 +22,7 @@
     "columns_arrow_total_bytes": 22625001234,
     "morton_u32_bytes": 4000000000,
     "permutation_bin_bytes": 4000000016,
-    "note": "terms/ is 0.25 GiB (266622154 bytes) -- neither the plan's assumed 3.7 GiB residual nor contracts §2.4's ~5.6 GiB pairs.parquet estimate. Root cause and plan correction in docs/design-memos/2026-07-30-tail-discrimination.md and docs/superpowers/plans/2026-07-30-external-id-identity.md."
+    "note": "terms/ is 0.25 GiB (266622154 bytes) -- neither the plan's assumed 3.7 GiB residual nor contracts §2.4's ~5.6 GiB pairs.parquet estimate. Root cause and plan correction in docs/evidence/memos/2026-07-30-tail-discrimination.md and docs/archive/plans/2026-07-30-external-id-identity.md."
   },
   "arms": {
     "A": {

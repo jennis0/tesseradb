@@ -8,9 +8,9 @@ Two TypeScript packages and a headless-browser smoke test, built to answer one q
 - `viewer/` — a Vite + deck.gl app. All UI, all state.
 - `spike/` — the deck.gl tile-convention spike, kept as a regression guard.
 
-Design: [`docs/superpowers/specs/2026-08-01-mvp-client-and-deckgl-viewer-design.md`](../../docs/superpowers/specs/2026-08-01-mvp-client-and-deckgl-viewer-design.md).
+Design: [`docs/archive/plans/2026-08-01-mvp-client-and-deckgl-viewer-design.md`](../../docs/archive/plans/2026-08-01-mvp-client-and-deckgl-viewer-design.md).
 It is the first slice of
-[`2026-07-31-client-interaction-architecture-design.md`](../../docs/superpowers/specs/2026-07-31-client-interaction-architecture-design.md),
+[`client-interaction.md`](../../docs/design/client-interaction.md),
 which owns the client architecture proper.
 
 ---

@@ -10,8 +10,6 @@ __pycache__/
 # reads. Per WORKTREE, never committed — hooks are shared across worktrees, so a tracked marker
 # would name one track for all of them.
 .claude/track
-.ignore/analysis-models/
-analysis-models/
 .vscode/
 
 # Task 14: reference oracle's isolated venv (never committed)

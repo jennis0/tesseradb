@@ -1,7 +1,7 @@
 # The two-axis sweep — tile count as an independent variable
 
 **What this is.** Follow-up 4 of
-[`docs/design-memos/2026-07-31-tile-parallelism-calibration.md`](../../docs/design-memos/2026-07-31-tile-parallelism-calibration.md):
+[`docs/evidence/memos/2026-07-31-tile-parallelism-calibration.md`](../../docs/evidence/memos/2026-07-31-tile-parallelism-calibration.md):
 the measurement the calibration campaign never made. §14.4 of
 [`../2026-07-31-concurrency-workstream/calibration-report.md`](../2026-07-31-concurrency-workstream/calibration-report.md)
 proved that no row-count constant can classify serial-vs-parallel correctly and named "row count,

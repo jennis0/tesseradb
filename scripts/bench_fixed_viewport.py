@@ -13,7 +13,7 @@ count-loop's cost doesn't depend on k) while p50 grows with k (because the gathe
 collapses, the tail is workload variance, not a stall.
 
 Same boot/authorise/warm-up recipe as bench_k_sweep.py (w=10^4, seed 0) so this is directly
-comparable to the existing k-sweep baseline (docs/superpowers/plans/bench-baselines/
+comparable to the existing k-sweep baseline (docs/archive/plans/bench-baselines/
 2026-07-29-1e9-k-sweep.json) at k=50 and k=1000. The fixed viewport is
 `gen_viewports(seed=1, n=5)[0]` -- the same generator bench_k_sweep.py uses for its random sweep
 (seed+1 where seed=0), first entry: zoom=6, bbox ~ a mid-sized span (the docstring's "~300 tiles"

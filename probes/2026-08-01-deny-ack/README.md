@@ -1,7 +1,7 @@
 # Deny-ack raw cells
 
 Findings, recommendations and the corrections that follow are in
-[`docs/design-memos/2026-08-01-deny-ack-baseline.md`](../../docs/design-memos/2026-08-01-deny-ack-baseline.md).
+[`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`](../../docs/evidence/memos/2026-08-01-deny-ack-baseline.md).
 This directory is the data.
 
 ## Files

@@ -1,7 +1,7 @@
 //! The `tessera_id` construction: a keyed **blinding permutation**, not encryption.
 //!
 //! Threat model, in three sentences (design memo
-//! `docs/design-memos/2026-07-30-tessera-id-construction.md`, normative): the key is not
+//! `docs/evidence/memos/2026-07-30-tessera-id-construction.md`, normative): the key is not
 //! secret against a bundle-holder, who can already invert every `tessera_id` trivially and
 //! gains nothing from doing so; the property actually defended is that a **viewer-plane**
 //! client — holding `tessera_id`s and no bundle — cannot derive entity IDs, cannot order

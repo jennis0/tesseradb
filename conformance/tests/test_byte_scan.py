@@ -14,7 +14,7 @@ stdout/stderr redirected to a file, so nothing is lost to an unread pipe) must c
 of any admitted or denied entity id, no encoding of the deployment identity key, and no caller
 external id anywhere except the one designed exception — within the scan scope described below.
 
-**Contracts r6 rewrote the wire's identity column** (`docs/design-memos/2026-07-30-tessera-id-
+**Contracts r6 rewrote the wire's identity column** (`docs/evidence/memos/2026-07-30-tessera-id-
 construction.md`; contracts §2.6, §3.2): `columns.arrow`/the points batch no longer carry
 `entity_id` at all — the gather cannot produce one — and the per-session `handle: u32` this test
 previously scanned for is retired from the viewer plane (design r21, Appendix C's new C17). The

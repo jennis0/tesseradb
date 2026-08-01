@@ -8,7 +8,7 @@ invert(tessera_id) == (shard, entity). This is valid because the construction is
 bijection over 2**64 (memo §1.7): `invert` never fails on a structurally valid u64, so
 `forward(*invert(x)) == x` must hold for every entry, `inverse_only` included.
 
-This module was written against `docs/design-memos/2026-07-30-tessera-id-construction.md`
+This module was written against `docs/evidence/memos/2026-07-30-tessera-id-construction.md`
 and this vectors file only -- no Rust was read while writing `oracle/identity.py` or this
 test file.
 """
@@ -311,7 +311,7 @@ def test_entity_of_rows_inverts_permutation_for_touched_rows(canonical_key):
 
 
 def test_row_order_is_morton_then_tessera_id_ascending(canonical_key):
-    """The post-fold storage sort order (`docs/design-memos/2026-07-30-priority-as-identity-
+    """The post-fold storage sort order (`docs/evidence/memos/2026-07-30-priority-as-identity-
     prefix.md`, "The decision"): `(morton, tessera_id)` ascending, no further tiebreak.
     `tessera_id` is already globally unique, so this needs no third key.
 
