@@ -969,8 +969,16 @@ ideally we want it full res from day one")*. The argument above says mark-count-
 not carry the load alone. It cannot be relieved by an underlay that is *blockier than the thing it
 is relieving*: at `serve.max_underlay_offset = 4` a 512-px tile carries 16 × 16 sub-cells — **32-px
 blocks** — which reads as a mosaic rather than as a density field, while the marks it sits beneath
-are individually placed. Full resolution means offset 9 (512 × 512 = 262,144 sub-cells per tile),
-and two things break before it:
+are individually placed. Full resolution means offset 9 (512 × 512 = 262,144 sub-cells per tile).
+
+**The binding limit is not the offset but `serve.max_underlay_cells`, whose default is 8,192 —
+for the whole request.** That is thirty-two tiles' worth at the current offset and *one
+thirty-second of a single tile* at full resolution, so the guard would have to move by four to
+five orders of magnitude. Naming it matters because it is the knob that actually refuses, and
+because a guard sized in total cells is the right shape for a sparse pair encoding and the wrong
+shape for a raster one — the encoding decision below changes what the guard should even count.
+
+Two things break before full resolution is reachable:
 
 - **The evaluation is per sub-cell.** The engine issues one `count_range` per cell and evaluates
   `4^offset` of them per tile (`underlay_cells_evaluated` exists to measure exactly this). Measured
@@ -1081,10 +1089,12 @@ refinement look right, doing work in a third place. The arithmetic is `marks ≈
 **Two constraints this exposes, neither of which the Potree/Cesium prior art carries**, because
 their budgets are spent against a static local octree rather than a per-request server:
 
-- **`serve.max_tiles_per_request`.** A 5 × 10⁴ mark budget at `m_target = 16` wants depth 6 —
-  **4,096 tiles** over a full-extent view. That guard is sized for a viewport's worth of tiles,
-  not a budget's worth, and the two numbers have never been reconciled. Whichever way it is
-  resolved, it is a serving-availability decision and not the client's to make quietly.
+- **`serve.max_tiles_per_request`, which turns out not to bind — but the relationship should be
+  documented.** The arithmetic (design §7.2's annotation of the same date) gives a tile count of
+  **`B / m_target`, independent of zoom**: 3,125 tiles for a 5 × 10⁴ budget at `m_target = 16`.
+  The guard's default is 262,144, so there is room by two orders of magnitude. What survives is
+  that an operator lowering it **silently caps the achievable budget at
+  `m_target · max_tiles_per_request`**, and neither knob's documentation says so.
 - **Depth choice and request coalescing are the same mechanism.** Asking for depth 6 at zoom 0 is
   only affordable as *one* viewport-addressed request; as 4,096 tile-addressed fetches it is the
   §8.2 self-DoS multiplied. The budget scheduler and the coalescing fix are therefore one
