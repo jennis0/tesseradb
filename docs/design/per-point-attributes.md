@@ -255,13 +255,29 @@ access.
 
 ### 3.7 Single- and multi-valued
 
-`render` requires single-valued: a rendered mark has one colour. Declaring `render` on a
-multi-valued attribute is refused at parse with that reason.
+**Multi-valued is a slow-path shape**: admissible under `filter` and `inspect`, never under
+`render`. A rendered mark has one colour, so declaring `render` on a multi-valued attribute is
+refused at parse with that reason — and **no projection, derived value or summary of one earns a
+hot column on its behalf either** (decision [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md)).
+A caller who wants to colour by a value drawn from a multi-valued field declares an ordinary
+single-valued attribute carrying that value: they say which single value they mean, in a column
+that means exactly that, with no mechanism between the declaration and the row.
+
+This is a rule about placement, not a claim about which encodings exist — the earlier phrasing said
+multi-valued attributes "have no hot-path component", which reads as the latter and invites an
+encoding to be offered against it. Several were, and 0039 records why each fails: slots past the
+first have no reader; a per-row vocabulary bitset is 29.8 GiB at 10⁹ and ships bits at the
+positions of invisible values; a dictionary of value combinations is refuted by measurement
+(80,902 combinations on the arXiv corpus, open-ended under ingest). **The one that looks free is a
+disclosure:** a "has more values" bit is computed over the full value set and baked into the row,
+so a principal who knows their only visible value on a point and reads that bit has learned the
+point carries at least one value they cannot see — §3.4's property, defeated in item space rather
+than in vocabulary space.
 
 ⊘ **Multi-valued attributes are specified and not built.** They are memo §6.2's keyword case —
-postings only, one per (item, value), no fixed width for a column — so they have no hot-path
-component and deferring them costs no format change. `multi = true` is refused at parse. The rule
-above is stated now so that adding them later cannot quietly acquire a `render` path.
+postings only, one per (item, value), no fixed width for a column — so deferring them costs no
+format change. `multi = true` is refused at parse. The rule above is stated now so that lifting
+that refusal for `filter` and `inspect` cannot quietly acquire a `render` path.
 
 ### 3.8 Listing, and where a gate comes from
 
