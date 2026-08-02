@@ -7,6 +7,7 @@
 //! `tessera build` advances the bundle.
 
 mod cache;
+mod flush;
 pub mod cancel;
 pub mod compose;
 mod pins;

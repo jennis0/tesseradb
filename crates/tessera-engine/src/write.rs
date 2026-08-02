@@ -200,6 +200,17 @@ pub struct ExecutorHealth {
     /// endpoint's 202 means "accepted, not yet done", and two requests before one tick are
     /// satisfied by that tick together.
     pub(crate) flush_requested: AtomicBool,
+    /// **The in-memory overlay holds dispositions the durable WAL does not** (§7.2).
+    ///
+    /// Set when [`Executor::recover_wal`] discards an undurable region, and **cleared only by a
+    /// restart**. `Wal::discard_undurable` deliberately does not un-apply — "a restart will not
+    /// carry them" — so the node returns to `Running` holding denies no record backs, and the
+    /// poisoned posture no longer covers it. Publishing a manifest or rotating the WAL from that
+    /// overlay would make a 500'd, never-acked deny permanent.
+    ///
+    /// Distinct from [`Self::wal_poisoned`], which is mirrored from the WAL in both directions:
+    /// this one latches, because what diverged stays diverged until the process is replaced.
+    pub(crate) overlay_diverged: AtomicBool,
     /// Buffer occupancy as of the last apply — what `/control/ingest`'s occupancy bound is checked
     /// against, and what `flush_max_items` marks ready.
     ///
@@ -208,6 +219,13 @@ pub struct ExecutorHealth {
     /// the generation, and the bound it feeds is a ceiling with an order of magnitude of headroom
     /// (see `DEFAULT_INGEST_BUFFER_MAX_ITEMS`), not a precise quota.
     pub(crate) buffered_items: AtomicUsize,
+    /// Items that would acquire geometry at the last tick — the buffer minus what the three
+    /// dispositions exclude (§3.5).
+    ///
+    /// **The gauge for a stalled flush.** It stays at zero on a node whose gates are closed and
+    /// grows without bound on one whose flush keeps failing, which are the two states
+    /// `buffered_items` alone cannot tell apart from healthy backlog.
+    pub(crate) flushable_items: AtomicUsize,
     /// Total nanoseconds spent in **the whole apply step** — the `IngestBuffer`/`Overlay` clone,
     /// the per-row inserts, the `Generation` construction and the swap.
     ///
@@ -371,8 +389,14 @@ pub struct ExecutorStats {
     /// Items in the ingest buffer as of the last apply — the figure `/control/ingest`'s occupancy
     /// bound is checked against.
     pub buffered_items: usize,
+    /// Items that would acquire geometry at the last tick (§3.5) — zero on a gated node, growing
+    /// without bound on one whose flush keeps failing.
+    pub flushable_items: usize,
     /// Whether a `POST /control/flush` is awaiting the next tick.
     pub flush_requested: bool,
+    /// Whether this node's overlay has diverged from its durable WAL (§7.2). **Latching**: it
+    /// publishes no flush and rotates no WAL until restarted.
+    pub overlay_diverged: bool,
     /// Successful WAL appends since the executor started.
     pub wal_appends: u64,
     /// Successful WAL fsyncs since the executor started — the unit group commit is
@@ -488,7 +512,9 @@ impl ExecutorHealth {
             deny_submitted: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             flush_requested: AtomicBool::new(false),
+            overlay_diverged: AtomicBool::new(false),
             buffered_items: AtomicUsize::new(0),
+            flushable_items: AtomicUsize::new(0),
             apply_nanos_total: AtomicU64::new(0),
             apply_nanos_max: AtomicU64::new(0),
             work_completed: AtomicU64::new(0),
@@ -577,6 +603,8 @@ impl ExecutorHealth {
             fragmentation: *lock_recover(&self.fragmentation),
             fragmentation_windows: self.fragmentation_windows.load(Ordering::Relaxed),
             ticks: self.ticks.load(Ordering::Relaxed),
+            overlay_diverged: self.overlay_diverged.load(Ordering::SeqCst),
+            flushable_items: self.flushable_items.load(Ordering::SeqCst),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
         }
@@ -2015,6 +2043,20 @@ pub const DENY_DURABILITY_ATTEMPTS: usize = DENY_DURABILITY_BACKOFF.len() + 1;
 /// **It bounds how long a node stays unready after its storage recovers, and nothing else.** The
 /// attempt is two small file operations, so the cost of polling is negligible; the cost of polling
 /// *too slowly* is an idle node steering traffic away from itself long after the fault cleared.
+/// Every slice the bundle holds, across partitions. A flush plans per slice, because a segment's
+/// entity range is contiguous only within one (§2.1).
+fn slices_of(generation: &Generation) -> Vec<String> {
+    let mut slices: Vec<String> = generation
+        .bundle
+        .partitions
+        .values()
+        .flat_map(|p| p.slices.keys().cloned())
+        .collect();
+    slices.sort_unstable();
+    slices.dedup();
+    slices
+}
+
 /// A second is short against the interval an operator or an orchestrator would take to notice, and
 /// long enough that a genuinely dead device is retried sixty times a minute rather than continuously.
 ///
@@ -2148,6 +2190,40 @@ impl Executor {
         // held until something arrives.
         self.health.flush_requested.store(false, Ordering::SeqCst);
 
+        // **⊘ Specified, not implemented: the segment write and the publication.** What runs is
+        // the *plan* — the step that decides which buffered items acquire geometry and what the
+        // three dispositions do to them (§3.5) — because that is the invariant-bearing half, and
+        // it is planned on this thread against the live generation either way. What it produces
+        // today is the count an operator needs to see a stalled flush: items that *would* acquire
+        // geometry at this tick, which stays at zero on a gated node and grows without bound on
+        // one whose flush is failing.
+        let generation = self.generation.load();
+        let mut flushable = 0usize;
+        for slice in slices_of(&generation) {
+            match crate::flush::plan_flush(
+                &generation,
+                &slice,
+                self.wal.is_poisoned(),
+                self.health.overlay_diverged.load(Ordering::SeqCst),
+            ) {
+                Ok(plan) => flushable += plan.items.len(),
+                Err(crate::flush::NoFlush::NothingToFlush) => {}
+                Err(gate) => {
+                    // Per tick, and deliberately: a gated node is gated until an operator acts, and
+                    // the tick is the interval at which that is worth repeating.
+                    tracing::warn!(
+                        slice = %slice,
+                        gate = ?gate,
+                        "flush skipped: this node publishes no geometry in this state"
+                    );
+                }
+            }
+        }
+        drop(generation);
+        self.health
+            .flushable_items
+            .store(flushable, Ordering::SeqCst);
+
         // Lifecycle §2.1: reclaim ran only as a side effect of the next geometry publication, and
         // a process that published once and went quiescent held a whole superseded bundle
         // indefinitely — at drain depth 1, which is *at* the alarm and so invisible in every gauge.
@@ -2201,7 +2277,28 @@ impl Executor {
         // A failure here leaves the handle exactly as it was, so the next pass tries again. It is
         // deliberately silent about failing: this runs on a timer while degraded, and a log line per
         // attempt would turn one storage fault into an unbounded stream of them.
-        let _ = self.wal.discard_undurable();
+        if self.wal.discard_undurable().is_ok() {
+            // **The overlay has now diverged from the durable WAL, and stays diverged.** The
+            // discard did not un-apply anything (`Wal::discard_undurable` says why), so every
+            // deletion and suppression applied under lifecycle §4's apply-anyway rule is in force
+            // in memory with no record behind it. Publishing a flush manifest or rotating the WAL
+            // from that overlay would make a 500'd, never-acked deny permanent — contradicting
+            // contracts §3.1's residual, which is that a restart does *not* carry it.
+            //
+            // So the node keeps serving and keeps applying denies, and publishes nothing, until an
+            // operator restarts it. That costs ingest visibility and is alarmed for exactly that
+            // reason: it is an operator's decision rather than a silent stall. Converging by
+            // re-appending was the alternative and is rejected — it produces a state no restart
+            // could have produced, which is lifecycle §4's central argument.
+            if !self.health.overlay_diverged.swap(true, Ordering::SeqCst) {
+                tracing::error!(
+                    "ALARM: this node recovered its WAL in process, so its overlay now holds \
+                     dispositions no durable record backs. It keeps serving and keeps applying \
+                     denies, but publishes NO flush and rotates NO WAL until restarted — ingest \
+                     stops becoming visible. Restart this node."
+                );
+            }
+        }
         self.observe_wal();
     }
 
