@@ -277,7 +277,7 @@ fn dispatch(ctx: &Context, arm: &ArmSpec, seed: u64) -> Result<()> {
             &or(&arm.k, &[30, 200, 1000, 10000]),
             &or(&arm.coverage, &[0.001, 0.01, 0.05, 0.25]),
             &or(&arm.range_rows, &[1000, 10_000, 100_000, 1_000_000]),
-            &or(&arm.columns, &strings(&["xy+id"])),
+            &or(&arm.columns, &strings(&["pos+id"])),
             seed,
         ),
         "viewport" => super::viewport::run(

@@ -242,8 +242,7 @@ fn run_viewport(
 
     let n = out.points.len();
     let mut point_ids = Vec::with_capacity(n);
-    let mut xs = Vec::with_capacity(n);
-    let mut ys = Vec::with_capacity(n);
+    let mut codes = Vec::with_capacity(n);
     for point in &out.points {
         // I10 (entity ids never cross the trust boundary) is upheld structurally: no entity id is
         // available to leak here, because the engine never gathers one on this path (see
@@ -252,8 +251,7 @@ fn run_viewport(
         // (`tessera-wire`'s `HandleTable` is retained for node handles, which are not on this path
         // — docs/decisions/0032-delete-the-dead-handle-table.md).
         point_ids.push(point.tessera_id.raw());
-        xs.push(point.x);
-        ys.push(point.y);
+        codes.push(point.code);
     }
 
     // Names come from `out.scalar_names`, populated by `Engine::viewport` from the SAME
@@ -292,8 +290,7 @@ fn run_viewport(
         matched: &matched,
         served: &served,
         points_tessera_ids: &point_ids,
-        xs: &xs,
-        ys: &ys,
+        codes: &codes,
         scalars: &scalar_refs,
         sub_cells: sub_cells
             .as_ref()

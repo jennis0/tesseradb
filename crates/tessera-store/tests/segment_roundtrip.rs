@@ -15,7 +15,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use tessera_spatial::tiler::{sort_batch, ScalarType, TilerItem};
-use tessera_spatial::Extent;
+use tessera_spatial::split32;
 use tessera_store::manifest::Manifest;
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{ColumnsRef, StoreError};
@@ -33,13 +33,10 @@ fn synthetic_tessera_id(seed: u64) -> TesseraId {
     TesseraId::new(z)
 }
 
-fn unit_extent() -> Extent {
-    Extent {
-        x_min: 0.0,
-        x_max: 1.0,
-        y_min: 0.0,
-        y_max: 1.0,
-    }
+/// Quantise a coordinate against the unit extent the way the importer does — the tiler takes
+/// fixed point, never a coordinate.
+fn q(v: f64) -> u32 {
+    tessera_spatial::fixed32(v, 0.0, 1.0)
 }
 
 #[test]
@@ -50,15 +47,14 @@ fn tiler_and_segment_writers_round_trip() {
     let mut items: Vec<TilerItem> = (0..n)
         .map(|entity_id| TilerItem {
             tessera_id: synthetic_tessera_id(entity_id),
-            x: rng.gen_range(0.0f32..1.0),
-            y: rng.gen_range(0.0f32..1.0),
+            qx: q(rng.gen_range(0.0f64..1.0)),
+            qy: q(rng.gen_range(0.0f64..1.0)),
             scalars: vec![],
         })
         .collect();
     let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
 
-    let extent = unit_extent();
-    let codes = sort_batch(&mut items, &mut entity_ids, &extent);
+    let codes = sort_batch(&mut items, &mut entity_ids);
     assert_eq!(codes.len(), items.len());
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -85,11 +81,10 @@ fn tiler_and_segment_writers_round_trip() {
     let mut reader = FileReader::try_new(file, None).expect("FileReader::try_new");
     let schema = reader.schema();
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-    assert_eq!(names, vec!["tessera_id", "x", "y", "priority"]);
+    assert_eq!(names, vec!["tessera_id", "residual", "priority"]);
     assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
-    assert_eq!(schema.field(1).data_type(), &DataType::Float32);
-    assert_eq!(schema.field(2).data_type(), &DataType::Float32);
-    assert_eq!(schema.field(3).data_type(), &DataType::UInt16);
+    assert_eq!(schema.field(1).data_type(), &DataType::UInt32);
+    assert_eq!(schema.field(2).data_type(), &DataType::UInt16);
 
     let batch = reader.next().expect("one batch").expect("batch ok");
     assert!(reader.next().is_none(), "expected exactly one record batch");
@@ -101,29 +96,27 @@ fn tiler_and_segment_writers_round_trip() {
         .downcast_ref::<UInt64Array>()
         .unwrap();
     assert_eq!(tessera_id_col.value(0), items[0].tessera_id.raw());
-    let x_col = batch
+    let residual_col = batch
         .column(1)
         .as_any()
-        .downcast_ref::<Float32Array>()
+        .downcast_ref::<UInt32Array>()
         .unwrap();
-    assert_eq!(x_col.value(0), items[0].x);
-    let y_col = batch
-        .column(2)
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .unwrap();
-    assert_eq!(y_col.value(0), items[0].y);
+    assert_eq!(residual_col.value(0), split32(items[0].qx, items[0].qy).1);
     let priority_col = batch
-        .column(3)
+        .column(2)
         .as_any()
         .downcast_ref::<UInt16Array>()
         .unwrap();
     assert_eq!(priority_col.value(0), items[0].tessera_id.priority());
 
+    // The stored pair is one splitting of one position: the residual at row i and the code at
+    // row i are the two halves of `split32` over the same item, so this also pins that
+    // `morton.u32` and `columns.arrow` describe the same points.
     for (i, item) in items.iter().enumerate() {
         assert_eq!(tessera_id_col.value(i), item.tessera_id.raw());
-        assert_eq!(x_col.value(i), item.x);
-        assert_eq!(y_col.value(i), item.y);
+        let (cell, residual) = split32(item.qx, item.qy);
+        assert_eq!(residual_col.value(i), residual);
+        assert_eq!(codes[i], cell.raw());
         assert_eq!(priority_col.value(i), item.tessera_id.priority());
     }
 
@@ -176,17 +169,16 @@ fn tiler_and_segment_writers_round_trip() {
 
 #[test]
 fn morton_file_is_u32_four_bytes_per_row_and_the_u64_file_is_gone() {
-    let extent = unit_extent();
     let mut items: Vec<TilerItem> = (0..1000u64)
         .map(|entity_id| TilerItem {
             tessera_id: synthetic_tessera_id(entity_id),
-            x: ((entity_id * 7919) % 1000) as f32 / 1000.0,
-            y: ((entity_id * 104_729) % 1000) as f32 / 1000.0,
+            qx: q(((entity_id * 7919) % 1000) as f64 / 1000.0),
+            qy: q(((entity_id * 104_729) % 1000) as f64 / 1000.0),
             scalars: vec![],
         })
         .collect();
     let mut entity_ids: Vec<EntityId> = (0..1000u64).map(EntityId::new).collect();
-    let codes = sort_batch(&mut items, &mut entity_ids, &extent);
+    let codes = sort_batch(&mut items, &mut entity_ids);
 
     let dir = tempfile::tempdir().expect("tempdir");
     write_segment(dir.path(), &items, &codes, &[]).expect("write_segment");
@@ -209,31 +201,30 @@ fn morton_file_is_u32_four_bytes_per_row_and_the_u64_file_is_gone() {
 
 #[test]
 fn tiebreak_orders_equal_morton_by_tessera_id() {
-    let extent = unit_extent();
     // Three items at the identical coordinate (identical Morton code): the row order must be
     // exactly ascending `tessera_id`, with no further tiebreak (contracts §2.6 r6).
     let mut items = vec![
         TilerItem {
             tessera_id: TesseraId::new(100),
-            x: 0.5,
-            y: 0.5,
+            qx: q(0.5),
+            qy: q(0.5),
             scalars: vec![],
         },
         TilerItem {
             tessera_id: TesseraId::new(1),
-            x: 0.5,
-            y: 0.5,
+            qx: q(0.5),
+            qy: q(0.5),
             scalars: vec![],
         },
         TilerItem {
             tessera_id: TesseraId::new(2),
-            x: 0.5,
-            y: 0.5,
+            qx: q(0.5),
+            qy: q(0.5),
             scalars: vec![],
         },
     ];
     let mut entity_ids = vec![EntityId::new(100), EntityId::new(1), EntityId::new(2)];
-    let codes = sort_batch(&mut items, &mut entity_ids, &extent);
+    let codes = sort_batch(&mut items, &mut entity_ids);
     assert_eq!(codes[0], codes[1]);
     assert_eq!(codes[1], codes[2]);
     let ordered: Vec<u64> = items.iter().map(|i| i.tessera_id.raw()).collect();
@@ -280,23 +271,22 @@ fn write_permutation_rejects_duplicate_entity_id() {
 fn write_segment_scalars_round_trip() {
     use tessera_spatial::tiler::ScalarValue;
 
-    let extent = unit_extent();
     let mut items = vec![
         TilerItem {
             tessera_id: TesseraId::new(1),
-            x: 0.1,
-            y: 0.2,
+            qx: q(0.1),
+            qy: q(0.2),
             scalars: vec![ScalarValue::U64(42), ScalarValue::Utf8("alpha".to_string())],
         },
         TilerItem {
             tessera_id: TesseraId::new(2),
-            x: 0.8,
-            y: 0.9,
+            qx: q(0.8),
+            qy: q(0.9),
             scalars: vec![ScalarValue::U64(7), ScalarValue::Utf8("beta".to_string())],
         },
     ];
     let mut entity_ids = vec![EntityId::new(1), EntityId::new(2)];
-    let codes = sort_batch(&mut items, &mut entity_ids, &extent);
+    let codes = sort_batch(&mut items, &mut entity_ids);
 
     let dir = tempfile::tempdir().expect("tempdir");
     let scalar_schema = vec![
@@ -311,16 +301,16 @@ fn write_segment_scalars_round_trip() {
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert_eq!(
         names,
-        vec!["tessera_id", "x", "y", "priority", "count", "label"]
+        vec!["tessera_id", "residual", "priority", "count", "label"]
     );
     let batch = reader.next().unwrap().unwrap();
     let count_col = batch
-        .column(4)
+        .column(3)
         .as_any()
         .downcast_ref::<UInt64Array>()
         .unwrap();
     let label_col = batch
-        .column(5)
+        .column(4)
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
         .unwrap();
@@ -385,6 +375,45 @@ fn a_pre_r6_columns_file_is_a_typed_error_not_a_half_read() {
 }
 
 #[test]
+fn a_pre_residual_columns_file_is_a_typed_error_rather_than_a_misread_position() {
+    // The cell-plus-residual change carries **no `bundle_format` bump** — format 1 has never
+    // been published — and that is only safe because `validate_schema` compares the fixed
+    // columns by name *and* type. This is the test that makes it so: a bundle written before
+    // the change carries `x`/`y` `f32` where `residual`/`priority` now sit, and must fail at
+    // open rather than reading a float's bits as a sub-cell position and a second float's as a
+    // priority. Without this, an old bundle against a new reader is silent nonsense geometry.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("columns.arrow");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("tessera_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("priority", DataType::UInt16, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(vec![1u64])) as ArrayRef,
+            Arc::new(Float32Array::from(vec![0.5f32])) as ArrayRef,
+            Arc::new(Float32Array::from(vec![0.5f32])) as ArrayRef,
+            Arc::new(UInt16Array::from(vec![0u16])) as ArrayRef,
+        ],
+    )
+    .expect("build batch");
+
+    let file = fs::File::create(&path).expect("create columns.arrow");
+    let mut writer = FileWriter::try_new(file, &schema).expect("FileWriter::try_new");
+    writer.write(&batch).expect("write batch");
+    writer.finish().expect("finish");
+
+    let err = ColumnsRef::load(&path).unwrap_err();
+    assert!(
+        matches!(err, StoreError::InvalidColumns { .. }),
+        "a pre-residual columns.arrow must be a typed reader error, got {err:?}"
+    );
+}
+
+#[test]
 fn a_manifest_without_an_identity_object_is_a_typed_error() {
     // Contracts §2.2 r6: `identity` is required, not defaulted. A bundle read without a key
     // cannot invert a tessera_id, and a *defaulted* key would invert every identifier to the
@@ -430,11 +459,10 @@ fn write_columns_from_parts_matches_write_columns_byte_for_byte() {
         let tessera: Vec<u64> = (0..rows as u64)
             .map(|i| synthetic_tessera_id(i).raw())
             .collect();
-        let x: Vec<f32> = (0..rows).map(|i| i as f32 * 0.25).collect();
-        let y: Vec<f32> = (0..rows).map(|i| 1.0 - i as f32 * 0.125).collect();
+        let residual: Vec<u32> = (0..rows).map(|i| (i as u32).wrapping_mul(2_654_435_761)).collect();
 
         let via_vecs = dir.path().join(format!("vecs-{rows}.arrow"));
-        write_columns(&via_vecs, tessera.clone(), x.clone(), y.clone()).expect("write_columns");
+        write_columns(&via_vecs, tessera.clone(), residual.clone()).expect("write_columns");
         let vec_bytes = fs::read(&via_vecs).expect("read write_columns output");
 
         // Heap-backed buffers through the from-parts door.
@@ -442,8 +470,7 @@ fn write_columns_from_parts_matches_write_columns_byte_for_byte() {
         write_columns_from_parts(
             &via_parts,
             Buffer::from_vec(tessera.clone()),
-            Buffer::from_vec(x.clone()),
-            Buffer::from_vec(y.clone()),
+            Buffer::from_vec(residual.clone()),
             rows,
         )
         .expect("write_columns_from_parts (heap buffers)");
@@ -458,14 +485,12 @@ fn write_columns_from_parts_matches_write_columns_byte_for_byte() {
         // to spill anyway — the heap-buffer case above covers rows == 0.)
         if rows > 0 {
             let t_bytes: Vec<u8> = tessera.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let x_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let y_bytes: Vec<u8> = y.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let r_bytes: Vec<u8> = residual.iter().flat_map(|v| v.to_le_bytes()).collect();
             let via_mmap = dir.path().join(format!("mmap-{rows}.arrow"));
             write_columns_from_parts(
                 &via_mmap,
                 mmap_buffer(&dir.path().join(format!("t-{rows}.bin")), &t_bytes),
-                mmap_buffer(&dir.path().join(format!("x-{rows}.bin")), &x_bytes),
-                mmap_buffer(&dir.path().join(format!("y-{rows}.bin")), &y_bytes),
+                mmap_buffer(&dir.path().join(format!("r-{rows}.bin")), &r_bytes),
                 rows,
             )
             .expect("write_columns_from_parts (mmap buffers)");
@@ -482,8 +507,7 @@ fn write_columns_from_parts_matches_write_columns_byte_for_byte() {
         let cols = ColumnsRef::load(&via_parts).expect("ColumnsRef must load from_parts output");
         assert_eq!(cols.row_count() as usize, rows);
         assert_eq!(cols.tessera_id(), &tessera[..]);
-        assert_eq!(cols.x(), &x[..]);
-        assert_eq!(cols.y(), &y[..]);
+        assert_eq!(cols.residual(), &residual[..]);
         let expected_priority: Vec<u16> = tessera
             .iter()
             .map(|&id| TesseraId::new(id).priority())
@@ -499,15 +523,13 @@ fn write_columns_from_parts_rejects_short_and_misaligned_buffers_without_panicki
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("never-written.arrow");
-    let x = Buffer::from_vec(vec![0f32; 4]);
-    let y = Buffer::from_vec(vec![0f32; 4]);
+    let residual = Buffer::from_vec(vec![0u32; 4]);
 
     // Too short: 3 u64s cannot back 4 rows.
     let err = write_columns_from_parts(
         &path,
         Buffer::from_vec(vec![0u64; 3]),
-        x.clone(),
-        y.clone(),
+        residual.clone(),
         4,
     )
     .expect_err("a buffer shorter than `rows` values must be a typed error");
@@ -517,7 +539,7 @@ fn write_columns_from_parts_rejects_short_and_misaligned_buffers_without_panicki
     // ScalarBuffer conversion would panic here; the writer must fail closed with an error
     // instead.
     let misaligned = Buffer::from_vec(vec![0u64; 5]).slice(4);
-    let err = write_columns_from_parts(&path, misaligned, x, y, 4)
+    let err = write_columns_from_parts(&path, misaligned, residual, 4)
         .expect_err("a misaligned buffer must be a typed error, not an arrow panic");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(

@@ -107,7 +107,7 @@ enum Command {
         /// Rows the tile range spans — the "points in cell" axis.
         #[arg(long, value_delimiter = ',', default_values_t = [1000u32, 10_000, 100_000, 1_000_000])]
         range_rows: Vec<u32>,
-        #[arg(long, value_delimiter = ',', default_values_t = ["xy+id".to_string()])]
+        #[arg(long, value_delimiter = ',', default_values_t = ["pos+id".to_string()])]
         columns: Vec<String>,
         #[arg(long, default_value_t = 0)]
         seed: u64,

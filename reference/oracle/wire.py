@@ -68,13 +68,12 @@ def decode_viewport(data: bytes):
             # `tessera_id` (u64), not `handle` (u32): contracts r6 retires the per-session
             # handle from the viewer plane and puts the stable wire identity at the row. The
             # oracle must not translate it — it is opaque here, and the differential compares
-            # point sets by `(x, y)` multiset precisely so that agreement never depends on
-            # either side interpreting an identifier.
+            # point sets by position code precisely so that agreement never depends on either
+            # side interpreting an identifier.
             id_col = batch.column("tessera_id").to_pylist()
-            x_col = batch.column("x").to_pylist()
-            y_col = batch.column("y").to_pylist()
-            for ident, x, y in zip(id_col, x_col, y_col):
-                points.append((ident, x, y))
+            code_col = batch.column("code").to_pylist()
+            for ident, code in zip(id_col, code_col):
+                points.append((ident, code))
 
     return tiles, points
 
@@ -83,7 +82,7 @@ def decode_viewport_points(data: bytes):
     """The points stream as a `pyarrow.Table` — **every** column, not the three [`decode_viewport`]
     names.
 
-    [`decode_viewport`] projects `(tessera_id, x, y)` because that is all the differential compares.
+    [`decode_viewport`] projects `(tessera_id, code)` because that is all the differential compares.
     A declared scalar (contracts §2.6 — the fixture's `fx_key`, the handle→item join) arrives as an
     additional column, and a test that means to assert on it has to see the schema rather than a
     fixed projection. Returning the table rather than widening the tuple keeps every existing
@@ -111,10 +110,9 @@ def decode_viewport_with_subcells(data: bytes):
     with ipc.open_stream(buf) as reader:
         for batch in reader:
             id_col = batch.column("tessera_id").to_pylist()
-            x_col = batch.column("x").to_pylist()
-            y_col = batch.column("y").to_pylist()
-            for ident, x, y in zip(id_col, x_col, y_col):
-                points.append((ident, x, y))
+            code_col = batch.column("code").to_pylist()
+            for ident, code in zip(id_col, code_col):
+                points.append((ident, code))
 
     # Whatever the points reader did not consume. Zero bytes means the underlay was not requested —
     # `viewport_ipc` emits nothing at all rather than an empty stream, precisely so that this is

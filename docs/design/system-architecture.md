@@ -235,7 +235,7 @@ bundle/
       slices/<slice_id>/
         permutation.bin            entity→row, one direction only
         segments/<seg_id>/
-          columns.arrow            tessera_id, x, y, priority, declared scalars
+          columns.arrow            tessera_id, residual, priority, declared scalars
           morton.u32               the Morton column; tile ranges derive from it
           permutation.bin          streamed segments only; absent on a build segment
 ```

@@ -2,12 +2,13 @@
 
 Five things are proven, kept deliberately separate (task brief):
 
-(a) morton.u32 byte-for-byte vs the oracle's own recomputation from columns.arrow's x/y
+(a) morton.u32 and columns.arrow's residual byte-for-byte vs the oracle's own recomputation
+    from the points file the build consumed
     (contracts §2.5's obligation).
 (b) postings-derived server counts == the oracle's pairs-derived brute-force counts, for every
     tile a random viewport touches — the union-vs-semi-join differential, and the entity-space
     vs row-space-diff composition-equivalence check.
-(c) point sets: server handles are opaque, so points are compared as (x, y) multisets against the
+(c) point sets: server handles are opaque, so points are compared as position-code multisets against the
     oracle's own `served` (design §7.2's definition, implemented independently — see
     `oracle/viewport.py`'s doc).
 (d) suppress over the control plane -> oracle told to drop it -> counts re-agree.
@@ -25,6 +26,7 @@ import base64
 import os
 import random
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -45,11 +47,20 @@ N_GRANT_SETS = int(os.environ.get("TESSERA_DIFFERENTIAL_N_GRANTS", "20"))
 N_VIEWPORTS_PER_GRANT = int(os.environ.get("TESSERA_DIFFERENTIAL_N_VIEWPORTS", "10"))
 ZOOM_RANGE = (3, 8)
 GRID_MAX = 65536.0
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(scope="session")
 def oracle_bundle(bundle_root) -> Bundle:
-    return Bundle(bundle_root)
+    """The fixture bundle with its source geometry attached — the oracle's third input.
+
+    `columns.arrow` stores a residual, not coordinates, so recomputing geometry from the bundle
+    alone would only read the build's own answer back. `harness.DEFAULT_POINTS` is the points file
+    `ensure_fixture_bundle` built from; handing in any other one is a whole-suite geometry failure.
+    """
+    from oracle.harness import DEFAULT_LIMIT, DEFAULT_POINTS, open_bundle_with_source
+
+    return open_bundle_with_source(bundle_root, REPO_ROOT / DEFAULT_POINTS, DEFAULT_LIMIT)
 
 
 def _descriptor_str(d: bytes) -> str:
@@ -74,12 +85,25 @@ def _random_bbox(rng: random.Random) -> tuple[float, float, float, float]:
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
-def test_morton_matches_byte_for_byte(oracle_bundle: Bundle):
-    """(a) morton.u32 vs the oracle's own recomputation from columns.arrow x/y."""
+def test_stored_position_matches_the_source_byte_for_byte(oracle_bundle: Bundle):
+    """(a) `morton.u32` **and** `columns.arrow`'s `residual` against the oracle's own
+    recomputation from the points file the build consumed.
+
+    Both halves, not just the cell: they are written by different code and a build that got the
+    cell right and the residual wrong would place every point correctly and draw it in the wrong
+    place inside its cell — invisible to a tile-count check and to any comparison that only looked
+    at `morton.u32`.
+
+    The comparison is exact. Positions are integers now, so the `f32` tolerance the old
+    coordinate check carried — and the disagreement a tolerance can hide — is gone.
+    """
     seg = oracle_bundle.segment(SLICE)
+    expected = oracle_bundle.row_position_codes(SLICE)
     for i in range(0, seg.row_count, max(1, seg.row_count // 5000)):
-        recomputed = morton.morton_of(float(seg.x[i]), float(seg.y[i]), oracle_bundle.extent)
-        assert recomputed == int(seg.morton[i]), f"row {i}: morton mismatch"
+        assert expected[i] == seg.stored_code(i), (
+            f"row {i}: stored position {seg.stored_code(i):#018x} disagrees with the source's "
+            f"{expected[i]:#018x}"
+        )
 
 
 def test_grid_differential(server, oracle_bundle: Bundle):
@@ -175,19 +199,23 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
             for t, _visible, _matched, served_n in server_tiles:
                 tile_points = server_points[cursor : cursor + served_n]
                 cursor += served_n
-                # Counter, not set: two distinct entities can share rounded coordinates within a
-                # tile, and a set would silently absorb a server bug that dropped one of them
-                # while duplicating another (the brief calls for a multiset comparison here).
-                server_xy = Counter((round(x, 4), round(y, 4)) for _h, x, y in tile_points)
+                # Counter, not set: two distinct entities can share a position within a tile,
+                # and a set would silently absorb a server bug that dropped one of them while
+                # duplicating another (the brief calls for a multiset comparison here).
+                #
+                # **Exact, with no tolerance.** The wire carries an integer position code, so the
+                # rounding this comparison used to need — and the disagreement it could hide — is
+                # gone: the oracle's code must equal the engine's bit for bit.
+                server_codes = Counter(code for _h, code in tile_points)
 
-                oracle_xy_list = oracle.served_points(
+                oracle_code_list = oracle.served_points(
                     t, **vp.params_from_meta(constants, k=k, v_total=v_total)
                 )
-                oracle_xy = Counter((round(x, 4), round(y, 4)) for x, y in oracle_xy_list)
+                oracle_codes = Counter(oracle_code_list)
 
-                assert server_xy == oracle_xy, (
+                assert server_codes == oracle_codes, (
                     f"point multiset disagrees for tile {t} zoom={zoom}: "
-                    f"server={server_xy} oracle={oracle_xy}"
+                    f"server={server_codes} oracle={oracle_codes}"
                 )
                 points_checked += len(tile_points)
                 if 0 < served_n < _visible_of(server_tiles, t):

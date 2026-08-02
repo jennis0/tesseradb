@@ -12,7 +12,7 @@ use croaring::Bitmap;
 use sha2::{Digest, Sha256};
 
 use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_spatial::{tiles_for_bbox, Extent, Tile};
+use tessera_spatial::{fixed32, split32, tiles_for_bbox, Extent, Tile};
 use tessera_store::manifest::{
     CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
     SegmentDescriptor, SegmentsManifest, SliceDescriptor,
@@ -68,13 +68,13 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         .map(|entity_id| TilerItem {
             tessera_id: synthetic_tessera_id(entity_id),
             // Spread points across the grid deterministically so tiles split them up.
-            x: ((entity_id * 37) % 100) as f32 / 100.0,
-            y: ((entity_id * 61) % 100) as f32 / 100.0,
+            qx: fixed32(((entity_id * 37) % 100) as f64 / 100.0, 0.0, 1.0),
+            qy: fixed32(((entity_id * 61) % 100) as f64 / 100.0, 0.0, 1.0),
             scalars: vec![],
         })
         .collect();
     let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
-    let codes = sort_batch(&mut items, &mut entity_ids, &extent);
+    let codes = sort_batch(&mut items, &mut entity_ids);
 
     let prefix_dir = root.join("v00000");
     let partition_dir = prefix_dir.join("partitions").join("default");
@@ -197,19 +197,26 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
 
     // columns.arrow round-trips row 0..n exactly.
     let tessera_id_col = seg.columns.tessera_id();
-    let x_col = seg.columns.x();
-    let y_col = seg.columns.y();
+    let residual_col = seg.columns.residual();
     let priority_col = seg.columns.priority();
     assert_eq!(tessera_id_col.len(), items.len());
     for (i, item) in items.iter().enumerate() {
         assert_eq!(tessera_id_col[i], item.tessera_id.raw());
-        assert_eq!(x_col[i], item.x);
-        assert_eq!(y_col[i], item.y);
+        assert_eq!(residual_col[i], split32(item.qx, item.qy).1);
         assert_eq!(priority_col[i], item.tessera_id.priority());
     }
 
-    // morton.u32 round-trips exactly what sort_batch computed.
+    // morton.u32 round-trips exactly what sort_batch computed, and the two files' words
+    // concatenate back to the position the item went in with — which is the whole point of
+    // splitting them across two files.
     assert_eq!(seg.morton.u32(), codes.as_slice());
+    for (i, item) in items.iter().enumerate() {
+        let (cell, residual) = split32(item.qx, item.qy);
+        assert_eq!(
+            ((seg.morton.u32()[i] as u64) << 32) | residual_col[i] as u64,
+            ((cell.raw() as u64) << 32) | residual as u64
+        );
+    }
 }
 
 #[test]

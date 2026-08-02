@@ -480,16 +480,6 @@ enum GeometryKind {
     MortonResidual,
 }
 
-/// The inverse of [`fixed32`], to the precision `f32` can hold.
-///
-/// **Interim.** It exists only because `columns.arrow` still stores `x`/`y` as `f32` while the
-/// build now carries 32-bit fixed point end to end: the *codes* are computed from the quantised
-/// form and are exact, and this is used solely to fill the stored coordinate columns. It goes when
-/// those columns become the residual, and nothing should grow a second caller meanwhile.
-pub(crate) fn dequantise32(q: u32, min: f64, max: f64) -> f32 {
-    (min + (q as f64) * (max - min) / 4_294_967_296.0) as f32
-}
-
 /// Narrow a `u64` column value to the `u32` a Morton or residual word must fit in, as a typed
 /// error rather than a truncation — a truncated code is a different position, silently.
 fn narrow_code(path: &Path, value: u64, name: &str) -> Result<u32> {

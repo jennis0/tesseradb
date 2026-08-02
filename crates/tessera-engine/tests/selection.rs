@@ -21,7 +21,7 @@ use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
 use tessera_engine::select::{decode_tier, DecodeTier, SelectParams, Selection, Threshold};
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
-use tessera_spatial::{morton_of, tiler::sort_batch, Extent, Tile, TilerItem};
+use tessera_spatial::{fixed32, morton_of, tiler::sort_batch, Extent, Tile, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{tile_ranges, Permutation};
@@ -60,8 +60,8 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
         .iter()
         .map(|&(x, y, id)| TilerItem {
             tessera_id: TesseraId::new(id),
-            x,
-            y,
+            qx: fixed32(x as f64, EXTENT.x_min, EXTENT.x_max),
+            qy: fixed32(y as f64, EXTENT.y_min, EXTENT.y_max),
             scalars: Vec::new(),
         })
         .collect();
@@ -69,7 +69,7 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
     // use it: visibility is expressed directly in row space (see the module doc), so the companion
     // is a placeholder and its post-sort contents are deliberately ignored.
     let mut entity_ids: Vec<EntityId> = (0..items.len() as u64).map(EntityId::new).collect();
-    let codes = sort_batch(&mut items, &mut entity_ids, &EXTENT);
+    let codes = sort_batch(&mut items, &mut entity_ids);
     write_segment(temp.path(), &items, &codes, &[]).unwrap();
 
     let data = SegmentData {
@@ -451,8 +451,7 @@ fn a_drawn_mark_is_still_drawn_in_the_child_that_contains_it() {
                 if !mask.contains_row(row) {
                     continue;
                 }
-                let (x, y, _) = points_of(&seg, row);
-                child_of.insert(seg.id_at(row), tile_of(x, y, depth + 1).prefix);
+                child_of.insert(seg.id_at(row), tile_of_row(&seg, row, depth + 1).prefix);
             }
 
             let mut served_by_child: HashMap<u64, Vec<u64>> = HashMap::new();
@@ -488,12 +487,22 @@ fn a_drawn_mark_is_still_drawn_in_the_child_that_contains_it() {
     );
 }
 
-/// Row `row`'s `(x, y, tessera_id)` as stored — the inverse of `segment_of`'s input, read back from
-/// the segment so a test never assumes the pre-sort order.
-fn points_of(seg: &Segment, row: u32) -> (f32, f32, u64) {
-    let cols = &seg.data.columns;
-    let i = row as usize;
-    (cols.x()[i], cols.y()[i], cols.tessera_id()[i])
+/// The depth-`d` tile row `row` falls in, read back from the segment so a test never assumes the
+/// pre-sort order.
+///
+/// Taken from the stored cell code rather than from a coordinate: no coordinate is stored, and a
+/// tile prefix is a prefix of that code anyway — the same shift `tile_of` performs after
+/// quantising.
+fn tile_of_row(seg: &Segment, row: u32, depth: u8) -> Tile {
+    let code = seg.data.morton.u32()[row as usize];
+    Tile {
+        prefix: if depth == 0 {
+            0
+        } else {
+            (code >> (32 - 2 * depth as u32)) as u64
+        },
+        depth,
+    }
 }
 
 /// The documented consequence of breaking the nesting premise: a client that reduces `cap` on

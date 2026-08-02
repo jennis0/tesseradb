@@ -24,7 +24,7 @@
 //!   of occupied tiles.
 //! * **range rows** — how much of the segment the tile spans, i.e. the "points in cell" axis.
 //! * **coverage** — how much of that range the principal can see.
-//! * **columns** — `xy` through `full`, testing design §10.4's "ten pages per column" claim.
+//! * **columns** — `pos` through `full`, testing design §10.4's "ten pages per column" claim.
 //!
 //! Held constant within a cell: the segment, the mask, the row range, and **the number of rows
 //! gathered**. Only the access pattern varies. That is what makes the comparison mean anything.
@@ -35,7 +35,7 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
 use tessera_authz::PostingsReader;
-use tessera_store::read::{open_bundle, ColumnsRef};
+use tessera_store::read::{open_bundle, SegmentData};
 
 use crate::arms::{Context, Result};
 use crate::corpus::{build_grant_to_coverage, GrantShape, TermStats};
@@ -86,39 +86,45 @@ impl Pattern {
 }
 
 /// Which columns the gather reads.
+///
+/// **A position is 8 B/row and always was**, so these widths did not change when `x`/`y` became
+/// the cell-plus-residual pair: what changed is that the two halves now live in two *files*, the
+/// cell in `morton.u32` and the residual in `columns.arrow`. Two mapped 4-byte columns either
+/// way, which is why the r21 18 B/row figure below still stands for this arm even though
+/// `columns.arrow` itself fell to 14.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Columns {
-    /// `x`, `y` — 8 B/row.
-    Xy,
-    /// `x`, `y`, `tessera_id` — 16 B/row. What the real viewport path reads.
-    XyId,
+    /// `morton`, `residual` — 8 B/row: the whole position, both halves.
+    Pos,
+    /// `morton`, `residual`, `tessera_id` — 16 B/row. What the real viewport path reads.
+    PosId,
     /// Adds `priority` — 18 B/row, the r21 residency figure.
-    XyIdPriority,
+    PosIdPriority,
 }
 
 impl Columns {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "xy" => Some(Columns::Xy),
-            "xy+id" => Some(Columns::XyId),
-            "xy+id+priority" | "full" => Some(Columns::XyIdPriority),
+            "pos" => Some(Columns::Pos),
+            "pos+id" => Some(Columns::PosId),
+            "pos+id+priority" | "full" => Some(Columns::PosIdPriority),
             _ => None,
         }
     }
     pub fn name(&self) -> &'static str {
         match self {
-            Columns::Xy => "xy",
-            Columns::XyId => "xy+id",
-            Columns::XyIdPriority => "xy+id+priority",
+            Columns::Pos => "pos",
+            Columns::PosId => "pos+id",
+            Columns::PosIdPriority => "pos+id+priority",
         }
     }
     /// Total bytes per row across the columns read — the denominator for bandwidth, and the
     /// width `pages_touched` uses per column.
     fn widths(&self) -> &'static [u64] {
         match self {
-            Columns::Xy => &[4, 4],
-            Columns::XyId => &[4, 4, 8],
-            Columns::XyIdPriority => &[4, 4, 8, 2],
+            Columns::Pos => &[4, 4],
+            Columns::PosId => &[4, 4, 8],
+            Columns::PosIdPriority => &[4, 4, 8, 2],
         }
     }
 }
@@ -159,33 +165,44 @@ fn select(pattern: Pattern, visible: &[u32], k: usize, seed: u64) -> Vec<u32> {
 /// column slice per row — without constructing a `PointOut`, so what is measured is the column
 /// reads and not the `Vec<PointOut>` allocation that sits on top of them in the real path. That
 /// allocation is real and is attributed separately by the stage timer's `gather_ns`.
+///
+/// It takes the whole [`SegmentData`] rather than its `ColumnsRef` because a position's two
+/// halves are in two files: reading only `columns.arrow` would miss the `morton.u32` load the
+/// real path makes, and understate the gather by one mapped column per row.
+///
+/// **What this still does not measure** (design `hot-row-geometry` §7): the residency saving
+/// against the pre-residual shape. That needs a second column source and a build able to emit
+/// both, and this arm has no memory-pressure mechanism at all — its `cold_*` arms are a
+/// token-cache split, not a page-cache one, so a residency saving would not show up as latency
+/// here even if both shapes were present.
 #[inline]
-fn gather(columns: &ColumnsRef, rows: &[u32], which: Columns) -> u64 {
+fn gather(segment: &SegmentData, rows: &[u32], which: Columns) -> u64 {
+    let columns = &segment.columns;
     let ids = columns.tessera_id();
-    let xs = columns.x();
-    let ys = columns.y();
+    let cells = segment.morton.u32();
+    let residuals = columns.residual();
     let mut acc = 0u64;
     match which {
-        Columns::Xy => {
+        Columns::Pos => {
             for &r in rows {
                 let i = r as usize;
-                acc = acc.wrapping_add(xs[i].to_bits() as u64 ^ ys[i].to_bits() as u64);
+                acc = acc.wrapping_add(((cells[i] as u64) << 32) | residuals[i] as u64);
             }
         }
-        Columns::XyId => {
+        Columns::PosId => {
             for &r in rows {
                 let i = r as usize;
                 acc = acc
-                    .wrapping_add(xs[i].to_bits() as u64 ^ ys[i].to_bits() as u64)
+                    .wrapping_add(((cells[i] as u64) << 32) | residuals[i] as u64)
                     .wrapping_add(ids[i]);
             }
         }
-        Columns::XyIdPriority => {
+        Columns::PosIdPriority => {
             let ps = columns.priority();
             for &r in rows {
                 let i = r as usize;
                 acc = acc
-                    .wrapping_add(xs[i].to_bits() as u64 ^ ys[i].to_bits() as u64)
+                    .wrapping_add(((cells[i] as u64) << 32) | residuals[i] as u64)
                     .wrapping_add(ids[i])
                     .wrapping_add(ps[i] as u64);
             }
@@ -286,7 +303,7 @@ pub fn run(
 
                             let (minor_before, major_before) = crate::metrics::faults();
                             let samples = crate::metrics::repeat(ctx.repeat, || {
-                                gather(&segment.columns, &selection, which)
+                                gather(segment, &selection, which)
                             });
                             let (minor_after, major_after) = crate::metrics::faults();
 

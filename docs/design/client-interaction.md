@@ -694,17 +694,21 @@ typed-array views to `data.attributes`. That is genuinely zero-copy, since Arrow
 attribute**. The one library consuming Arrow directly is `@geoarrow/deck.gl-layers`,
 third-party and outside core, and it is what lonboard uses.
 
-Two frictions to record rather than discover. The x/y **interleave**: `getPosition`
-wants interleaved pairs and we ship separate `x`/`y` columns, so the core does an
-O(served) pass — noise at small *k*, an ~80 MB shuffle per refresh at 10⁷ marks. An
-Arrow `fixed_size_list<f32,2>` position column would be zero-copy, and is GeoArrow's
-point encoding; a candidate **additive** wire change to decide on P2's numbers. Note that
-attribute descriptors accept `offset` and `stride`, so several attributes may read from
-one interleaved buffer — which means deck.gl consumes interleaved layouts *natively*
-rather than merely tolerating them, strengthening that open question. It does **not**
-rescue the current layout: stride reads separate attributes *out of* an interleaved
-buffer, whereas our problem is the reverse — two contiguous columns that must be fused
-into one attribute, which no stride arrangement achieves. And
+Two frictions to record rather than discover. The position **deinterleave**: the wire
+carries one `code: uint64` per point (contracts §3.2) and `getPosition` wants interleaved
+axis pairs, so the core does an O(served) pass — noise at small *k*, an ~80 MB shuffle per
+refresh at 10⁷ marks. **That pass is not new and is not removable by a wire change**: it
+was an interleave of two `f32` columns before the position became a code, and it is a
+deinterleave of one now. An Arrow `fixed_size_list<f32,2>` position column would be
+zero-copy and is GeoArrow's point encoding, but it would also throw away the precision the
+code carries — an `f32` mantissa holds 24 bits against the code's 32 per axis — so it is a
+trade, not a free win, and it belongs to P2's numbers together with `fp64` emulation rather
+than ahead of them. Note that attribute descriptors accept `offset` and `stride`, so several
+attributes may read from one interleaved buffer — which means deck.gl consumes interleaved
+layouts *natively* rather than merely tolerating them. It does **not** rescue the current
+layout: stride reads separate attributes *out of* an interleaved buffer, whereas our problem
+is the reverse — one column that must be split into an attribute, which no stride arrangement
+achieves. And
 **cross-tile draw order** for the underlay: tiles render in arbitrary order, so one
 tile's opaque cells can overdraw an adjacent tile's marks — mitigable with a
 translucent underlay and depth test off, or by separating the layers.
@@ -1375,11 +1379,18 @@ archive is forbidden.*
 - **Notebook token custody**: the widget must never serialise a token into saved output.
 - **Whether the `fixed_size_list<f32,2>` position column is worth an additive wire
   change** — decided on P2's numbers, not now.
-- **Whether position storage should be Morton-derived rather than `x`/`y`** *(owner,
-  2026-07-31; three variants after the third review, 2026-08-01)*. §2.6 stores `x`, `y`
-  as `float32` "as supplied (quantisation is for codes, not storage)", so `morton.u32`
-  duplicates their quantised high bits; what Morton cannot recover is only the residual
-  *within* a cell. Every variant below is **8 B/row against 12 B — 4 GB at 10⁹**, the
+- ~~**Whether position storage should be Morton-derived rather than `x`/`y`**~~ *(owner,
+  2026-07-31; three variants after the third review, 2026-08-01)*. **Closed: variant A,
+  split** — `docs/design/hot-row-geometry.md`, which is normative and built. `columns.arrow`
+  stores a `residual: uint32` and no coordinate; the wire carries the fused 64-bit code, so
+  the wire form is B's and the storage form is A's. The variant table below is kept because
+  its cost argument is the one that decided it: A was chosen over the fused column **on
+  reviewability, not on correctness** — a single fused column is sound, and the objection
+  usually made to it (that binary search needs a sorted array) is wrong, since search needs
+  only a partitioned predicate and every target is a cell boundary. Do not re-derive the
+  wrong argument. What follows is the analysis as it stood:
+
+  Every variant below is **8 B/row against 12 B — 4 GB at 10⁹**, the
   same magnitude and the same argument as r5's narrowing, and none is dominant:
 
   | Variant | Search column | Random touches per served point |
@@ -1409,8 +1420,11 @@ archive is forbidden.*
   served-prefix machinery are disturbed. And precision is a non-issue: 32-bit fixed point
   over the extent is uniformly *more* faithful than `float32`; what is genuinely lost is
   bit-exact round-trip of supplied floats and extent-independence of stored values, both
-  contract changes the oracle inherits. The wire need not change — the server dequantises
-  during the gather, and that pass **is** the interleave pass the item above wants.
+  contract changes the oracle inherits. *(Two of those predictions did not survive
+  building it. The wire **did** change — the server does not dequantise during the gather;
+  it ships the code and the client deinterleaves — and the oracle's contract change was
+  larger than "inherits": removing the coordinate columns took away its only independent
+  geometry input, which is why `conformance.md` §1 now names a third one.)*
   **Belongs to the drawn-mark-budget spec as P4 arms**, not to this document; recorded
   here because it was raised during this design.
 - **Whether a shared WASM kernel should own the invariant-bearing arithmetic** *(third

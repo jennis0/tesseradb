@@ -1,8 +1,10 @@
 # Hot-row geometry — cell plus residual
 
 **Date:** 2026-08-02
-**Status:** **Provisional — reviewed, no open decisions.** To become normative: the §6 amendments
-folded into `architecture.md`, `contracts.md` and `conformance.md`.
+**Status:** **Normative.** The §6 amendments are folded into `architecture.md`, `contracts.md`
+and `conformance.md`; the representation is built end to end from the importer to the client. One
+piece named here is specified and not built and says so at the claim: the binding between a bundle
+and the points file the oracle reads it against (§5.2).
 **Reads against:** architecture §4 (I9, I10), §5.3, §7.2, §10.3, §10.5, Appendix A; contracts §0.3
 (deviations 5, 9, 10), §0.4, §2.5, §2.6, §3.2, §3.4; `conformance.md` §1, §7.
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
@@ -160,11 +162,12 @@ depend on `entities/external-ids-<k>.arrow`, which contracts **§0.4** does not 
 conformance burden and must. The alternative is to require the source to carry the internal entity
 id, which no current fixture does.
 
-**A binding.** Nothing ties a Parquet to a bundle — no digest, no manifest entry. `catalogue.py`
-records this drift having already bitten the suite once. Under this design it becomes a whole-suite
-geometry failure that reads as an engine bug, and nothing structurally prevents a runner
-regenerating the "source" from the bundle, restoring the tautology. A source digest in
-`MANIFEST.json` closes it.
+**A binding.** ⊘ **Specified, not built.** Nothing ties a Parquet to a bundle — no digest, no
+manifest entry. `catalogue.py` records this drift having already bitten the suite once. Under this
+design it is a whole-suite geometry failure that reads as an engine bug, and nothing structurally
+prevents a runner regenerating the "source" from the bundle, restoring the tautology. A source
+digest in `MANIFEST.json` closes it; until it exists the binding is the harness's discipline, and
+`conformance.md` §1 says so where a reader meets the third input.
 
 ### 5.3 Tests, and the rest of the blast radius
 
@@ -215,14 +218,18 @@ for every ID at or above the floor, the same guarantee `tessera_id`'s own column
 
 ## 7. Benchmarks
 
-Residency is the only benefit, and **it cannot currently be measured**: `arms/gather.rs` fixes its
-column axis and gathers through a `ColumnsRef` only, so measuring this against today needs a second
-column source and a build able to emit both shapes; and the bench has no memory-pressure mechanism
-at all — the `cold_*` arms are a token-cache split, not a page-cache one. A residency saving becomes
-latency only under contention.
+Residency is the only benefit, and **it is not measured**. `arms/gather.rs` now reads both halves
+of a position — it takes the whole `SegmentData`, so the `morton.u32` load the real path makes is
+in the measurement rather than missing from it, and its column axis names what it reads (`pos`,
+`pos+id`, `pos+id+priority`). That closes the arm's *fidelity* gap and not the comparison one:
+measuring this shape against the previous one needs a second column source and a build able to emit
+both, and the bench has no memory-pressure mechanism at all — the `cold_*` arms are a token-cache
+split, not a page-cache one. A residency saving becomes latency only under contention, so it would
+not show up here even with both shapes present.
 
-The design rests on arithmetic against Appendix A, and the arithmetic is sound. Building the
-instrument is part of this work, not a follow-up.
+**The saving is therefore arithmetic against Appendix A, not a measurement, and must not be quoted
+as one.** The arithmetic is sound. Note that the arm's own widths did not change: a position is
+8 B/row either way, and what moved is which files it is split across.
 
 Open-time cost — `MortonSlice::load`'s ascending scan — is likewise untimed, and §2.1 spends it as
 an argument.
@@ -237,7 +244,13 @@ an argument.
 - **No fix for `morton.u32`'s absence from Appendix A** (§2.3).
 - ⊘ **Nothing streaming-side is exercisable end to end.** Residual geometry can be carried through
   the WAL and buffer, but there is no flush: buffered rows have no row in `columns.arrow` and
-  `Engine::item` returns `Ok(None)` for them.
+  `Engine::item` returns `Ok(None)` for them. `/control/ingest` accordingly still takes `x`/`y`
+  `f32` — §2.2's noted asymmetry between built and streamed points, unchanged here.
+- **No new precision in any existing corpus.** The generators quantise the way the engine does and
+  emit a residual, but every corpus predating that must be rebuilt to carry one, and the scaled
+  corpora hold 16 bits per axis whatever they are rebuilt from (§2.2). Rebuilding also moves ~25%
+  of points between cells, because the generators previously quantised as `round(t × (2¹⁶ − 1))`
+  where the engine floors at `2¹⁶` — so benchmark figures re-baseline. Inherent, not a choice.
 
 ---
 

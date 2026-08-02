@@ -230,7 +230,7 @@ At 10<sup>9</sup> items the grid gives 0.23 points per cell, so collisions are n
 
 ### 5.3 Hot columns
 
-Per slice, fixed-width columns of **`tessera_id`**, x, y, priority and per-item scalars (Appendix A). Four columns, not five: there is no entity-ID column — that is **I10**'s structural half, since a column the gather can read is a column the gather can emit — and no cluster-node column, which had no reader and would have cost a billion identical sentinels in a per-viewport file (contracts §0.3 deviations 6 and 7). Neither text nor high-dimensional vectors appear here; both live outside the hot path (§8.3). Sparse per-item vocabulary vectors for extractive labelling are stored separately in CSR form.
+Per slice, fixed-width columns of **`tessera_id`**, the position **`residual`**, priority and per-item scalars (Appendix A). No coordinate is stored: a position is the row's Morton cell code in `morton.u32` concatenated with its sub-cell residual here, 32 bits per axis, and the pair is what the wire carries as a single `code` (contracts §3.2). Four columns, not five: there is no entity-ID column — that is **I10**'s structural half, since a column the gather can read is a column the gather can emit — and no cluster-node column, which had no reader and would have cost a billion identical sentinels in a per-viewport file (contracts §0.3 deviations 6 and 7). Neither text nor high-dimensional vectors appear here; both live outside the hot path (§8.3). Sparse per-item vocabulary vectors for extractive labelling are stored separately in CSR form.
 
 ## 6. Access control
 
@@ -917,8 +917,8 @@ At 10<sup>7</sup> items:
 | Dense mask fragment | 1.25 MB |
 | Term index, ~10 postings/item | 200–400 MB |
 | Term index, ~1 posting/item | 20–40 MB |
-| Hot columns (18 B/row) | 180 MB |
-| Coordinates only (2 × float32) | 80 MB |
+| Hot columns (14 B/row) | 140 MB |
+| Position (cell + residual, 2 × uint32) | 80 MB |
 | Permutation `entity_to_row` | 40 MB |
 | Retained auth data (per mask) | ~40 KB |
 | Wire payload, 50 k points *(arithmetic at an assumed k, not a measured payload)* | 0.6 MB |
@@ -931,8 +931,8 @@ At 10<sup>9</sup> items:
 | Dense mask | 125 MB | 2.0 MB |
 | Term index, ~10 postings/item | ~20 GB | ~310 MB |
 | Term index, ~1 posting/item | ~2 GB | ~31 MB |
-| Hot columns | 18 GB | 281 MB |
-| Coordinates only | 8 GB | 125 MB |
+| Hot columns | 14 GB | 219 MB |
+| Position (cell + residual) | 8 GB | 125 MB |
 | Permutation `entity_to_row` | 4 GB | 62.5 MB |
 | Source embeddings, if served | ~3 TB | separate store |
 
@@ -940,9 +940,11 @@ Neither table carries a row for a tile table or for candidate lists. Neither str
 
 **Four columns, not five** *(r21)*. Contracts §2.6 r6 removes `node_id` (no reader before Phase 3 — the build wrote a billion identical sentinels into a per-viewport file) and replaces `entity_id` with the width-neutral `tessera_id`: 22 B/row → 18 B/row. The external-ID extents, which earlier revisions did not count because they were assumed cold, were in fact mapped and linearly scanned at open; r6 makes them a per-extent lazily-opened sidecar and they leave the residency table, at the cost of one extent joining it after the first drill-down.
 
+**The hot-column row counts `columns.arrow` alone, and a position is only half in it.** A point's position is the 32-bit cell code in `morton.u32` plus a 32-bit residual in `columns.arrow` (§5.3), so `columns.arrow` holds `tessera_id`, `residual` and `priority` — 14 B/row — while the position still costs 8 B/row across the two files, which is why the *Position* row does not halve alongside the *Hot columns* row. `morton.u32` appears in neither table though it is mapped and searched on every request: 4 GB at 10⁹, untabulated here and not fixed by the change that made it worth naming.
+
 **One direction only** *(r20; mechanism updated at r21)*. Earlier revisions listed "permutation arrays, both directions". Contracts §2.6 stores only `entity_to_row: u32 × bound`; the row→entity direction is **derived by inverting the `tessera_id` column** of `columns.arrow` *(r21; at r20 that column held the entity ID directly)* — either way it is not a second stored array. Counting it twice inflated the residency figure by 4 GB at 10<sup>9</sup>.
 
-**The wire figure is an assumption, not a measurement.** 0.6 MB at 50 k points is 12 B/point arithmetic against an assumed mark budget, not an observed Arrow IPC payload, and it remains one. The measurement that has since reported is at the operating point rather than at that budget: at 10⁹ with *k* ≥ 500 a viewport returns a mean of 4,381 points in a mean response of **79 KB** — ~18 B/point, matching the hot-column width — which is the evidence behind §13.2's finding that the payload is what does *not* break with the corpus. Scaling this row to a calibrated mark budget still wants measuring at that budget, together with transfer and client decode time.
+**The wire figure is an assumption, not a measurement.** 0.6 MB at 50 k points is 12 B/point arithmetic against an assumed mark budget, not an observed Arrow IPC payload, and it remains one. The measurement that has since reported is at the operating point rather than at that budget: at 10⁹ with *k* ≥ 500 a viewport returns a mean of 4,381 points in a mean response of **79 KB** — ~18 B/point, which no longer matches the hot-column width now that a position is a single `code` beside `tessera_id` (16 B/point on the wire, 14 B/row in `columns.arrow`) — which is the evidence behind §13.2's finding that the payload is what does *not* break with the corpus. Scaling this row to a calibrated mark budget still wants measuring at that budget, together with transfer and client decode time.
 
 **The per-viewport scanned column widens 4×** *(r22)*. §7.2's implemented comparator reads the full `tessera_id` (8 B/row) rather than the `priority` prefix (2 B/row), so the column a viewport scans under direct evaluation goes from **2 GB to 8 GB at 10⁹**. The `priority` column is written and unread at query time. This is the price of not building the prefix-scan-then-fall-through path — deliberate, since the obviously-correct construction is preferred to the fast one, and reversible under §7.2's own `w ≈ log₂(V_max/k)` trigger. Any residency table that lists `priority` as the per-viewport scanned structure should read `tessera_id` instead.
 

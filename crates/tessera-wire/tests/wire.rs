@@ -1,7 +1,7 @@
 //! `tessera-wire`'s handle tables and Arrow IPC payloads (I10 — the trust boundary between
 //! entity space and the wire).
 
-use arrow::array::{Array, Float32Array, UInt64Array};
+use arrow::array::{Array, UInt64Array};
 use arrow::datatypes::DataType;
 use arrow::ipc::reader::StreamReader;
 use tessera_types::{EntityId, Handle};
@@ -50,8 +50,7 @@ fn viewport_payload_round_trips_through_arrow_ipc() {
     let visible = [10u64, 5];
     let matched = [10u64, 5];
     let tessera_ids = [0u64, 1, 2];
-    let xs = [1.0f32, 2.0, 3.0];
-    let ys = [4.0f32, 5.0, 6.0];
+    let codes = [1u64, 2, 3];
     let counts = [70u64, 80, 90];
     let scalars = [("count", ScalarColumn::U64(&counts))];
 
@@ -65,8 +64,7 @@ fn viewport_payload_round_trips_through_arrow_ipc() {
         matched: &matched,
         served: &served,
         points_tessera_ids: &tessera_ids,
-        xs: &xs,
-        ys: &ys,
+        codes: &codes,
         scalars: &scalars,
         sub_cells: None,
     });
@@ -112,9 +110,8 @@ fn viewport_payload_round_trips_through_arrow_ipc() {
     {
         let schema = points_reader.schema();
         assert_eq!(schema.field(0).name(), "tessera_id");
-        assert_eq!(schema.field(1).name(), "x");
-        assert_eq!(schema.field(2).name(), "y");
-        assert_eq!(schema.field(3).name(), "count");
+        assert_eq!(schema.field(1).name(), "code");
+        assert_eq!(schema.field(2).name(), "count");
     }
     let points_batch = points_reader.next().unwrap().unwrap();
     assert_eq!(points_batch.num_rows(), 3);
@@ -131,23 +128,14 @@ fn viewport_payload_round_trips_through_arrow_ipc() {
         points_batch
             .column(1)
             .as_any()
-            .downcast_ref::<Float32Array>()
+            .downcast_ref::<UInt64Array>()
             .unwrap()
             .values(),
-        &xs
+        &codes
     );
     assert_eq!(
         points_batch
             .column(2)
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .unwrap()
-            .values(),
-        &ys
-    );
-    assert_eq!(
-        points_batch
-            .column(3)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap()
@@ -172,8 +160,7 @@ fn payload_bytes_never_contain_a_raw_entity_id_encoding() {
         .iter()
         .map(|&raw| table.handle_for(EntityId::new(raw)).raw() as u64)
         .collect();
-    let xs = vec![1.0f32; handles.len()];
-    let ys = vec![2.0f32; handles.len()];
+    let codes = vec![1u64; handles.len()];
 
     let one_tile = [0u64];
     let n = [handles.len() as u64];
@@ -183,8 +170,7 @@ fn payload_bytes_never_contain_a_raw_entity_id_encoding() {
         matched: &n,
         served: &n,
         points_tessera_ids: &handles,
-        xs: &xs,
-        ys: &ys,
+        codes: &codes,
         scalars: &[],
         sub_cells: None,
     });
@@ -204,8 +190,7 @@ fn payload_bytes_never_contain_a_raw_entity_id_encoding() {
 #[test]
 fn the_points_batch_identity_column_is_tessera_id() {
     let tessera_ids = [10u64, 20, 30];
-    let xs = [1.0f32, 2.0, 3.0];
-    let ys = [4.0f32, 5.0, 6.0];
+    let codes = [1u64, 2, 3];
 
     let one_tile = [0u64];
     let n = [tessera_ids.len() as u64];
@@ -215,8 +200,7 @@ fn the_points_batch_identity_column_is_tessera_id() {
         matched: &n,
         served: &n,
         points_tessera_ids: &tessera_ids,
-        xs: &xs,
-        ys: &ys,
+        codes: &codes,
         scalars: &[],
         sub_cells: None,
     });
@@ -267,8 +251,7 @@ fn a_pre_underlay_reader_still_decodes_a_payload_carrying_sub_cells() {
     let matched = [9u64];
     let served = [2u64];
     let tessera_ids = [11u64, 22];
-    let xs = [1.0f32, 2.0];
-    let ys = [3.0f32, 4.0];
+    let codes = [1u64, 2];
     let cells = [100u64, 101, 102];
     let counts = [5u64, 3, 1];
 
@@ -278,8 +261,7 @@ fn a_pre_underlay_reader_still_decodes_a_payload_carrying_sub_cells() {
         matched: &matched,
         served: &served,
         points_tessera_ids: &tessera_ids,
-        xs: &xs,
-        ys: &ys,
+        codes: &codes,
         scalars: &[],
         sub_cells: Some((&cells, &counts)),
     });
@@ -313,8 +295,7 @@ fn an_unrequested_underlay_adds_no_bytes_at_all() {
     let matched = [9u64];
     let served = [2u64];
     let tessera_ids = [11u64, 22];
-    let xs = [1.0f32, 2.0];
-    let ys = [3.0f32, 4.0];
+    let codes = [1u64, 2];
 
     let cols = |sub_cells| ViewportColumns {
         tile: &tile,
@@ -322,8 +303,7 @@ fn an_unrequested_underlay_adds_no_bytes_at_all() {
         matched: &matched,
         served: &served,
         points_tessera_ids: &tessera_ids,
-        xs: &xs,
-        ys: &ys,
+        codes: &codes,
         scalars: &[],
         sub_cells,
     };
@@ -350,8 +330,7 @@ fn the_sub_cell_stream_decodes_as_cell_and_count() {
     let matched = [9u64];
     let served = [1u64];
     let tessera_ids = [11u64];
-    let xs = [1.0f32];
-    let ys = [3.0f32];
+    let codes = [1u64];
     let cells = [100u64, 101];
     let counts = [5u64, 3];
 
@@ -361,8 +340,7 @@ fn the_sub_cell_stream_decodes_as_cell_and_count() {
         matched: &matched,
         served: &served,
         points_tessera_ids: &tessera_ids,
-        xs: &xs,
-        ys: &ys,
+        codes: &codes,
         scalars: &[],
         sub_cells: Some((&cells, &counts)),
     });

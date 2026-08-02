@@ -25,7 +25,6 @@ pub mod observer;
 mod pipeline;
 pub(crate) mod spill;
 
-use crate::input::dequantise32;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -447,17 +446,14 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         let tessera_id = args.identity_key.forward(args.shard_id, entity_id)?;
         tiler_items.push(TilerItem {
             tessera_id,
-            // Interim, matching the streaming pipeline: the tiler and the stored columns are
-            // still `f32` coordinates. `sort_batch` re-quantises these to get the code, which is
-            // exact because `dequantise32` inverts `fixed32` well within a cell.
-            x: dequantise32(item.qx, args.extent.x_min, args.extent.x_max),
-            y: dequantise32(item.qy, args.extent.y_min, args.extent.y_max),
+            qx: item.qx,
+            qy: item.qy,
             scalars: Vec::new(),
         });
     }
 
     // ---- 7. tiler and segment ---------------------------------------------------------
-    let codes = sort_batch(&mut tiler_items, &mut entity_ids, &args.extent);
+    let codes = sort_batch(&mut tiler_items, &mut entity_ids);
     write_segment(&segment_dir, &tiler_items, &codes, &[])
         .map_err(|e| BuildError::io(&segment_dir, e))?;
     fsync_file(&segment_dir.join("columns.arrow"))?;

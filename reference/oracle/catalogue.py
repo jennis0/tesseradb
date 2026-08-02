@@ -538,6 +538,15 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     }
 
 
+def catalogue_points_path(work_dir: Path | None = None) -> Path:
+    """The points Parquet [`build_catalogue_bundle`] built from — the oracle's source geometry.
+
+    Exposed because the oracle now recomputes geometry from the build's *input* rather than from
+    `columns.arrow`, and the catalogue is the one corpus whose input this module owns.
+    """
+    return (DEFAULT_WORK_DIR if work_dir is None else work_dir) / POINTS_NAME
+
+
 def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int]]:
     """Synthesise the corpus and build it; return `(bundle_root, fx_keys)`.
 
@@ -709,10 +718,10 @@ def verify(bundle: Bundle) -> VerificationReport:
 def _tiles_of(bundle: Bundle, entities: set[int], depth: int) -> set[int]:
     """The depth-`depth` tiles the given entities' rows fall in, recomputed from geometry."""
     seg = bundle.segment(SLICE_ID)
+    codes = bundle.row_morton_codes(SLICE_ID)
     shift = 32 - 2 * depth
     out: set[int] = set()
     for row in range(seg.row_count):
         if int(seg.entity_id[row]) in entities:
-            code = morton.morton_of(float(seg.x[row]), float(seg.y[row]), bundle.extent)
-            out.add(code >> shift)
+            out.add(codes[row] >> shift)
     return out

@@ -62,7 +62,7 @@ narrower pass required.
 **Why no narrower (4-byte) scan is run against the `tessera_id` column, and why that is not a
 weaker test than the old `handle` design.** The old `handle` column was a plain sequential `u32`
 counter — a 4-byte-aligned scan against it was exact signal, not noise (see the retained
-reasoning below for `x`/`y`). `tessera_id` is different in kind: it is a keyed permutation output,
+reasoning below for `code`). `tessera_id` is different in kind: it is a keyed permutation output,
 essentially uniform over `2^64`, and a 4-byte-aligned scan would inspect each 32-bit half of that
 uniform value *on its own* — a quantity with no special relationship to the entity-id space at
 all. Against this fixture's 150,000-entity target-id set, the *expected number of coincidental
@@ -80,7 +80,7 @@ at whatever width is safe for its own shape.** Retiring `handle`'s 4-byte pass t
 reduce coverage of the one bug shape that mattered (raw id zero-extended into the id column) — the
 8-byte aligned scan already owns it — and avoids reintroducing exactly the chance-collision flake
 this suite's own history (the code review this file's original docstring cites) fought hard to
-eliminate for `x`/`y`.
+eliminate for the geometry column.
 
 **Residual gap, stated honestly (mirrors the original file's "Residual gap" section for `x`/`y`,
 now updated for the same underlying reason).** A bug that put a raw entity id in *only* the high
@@ -100,12 +100,17 @@ this module moved off the Phase 0 corpus, which is why the check now runs here. 
 without revisiting this paragraph). The `tessera_id` column
 remains the one place I10 is actually at risk on the wire, and it gets the width that matters most.
 
-**Why `x`/`y` keep exactly the pre-r6 scan shape (8-byte scan across all three columns, no 4-byte
-pass over the floats).** Unaffected by this revision — repeated here rather than assumed: a
-`float32`'s raw 4-byte bit pattern reinterpreted as an integer is adversarial noise relative to a
-small, dense target-id set (the same "order of tens of chance collisions" arithmetic as above), and
-there is no plausible bug shape that encodes an entity id *as a coordinate's bit pattern` — `x`/`y`
-are always genuine floats, never a reinterpreted integer end to end.
+**Why `code` keeps the stride the `x`/`y` pair had, not the width it now has.** The geometry
+column is one `uint64` position (contracts §3.2), where it used to be two `float32` lanes. The
+sweep still runs at **stride 4** over it, which is a superset of its own aligned windows: the extra
+half-offset windows are the only thing that sees an entity id straddling the high half of one code
+and the low half of the next, which is the smuggling shape the two float lanes made visible. What
+*did* change is that the aligned case now matters too. A `float32` pair made "an entity id written
+where geometry belongs" implausible — a coordinate is never a reinterpreted integer end to end — but
+a `u64` position column and a `u64` identifier are the same shape, so a build writing a
+`tessera_id` into `code` is now an ordinary bug. Floor-filtering catches it for every id at or
+above the floor, the same guarantee `tessera_id`'s own column carries; both plants are in
+`test_every_scan_mechanism_catches_a_planted_entity_id`.
 
 **Why the scan targets the points batch's decoded column *value buffers*, not the raw framed bytes
 wholesale.** Unaffected by this revision: Arrow's IPC framing (buffer offset/length tables,
@@ -113,7 +118,7 @@ alignment padding, continuation markers) is full of small, unremarkable integers
 *lengths* especially — which land in exactly the same numeric neighbourhood as this fixture's
 entity-id space. A generic sliding-byte-window scan over the whole framed payload matches those
 constantly (verified empirically while writing the original version of this test); the scan is
-restricted to the `tessera_id`/`x`/`y` columns' actual decoded value buffers, the only place the
+restricted to the `tessera_id`/`code` columns' actual decoded value buffers, the only place the
 wire format could ever legitimately carry an entity id, an identity key, or an external id.
 
 **`SAFE_ID_FLOOR`, re-derived rather than inherited (brief step 1.2).** The constant survives, but
@@ -140,19 +145,16 @@ its job changes completely, because its old job no longer exists.
   happen. The `tessera_id`-column scan below therefore runs against the **full, unfiltered**
   admitted/denied sets — no floor applied — which is *strictly stronger* coverage than the pre-r6
   test had for its equivalent column (that test could only ever check ids `>= SAFE_ID_FLOOR`).
-- *What still needs a floor, and why, precisely — including a genuine surprise found while
-  building this test:* `x`/`y` are **not** exempt the way `tessera_id` is, and this is not merely
-  inherited caution — it was caught empirically while writing this revision. A perfectly ordinary
-  `x == 0.0` (or `y == 0.0`) coordinate's 4 raw bytes are all zero, and the 8-byte window spanning
-  it and its neighbour is therefore `0` whenever that neighbour is also small/zero-ish — which
-  numerically equals entity id **0**, a real, always-present member of a dense `0..N` id space.
-  Unfiltered, this fires on essentially every run (it did, immediately, the first time this test
-  was run against the real fixture). `x`/`y`'s windows are therefore still checked against the
-  **floor-filtered** target set, exactly as the pre-r6 design did, for a related but distinct
-  reason: not because a float bit pattern is "adversarial noise" against a dense id space in
-  general (that was the original, still-valid reasoning against a 4-byte pass), but because the
-  *specific* value `0.0` is common, legitimate, and numerically indistinguishable from entity id 0
-  once reduced to raw bytes. The log's **binary** scan keeps the same floor for an independent
+- *What still needs a floor, and why, precisely:* `code` is **not** exempt the way `tessera_id`
+  is. Under `x`/`y` this was caught empirically — an ordinary `x == 0.0` has four zero bytes, and
+  the 8-byte window spanning it and a small neighbour is `0`, which numerically equals entity id
+  **0**, a real and always-present member of a dense `0..N` id space; unfiltered it fired on
+  essentially every run. A single `uint64` position does not remove that: a point at the extent
+  origin quantises to `0` on both axes and therefore has `code == 0` exactly. The same value, the
+  same collision, reached by a shorter route — so `code`'s windows are still checked against the
+  **floor-filtered** target set. The reasoning is the one the pre-r6 design settled on: not that a
+  bit pattern is "adversarial noise" against a dense id space in general, but that this *specific*
+  value is common, legitimate, and numerically indistinguishable from entity id 0. The log's **binary** scan keeps the same floor for an independent
   reason: it retains a stride-1 (unstructured-bytes) 4-byte pass — the log is text, not a typed
   column, so no alignment can be assumed, and a stride-1 4-byte scan over `L` bytes of log against
   a target set of size `T` produces an expected `L * T / 2^32` chance hits. `SAFE_ID_FLOOR` bounds
@@ -246,8 +248,8 @@ import pytest
 
 from oracle import catalogue
 from oracle import mask as mask_mod
-from oracle.bundle import Bundle
-from oracle.harness import spawn_server, stop_server
+from oracle.catalogue import catalogue_points_path
+from oracle.harness import open_bundle_with_source, spawn_server, stop_server
 from oracle.wire import decode_viewport_with_subcells, split_frames
 
 SLICE = "s0"
@@ -277,8 +279,10 @@ def _le_windows(data: bytes, width: int, *, stride: int = 1) -> set[int]:
     alignment. But for a *column buffer* known to be a native fixed-width array, `stride=1` would
     be actively wrong — it would manufacture byte-straddled values out of two adjacent, harmless
     array elements. Every column scan below uses `stride` equal to that column's own native
-    element width (8 for `tessera_id`, 4 for `x`/`y`), so only offsets that could ever really be a
-    stored value are considered."""
+    element width — 8 for `tessera_id`; 4, deliberately, for `code`, whose own width is 8 but
+    whose half-offset windows are the only ones that see a value straddling two adjacent positions
+    (`_points_value_buffer_windows`). So only offsets that could carry a stored value, or a value
+    smuggled across two of them, are considered."""
     n = len(data)
     if n < width:
         return set()
@@ -303,26 +307,33 @@ def _decimal_windows(data: bytes, floor: int) -> set[int]:
 
 
 def _points_value_buffer_windows(points_bytes: bytes) -> tuple[set[int], set[int]]:
-    """Returns `(tessera_id_windows, xy_windows)`: every 8-byte-aligned window over the points
+    """Returns `(tessera_id_windows, code_windows)`: every 8-byte-aligned window over the points
     batch's decoded `tessera_id` column value buffer, and separately every 8-byte window over the
-    `x`/`y` columns' value buffers — deliberately not the raw framed Arrow IPC bytes wholesale
+    `code` column's value buffer — deliberately not the raw framed Arrow IPC bytes wholesale
     (module doc: framing is full of small, unremarkable buffer-length integers), and deliberately
-    never a narrower-than-8-byte pass over `tessera_id` (module doc's chance-collision arithmetic)
-    nor a 4-byte pass over `x`/`y` (unaffected pre-r6 reasoning, restated in the module doc).
+    never a narrower-than-8-byte pass over `tessera_id` (module doc's chance-collision arithmetic).
 
     `tessera_id` is scanned at its own native stride (8 — one window per stored value, aligned,
-    never byte-straddled). `x`/`y` are scanned at stride 4 (their own native element width),
-    giving an 8-byte window spanning two adjacent float lanes, exactly as the pre-r6 design did —
-    unaffected by this revision. The two results are kept **separate**, not merged into one set:
-    `tessera_id`'s windows are safe to compare against the full, unfiltered target-id set (module
-    doc's `SAFE_ID_FLOOR` section); `x`/`y`'s are not, because a genuine `0.0` coordinate produces
-    an all-zero 8-byte window that numerically equals entity id 0 — see the inline comment below.
+    never byte-straddled). `code` — the 64-bit position that replaced the `x`/`y` `f32` pair — is
+    scanned at **stride 4**, which is a superset of its own aligned windows and additionally sees
+    a value straddling two adjacent codes' halves. That straddle is the same smuggling shape the
+    pre-r6 sweep of two 4-byte float lanes existed to catch, so widening the column did not retire
+    the case; it is why the stride did not follow the width.
+
+    The two results are kept **separate**, not merged into one set: `tessera_id`'s windows are safe
+    to compare against the full, unfiltered target-id set (module doc's `SAFE_ID_FLOOR` section);
+    `code`'s are not, because a point at the extent origin has `code == 0`, which numerically
+    equals entity id 0 — the same floor-filtering reasoning a genuine `0.0` coordinate needed, for
+    the same reason. **One thing genuinely changed**: a build writing a `tessera_id` into the
+    `code` column is now a plausible bug shape, which two float columns made implausible.
+    Floor-filtering catches it for every id at or above the floor — the same guarantee
+    `tessera_id`'s own column carries.
     """
     tessera_windows: set[int] = set()
-    xy_windows: set[int] = set()
+    code_windows: set[int] = set()
     with ipc.open_stream(io.BytesIO(points_bytes)) as reader:
         for batch in reader:
-            for name, width in (("tessera_id", 8), ("x", 4), ("y", 4)):
+            for name, width in (("tessera_id", 8), ("code", 8)):
                 col = batch.column(name)
                 # Arrow buffers are padded to an alignment boundary past the last real element
                 # (Arrow's own spec, independent of anything this suite controls) — trimming to
@@ -338,17 +349,18 @@ def _points_value_buffer_windows(points_bytes: bytes) -> tuple[set[int], set[int
                 if name == "tessera_id":
                     tessera_windows |= _le_windows(trimmed, 8, stride=8)
                 else:
-                    # `x`/`y` at native stride 4 (an 8-byte window spans two adjacent float
-                    # lanes) — kept separate from `tessera_id`'s windows below, because a
-                    # genuine `x == 0.0`/`y == 0.0` (an ordinary, common coordinate value, not a
-                    # bug) produces an 8-byte all-zero window that numerically equals entity id
-                    # 0. That is exactly the "floor exists to keep small legitimate values out of
-                    # the target set" problem the module doc describes for the log/text scans,
-                    # just arriving via a different route (a real float bit pattern rather than
-                    # log noise) — so `x`/`y` windows are checked against the FLOOR-FILTERED
-                    # target set, same as the log/decimal scans, not the full one.
-                    xy_windows |= _le_windows(trimmed, 8, stride=4)
-    return tessera_windows, xy_windows
+                    # `code` at stride 4, not at its own width: the extra half-offset windows are
+                    # what see a value straddling two adjacent codes. Kept separate from
+                    # `tessera_id`'s windows below, because a point at the extent origin has
+                    # `code == 0` — an ordinary position, not a bug — whose 8-byte window
+                    # numerically equals entity id 0. That is exactly the "floor exists to keep
+                    # small legitimate values out of the target set" problem the module doc
+                    # describes for the log/text scans, just arriving via a different route (a
+                    # real position rather than log noise) — so `code` windows are checked
+                    # against the FLOOR-FILTERED target set, same as the log/decimal scans, not
+                    # the full one.
+                    code_windows |= _le_windows(trimmed, 8, stride=4)
+    return tessera_windows, code_windows
 
 
 def _points_stream_length(points_and_beyond: bytes) -> int:
@@ -376,9 +388,9 @@ def _subcell_value_buffer_windows(subcell_bytes: bytes) -> set[int]:
     entity-id neighbourhood the module doc's `SAFE_ID_FLOOR` reasoning was built for.
 
     Both columns are `uint64`, so a window is a single element rather than a straddle; they are
-    returned together and compared against the FLOOR-FILTERED target set, for the same reason `x`/`y`
-    are — a genuine `count` of 0 or a `cell` prefix of 0 is an all-zero window that numerically
-    equals entity id 0.
+    returned together and compared against the FLOOR-FILTERED target set, for the same reason
+    `code` is — a genuine `count` of 0 or a `cell` prefix of 0 is an all-zero window that
+    numerically equals entity id 0.
     """
     windows: set[int] = set()
     if not subcell_bytes:
@@ -427,20 +439,18 @@ def test_the_catalogue_bundles_identity_column_agrees_with_its_key(catalogue_bun
     catalogue_bundle.verify_identity_cross_check(SLICE)
 
 
-def _points_stream(tessera_ids: list[int], xs: list[float], ys: list[float]) -> bytes:
-    """A points batch in the wire's own schema (contracts §2.6), built by the harness."""
+def _points_stream(tessera_ids: list[int], codes: list[int]) -> bytes:
+    """A points batch in the wire's own schema (contracts §3.2), built by the harness."""
     schema = pa.schema(
         [
             pa.field("tessera_id", pa.uint64()),
-            pa.field("x", pa.float32()),
-            pa.field("y", pa.float32()),
+            pa.field("code", pa.uint64()),
         ]
     )
     batch = pa.record_batch(
         [
             pa.array(tessera_ids, type=pa.uint64()),
-            pa.array(np.array(xs, dtype=np.float32)),
-            pa.array(np.array(ys, dtype=np.float32)),
+            pa.array(codes, type=pa.uint64()),
         ],
         schema=schema,
     )
@@ -459,11 +469,6 @@ def _subcell_stream(cells: list[int], counts: list[int]) -> bytes:
     with ipc.new_stream(sink, schema) as writer:
         writer.write_batch(batch)
     return sink.getvalue()
-
-
-def _f32_from_u32(value: int) -> float:
-    """The `float32` whose raw little-endian bytes are `value`'s."""
-    return float(np.frombuffer(value.to_bytes(4, "little"), dtype=np.float32)[0])
 
 
 def test_every_scan_mechanism_catches_a_planted_entity_id():
@@ -509,35 +514,37 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     # 1. The `tessera_id` column, at the column's own 8-byte stride. This is the bug shape the
     #    module doc names: a server minting `tessera_id = entity_id as u64` instead of applying the
     #    keyed permutation, so the raw id sits zero-extended in the identity lane.
-    tid_w, _xy = _points_value_buffer_windows(_points_stream([planted], [1.0], [2.0]))
+    tid_w, _code = _points_value_buffer_windows(_points_stream([planted], [0x0102_0304_0506_0708]))
     assert tid_w & targets, "the tessera_id column sweep did not catch a raw entity id in it"
-    tid_clean, _ = _points_value_buffer_windows(_points_stream(clean_ids, [1.0, 2.0], [3.0, 4.0]))
+    tid_clean, _ = _points_value_buffer_windows(
+        _points_stream(clean_ids, [0x0102_0304_0506_0708, 0x0807_0605_0403_0201])
+    )
     assert not (tid_clean & targets), "the tessera_id column sweep flagged a clean batch"
 
-    # 2. The `x`/`y` columns, whose 8-byte window spans two adjacent 4-byte lanes — so the plant is
-    #    the id's two halves in consecutive rows, which is what a leak smuggled through a
-    #    coordinate buffer would look like.
+    # 2. The `code` column. Two plants, because the column carries two distinct bug shapes.
     #
-    #    **The halves sit at lanes 1 and 2, not 0 and 1, and that is the whole point of this case.**
-    #    A plant at lane 0 is caught by any stride dividing 8, so it does not pin the stride it
-    #    exists to justify: changing the sweep from `stride=4` to `stride=8` deletes precisely the
-    #    odd-offset straddling window the module doc calls the reason for scanning x/y at native
-    #    element width, and a lane-0 plant goes on passing. Measured — that sabotage passed before
-    #    the halves moved. Straddling lanes 1|2 can only be seen by a window starting at byte 4.
-    #
-    #    Planted into `x` **and** into `y` in separate calls, because dropping `y` from the sweep
-    #    entirely also passed while only `x` carried a plant.
-    lo = _f32_from_u32(planted & 0xFFFF_FFFF)
-    hi = _f32_from_u32(planted >> 32)
-    for column in ("x", "y"):
-        xs = [0.0, lo, hi] if column == "x" else [0.0, 0.0, 0.0]
-        ys = [0.0, lo, hi] if column == "y" else [0.0, 0.0, 0.0]
-        _tid, xy_w = _points_value_buffer_windows(_points_stream([1, 2, 3], xs, ys))
-        assert xy_w & targets, (
-            f"the x/y column sweep did not catch an entity id straddling two lanes of `{column}`"
-        )
-    clean_xy = _points_value_buffer_windows(_points_stream([1, 2, 3], [1.0, 2.0, 3.0], [4.0, 5.0, 6.0]))[1]
-    assert not (clean_xy & targets), "the x/y column sweep flagged a clean batch"
+    #    2a. **Aligned**: a whole entity id written into one `code` lane. This is the shape the
+    #        float columns made implausible and a `u64` position column makes plausible — a build
+    #        putting an identifier where a position belongs. Caught by any stride dividing 8.
+    lane_w = _points_value_buffer_windows(_points_stream([1], [planted]))[1]
+    assert lane_w & targets, "the code column sweep did not catch a raw entity id in one lane"
+
+    #    2b. **Straddling**: the id's two halves in the high half of one code and the low half of
+    #        the next, which is what a leak smuggled through a position buffer looks like. This is
+    #        the case that pins the stride: it can only be seen by a window starting at byte 4, so
+    #        changing the sweep from `stride=4` to `stride=8` deletes precisely this and leaves
+    #        2a passing. The same sabotage was measured against the pre-r6 `x`/`y` lanes.
+    lo = planted & 0xFFFF_FFFF
+    hi = planted >> 32
+    straddle_w = _points_value_buffer_windows(_points_stream([1, 2], [lo << 32, hi]))[1]
+    assert straddle_w & targets, (
+        "the code column sweep did not catch an entity id straddling two adjacent codes"
+    )
+
+    clean_code = _points_value_buffer_windows(
+        _points_stream([1, 2, 3], [1 << 40, 2 << 40, 3 << 40])
+    )[1]
+    assert not (clean_code & targets), "the code column sweep flagged a clean batch"
 
     # 3. The §3.3 underlay's appended sub-cell stream.
     sub_w = _subcell_value_buffer_windows(_subcell_stream([planted], [7]))
@@ -593,7 +600,9 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     byte_scan_server, catalogue_bundle_root: Path
 ):
     server, log_path = byte_scan_server
-    oracle_bundle = Bundle(catalogue_bundle_root)
+    oracle_bundle = open_bundle_with_source(
+        catalogue_bundle_root, catalogue_points_path()
+    )
     assert oracle_bundle.identity_key is not None, "fixture must be a post-r6 bundle"
 
     # The grant set is **named, not sliced**. A "first half of the dictionary" grant admits and
@@ -618,12 +627,12 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     denied = all_entities - admitted
 
     # Unfiltered target set — used ONLY for the tessera_id column's own scan (module doc: no
-    # floor needed there; x/y and the log/item text scans below use the floor-filtered set).
+    # floor needed there; `code` and the log/item text scans below use the floor-filtered set).
     target_ids = admitted | denied
     assert admitted, "fixture/grant choice must admit >= 1 entity for this test to mean anything"
     assert denied, "fixture/grant choice must deny >= 1 entity for this test to mean anything"
 
-    # Floor-filtered target set — used for x/y's windows, the log (binary + decimal) and the
+    # Floor-filtered target set — used for `code`'s windows, the log (binary + decimal) and the
     # /v1/items decimal scan (module doc).
     admitted_high = {e for e in admitted if e >= SAFE_ID_FLOOR}
     denied_high = {e for e in denied if e >= SAFE_ID_FLOOR}
@@ -640,7 +649,7 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     identity_key_raw = bytes.fromhex(identity_key_hex)
 
     tessera_id_windows: set[int] = set()
-    xy_windows: set[int] = set()
+    code_windows: set[int] = set()
     sampled_ids: set[int] = set()
     all_raw_responses: list[bytes] = []
     bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
@@ -677,13 +686,13 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
         # Scope decision (module doc): the tile batch (visible/matched counts) is deliberately
         # excluded from the scan — those are I2-legitimate aggregates, not a surface I10 governs.
         # Only the points batch's decoded column *value buffers* are scanned.
-        tid_w, xy_w = _points_value_buffer_windows(points_bytes)
+        tid_w, code_w = _points_value_buffer_windows(points_bytes)
         tessera_id_windows |= tid_w
-        xy_windows |= xy_w
+        code_windows |= code_w
         sampled_ids.update(_decode_tessera_ids(points_bytes))
     # Used for checks (identity key, external ids) that need to look at the whole points batch,
     # not just the entity-id sweep's column-specific split above.
-    all_points_windows = tessera_id_windows | xy_windows
+    all_points_windows = tessera_id_windows | code_windows
 
     # The identity key must not appear ANYWHERE, sub-cell stream included — it is a 128-bit random
     # value, so there is no chance-collision hazard in widening the haystack for it.
@@ -708,18 +717,19 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
 
     # --- I10: no entity id, at 8-byte-aligned width, anywhere in the points batch's buffers -----
     # `tessera_id`'s own windows are checked against the FULL, unfiltered target set (module doc:
-    # negligible chance-collision risk for a uniform 64-bit column). `x`/`y`'s windows are checked
-    # against the floor-filtered set only, because a genuine `0.0` coordinate produces an all-zero
-    # window that numerically equals entity id 0 (module doc, `_points_value_buffer_windows`).
+    # negligible chance-collision risk for a uniform 64-bit column). `code`'s windows are checked
+    # against the floor-filtered set only, because a point at the extent origin has `code == 0`,
+    # which numerically equals entity id 0 (module doc, `_points_value_buffer_windows`).
     leaked_tid = tessera_id_windows & target_ids
     assert not leaked_tid, (
         f"found {len(leaked_tid)} entity id(s) encoded as an 8-byte-aligned LE integer in the "
         f"tessera_id column of a viewport points batch: {sorted(leaked_tid)[:20]}"
     )
-    leaked_xy = xy_windows & target_ids_high
-    assert not leaked_xy, (
-        f"found {len(leaked_xy)} entity id(s) encoded as an 8-byte LE integer spanning the x/y "
-        f"columns of a viewport points batch: {sorted(leaked_xy)[:20]}"
+    leaked_code = code_windows & target_ids_high
+    assert not leaked_code, (
+        f"found {len(leaked_code)} entity id(s) encoded as an 8-byte LE integer in — or spanning "
+        f"two adjacent lanes of — the code column of a viewport points batch: "
+        f"{sorted(leaked_code)[:20]}"
     )
 
     # --- I10: the §3.3 underlay's appended sub-cell stream, which was previously unscanned -------

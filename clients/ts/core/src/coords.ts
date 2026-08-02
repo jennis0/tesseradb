@@ -96,15 +96,24 @@ export function dataToWorldXY(x: number, y: number, q: Quantisation): [number, n
 }
 
 /**
- * In-place data→world conversion of an interleaved x,y buffer. One pass, no allocation — this runs
- * once per tile response and the buffer is handed straight to a deck.gl binary attribute.
+ * Cell→world conversion of an interleaved x,y buffer, narrowing to the `Float32Array` a deck.gl
+ * binary attribute takes. One pass, one allocation per tile response.
+ *
+ * **No quantisation extent, and that is the point.** `decodeViewport` returns cell space, which is
+ * the grid's own units — the same units this world is a scaling of — so the conversion is one
+ * constant factor per axis and there is no extent for it to disagree with the server about. The
+ * scale is uniform because cell space is square; a rectangular data extent is already accounted
+ * for by the quantisation that produced the cells.
+ *
+ * This is where the `f64` positions narrow to `f32`, and therefore where precision is actually
+ * spent: below roughly a 2^-8 fraction of a world unit the mantissa runs out. Recovering it means
+ * deck.gl's `fp64` emulation — a `position64Low` attribute carrying `p - Math.fround(p)` — which
+ * is a layer-side change, not a wire one.
  */
-export function positionsToWorld(positions: Float32Array, q: Quantisation): Float32Array {
-  const sx = WORLD_SIZE / (q.xMax - q.xMin);
-  const sy = WORLD_SIZE / (q.yMax - q.yMin);
-  for (let i = 0; i < positions.length; i += 2) {
-    positions[i] = (positions[i]! - q.xMin) * sx;
-    positions[i + 1] = (positions[i + 1]! - q.yMin) * sy;
+export function positionsToWorld(positions: Float64Array): Float32Array {
+  const out = new Float32Array(positions.length);
+  for (let i = 0; i < positions.length; i++) {
+    out[i] = positions[i]! / CELLS_PER_WORLD_UNIT;
   }
-  return positions;
+  return out;
 }

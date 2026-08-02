@@ -6,12 +6,13 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float32Array, StringArray, UInt16Array, UInt64Array};
+use arrow::array::{ArrayRef, Float32Array, StringArray, UInt16Array, UInt32Array, UInt64Array};
 use arrow::buffer::{Buffer, ScalarBuffer};
 use arrow::datatypes::{ArrowNativeType, DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 
+use tessera_spatial::split32;
 use tessera_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
 use tessera_types::{EntityId, TesseraId};
 
@@ -54,14 +55,19 @@ pub fn write_segment(
     Ok(())
 }
 
-/// The four fixed, non-nullable fields of `columns.arrow` (contracts §2.6 r6), in column
+/// The three fixed, non-nullable fields of `columns.arrow` (contracts §2.6 r6), in column
 /// order. One definition, so the three writers below cannot drift apart in name, type or
 /// nullability — the reader (`read::validate_schema`) checks all three per column.
+///
+/// `residual` is the *low* half of the point's 64-bit interleaved position; the high half is
+/// the cell code in `morton.u32`, and concatenating them recovers the whole. It replaces the
+/// `x`/`y` `f32` pair, which is why this table is three columns and 14 bytes per row rather
+/// than four and 18. Nothing reads a coordinate off a segment: what is stored is the position
+/// in the grid's own units, at 32 bits per axis rather than an `f32`'s 24-bit mantissa.
 fn fixed_fields() -> Vec<Field> {
     vec![
         Field::new("tessera_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
+        Field::new("residual", DataType::UInt32, false),
         Field::new("priority", DataType::UInt16, false),
     ]
 }
@@ -98,8 +104,12 @@ fn write_columns_arrow(
     let tessera_id: ArrayRef = Arc::new(UInt64Array::from_iter_values(
         items.iter().map(|i| i.tessera_id.raw()),
     ));
-    let x: ArrayRef = Arc::new(Float32Array::from_iter_values(items.iter().map(|i| i.x)));
-    let y: ArrayRef = Arc::new(Float32Array::from_iter_values(items.iter().map(|i| i.y)));
+    // The residual is the low half of `split32` — the same call whose high half the tiler
+    // returned as this row's Morton code, so the stored pair is one splitting of one position
+    // rather than two derivations that could disagree.
+    let residual: ArrayRef = Arc::new(UInt32Array::from_iter_values(
+        items.iter().map(|i| split32(i.qx, i.qy).1),
+    ));
     // `priority` is derived here, from the `tessera_id` the item already carries — the one
     // place this column is computed (contracts §2.6 r6, `TesseraId::priority()`); neither the
     // tiler nor `write_columns` below recomputes the shift inline.
@@ -107,7 +117,7 @@ fn write_columns_arrow(
         items.iter().map(|i| i.tessera_id.priority()),
     ));
 
-    let mut columns: Vec<ArrayRef> = vec![tessera_id, x, y, priority];
+    let mut columns: Vec<ArrayRef> = vec![tessera_id, residual, priority];
     for (idx, (name, ty)) in scalar_schema.iter().enumerate() {
         columns.push(build_scalar_column(items, idx, *ty, name)?);
     }
@@ -219,12 +229,12 @@ pub fn write_morton_codes<I: IntoIterator<Item = u32>>(path: &Path, codes: I) ->
     writer.flush()
 }
 
-/// Write `columns.arrow` from columns that are already in row order — the fixed four columns of
+/// Write `columns.arrow` from columns that are already in row order — the fixed three columns of
 /// contracts §2.6, no declared scalars.
 ///
 /// Takes each column **by value** so the `Vec`s become the Arrow buffers with no copy. This
 /// record batch is the largest single structure the batch build materialises (at 10^9 rows,
-/// 8+4+4+2 bytes per row), so a copy here would be another eighteen gigabytes. Produces
+/// 8+4+2 bytes per row), so a copy here would be another fourteen gigabytes. Produces
 /// byte-for-byte what [`write_segment`] writes for the same rows and no scalars.
 ///
 /// `priority` is derived from `tessera_id` via `TesseraId::priority` — the same one place
@@ -235,17 +245,17 @@ pub fn write_morton_codes<I: IntoIterator<Item = u32>>(path: &Path, codes: I) ->
 pub fn write_columns(
     path: &Path,
     tessera_id: Vec<u64>,
-    x: Vec<f32>,
-    y: Vec<f32>,
+    residual: Vec<u32>,
 ) -> io::Result<()> {
     let rows = tessera_id.len();
-    for (name, len) in [("x", x.len()), ("y", y.len())] {
-        if len != rows {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("write_columns: column '{name}' has {len} rows, tessera_id has {rows}"),
-            ));
-        }
+    if residual.len() != rows {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "write_columns: column 'residual' has {} rows, tessera_id has {rows}",
+                residual.len()
+            ),
+        ));
     }
 
     // Delegation, not duplication: `Buffer::from_vec` takes ownership of each `Vec`'s
@@ -256,17 +266,16 @@ pub fn write_columns(
     write_columns_from_parts(
         path,
         Buffer::from_vec(tessera_id),
-        Buffer::from_vec(x),
-        Buffer::from_vec(y),
+        Buffer::from_vec(residual),
         rows,
     )
 }
 
 /// [`write_columns`], but from raw column bytes instead of `Vec`s: `tessera_id` as `rows`
-/// little-endian `u64`s, `x` and `y` as `rows` little-endian `f32`s each, taken **without
+/// little-endian `u64`s and `residual` as `rows` little-endian `u32`s, taken **without
 /// copying** — each `Buffer` *becomes* the record batch's values buffer. This is the batch
-/// build's handover point for file-backed columns: at 3×10⁹ rows the three `Vec`s of
-/// [`write_columns`] are 48 GB of anonymous memory, whereas mmap-backed `Buffer`s
+/// build's handover point for file-backed columns: at 3×10⁹ rows the two `Vec`s of
+/// [`write_columns`] are 36 GB of anonymous memory, whereas mmap-backed `Buffer`s
 /// (`Buffer::from_custom_allocation` over a scratch file) cost address space only.
 ///
 /// `priority` is still derived here, row by row, from the `tessera_id` buffer via
@@ -275,7 +284,7 @@ pub fn write_columns(
 /// only allocation proportional to the input and is bounded, accepted cost.
 ///
 /// **Alignment**: Arrow requires each values buffer to be aligned to its element type —
-/// 8 bytes for `tessera_id`, 4 for `x`/`y` (`ScalarBuffer` refuses less). An mmap is
+/// 8 bytes for `tessera_id`, 4 for `residual` (`ScalarBuffer` refuses less). An mmap is
 /// page-aligned, so a buffer covering a mapping from offset 0 always qualifies; only a caller
 /// slicing a buffer at an offset that is not a multiple of the element size can violate it,
 /// and that (like a buffer shorter than `rows` elements) is rejected here as an
@@ -287,13 +296,11 @@ pub fn write_columns(
 pub fn write_columns_from_parts(
     path: &Path,
     tessera_id: Buffer,
-    x: Buffer,
-    y: Buffer,
+    residual: Buffer,
     rows: usize,
 ) -> io::Result<()> {
     let tessera_id: ScalarBuffer<u64> = typed_column("tessera_id", tessera_id, rows)?;
-    let x: ScalarBuffer<f32> = typed_column("x", x, rows)?;
-    let y: ScalarBuffer<f32> = typed_column("y", y, rows)?;
+    let residual: ScalarBuffer<u32> = typed_column("residual", residual, rows)?;
 
     let tessera_id = UInt64Array::new(tessera_id, None);
     let priority: Vec<u16> = tessera_id
@@ -305,8 +312,7 @@ pub fn write_columns_from_parts(
     let schema = Arc::new(Schema::new(fixed_fields()));
     let columns: Vec<ArrayRef> = vec![
         Arc::new(tessera_id),
-        Arc::new(Float32Array::new(x, None)),
-        Arc::new(Float32Array::new(y, None)),
+        Arc::new(UInt32Array::new(residual, None)),
         Arc::new(UInt16Array::from(priority)),
     ];
     let batch = RecordBatch::try_new(schema.clone(), columns)

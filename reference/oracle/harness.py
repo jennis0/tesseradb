@@ -122,6 +122,38 @@ def ensure_cli_built() -> None:
     )
 
 
+
+def open_bundle_with_source(
+    bundle_root: Path, points: Path | str, limit: int | None = None
+) -> "object":
+    """Open `bundle_root` as an oracle [`Bundle`] with its **source geometry attached**.
+
+    This is the escape `conformance.md` §1's layering rule requires, and the only one: the oracle's
+    geometry now comes from the points file the build consumed, and a definitional module may not
+    go looking for it. So a driver — this function — resolves the path and hands it in, exactly as
+    the fixture already hands in the identity key.
+
+    Every driver that opens a bundle for a geometry comparison must come through here rather than
+    calling `Bundle(root)` directly, because a `Bundle` with no source attached refuses to derive
+    a code at all. That refusal is deliberate: the alternative, falling back to the stored column,
+    is the tautology the third input exists to remove, and it would fire silently exactly when a
+    harness forgot to wire the source up.
+
+    `limit` must match the `--limit` the bundle was built with: the corpus is 10⁹ rows and the
+    fixture is a prefix of it, so reading the whole file to check a prefix would exhaust the
+    machine (`read_source_geometry`).
+
+    **Nothing binds `points` to `bundle_root`.** No digest, no manifest entry — see
+    `bundle.SourceGeometry`'s note. Handing in the wrong file is a whole-suite geometry failure
+    that reads like an engine bug.
+    """
+    from .bundle import Bundle, read_source_geometry  # noqa: PLC0415 — avoids an import cycle
+
+    bundle = Bundle(bundle_root)
+    bundle.attach_source_geometry(read_source_geometry(points, bundle.extent, limit))
+    return bundle
+
+
 def ensure_fixture_bundle(
     bundle_root: Path,
     *,

@@ -84,18 +84,19 @@ def _oracle_state(bundle: Bundle, case, depth: int):
 
 
 def _server_view(server, token: str, depth: int, k: int):
-    """One viewport request, decoded into `({tile: (visible, served)}, {tile: [(x, y), ...]})`.
+    """One viewport request, decoded into `({tile: (visible, served)}, {tile: [code, ...]})`.
 
     The points batch is split per tile by the tile batch's own `served` column (contracts r7), not
     by `min(k, visible)`: under §7.2's density rule the per-tile count is `min(cap, max(k_min,
     C_θ))` clamped to visible, which cannot be recomputed from `k` and `visible` alone. That is the
     whole reason `served` is on the wire.
 
-    Per-tile points keep the order they arrived in **and their exact coordinates**. The order is
+    Per-tile points keep the order they arrived in **and their exact positions**. The order is
     part of what is under test (see the module doc), so this must not sort, canonicalise or
-    deduplicate anything; the coordinates are left unrounded because the nesting test recomputes a
-    point's containing tile from them, and a rounded coordinate can — rarely, but not never — fall
-    the other side of a tile edge.
+    deduplicate anything. Positions are 64-bit codes, which removes a hazard the old `(x, y)` pairs
+    carried: the nesting test recomputes a point's containing tile from its position, and a
+    *rounded* coordinate could — rarely, but not never — fall the other side of a tile edge. A
+    tile is now a prefix of the code, so it cannot.
     """
     raw = server.viewport(token, SLICE, depth, FULL_VIEWPORT, k=k)
     tiles, points = decode_viewport(raw)
@@ -105,16 +106,21 @@ def _server_view(server, token: str, depth: int, k: int):
     cursor = 0
     for tile, visible, matched, served in tiles:
         assert visible == matched, "Phase 1 has no filters: matched must equal visible"
-        per_tile[tile] = [(x, y) for _ident, x, y in points[cursor : cursor + served]]
+        per_tile[tile] = [code for _ident, code in points[cursor : cursor + served]]
         counts[tile] = (visible, served)
         cursor += served
     assert cursor == len(points), "the points batch must be exactly consumed by the tile batch"
     return counts, per_tile
 
 
-def _ordered(points) -> list[tuple[float, float]]:
-    """Coordinates rounded for comparison, **order preserved** — the served sequence itself."""
-    return [(round(x, 4), round(y, 4)) for x, y in points]
+def _ordered(points) -> list[int]:
+    """The served sequence itself, **order preserved**.
+
+    A pass-through since positions became integer codes — kept as a named function because the
+    call sites read as a statement about what is and is not canonicalised here, and because its
+    counterpart `_multiset` is the one that discards order.
+    """
+    return list(points)
 
 
 def _multiset(points) -> Counter:
@@ -225,15 +231,14 @@ def test_i7_selection_nests_across_zoom(catalogue_bundle: Bundle, catalogue_dens
     every child tile and asserted the point was drawn *somewhere*, which a bug that drew the item
     into the wrong child passes — and drawing into the wrong child is a tiling bug, exactly the
     class `Bundle.row_morton_codes` recomputes geometry to catch. The containing child is a
-    function of `(x, y)`: quantise, take the Morton code, shift to the child depth. Two lines, and
-    the assertion becomes the property the docstring claims.
+    *prefix* of the point's own position code: take the cell half, shift to the child depth. One
+    line, and the assertion becomes the property the docstring claims.
     """
     if not case.entities:
         pytest.skip("the empty case has nothing to nest")
 
     server = catalogue_density_server
     token = server.authorise(list(case.grants))["token"]
-    extent = catalogue_bundle.extent
     k = 30
 
     checked = 0
@@ -245,13 +250,15 @@ def test_i7_selection_nests_across_zoom(catalogue_bundle: Bundle, catalogue_dens
 
         for tile in parent_counts:
             # Group the parent's marks by the child that contains them, then require that child to
-            # carry at least as many copies of each. Points sharing a rounded coordinate share a
-            # child by construction — the child is a function of the coordinate — so counting per
-            # child is exact rather than approximate.
+            # carry at least as many copies of each. Points sharing a position share a child by
+            # construction — the child is a prefix of the position — so counting per child is
+            # exact.
             wanted: dict[int, Counter] = {}
-            for x, y in parent_points[tile]:
-                child = morton.morton_of(x, y, extent) >> shift
-                wanted.setdefault(child, Counter()).update(_ordered([(x, y)]))
+            for code in parent_points[tile]:
+                # The containing child is a *prefix* of the position, not a requantisation of it:
+                # the cell is the code's high 32 bits, and the tile the top `2·depth` of those.
+                child = (code >> 32) >> shift
+                wanted.setdefault(child, Counter()).update([code])
 
             for child, needed in wanted.items():
                 drawn = _multiset(child_points.get(child, []))

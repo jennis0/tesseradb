@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Array, Float32Array, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
@@ -439,11 +439,12 @@ pub async fn post_item(server: &TestServer, token: &str, tessera_id: u64) -> req
 }
 
 pub type TileRow = (u64, u64, u64);
-pub type PointRow = (u64, f32, f32);
+pub type PointRow = (u64, u64);
 
 /// Decode the framed Arrow payload `tessera_wire::viewport_ipc` builds: a 4-byte LE length, the
 /// tile stream, then the points stream. Returns `(tiles, points)` where each tile is
-/// `(tile, visible, matched)` and each point is `(tessera_id, x, y)`.
+/// `(tile, visible, matched)` and each point is `(tessera_id, code)` — `code` being the point's
+/// 64-bit Morton position (contracts §3.2).
 pub fn decode_viewport(bytes: &[u8]) -> (Vec<TileRow>, Vec<PointRow>) {
     let tile_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let tile_bytes = &bytes[4..4 + tile_len];
@@ -482,18 +483,13 @@ pub fn decode_viewport(bytes: &[u8]) -> (Vec<TileRow>, Vec<PointRow>) {
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
-        let x = batch
+        let code = batch
             .column(1)
             .as_any()
-            .downcast_ref::<Float32Array>()
-            .unwrap();
-        let y = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<Float32Array>()
+            .downcast_ref::<UInt64Array>()
             .unwrap();
         for i in 0..batch.num_rows() {
-            points.push((tessera_id.value(i), x.value(i), y.value(i)));
+            points.push((tessera_id.value(i), code.value(i)));
         }
     }
 

@@ -332,7 +332,10 @@ def test_row_order_is_morton_then_tessera_id_ascending(canonical_key):
 
     # A handful of distinct Morton codes with deliberate repeats, so the tiebreak is
     # exercised -- built from real (x, y) geometry, not by pre-picking morton codes
-    # directly, so this exercises `morton_of` too rather than assuming its output.
+    # directly, so this exercises `morton_of` too rather than assuming its output. The codes
+    # are computed here rather than inside `row_order_from_geometry`, which now takes them:
+    # a source corpus may hold cell indices rather than coordinates, and quantising *those*
+    # against an extent is the importer's own refused mistake.
     def xy_for_cell(cell: int) -> tuple[float, float]:
         frac = (cell + 0.5) / 65536.0
         return frac * 100.0, 0.0
@@ -343,8 +346,6 @@ def test_row_order_is_morton_then_tessera_id_ascending(canonical_key):
         x, y = xy_for_cell(i % 7)
         xs.append(x)
         ys.append(y)
-    x_arr = np.array(xs, dtype=np.float32)
-    y_arr = np.array(ys, dtype=np.float32)
     entity_arr = np.array(entities, dtype=np.uint64)
 
     morton_codes = [morton.morton_of(x, y, extent) for x, y in zip(xs, ys)]
@@ -356,7 +357,7 @@ def test_row_order_is_morton_then_tessera_id_ascending(canonical_key):
         range(len(entities)), key=lambda i: (morton_codes[i], tessera_ids[i])
     )
 
-    got_order = row_order_from_geometry(canonical_key, shard_id, entity_arr, x_arr, y_arr, extent)
+    got_order = row_order_from_geometry(canonical_key, shard_id, entity_arr, morton_codes)
     assert list(got_order) == expected_order
 
     # And re-sorting entirely by tessera_id alone, once morton codes are fixed, agrees with
@@ -375,7 +376,7 @@ def test_row_order_is_morton_then_tessera_id_ascending(canonical_key):
 # S4/S5: `Bundle.derive_row_order`, `Bundle.verify_identity_cross_check` and
 # `Bundle.sidecar_round_trips` were all written and none was ever called against a bundle.
 # The row-order check is the only thing that asserts a *real* bundle's stored order is the
-# contract order `(morton_of(x, y), forward(key, shard, entity))`; the cross-check is cited by
+# contract order `(source-recomputed morton, forward(key, shard, entity))`; the cross-check is cited by
 # name in `conformance/tests/test_byte_scan.py`'s residual-gap argument, which was therefore
 # leaning on a check that never ran. `bundle_root` (conftest) builds the fixture via the CLI if
 # it is absent, so these are as cheap as the rest of this suite after the first run.
@@ -383,9 +384,14 @@ def test_row_order_is_morton_then_tessera_id_ascending(canonical_key):
 
 @pytest.fixture(scope="module")
 def fixture_bundle(bundle_root):
-    from oracle.bundle import Bundle
+    from oracle.harness import (
+        DEFAULT_LIMIT,
+        DEFAULT_POINTS,
+        REPO_ROOT,
+        open_bundle_with_source,
+    )
 
-    return Bundle(bundle_root)
+    return open_bundle_with_source(bundle_root, REPO_ROOT / DEFAULT_POINTS, DEFAULT_LIMIT)
 
 
 def test_fixture_bundle_rows_are_stored_in_morton_then_tessera_id_order(fixture_bundle):

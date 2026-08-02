@@ -46,9 +46,16 @@ def catalogue_bundle_root() -> Path:
 
 @pytest.fixture(scope="session")
 def catalogue_bundle(catalogue_bundle_root: Path):
-    from oracle.bundle import Bundle  # noqa: PLC0415
+    """The catalogue bundle with its source geometry attached.
 
-    return Bundle(catalogue_bundle_root)
+    Attached, not optional: `columns.arrow` stores a residual rather than coordinates, so the
+    oracle's geometry comes from the points file the build consumed and a driver has to supply it
+    (`harness.open_bundle_with_source`).
+    """
+    from oracle.catalogue import catalogue_points_path  # noqa: PLC0415
+    from oracle.harness import open_bundle_with_source  # noqa: PLC0415
+
+    return open_bundle_with_source(catalogue_bundle_root, catalogue_points_path())
 
 
 @pytest.fixture(scope="session")

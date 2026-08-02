@@ -12,7 +12,7 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_spatial::Extent;
+use tessera_spatial::{fixed32, Extent};
 use tessera_store::manifest::{
     CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
     SegmentDescriptor, SegmentsManifest, SliceDescriptor,
@@ -75,15 +75,15 @@ fn build_bundle(root: &Path) {
         for _ in 0..rows {
             items.push(TilerItem {
                 tessera_id: synthetic_tessera_id(items.len() as u64),
-                x: (f64::from(cx) + 0.5) as f32 / 65536.0,
-                y: (f64::from(cy) + 0.5) as f32 / 65536.0,
+                qx: fixed32((f64::from(cx) + 0.5) / 65536.0, 0.0, 1.0),
+                qy: fixed32((f64::from(cy) + 0.5) / 65536.0, 0.0, 1.0),
                 scalars: vec![],
             });
         }
     }
     let n = items.len() as u64;
     let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
-    let codes = sort_batch(&mut items, &mut entity_ids, &extent);
+    let codes = sort_batch(&mut items, &mut entity_ids);
 
     let prefix_dir = root.join("v00000");
     let partition_dir = prefix_dir.join("partitions").join("default");

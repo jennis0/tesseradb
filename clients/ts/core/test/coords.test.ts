@@ -81,10 +81,12 @@ describe('coords', () => {
     expect(request[3]).toBeLessThan(exact[3]);
   });
 
-  it('converts an interleaved buffer in place, pair by pair', () => {
-    const positions = new Float32Array([0, 0, 65536, 65536, 32768, 16384]);
-    const out = positionsToWorld(positions, square);
-    expect(out).toBe(positions); // in place: no allocation per tile
+  it('scales an interleaved cell-space buffer to world space, pair by pair', () => {
+    // Cell space in, world space out: the whole grid maps onto the whole world, and the scale
+    // needs no quantisation extent because both spaces are the grid.
+    const positions = new Float64Array([0, 0, 65536, 65536, 32768, 16384]);
+    const out = positionsToWorld(positions);
+    expect(out).toBeInstanceOf(Float32Array);
     expect([...out]).toEqual([0, 0, WORLD_SIZE, WORLD_SIZE, WORLD_SIZE / 2, WORLD_SIZE / 4]);
   });
 });

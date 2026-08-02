@@ -37,7 +37,7 @@ use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
 use tessera_engine::select::{SelectParams, Selection, Threshold};
 use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_spatial::{tiler::sort_batch, Extent, TilerItem};
+use tessera_spatial::{fixed32, tiler::sort_batch, Extent, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::Permutation;
@@ -188,14 +188,14 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
         let fy = (mix(n ^ 0xABCD) >> 40) as f64 / (1u64 << 24) as f64;
         items.push(TilerItem {
             tessera_id: TesseraId::new(mix(n ^ 0x5EED)),
-            x: (fx * 1023.0) as f32,
-            y: (fy * 1023.0) as f32,
+            qx: fixed32(fx * 1023.0, EXTENT.x_min, EXTENT.x_max),
+            qy: fixed32(fy * 1023.0, EXTENT.y_min, EXTENT.y_max),
             scalars: Vec::new(),
         });
     }
 
     let mut entity_ids: Vec<EntityId> = (0..items.len() as u64).map(EntityId::new).collect();
-    let codes = sort_batch(&mut items, &mut entity_ids, &EXTENT);
+    let codes = sort_batch(&mut items, &mut entity_ids);
     write_segment(temp.path(), &items, &codes, &[]).unwrap();
     let seg = SegmentData {
         seg_id: "seg0".into(),

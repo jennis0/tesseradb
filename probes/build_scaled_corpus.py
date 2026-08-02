@@ -8,6 +8,13 @@ corpora, and a probe selects a scale by filtering `entity_id < limit`:
     250,000        prefix of the real arXiv data (oldest by v1_created)
     2,422,486      the real arXiv data, entire — replica 0, coordinates
                    copied verbatim from the hashed geometry artifact
+                   and re-quantised here. Its Morton codes are NOT the
+                   `morton` column of that artifact: `build_geometry.py`
+                   wrote those from `gx`/`gy`, and this script quantises
+                   the way the engine does (see `quantise32`). Roughly a
+                   quarter of points land in a different cell, so any
+                   corpus built before that must be regenerated and
+                   benchmarks against it re-baselined.
     250,000,000    + transformed replicas
     1,000,000,000  + transformed replicas (the design's target; 0.23
                    points per 2^16 cell per §5.2; u32 row IDs 23% used)
@@ -33,7 +40,8 @@ identical copies give every term N identical posting blocks and every
 tile the same occupancy, so mask and spatial structure both go
 degenerate. Replicas 0-4 pin deliberate edge cases:
 
-  0  identity, real coordinates   — the hashed artifact, unchanged
+  0  identity, real coordinates   — the hashed artifact's coordinates,
+                                    re-quantised here, not its codes
   1  extreme compression          — 2.4M points into a few grid cells:
                                     Morton collisions, hot tiles, the
                                     intra-leaf priority tiebreak at load
@@ -345,8 +353,9 @@ manifest_f.write_text(json.dumps({
     "row_order": "geometry.parquet is sorted by (morton, entity_id); a scale's "
                  "row_id is the running position among rows with entity_id < limit",
     "real_data": {"entity_id_limit": n_base,
-                  "note": "replica 0 uses the hashed geometry artifact's grid "
-                          "coordinates verbatim"},
+                  "note": "replica 0 uses the hashed geometry artifact's coordinates "
+                          "verbatim, re-quantised here; its Morton codes are not that "
+                          "artifact's `morton` column"},
     **pairs_info,
 }, indent=2) + "\n")
 log(f"wrote {manifest_f}")

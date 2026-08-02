@@ -7,7 +7,7 @@
 
 use tessera_types::{EntityId, TesseraId};
 
-use crate::morton::{morton_of, Extent};
+use crate::morton::split32;
 
 /// A declared-scalar value carried alongside the fixed columns (`tessera_id`, `x`, `y`,
 /// `priority`). The three kinds below are the whole set (contracts §2.2).
@@ -30,11 +30,20 @@ pub enum ScalarType {
 /// One item to be placed into a segment: its wire identity, geometry, and any declared
 /// scalars. No `priority` field — it is a prefix of `tessera_id`, and a stored second copy
 /// would be a second source of truth (contracts §2.6 r6, 2026-07-30 fold).
+///
+/// Geometry is **already quantised**: 32-bit fixed point per axis against the build extent
+/// ([`crate::fixed32`]), not the coordinates the source held. The item therefore carries the
+/// position in the one form from which both stored words — the cell code and its sub-cell
+/// residual — fall out by shift and mask ([`crate::split32`]), so the tiler cannot disagree
+/// with the segment writer about which cell a point is in. Coordinates are quantised exactly
+/// once, upstream in the importer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TilerItem {
     pub tessera_id: TesseraId,
-    pub x: f32,
-    pub y: f32,
+    /// 32-bit fixed-point x against the build extent; `qx >> 16` is the cell.
+    pub qx: u32,
+    /// 32-bit fixed-point y against the build extent; `qy >> 16` is the cell.
+    pub qy: u32,
     pub scalars: Vec<ScalarValue>,
 }
 
@@ -52,16 +61,14 @@ pub struct TilerItem {
 /// fixes the grid at 2^16 x 2^16 — a property of the *grid*, not the population, so this width
 /// does not change at 10^10 or 10^11 (contracts §2.5, r5; was a low-aligned `u64`).
 ///
-/// Morton codes are computed from the `f32` `x`/`y` values promoted to `f64` for the
-/// quantisation math (contracts §2.5 defines `cell()` over `f64`), against `extent`.
+/// **No extent, and no quantisation here.** The code is the high half of the item's fixed-point
+/// position ([`split32`]), which the importer already computed against the build extent — so
+/// this function cannot re-quantise, and there is no second place a coordinate could be turned
+/// into a cell under bounds that have drifted from the ones `MANIFEST.json` declares.
 ///
 /// `entity_ids` is permuted identically to `items` (a companion vector, not a sort key) and
 /// must be the same length.
-pub fn sort_batch(
-    items: &mut Vec<TilerItem>,
-    entity_ids: &mut Vec<EntityId>,
-    extent: &Extent,
-) -> Vec<u32> {
+pub fn sort_batch(items: &mut Vec<TilerItem>, entity_ids: &mut Vec<EntityId>) -> Vec<u32> {
     assert_eq!(
         items.len(),
         entity_ids.len(),
@@ -73,7 +80,7 @@ pub fn sort_batch(
     // comparison, and avoids the code and the sorted item order ever disagreeing).
     let mut codes: Vec<u32> = items
         .iter()
-        .map(|item| morton_of(item.x as f64, item.y as f64, extent).raw())
+        .map(|item| split32(item.qx, item.qy).0.raw())
         .collect();
 
     let mut order: Vec<usize> = (0..items.len()).collect();
@@ -102,6 +109,7 @@ pub fn sort_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::morton::{morton_of, Extent};
 
     fn unit_extent() -> Extent {
         Extent {
@@ -112,25 +120,27 @@ mod tests {
         }
     }
 
-    fn item(tessera_id: u64, x: f32, y: f32) -> TilerItem {
+    /// An item at coordinate `(x, y)`, quantised against the unit extent the way the importer
+    /// quantises — the tiler itself never sees a coordinate.
+    fn item(tessera_id: u64, x: f64, y: f64) -> TilerItem {
+        let e = unit_extent();
         TilerItem {
             tessera_id: TesseraId::new(tessera_id),
-            x,
-            y,
+            qx: crate::morton::fixed32(x, e.x_min, e.x_max),
+            qy: crate::morton::fixed32(y, e.y_min, e.y_max),
             scalars: vec![],
         }
     }
 
     #[test]
     fn sorts_by_morton_then_tessera_id() {
-        let e = unit_extent();
         // Two items at the identical coordinate (same Morton code) plus a third sharing the
         // leading 16 bits with one of them: must order purely by ascending `tessera_id` — the
         // tiebreak is contract (contracts §2.6 r6). Without a Morton collision this test would
         // prove nothing about the order that just changed.
         let mut items = vec![item(9, 0.5, 0.5), item(2, 0.5, 0.5), item(1, 0.5, 0.5)];
         let mut entity_ids = vec![EntityId::new(90), EntityId::new(20), EntityId::new(10)];
-        let codes = sort_batch(&mut items, &mut entity_ids, &e);
+        let codes = sort_batch(&mut items, &mut entity_ids);
         assert_eq!(
             items.iter().map(|i| i.tessera_id.raw()).collect::<Vec<_>>(),
             vec![1, 2, 9]
@@ -170,26 +180,37 @@ mod tests {
 
     #[test]
     fn returned_codes_are_non_decreasing() {
-        let e = unit_extent();
         let mut items = vec![item(1, 0.9, 0.9), item(2, 0.1, 0.1), item(3, 0.5, 0.5)];
         let mut entity_ids = vec![EntityId::new(1), EntityId::new(2), EntityId::new(3)];
-        let codes = sort_batch(&mut items, &mut entity_ids, &e);
+        let codes = sort_batch(&mut items, &mut entity_ids);
         assert!(codes.windows(2).all(|w| w[0] <= w[1]));
     }
 
+    /// The code the tiler returns for a point is the code `morton_of` gives for the coordinate
+    /// that point came from. The tiler now derives it by shifting the importer's fixed point
+    /// rather than by quantising, so this is the join between the two routes — if they ever
+    /// disagreed, `morton.u32` would stop describing where the points actually are.
     #[test]
-    fn returned_codes_are_u32_and_match_morton_of_on_the_sorted_items() {
+    fn returned_codes_are_u32_and_match_morton_of_on_the_source_coordinates() {
         let e = unit_extent();
-        let mut items = vec![item(1, 0.75, 0.75), item(2, 0.10, 0.10)];
+        let coords = [(1u64, 0.75, 0.75), (2, 0.10, 0.10)];
+        let mut items: Vec<TilerItem> = coords
+            .iter()
+            .map(|&(id, x, y)| item(id, x, y))
+            .collect();
         let mut entity_ids = vec![EntityId::new(1), EntityId::new(2)];
-        let codes: Vec<u32> = sort_batch(&mut items, &mut entity_ids, &e);
+        let codes: Vec<u32> = sort_batch(&mut items, &mut entity_ids);
         assert_eq!(codes.len(), 2);
         assert!(codes[0] <= codes[1]);
         for (i, it) in items.iter().enumerate() {
+            let &(_, x, y) = coords
+                .iter()
+                .find(|&&(id, _, _)| id == it.tessera_id.raw())
+                .expect("every sorted item came from a source coordinate");
             assert_eq!(
                 codes[i],
-                morton_of(it.x as f64, it.y as f64, &e).raw(),
-                "row {i}: returned code must equal morton_of() on the sorted item"
+                morton_of(x, y, &e).raw(),
+                "row {i}: returned code must equal morton_of() on the source coordinate"
             );
         }
     }

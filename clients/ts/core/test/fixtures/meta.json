@@ -5,15 +5,16 @@
   "filter_operands": [],
   "idset": 1,
   "quantisation": {
-    "x_max": 65536,
-    "x_min": 0,
-    "y_max": 65536,
-    "y_min": 0
+    "x_max": 18.44,
+    "x_min": -17.18,
+    "y_max": 23.2,
+    "y_min": -21.13
   },
   "selection": {
     "k_max_marks": 500,
     "k_min": 2,
     "max_k": 5000,
+    "max_tiles_per_request": 262144,
     "max_underlay_offset": 4,
     "theta_target_marks": 16
   },

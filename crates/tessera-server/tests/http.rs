@@ -130,7 +130,7 @@ async fn i_item_404s_identically_for_unknown_and_invisible() {
 
     // Find a tessera_id that is real (session A's own viewport returned it) but invisible to B.
     let mut invisible_to_b = None;
-    for &(tessera_id, _, _) in &points {
+    for &(tessera_id, _) in &points {
         let resp_b = post_item(&server, token_b, tessera_id).await;
         if resp_b.status() == 404 {
             invisible_to_b = Some(tessera_id);

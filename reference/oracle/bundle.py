@@ -62,11 +62,187 @@ class Segment:
     """
 
     entity_id: np.ndarray  # uint64, row order (stored pre-r6, DERIVED post-r6)
-    x: np.ndarray  # float32, row order
-    y: np.ndarray  # float32, row order
+    residual: np.ndarray  # uint32, row order (the position's low half, from columns.arrow)
     morton: np.ndarray  # uint32, row order (raw sorted codes from morton.u32)
     row_count: int
     tessera_id: np.ndarray | None = None  # uint64, row order (stored post-r6; absent pre-r6)
+
+    def stored_code(self, row: int) -> int:
+        """Row `row`'s position as the bundle stores it: the two words concatenated.
+
+        **Stored, therefore not independent.** This is what the engine would have to agree with
+        itself about, so it is the right thing for a *wire* comparison (does the served point
+        carry the position the segment holds?) and the wrong thing for a *geometry* comparison
+        (is that position where the source said the item is?). The second question is what
+        `Bundle.row_position_codes` answers, and it does not read this.
+        """
+        return (int(self.morton[row]) << 32) | int(self.residual[row])
+
+
+@dataclass
+class SourceGeometry:
+    """The points file the build consumed, read back as 32-bit fixed point per axis.
+
+    **The oracle's third input, and the reason it exists.** `columns.arrow` no longer holds
+    coordinates: a position is the cell code in `morton.u32` plus a residual, and both were
+    written by the build. Recomputing "the" Morton code from those would be
+    `code == interleave(deinterleave(code))` — a tautology that a build emitting a wrong column
+    and then sorting consistently by its own wrong values passes. So the geometry the differential
+    checks against comes from **upstream of the build**, which is strictly stronger than the
+    `(x, y)` columns it replaces.
+
+    `conformance.md` §1 states the oracle's inputs and treats the count as load-bearing;
+    `reference/tests/test_oracle_layering.py` keeps the definitional modules from reaching a
+    fixture builder. Neither is circumvented here: this class *reads a path it is given*. It never
+    finds one, and `Bundle` never opens one on its own — a driver calls
+    `Bundle.attach_source_geometry`, exactly as the fixture already hands in the identity key.
+
+    Nothing yet binds a points file to a bundle — no digest, no manifest entry — so a runner can
+    hand in the wrong file, and `catalogue.py` records that drift having already bitten this suite
+    once. Under this design it surfaces as a whole-suite geometry failure that reads like an
+    engine bug. A source digest in `MANIFEST.json` would close it; that is not built (see the
+    hot-row-geometry design §5.2), and until it is, the binding is the harness's discipline.
+    """
+
+    qx: dict[int, int]
+    qy: dict[int, int]
+
+    def position(self, source_id: int) -> tuple[int, int]:
+        if source_id not in self.qx:
+            raise KeyError(
+                f"source geometry has no row for source id {source_id}: the points file handed "
+                "to the oracle is not the one this bundle was built from"
+            )
+        return self.qx[source_id], self.qy[source_id]
+
+
+def _row_groups_worth_reading(reader, limit: int | None) -> list[int]:
+    """Row groups that may hold a row with `entity_id < limit`, by their own statistics.
+
+    Mirrors the importer's own row-group filter (`tessera_build::input`), and for the same
+    reason: the fixture corpus is 10⁹ rows and the fixture bundle a 250,000-row prefix, so a
+    reader that visits every group to find a prefix is not slow, it is unusable. Returns **all**
+    groups when there is no limit or no usable statistic — the filter may never drop a group it
+    cannot prove is excluded.
+    """
+    metadata = reader.metadata
+    if limit is None:
+        return list(range(metadata.num_row_groups))
+    column = reader.schema_arrow.names.index("entity_id")
+    keep = []
+    for i in range(metadata.num_row_groups):
+        stats = metadata.row_group(i).column(column).statistics
+        if stats is None or not stats.has_min_max or stats.min < limit:
+            keep.append(i)
+    return keep
+
+
+def read_source_geometry(
+    path: Path | str,
+    extent: tuple[float, float, float, float],
+    limit: int | None = None,
+) -> SourceGeometry:
+    """Read a points Parquet into [`SourceGeometry`], mirroring the importer's three schemas.
+
+    Independently derived from `contracts` §2.5 and the importer's documented branches, not from
+    the Rust — which is the whole point of an oracle. The branches, checked in this order:
+
+    1. `entity_id` + `x` + `y` — coordinates quantised against `extent` by `fixed32`, the one
+       place quantisation happens.
+    2. `entity_id` + `morton` + `residual` — already in this form; the two words are reassembled
+       rather than converted. Full 32 bits per axis.
+    3. `entity_id` + `morton` — 16 bits per axis, widened with a zero residual, because that is
+       genuinely all the file says about the point.
+
+    Both Morton branches require the identity extent `[0, 65536)`, where `cell(v) = v`; under any
+    other extent the cell indices would be re-quantised as though they were coordinates in that
+    extent's units. The importer errors there and so does this.
+
+    `limit` mirrors `tessera build --limit`: keep source rows with `entity_id < limit`. **Passing
+    it is not an optimisation** — see [`_row_groups_worth_reading`].
+
+    The per-row arithmetic is vectorised in numpy rather than written as the loop the rest of this
+    oracle prefers. That is a deliberate exception to "definitions, not algorithms": the quantities
+    are the same quantities, and a Python loop over even the 250,000-row prefix — let alone the
+    groups a coarser statistic fails to exclude — costs minutes per test session. The definitions
+    themselves (`fixed32`, the interleave) stay scalar in `morton.py`; what is vectorised here is
+    only the extraction.
+    """
+    import pyarrow.parquet as pq  # local: keeps the module's import surface to what it always uses
+
+    reader = pq.ParquetFile(path)
+    names = set(reader.schema_arrow.names)
+    if "entity_id" not in names:
+        raise ValueError(f"{path}: points file has no `entity_id` column")
+
+    x_min, x_max, y_min, y_max = extent
+    if "x" in names and "y" in names:
+        columns = ["entity_id", "x", "y"]
+        morton_branch = False
+    elif "morton" in names:
+        if extent != (0.0, 65536.0, 0.0, 65536.0):
+            raise ValueError(
+                f"{path}: a Morton points file is only meaningful under the identity extent "
+                f"[0, 65536), where cell(v) = v; this bundle declares {extent}"
+            )
+        columns = ["entity_id", "morton"] + (["residual"] if "residual" in names else [])
+        morton_branch = True
+    else:
+        raise ValueError(f"{path}: points file has neither `x`/`y` nor `morton`")
+
+    qx: dict[int, int] = {}
+    qy: dict[int, int] = {}
+    for group in _row_groups_worth_reading(reader, limit):
+        table = reader.read_row_group(group, columns=columns)
+        source_ids = table.column("entity_id").to_numpy(zero_copy_only=False).astype(np.uint64)
+        if limit is not None:
+            keep = source_ids < np.uint64(limit)
+            if not keep.any():
+                continue
+        else:
+            keep = slice(None)
+        source_ids = source_ids[keep]
+
+        if morton_branch:
+            hi = table.column("morton").to_numpy(zero_copy_only=False).astype(np.uint64)[keep]
+            lo = (
+                table.column("residual").to_numpy(zero_copy_only=False).astype(np.uint64)[keep]
+                if "residual" in columns
+                else np.zeros(len(source_ids), dtype=np.uint64)
+            )
+            codes = (hi << np.uint64(32)) | lo
+            axis_x = _compact64(codes)
+            axis_y = _compact64(codes >> np.uint64(1))
+        else:
+            xs = table.column("x").to_numpy(zero_copy_only=False).astype(np.float64)[keep]
+            ys = table.column("y").to_numpy(zero_copy_only=False).astype(np.float64)[keep]
+            axis_x = _fixed32_vec(xs, x_min, x_max)
+            axis_y = _fixed32_vec(ys, y_min, y_max)
+
+        qx.update(zip(source_ids.tolist(), axis_x.tolist()))
+        qy.update(zip(source_ids.tolist(), axis_y.tolist()))
+
+    return SourceGeometry(qx=qx, qy=qy)
+
+
+def _fixed32_vec(v: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
+    """[`morton.fixed32`] over an array. Pinned against the scalar definition by
+    `test_differential`'s byte-for-byte position check, which compares what this produces against
+    what the engine stored, so a divergence in the clamp or the rounding fails there."""
+    scaled = np.floor((v - vmin) / (vmax - vmin) * 4294967296.0)
+    return np.clip(scaled, 0.0, 4294967295.0).astype(np.uint32).astype(np.uint64)
+
+
+def _compact64(code: np.ndarray) -> np.ndarray:
+    """Gather the even bits of a 64-bit interleave into a 32-bit axis — the array form of
+    `morton.deinterleave64`'s per-axis half."""
+    x = code & np.uint64(0x5555555555555555)
+    x = (x | (x >> np.uint64(1))) & np.uint64(0x3333333333333333)
+    x = (x | (x >> np.uint64(2))) & np.uint64(0x0F0F0F0F0F0F0F0F)
+    x = (x | (x >> np.uint64(4))) & np.uint64(0x00FF00FF00FF00FF)
+    x = (x | (x >> np.uint64(8))) & np.uint64(0x0000FFFF0000FFFF)
+    x = (x | (x >> np.uint64(16))) & np.uint64(0x00000000FFFFFFFF)
+    return x
 
 
 @dataclass
@@ -166,6 +342,13 @@ class Bundle:
 
         self._pairs_path_cache: Path | None = None
 
+        # The source geometry a driver hands in (`attach_source_geometry`). `None` until then,
+        # and every geometry re-derivation refuses rather than falling back to the stored
+        # columns: a fallback is exactly the tautology this input exists to prevent, and one
+        # that only fires when the harness forgot to wire it up would be invisible.
+        self.source_geometry: SourceGeometry | None = None
+        self._position_cache: dict[str, list[int]] = {}
+
     def _verify_files(self, files: dict) -> None:
         for rel, info in files.items():
             path = self.prefix_dir / rel
@@ -198,26 +381,76 @@ class Bundle:
             self._segment_cache[slice_id] = _read_segment(seg_dir, perm_path)
         return self._segment_cache[slice_id]
 
-    def row_morton_codes(self, slice_id: str) -> list[int]:
-        """Every row's Morton code, **recomputed from `(x, y)`** — never read from `morton.u32`.
+    def attach_source_geometry(self, source: SourceGeometry) -> None:
+        """Hand the oracle the points file this bundle was built from (see [`SourceGeometry`]).
 
-        The §7.2 oracle needs to know which tile a row is in. Reading the stored column would make
-        the oracle and the engine share a build artefact on the one path where they are supposed to
-        be independent: a build that emitted a wrong Morton column and then sorted and served
-        consistently by its own wrong values would agree with itself and pass. Recomputing means
-        that build fails the differential instead.
+        A method rather than a constructor argument because `conformance.md` §1's layering rule is
+        that the definitional modules never *find* an input; a driver supplies it. Attaching a
+        second, different source after codes have been derived would silently mix two geometries,
+        so the derived caches are dropped here.
+        """
+        self.source_geometry = source
+        self._morton_cache.clear()
+        self._position_cache.clear()
+
+    def _require_source(self) -> SourceGeometry:
+        if self.source_geometry is None:
+            raise ValueError(
+                "this Bundle has no source geometry attached: `columns.arrow` stores a residual, "
+                "not coordinates, so a geometry re-derivation would only be reading the build's "
+                "own answer back. Call `attach_source_geometry(read_source_geometry(points, "
+                "bundle.extent))` from the driver."
+            )
+        return self.source_geometry
+
+    def row_source_ids(self, slice_id: str) -> list[int]:
+        """Every row's **source-corpus** id — the join the source geometry is keyed by.
+
+        Three hops, none of which reads a geometry column: row → `entity_id` (`permutation.bin`,
+        the only key-independent bridge between the two spaces), → `external_id`
+        (`entities/external-ids-<k>.arrow`, 8 bytes little-endian of the source id, which is the
+        build's stated convention), → source id. That makes every geometry differential depend on
+        the external-ID sidecar, which contracts §0.4 does not yet list in the Phase-1 conformance
+        burden and must; a bundle built without `--mint-external-ids` cannot be checked this way
+        at all, which is why the harness's fixture passes the flag.
+        """
+        if slice_id not in self._position_cache:
+            self._position_cache[slice_id] = [
+                int.from_bytes(self.external_id_of(entity_id), "little")
+                for entity_id in self.row_entity_ids(slice_id)
+            ]
+        return self._position_cache[slice_id]
+
+    def row_position_codes(self, slice_id: str) -> list[int]:
+        """Every row's full 64-bit position code, **recomputed from the source geometry**.
+
+        The §7.2 oracle needs to know which tile a row is in, and the wire comparison needs the
+        exact position. Both come from here, and neither reads `morton.u32` or `residual`: the
+        oracle and the engine are supposed to be independent on precisely this path, so a build
+        that emitted a wrong column and then sorted and served consistently by its own wrong
+        values must fail the differential rather than agree with itself.
 
         Computed once per slice and held, because it is a pure function of geometry and does not
         vary with the mask — unlike anything in `viewport.Selection`, which is rebuilt per mask on
         purpose.
         """
         if slice_id not in self._morton_cache:
-            seg = self.segment(slice_id)
-            self._morton_cache[slice_id] = [
-                morton_mod.morton_of(float(seg.x[i]), float(seg.y[i]), self.extent)
-                for i in range(seg.row_count)
-            ]
+            source = self._require_source()
+            codes = []
+            for source_id in self.row_source_ids(slice_id):
+                qx, qy = source.position(source_id)
+                cell_code, residual = morton_mod.split32(qx, qy)
+                codes.append((cell_code << 32) | residual)
+            self._morton_cache[slice_id] = codes
         return self._morton_cache[slice_id]
+
+    def row_morton_codes(self, slice_id: str) -> list[int]:
+        """Every row's 32-bit Morton **cell** code: the high half of [`row_position_codes`].
+
+        Same independence, and the same single derivation — a cell is a prefix of a position, so
+        deriving it separately would only create a way for the two to disagree.
+        """
+        return [code >> 32 for code in self.row_position_codes(slice_id)]
 
     def row_entity_ids(self, slice_id: str) -> list[int]:
         """Every row's entity id as a plain Python list — the permutation-derived, key-independent
@@ -264,7 +497,7 @@ class Bundle:
         return identity_mod.forward(self.identity_key, self.identity_shard_id, entity_id)
 
     def derive_row_order(self, slice_id: str) -> np.ndarray:
-        """Re-derive row order from `(morton_of(x, y, extent), forward(identity.key,
+        """Re-derive row order from `(source-recomputed morton, forward(identity.key,
         identity.shard_id, entity_id))` ascending, with no further tiebreak (the
         priority-as-identity-prefix fold; `tessera_id` is already unique so nothing else is
         needed to break ties). Row order is therefore key-dependent, where it previously
@@ -272,7 +505,8 @@ class Bundle:
         `Bundle.__init__` already parses.
 
         Delegates to `row_order_from_geometry`, the module-level, key-dependent
-        re-derivation -- computed from `(x, y)` and the permutation-derived `entity_id`,
+        re-derivation -- computed from the *source* geometry and the permutation-derived
+        `entity_id`,
         **never from the stored `morton`/`tessera_id` columns** (finding 5): a build that
         emitted a wrong `tessera_id` column and sorted consistently by its own wrong
         values must fail this check, not pass it. `test_identity.py` calls the same
@@ -286,7 +520,10 @@ class Bundle:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
         seg = self.segment(slice_id)
         return row_order_from_geometry(
-            self.identity_key, self.identity_shard_id, seg.entity_id, seg.x, seg.y, self.extent
+            self.identity_key,
+            self.identity_shard_id,
+            seg.entity_id,
+            self.row_morton_codes(slice_id),
         )
 
     def permutation(self, slice_id: str) -> Permutation:
@@ -440,15 +677,18 @@ def row_order_from_geometry(
     key: identity_mod.IdentityKey,
     shard_id: int,
     entity_ids: np.ndarray,
-    x: np.ndarray,
-    y: np.ndarray,
-    extent: tuple[float, float, float, float],
+    morton_codes: list[int] | np.ndarray,
 ) -> np.ndarray:
     """The single, module-level row-order re-derivation (finding 5, task-5 review): sort
-    ascending by `(morton_of(x, y, extent), forward(key, shard_id, entity_id))`, computed
-    from geometry and the permutation-derived entity id -- never by reading the stored
-    `morton`/`tessera_id` columns, so a build that emits a wrong column but sorts
-    consistently by its own wrong values does not pass this check.
+    ascending by `(morton, forward(key, shard_id, entity_id))`, with the codes coming from
+    `Bundle.row_morton_codes` -- i.e. from the source geometry and the permutation-derived
+    entity id, never from the stored `morton`/`tessera_id` columns, so a build that emits a
+    wrong column but sorts consistently by its own wrong values does not pass this check.
+
+    It takes codes rather than coordinates because the source is no longer required to hold
+    coordinates: a Morton-sourced corpus holds cell indices, and quantising *those* against an
+    extent would be the importer's own refused mistake. The one derivation of a code lives in
+    `Bundle.row_position_codes`; this function orders by it.
 
     `Bundle.derive_row_order` and `test_identity.py`'s
     `test_row_order_is_morton_then_tessera_id_ascending` both call this function rather
@@ -461,12 +701,15 @@ def row_order_from_geometry(
     has a real call site too.
     """
     n = len(entity_ids)
+    if len(morton_codes) != n:
+        raise ValueError(
+            f"row_order_from_geometry: {n} entity ids but {len(morton_codes)} morton codes"
+        )
     mortons = np.empty(n, dtype=np.uint64)
     tesseras = np.empty(n, dtype=np.uint64)
     for i in range(n):
-        morton_code = morton_mod.morton_of(float(x[i]), float(y[i]), extent)
         morton_code, tessera_id = identity_mod.row_sort_key(
-            key, shard_id, int(entity_ids[i]), morton_code
+            key, shard_id, int(entity_ids[i]), int(morton_codes[i])
         )
         mortons[i] = morton_code
         tesseras[i] = tessera_id
@@ -523,12 +766,11 @@ def _read_segment(seg_dir: Path, perm_path: Path | None = None) -> Segment:
 
     with ipc.open_file(columns_path) as reader:
         table = reader.read_all()
-    x = table.column("x").to_numpy(zero_copy_only=False).astype(np.float32)
-    y = table.column("y").to_numpy(zero_copy_only=False).astype(np.float32)
+    residual = table.column("residual").to_numpy(zero_copy_only=False).astype(np.uint32)
 
     morton_bytes = morton_path.read_bytes()
     morton = np.frombuffer(morton_bytes, dtype="<u4")
-    row_count = len(x)
+    row_count = len(residual)
     if len(morton) != row_count:
         raise ValueError(
             f"{seg_dir}: columns.arrow has {row_count} rows but morton.u32 has {len(morton)}"
@@ -566,8 +808,7 @@ def _read_segment(seg_dir: Path, perm_path: Path | None = None) -> Segment:
 
     return Segment(
         entity_id=entity_id,
-        x=x,
-        y=y,
+        residual=residual,
         morton=morton,
         row_count=row_count,
         tessera_id=tessera_id,

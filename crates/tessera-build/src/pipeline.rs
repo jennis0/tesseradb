@@ -133,7 +133,7 @@ use tessera_store::write::{write_columns, write_morton_codes, write_permutation_
 use tessera_types::{EntityId, IdentityKey, SMALL_TERM_THRESHOLD_DEFAULT};
 
 use crate::error::{BuildError, Result};
-use crate::input::{self, dequantise32};
+use crate::input;
 use crate::observer::{BuildObserver, BuildStage, StageTimer};
 use crate::spill;
 use crate::{
@@ -1195,15 +1195,15 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         // this build ever holds, so nothing that can be dropped first is kept alongside it.
         // Indexed parallel gathers — collect preserves row order, so bytes are unchanged; at
         // 10⁹ rows the serial versions are a billion random 4-byte reads each.
-        // Interim: the stored columns are still `f32` coordinates, so the quantised value is
-        // converted back here and only here. The codes above never take this path.
-        let x_row: Vec<f32> = rows
+        // The residual is the low half of the same `split32` whose high half became the row's
+        // Morton code above — one splitting of one fixed-point position, so `columns.arrow` and
+        // `morton.u32` cannot describe different points.
+        let residual_row: Vec<u32> = rows
             .par_iter()
-            .map(|r| dequantise32(x_of_entity[r.entity as usize], args.extent.x_min, args.extent.x_max))
-            .collect();
-        let y_row: Vec<f32> = rows
-            .par_iter()
-            .map(|r| dequantise32(y_of_entity[r.entity as usize], args.extent.y_min, args.extent.y_max))
+            .map(|r| {
+                let entity = r.entity as usize;
+                split32(x_of_entity[entity], y_of_entity[entity]).1
+            })
             .collect();
         drop(x_of_entity);
         drop(y_of_entity);
@@ -1223,7 +1223,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             .collect::<std::result::Result<_, _>>()
             .map_err(BuildError::Identity)?;
         drop(entity_row);
-        write_columns(&columns_path, tessera_row, x_row, y_row)
+        write_columns(&columns_path, tessera_row, residual_row)
             .map_err(|e| BuildError::io(&columns_path, e))?;
     }
     fsync_file(&columns_path)?;

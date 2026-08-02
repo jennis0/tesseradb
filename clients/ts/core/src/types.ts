@@ -47,8 +47,22 @@ export type ViewportResult = {
   tiles: TileCounts[];
   /** Wire identity, u64 — never narrowed to a number. */
   ids: BigUint64Array;
-  /** Interleaved x,y in DATA space, ready for deck.gl once transformed to world space. */
-  positions: Float32Array;
+  /**
+   * Each point's 64-bit Morton position code, exactly as the server sent it. Its high 32 bits are
+   * the point's cell, so `code >> BigInt(32 - 2 * z)` is the depth-`z` tile containing it — hover
+   * bucketing and client-side clustering without a round trip.
+   */
+  codes: BigUint64Array;
+  /**
+   * Interleaved x,y in CELL space — `[0, 65536)` per axis, fractional below the cell — ready for
+   * deck.gl once scaled to world space.
+   *
+   * `Float64Array`, not `Float32Array`: the code carries 32 bits per axis and an `f32` mantissa
+   * holds 24, so narrowing here would discard precision the wire went to some trouble to deliver.
+   * The narrowing happens once, at the GPU attribute (`positionsToWorld`), which is where fp64
+   * emulation would later recover it.
+   */
+  positions: Float64Array;
   scalars: Record<string, unknown[]>;
   subCells: SubCell[] | null;
 };

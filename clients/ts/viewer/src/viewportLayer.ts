@@ -224,7 +224,7 @@ export class ViewportController {
 
       this.store.update((s) => {
         s.result = response.result;
-        s.worldPositions = positionsToWorld(response.result.positions, meta.quantisation);
+        s.worldPositions = positionsToWorld(response.result.positions);
         s.lastTimings = response.timings;
         s.lastBytes = response.bytes;
         s.lastVisibleInView = visible;

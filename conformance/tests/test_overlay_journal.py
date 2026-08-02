@@ -126,7 +126,7 @@ def _oracle_counts(bundle: Bundle, mask: set[int]) -> dict[int, int]:
 
 
 def _engine_view(server, token: str, k: int, depth: int = DEPTH):
-    """`({tile: (visible, served)}, {tile: [(x, y), ...]}, {tile: [tessera_id, ...]})`.
+    """`({tile: (visible, served)}, {tile: [code, ...]}, {tile: [tessera_id, ...]})`.
 
     Points are split per tile by the tile batch's own `served` column and keep their arrival
     order — contracts §2.6 makes ascending `tessera_id` within a tile part of the payload, and
@@ -136,22 +136,28 @@ def _engine_view(server, token: str, k: int, depth: int = DEPTH):
     tiles, points = decode_viewport(raw)
 
     counts: dict[int, tuple[int, int]] = {}
-    per_tile: dict[int, list[tuple[float, float]]] = {}
+    per_tile: dict[int, list[int]] = {}
     per_tile_ids: dict[int, list[int]] = {}
     cursor = 0
     for tile, visible, matched, served in tiles:
         assert visible == matched, "Phase 1 has no filters: matched must equal visible"
         window = points[cursor : cursor + served]
         counts[tile] = (visible, served)
-        per_tile[tile] = [(x, y) for _ident, x, y in window]
-        per_tile_ids[tile] = [ident for ident, _x, _y in window]
+        per_tile[tile] = [code for _ident, code in window]
+        per_tile_ids[tile] = [ident for ident, _code in window]
         cursor += served
     assert cursor == len(points), "the points batch must be exactly consumed by the tile batch"
     return counts, per_tile, per_tile_ids
 
 
-def _round(points) -> list[tuple[float, float]]:
-    return [(round(x, 4), round(y, 4)) for x, y in points]
+def _round(points) -> list[int]:
+    """The served sequence itself.
+
+    A pass-through since a position became a 64-bit integer code: the comparison is exact and
+    there is nothing left to round. Kept as a named function because every call site below reads
+    as a statement that the sequence is compared as it arrived — unsorted, undeduplicated — and
+    because deleting it would touch a dozen assertions that are not what changed."""
+    return list(points)
 
 
 def _compare_served(

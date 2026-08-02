@@ -47,7 +47,7 @@ use arrow::record_batch::RecordBatch;
 /// One named scalar column of declared-scalar values for the points batch.
 ///
 /// Plain data only — no engine or store type. Each variant's slice must be the same length as
-/// `points_tessera_ids`/`xs`/`ys` in the corresponding [`viewport_ipc`] call.
+/// `points_tessera_ids`/`codes` in the corresponding [`viewport_ipc`] call.
 pub enum ScalarColumn<'a> {
     U64(&'a [u64]),
     F32(&'a [f32]),
@@ -70,8 +70,8 @@ pub struct ViewportColumns<'a> {
 
     /// Points batch: one row per served point. All must be the same length.
     pub points_tessera_ids: &'a [u64],
-    pub xs: &'a [f32],
-    pub ys: &'a [f32],
+    /// Each point's 64-bit Morton position code (see [`encode_points_batch`]).
+    pub codes: &'a [u64],
     /// Declared-scalar columns in the schema's declared order, each tagged with its field name.
     pub scalars: &'a [(&'a str, ScalarColumn<'a>)],
 
@@ -95,8 +95,7 @@ pub fn viewport_ipc(cols: &ViewportColumns<'_>) -> Vec<u8> {
     assert_eq!(tiles, cols.served.len(), "tile/served length mismatch");
 
     let points = cols.points_tessera_ids.len();
-    assert_eq!(points, cols.xs.len(), "points/xs length mismatch");
-    assert_eq!(points, cols.ys.len(), "points/ys length mismatch");
+    assert_eq!(points, cols.codes.len(), "points/codes length mismatch");
     // The points batch is a flat concatenation whose only grouping key is `served`; if they
     // disagree, every consumer mis-splits it, so catch it here rather than at the client.
     let served_total: u64 = cols.served.iter().sum();
@@ -117,8 +116,7 @@ pub fn viewport_ipc(cols: &ViewportColumns<'_>) -> Vec<u8> {
     }
 
     let tile_stream = encode_tile_batch(cols.tile, cols.visible, cols.matched, cols.served);
-    let points_stream =
-        encode_points_batch(cols.points_tessera_ids, cols.xs, cols.ys, cols.scalars);
+    let points_stream = encode_points_batch(cols.points_tessera_ids, cols.codes, cols.scalars);
     let subcell_stream = cols
         .sub_cells
         .map(|(cells, counts)| encode_subcell_batch(cells, counts));
@@ -180,16 +178,20 @@ fn encode_subcell_batch(cells: &[u64], counts: &[u64]) -> Vec<u8> {
     write_stream(&schema, &batch)
 }
 
+/// The points batch: one `tessera_id` and one 64-bit position `code` per point.
+///
+/// `code` is the Morton interleave of the point's two 32-bit fixed-point axes against the extent
+/// `/v1/meta` publishes — the same 16 bytes per point the `x`/`y` `f32` pair cost, carrying 32
+/// bits per axis instead of an `f32` mantissa's 24, and letting the client derive the containing
+/// tile at any zoom by a shift rather than by re-quantising (contracts §3.2).
 fn encode_points_batch(
     points_tessera_ids: &[u64],
-    xs: &[f32],
-    ys: &[f32],
+    codes: &[u64],
     scalars: &[(&str, ScalarColumn)],
 ) -> Vec<u8> {
     let mut fields = vec![
         Field::new("tessera_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
+        Field::new("code", DataType::UInt64, false),
     ];
     for (name, col) in scalars {
         let ty = match col {
@@ -204,10 +206,9 @@ fn encode_points_batch(
     let id_col: ArrayRef = Arc::new(UInt64Array::from_iter_values(
         points_tessera_ids.iter().copied(),
     ));
-    let x_col: ArrayRef = Arc::new(Float32Array::from_iter_values(xs.iter().copied()));
-    let y_col: ArrayRef = Arc::new(Float32Array::from_iter_values(ys.iter().copied()));
+    let code_col: ArrayRef = Arc::new(UInt64Array::from_iter_values(codes.iter().copied()));
 
-    let mut columns: Vec<ArrayRef> = vec![id_col, x_col, y_col];
+    let mut columns: Vec<ArrayRef> = vec![id_col, code_col];
     for (_, col) in scalars {
         let array: ArrayRef = match col {
             ScalarColumn::U64(s) => Arc::new(UInt64Array::from_iter_values(s.iter().copied())),

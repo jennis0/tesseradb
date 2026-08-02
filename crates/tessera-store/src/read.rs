@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use arrow::array::{Array, Float32Array, StringArray, UInt16Array, UInt64Array};
+use arrow::array::{Array, Float32Array, StringArray, UInt16Array, UInt32Array, UInt64Array};
 use arrow::buffer::Buffer;
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::ipc::convert::fb_to_schema;
@@ -733,7 +733,7 @@ pub enum ScalarSlice<'a> {
 
 /// A zero-copy, mmap-backed view of `columns.arrow`. Validated once at [`ColumnsRef::load`]:
 /// exactly one record batch, uncompressed, 8-byte-aligned buffers (via
-/// [`FileDecoder::with_require_alignment`]), and the four fixed columns present with the
+/// [`FileDecoder::with_require_alignment`]), and the three fixed columns present with the
 /// expected names and types (contracts §2.6 r6). Every accessor below borrows directly from the
 /// underlying `RecordBatch`'s buffers — no per-call copy.
 #[derive(Debug)]
@@ -742,10 +742,9 @@ pub struct ColumnsRef {
     scalar_index: HashMap<String, usize>,
 }
 
-const FIXED_COLUMNS: [(&str, DataType); 4] = [
+const FIXED_COLUMNS: [(&str, DataType); 3] = [
     ("tessera_id", DataType::UInt64),
-    ("x", DataType::Float32),
-    ("y", DataType::Float32),
+    ("residual", DataType::UInt32),
     ("priority", DataType::UInt16),
 ];
 
@@ -799,16 +798,17 @@ impl ColumnsRef {
         downcast::<UInt64Array>(&self.batch, 0).values()
     }
 
-    pub fn x(&self) -> &[f32] {
-        downcast::<Float32Array>(&self.batch, 1).values()
-    }
-
-    pub fn y(&self) -> &[f32] {
-        downcast::<Float32Array>(&self.batch, 2).values()
+    /// The low half of each row's 64-bit interleaved position. The high half is the row's cell
+    /// code in `morton.u32`, so a whole position is `(morton[i] as u64) << 32 | residual[i]` —
+    /// see `tessera_spatial::split32`, which is what wrote it. No coordinate is stored: this is
+    /// the position in the grid's own units, and turning it back into coordinates needs the
+    /// extent `MANIFEST.json` declares.
+    pub fn residual(&self) -> &[u32] {
+        downcast::<UInt32Array>(&self.batch, 1).values()
     }
 
     pub fn priority(&self) -> &[u16] {
-        downcast::<UInt16Array>(&self.batch, 3).values()
+        downcast::<UInt16Array>(&self.batch, 2).values()
     }
 
     /// A declared-scalar column by name, or `None` if `columns.arrow` has no such column.

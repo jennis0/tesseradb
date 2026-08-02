@@ -26,6 +26,57 @@ def cell(v: float, vmin: float, vmax: float) -> int:
     return int(floored)
 
 
+def fixed32(v: float, vmin: float, vmax: float) -> int:
+    """fixed32(v) = clamp( floor( (v - min) / (max - min) * 2^32 ), 0, 2^32 - 1 ), computed in f64.
+
+    The 32-bit widening of :func:`cell`, and the quantiser the whole cell-plus-residual
+    representation rests on: ``fixed32(v) >> 16 == cell(v)`` exactly, at both clamps. That is what
+    makes a residual the remainder within *the* cell a point is in, rather than a separately
+    rounded quantity that might land in a neighbouring one. Contracts §2.5 pins it as precisely as
+    it pins ``cell``, and this must match the Rust bit for bit — the point-set differential
+    compares integer codes, which admit no tolerance.
+    """
+    scaled = (v - vmin) / (vmax - vmin) * 4294967296.0
+    floored = math.floor(scaled)
+    if floored <= 0.0:
+        return 0
+    if floored >= 0xFFFFFFFF:
+        return 0xFFFFFFFF
+    return int(floored)
+
+
+def split32(qx: int, qy: int) -> tuple[int, int]:
+    """Split a pair of 32-bit fixed-point axes into the stored ``(cell code, residual)``.
+
+    The two words concatenate to the 64-bit interleave of the inputs — ``(cell << 32) | residual``
+    — because interleaving is bit-local, so the high half of the 64-bit form is exactly the 32-bit
+    interleave of the two high halves. This is the layout `columns.arrow` and `morton.u32` hold
+    between them.
+    """
+    cell_code = interleave(qx >> 16, qy >> 16)
+    residual = (_spread(qx & 0xFFFF) | (_spread(qy & 0xFFFF) << 1)) & 0xFFFFFFFF
+    return cell_code, residual
+
+
+def code_of(x: float, y: float, extent: tuple[float, float, float, float]) -> int:
+    """The full 64-bit position code for ``(x, y)`` — what the points batch carries."""
+    x_min, x_max, y_min, y_max = extent
+    qx = fixed32(x, x_min, x_max)
+    qy = fixed32(y, y_min, y_max)
+    cell_code, residual = split32(qx, qy)
+    return (cell_code << 32) | residual
+
+
+def deinterleave64(code: int) -> tuple[int, int]:
+    """Inverse of the 64-bit interleave: the two 32-bit fixed-point axes a ``code`` holds."""
+    qx = 0
+    qy = 0
+    for bit in range(32):
+        qx |= ((code >> (2 * bit)) & 1) << bit
+        qy |= ((code >> (2 * bit + 1)) & 1) << bit
+    return qx, qy
+
+
 def _spread(v: int) -> int:
     """Spread the low 16 bits of v into the even bit positions of a 32-bit value."""
     x = v & 0xFFFF

@@ -273,9 +273,13 @@ fn f_selection_returns_the_lowest_tessera_ids_not_the_first_rows() {
     let mut by_id: Vec<(u64, usize)> = ids.iter().copied().zip(0..).collect();
     by_id.sort_unstable();
     let expected: Vec<u64> = by_id[0..3].iter().map(|&(id, _)| id).collect();
-    let expected_xy: Vec<(f32, f32)> = by_id[0..3]
+    // Each point's position as the store holds it: the row's cell code concatenated with its
+    // residual, which is exactly what the gather must hand back.
+    let expected_codes: Vec<u64> = by_id[0..3]
         .iter()
-        .map(|&(_, row)| (segment.columns.x()[row], segment.columns.y()[row]))
+        .map(|&(_, row)| {
+            ((segment.morton.u32()[row] as u64) << 32) | segment.columns.residual()[row] as u64
+        })
         .collect();
 
     // What the retired placeholder would have returned.
@@ -306,7 +310,7 @@ fn f_selection_returns_the_lowest_tessera_ids_not_the_first_rows() {
         "served set must be the three lowest identities"
     );
     for (i, point) in out.points.iter().enumerate() {
-        assert_eq!((point.x, point.y), expected_xy[i], "point {i} geometry");
+        assert_eq!(point.code, expected_codes[i], "point {i} geometry");
     }
 
     // The discriminating assertion. If the fixture ever changed such that these coincided, the

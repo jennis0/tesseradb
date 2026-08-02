@@ -173,7 +173,11 @@ class Selection:
         if self.segment.tessera_id is None:
             raise ValueError("segment has no stored tessera_id column (pre-r6 bundle)")
 
-        codes = bundle.row_morton_codes(slice_id)
+        # The full 64-bit positions, recomputed from the source geometry: the cell half decides
+        # the tile, and the whole thing is what the wire comparison is against. One derivation,
+        # so the tile a row is placed in and the position it is served with cannot disagree.
+        self.position_codes = bundle.row_position_codes(slice_id)
+        codes = [code >> 32 for code in self.position_codes]
         entities = bundle.row_entity_ids(slice_id)
         shift = 32 - 2 * depth
 
@@ -239,17 +243,19 @@ class Selection:
         m = min(cap, max(floor, c_theta))
         return rows[: min(m, len(rows))]
 
-    def served_points(self, tile: int, **params) -> list[tuple[float, float]]:
-        """[`served_rows`] as `(x, y)` pairs **in served order**, which is what the wire carries.
+    def served_points(self, tile: int, **params) -> list[int]:
+        """[`served_rows`] as position **codes** in served order, which is what the wire carries.
 
-        The differential compares by coordinate rather than by identity deliberately: agreement
-        then never depends on either side *interpreting* an identifier, only on both selecting the
-        same items. It compares the **list**, not a set or a multiset — both sides are in ascending
+        The differential compares by position rather than by identity deliberately: agreement then
+        never depends on either side *interpreting* an identifier, only on both selecting the same
+        items. It compares the **list**, not a set or a multiset — both sides are in ascending
         `tessera_id` order and contracts §2.6 makes that order part of the payload contract (see
         [`served_rows`]), so list equality is strictly stronger for free.
+
+        A `u64` code, not a rounded `(x, y)` pair: the comparison is now exact. The old one carried
+        an `f32` tolerance, which is what an integer identity of position removes.
         """
-        seg = self.segment
-        return [(float(seg.x[row]), float(seg.y[row])) for row in self.served_rows(tile, **params)]
+        return [self.position_codes[row] for row in self.served_rows(tile, **params)]
 
     def served_identities(self, tile: int, **params) -> list[int]:
         """[`served_rows`] as `tessera_id`s — the key §7.2's nesting property is stated over.
@@ -298,9 +304,8 @@ class Selection:
         m = min(cap, max(min(k_min, cap), c_theta))
         return rows[: min(m, len(rows))]
 
-    def first_k_points(self, tile: int, **params) -> list[tuple[float, float]]:
-        seg = self.segment
-        return [(float(seg.x[row]), float(seg.y[row])) for row in self.first_k_rows(tile, **params)]
+    def first_k_points(self, tile: int, **params) -> list[int]:
+        return [self.position_codes[row] for row in self.first_k_rows(tile, **params)]
 
 
 # ---------------------------------------------------------------------------------------------

@@ -102,8 +102,11 @@ pub struct TileCount {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PointOut {
     pub tessera_id: TesseraId,
-    pub x: f32,
-    pub y: f32,
+    /// The point's position as the 64-bit Morton interleave of its two 32-bit fixed-point axes:
+    /// the row's cell code in the high half, its stored residual in the low. Deinterleaving and
+    /// scaling against the extent `/v1/meta` publishes recovers the coordinates; shifting right
+    /// by `32 - 2·zoom` gives the containing tile without recomputing anything (contracts §3.2).
+    pub code: u64,
     pub scalars: Vec<ScalarOut>,
 }
 
@@ -1161,14 +1164,17 @@ struct TileResult {
     stats: TileStats,
 }
 
-/// Gather one row's `entity_id`/`x`/`y`/declared scalars through `ColumnsRef` — zero-copy reads,
-/// no per-row allocation beyond what a `Utf8` scalar's owned `String` requires.
+/// Gather one row's `tessera_id`/position/declared scalars — zero-copy reads, no per-row
+/// allocation beyond what a `Utf8` scalar's owned `String` requires.
+///
+/// The position takes one load from each of the two files that hold it, `morton.u32` for the
+/// cell and `columns.arrow` for the residual, over the same row span the old `x`/`y` pair swept:
+/// the same two loads, and the concatenation is a shift and an or.
 fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) -> PointOut {
     let idx = row as usize;
     let cols = &segment.columns;
     let tessera_id = TesseraId::new(cols.tessera_id()[idx]);
-    let x = cols.x()[idx];
-    let y = cols.y()[idx];
+    let code = ((segment.morton.u32()[idx] as u64) << 32) | cols.residual()[idx] as u64;
 
     let mut scalars = Vec::with_capacity(declared.len());
     for declared_scalar in declared {
@@ -1186,8 +1192,7 @@ fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) ->
 
     PointOut {
         tessera_id,
-        x,
-        y,
+        code,
         scalars,
     }
 }

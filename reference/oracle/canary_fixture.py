@@ -263,20 +263,22 @@ def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]
         return failures
 
     for row in range(free.row_count):
+        # Stored columns on both sides, deliberately: the question here is whether the two
+        # *builds* placed the same items at the same rows, not whether either agrees with the
+        # source — so comparing what each wrote is exactly right, and an integer position makes
+        # the comparison exact where the old `f32` pair made it approximate.
         if (
-            float(free.x[row]) != float(canary.x[row])
-            or float(free.y[row]) != float(canary.y[row])
-            or int(free.morton[row]) != int(canary.morton[row])
+            free.stored_code(row) != canary.stored_code(row)
             or int(free.tessera_id[row]) != int(canary.tessera_id[row])
         ):
             failures.append(
                 f"row {row} differs between the two bundles: the canary displaced a real item, so "
                 f"one of allocation rules 1, 2, 3 or 5 is broken and the canary comparison would "
                 f"be measuring fixture perturbation rather than disclosure. "
-                f"free=(x={float(free.x[row])}, y={float(free.y[row])}, "
-                f"morton={int(free.morton[row])}, tessera_id={int(free.tessera_id[row])}) "
-                f"canary=(x={float(canary.x[row])}, y={float(canary.y[row])}, "
-                f"morton={int(canary.morton[row])}, tessera_id={int(canary.tessera_id[row])})"
+                f"free=(code={free.stored_code(row):#018x}, "
+                f"tessera_id={int(free.tessera_id[row])}) "
+                f"canary=(code={canary.stored_code(row):#018x}, "
+                f"tessera_id={int(canary.tessera_id[row])})"
             )
             break
 

@@ -139,8 +139,13 @@ import pyarrow.ipc as ipc
 import pytest
 
 from oracle import mask as mask_mod
-from oracle.bundle import Bundle
-from oracle.harness import kill_server, spawn_server, stop_server
+from oracle.catalogue import catalogue_points_path
+from oracle.harness import (
+    kill_server,
+    open_bundle_with_source,
+    spawn_server,
+    stop_server,
+)
 from oracle.wire import decode_viewport
 
 SLICE = "s0"
@@ -242,7 +247,9 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
 
     Then the survival questions, against a WAL truncated to what the engine claims is durable.
     """
-    oracle_bundle = Bundle(catalogue_bundle_root)
+    oracle_bundle = open_bundle_with_source(
+        catalogue_bundle_root, catalogue_points_path()
+    )
     cache_dir = restart_paths["cache"]
     wal_path = restart_paths["wal"]
     tmp_dir = restart_paths["root"]
@@ -336,7 +343,9 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
 
 
 def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Path, restart_paths):
-    oracle_bundle = Bundle(catalogue_bundle_root)
+    oracle_bundle = open_bundle_with_source(
+        catalogue_bundle_root, catalogue_points_path()
+    )
     cache_dir = restart_paths["cache"]
     wal_path = restart_paths["wal"]
     tmp_dir = restart_paths["root"]

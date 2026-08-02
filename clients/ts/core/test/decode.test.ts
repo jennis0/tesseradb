@@ -2,6 +2,7 @@ import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {describe, expect, it} from 'vitest';
 import {decodeViewport} from '../src/decode.js';
+import {CELL_GRID} from '../src/coords.js';
 
 const fixture = (name: string) =>
   new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
@@ -25,14 +26,47 @@ describe('decodeViewport', () => {
     expect(r.positions.length).toBe(served * 2);
   });
 
-  it('places every point inside the bundle’s extent', () => {
+  it('places every point inside the cell grid', () => {
+    const r = decodeViewport(fixture('viewport-plain.bin'));
+    for (let i = 0; i < r.ids.length; i++) {
+      expect(r.positions[i * 2]).toBeGreaterThanOrEqual(0);
+      expect(r.positions[i * 2]).toBeLessThan(CELL_GRID);
+      expect(r.positions[i * 2 + 1]).toBeGreaterThanOrEqual(0);
+      expect(r.positions[i * 2 + 1]).toBeLessThan(CELL_GRID);
+    }
+  });
+
+  it('deinterleaves losslessly — the positions re-interleave to the code they came from', () => {
+    // The decoder's only geometric job. Re-spreading the two axes must reproduce the server's
+    // `code` bit for bit, at the full 32 bits per axis: a `Float32Array` here would fail this,
+    // which is why the positions are `f64`.
+    const r = decodeViewport(fixture('viewport-plain.bin'));
+    expect(r.codes.length).toBe(r.ids.length);
+    const spread = (v: number): bigint => {
+      let out = 0n;
+      for (let bit = 0; bit < 32; bit++) out |= ((BigInt(v) >> BigInt(bit)) & 1n) << BigInt(2 * bit);
+      return out;
+    };
+    for (let i = 0; i < r.ids.length; i++) {
+      const qx = Math.round(r.positions[i * 2]! * 65536);
+      const qy = Math.round(r.positions[i * 2 + 1]! * 65536);
+      expect(spread(qx) | (spread(qy) << 1n)).toBe(r.codes[i]!);
+    }
+  });
+
+  it('agrees with the bundle’s cell grid on where the points are', () => {
+    // The extent is still what makes a cell interpretable — it just no longer sits between the
+    // wire and the position. Scaling cell space back through it must land inside the extent
+    // `/v1/meta` publishes, or the client and the server disagree about the grid.
     const r = decodeViewport(fixture('viewport-plain.bin'));
     const q = meta.quantisation;
     for (let i = 0; i < r.ids.length; i++) {
-      expect(r.positions[i * 2]).toBeGreaterThanOrEqual(q.x_min);
-      expect(r.positions[i * 2]).toBeLessThanOrEqual(q.x_max);
-      expect(r.positions[i * 2 + 1]).toBeGreaterThanOrEqual(q.y_min);
-      expect(r.positions[i * 2 + 1]).toBeLessThanOrEqual(q.y_max);
+      const x = q.x_min + (r.positions[i * 2]! / CELL_GRID) * (q.x_max - q.x_min);
+      const y = q.y_min + (r.positions[i * 2 + 1]! / CELL_GRID) * (q.y_max - q.y_min);
+      expect(x).toBeGreaterThanOrEqual(q.x_min);
+      expect(x).toBeLessThanOrEqual(q.x_max);
+      expect(y).toBeGreaterThanOrEqual(q.y_min);
+      expect(y).toBeLessThanOrEqual(q.y_max);
     }
   });
 
