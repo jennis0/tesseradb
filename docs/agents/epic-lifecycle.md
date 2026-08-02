@@ -60,8 +60,15 @@ closes:
 - **Design changes** → the corpus, through [`design-process.md`](design-process.md). An epic that
   changed how the system works and did not change its specification has left the specification
   wrong.
-- **Leftovers** → new issues. Not a "deferred" note in a document nobody will read again. If it
-  is real work, it is an issue; if it is not real work, delete it. That said, be smart about the issues you create. Group issues into coherent tickets, and make sure it isn't better to do the work now. Issues should be for large workchunks and explicitly deferred improvements, not things that should already be fixed.
+- **Leftovers** → fixed now, or one issue, or deleted. In that order of preference. If it is
+  small and in scope, fix it in the change that found it — an issue for a five-minute fix costs
+  more to file, triage and close than the fix does. If it is real deferred work, it is an issue,
+  not a "deferred" note in a document nobody will read again. If it is neither, delete it.
+
+  An issue is for a large chunk of work, an explicit deferral, or something needing an owner
+  ruling. Group related leftovers into one coherent ticket rather than filing each observation.
+  A closing epic that produces ten issues has almost always converted work into backlog: go back
+  and do the ones that should just be done.
 
 Then close it. An epic that stays open because 10% of it might one day matter is no longer
 tracking anything.

@@ -18,6 +18,10 @@ On the rare occasions that history is worth keeping, it belongs in `docs/decisio
 interleaved with the explanation. A document whose paragraphs are half archaeology forces every
 reader to separate the two, every time.
 
+This applies to the revision trail too. Appendix R exists so a reviewer can see what was already
+attacked; it is a few lines per revision, collapsing as revisions age. A design document that is
+mostly its own history has inverted the ratio and needs the history cut, not the design expanded.
+
 > ✗ "r3 replaced r1's blanket retirement stamp, because for suppressions that was fail-open. §5.1
 > was then amended in r4 once flush became the visibility mechanism."
 >
@@ -61,7 +65,7 @@ A reader should not need three other documents open to parse one paragraph.
   need to go. "The alternative route, and why it was rejected, is in §7.2" tells them.
 - Cross-references support the text; they do not substitute for it.
 
-### 3. Calibrate density
+### 3. Calibrate density, and length
 
 Two failures, equally common. **Padding**: restating the heading, narrating the structure
 ("in this section we will…"), or three sentences where the second was the point. **Compression**:
@@ -69,6 +73,13 @@ a paragraph so dense the reader has to decompress it — clauses stacked with em
 distinct claims sharing one sentence.
 
 The test is whether a competent reader gets it at reading speed, once.
+
+Length is governed by the same test at document scale. Cover the substance and stop. A document
+does not need an introduction restating its title, a summary restating its body, a section for
+every heading a similar document happened to have, or an enumeration of alternatives nobody
+proposed. Most design documents here are a few hundred lines; the two that run past a thousand
+earned it by specifying the whole system, and are not a model to imitate. If a draft has grown
+past what it needs, the fix is to cut it before review, not to explain the length.
 
 ### 4. Proportion
 
@@ -119,12 +130,13 @@ Tables count. A three-way comparison is a table, not three paragraphs.
 
 The same rules, plus:
 
-**Module docs carry the design argument, and are long here where that is warranted.** Sixty-plus
-lines of `//!` is normal in this tree when the module upholds an invariant in a way the code does
-not show, when an obvious construction was rejected for a non-obvious reason, when a measurement
-drove a shape that otherwise looks arbitrary, or when something is duplicated deliberately and a
-reader would otherwise "fix" it. Length follows from having something to say; it is not a target,
-and restating the code is never warranted.
+**Module docs carry the design argument, and run long here where that is warranted.** A long `//!`
+is right when the module upholds an invariant in a way the code does not show, when an obvious
+construction was rejected for a non-obvious reason, when a measurement drove a shape that
+otherwise looks arbitrary, or when something is duplicated deliberately and a reader would
+otherwise "fix" it. Absent one of those, a few lines saying what the module is for is the whole
+job. Length follows from having something to say; it is not a target, and restating the code is
+never warranted.
 
 **Comments record decisions and evidence, not backlog.** There are essentially no `TODO` or
 `FIXME` markers here, deliberately. Open work is an issue, where it can be found and closed.

@@ -1,8 +1,13 @@
 # Several agents at once
 
-This repo routinely runs four or five agents in parallel against the same tree. That works
-because file ownership is enforced rather than intended, and because one role holds the
-invariant-bearing decisions instead of distributing them.
+This repo can run four or five agents in parallel against the same tree. That works because file
+ownership is enforced rather than intended, and because one role holds the invariant-bearing
+decisions instead of distributing them.
+
+**Use this machinery when the work is genuinely parallel** — several sizeable tracks over disjoint
+files, where the seams are known before dispatch. Worktrees, allowlists and briefs cost real
+setup; below a few substantial tracks they cost more than they save, and the right move is to do
+the work directly. A task you would finish in a handful of tool calls is never a track.
 
 ## Roles
 
@@ -14,8 +19,10 @@ does, it stops being able to review its own work honestly.
 contract is: do the brief, verify it, report — and **stop and report** rather than reach outside
 its allowlist, guess at an invariant question, or edit the rules that constrain it.
 
-**Reviewer.** Has no stake in the work being right. For invariant-bearing changes, use several
-reviewers with different lenses rather than several with the same lens.
+**Reviewer.** Has no stake in the work being right. For invariant-bearing changes, use two or
+three reviewers with different lenses rather than several with the same lens. For everything else
+the gate plus the controller's own reading is the review — a separate reviewer agent per task is
+cost without signal.
 
 Verify what an implementer reports rather than accepting the summary. The summary is what it
 believes it did.

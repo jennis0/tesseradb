@@ -47,6 +47,18 @@ records which ones were wrong.
   here were refuted by measurement.
 - **"Was this already decided?"** → `../decisions/`, then the relevant Appendix R.
 
+## How much process a task needs
+
+The procedures below govern the corpus and the invariants. They are not a checklist to apply to
+every change, and applying them where they do not belong is its own failure mode — it produces
+review rounds that grow designs, documents that are mostly their own history, and issues filed
+for things that should have been fixed on the spot.
+
+Most work is: make the change, run the gate, say what you did. Reach for
+[`design-process.md`](design-process.md) when a document is about to become binding, and for
+[`parallel-work.md`](parallel-work.md) when there are several sizeable independent tracks.
+Otherwise, just do the work.
+
 ## The four procedures
 
 - [`design-process.md`](design-process.md) — how a design becomes normative.

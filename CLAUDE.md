@@ -77,22 +77,44 @@ optimisation that costs reviewability needs an argument, not just a benchmark. T
 model to design against: **bitmap operations cost O(containers touched), not O(cardinality)** —
 contiguity in entity space is the highest-leverage property in the index.
 
-**Dispatch plans for independent review before implementing.** Hand the plan to a subagent with no
-stake in it being right, and act on the review before code is written. This caught four fail-open
-paths and two unimplementable mechanisms during design alone.
-
-**Decompose across subagents; direct and review rather than write.** Verify a subagent's work
-rather than accepting its summary — invariant-bearing decisions stay with the reviewer.
-
 **Stop and report** rather than guessing, when the answer would set an invariant, a guarantee, or
 something the owner has not decided. Full procedures in [docs/agents/](docs/agents/).
+
+## Pace
+
+The process in [docs/agents/](docs/agents/) protects thirteen invariants and a leak register. It
+is not a tax on every change, and applying it where it does not belong has a visible cost here:
+revision archaeology crowding design out of the corpus, review rounds that add mechanism instead
+of removing it, and backlogs of issues for things that should just have been fixed.
+
+- **Fix it now.** If a problem is in scope and you can fix it in the change you are making, do
+  that. An issue is for work that is genuinely large, needs an owner ruling, or is a deliberate
+  deferral — not for a loose end you noticed. A change that spawns several issues has usually
+  mistaken a to-do list for a plan.
+- **Review once, where it counts.** One adversarial review at the point a design becomes binding
+  — not a round per draft. Findings are dispositioned in a single pass and the document is
+  promoted; re-review only if the disposition changed the design's shape. Reviews that keep
+  finding things are usually growing the design, not converging it.
+- **Delegate for breadth, not for assurance.** A subagent earns its cost on a large,
+  genuinely independent track of work — a wide investigation, a parallel implementation seam.
+  Do not delegate what you would finish in a handful of tool calls, and do not spawn a subagent
+  to double-check work you can check yourself. One agent where one will do.
+- **Verify a subagent's work** rather than accepting its summary; invariant-bearing decisions
+  stay with the reviewer.
+- **Scope is the deliverable.** Deliver what was asked at the scope intended. If a better
+  approach or a real problem turns up, say so in a sentence and continue rather than quietly
+  widening the task.
 
 ## House style
 
 Full guide in [docs/agents/writing.md](docs/agents/writing.md). The rules that matter most:
 
 - **Describe the system, not its construction.** What it is and why — not which revision changed
-  it or which phase built it. That archaeology belongs in `docs/decisions/` and git.
+  it or which phase built it. That archaeology belongs in `docs/decisions/` and git. A design
+  document that is mostly revision history has stopped being a design document.
+- **Length follows substance.** Cover what the reader needs and stop. No padding, no restated
+  summaries, no section that exists because the template had one. Most design documents here
+  should be shorter than the one you are about to write.
 - **Module docs carry the design argument**, and run long here where that is warranted: an
   invariant upheld in a way the code does not show, an obvious construction rejected for a
   non-obvious reason, a measurement driving a shape that otherwise looks arbitrary, or a
