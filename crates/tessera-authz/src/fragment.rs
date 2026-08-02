@@ -138,6 +138,7 @@ fn canonical_key(
     bundle_identity: &[u8; 32],
     auth_plugin_hash: &[u8; 32],
     terms: &[TermId],
+    watermark: u64,
 ) -> [u8; 32] {
     let mut sorted: Vec<u32> = terms.iter().copied().map(TermId::raw).collect();
     sorted.sort_unstable();
@@ -146,6 +147,7 @@ fn canonical_key(
     let mut hasher = Sha256::new();
     hasher.update(bundle_identity);
     hasher.update(auth_plugin_hash);
+    hasher.update(watermark.to_le_bytes());
     for term in &sorted {
         hasher.update(term.to_le_bytes());
     }
@@ -404,10 +406,11 @@ impl CacheWeight for FrozenFragment {
 /// between clears" — assumed, not measured; at ~80 B per entry it caps this map at ~330 KB.
 const KEY_MEMO_MAX_ENTRIES: usize = 4096;
 
-/// What a canonical key is memoised against: the credential, and the dictionary length its terms
-/// were resolved through. Both, because a flush's promotion makes one credential resolve to two
-/// different term sets over time — see [`FragmentCache::get_or_build`].
-type KeyMemoKey = ([u8; 32], u32);
+/// What a canonical key is memoised against: the credential, the dictionary length its terms were
+/// resolved through, and the watermark the fragment covers. All three, because each of them alone
+/// changes what the same credential's fragment contains over time — see
+/// [`FragmentCache::get_or_build`].
+type KeyMemoKey = ([u8; 32], u32, u64);
 
 /// Directory-backed frozen fragment store.
 ///
@@ -458,6 +461,8 @@ pub struct FragmentCache {
     dir: PathBuf,
     bundle_identity: [u8; 32],
     auth_plugin_hash: [u8; 32],
+    /// The on-disk entry format this cache reads and writes — see [`FRAGMENT_FORMAT`].
+    format_version: u32,
     key_memo: Mutex<FxHashMap<KeyMemoKey, [u8; 32]>>,
     slots: SingleFlightCache<[u8; 32], FrozenFragment>,
     rebuilds: AtomicU64,
@@ -524,11 +529,17 @@ impl FragmentCache {
     /// A cache built this way is therefore **unbounded**. That is correct for tests, benches and
     /// embedders; it is not correct for a server, and `tessera_server::prepare` is what makes sure
     /// a server never gets one.
-    pub fn new(dir: &Path, bundle_identity: [u8; 32], auth_plugin_hash: [u8; 32]) -> Self {
+    pub fn new(
+        dir: &Path,
+        bundle_identity: [u8; 32],
+        auth_plugin_hash: [u8; 32],
+        format_version: u32,
+    ) -> Self {
         FragmentCache {
             dir: dir.to_path_buf(),
             bundle_identity,
             auth_plugin_hash,
+            format_version,
             key_memo: Mutex::new(FxHashMap::default()),
             slots: SingleFlightCache::new(u64::MAX),
             rebuilds: AtomicU64::new(0),
@@ -547,8 +558,13 @@ impl FragmentCache {
     /// Public because evicting a *named* entry is impossible without it, and the key is otherwise
     /// computed only inside [`Self::get_or_build`]. It is a pure function of its inputs and reveals
     /// nothing a caller did not supply: the term set is the caller's own.
-    pub fn canonical_key_for(&self, satisfied: &[TermId]) -> [u8; 32] {
-        canonical_key(&self.bundle_identity, &self.auth_plugin_hash, satisfied)
+    pub fn canonical_key_for(&self, satisfied: &[TermId], watermark: u64) -> [u8; 32] {
+        canonical_key(
+            &self.bundle_identity,
+            &self.auth_plugin_hash,
+            satisfied,
+            watermark,
+        )
     }
 
     /// Drop one entry from the **in-memory** tier. Returns whether anything was there.
@@ -608,12 +624,73 @@ impl FragmentCache {
         self.key_memo.lock().unwrap().len()
     }
 
+    /// The directory this cache's entries live in: `<dir>/v<format>/`.
+    ///
+    /// Versioned because the *key* changed shape when the watermark joined it (§9). Every
+    /// pre-upgrade entry is unreachable under the new key — a leak rather than a fail-open, since
+    /// new code can never read one — and nothing on this path ever deleted anything, so without a
+    /// version there would be no way to tell an orphan from a live entry and no safe sweep.
+    fn version_dir(&self) -> PathBuf {
+        self.dir.join(format!("v{}", self.format_version))
+    }
+
     fn frag_path(&self, key: &[u8; 32]) -> PathBuf {
-        self.dir.join(format!("{}.frag", hex_encode(key)))
+        self.version_dir().join(format!("{}.frag", hex_encode(key)))
     }
 
     fn meta_path(&self, key: &[u8; 32]) -> PathBuf {
-        self.dir.join(format!("{}.meta", hex_encode(key)))
+        self.version_dir().join(format!("{}.meta", hex_encode(key)))
+    }
+
+    /// The `.frag` path an entry for `satisfied` at `watermark` occupies. Exposed so that "two
+    /// watermarks are two entries" is assertable on the paths themselves rather than inferred from
+    /// two reads.
+    pub fn path_of(&self, satisfied: &[TermId], watermark: u64) -> PathBuf {
+        self.frag_path(&canonical_key(
+            &self.bundle_identity,
+            &self.auth_plugin_hash,
+            satisfied,
+            watermark,
+        ))
+    }
+
+    /// Delete every entry this cache cannot read: anything outside its own version directory.
+    ///
+    /// **Nothing else on this path deletes anything**, so without this the entries a previous
+    /// format left behind stay for ever. Run once at `Engine::open`, where a scan of a cache
+    /// directory is affordable and a stale entry has not yet cost anyone a lookup.
+    ///
+    /// Returns the number of files removed. A file it cannot delete is skipped rather than
+    /// failing the open: an unreadable orphan is wasted disk, not a correctness problem, and a
+    /// node that will not start over one is a worse outcome.
+    pub fn sweep_orphans(&self) -> io::Result<usize> {
+        let mine = self.version_dir();
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            // No cache directory yet is not an error: there is nothing to sweep.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let mut swept = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == mine {
+                continue;
+            }
+            if path.is_dir() {
+                // A previous *version* directory: everything under it is unreachable.
+                for stale in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+                    if std::fs::remove_file(stale.path()).is_ok() {
+                        swept += 1;
+                    }
+                }
+                let _ = std::fs::remove_dir(&path);
+            } else if std::fs::remove_file(&path).is_ok() {
+                // A pre-versioning entry, written flat into the cache root.
+                swept += 1;
+            }
+        }
+        Ok(swept)
     }
 
     /// Return the frozen fragment for `satisfied` (the terms a viewer's credential grants),
@@ -645,15 +722,22 @@ impl FragmentCache {
     ///
     /// `postings` and `deltas` supply the union inputs on a cache miss.
     ///
-    /// **⊘ The canonical key does not yet distinguish tier sets.** It is
-    /// `(bundle_identity, auth_plugin_hash, satisfied)`, so two builds over the same grant and
-    /// different live tiers collide — which is harmless only while nothing publishes a tier. The
-    /// watermark is what identifies a tier set, and it joins the key with the flush that first
-    /// produces one; until then `deltas` is always empty in production. Do not publish a flush
-    /// segment's tier before that key change lands. `watermark` is the caller-supplied
-    /// SEGMENTS watermark to persist alongside a freshly built fragment; it is ignored on a cache
-    /// hit: the hit's own persisted watermark, from when it was built, is what is returned, and
-    /// mask composition uses that rather than the caller's).
+    /// **`watermark` is part of the key, because it is what identifies a tier set** (§9). Two
+    /// builds over the same grant and different live tiers must not collide: they differ by the
+    /// entities the newer tiers carry, and under one key which of them a session gets would be
+    /// decided by whoever wrote last — a disclosure, not merely staleness. It is also what makes
+    /// `tmp_sibling`'s "both writers wrote byte-identical content" argument hold again, which is
+    /// the thing that makes a concurrent write-then-rename safe here.
+    ///
+    /// **A merge needs nothing of its own**, and that is why the watermark suffices rather than
+    /// merely helping: a merge coalesces tiers as a content-preserving re-encode (§5.2), so the
+    /// fragment it would produce is identical and reusing the pre-merge entry is correct. Only a
+    /// flush changes what a build returns, and a flush moves the watermark.
+    ///
+    /// For the compaction author: a persisted fragment surviving a restart at a **pre-flush** stamp
+    /// would falsify lifecycle §3.2's "the cache restarts cold" premise, which is what scopes the
+    /// future retirement floor worker-locally. With the watermark in the key a pre-flush fragment
+    /// is never found by a post-flush lookup, and the premise holds.
     ///
     /// **D-G slot-state single-flight (lifecycle §3.3).** The single-flight map is keyed by the
     /// canonical key computed just below — never by `auth_data_hash` — so two different
@@ -676,14 +760,19 @@ impl FragmentCache {
         deltas: &[Arc<DeltaTier>],
         watermark: u64,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
-        let memo_key = (auth_data_hash, dict_len);
+        let memo_key = (auth_data_hash, dict_len, watermark);
         let key = {
             let cached = self.key_memo.lock().unwrap().get(&memo_key).copied();
             match cached {
                 Some(key) => {
                     debug_assert_eq!(
                         key,
-                        canonical_key(&self.bundle_identity, &self.auth_plugin_hash, satisfied),
+                        canonical_key(
+                            &self.bundle_identity,
+                            &self.auth_plugin_hash,
+                            satisfied,
+                            watermark
+                        ),
                         "get_or_build: auth_data_hash {auth_data_hash:02x?} was previously \
                          and dict_len {dict_len} were previously associated with a different term \
                          set than `satisfied` now hashes to — callers must derive auth_data_hash \
@@ -695,8 +784,12 @@ impl FragmentCache {
                     key
                 }
                 None => {
-                    let key =
-                        canonical_key(&self.bundle_identity, &self.auth_plugin_hash, satisfied);
+                    let key = canonical_key(
+                        &self.bundle_identity,
+                        &self.auth_plugin_hash,
+                        satisfied,
+                        watermark,
+                    );
                     let mut memo = self.key_memo.lock().unwrap();
                     // Bounded by clearing rather than by evicting: this map is pure memoisation, so
                     // discarding it costs a re-derive and never an answer. See
@@ -727,7 +820,7 @@ impl FragmentCache {
                     return Ok(frozen);
                 }
 
-                create_private_dir_all(&self.dir)?;
+                create_private_dir_all(&self.version_dir())?;
                 let bitmap = build_fragment_with_deltas(satisfied, postings, deltas)?;
                 self.rebuilds.fetch_add(1, Ordering::Relaxed);
                 FrozenFragment::build_and_persist(&frag_path, &meta_path, &bitmap, watermark)
@@ -763,7 +856,12 @@ mod tests {
         crate::postings::write_postings(&postings_path, &[vec![1u32, 2, 3]], 32).unwrap();
         let reader = PostingsReader::open(&postings_path, false).unwrap();
 
-        let cache = FragmentCache::new(&temp.path().join("frag"), [7u8; 32], [9u8; 32]);
+        let cache = FragmentCache::new(
+            &temp.path().join("frag"),
+            [7u8; 32],
+            [9u8; 32],
+            crate::FRAGMENT_FORMAT,
+        );
 
         // Every call presents a *distinct* credential digest and an empty grant set — the exact
         // shape the doc describes: one canonical key, one build, unbounded distinct hashes.

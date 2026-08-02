@@ -123,7 +123,7 @@ fn bench_compose(c: &mut Criterion) {
     let terms: Vec<TermId> = (0..vocab.min(1000)).map(TermId::new).collect();
 
     let cache_tmp = TempDir::new().unwrap();
-    let cache = FragmentCache::new(cache_tmp.path(), [0u8; 32], [1u8; 32]);
+    let cache = FragmentCache::new(cache_tmp.path(), [0u8; 32], [1u8; 32], tessera_authz::FRAGMENT_FORMAT);
     let fragment = cache
         .get_or_build(&terms, [2u8; 32], 0, &postings, &[], ITEM_LIMIT)
         .expect("fragment build should succeed");

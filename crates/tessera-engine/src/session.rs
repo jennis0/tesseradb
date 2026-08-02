@@ -531,7 +531,21 @@ impl Engine {
             cache_dir,
             bundle_identity,
             auth_plugin_hash,
+            tessera_authz::FRAGMENT_FORMAT,
         ));
+        // **Entries a previous format version left behind are unreachable, and nothing else
+        // deletes them** (§9). Swept once here, where a directory scan is affordable and a stale
+        // entry has not yet cost anyone a lookup. A failure is logged and not fatal: an
+        // undeletable orphan is wasted disk, and a node that refuses to start over one is worse.
+        match fragment_cache.sweep_orphans() {
+            Ok(0) => {}
+            Ok(swept) => tracing::info!(swept, "swept fragment cache entries of an older format"),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not sweep older-format fragment cache entries; they are unreachable and \
+                 will simply occupy disk"
+            ),
+        }
 
         // D-D: build the shared compute pool now, not lazily on first request — a pool that
         // cannot be built is an `Engine` that cannot serve any viewport, and that is a fact about
@@ -976,11 +990,17 @@ impl Engine {
         self.fragment_cache.rebuild_count()
     }
 
-    /// The canonical cache key for `satisfied` under this engine's bundle and plugin identity — the
-    /// only way to name a fragment entry from outside, and therefore what [`Self::evict_fragment`]
-    /// takes. Pure; reveals nothing the caller did not supply.
+    /// The canonical cache key for `satisfied` under this engine's bundle and plugin identity, at
+    /// the live generation's watermark — the only way to name a fragment entry from outside, and
+    /// therefore what [`Self::evict_fragment`] takes. Pure; reveals nothing the caller did not
+    /// supply.
+    ///
+    /// The watermark is the live one rather than a parameter because an entry a caller could want
+    /// to name is one the current generation could produce; a stale-watermark entry is unreachable
+    /// by any lookup anyway (§9).
     pub fn fragment_canonical_key(&self, satisfied: &[TermId]) -> [u8; 32] {
-        self.fragment_cache.canonical_key_for(satisfied)
+        self.fragment_cache
+            .canonical_key_for(satisfied, self.generation.load().watermark)
     }
 
     /// Drop one entry from the fragment cache's **in-memory** tier; returns whether it was there.

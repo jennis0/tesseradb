@@ -68,7 +68,7 @@ fn build_fixture() -> Fixture {
 
     let granted: Vec<TermId> = vec![TermId::new(0), TermId::new(1)];
     let cache_dir = temp.path().join("cache");
-    let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32]);
+    let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32], tessera_authz::FRAGMENT_FORMAT);
     let fragment = cache
         .get_or_build(&granted, [3u8; 32], 0, &postings, &[], WATERMARK)
         .unwrap();
@@ -118,7 +118,7 @@ fn e(id: u64) -> EntityId {
 /// threading it through the fixture's lifetime.
 fn fragment_for(fx: &Fixture) -> Arc<FrozenFragment> {
     let cache_dir = fx._temp.path().join("cache");
-    let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32]);
+    let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32], tessera_authz::FRAGMENT_FORMAT);
     let granted: Vec<TermId> = vec![TermId::new(0), TermId::new(1)];
     cache
         .get_or_build(&granted, [3u8; 32], 0, &fx.postings, &[], WATERMARK)

@@ -16,6 +16,22 @@ use tessera_authz::{build_fragment, write_postings, FragmentCache, FragmentCache
 use tessera_types::TermId;
 
 const UNIVERSE: u32 = 100_000;
+
+/// The single `.frag` file a cache has written, found by scanning rather than by reaching into
+/// `FragmentCache`'s internals.
+///
+/// Entries live under `<dir>/v<format>/` — the cache is versioned because the *key* changed shape
+/// when the watermark joined it (§9), and the version is what lets a sweep tell an unreachable
+/// orphan from a live entry.
+fn the_frag_file(cache_dir: &std::path::Path) -> std::path::PathBuf {
+    let version_dir = cache_dir.join(format!("v{}", tessera_authz::FRAGMENT_FORMAT));
+    std::fs::read_dir(&version_dir)
+        .unwrap_or_else(|e| panic!("no version dir at {}: {e}", version_dir.display()))
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("frag"))
+        .expect("exactly one .frag file expected")
+}
 const SMALL_TERM_THRESHOLD: u32 = 32;
 
 /// Write postings for `term_count` random terms over `[0, UNIVERSE)`, returning the reader path
@@ -96,7 +112,12 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
     }
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
+        let cache = FragmentCache::new(
+            cache_dir.path(),
+            bundle_identity,
+            auth_plugin_hash,
+            tessera_authz::FRAGMENT_FORMAT,
+        );
         assert_eq!(cache.rebuild_count(), 0);
 
         let frozen = cache
@@ -122,7 +143,12 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
     // Drop the cache (and its in-memory map), reopen the cache dir fresh: the on-disk frozen
     // fragment must still be reused, not rebuilt.
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
+        let cache = FragmentCache::new(
+            cache_dir.path(),
+            bundle_identity,
+            auth_plugin_hash,
+            tessera_authz::FRAGMENT_FORMAT,
+        );
         assert_eq!(cache.rebuild_count(), 0);
 
         let frozen = cache
@@ -142,12 +168,7 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
 
         // Frozen file length must equal the exact serialised size. Find the single `.frag` file
         // written under the cache dir rather than reaching into `FragmentCache`'s internals.
-        let frag_path = std::fs::read_dir(cache_dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("frag"))
-            .expect("exactly one .frag file expected");
+        let frag_path = the_frag_file(cache_dir.path());
         let on_disk_len = std::fs::metadata(&frag_path).unwrap().len();
         let expected_len = frozen
             .view()
@@ -168,7 +189,12 @@ fn stale_bundle_identity_misses_the_cache() {
     let auth_data_hash = [1u8; 32];
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), [9u8; 32], auth_plugin_hash);
+        let cache = FragmentCache::new(
+            cache_dir.path(),
+            [9u8; 32],
+            auth_plugin_hash,
+            tessera_authz::FRAGMENT_FORMAT,
+        );
         cache
             .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
             .unwrap();
@@ -178,7 +204,12 @@ fn stale_bundle_identity_misses_the_cache() {
     // Same cache dir, different bundle_identity: must rebuild, not hit — a persistent cache dir
     // reused across bundle rebuilds must never serve a fragment naming a different entity set.
     {
-        let cache = FragmentCache::new(cache_dir.path(), [10u8; 32], auth_plugin_hash);
+        let cache = FragmentCache::new(
+            cache_dir.path(),
+            [10u8; 32],
+            auth_plugin_hash,
+            tessera_authz::FRAGMENT_FORMAT,
+        );
         cache
             .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
             .unwrap();
@@ -202,7 +233,12 @@ fn stale_auth_plugin_hash_misses_the_cache() {
     let auth_data_hash = [1u8; 32];
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, [7u8; 32]);
+        let cache = FragmentCache::new(
+            cache_dir.path(),
+            bundle_identity,
+            [7u8; 32],
+            tessera_authz::FRAGMENT_FORMAT,
+        );
         cache
             .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
             .unwrap();
@@ -213,7 +249,12 @@ fn stale_auth_plugin_hash_misses_the_cache() {
     // design §2.3 requires the plugin version in the key (an auth plugin upgrade must not serve a
     // frozen fragment computed under a different plugin's term semantics).
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, [8u8; 32]);
+        let cache = FragmentCache::new(
+            cache_dir.path(),
+            bundle_identity,
+            [8u8; 32],
+            tessera_authz::FRAGMENT_FORMAT,
+        );
         cache
             .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
             .unwrap();
@@ -249,7 +290,12 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
 
     // Build and persist the frozen fragment once.
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
+        let cache = FragmentCache::new(
+            cache_dir.path(),
+            bundle_identity,
+            auth_plugin_hash,
+            tessera_authz::FRAGMENT_FORMAT,
+        );
         cache
             .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 5)
             .unwrap();
@@ -258,12 +304,7 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
 
     // Flip one byte in the on-disk `.frag` file — a corrupt-but-right-length buffer, exactly the
     // failure mode a torn write after power loss would produce.
-    let frag_path = std::fs::read_dir(cache_dir.path())
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("frag"))
-        .expect("exactly one .frag file expected");
+    let frag_path = the_frag_file(cache_dir.path());
     {
         let mut bytes = std::fs::read(&frag_path).unwrap();
         assert!(
@@ -277,7 +318,12 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     // Reopening the cache dir fresh must not crash, must not serve the corrupted bytes, and must
     // rebuild instead — the correct fragment either way, from postings directly this time.
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
+        let cache = FragmentCache::new(
+            cache_dir.path(),
+            bundle_identity,
+            auth_plugin_hash,
+            tessera_authz::FRAGMENT_FORMAT,
+        );
         let frozen = cache
             .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 5)
             .expect("a corrupted cache entry must fail closed to a rebuild, not an error");
@@ -309,7 +355,12 @@ fn concurrent_cold_builds_single_flight_to_one_real_build() {
     let reader = Arc::new(tessera_authz::PostingsReader::open(&path, false).unwrap());
 
     let cache_dir = TempDir::new().unwrap();
-    let cache = Arc::new(FragmentCache::new(cache_dir.path(), [1u8; 32], [2u8; 32]));
+    let cache = Arc::new(FragmentCache::new(
+        cache_dir.path(),
+        [1u8; 32],
+        [2u8; 32],
+        tessera_authz::FRAGMENT_FORMAT,
+    ));
     let terms: Vec<TermId> = (0..20u32).map(TermId::new).collect();
     let auth_data_hash = [9u8; 32];
 
@@ -375,7 +426,12 @@ fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
     let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
-    let cache = FragmentCache::new(cache_dir.path(), [3u8; 32], [4u8; 32]);
+    let cache = FragmentCache::new(
+        cache_dir.path(),
+        [3u8; 32],
+        [4u8; 32],
+        tessera_authz::FRAGMENT_FORMAT,
+    );
     let terms: Vec<TermId> = (0..6u32).map(TermId::new).collect();
     let auth_data_hash = [5u8; 32];
 
@@ -389,8 +445,11 @@ fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
         .unwrap();
     assert_eq!(cache.rebuild_count(), 1);
 
-    // Poison the backing files: remove every file the cache directory holds.
-    for entry in std::fs::read_dir(cache_dir.path()).unwrap() {
+    // Poison the backing files: remove every file the cache's version directory holds.
+    let version_dir = cache_dir
+        .path()
+        .join(format!("v{}", tessera_authz::FRAGMENT_FORMAT));
+    for entry in std::fs::read_dir(&version_dir).unwrap() {
         std::fs::remove_file(entry.unwrap().path()).unwrap();
     }
 
@@ -427,7 +486,12 @@ fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
     std::fs::write(&blocker_path, b"not a directory").unwrap();
     let cache_dir = blocker_path.join("cache");
 
-    let cache = FragmentCache::new(&cache_dir, [6u8; 32], [7u8; 32]);
+    let cache = FragmentCache::new(
+        &cache_dir,
+        [6u8; 32],
+        [7u8; 32],
+        tessera_authz::FRAGMENT_FORMAT,
+    );
     let terms: Vec<TermId> = (0..4u32).map(TermId::new).collect();
     let auth_data_hash = [8u8; 32];
 

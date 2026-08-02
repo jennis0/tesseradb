@@ -209,7 +209,7 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
     let postings_path = temp.path().join("postings.arrow");
     write_postings(&postings_path, &[all], 32).unwrap();
     let postings = PostingsReader::open(&postings_path, false).unwrap();
-    let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
+    let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32], tessera_authz::FRAGMENT_FORMAT);
     let fragment = cache
         .get_or_build(&[TermId::new(0)], [3u8; 32], 0, &postings, &[], bound)
         .unwrap();
