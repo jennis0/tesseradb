@@ -334,7 +334,6 @@ pub struct Engine {
     /// read paths own the load, and both must see one pointer or a swap would be invisible.
     pub(crate) generation: Arc<GenerationHandle>,
     pub(crate) plugin: Arc<dyn Plugin>,
-    pub(crate) postings: Arc<PostingsReader>,
     pub(crate) fragment_cache: Arc<FragmentCache>,
     /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
     pub(crate) row_projection_cache: RowProjectionCache,
@@ -499,6 +498,8 @@ impl Engine {
             watermark,
             bundle: Arc::new(bundle),
             dict: Arc::clone(&dict),
+            postings: Arc::clone(&postings),
+            delta_postings: Vec::new(),
             overlay_version: 0,
             overlay: Arc::new(overlay),
             buffer: Arc::new(buffer),
@@ -507,7 +508,6 @@ impl Engine {
         Ok(Engine {
             generation: Arc::clone(&generation),
             plugin,
-            postings,
             fragment_cache,
             // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
             // after `open`, having validated the figure; every other embedder (tests, benches,
@@ -607,7 +607,8 @@ impl Engine {
                 &satisfied_sorted,
                 auth_data_hash,
                 generation.dict.len(),
-                &self.postings,
+                &generation.postings,
+                &generation.delta_postings,
                 generation.watermark,
             )
             .map_err(|e| match e {
@@ -689,10 +690,11 @@ impl Engine {
     /// [`GeometryRefused`] and `pins::check_publishable` for why that is a refusal and not a
     /// warning.
     ///
-    /// `dict` is published with the geometry rather than read out of the engine, because a flush
-    /// promotes novel descriptors to durable ordinals and publishes the assignment as a
-    /// `dict_extents` entry (§3.2) — so the dictionary moves with the segments that carry it. A
-    /// caller with nothing to promote passes the current generation's own.
+    /// `dict` and `delta_postings` are published with the geometry rather than read out of the
+    /// engine, because a flush produces both: it promotes novel descriptors to durable ordinals
+    /// and publishes the assignment as a `dict_extents` entry (§3.2), and it publishes one sparse
+    /// delta postings tier per segment (§5.2). A caller with neither passes the current
+    /// generation's own.
     pub fn publish_geometry(
         &self,
         prefix: String,
@@ -700,6 +702,7 @@ impl Engine {
         watermark: u64,
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
+        delta_postings: Vec<Arc<PostingsReader>>,
     ) -> std::result::Result<Vec<Reclaimed>, GeometryRefused> {
         // An explicit compare-and-swap loop rather than `ArcSwap::rcu`, for two reasons. The guard
         // has to be evaluated against the generation actually being replaced, which means inside
@@ -716,6 +719,8 @@ impl Engine {
                 watermark,
                 bundle: Arc::clone(&bundle),
                 dict: Arc::clone(&dict),
+                postings: Arc::clone(&live.postings),
+                delta_postings: delta_postings.clone(),
                 overlay_version: live.overlay_version,
                 overlay: Arc::clone(&live.overlay),
                 buffer: Arc::clone(&live.buffer),

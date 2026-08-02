@@ -57,24 +57,52 @@ pub use crate::single_flight::CacheStats;
 /// must not appear anywhere in this crate — `terms` and the returned bitmap are both
 /// entity-space, never row-space.
 pub fn build_fragment(terms: &[TermId], postings: &PostingsReader) -> io::Result<Bitmap> {
+    build_fragment_with_deltas(terms, postings, &[])
+}
+
+/// [`build_fragment`] over the base postings **and every live delta tier**.
+///
+/// Flush publishes one sparse tier per segment — only the terms present in its flushed set — so a
+/// build is the union, per satisfied term, of the base posting and that term's posting in each
+/// tier that carries it. A tier that does not carry the term contributes nothing at zero cost.
+///
+/// **The union is over `terms`, never over a tier's whole term set** (I2): a tier holds the
+/// postings of every term its flushed items carried, including terms this session was never
+/// granted, and unioning a tier wholesale would hand a viewer entities outside `M_auth`.
+///
+/// Over zero tiers this is byte-for-byte what a base-only build produces, which is what made it
+/// landable before any flush existed.
+pub fn build_fragment_with_deltas(
+    terms: &[TermId],
+    postings: &PostingsReader,
+    deltas: &[Arc<PostingsReader>],
+) -> io::Result<Bitmap> {
     let mut views: Vec<BitmapView<'_>> = Vec::new();
     let mut small: Vec<u32> = Vec::new();
 
-    for &term in terms {
-        match postings.posting(term)? {
-            PostingRef::Roaring(view) => views.push(view),
-            PostingRef::Array(bytes) => {
-                // `PostingsReader::open` validates every tag-0 payload's length is a
-                // multiple of 4 once, at open time — this is not re-checked per lookup, so a
-                // violation here would mean that validation was bypassed, not that this call site
-                // needs its own fail-closed handling.
-                debug_assert!(
-                    bytes.len() % 4 == 0,
-                    "tag-0 posting payload length must be a multiple of 4 (validated at \
-                     PostingsReader::open)"
-                );
-                for chunk in bytes.chunks_exact(4) {
-                    small.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+    // The base and the tiers are read by the same arm, because a tier is a `PostingsReader` and
+    // the union does not care which file an entity came from — only that the term is satisfied.
+    let readers = std::iter::once(postings).chain(deltas.iter().map(|d| d.as_ref()));
+    for reader in readers {
+        for &term in terms {
+            let Some(posting) = reader.posting(term)? else {
+                continue;
+            };
+            match posting {
+                PostingRef::Roaring(view) => views.push(view),
+                PostingRef::Array(bytes) => {
+                    // `PostingsReader::open` validates every tag-0 payload's length is a
+                    // multiple of 4 once, at open time — this is not re-checked per lookup, so a
+                    // violation here would mean that validation was bypassed, not that this call
+                    // site needs its own fail-closed handling.
+                    debug_assert!(
+                        bytes.len() % 4 == 0,
+                        "tag-0 posting payload length must be a multiple of 4 (validated at \
+                         PostingsReader::open)"
+                    );
+                    for chunk in bytes.chunks_exact(4) {
+                        small.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+                    }
                 }
             }
         }
@@ -608,7 +636,14 @@ impl FragmentCache {
     /// the fast path (that would defeat its purpose), so this obligation is load-bearing in
     /// release too.
     ///
-    /// `postings` supplies the union inputs on a cache miss. `watermark` is the caller-supplied
+    /// `postings` and `deltas` supply the union inputs on a cache miss.
+    ///
+    /// **⊘ The canonical key does not yet distinguish tier sets.** It is
+    /// `(bundle_identity, auth_plugin_hash, satisfied)`, so two builds over the same grant and
+    /// different live tiers collide — which is harmless only while nothing publishes a tier. The
+    /// watermark is what identifies a tier set, and it joins the key with the flush that first
+    /// produces one; until then `deltas` is always empty in production. Do not publish a flush
+    /// segment's tier before that key change lands. `watermark` is the caller-supplied
     /// SEGMENTS watermark to persist alongside a freshly built fragment; it is ignored on a cache
     /// hit: the hit's own persisted watermark, from when it was built, is what is returned, and
     /// mask composition uses that rather than the caller's).
@@ -631,6 +666,7 @@ impl FragmentCache {
         auth_data_hash: [u8; 32],
         dict_len: u32,
         postings: &PostingsReader,
+        deltas: &[Arc<PostingsReader>],
         watermark: u64,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
         let memo_key = (auth_data_hash, dict_len);
@@ -685,7 +721,7 @@ impl FragmentCache {
                 }
 
                 create_private_dir_all(&self.dir)?;
-                let bitmap = build_fragment(satisfied, postings)?;
+                let bitmap = build_fragment_with_deltas(satisfied, postings, deltas)?;
                 self.rebuilds.fetch_add(1, Ordering::Relaxed);
                 FrozenFragment::build_and_persist(&frag_path, &meta_path, &bitmap, watermark)
             })
@@ -730,7 +766,7 @@ mod tests {
             let mut auth_data_hash = [0u8; 32];
             auth_data_hash[..8].copy_from_slice(&(n as u64).to_le_bytes());
             cache
-                .get_or_build(&[], auth_data_hash, 0, &reader, 0)
+                .get_or_build(&[], auth_data_hash, 0, &reader, &[], 0)
                 .expect("an empty grant set builds once and hits thereafter");
             high_water = high_water.max(cache.key_memo_len());
             assert!(

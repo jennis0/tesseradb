@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use tessera_authz::Dict;
+use tessera_authz::{Dict, PostingsReader};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
@@ -114,6 +114,15 @@ pub struct Generation {
     /// does *not* get is the newly promoted one, which is fail-closed and is what §3.3's
     /// staleness hint exists to advertise.
     pub dict: Arc<Dict>,
+    /// The base postings — the build's `terms/postings.arrow`, unchanged by any flush.
+    pub postings: Arc<PostingsReader>,
+    /// One sparse delta postings tier per flush segment, in publication order.
+    ///
+    /// A fragment build unions the base with every live tier over the session's satisfied terms
+    /// (§5.2). They live on the generation rather than on the engine for the same reason the
+    /// dictionary does: a flush publishes one, and a merge coalesces several into one, so the set
+    /// changes exactly when geometry does. Empty in a bundle straight out of `tessera build`.
+    pub delta_postings: Vec<Arc<PostingsReader>>,
     /// Monotone counter bumped on every overlay/buffer swap (independent of `segments_version` —
     /// an overlay change never touches the bundle).
     pub overlay_version: u64,

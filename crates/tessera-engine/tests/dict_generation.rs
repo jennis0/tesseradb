@@ -75,6 +75,7 @@ fn the_write_path_resolves_against_the_generations_dict() {
             live.watermark,
             Arc::clone(&live.bundle),
             extended,
+            Vec::new(),
         )
         .unwrap();
 
@@ -88,10 +89,9 @@ fn the_write_path_resolves_against_the_generations_dict() {
 /// Authorise reads the generation's dictionary, not a process-lifetime one — so a descriptor
 /// promoted by a publication is satisfiable by the sessions authorised after it.
 ///
-/// **The promoted half arrives with the delta tier.** A promoted ordinal is at or above the base
-/// postings' term count, so a fragment build over base postings alone cannot read it; what this
-/// asserts today is the other direction — that an unknown descriptor drops out of `satisfied`
-/// rather than erroring, which is the condition §3.3's staleness hint is computed from.
+/// A promoted ordinal sits at or above the base postings' term count, so this only works because
+/// a term no file carries reads as an empty posting rather than an error (§5.2) — the property
+/// that makes a sparse delta tier possible at all.
 #[test]
 fn authorise_resolves_against_the_generations_dict() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -116,11 +116,34 @@ fn authorise_resolves_against_the_generations_dict() {
         "an unknown descriptor is simply unsatisfied, never an error"
     );
 
-    // The generation's dictionary is what authorise read, and it is the one a flush republishes.
+    let live = engine.generation();
+    let extended = Arc::new(
+        live.dict
+            .load_extending(&extent_in(&tmp.path().join("promoted"), &[b"novel"]))
+            .unwrap(),
+    );
+    engine
+        .publish_geometry(
+            live.prefix.clone(),
+            live.segments_version + 1,
+            live.watermark,
+            Arc::clone(&live.bundle),
+            extended,
+            Vec::new(),
+        )
+        .unwrap();
+
+    let after = engine.authorise(&credential).unwrap();
     assert_eq!(
-        engine.generation().dict.lookup(b"novel"),
-        None,
-        "nothing has promoted it yet"
+        after.satisfied.len(),
+        2,
+        "a promoted descriptor is satisfiable by a session authorised after the publication"
+    );
+    assert_eq!(
+        before.satisfied.len(),
+        1,
+        "and the session authorised before it is untouched — `satisfied` is never re-resolved, \
+         which is what §3.4's patch-equals-a-rebuild rests on"
     );
 }
 

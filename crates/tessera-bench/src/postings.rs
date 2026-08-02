@@ -17,7 +17,11 @@ use tessera_types::TermId;
 /// cardinality and container span, not about which representation the writer picked. Note that
 /// the tag-0 path *copies*, so this is setup-only and must never appear inside a timed loop.
 pub fn to_bitmap(postings: &PostingsReader, term: TermId) -> std::io::Result<Bitmap> {
-    Ok(match postings.posting(term)? {
+    let Some(posting) = postings.posting(term)? else {
+        // Absent means the file carries no record for this term — an empty posting, not an error.
+        return Ok(Bitmap::new());
+    };
+    Ok(match posting {
         PostingRef::Roaring(view) => (*view).clone(),
         PostingRef::Array(bytes) => {
             let mut values: Vec<u32> = bytes

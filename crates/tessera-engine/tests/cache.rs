@@ -91,6 +91,7 @@ fn publish_second_geometry(engine: &Engine, tmp: &TempDir) -> u64 {
             watermark_of(&second),
             second,
             engine.generation().dict.clone(),
+            Vec::new(),
         )
         .expect("a strictly-increasing segments_version publishes");
     next_version

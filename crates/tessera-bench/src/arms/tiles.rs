@@ -191,5 +191,5 @@ fn frozen_fragment(
     let dir = std::env::temp_dir().join(format!("tessera-bench-frag-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let cache = tessera_authz::FragmentCache::new(&dir, [0u8; 32], [1u8; 32]);
-    Ok(cache.get_or_build(terms, [2u8; 32], terms.len() as u32, postings, u64::MAX)?)
+    Ok(cache.get_or_build(terms, [2u8; 32], terms.len() as u32, postings, &[], u64::MAX)?)
 }

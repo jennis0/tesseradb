@@ -125,7 +125,7 @@ fn bench_compose(c: &mut Criterion) {
     let cache_tmp = TempDir::new().unwrap();
     let cache = FragmentCache::new(cache_tmp.path(), [0u8; 32], [1u8; 32]);
     let fragment = cache
-        .get_or_build(&terms, [2u8; 32], 0, &postings, ITEM_LIMIT)
+        .get_or_build(&terms, [2u8; 32], 0, &postings, &[], ITEM_LIMIT)
         .expect("fragment build should succeed");
 
     let bundle = open_bundle(&bundle_root).expect("bundle should open");

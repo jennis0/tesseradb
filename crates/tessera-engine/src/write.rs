@@ -2935,6 +2935,8 @@ impl Executor {
             watermark: generation.watermark,
             bundle: Arc::clone(&generation.bundle),
             dict: Arc::clone(&generation.dict),
+            postings: Arc::clone(&generation.postings),
+            delta_postings: generation.delta_postings.clone(),
             overlay: Arc::clone(&generation.overlay),
         };
         self.publish(next, started)
@@ -3002,6 +3004,8 @@ impl Executor {
             watermark: generation.watermark,
             bundle: Arc::clone(&generation.bundle),
             dict: Arc::clone(&generation.dict),
+            postings: Arc::clone(&generation.postings),
+            delta_postings: generation.delta_postings.clone(),
             buffer: Arc::clone(&generation.buffer),
         };
         self.publish(next, started)

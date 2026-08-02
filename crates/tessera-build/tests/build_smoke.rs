@@ -155,7 +155,7 @@ fn read_arrow_ipc(path: &Path) -> Vec<RecordBatch> {
 fn posting_entities(path: &Path, term: TermId) -> BTreeSet<u64> {
     use tessera_authz::{PostingRef, PostingsReader};
     let reader = PostingsReader::open(path, false).unwrap();
-    let out = match reader.posting(term).unwrap() {
+    let out = match reader.posting(term).unwrap().expect("the term is present in this file") {
         PostingRef::Array(bytes) => bytes
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64)

@@ -316,15 +316,23 @@ impl PostingsReader {
         self.array.len() as u32
     }
 
-    /// Return term `t`'s postings.
-    pub fn posting(&self, t: TermId) -> io::Result<PostingRef<'_>> {
+    /// Return term `t`'s postings, or `None` if this file carries no record for it.
+    ///
+    /// **`None` is an ordinary answer, not a failure, and that is what makes a delta tier
+    /// possible.** A flush publishes a *sparse* tier — only the terms present in its flushed set
+    /// — so a term the tier does not carry is simply one it contributes nothing for. The same
+    /// answer covers a promoted descriptor against the base file: promotion assigns an ordinal at
+    /// or above the base's term count (§3.2), and the base has nothing for it because the items
+    /// carrying it live in the flush segment.
+    ///
+    /// The corruption this once guarded against is caught elsewhere and earlier: `open` validates
+    /// every record, and a term id that should have been in range but is not is a dictionary/
+    /// postings disagreement, which no per-lookup error here could repair. What it *did* do was
+    /// make an absent term fatal, which is the wrong answer for every tiered read.
+    pub fn posting(&self, t: TermId) -> io::Result<Option<PostingRef<'_>>> {
         let idx = t.raw() as usize;
         if idx >= self.array.len() {
-            return Err(invalid_data(format!(
-                "postings.arrow: term id {} out of range (term_count = {})",
-                t.raw(),
-                self.array.len()
-            )));
+            return Ok(None);
         }
 
         let bytes = self.array.value(idx);
@@ -333,7 +341,7 @@ impl PostingsReader {
             .ok_or_else(|| invalid_data(format!("postings.arrow: term {idx} has no tag byte")))?;
 
         match tag {
-            0 => Ok(PostingRef::Array(payload)),
+            0 => Ok(Some(PostingRef::Array(payload))),
             1 => {
                 // SAFETY: every tag-1 payload in `self.array` was validated once, at `open`
                 // time, by `validate_records` — which round-trips it through
@@ -343,7 +351,7 @@ impl PostingsReader {
                 // contract (valid portable bytes, no length mismatch) is therefore already
                 // discharged before we ever reach this unsafe block.
                 let view = unsafe { BitmapView::deserialize::<Portable>(payload) };
-                Ok(PostingRef::Roaring(view))
+                Ok(Some(PostingRef::Roaring(view)))
             }
             other => Err(invalid_data(format!(
                 "postings.arrow: term {idx} has unknown tag byte {other}"
@@ -513,11 +521,19 @@ mod tests {
         write_postings(&path, &[at_threshold.clone(), over_threshold.clone()], 32).unwrap();
 
         let reader = PostingsReader::open(&path, false).unwrap();
-        match reader.posting(TermId::new(0)).unwrap() {
+        match reader
+            .posting(TermId::new(0))
+            .unwrap()
+            .expect("term 0 is present")
+        {
             PostingRef::Array(bytes) => assert_eq!(bytes.len(), 32 * 4),
             PostingRef::Roaring(_) => panic!("count == threshold must stay tag 0"),
         };
-        match reader.posting(TermId::new(1)).unwrap() {
+        match reader
+            .posting(TermId::new(1))
+            .unwrap()
+            .expect("term 1 is present")
+        {
             PostingRef::Roaring(bm) => assert_eq!(bm.cardinality(), 33),
             PostingRef::Array(_) => panic!("count == threshold + 1 must be tag 1"),
         };
@@ -549,7 +565,7 @@ mod tests {
             prop_assert_eq!(reader.term_count() as usize, per_term.len());
 
             for (t, expected) in per_term.iter().enumerate() {
-                let got: Vec<u32> = match reader.posting(TermId::new(t as u32)).unwrap() {
+                let got: Vec<u32> = match reader.posting(TermId::new(t as u32)).unwrap().expect("every term is present") {
                     PostingRef::Array(bytes) => bytes
                         .chunks_exact(4)
                         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
@@ -649,15 +665,24 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
+    /// **A term this file does not carry is absent, not an error, and the change from the latter
+    /// to the former was deliberate.** A delta tier is sparse by construction — a flush publishes
+    /// postings only for the terms its flushed set carried — and a promoted descriptor's ordinal
+    /// sits at or above the base file's term count (§3.2). Under the old answer, every tiered read
+    /// of an unheld term, and every authorise carrying a promoted descriptor, failed outright.
+    ///
+    /// Nothing is lost by it: `open` validates every record this file *does* hold, and a term id
+    /// that ought to have been in range but is not is a dictionary/postings disagreement that no
+    /// per-lookup error could repair.
     #[test]
-    fn posting_rejects_out_of_range_term_id() {
+    fn a_term_this_file_does_not_carry_reads_as_absent() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("postings.arrow");
         write_postings(&path, &[vec![1, 2, 3]], 32).unwrap();
 
         let reader = PostingsReader::open(&path, false).unwrap();
-        let err = reader.posting(TermId::new(5)).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(reader.posting(TermId::new(5)).unwrap().is_none());
+        assert!(reader.posting(TermId::new(0)).unwrap().is_some());
     }
 
     #[test]

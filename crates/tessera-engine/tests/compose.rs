@@ -70,7 +70,7 @@ fn build_fixture() -> Fixture {
     let cache_dir = temp.path().join("cache");
     let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32]);
     let fragment = cache
-        .get_or_build(&granted, [3u8; 32], 0, &postings, WATERMARK)
+        .get_or_build(&granted, [3u8; 32], 0, &postings, &[], WATERMARK)
         .unwrap();
 
     let perm_path = temp.path().join("permutation.bin");
@@ -121,7 +121,7 @@ fn fragment_for(fx: &Fixture) -> Arc<FrozenFragment> {
     let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32]);
     let granted: Vec<TermId> = vec![TermId::new(0), TermId::new(1)];
     cache
-        .get_or_build(&granted, [3u8; 32], 0, &fx.postings, WATERMARK)
+        .get_or_build(&granted, [3u8; 32], 0, &fx.postings, &[], WATERMARK)
         .unwrap()
 }
 

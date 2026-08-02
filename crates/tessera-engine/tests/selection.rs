@@ -109,7 +109,7 @@ fn mask_over_with(
 
     let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
     let fragment = cache
-        .get_or_build(&[TermId::new(0)], [3u8; 32], 0, &postings, bound)
+        .get_or_build(&[TermId::new(0)], [3u8; 32], 0, &postings, &[], bound)
         .unwrap();
 
     let perm_path = temp.path().join("permutation.bin");

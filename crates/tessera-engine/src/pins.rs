@@ -732,6 +732,16 @@ mod tests {
 
     use super::*;
 
+    /// An empty postings file, for the same reason the bundle above is empty: `retire` never
+    /// reads one. Written to a temporary directory that is dropped immediately — the reader holds
+    /// its own mapping.
+    fn empty_postings() -> tessera_authz::PostingsReader {
+        let dir = tempfile::TempDir::new().expect("a temp dir");
+        let path = dir.path().join("postings.arrow");
+        tessera_authz::write_postings(&path, &[], 32).expect("an empty postings file");
+        tessera_authz::PostingsReader::open(&path, false).expect("it opens")
+    }
+
     /// A `Generation` over an empty synthetic bundle. Nothing here reads the bundle's contents —
     /// `retire` clones the `Arc` and compares identity strings — so an empty partition map is
     /// enough, and building a real one would make this test about the fixture instead.
@@ -771,6 +781,8 @@ mod tests {
                 partitions: HashMap::new(),
             }),
             dict: Arc::new(tessera_authz::Dict::load(&[]).expect("an empty dict needs no file")),
+            postings: Arc::new(empty_postings()),
+            delta_postings: Vec::new(),
             overlay_version: 0,
             overlay: Arc::new(Overlay::new()),
             buffer: Arc::new(IngestBuffer::new()),
