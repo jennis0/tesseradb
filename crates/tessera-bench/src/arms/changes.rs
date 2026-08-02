@@ -214,6 +214,9 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                     compute_threads: tessera_engine::default_compute_threads(),
                     pin_ttl_secs: 300,
                     pins_per_session_max: 4,
+                    drain_depth_max: 4,
+                    flush_max_age_secs: 90,
+                    flush_max_items: 100_000,
                 },
             )?;
             // The WAL lives on a dedicated executor thread, so an engine that writes must start
@@ -467,6 +470,9 @@ pub fn run_deny_ack(
                         compute_threads: tessera_engine::default_compute_threads(),
                         pin_ttl_secs: 300,
                         pins_per_session_max: 4,
+                        drain_depth_max: 4,
+                        flush_max_age_secs: 90,
+                        flush_max_items: 100_000,
                     },
                 )?;
                 // Small on purpose, unlike the other arms' generous 1024: the never-shed phase

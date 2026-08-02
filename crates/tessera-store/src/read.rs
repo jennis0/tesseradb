@@ -833,6 +833,12 @@ pub struct MortonSlice {
 }
 
 impl MortonSlice {
+    /// The mapped file's size in bytes — the operand of `tessera-server`'s merge-size relation
+    /// (§4's relation 2), which needs a segment's on-disk size and has no other way to ask for it.
+    pub fn byte_len(&self) -> u64 {
+        self.mmap.len() as u64
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
@@ -914,6 +920,11 @@ const FIXED_COLUMNS: [(&str, DataType); 3] = [
 ];
 
 impl ColumnsRef {
+    /// This segment's `columns.arrow` size in bytes — see [`MortonSlice::byte_len`].
+    pub fn byte_len(&self) -> u64 {
+        self.batch.get_array_memory_size() as u64
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),

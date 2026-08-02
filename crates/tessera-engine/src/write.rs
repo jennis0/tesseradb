@@ -193,6 +193,21 @@ pub struct ExecutorHealth {
     wal_recoveries: AtomicU64,
     work_submitted: AtomicU64,
     deny_submitted: AtomicU64,
+    /// Flush ticks fired since the executor started — the observable that makes "the tick runs"
+    /// a condition a test can wait on rather than a sleep it has to guess at.
+    pub(crate) ticks: AtomicU64,
+    /// A `POST /control/flush` awaiting the next tick (contracts §3.4). A flag, not a count: the
+    /// endpoint's 202 means "accepted, not yet done", and two requests before one tick are
+    /// satisfied by that tick together.
+    pub(crate) flush_requested: AtomicBool,
+    /// Buffer occupancy as of the last apply — what `/control/ingest`'s occupancy bound is checked
+    /// against, and what `flush_max_items` marks ready.
+    ///
+    /// Published by the executor and read by handlers, so it lags by at most one apply. That is
+    /// the right shape for a backpressure signal: an exact figure would need the handler to hold
+    /// the generation, and the bound it feeds is a ceiling with an order of magnitude of headroom
+    /// (see `DEFAULT_INGEST_BUFFER_MAX_ITEMS`), not a precise quota.
+    pub(crate) buffered_items: AtomicUsize,
     /// Total nanoseconds spent in **the whole apply step** — the `IngestBuffer`/`Overlay` clone,
     /// the per-row inserts, the `Generation` construction and the swap.
     ///
@@ -351,6 +366,13 @@ pub struct ExecutorStats {
     /// See [`ExecutorHealth::apply_nanos_total`] — the whole apply step, not the clone alone.
     pub apply_nanos_total: u64,
     pub apply_nanos_max: u64,
+    /// Flush ticks fired since the executor started (§1.3).
+    pub ticks: u64,
+    /// Items in the ingest buffer as of the last apply — the figure `/control/ingest`'s occupancy
+    /// bound is checked against.
+    pub buffered_items: usize,
+    /// Whether a `POST /control/flush` is awaiting the next tick.
+    pub flush_requested: bool,
     /// Successful WAL appends since the executor started.
     pub wal_appends: u64,
     /// Successful WAL fsyncs since the executor started — the unit group commit is
@@ -464,6 +486,9 @@ impl ExecutorHealth {
             wal_recoveries: AtomicU64::new(0),
             work_submitted: AtomicU64::new(0),
             deny_submitted: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
+            flush_requested: AtomicBool::new(false),
+            buffered_items: AtomicUsize::new(0),
             apply_nanos_total: AtomicU64::new(0),
             apply_nanos_max: AtomicU64::new(0),
             work_completed: AtomicU64::new(0),
@@ -551,6 +576,9 @@ impl ExecutorHealth {
             overlay_soft_limit_alarms: self.overlay_soft_limit_alarms.load(Ordering::Relaxed),
             fragmentation: *lock_recover(&self.fragmentation),
             fragmentation_windows: self.fragmentation_windows.load(Ordering::Relaxed),
+            ticks: self.ticks.load(Ordering::Relaxed),
+            buffered_items: self.buffered_items.load(Ordering::Relaxed),
+            flush_requested: self.flush_requested.load(Ordering::SeqCst),
         }
     }
 
@@ -1251,6 +1279,7 @@ impl WritePath {
         pins: Arc<PinManager>,
         row_projection_cache: Arc<RowProjectionCache>,
         queue_bound: usize,
+        flush_max_age_secs: u64,
         #[cfg(feature = "fault-injection")] faults: Option<
             Arc<tessera_lifecycle::faults::FaultSwitchboard>,
         >,
@@ -1300,6 +1329,8 @@ impl WritePath {
                     },
                     health: Arc::clone(&health),
                     window_seq: 0,
+                    flush_max_age_secs,
+                    last_tick: std::time::Instant::now(),
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
                 };
@@ -2023,6 +2054,11 @@ struct Executor {
     /// The last window's sequence number. [`BatchState::Held`] is what it is for; all it has to be
     /// is distinct per window.
     window_seq: u64,
+    /// §4's `flush_max_age_secs` — the tick's period.
+    flush_max_age_secs: u64,
+    /// When the last tick fired. Started at construction, so the first tick is one period after
+    /// the executor starts rather than immediately at startup.
+    last_tick: std::time::Instant,
     #[cfg(feature = "fault-injection")]
     faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }
@@ -2072,6 +2108,7 @@ impl Executor {
     fn run(&mut self) {
         loop {
             self.recover_wal();
+            self.tick_if_due();
             while self.run_deny_pass() {}
             if self.run_work_pass() {
                 continue;
@@ -2079,6 +2116,46 @@ impl Executor {
             if !self.wait_for_work() {
                 break;
             }
+        }
+    }
+
+    /// **The flush tick** (§1.3): the one cadence on which geometry is published.
+    ///
+    /// Runs at the top of the loop, *before* the deny drain, so a tick is never delayed by work
+    /// that arrived after it came due — and after it, because a tick that publishes must not
+    /// preempt a deny already queued (lifecycle §1.3's priority lane).
+    ///
+    /// **Three publishers reach this cadence and none publishes off it.** The tick itself;
+    /// `flush_max_items`, which marks the buffer flush-*ready* and waits (publishing on trip would
+    /// move the real period below the one §4's relation 1 validated, and §2.2's depth trim would
+    /// then drop pins before their TTL while the depth alarm saturates); and
+    /// `POST /control/flush`, accepted at any time and executed here, its 202 already meaning
+    /// "accepted, not yet done".
+    ///
+    /// **⊘ Specified, not implemented: the flush itself.** What this drives today is `reclaim` —
+    /// lifecycle §2.1 assigns that gap to "whichever stage introduces a periodic publisher", and
+    /// this is that publisher — and the flush-readiness bookkeeping the tick will consume. The
+    /// segment write and the publication arrive with the flush unit.
+    fn tick_if_due(&mut self) {
+        let period = std::time::Duration::from_secs(self.flush_max_age_secs);
+        if self.last_tick.elapsed() < period {
+            return;
+        }
+        self.last_tick = std::time::Instant::now();
+        self.health.ticks.fetch_add(1, Ordering::Relaxed);
+        // Requested flushes are consumed by the tick whether or not there is anything to flush: a
+        // `POST /control/flush` against an empty buffer is satisfied by the tick it named, not
+        // held until something arrives.
+        self.health.flush_requested.store(false, Ordering::SeqCst);
+
+        // Lifecycle §2.1: reclaim ran only as a side effect of the next geometry publication, and
+        // a process that published once and went quiescent held a whole superseded bundle
+        // indefinitely — at drain depth 1, which is *at* the alarm and so invisible in every gauge.
+        // This is the periodic caller that gap was waiting for.
+        let reclaimed = self.pins.reclaim();
+        for entry in &reclaimed {
+            self.row_projection_cache
+                .prune_generation(entry.segments_version);
         }
     }
 
@@ -2139,14 +2216,26 @@ impl Executor {
     /// Shutdown is unchanged and still leaves only from here, after both queues have been observed
     /// empty: a timeout resumes the loop, and only a disconnect ends it.
     fn wait_for_work(&self) -> bool {
-        if self.wal.is_poisoned() {
-            !matches!(
-                self.queues.bell.recv_timeout(WAL_RECOVERY_POLL_INTERVAL),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
-            )
+        // **Bounded by the next tick, always.** An unbounded `recv` here is what an idle node used
+        // to do, and with a periodic publisher it is wrong: the tick would fire only when traffic
+        // happened to wake the loop, making visibility latency a function of load rather than of
+        // `flush_max_age_secs`, and leaving reclaim un-run on exactly the quiescent node
+        // lifecycle §2.1 describes.
+        //
+        // A poisoned WAL wants a shorter wait than the tick, so the two take the smaller.
+        let until_tick = std::time::Duration::from_secs(self.flush_max_age_secs)
+            .saturating_sub(self.last_tick.elapsed());
+        let wait = if self.wal.is_poisoned() {
+            until_tick.min(WAL_RECOVERY_POLL_INTERVAL)
         } else {
-            self.queues.bell.recv().is_ok()
-        }
+            until_tick
+        };
+        // Shutdown is unchanged and still leaves only from here, after both queues have been
+        // observed empty: a timeout resumes the loop, and only a disconnect ends it.
+        !matches!(
+            self.queues.bell.recv_timeout(wait),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        )
     }
 
     /// **The deny window**: gather the queued denies into one committable unit and commit it.
@@ -3112,6 +3201,13 @@ impl Executor {
         }
         drop(established);
         drop(established_inverse);
+
+        // Published here, at the one place buffer occupancy changes, so `/control/ingest`'s
+        // occupancy bound reads a figure the executor maintains rather than one a handler derives
+        // from a generation it would have to load.
+        self.health
+            .buffered_items
+            .store(buffer.len(), Ordering::SeqCst);
 
         let next = Generation {
             overlay_version: generation.overlay_version + 1,

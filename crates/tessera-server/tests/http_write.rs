@@ -694,6 +694,9 @@ fn concurrent_ingest_and_change_both_survive() {
             compute_threads: tessera_engine::default_compute_threads(),
             pin_ttl_secs: 300,
             pins_per_session_max: 4,
+            drain_depth_max: 4,
+            flush_max_age_secs: 90,
+            flush_max_items: 100_000,
         },
     )
     .expect("engine should open");
@@ -1875,6 +1878,7 @@ async fn parked_fixture(tmp: &TempDir) -> ParkedFixture {
         200,
         generous_test_gate(),
         IngestLimits {
+            buffer_max_items: 10_000_000,
             admission: PARKED_INGEST_ADMISSION,
             max_batch_rows: 200_000,
             max_batch_bytes: 64 * 1024 * 1024,
@@ -1945,6 +1949,124 @@ fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
     (0..n)
         .map(|i| (INGEST_BOUND_ID_BASE + base + i, i as f32, i as f32, "0"))
         .collect()
+}
+
+/// **Backpressure by buffer occupancy, not only by queue depth** (§1.3).
+///
+/// `ingest_queue_bound` bounds the *command queue* — 32 jobs by default — and the executor drains
+/// a job into the buffer in milliseconds, so no ingest rate produces a 429 by buffer size through
+/// it. Between ticks the buffer is what grows, and deferring `flush_max_items` to the tick needs a
+/// bound on the thing that grows. This is that bound, and the two are distinct knobs because they
+/// bound distinct resources.
+///
+/// The refusal costs no entity id, no queue slot and no WAL append: it fires before submission,
+/// the same standard the row cap is held to.
+#[tokio::test]
+async fn ingest_is_refused_by_buffer_occupancy() {
+    const BUFFER_MAX: usize = 8;
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let mut engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        default_engine_config(),
+    )
+    .unwrap();
+    // Deep, so nothing here can 429 for the *queue*: this test is about the other bound.
+    engine.start_write_executor(1024).unwrap();
+    let server = mount_server_with_ingest_limits(
+        engine,
+        200,
+        generous_test_gate(),
+        IngestLimits {
+            buffer_max_items: BUFFER_MAX,
+            admission: 64,
+            max_batch_rows: 200_000,
+            max_batch_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .await;
+
+    // Fill the buffer past the bound. Nothing flushes, so it only grows.
+    let (status, _) = post_ingest(&server, "fill", &rows_from(0, BUFFER_MAX as u64), true).await;
+    assert_eq!(status, 200, "the first batch is under the bound");
+
+    // The next one is refused — and refused as backpressure, with a Retry-After, not as a
+    // contract violation: the caller did nothing wrong and should come back after a tick.
+    let response = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .header("x-tessera-batch-id", "over")
+        .header("content-type", "application/octet-stream")
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .body(build_ingest_batch(&rows_from(1000, 1)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 429);
+    assert!(
+        response.headers().contains_key("retry-after"),
+        "a shed ingest must be told when to return"
+    );
+}
+
+/// `POST /control/flush` is **accepted at any time and executed at the next tick** (contracts
+/// §3.4) — its 202 already means "accepted, not yet done", which is what lets it be deferred
+/// without changing what a caller was promised.
+///
+/// Publishing on request would move the real publication period below the one §4's relation 1
+/// validated at startup, and §2.2's depth trim would then drop pins before their TTL while the
+/// depth alarm saturates.
+#[tokio::test]
+async fn control_flush_is_accepted_and_deferred() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let response = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 202);
+
+    // Idempotent: a second request before any tick is satisfied by the same tick.
+    let again = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status().as_u16(), 202);
+
+    // And it is on the operator-credentialled plane like every other control route.
+    let unauthenticated = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status().as_u16(), 401);
 }
 
 /// **Unbounded ingest hangs the viewer plane rather than shedding it, and this closes that.**
@@ -2239,6 +2361,7 @@ async fn ingest_429s_when_the_queue_is_full() {
         200,
         generous_test_gate(),
         IngestLimits {
+            buffer_max_items: 10_000_000,
             admission: 8,
             max_batch_rows: 200_000,
             max_batch_bytes: 64 * 1024 * 1024,
@@ -2342,6 +2465,7 @@ async fn an_oversized_batch_is_422_not_a_queue_slot() {
         200,
         generous_test_gate(),
         IngestLimits {
+            buffer_max_items: 10_000_000,
             admission: 8,
             max_batch_rows: 4,
             max_batch_bytes: 64 * 1024 * 1024,
@@ -2429,6 +2553,7 @@ async fn an_oversized_body_is_422_not_413() {
         200,
         generous_test_gate(),
         IngestLimits {
+            buffer_max_items: 10_000_000,
             admission: 8,
             max_batch_rows: 200_000,
             max_batch_bytes: cap,
@@ -2527,6 +2652,7 @@ async fn backpressure_is_invisible_before_auth() {
         200,
         generous_test_gate(),
         IngestLimits {
+            buffer_max_items: 10_000_000,
             admission: 0,
             // Generous **on purpose**: the row cap is unreachable on this server (see above), and
             // setting it tight here is what made the earlier leg 3 vacuous.
@@ -2606,6 +2732,7 @@ async fn backpressure_is_invisible_before_auth() {
         200,
         generous_test_gate(),
         IngestLimits {
+            buffer_max_items: 10_000_000,
             admission: 8,
             // Tight, and this is where it *bites*: a permit is available here, so an authenticated
             // over-row-cap batch reaches `run_ingest` and the row check is what answers.

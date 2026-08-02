@@ -34,7 +34,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig, EngineError, GeometryRefusedReason, DRAIN_DEPTH_MAX};
+use tessera_engine::{Engine, EngineConfig, EngineError, GeometryRefusedReason, DEFAULT_DRAIN_DEPTH_MAX};
 use tessera_lifecycle::wal::{Wal, WalRecord, WalRow};
 use tessera_lifecycle::ChangeOp;
 use tessera_store::read::open_bundle;
@@ -723,9 +723,9 @@ fn a_pin_past_its_ttl_is_410() {
 
 /// `a_session_cannot_exceed_its_pin_cap` needs four geometries resolvable at once, so it is at the
 /// mercy of the depth ceiling. Checked at **compile** time rather than assumed: lowering
-/// `DRAIN_DEPTH_MAX` below 4 must fail here with a reason, not as a mysterious `PinExpired` in the
+/// `DEFAULT_DRAIN_DEPTH_MAX` below 4 must fail here with a reason, not as a mysterious `PinExpired` in the
 /// middle of a cap assertion.
-const _: () = assert!(DRAIN_DEPTH_MAX >= 4);
+const _: () = assert!(DEFAULT_DRAIN_DEPTH_MAX >= 4);
 
 /// Lifecycle §2.2's per-session cap: the most **superseded** geometries one session may hold
 /// resolvable at once.
@@ -747,6 +747,9 @@ fn a_session_cannot_exceed_its_pin_cap() {
     let engine = open_with(
         EngineConfig {
             pins_per_session_max: 2,
+            drain_depth_max: 4,
+            flush_max_age_secs: 90,
+            flush_max_items: 100_000,
             ..config()
         },
         &tmp,
@@ -938,7 +941,7 @@ fn a_bundle_swap_under_an_unchanged_pin_identity_is_refused() {
         .expect("the refusals above are about the version, not about publication");
 }
 
-/// `DRAIN_DEPTH_MAX` is a **bound**, not a gauge: the list is trimmed to it, and the trimmed pins
+/// `DEFAULT_DRAIN_DEPTH_MAX` is a **bound**, not a gauge: the list is trimmed to it, and the trimmed pins
 /// `410`.
 ///
 /// The failure it catches is the depth trim being absent or a no-op, which is invisible in every
@@ -979,21 +982,21 @@ fn the_drain_list_is_trimmed_to_drain_depth_max() {
             .expect("each publication strictly increases segments_version")
     };
 
-    // Fill the list exactly to the ceiling: after `DRAIN_DEPTH_MAX` publications the original
-    // geometry and the first `DRAIN_DEPTH_MAX - 1` replacements are all superseded.
-    for step in 1..=DRAIN_DEPTH_MAX {
+    // Fill the list exactly to the ceiling: after `DEFAULT_DRAIN_DEPTH_MAX` publications the original
+    // geometry and the first `DEFAULT_DRAIN_DEPTH_MAX - 1` replacements are all superseded.
+    for step in 1..=DEFAULT_DRAIN_DEPTH_MAX {
         assert!(
             publish(step).is_empty(),
             "nothing is reclaimed while the list is filling"
         );
     }
-    assert_eq!(engine.pin_stats().drain_depth, DRAIN_DEPTH_MAX);
+    assert_eq!(engine.pin_stats().drain_depth, DEFAULT_DRAIN_DEPTH_MAX);
     // The control: at the ceiling, the oldest pin still resolves.
     engine
         .viewport(&session, whole_extent().pin(Some(oldest.clone())))
         .expect("a pin at the ceiling, well inside its TTL, resolves");
 
-    let trimmed = publish(DRAIN_DEPTH_MAX + 1);
+    let trimmed = publish(DEFAULT_DRAIN_DEPTH_MAX + 1);
     assert_eq!(
         trimmed
             .iter()
@@ -1004,7 +1007,7 @@ fn the_drain_list_is_trimmed_to_drain_depth_max() {
     );
     assert_eq!(
         engine.pin_stats().drain_depth,
-        DRAIN_DEPTH_MAX,
+        DEFAULT_DRAIN_DEPTH_MAX,
         "the list is capped, not merely alarmed on"
     );
 
@@ -1020,8 +1023,8 @@ fn the_drain_list_is_trimmed_to_drain_depth_max() {
         .viewport(
             &session,
             whole_extent().pin(Some(PinId {
-                prefix: format!("v{:05}", DRAIN_DEPTH_MAX),
-                segments_version: oldest.segments_version + DRAIN_DEPTH_MAX as u64,
+                prefix: format!("v{:05}", DEFAULT_DRAIN_DEPTH_MAX),
+                segments_version: oldest.segments_version + DEFAULT_DRAIN_DEPTH_MAX as u64,
             })),
         )
         .expect("the newest superseded geometry is still on the list");

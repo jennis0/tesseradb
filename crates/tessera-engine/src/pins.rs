@@ -42,7 +42,7 @@
 //!    remove is the use-after-free the review caught").
 //! 3. Lifecycle §2.2's TTL bites at [`PinManager::resolve`], not only at reclaim, so a lifecycle
 //!    thread that has not run its reclaim pass cannot make an over-age pin resolvable again.
-//! 4. **What bounds retention is the TTL, [`DRAIN_DEPTH_MAX`], and a reclaim pass actually running
+//! 4. **What bounds retention is the TTL, [`DEFAULT_DRAIN_DEPTH_MAX`], and a reclaim pass actually running
 //!    — not §2.2's per-session cap.** See [`PinManager::pins_per_session_max`], and
 //!    [`PinStats::oldest_retired_secs`] for the gauge that makes the third of those observable.
 
@@ -68,7 +68,7 @@ use crate::Generation;
 /// **modelled** 50–100 µs per page miss. (The measured/modelled distinction is deliberate
 /// throughout this project; do not flatten it.)
 ///
-/// **An alarm above a saturated ceiling signals nothing** — see [`DRAIN_DEPTH_MAX`]'s sizing
+/// **An alarm above a saturated ceiling signals nothing** — see [`DEFAULT_DRAIN_DEPTH_MAX`]'s sizing
 /// obligation, which is what keeps this gauge informative.
 pub const DRAIN_DEPTH_ALARM: usize = 1;
 
@@ -100,10 +100,21 @@ pub const DRAIN_DEPTH_ALARM: usize = 1;
 /// matters — and pins are dropped by the trim rather than by their TTL. Whichever of the two knobs
 /// that stage sets, it must keep `pin_ttl_secs < DRAIN_DEPTH_MAX × publication_period`.
 ///
-/// A constant rather than a config key deliberately: the stage-2.1 plan's rule 2 lands every config
-/// key in the seam commit, and no key exists for this. If deployment experience wants it tunable,
-/// that is a seam change, not a track's.
-pub const DRAIN_DEPTH_MAX: usize = 4;
+/// **A config key now, not a constant, and this constant is only its default.** The paragraph this
+/// replaces argued the other way — "no key exists for this; if deployment experience wants it
+/// tunable, that is a seam change" — and §1.4's cost model is what changed the answer rather than
+/// deployment experience. The figure above was sized when a drain entry meant a whole distinct
+/// bundle; under §1.2's incremental construction consecutive generations share their base geometry
+/// by `Arc` and differ by a handful of small segments, so an entry costs roughly one flush segment.
+/// That makes it the **cheaper** of the two knobs an admin has for visibility latency — raise this
+/// rather than shorten `pin_ttl_secs` — and a knob compiled in is no knob.
+///
+/// *Modelled, not measured.* The figure to take before an admin leans on it is resident bytes per
+/// drain entry under sustained flush.
+///
+/// The sizing obligation above is discharged by `tessera-server`'s loader, which refuses a
+/// configuration violating `pin_ttl_secs < drain_depth_max × flush_max_age_secs` at startup.
+pub const DEFAULT_DRAIN_DEPTH_MAX: usize = 4;
 
 /// The most sessions one drain entry tracks against the per-session cap before it starts forgetting
 /// the oldest.
@@ -111,7 +122,7 @@ pub const DRAIN_DEPTH_MAX: usize = 4;
 /// Bounded because `holders` would otherwise be an unbounded, attacker-driven allocation on a path
 /// entered only *after* a failed equality check: `Engine::authorise` mints a fresh `token_id` per
 /// call and the fragment is cached, so rotating sessions is nearly free. Total bookkeeping is
-/// bounded at `DRAIN_DEPTH_MAX × MAX_HOLDERS_PER_ENTRY × 8` bytes ≈ 32 KiB.
+/// bounded at `drain_depth_max × MAX_HOLDERS_PER_ENTRY × 8` bytes ≈ 32 KiB.
 ///
 /// **The degradation past the ceiling runs in both directions**, and only one of them is
 /// fail-closed:
@@ -121,7 +132,7 @@ pub const DRAIN_DEPTH_MAX: usize = 4;
 /// - and, the direction a one-sided reading misses, forgetting also makes that session's `held`
 ///   count *smaller*, so it can accumulate more simultaneously-resolvable geometries than
 ///   `pins_per_session_max` nominally allows. That over-run is bounded absolutely by
-///   [`DRAIN_DEPTH_MAX`] — a session cannot resolve more geometries than the list holds — and the
+///   [`DEFAULT_DRAIN_DEPTH_MAX`] — a session cannot resolve more geometries than the list holds — and the
 ///   cap is an availability limit that never reaches an authorisation decision either way. It is
 ///   also bypassable outright by session rotation (see [`PinManager::pins_per_session_max`]), so
 ///   this ceiling is not the thing standing between a client and extra retained geometry.
@@ -213,7 +224,7 @@ pub struct Reclaimed {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PinStats {
     /// Entries currently on the drain list. Alarm above [`DRAIN_DEPTH_ALARM`]; entries past
-    /// [`DRAIN_DEPTH_MAX`] are dropped rather than retained.
+    /// [`DEFAULT_DRAIN_DEPTH_MAX`] are dropped rather than retained.
     pub drain_depth: usize,
     /// **Every** acquisition of the drain mutex since process start, from anywhere in this module.
     ///
@@ -340,7 +351,7 @@ pub(crate) struct PinManager {
     ///
     /// **What this does and does not bound, stated honestly.** A `DrainEntry` holds its bundle from
     /// retirement until its TTL whether or not any session ever presents it, so retention is
-    /// governed entirely by `pin_ttl_secs`, [`DRAIN_DEPTH_MAX`] and reclaim running — not by this.
+    /// governed entirely by `pin_ttl_secs`, [`DEFAULT_DRAIN_DEPTH_MAX`] and reclaim running — not by this.
     /// And a client can hold N drained geometries by rotating N sessions, since `Engine::authorise`
     /// mints a `token_id` per call against a cached fragment. So this is a per-session politeness
     /// limit that the spec requires and that keeps one *well-behaved* session's use of superseded
@@ -351,7 +362,10 @@ pub(crate) struct PinManager {
     /// should be. `tessera-server`'s config loader refuses zero, so only a direct embedder of
     /// `EngineConfig` can reach it.
     pins_per_session_max: usize,
-    /// Superseded geometries, **oldest first**, capped at [`DRAIN_DEPTH_MAX`]. Depth is expected to
+    /// Lifecycle §2.2's ceiling — see [`DEFAULT_DRAIN_DEPTH_MAX`] for why it is configured rather
+    /// than compiled in.
+    drain_depth_max: usize,
+    /// Superseded geometries, **oldest first**, capped at `drain_depth_max`. Depth is expected to
     /// be 0 or 1 (see [`DRAIN_DEPTH_ALARM`]), so the linear scans below are scans of a one-element
     /// vector on the cold path — a `Vec` says that, where a map would imply a size this list must
     /// never reach, and the ordering is what makes "drop the oldest" and
@@ -371,10 +385,15 @@ pub(crate) struct PinManager {
 }
 
 impl PinManager {
-    pub(crate) fn new(pin_ttl_secs: u64, pins_per_session_max: usize) -> Self {
+    pub(crate) fn new(
+        pin_ttl_secs: u64,
+        pins_per_session_max: usize,
+        drain_depth_max: usize,
+    ) -> Self {
         PinManager {
             pin_ttl_secs,
             pins_per_session_max,
+            drain_depth_max,
             drain: Mutex::new(Vec::new()),
             drain_depth: AtomicUsize::new(0),
             drain_locks: AtomicU64::new(0),
@@ -482,7 +501,7 @@ impl PinManager {
         })
     }
 
-    /// Put `superseded`'s geometry on the drain list, and trim the list to [`DRAIN_DEPTH_MAX`].
+    /// Put `superseded`'s geometry on the drain list, and trim the list to [`DEFAULT_DRAIN_DEPTH_MAX`].
     ///
     /// Returns the entries the trim removed, already verified and dropped by the same
     /// remove → verify → drop discipline [`Self::reclaim`] uses. Dropping the oldest is fail-closed:
@@ -543,7 +562,7 @@ impl PinManager {
                 retired_at: Instant::now(),
                 holders: Vec::new(),
             });
-            let over = drain.len().saturating_sub(DRAIN_DEPTH_MAX);
+            let over = drain.len().saturating_sub(self.drain_depth_max);
             let evicted: Vec<DrainEntry> = drain.drain(..over).collect();
             self.note_depth(&drain);
             evicted
@@ -793,7 +812,7 @@ mod tests {
     /// is drained. Without this the refusal below could pass by `retire` never draining anything.
     #[test]
     fn retire_drains_a_geometry_that_is_no_longer_live() {
-        let pins = PinManager::new(300, 4);
+        let pins = PinManager::new(300, 4, DEFAULT_DRAIN_DEPTH_MAX);
         let superseded = generation("v00000", 7);
 
         assert!(pins.retire(&superseded, "v00001", 8).is_empty());
@@ -813,7 +832,7 @@ mod tests {
     /// `Arc`), and it is the shape a pointer-identity guard is blind to.
     #[test]
     fn retire_refuses_a_geometry_that_is_still_live() {
-        let pins = PinManager::new(300, 4);
+        let pins = PinManager::new(300, 4, DEFAULT_DRAIN_DEPTH_MAX);
         let superseded = generation("v00000", 7);
         let clobbered_live = generation("v00000", 7);
 
@@ -837,7 +856,7 @@ mod tests {
     /// entry per accepted suppression.
     #[test]
     fn retire_ignores_an_overlay_only_swap() {
-        let pins = PinManager::new(300, 4);
+        let pins = PinManager::new(300, 4, DEFAULT_DRAIN_DEPTH_MAX);
         let superseded = generation("v00000", 7);
 
         assert!(pins.retire(&superseded, "v00000", 7).is_empty());
@@ -855,7 +874,7 @@ mod tests {
     /// just as well.
     #[test]
     fn oldest_retired_secs_reports_the_oldest_entry() {
-        let pins = PinManager::new(300, 4);
+        let pins = PinManager::new(300, 4, DEFAULT_DRAIN_DEPTH_MAX);
         assert_eq!(pins.stats().oldest_retired_secs, None);
         assert_eq!(pins.stats().pin_ttl_secs, 300);
 
@@ -880,7 +899,7 @@ mod tests {
 
         // A TTL of zero makes every entry immediately over-age, so one reclaim pass empties the
         // list — and the gauge must follow it back to `None` rather than pinning at the last value.
-        let expiring = PinManager::new(0, 4);
+        let expiring = PinManager::new(0, 4, DEFAULT_DRAIN_DEPTH_MAX);
         expiring.retire(&generation("v00000", 7), "v00001", 8);
         assert_eq!(expiring.stats().oldest_retired_secs, Some(0));
         assert_eq!(expiring.reclaim().len(), 1);

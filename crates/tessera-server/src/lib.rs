@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
 
-use config::{Config, ControlListen};
+use config::{Config, ConfigError, ControlListen};
 use state::{AppState, ComputeGate, SessionRegistry};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -130,6 +130,42 @@ fn validate_cache_bounds(config: &Config) -> Result<(), BoxError> {
     Ok(())
 }
 
+/// **§4's relation 2**: a merge's byte cap must be strictly below the base segment's size.
+///
+/// A merge bounded at or above the base could consume it, and a merge that consumes the base is
+/// compaction under another name — it pays a full permutation rewrite and re-emits every column,
+/// banks none of compaction's benefit, and leaves `MANIFEST.files` digesting files nothing
+/// references (§5.3). **The base is not excluded by a rule; it is excluded by this bound**, which
+/// is why the bound is validated rather than assumed.
+///
+/// The base segment is the largest in each slice — a flush segment is one tick's arrivals — so the
+/// comparison is against the largest segment the deployment holds.
+fn validate_merge_size_relation(config: &Config, engine: &Engine) -> Result<(), BoxError> {
+    let generation = engine.generation();
+    let base_segment_bytes = generation
+        .bundle
+        .partitions
+        .values()
+        .flat_map(|p| p.slices.values())
+        .flat_map(|s| s.segments.iter())
+        .map(|s| s.columns.byte_len() + s.morton.byte_len())
+        .max()
+        .unwrap_or(0);
+    // Only an **explicitly set** value is checked. An unset one is derived from this same figure
+    // when merge selection lands, so it cannot violate the relation — and no fixed default could
+    // satisfy it across deployment sizes, which is the whole reason there is not one.
+    let Some(max_merged_segment_bytes) = config.max_merged_segment_bytes else {
+        return Ok(());
+    };
+    if base_segment_bytes > 0 && max_merged_segment_bytes >= base_segment_bytes {
+        return Err(Box::new(ConfigError::MergeSizeRelation {
+            max_merged_segment_bytes,
+            base_segment_bytes,
+        }));
+    }
+    Ok(())
+}
+
 /// Load config and open the engine. Fails closed: a missing `[disclosure]` section, an
 /// unreadable bundle, or a WAL that fails the positional CRC rule all return `Err` here, before
 /// any socket is ever bound.
@@ -158,6 +194,9 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         // holds them for the drain list they bound.
         pin_ttl_secs: config.pin_ttl_secs,
         pins_per_session_max: config.pins_per_session_max,
+        drain_depth_max: config.drain_depth_max,
+        flush_max_age_secs: config.flush_max_age_secs,
+        flush_max_items: config.flush_max_items,
     };
     let mut engine = Engine::open(
         &config.bundle_path,
@@ -166,6 +205,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         Passthrough::new(),
         engine_config,
     )?;
+    // **§4's relation 2**, checked here rather than in `config::load` because its right-hand side
+    // is a property of the deployment's data: the base segment's size is knowable only once the
+    // bundle is open. Same standard as relation 1 — refused, never clamped.
+    validate_merge_size_relation(&config, &engine)?;
     // Move the WAL onto its own thread and open the two write queues. Started here rather than
     // inside `Engine::open` so that an engine which never ingests — every read-only test, bench,
     // example and embedder — starts no thread at all. This is `ingest_queue_bound`'s only consumer.
@@ -214,6 +257,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         // gate never covers the control plane, so writes need a limiter of their own.
         ingest_admission: state::IngestAdmission::new(config.ingest_admission),
         ingest_max_batch_rows: config.ingest_max_batch_rows,
+        ingest_buffer_max_items: config.ingest_buffer_max_items,
         ingest_max_batch_bytes: config.ingest_max_batch_bytes,
         stage_timing: config.stage_timing,
         min_visible_members: config.min_visible_members,

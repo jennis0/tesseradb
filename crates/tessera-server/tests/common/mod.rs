@@ -202,6 +202,9 @@ pub fn default_engine_config() -> EngineConfig {
         // tessera-engine's `tests/common/mod.rs`.
         pin_ttl_secs: 300,
         pins_per_session_max: 4,
+        drain_depth_max: 4,
+        flush_max_age_secs: 90,
+        flush_max_items: 100_000,
     }
 }
 
@@ -306,6 +309,8 @@ pub struct IngestLimits {
     pub admission: usize,
     pub max_batch_rows: usize,
     pub max_batch_bytes: usize,
+    /// Buffer occupancy at which ingest is refused (§1.3).
+    pub buffer_max_items: usize,
 }
 
 /// Generous enough that no test which is not about these bounds can observe them — the same
@@ -318,6 +323,10 @@ pub fn generous_ingest_limits() -> IngestLimits {
         // make the ingest side genuinely heavy. A harness default that silently turned that test's
         // premise into a 422 would be measuring the harness.
         max_batch_rows: 200_000,
+        // Above anything a test that is not about this bound could reach: without a flush the
+        // buffer only grows, so a modest ceiling would turn every long-running ingest test into a
+        // 429 about a bound it never meant to exercise.
+        buffer_max_items: 10_000_000,
         max_batch_bytes: 64 * 1024 * 1024,
     }
 }
@@ -377,6 +386,7 @@ async fn mount_server_with(
         compute_gate,
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         ingest_max_batch_rows: ingest_limits.max_batch_rows,
+        ingest_buffer_max_items: ingest_limits.buffer_max_items,
         ingest_max_batch_bytes: ingest_limits.max_batch_bytes,
         // On, so the header assertions below exercise the emission path rather than only its
         // absence. The compile-time `bench-timing` gate still decides whether anything is sent.

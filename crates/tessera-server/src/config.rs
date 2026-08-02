@@ -24,13 +24,15 @@
 //! `"60s"` sketch, taken deliberately so a value's unit survives being read out of a log line or
 //! a status payload without its key.
 //!
-//! **Three of the fifteen are inert.** ⊘ Specified, not implemented: `flush_max_items` and
-//! `flush_max_age_secs` are parsed, validated and stored, and *nothing reads them*, because flush
-//! does not exist; `commit_window_max_age_ms` likewise, because an age bound has no subject in an
-//! executor whose commit window never waits (see
-//! [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`]). [`tests::the_flush_knobs_are_inert`] and
-//! [`tests::the_commit_window_age_bound_is_inert`] assert that mechanically, so an operator cannot
-//! set one and believe it works without this file's doc having been changed first.
+//! **One key is inert.** ⊘ Specified, not implemented: `commit_window_max_age_ms`, because an age
+//! bound has no subject in an executor whose commit window never waits (see
+//! [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`]). [`tests::the_commit_window_age_bound_is_inert`] asserts
+//! that mechanically, so an operator cannot set it and believe it works without this file's doc
+//! having been changed first.
+//!
+//! `flush_max_items` and `flush_max_age_secs` were inert too, and are not: the flush tick reads
+//! both, and the assertion that used to pin their inertness was deleted in the commit that gave
+//! them a consumer — which is what it asked for.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -68,6 +70,39 @@ pub enum ConfigError {
         k_min: usize,
         cap_name: &'static str,
         cap: usize,
+    },
+    /// `serve.pin_ttl_secs` is not strictly below `drain_depth_max × flush_max_age_secs` (§1.3,
+    /// §4's relation 1).
+    ///
+    /// **A saturated ceiling is what this refuses.** Publications landing closer together than
+    /// `pin_ttl_secs / drain_depth_max` leave the drain list permanently at its ceiling: the depth
+    /// alarm saturates — stopping signalling exactly when depth matters — and pins are dropped by
+    /// the trim rather than by their TTL, so a client is `410`d before the lifetime it was
+    /// promised. `tessera_engine::pins`' sizing obligation names this as the duty of whichever
+    /// stage introduces a periodic publisher; the flush tick is that publisher.
+    ///
+    /// The message names all three knobs, because an operator told only "the relation fails"
+    /// cannot tell which one to move.
+    PinDrainRelation {
+        pin_ttl_secs: u64,
+        drain_depth_max: usize,
+        flush_max_age_secs: u64,
+    },
+    /// `merge.max_merged_segment_bytes` is not strictly below the base segment's size (§4's
+    /// relation 2).
+    ///
+    /// A merge bounded above the base segment could consume it, and a merge that consumes the base
+    /// is compaction under another name — it pays a full permutation rewrite and re-emits every
+    /// column, banks none of compaction's benefit, and leaves `MANIFEST.files` digesting files
+    /// nothing references. See [`DEFAULT_MAX_MERGED_SEGMENT_BYTES`].
+    ///
+    /// Validated where the bundle is open rather than in [`load`], because the right-hand side is
+    /// a property of the deployment's data and not of its configuration — which is also why there
+    /// is no fixed default to violate it: an unset key is derived from the base segment
+    /// ([`MAX_MERGED_SEGMENT_BASE_FRACTION`]), and only an explicitly-set one is checked here.
+    MergeSizeRelation {
+        max_merged_segment_bytes: u64,
+        base_segment_bytes: u64,
     },
     /// `serve.max_underlay_offset` above the grid's own depth. The §5.2 grid is 2¹⁶ × 2¹⁶, so an
     /// offset beyond 16 can never be usable at any zoom — every request naming it would be refused
@@ -202,6 +237,33 @@ pub enum ConfigError {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ConfigError::PinDrainRelation {
+                pin_ttl_secs,
+                drain_depth_max,
+                flush_max_age_secs,
+            } => write!(
+                f,
+                "serve.pin_ttl_secs = {pin_ttl_secs} is not below serve.drain_depth_max \
+                 ({drain_depth_max}) x ingest.flush_max_age_secs ({flush_max_age_secs}) = {}. \
+                 Geometry is published every flush_max_age_secs, so publications land closer \
+                 together than pin_ttl_secs / drain_depth_max and the pin drain list sits at its \
+                 ceiling permanently: the depth alarm saturates and pins are dropped by the trim \
+                 rather than by their TTL. Lower pin_ttl_secs, or raise drain_depth_max (the \
+                 cheaper knob -- a drain entry costs roughly one flush segment), or lengthen \
+                 flush_max_age_secs and accept the visibility latency",
+                *drain_depth_max as u64 * flush_max_age_secs
+            ),
+            ConfigError::MergeSizeRelation {
+                max_merged_segment_bytes,
+                base_segment_bytes,
+            } => write!(
+                f,
+                "merge.max_merged_segment_bytes = {max_merged_segment_bytes} is not below this \
+                 deployment's base segment ({base_segment_bytes} bytes), so a merge could consume \
+                 the base -- which is compaction under another name: it pays a full permutation \
+                 rewrite and re-emits every column, banks none of compaction's benefit, and leaves \
+                 MANIFEST.files digesting files nothing references"
+            ),
             ConfigError::Io(e) => write!(f, "config io error: {e}"),
             ConfigError::Toml(e) => write!(f, "config parse error: {e}"),
             ConfigError::MissingDisclosureSection => write!(
@@ -463,6 +525,8 @@ struct RawIngest {
     flush_max_items: Option<usize>,
     #[serde(default)]
     flush_max_age_secs: Option<u64>,
+    #[serde(default)]
+    ingest_buffer_max_items: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -527,6 +591,14 @@ struct RawServe {
     expected_concurrent_sessions: Option<usize>,
     #[serde(default)]
     pin_ttl_secs: Option<u64>,
+    #[serde(default)]
+    drain_depth_max: Option<usize>,
+    #[serde(default)]
+    segment_floor_bytes: Option<u64>,
+    #[serde(default)]
+    max_merged_segment_bytes: Option<u64>,
+    #[serde(default)]
+    tier_width: Option<usize>,
     #[serde(default)]
     pins_per_session_max: Option<usize>,
     /// Browser origins permitted to call the viewer and session planes.
@@ -636,12 +708,42 @@ pub struct Config {
     /// **Alarms only** — ⊘ no compaction fold exists, so crossing it gets an operator a signal,
     /// never relief.
     pub overlay_soft_limit: usize,
-    /// **INERT.** ⊘ Parsed, validated, stored, read by nothing: its consumer is flush, which does
-    /// not exist. See [`DEFAULT_FLUSH_MAX_ITEMS`].
+    /// Buffer occupancy at which a flush becomes **ready** — not at which it publishes. See
+    /// [`DEFAULT_FLUSH_MAX_ITEMS`] and [`Config::flush_max_age_secs`].
     pub flush_max_items: usize,
-    /// **INERT.** ⊘ Parsed, validated, stored, read by nothing: its consumer is flush, which does
-    /// not exist. See [`DEFAULT_FLUSH_MAX_AGE_SECS`].
+    /// The flush tick: the period at which geometry is published, and therefore the bound on how
+    /// stale an acknowledged item's absence may be. See [`DEFAULT_FLUSH_MAX_AGE_SECS`], and
+    /// [`ConfigError::PinDrainRelation`] for the relation that bounds it from below.
     pub flush_max_age_secs: u64,
+    /// Buffer occupancy at which `/control/ingest` is refused with a 429 (§1.3).
+    ///
+    /// A **distinct knob** from [`Config::ingest_queue_bound`], which bounds queued *commands*:
+    /// the executor drains a job into the buffer in milliseconds, so no ingest rate produces a 429
+    /// by buffer size through that one. See [`DEFAULT_INGEST_BUFFER_MAX_ITEMS`].
+    pub ingest_buffer_max_items: usize,
+    /// Superseded generations retained on the pin drain list (lifecycle §2.2). See
+    /// [`DEFAULT_DRAIN_DEPTH_MAX`].
+    pub drain_depth_max: usize,
+    /// Below this, segments compare equal for merge selection, so a tail of tiny ones does not
+    /// dominate it. See [`DEFAULT_SEGMENT_FLOOR_BYTES`].
+    pub segment_floor_bytes: u64,
+    /// Cap on any single merge — and the bound that keeps a merge from swallowing the base
+    /// segment, which would be compaction under another name (§5.3).
+    ///
+    /// **`None` means "derive it from the base segment", and there is deliberately no fixed
+    /// default.** §4's relation 2 puts the base segment's size on the right-hand side, and that is
+    /// a property of the deployment's data rather than of its configuration: any constant large
+    /// enough for a 10⁹-row deployment exceeds a small one's whole base segment, so shipping one
+    /// would give a server that refuses to start on its own defaults for every bundle below that
+    /// size — the failure `DEFAULT_FLUSH_MAX_AGE_SECS` had against relation 1.
+    ///
+    /// **⊘ The derivation lands with merge selection**, which is the only thing that will read it;
+    /// until then an unset key means "no merge policy is configured", which is accurate because
+    /// there is no merge. An explicitly-set value *is* checked — see
+    /// [`ConfigError::MergeSizeRelation`] — so an operator cannot configure the fail-open early.
+    pub max_merged_segment_bytes: Option<u64>,
+    /// Segments in a tier before a merge is selected. See [`DEFAULT_TIER_WIDTH`].
+    pub tier_width: usize,
     /// Byte bound on the row-projection cache. See [`DEFAULT_ROW_PROJECTION_CACHE_BYTES`], and
     /// [`MEASURED_PROJECTION_BYTES_AT_1E9`] for the per-entry size the startup validation weighs it
     /// against.
@@ -1169,23 +1271,59 @@ const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 /// **INERT.** The flush trigger by buffered-item count. **SA §7's own default**, carried across
 /// unchanged.
 ///
-/// ⊘ Specified, not implemented: its consumer is flush, which does not exist, so nothing in the
-/// process reads this value and an operator who sets it changes nothing at all. It is parsed,
-/// validated and documented so that whatever builds flush finds the key already settled.
-/// [`tests::the_flush_knobs_are_inert`] fails the moment anything outside this module names it,
-/// which is the moment this paragraph must be deleted.
+/// **It marks the buffer flush-*ready*; it does not publish** (§1.3). Publication waits for the
+/// next tick, because publishing on trip would move the real period below the one
+/// [`ConfigError::PinDrainRelation`] validated — and §2.2's depth trim would then drop pins before
+/// their TTL while the depth alarm saturates.
 const DEFAULT_FLUSH_MAX_ITEMS: usize = 100_000;
 
-/// **INERT.** The flush trigger by age — SA §7's `flush_max_age = "60s"`, carried across with the
-/// unit moved into the key name.
+/// **The flush tick**, and therefore the bound on how stale an acknowledged item's absence may be:
+/// a buffered item contributes to no viewport, count or density until a flush gives it a row. A
+/// visibility-latency control, not merely a segment-count one.
 ///
-/// ⊘ Specified, not implemented: its consumer is flush, which does not exist. See
-/// [`DEFAULT_FLUSH_MAX_ITEMS`]. Worth knowing whenever it is wired: lifecycle §1.2 makes this the
-/// bound on **how stale an acknowledged item's absence may be** — a buffered item contributes to no
-/// viewport, count or density until flush gives it a row — so it becomes a visibility-latency
-/// control, not merely a segment-count one. That is an argument for revisiting the number then, not
-/// for pretending it does something now.
-const DEFAULT_FLUSH_MAX_AGE_SECS: u64 = 60;
+/// **90, not SA §7's 60, and the change came with the validation that makes it necessary.** The
+/// floor the shipped `pin_ttl_secs` (300) and `drain_depth_max` (4) permit is 75 s
+/// ([`ConfigError::PinDrainRelation`]); 60 violates it, so landing the relation without moving this
+/// number would give a server that refuses to start on its own defaults. 90 sits above the floor
+/// with margin.
+///
+/// An admin who wants lower visibility latency raises `drain_depth_max` rather than shortening
+/// `pin_ttl_secs`: under §1.2's incremental generation construction the marginal cost of a drain
+/// entry is roughly one flush segment rather than a whole bundle, which is what makes it the
+/// cheaper knob. *Modelled, not measured* — the figure to take before leaning on it is resident
+/// bytes per drain entry under sustained flush.
+const DEFAULT_FLUSH_MAX_AGE_SECS: u64 = 90;
+
+/// Buffer occupancy at which `/control/ingest` is refused (§1.3).
+///
+/// **`ingest_queue_bound` does not bound this.** That one bounds the *command queue* — 32 jobs by
+/// default — and the executor drains a job into the buffer in milliseconds, so nothing in the
+/// system compared buffer occupancy to anything and no ingest rate produced a 429 by buffer size.
+/// Deferring `flush_max_items` to the tick needs such a bound to exist, because between ticks the
+/// buffer is what grows.
+///
+/// Sized an order above `flush_max_items` (100 000): a flush-ready buffer must not be a refusing
+/// one, or a deployment that trips the item bound between ticks sheds ingest it was about to
+/// publish. What this bounds is the pathological case — repeated flush failure — where the buffer
+/// grows without a flush to drain it, and 429 is the intended backpressure (§10).
+const DEFAULT_INGEST_BUFFER_MAX_ITEMS: usize = 1_000_000;
+
+/// Superseded generations retained on the pin drain list (lifecycle §2.2).
+///
+/// **Admin-configurable, reversing `tessera_engine::pins`' recorded choice** that it be a
+/// compile-time constant. §1.4's cost model is what changes the answer: the constant was chosen
+/// when a drain entry meant a whole distinct bundle, and under §1.2's incremental construction
+/// consecutive generations share their base geometry by `Arc`, so a drain entry costs roughly one
+/// flush segment. That makes this the cheaper of the two knobs an admin has for visibility
+/// latency, and a knob is no use compiled in.
+const DEFAULT_DRAIN_DEPTH_MAX: usize = 4;
+
+/// Below this, segments compare equal for merge selection (§5.1), so a tail of tiny segments does
+/// not dominate it.
+const DEFAULT_SEGMENT_FLOOR_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Segments in a tier before a merge is selected (§5.1).
+const DEFAULT_TIER_WIDTH: usize = 4;
 
 /// The **measured** serialised size of one row projection at the 10⁹ operating point: every
 /// mask at ≥25% coverage serialises to a 125.12 MB dense bound (design Appendix A quotes the
@@ -1582,8 +1720,40 @@ fn parse(text: &str) -> Result<Config> {
         raw.ingest
             .flush_max_age_secs
             .unwrap_or(DEFAULT_FLUSH_MAX_AGE_SECS),
-        "a zero age trigger asks flush to run continuously (INERT — nothing reads this key; \
-         validated so that whatever builds flush inherits the guard)",
+        "a zero tick asks the executor to publish geometry continuously, which is a publication \
+         per loop iteration and a drain entry per publication",
+    )?;
+    let ingest_buffer_max_items = non_zero_usize(
+        "ingest.ingest_buffer_max_items",
+        raw.ingest
+            .ingest_buffer_max_items
+            .unwrap_or(DEFAULT_INGEST_BUFFER_MAX_ITEMS),
+        "a zero buffer bound refuses EVERY ingest with 429 while denies continue normally — \
+         indistinguishable from ingest being switched off, but silently",
+    )?;
+    let drain_depth_max = non_zero_usize(
+        "serve.drain_depth_max",
+        raw.serve.drain_depth_max.unwrap_or(DEFAULT_DRAIN_DEPTH_MAX),
+        "a zero drain depth retires every superseded geometry immediately, so a pin taken one \
+         instant before a flush is 410 the next — I11's frozen view would last less than a tick",
+    )?;
+    let segment_floor_bytes = raw
+        .serve
+        .segment_floor_bytes
+        .unwrap_or(DEFAULT_SEGMENT_FLOOR_BYTES);
+    let max_merged_segment_bytes = match raw.serve.max_merged_segment_bytes {
+        Some(bytes) => Some(non_zero_u64(
+            "serve.max_merged_segment_bytes",
+            bytes,
+            "a zero merge cap admits no merge at all, so the segment and delta-tier counts grow \
+             without limit under flush — §0's serving cliff on both axes",
+        )?),
+        None => None,
+    };
+    let tier_width = non_zero_usize(
+        "serve.tier_width",
+        raw.serve.tier_width.unwrap_or(DEFAULT_TIER_WIDTH),
+        "a zero tier width selects a merge over no segments at all",
     )?;
     let row_projection_cache_bytes = non_zero_u64(
         "serve.row_projection_cache_bytes",
@@ -1616,6 +1786,18 @@ fn parse(text: &str) -> Result<Config> {
         "every pin would expire the instant it was issued, so a client presenting a pin it was \
          just given gets 410 with nothing to distinguish that from a drained generation",
     )?;
+    // **§4's relation 1**, checked here because all three operands are now known and because a
+    // violating configuration must be refused rather than clamped: clamping would silently give an
+    // operator a different pin lifetime, or a different visibility latency, than the one they
+    // configured. The flush tick is the periodic publisher `tessera_engine::pins`' sizing
+    // obligation names, and this is that obligation discharged.
+    if pin_ttl_secs >= drain_depth_max as u64 * flush_max_age_secs {
+        return Err(ConfigError::PinDrainRelation {
+            pin_ttl_secs,
+            drain_depth_max,
+            flush_max_age_secs,
+        });
+    }
     let pins_per_session_max = non_zero_usize(
         "serve.pins_per_session_max",
         raw.serve
@@ -1698,6 +1880,11 @@ fn parse(text: &str) -> Result<Config> {
     }
 
     Ok(Config {
+        ingest_buffer_max_items,
+        drain_depth_max,
+        segment_floor_bytes,
+        max_merged_segment_bytes,
+        tier_width,
         bundle_path: raw.bundle.path,
         cache_dir: raw.bundle.cache,
         wal_path: raw.bundle.wal,
@@ -1849,6 +2036,87 @@ mod tests {
             {serve_extra}
         "#
         )
+    }
+
+    /// **§4's relation 1.** A violating configuration is refused, and the message names all three
+    /// knobs, because an operator told only "the relation fails" cannot tell which one to move.
+    ///
+    /// The fixture is what SA §7 shipped: `pin_ttl_secs` 300 against a 60 s tick, which is a drain
+    /// list permanently at its ceiling — the depth alarm saturated and pins dropped by the trim
+    /// rather than by their TTL.
+    #[test]
+    fn a_pin_ttl_the_publication_cadence_cannot_cover_is_refused() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml_with(
+            "pin_ttl_secs = 300",
+            "flush_max_age_secs = 60",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(err, ConfigError::PinDrainRelation { .. }),
+            "got {err:?}"
+        );
+        let text = err.to_string();
+        for knob in ["pin_ttl_secs", "drain_depth_max", "flush_max_age_secs"] {
+            assert!(text.contains(knob), "the message must name {knob}: {text}");
+        }
+    }
+
+    /// **The shipped defaults satisfy it**, which is not automatic: SA §7's 60 s tick against the
+    /// 300 s pin TTL and a depth of 4 violates the relation, so landing the validation without
+    /// moving `DEFAULT_FLUSH_MAX_AGE_SECS` would have given a server that refuses to start on its
+    /// own configuration. The two changed together.
+    #[test]
+    fn the_shipped_defaults_satisfy_relation_one() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("")).expect("the defaults must load");
+        assert!(
+            config.pin_ttl_secs < config.drain_depth_max as u64 * config.flush_max_age_secs,
+            "pin_ttl_secs {} >= {} x {}",
+            config.pin_ttl_secs,
+            config.drain_depth_max,
+            config.flush_max_age_secs
+        );
+    }
+
+    /// Raising `drain_depth_max` is the way to a shorter tick, and §1.4 is why: under incremental
+    /// generation construction a drain entry costs roughly one flush segment rather than a whole
+    /// bundle, so it is the cheaper knob than shortening `pin_ttl_secs`. This is that path being
+    /// open rather than merely described.
+    #[test]
+    fn a_deeper_drain_list_admits_a_shorter_tick() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        assert!(parse(&valid_toml_with(
+            "pin_ttl_secs = 300\n            drain_depth_max = 16",
+            "flush_max_age_secs = 30",
+        ))
+        .is_ok());
+    }
+
+    /// The new knobs default rather than requiring an operator to name them, and
+    /// `max_merged_segment_bytes` defaults to **unset** — there is no fixed value that can satisfy
+    /// §4's relation 2 across deployment sizes.
+    #[test]
+    fn the_flush_and_merge_knobs_have_working_defaults() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("")).expect("defaults must load");
+        assert_eq!(config.flush_max_age_secs, DEFAULT_FLUSH_MAX_AGE_SECS);
+        assert_eq!(config.flush_max_items, DEFAULT_FLUSH_MAX_ITEMS);
+        assert_eq!(
+            config.ingest_buffer_max_items,
+            DEFAULT_INGEST_BUFFER_MAX_ITEMS
+        );
+        assert_eq!(config.drain_depth_max, DEFAULT_DRAIN_DEPTH_MAX);
+        assert_eq!(config.segment_floor_bytes, DEFAULT_SEGMENT_FLOOR_BYTES);
+        assert_eq!(config.tier_width, DEFAULT_TIER_WIDTH);
+        assert_eq!(
+            config.max_merged_segment_bytes, None,
+            "no fixed default can satisfy relation 2 — it is derived from the base segment"
+        );
     }
 
     #[test]
@@ -2267,31 +2535,6 @@ mod tests {
             }
         }
         offenders
-    }
-
-    /// **The inertness assertion.** `flush_max_items` and `flush_max_age_secs` are parsed,
-    /// validated and stored, and *nothing reads them* — their consumer is flush, which does not
-    /// exist. An operator must not be able to set one and believe it works, so the claim is checked
-    /// mechanically rather than promised in a doc comment: no `.rs` file in the workspace outside
-    /// this module may **use** either key.
-    ///
-    /// Whatever wires flush fails this test, which is the design: the failure is the prompt to
-    /// delete the INERT paragraphs from both `DEFAULT_FLUSH_*` constants and both `Config` fields in
-    /// the same commit that gives them a consumer. Deleting this test without doing that is the
-    /// failure mode it exists to prevent, so its message says so.
-    #[test]
-    fn the_flush_knobs_are_inert() {
-        let offenders = files_using(&["flush_max_items", "flush_max_age_secs"]);
-        assert!(
-            offenders.is_empty(),
-            "flush_max_items / flush_max_age_secs are documented as INERT, but are USED \
-             (outside a comment) in: {offenders:?}. Naming either key in prose — a doc \
-             comment, a caveat, a TODO — is fine and always was intended to be; comments are \
-             stripped before this scan. If flush now consumes them, delete this test AND the \
-             INERT paragraphs on DEFAULT_FLUSH_MAX_ITEMS, DEFAULT_FLUSH_MAX_AGE_SECS and both \
-             Config fields — an operator reading a stale 'INERT' note is exactly what this test \
-             prevents"
-        );
     }
 
     /// **The second inertness assertion.** `commit_window_max_age_ms` is parsed, validated and

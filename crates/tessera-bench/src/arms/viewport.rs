@@ -180,6 +180,9 @@ pub fn run(
                         compute_threads: tessera_engine::default_compute_threads(),
                         pin_ttl_secs: 300,
                         pins_per_session_max: 4,
+                        drain_depth_max: 4,
+                        flush_max_age_secs: 90,
+                        flush_max_items: 100_000,
                     },
                 )?;
                 let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;

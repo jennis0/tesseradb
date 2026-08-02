@@ -122,6 +122,25 @@ pub struct EngineConfig {
     /// This is **not** the page-cache defence — `crate::pins::PinManager::pins_per_session_max`
     /// says what it does and does not bound.
     pub pins_per_session_max: usize,
+    /// Lifecycle §2.2's drain-list ceiling: superseded generations retained.
+    ///
+    /// A field rather than `pins::DRAIN_DEPTH_MAX`, which it replaces. That constant's own doc
+    /// argued for a constant — "the stage-2.1 plan's rule 2 lands every config key in the seam
+    /// commit, and no key exists for this" — and §1.4's cost model is what changes the answer: it
+    /// was chosen when a drain entry meant a whole distinct bundle, and under §1.2's incremental
+    /// construction consecutive generations share their base geometry, so an entry costs roughly
+    /// one flush segment. That makes it the cheaper of the two knobs an admin has for visibility
+    /// latency, and a knob compiled in is no knob.
+    pub drain_depth_max: usize,
+    /// The flush tick, in seconds: the period at which geometry is published.
+    ///
+    /// Bounded from below by `pin_ttl_secs < drain_depth_max × flush_max_age_secs`, which
+    /// `tessera-server`'s loader refuses to start without (§4's relation 1). An embedder
+    /// constructing this struct directly is on its own honour, as it is for `k_min`.
+    pub flush_max_age_secs: u64,
+    /// Buffer occupancy at which a flush becomes **ready** — publication still waits for the tick
+    /// (§1.3).
+    pub flush_max_items: usize,
 }
 
 /// D-D's default: fill the machine. Identical reasoning and identical fallback (`1`, never
@@ -544,6 +563,7 @@ impl Engine {
         let pins = Arc::new(PinManager::new(
             config.pin_ttl_secs,
             config.pins_per_session_max,
+            config.drain_depth_max,
         ));
         // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
         // after `open`, having validated the figure; every other embedder (tests, benches,
@@ -1150,6 +1170,7 @@ impl Engine {
             Arc::clone(&self.pins),
             Arc::clone(&self.row_projection_cache),
             queue_bound,
+            self.config.flush_max_age_secs,
             #[cfg(feature = "fault-injection")]
             None,
         )
@@ -1168,6 +1189,7 @@ impl Engine {
             Arc::clone(&self.pins),
             Arc::clone(&self.row_projection_cache),
             queue_bound,
+            self.config.flush_max_age_secs,
             Some(faults),
         )
     }
@@ -1186,6 +1208,29 @@ impl Engine {
     /// unauthenticated surface).
     pub fn write_executor_stats(&self) -> crate::write::ExecutorStats {
         self.write.health().stats()
+    }
+
+    /// Items in the ingest buffer as of the executor's last apply — what `/control/ingest`'s
+    /// occupancy bound is checked against (§1.3).
+    ///
+    /// **Lags by at most one apply, deliberately.** An exact figure would need the caller to load
+    /// the generation, and the bound this feeds is a ceiling with an order of magnitude of
+    /// headroom over `flush_max_items`, not a precise quota.
+    pub fn buffered_items(&self) -> usize {
+        self.write.health().buffered_items.load(Ordering::SeqCst)
+    }
+
+    /// Request a flush. **Accepted at any time, executed at the next tick** (contracts §3.4) —
+    /// its 202 already means "accepted, not yet done".
+    ///
+    /// Publishing on request would move the real publication period below the one §4's relation 1
+    /// validated, which is the same reason `flush_max_items` marks the buffer ready rather than
+    /// publishing.
+    pub fn request_flush(&self) {
+        self.write
+            .health()
+            .flush_requested
+            .store(true, Ordering::SeqCst);
     }
 
     /// Submit an ingest batch and wait for its receipt. Rows arrive **unallocated**: entity ids are

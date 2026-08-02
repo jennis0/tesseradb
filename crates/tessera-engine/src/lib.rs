@@ -34,7 +34,8 @@ pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
 // refusal a publisher must handle, the gauges `/control/status` publishes, and the two depths —
 // the one an operator alarms above and the one `tests/pins.rs` asserts the trim against.
 pub use pins::{
-    GeometryRefused, GeometryRefusedReason, PinStats, Reclaimed, DRAIN_DEPTH_ALARM, DRAIN_DEPTH_MAX,
+    GeometryRefused, GeometryRefusedReason, PinStats, Reclaimed, DEFAULT_DRAIN_DEPTH_MAX,
+    DRAIN_DEPTH_ALARM,
 };
 pub use session::{default_compute_threads, Engine, EngineConfig, EngineError, Session};
 // The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot state

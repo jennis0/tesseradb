@@ -362,6 +362,9 @@ fn theta_does_not_move_when_the_viewport_pans() {
             compute_threads: default_compute_threads(),
             pin_ttl_secs: 300,
             pins_per_session_max: 4,
+            drain_depth_max: 4,
+            flush_max_age_secs: 90,
+            flush_max_items: 100_000,
         },
     )
     .unwrap();
@@ -437,6 +440,9 @@ fn no_visible_tile_is_ever_served_empty() {
             compute_threads: default_compute_threads(),
             pin_ttl_secs: 300,
             pins_per_session_max: 4,
+            drain_depth_max: 4,
+            flush_max_age_secs: 90,
+            flush_max_items: 100_000,
         },
     )
     .unwrap();
@@ -1156,6 +1162,9 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             compute_threads: default_compute_threads(),
             pin_ttl_secs: 300,
             pins_per_session_max: 4,
+            drain_depth_max: 4,
+            flush_max_age_secs: 90,
+            flush_max_items: 100_000,
         },
     )
     .expect("engine should open the 2.4M bundle");

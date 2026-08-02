@@ -242,6 +242,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/control/ingest", ingest_route)
         .route("/control/changes", changes_route)
         .route("/control/status", get(status))
+        .route("/control/flush", post(flush))
         // **The whole plane's credential check, in one place** — see
         // [`require_operator_credential`]. `Router::layer` rather than a `route_layer` per route:
         // the point of this construction is that a route added below inherits the check without
@@ -354,6 +355,7 @@ pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/control/ingest"),
     ("POST", "/control/changes"),
     ("GET", "/control/status"),
+    ("POST", "/control/flush"),
 ];
 
 /// `/control/changes`'s request-body limit.
@@ -366,6 +368,14 @@ pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
 /// item is order 200 B (see `config::RESERVED_DENY_HEADROOM_BYTES`), so this admits roughly ten
 /// thousand suppressions in one request, and a caller with more than that has to split — which is
 /// a latency cost on a batch, not a refusal of any individual deny.
+/// `Retry-After` for a buffer-occupancy 429.
+///
+/// **A flush period, not the queue estimator's figure.** `estimate_retry_after_s` models a client
+/// queued behind work the executor is draining now; this client is queued behind a *flush*, which
+/// happens on the tick and not before it, so the honest advice is "after the next tick". A default
+/// tick is 90 s, and a client told 1 s would simply be refused ninety more times.
+const INGEST_BUFFER_FULL_RETRY_AFTER_S: u64 = 90;
+
 const CHANGES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -595,10 +605,9 @@ fn resolve_slice(slice: Option<&str>, slices: &[(String, String)]) -> Result<Str
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
-        None => slices
-            .first()
-            .map(|(id, _)| id.clone())
-            .ok_or_else(|| ApiError::Contract("this bundle declares no slice to ingest into".into())),
+        None => slices.first().map(|(id, _)| id.clone()).ok_or_else(|| {
+            ApiError::Contract("this bundle declares no slice to ingest into".into())
+        }),
         Some(id) if slices.iter().any(|(known, _)| known == id) => Ok(id.to_string()),
         Some(id) => Err(ApiError::Unknown(format!("unknown slice '{id}'"))),
     }
@@ -828,6 +837,24 @@ fn run_ingest(
             "duplicate external ids already known to this deployment: {}",
             existing_ids.join(", ")
         )));
+    }
+
+    // **The buffer-occupancy bound (§1.3).** Checked here, before submission, and distinct from
+    // `ingest_queue_bound`: that one bounds the *command queue* — 32 jobs by default — and the
+    // executor drains a job into the buffer in milliseconds, so no ingest rate produces a 429 by
+    // buffer size through it. Between ticks the buffer is what grows, and deferring
+    // `flush_max_items` to the tick needs a bound on the thing that grows.
+    //
+    // Placed after the duplicate checks and before the submission so a refusal costs no entity id,
+    // no queue slot and no WAL append — the same standard the row cap above is held to.
+    //
+    // The figure read lags by at most one apply; see `Engine::buffered_items` for why that is the
+    // right shape for a ceiling with an order of magnitude of headroom rather than a quota.
+    let buffered = state.engine.buffered_items();
+    if buffered >= state.ingest_buffer_max_items {
+        return Err(ApiError::WriteBackpressure {
+            retry_after_s: INGEST_BUFFER_FULL_RETRY_AFTER_S,
+        });
     }
 
     // The rows go to the executor **unallocated**: entity-id assignment happens on the single writer
@@ -1330,6 +1357,21 @@ async fn changes(
 
     // R5: `/control/changes` is 200 after fsync, never 429.
     Ok(StatusCode::OK)
+}
+
+/// `POST /control/flush` (contracts §3.4): **accepted at any time, executed at the next tick.**
+///
+/// The 202 already means "accepted, not yet done", which is the whole reason this can be deferred
+/// without changing what a caller was promised. Publishing on request instead would move the real
+/// publication period below the one §4's relation 1 validated at startup, and §2.2's depth trim
+/// would then drop pins before their TTL while the depth alarm saturates — the same reason
+/// `flush_max_items` marks the buffer flush-ready rather than publishing.
+///
+/// Idempotent: two requests before one tick are satisfied by that tick together, because what is
+/// recorded is a flag and not a count.
+async fn flush(State(state): State<Arc<AppState>>) -> StatusCode {
+    state.engine.request_flush();
+    StatusCode::ACCEPTED
 }
 
 /// **The precedent for [`require_operator_credential`], and the reason it is a layer.** R5 requires

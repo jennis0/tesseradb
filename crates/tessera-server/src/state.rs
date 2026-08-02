@@ -482,6 +482,9 @@ pub struct AppState {
     /// Per-request row cap on `/control/ingest`; over is 422. Checked after the Arrow decode, which
     /// is the earliest point the row count is knowable.
     pub ingest_max_batch_rows: usize,
+    /// Buffer occupancy at which `/control/ingest` is refused with a 429 (§1.3). A **distinct**
+    /// bound from `ingest_queue_bound`, which bounds queued commands rather than buffered items.
+    pub ingest_buffer_max_items: usize,
     /// Per-request body-byte cap on `/control/ingest`; over is 422.
     ///
     /// **Enforced by a `DefaultBodyLimit` layer on the route, not by a length check in the

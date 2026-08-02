@@ -388,6 +388,9 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     compute_threads: tessera_engine::default_compute_threads(),
                     pin_ttl_secs: 300,
                     pins_per_session_max: 4,
+                    drain_depth_max: 4,
+                    flush_max_age_secs: 90,
+                    flush_max_items: 100_000,
                 },
             )?;
             // The WAL lives on a dedicated executor thread, so an engine that writes must start
@@ -500,6 +503,9 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 compute_threads: tessera_engine::default_compute_threads(),
                 pin_ttl_secs: 300,
                 pins_per_session_max: 4,
+                drain_depth_max: 4,
+                flush_max_age_secs: 90,
+                flush_max_items: 100_000,
             },
         )?;
         // The WAL lives on a dedicated executor thread, so an engine that writes must start one.
@@ -731,6 +737,9 @@ pub fn run_concurrent(
                     compute_threads: tessera_engine::default_compute_threads(),
                     pin_ttl_secs: 300,
                     pins_per_session_max: 4,
+                    drain_depth_max: 4,
+                    flush_max_age_secs: 90,
+                    flush_max_items: 100_000,
                 },
             )?;
             // Generous, deliberately: this arm means to measure what a full window collects, never
