@@ -238,12 +238,26 @@ flush — touching authorise, the write path and the resolver. §13 lists the si
 
 The first of these is also what makes §3.4's equality hold, and §3.4 relies on it explicitly.
 
-### 3.3 Mask staleness is a session-invalidation cause, not a new signal
+### 3.3 Mask staleness is advertised, never forced
 
 §3.2's first consequence — a promoted descriptor is satisfiable only by sessions authorised after
-its flush — leaves an older session permanently under-seeing with no way to find out. **The remedy
-adds no new mechanism and no new wire surface: staleness becomes a third cause of session
-invalidation, expressed through the expiry machinery that already exists.**
+its flush — leaves an older session under-seeing with no way to find out. This section gives it a
+way. **What is specified here is the internal condition and the rules governing it; the wire
+representation, and a client's policy for acting on it, are client-facing work.**
+
+**It is a hint, and the client chooses when to act on it.** The tempting construction — treat a
+stale session as expired and reuse the existing expiry path — is rejected, and the reason is load,
+not correctness. Re-authorising rebuilds the mask fragment, and the session's first viewport
+afterwards pays a row projection at a **measured 10.7 s** at 10⁹ rows. Forcing that on every
+affected session at the instant of a promoting flush synchronises the most expensive operation in
+the request path across the whole session population. A hint lets each client absorb it when it
+suits — during an idle moment, or at its next natural re-authorisation — and spreads the same total
+work over the interval instead of stacking it on one tick.
+
+**What bounds staleness if a client ignores the hint is machinery that already exists.**
+`token_max_lifetime_secs` caps every session's life, so the maximum time a session can stay stale is
+already bounded and needs nothing new. The hint is the fast path, not the safety net — which is why
+it can afford to be purely advisory.
 
 **The condition is already computed and thrown away.** `Session::satisfied` is built as
 `auth_terms.filter_map(|d| dict.lookup(d))` over the plugin's granted descriptors, over a module
@@ -263,49 +277,36 @@ across flushes, and read from the generation the request already loaded once at 
 (lifecycle §1.1's ordering invariant). Two loads and a branch. **Decision 0020 is untouched: a count
 and an integer are not authorisation data.**
 
-**The effect reuses `Session::expires_at`.** A stale session is treated as expired, so the next
-request receives the ordinary expired-token response and the client re-authorises — behaviour every
-client must already implement. Three properties follow, and each is why this shape is better than a
-new staleness flag:
-
-- **No new wire field.** `expires_at` is already returned at authorise and already published.
-- **Early invalidation is already precedented and already contractual.** Decision 0025 makes a key
-  rotation a session-invalidation event, so `expires_at` is an upper bound on validity rather than a
-  guarantee of it, and a client that assumed otherwise was already wrong.
-- **The remedy is structurally a *new session*, never a re-resolution in place.** Re-resolving
-  `satisfied` inside a live session would break §3.4's premise 3 and with it the
-  patch-equals-rebuild equality. Expressing staleness as expiry makes that impossible rather than
-  forbidden.
-
-**Evaluated lazily at request time, never swept.** The check is made where expiry is already
-checked; nothing walks the session registry when a flush promotes a term. That keeps the executor
-free of an O(sessions) publication step and is consistent with decision 0035 — the session sweep
-runs on growth, not on a timer, and this adds neither.
-
-Invalidation is **immediate** rather than graced. The cost is a burst of re-authorisations at a
-promoting flush, bounded by how rare promotion is: a novel *descriptor* is rare in a way a novel
-*item* is not.
+**Evaluated lazily at request time, never swept.** The comparison sits beside the expiry check the
+request already makes; nothing walks the session registry when a flush promotes a term. That keeps
+the executor free of an O(sessions) publication step and is consistent with decision 0035 — the
+session sweep runs on growth, not on a timer, and this adds neither.
 
 **Precise where it matters, over-reporting where it does not.** A session with no unresolved
-descriptors is *never* invalidated — the common case, and the one that must not regress. A session
-with one is invalidated whenever any term is promoted, not only its own. The asymmetry is the right
-way round: the false direction costs a needless re-authorisation. The refinement available later
-without a wire change is to compare digests of the unresolved descriptors against digests of the
-promoted ones; noted rather than built, because it retains more than a count does, and because the
-coarse form leaks **less** (below).
+descriptors is *never* hinted — the common case, and the one that must not regress. A session with
+one is hinted whenever any term is promoted, not only its own. The asymmetry is the right way round:
+the false direction costs a client one voluntary re-authorisation it did not need. The refinement
+available later without changing this design is to compare digests of the unresolved descriptors
+against digests of the promoted ones; noted rather than built, because it retains more than a count
+does, and because the coarse form leaks **less** (below).
 
-**Two rules that keep this from becoming something it must not be:**
+**Three rules that keep this from becoming something it must not be:**
 
 - **It moves in one direction only, and nothing may ever be wired to make a revocation take effect
-  through it.** A stale session sees *fewer* items than its principal is entitled to — fail-closed.
-  Grant changes are not covered here and must not be made to look as though they are; decision 0025
-  governs rotation, and a future reader must not read this as a general "the mask changed" channel.
-- **It needs a leak-register row.** An invalidation tells a viewer that *some* descriptor was
-  interned since they authorised — weak corpus-level inference, but not nothing (decision 0024
-  scopes the register to viewer inference). The coarse form leaks strictly less than the digest
-  refinement would: coarse says "a term appeared", precise would confirm that *their specific
-  descriptor* now exists. Cheaper and less disclosive is an unusual pairing, and is the reason to
-  prefer it.
+  through it.** A stale session sees *fewer* items than its principal is entitled to — fail-closed,
+  which is what makes an advisory hint a legitimate response at all. Grant changes are not covered
+  here and must not be made to look as though they are; decision 0025 governs rotation, and a future
+  reader must not read this as a general "the mask changed" channel.
+- **The only remedy is a new session; `satisfied` is never re-resolved in place.** Re-resolving it
+  inside a live session would break §3.4's premise 3 and with it the patch-equals-rebuild equality.
+  **This is a rule rather than a structural impossibility, and the honest note is that the rejected
+  expiry construction made it structural.** That is the one property given up to avoid the load
+  spike, and it is the thing to check first in any future change to session handling.
+- **It needs a leak-register row.** A hint tells a viewer that *some* descriptor was interned since
+  they authorised — weak corpus-level inference, but not nothing (decision 0024 scopes the register
+  to viewer inference). The coarse form leaks strictly less than the digest refinement would: coarse
+  says "a term appeared", precise would confirm that *their specific descriptor* now exists. Cheaper
+  and less disclosive is an unusual pairing, and is the reason to prefer it.
 
 **Compaction inherits one obligation:** dictionary length is the monotone counter this rests on, so
 a compaction that renumbers the dictionary must not reduce it, or must introduce a counter that
@@ -705,10 +706,11 @@ Extending the lifecycle §7.3 fault switchboard rather than building a second be
 14. An out-of-extent ingest is refused before ack and leaves no WAL record; a pre-existing one is
     quarantined rather than retried (§6).
 15. `tessera build` refuses a bundle root containing a `CURRENT` (§11).
-16. A session holding an unresolved descriptor is invalidated by a promoting flush, and
-    re-authorising resolves the descriptor and sees the items (§3.3) — **and a session holding none
-    is not invalidated by any flush**, which is the half that regresses silently if the condition is
-    ever loosened.
+16. A session holding an unresolved descriptor is hinted stale by a promoting flush, and
+    re-authorising resolves the descriptor and sees the items; **a session holding none is never
+    hinted by any flush** — the half that regresses silently if the condition is loosened; and **a
+    hinted session continues to serve normally**, since the hint is advisory and no request may fail
+    because of it (§3.3).
 
 ## 15. Out of scope
 
@@ -731,11 +733,10 @@ with the code:
 - **inventory, conformance** — the flush- and merge-dependent markers.
 - **`HONOURED_STATE`** — gains `"deltas"`, `"deny"`, `"tombstones"` (§8.1).
 - **`buffer.rs`** — its "until the next build assigns a durable term id" now names flush (§3.2).
-- **Appendix C** — a leak-register row for the staleness invalidation: a viewer learns that some
+- **Appendix C** — a leak-register row for the staleness hint: a viewer learns that some
   descriptor was interned since they authorised (§3.3).
-- **`session.rs` / contracts §3.2** — `expires_at` is an upper bound on validity, not a guarantee of
-  it. Decision 0025 already made that true for rotation; staleness is the second cause, and the
-  place it is stated should name both rather than either.
+- **contracts §3.2** — the staleness hint's wire representation, when the client-facing work
+  specifies it. Nothing in this change alters `expires_at`'s meaning.
 
 Five decision records: the single publication cadence and its minimum interval (§1.3); dropping the
 Morton re-rank decorator (§2.3); refusing out-of-extent coordinates at ingest (§6); the overlay
@@ -773,14 +774,21 @@ snapshot; `tessera build`'s semantics post-initial-load → initial-load only (�
 dissolves r1's rebuild-fencing question.
 
 **r3** adds §3.3, mask staleness, raised by the owner. r2 stated that a promoted descriptor is
-satisfiable only by sessions authorised after its flush and then left such a session permanently
-under-seeing with no way to find out. The first draft of §3.3 introduced a staleness flag; the owner
-observed that the existing session-lifespan machinery already provides the comparison, and it does —
-`Session::expires_at` exists, is already published at authorise, and decision 0025 already
-established that a session can be invalidated before it. Staleness is therefore a **third
-invalidation cause** rather than a new signal, which removes the wire work entirely instead of
-deferring it, and makes "the remedy is a new session, never a re-resolution in place" structural
-rather than a rule — which is what protects §3.4's patch-equals-rebuild premise 3.
+satisfiable only by sessions authorised after its flush, and then left such a session under-seeing
+with no way to find out.
+
+The section was drafted three times and the third is the one to keep. A staleness *flag* was drafted
+first; reusing `Session::expires_at` to invalidate the session was drafted second, and looked
+strictly better — no wire field, early invalidation already contractual under decision 0025, and the
+"never re-resolve `satisfied` in place" rule became structurally impossible rather than merely
+forbidden. **It was rejected on load.** Re-authorising rebuilds the mask fragment and the next
+viewport pays a measured 10.7 s row projection at 10⁹; forcing that on every affected session at one
+tick synchronises the most expensive operation in the request path across the session population. So
+the hint is advisory, and what bounds staleness for a client that ignores it is
+`token_max_lifetime_secs`, which already exists.
+
+The property given up is recorded at the rule rather than buried: the expiry construction made
+"never re-resolve in place" structural, and the hint makes it a rule again.
 
 **Unreviewed.** The second review round was not run. §3.3 in particular, and r2's new §5.2, §6, §7.2,
 §8, §9 and §11, have had no independent scrutiny; r1's review covered none of them.
