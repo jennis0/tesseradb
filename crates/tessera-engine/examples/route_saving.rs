@@ -35,7 +35,7 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
-use tessera_engine::select::{SelectParams, Selection, Threshold};
+use tessera_engine::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::{fixed32, tiler::sort_batch, Extent, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
@@ -102,7 +102,7 @@ fn main() {
             // Under saturation, serving everything means served == visible; needing selection means
             // served == cap < visible. Asserting this is what proves the two arms of the sweep are
             // actually hitting different branches.
-            let served = Selection::of(&mask, &seg, ranges[0].0.clone(), &params, ranges[0].1)
+            let served = Selection::of(&mask, &SelectionParts::new(&[SelectionPart::base(&seg, ranges[0].0.clone(), ranges[0].1)]), &params, ranges[0].1)
                 .rows
                 .len();
             if v_per_tile == cap {
@@ -162,12 +162,12 @@ fn time(
 ) -> u128 {
     // Warm.
     for (r, vis) in ranges {
-        black_box(Selection::of(mask, seg, r.clone(), params, *vis));
+        black_box(Selection::of(mask, &SelectionParts::new(&[SelectionPart::base(seg, r.clone(), *vis)]), params, *vis));
     }
     let t0 = Instant::now();
     for _ in 0..reps {
         for (r, vis) in ranges {
-            black_box(Selection::of(mask, seg, r.clone(), params, *vis));
+            black_box(Selection::of(mask, &SelectionParts::new(&[SelectionPart::base(seg, r.clone(), *vis)]), params, *vis));
         }
     }
     t0.elapsed().as_nanos() / reps as u128
@@ -209,7 +209,7 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
     let postings_path = temp.path().join("postings.arrow");
     write_postings(&postings_path, &[all], 32).unwrap();
     let postings = PostingsReader::open(&postings_path, false).unwrap();
-    let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32], tessera_authz::FRAGMENT_FORMAT);
+    let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
     let fragment = cache
         .get_or_build(&[TermId::new(0)], [3u8; 32], 0, &postings, &[], bound)
         .unwrap();

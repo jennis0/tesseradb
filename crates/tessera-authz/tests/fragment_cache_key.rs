@@ -3,9 +3,7 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tessera_authz::{
-    write_delta_tier, write_postings, DeltaTier, FragmentCache, PostingsReader, FRAGMENT_FORMAT,
-};
+use tessera_authz::{write_delta_tier, write_postings, DeltaTier, FragmentCache, PostingsReader};
 use tessera_types::TermId;
 
 const THRESHOLD: u32 = 32;
@@ -23,12 +21,7 @@ fn tier(dir: &std::path::Path, name: &str, entities: &[u32]) -> Arc<DeltaTier> {
 }
 
 fn cache(dir: &TempDir) -> FragmentCache {
-    FragmentCache::new(
-        &dir.path().join("cache"),
-        [1u8; 32],
-        [2u8; 32],
-        FRAGMENT_FORMAT,
-    )
+    FragmentCache::new(&dir.path().join("cache"), [1u8; 32], [2u8; 32])
 }
 
 /// **Two watermarks, two entries.** Without this the same key names two different fragments: after
@@ -109,32 +102,7 @@ fn coalescing_tiers_leaves_the_fragment_unchanged() {
     assert_eq!(separate.view().to_vec(), coalesced.view().to_vec());
 }
 
-/// Every pre-upgrade entry becomes unreachable when the key's shape changes — a leak rather than a
-/// fail-open, since new code can never read one, but nothing on that path deletes anything. So the
-/// cache carries a format version and sweeps what the previous one left.
-#[test]
-fn a_previous_format_versions_entries_are_swept() {
-    let dir = TempDir::new().unwrap();
-    let cache_dir = dir.path().join("cache");
-    std::fs::create_dir_all(&cache_dir).unwrap();
-    // What a pre-versioning cache left behind: a `.frag`/`.meta` pair at the top level.
-    std::fs::write(cache_dir.join("deadbeef.frag"), b"stale").unwrap();
-    std::fs::write(cache_dir.join("deadbeef.meta"), b"stale").unwrap();
-
-    let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32], FRAGMENT_FORMAT);
-    assert_eq!(cache.sweep_orphans().unwrap(), 2, "both halves of the pair");
-    assert!(!cache_dir.join("deadbeef.frag").exists());
-
-    // And a sweep of a cache holding only current-version entries removes nothing.
-    let base = base(dir.path());
-    cache
-        .get_or_build(&[TermId::new(0)], [3u8; 32], 1, &base, &[], 10)
-        .unwrap();
-    assert_eq!(cache.sweep_orphans().unwrap(), 0);
-}
-
-/// A cache written by this version reopens its own entries — the property the sweep must not
-/// break, and the one that makes a persistent cache worth having.
+/// A cache reopens its own entries — the property that makes a persistent cache worth having.
 #[test]
 fn an_entry_survives_a_reopen_of_the_cache() {
     let dir = TempDir::new().unwrap();

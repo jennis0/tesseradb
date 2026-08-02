@@ -67,9 +67,15 @@ pub struct StageTimings {
     // ---- durations, ns, in request order ----
     /// `ArcSwap::load_full` on the generation pointer.
     pub generation_resolve_ns: u64,
-    /// Pin validation or minting (I11).
-    pub pin_resolve_ns: u64,
-    /// Slice lookup and the single-segment check.
+    /// The staleness comparison: one stamp clone and one equality test. Kept as a named stage
+    /// though it is nanoseconds, because it is what the multi-second pin resolve became and a
+    /// stage that vanishes from the breakdown looks like a stage that was forgotten.
+    pub stamp_compare_ns: u64,
+    /// Bringing the session's fragment forward to the live watermark (`Engine::fragment_for`).
+    /// Zero on the common path — the session's own fragment is already current — and one
+    /// `build_fragment_with_deltas` on the first request of each credential after a flush.
+    pub fragment_forward_ns: u64,
+    /// Slice lookup, and resolving each segment's `row_base`.
     pub slice_lookup_ns: u64,
     /// Row-projection cache lookup — **including the `RowProjection::new` build on a miss**, which
     /// is the expensive I4 entity→row crossing. `row_projection_built` says which happened.
@@ -194,7 +200,8 @@ impl StageTimings {
     /// head off.
     pub fn unattributed_ns(&self) -> u64 {
         let named = self.generation_resolve_ns
-            + self.pin_resolve_ns
+            + self.stamp_compare_ns
+            + self.fragment_forward_ns
             + self.slice_lookup_ns
             + self.row_projection_ns
             + self.compose_ns

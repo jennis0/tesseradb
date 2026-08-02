@@ -1,11 +1,10 @@
 # Geometry pinning — design
 
 **Date:** 2026-08-02
-**Status:** Provisional — under review, and **not approved**. The rest of the corpus governs where
-they disagree. **To become normative:** owner sign-off, and §12's amendments folded into
-`architecture.md` (I11), `concurrency-lifecycle.md` (§2.1–§2.3) and `contracts.md` (§3.1's code
-list, §3.4's pin header) as the code lands.
-**Reads against:** architecture §2.6, §10.4, §11.2, I11, Appendix C; contracts §3.1, §3.4;
+**Status:** Normative. Reviewed three times (invariants, implementability, client contract),
+dispositioned and signed off 2026-08-03; the deletion has landed. §14's amendments are folded into
+the ten documents it names.
+**Reads against:** architecture §2.6, §10.4, §11.2, I11, Appendix C; contracts §3.1, §3.2;
 concurrency-lifecycle §2.1–§2.3, §3.2, §6, §7.2; flush-and-merge §1.3, §2.1, §2.2.
 **Citation convention:** unprefixed §n is the architecture design; `lifecycle §n` is
 concurrency-lifecycle, `contracts §n` contracts, `flush §n` flush-and-merge. This document's own
@@ -30,18 +29,29 @@ memory-mapped segment files, for up to `pin_ttl_secs`.
 That was affordable while geometry moved rarely — a rebuild, a compaction. **Flush makes it move
 every tick**, and the cost stops being incidental:
 
-- A drain entry per tick, each pinning a superseded bundle's mappings.
+- A drain entry per tick, each pinning a superseded bundle's mappings. Lifecycle §2.2's own sizing
+  note puts a *measured* 47.02 GB bundle at a *modelled* ~94 GB of mapped files at depth 2,
+  contending for page cache with the live one.
 - A startup relation `pin_ttl_secs < drain_depth_max × flush_max_age_secs` (lifecycle §2.2's
   sizing obligation), because publications landing closer together than
   `pin_ttl_secs / drain_depth_max` leave the list permanently at its ceiling: the depth alarm
   saturates, and pins are dropped by the trim rather than by their TTL, so a client is `410`d
   before the lifetime it was promised.
-- Therefore a **floor on visibility latency of 75 s** at the shipped 300 s TTL and depth 4 —
-  which is why `flush_max_age_secs` defaults to 90 s rather than to something a user would notice
-  less.
+- Roughly 2,000 lines across six crates and three languages, plus two design sections, an error
+  code, three config keys and a startup relation.
 
 So the question is whether the retention earns that. This document argues it does not, and that
 what a client actually needs is a *staleness signal* rather than a frozen view.
+
+**What the case is not.** An earlier draft led on the startup relation as a *floor of 75 s on
+visibility latency*, and that is wrong in both directions. It is not the binding floor: the
+row-projection cache keys on `segments_version`, so every flush rotates every session's key, and a
+miss is a **measured 10.7 s** at 10⁹ (flush §9 — *"the fallback is not an edge case but the steady
+state"*). That floor is removed by patching the projection, which is needed whatever happens to
+pins and is not this document's to claim. Nor is the relation itself a reason to delete anything:
+it is a sizing constraint, and sizing constraints are satisfied by choosing numbers. The honest
+case is the two bullets above — mapped bytes and lines of mechanism, both buying something no
+client uses.
 
 ## 1. I11 is two claims, and only one of them requires retention
 
@@ -96,27 +106,35 @@ in the geometry that issued them. It does not hold any such identifier.
 So a re-issued request re-locates everything it needs. There is no identifier a client can hold
 that a fresh generation cannot resolve.
 
-## 4. A flush cannot invalidate a pin
+## 4. A flush cannot invalidate a pin — and merge permutes row space, so nothing may key on the prefix
 
-This is the load-bearing claim, and it is a property of the design rather than of an
-implementation detail.
+Two claims, and the second is the one a future reader is most likely to get wrong, because an
+earlier draft of this document got it wrong.
 
-**Within a prefix, a row id addresses the same entity for the prefix's whole life.**
-
-- A flush **appends**: flush §2.1 gives segment *k* `[row_base_k, row_base_k + row_count_k)` and
-  the extent list is ordered and disjoint. An extent is admissible only where its `row_base` is
-  exactly the slice's current row total.
-- A merge is **row-count preserving**: flush §2.2 — *"A merge emits exactly as many rows as it
-  consumed, so no later segment's `row_base` ever moves"*. Merging *k* adjacent extents collapses
-  them to one at the same base.
-- Neither rewrites the base `permutation.bin`.
-
-So a pin taken before a flush and answered after it would return **identical answers for every row
-that existed when the pin was issued**. The retention machinery is being paid for on the one event
-that cannot invalidate what it protects.
+**A flush appends, so it invalidates nothing.** Flush §2.1 gives segment *k*
+`[row_base_k, row_base_k + row_count_k)` and the extent list is ordered and disjoint; an extent is
+admissible only where its `row_base` is exactly the slice's current row total, and a flush never
+rewrites the base `permutation.bin`. So a pin taken before a flush and answered after it returns
+**identical answers for every row that existed when the pin was issued**. The retention machinery
+is being paid for on the one event that cannot invalidate what it protects.
 
 What a pinned answer *does* differ in is that it omits rows that did not exist at pin time. That
 is the frozen view, and spec §6 is about whether it is worth anything.
+
+**Merge does not preserve row identity, only row count — so "a row id is immutable within a
+prefix" is false.** A merge is row-count preserving in the sense flush §2.2 states: it emits
+exactly as many rows as it consumed, so no *later* extent's `row_base` moves. Inside the merged
+span it is a linear merge-sort of Morton-sorted arrays producing globally sorted output (flush
+§2.3), so entities interleave and a row id inside that span names a **different entity** after the
+merge than before it.
+
+Nothing live fails open on this — the row-projection cache keys on `segments_version`, which a
+merge advances, so no cached row-space structure survives one. The reason it is stated here, in
+the strongest terms available, is that the false version is exactly the sentence a future reader
+would rely on to key a *persisted* projection cache on the prefix, which would then serve one
+entity's rows under another's mask. **The rule that replaces it: merge permutes row space within
+the merged span, so no row-space artefact may key on the prefix.** `segments_version` is the only
+safe discriminator, and spec §9 is why it stays one.
 
 ## 5. Compaction is the real hazard, and it is prefix-scoped
 
@@ -131,10 +149,13 @@ cannot invalidate anything (spec §4).
 Two consequences:
 
 - A staleness signal that distinguishes prefixes distinguishes the only boundary that matters.
-- **Re-quantisation is the one case where a Morton prefix stops being a stable address**, because
-  the grid it names changes. A client holding pre-compaction cell identifiers must be told to
-  discard them, which is the same shape as `idset`'s answer for identifiers (contracts §2.2). The
-  compaction spec must settle this; this document does not.
+- **A Morton prefix is a permanently stable address.** An earlier draft carried re-quantisation as
+  the one case where it stops being one; [decision 0040](../decisions/0040-quantisation-is-slice-scoped-index-config.md)
+  removes the case. Quantisation is slice-scoped index configuration, immutable at runtime, and
+  compaction carries each slice's forward byte-for-byte — re-quantisation is not one of the
+  reorganisations compaction does. So a client never has to be told to discard cell identifiers,
+  and spec §12's superseded-prefix obligation is a freshness question rather than a correctness
+  one.
 
 ## 6. What the frozen view is worth
 
@@ -214,9 +235,14 @@ to is not closing the door: dropping the request field now would mean re-adding 
 
 ## 10. What this buys
 
-- **`flush_max_age_secs` loses its floor.** The 90 s default exists only to clear 75 s; the tick
-  becomes a free choice, and single-digit seconds becomes an ordinary configuration rather than one
-  requiring a second knob to be raised first.
+- **~94 GB of mapped files stop being retained** at lifecycle §2.2's own depth-2 sizing, against a
+  *measured* 47.02 GB live bundle — page cache spent holding geometry no client resolves.
+- **`flush_max_age_secs` loses one of its two constraints.** The startup relation goes, so the 90 s
+  default stops being forced by the TTL. **It does not become a free choice**: the binding floor is
+  the row-projection rebuild, a *measured* 10.7 s at 10⁹ synchronised across the session population
+  at every tick, and only patching the projection removes that. Claiming the tick as this
+  document's win was an error in an earlier draft and is corrected here rather than quietly
+  dropped.
 - **Cache pruning simplifies.** Today the licence to prune a superseded generation's projections is
   a `Reclaimed` value produced by a drain-list reclaim, and `prune_generation` runs synchronously
   inside the publication — which is why flush §9 needs *"retention of superseded-generation entries
@@ -240,10 +266,15 @@ each is a place to attack.
    difference in freshness rather than in correctness, and that pinning did not solve it either
    (the vector fixes each partition independently, not jointly). **This is the strongest objection
    and the least tested.**
-2. **The prefix-retention bound loses its operand.** Lifecycle §2.2 makes a local prefix copy
-   deletable only after `marker + session-pin TTL`. With no TTL the bound must become "no in-flight
-   request holds it", which is an `Arc` strong count rather than a clock — implementable, but it is
-   a different mechanism and this document does not specify it.
+2. **The prefix-retention bound loses its operand, and the replacement is not free.** Lifecycle
+   §2.2 makes a local prefix copy deletable only after `marker + session-pin TTL`. With no TTL the
+   bound must become "no in-flight request holds it", which is an `Arc` strong count rather than a
+   clock. **Nothing can observe a strong count reaching zero.** `Arc::strong_count` is a sample,
+   not an event, so the mechanism is a registry of `Weak` handles and something that polls it —
+   which is the drain list again, wearing a different type. Roughly 100 of the deleted lines come
+   back the day prefix deletion lands. That is a real cost of this decision and it is recorded here
+   rather than discovered then; it is still an order less than what is removed, and it is scoped to
+   prefixes (compactions) rather than to every flush.
 3. **The frozen view is a product judgement** (spec §6), not a derivation.
 4. **Compaction is undesigned** (spec §5). If it turns out to need cross-request geometry retention
    for a reason not visible from here, this document has removed the machinery it would have used —
@@ -270,17 +301,87 @@ the multi-partition router protocol (lifecycle §6); the prefix-retention mechan
 
 ## 14. Corpus updates that land with the code
 
+The draft listed five documents. The real set is ten, and the five it missed are named first
+because a missed document is how a corpus goes stale silently.
+
+- **conformance** — §4.4 tests I11 **through the pin**, calling it *"the presentable proxy"*.
+  Removing pins moves I11 from covered to uncovered. **That must be stated as a negative result,
+  not left silent**: the within-request rule (spec §1) is what survives, and it has no test until
+  one is written against generation resolution directly.
+- **client-interaction** — §6.1's per-session staleness scoping (now an efficiency argument, not a
+  security one — see the ruling below) and §6.2's tier table, whose "pin/segment-set version" tier
+  assumes `segments_version` moves only on compaction. Flush made it move every tick, and that
+  inconsistency is real independently of pins.
+- **system-architecture** §4.2 — the pin in the three-plane API surface.
+- **tile-addressed-integration** — the per-tile request pattern reads against the pin.
+- **caching** — the pin as a cache key component.
+- **inventory** — the I11 row.
 - **architecture** — I11 restated as the within-request rule; §10.4's session-pinning paragraph and
-  §11.2's pin-vector language; §12.5's compaction/drain interaction.
+  §11.2's pin-vector language; §12.5's compaction/drain interaction. **Appendix C's C15 mitigation
+  column is false in code** and is corrected rather than carried: it claims *"Pin values are
+  per-session scrambled so no cross-session correlation"*, and `PinId` is a plaintext
+  `(prefix, segments_version)`, identical for every principal. Harmless under the ruling below, but
+  a leak register that describes a mitigation the code does not implement is worse than one that
+  describes the exposure.
 - **concurrency-lifecycle** — §2.1 (the drain list), §2.2 (session pins, the two bounds and the
   sizing obligation, the prefix-retention marker), §2.3 (pinned geometry against current overlay).
   §3.2's retirement floor is unchanged and should say so.
-- **contracts** — §3.1's closed code list loses 410 `pin-expired`; §3.4's `x-tessera-pin` changes
-  meaning from a selector to an advisory stamp.
+- **contracts** — §3.1's closed code list loses 410 `pin-expired`; **§3.1 and §3.2** carry the
+  `x-tessera-pin` header, which changes meaning from a selector to an advisory stamp. (The draft
+  and the Status line both cited §3.4 for this; §3.4 is the external-id contract.)
 - **flush-and-merge** — §1.3 and §4's relation 1 and its default; §13's I11 line.
-- **inventory** — the I11 row.
 - One decision record: pins become a staleness stamp rather than retained geometry.
+
+### The owner's leak ruling, recorded
+
+**Knowing that data has been ingested is not a security leak.** Ruled 2026-08-02, resolving a
+finding the invariants and client-contract reviewers raised independently: the staleness signal in
+spec §7 may be the **broadcast** form — the live generation stamp, with no per-session mask
+intersection. `client-interaction.md` §6.1 argues for per-session scoping; under this ruling that
+argument is an efficiency one (do not wake clients whose visible set did not change), not a
+security one, and it is recorded there as such.
+
+This is what makes spec §7 implementable as one comparison against the live generation rather than
+as a per-session diff, and it is why C15 needs no mitigation beyond an accurate description.
 
 ## Appendix R — Review record
 
-Not yet reviewed.
+**r1 (2026-08-02) — drafted.**
+
+**r2 (2026-08-02) — three independent reviews: invariants, implementability, client contract.**
+The central argument survived all three. `client-interaction.md` §6.2 in fact states the conclusion
+more definitively than the draft did — its tier table has the pin advancing on compaction and
+voiding *"nothing"* for a client.
+
+**r3 (2026-08-03) — disposition and sign-off.** Six corrections, all to the document rather than to
+the design:
+
+1. §4's mechanism was false — row ids are *not* immutable within a prefix, because merge permutes
+   row space within the merged span. Replaced and inverted into the rule that no row-space artefact
+   may key on the prefix.
+2. §10's headline benefit was false. The binding floor on `flush_max_age_secs` is the
+   row-projection rebuild, not the pin TTL. §0's motivation rewritten to the honest case: mapped
+   bytes and lines of mechanism.
+3. §5's re-quantisation caveat is gone under decision 0040, and §12's superseded-prefix obligation
+   with it.
+4. §14 listed five documents; the real set is ten. Five added, and the `x-tessera-pin` citation
+   corrected from contracts §3.4 to §3.1/§3.2.
+5. The owner's leak ruling recorded in §14 and here.
+6. C15's mitigation column corrected — `PinId` is plaintext, identical for every principal.
+
+**One finding verified and rejected.** The client reviewer argued the real cross-request dependency
+is frame assembly: a tile-addressed client issues one request per tile, and spec §2 obliges it to
+*"render only responses sharing one view key"*. Checked against `client-interaction.md`: §6.2 makes
+content version (flush) and pin/segment-set version (compaction) **separate tiers**, and §6.1
+assigns frame assembly to a client-side replica store — *"Fetch behind the current display and flip
+atomically when the visible tiles and their counts are complete"* — with rule 2 going further, that
+*"auto-flipping is the wrong default"*. So the pin is not the mechanism frame assembly rests on,
+and removing it does not remove one. The §6.2 inconsistency the finding surfaced on the way (the
+tier table assumes `segments_version` moves only on compaction; flush moves it every tick) is real
+and is fixed there.
+
+**The fallback that was not taken, named so it is not rediscovered as novel.** The reviewer offered
+a **frame-window retention** — prefix-scoped, depth 1–2, seconds rather than 300 s — as a middle
+path keeping most of the stability benefit at a fraction of the cost. It was put to the owner
+alongside full deletion and full deletion was chosen. If spec §11's objections turn out to bite,
+this is the cheaper thing to reintroduce, and it is cheaper than what was removed.

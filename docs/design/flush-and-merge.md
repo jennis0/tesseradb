@@ -86,11 +86,11 @@ than the flush it followed. §1.4's memory claim rests on it.
 The distinction is what lifecycle §2.2's sizing obligation is actually about, and the two are easy to
 conflate because both write a side-manifest:
 
-- A **geometry publication** supersedes geometry, so it creates a drain entry and bumps
-  `segments_version`. Flush and merge are the only ones, and these are what §2.2 sizes.
+- A **geometry publication** supersedes geometry, so it bumps `segments_version` and runs the
+  row-projection retention pass. Flush and merge are the only ones.
 - An **overlay publication** — a side-manifest written because a deny disposition was accepted
-  (contracts §2.3) — changes no geometry. Nothing is superseded, **no drain entry is created, and
-  `segments_version` does not move.** It is not governed by the pin relation, and contracts §2.3's
+  (contracts §2.3) — changes no geometry. Nothing is superseded and **`segments_version` does not
+  move**, so no session's row projection is invalidated by a deny. Contracts §2.3's
   rule that an accepted deny publishes **immediately, never deferred to the next flush**, stands.
 
 Immediacy is not a concession but the only workable answer: the deny lane is unbounded and can never
@@ -112,17 +112,16 @@ else.
 - `flush_max_age_secs` — the tick itself.
 - `flush_max_items` — trips under load, and can trip far faster than the tick. **It does not publish
   early**; it marks the buffer flush-ready and publication waits for the next tick. Publishing on
-  trip would move the real period below the validated one, and §2.2's depth trim would then drop pins
-  before their TTL while the depth alarm saturates.
+  trip would make the real publication period a function of ingest rate rather than of
+  `flush_max_age_secs` — and every publication rotates the row-projection cache key, so that is the
+  rate at which every live session pays to bring its projection forward (§9).
 - `POST /control/flush` (contracts §3.4) — operator-triggered, accepted at any time, **executed at
   the next tick**. Its 202 already means "accepted, not yet done".
 
-The relation is then exact over the actual minimum period, **validated at startup with a violating
-configuration refused**:
-
-```
-pin_ttl_secs < drain_depth_max × flush_max_age_secs
-```
+**There is no longer a startup relation to satisfy.** An earlier revision required
+`pin_ttl_secs < drain_depth_max × flush_max_age_secs` and made the tick's floor 75 s at the shipped
+defaults. Pin retention is deleted (`geometry-pinning.md`), and with it the relation. **What replaces
+it is a cost, not a refusal** — §9's projection rebuild — and no configuration is refused for it.
 
 **Deferring `flush_max_items` to the tick requires a bound on the buffer that does not yet exist.**
 `ingest_queue_bound` bounds the *command queue* — `sync_channel(queue_bound)`, 32 jobs by default —
@@ -132,26 +131,30 @@ ingest rate produces a 429 by buffer size. This design therefore adds `ingest_bu
 buffer-occupancy admission bound, checked in the handler before submission, 429 on exceed. It is a
 distinct knob from `ingest_queue_bound` because it bounds a distinct thing.
 
-### 1.4 The marginal cost of drain depth
+### 1.4 What the tick's period actually costs
 
-Lifecycle §2.2 caps the drain list at four superseded generations, and the natural reading is that
-raising the cap is expensive because each entry pins an `Arc<Bundle>`.
+The knob's floor used to be the pin relation. With that gone, the binding cost is the
+**row-projection cache**: its key carries `segments_version`, so every publication rotates every live
+session's key, and the entry has to be brought forward before that session's next viewport is served.
 
-That reading holds only while consecutive generations are whole distinct bundles. Under §1.2's
-incremental construction they share base geometry by `Arc` and differ by a handful of small segments,
-so the marginal cost of a drain entry is roughly one flush segment.
+- **Brought forward by a patch**, where the immediately-superseded generation's entry is still
+  resident: a union of the new extents' rows onto the old bitmap, which is *equal to* a projection
+  over the whole space because a flush appends (§3.4). This is why the cache retains one generation
+  back rather than pruning at the swap (lifecycle §2.2).
+- **Rebuilt from scratch** otherwise: a *measured* **10.7 s at 10⁹**, per session, and if the patch's
+  input is missing then per session *per tick*, synchronised across the whole population. §9 states
+  that failure; the retention depth is what prevents it.
 
-*Modelled, not measured.* The figure to take before an admin leans on it is resident bytes per drain
-entry under sustained flush.
+So a shorter tick is affordable exactly to the extent that the patch holds. An admin lowering
+`flush_max_age_secs` is buying visibility latency with per-tick patch work, not against a validated
+floor.
 
-`drain_depth_max` is therefore the cheaper knob, and an admin wanting 15 s visibility raises it rather
-than shortening `pin_ttl_secs`.
+### 1.5 The retention pass runs at the publication
 
-### 1.5 Reclaim's periodic caller
-
-Lifecycle §2.1 records that reclaim runs only as a side effect of the next geometry publication, and
-assigns the gap to "whichever stage introduces a periodic publisher". **The flush tick drives
-reclaim.**
+Every geometry publication drops row-projection entries more than one generation behind the one it
+just published (lifecycle §2.2). There is nothing periodic left to schedule: retention is a depth on
+the cache rather than a clock over a drain list, so it is discharged by the swap that creates the
+need for it.
 
 ## 2. Row space
 
@@ -391,28 +394,20 @@ Admin-configurable, all validated at startup:
 | `flush_max_age_secs` | the tick: visibility latency, and the publication period |
 | `flush_max_items` | buffer size at which a flush becomes ready (executed at the next tick) |
 | `ingest_buffer_max_items` | buffer-occupancy admission bound (§1.3) |
-| `pin_ttl_secs` | session pin lifetime |
-| `drain_depth_max` | superseded generations retained |
 | `segment_floor_bytes` | below this, segments compare equal for selection |
 | `max_merged_segment_bytes` | cap on any single merge |
 | `tier_width` | segments per tier before a merge is selected |
 
-Two relations are enforced — a configuration **violating** either is refused at startup:
+One relation is enforced — a configuration **violating** it is refused at startup:
 
-1. `pin_ttl_secs < drain_depth_max × flush_max_age_secs` — §1.3.
-2. `max_merged_segment_bytes < base segment bytes` — §5.3.
+1. `max_merged_segment_bytes < base segment bytes` — §5.3.
 
-Defaults: `flush_max_age_secs` 90–120 s. The **floor** the current `pin_ttl_secs` (300 s) and
-`drain_depth_max` (4) permit is 75 s, so the default sits above it with margin. Ingest visibility
-latency is bounded below by the pin relation rather than by an arbitrary choice, and an admin wanting
-it lower raises `drain_depth_max` (§1.4).
+*(The pin relation that used to be relation 1 is gone with pin retention; §1.3 and §1.4 record what
+replaces it, which is a cost rather than a refusal.)*
 
-Two things about the existing code this change has to move with it. **`DEFAULT_FLUSH_MAX_AGE_SECS` is
-60**, which fails relation 1 against the current pin defaults — landing the validation without moving
-the default gives a server that refuses to start on its own configuration. And **`drain_depth_max`
-becoming a knob reverses a recorded choice**: `DRAIN_DEPTH_MAX` is a compile-time constant that
-`pins.rs` describes as "a constant rather than a config key deliberately". §1.4's cost model is what
-changes the answer — the constant was chosen when a drain entry meant a whole bundle.
+Defaults: `flush_max_age_secs` 90 s. **Nothing now forces that number** — it was raised from 60 to
+clear the pin relation's 75 s floor, and it is kept because it is what this deployment has run at,
+not because anything refuses a shorter one. §1.4 is the cost to weigh before lowering it.
 
 `flush_max_items` and `flush_max_age_secs` are today parsed and asserted **inert** by a test, replaced
 by one asserting both bounds are honoured — epic #3's "honoured rather than parsed".
@@ -661,14 +656,18 @@ modifies a cached value.
 
 **Two pieces of machinery have to be built for that to mean anything:**
 
-- **A derive-capable build path.** The cache's only entry point is `get_or_build` with an infallible
-  closure and no way to read another key's entry, so "derived from the old entry" is not expressible
-  today and would silently degrade to "rebuild from scratch".
-- **Retention of superseded-generation entries until patched or drain-expired.** `prune_generation`
-  runs *synchronously inside* `publish_geometry`, so with no pins outstanding the old entries are
-  gone at the instant of the swap — before any request-driven patch could run. Patching is
-  request-driven and unbounded in time, so "prune after the patch publishes" is unsequenceable
-  against today's callers.
+- **A derive-capable build path.** The cache's only entry point was `get_or_build`, with an
+  infallible closure and no way to read another key's entry, so "derived from the old entry" was not
+  expressible and would silently degrade to "rebuild from scratch". **Built**: `get_or_derive` reads
+  the source entry under the same lock acquisition that claims the target slot, then runs the
+  derivation outside it. A source miss falls back to the full build, so the answer is identical
+  either way and only the cost differs.
+- **Retention of superseded-generation entries.** The pruner used to run inside the publication and
+  key on a drain-list reclaim, so with no pins outstanding the old entries were gone at the instant
+  of the swap — before any request-driven patch could run. **Built**: retention is now an explicit
+  depth on the cache (`KEEP_SUPERSEDED_GENERATIONS = 1`), stated where the cache is bounded rather
+  than inherited from a pin lifetime, and the publication drops only what is more than one
+  generation behind. Depth one is exactly what the patch needs and depth two is derivable from it.
 
 Without both, the fallback is not an edge case but the steady state: a full 10.7 s projection per
 session per tick, synchronised across the session population — the spike §3.3 rejects the expiry
@@ -679,9 +678,15 @@ rather than the key.** After flush, same-key entries would exist at heterogeneou
 `tmp_sibling`'s "both writers wrote byte-identical content" argument would no longer hold. **The
 watermark joins the disk cache key.**
 
-Two consequences. Every pre-upgrade on-disk entry becomes unreachable — a leak rather than a
-fail-open, since new code can never read one, but nothing on that path ever deletes anything, so the
-orphans need a sweep and the cache needs a format version. And, for the compaction spec: persisted
+One consequence, and one this design asked for and does not get. Every pre-upgrade on-disk entry
+becomes unreachable — a leak rather than a fail-open, since new code can never read one. **This
+section asked for a format version and an orphan sweep to reclaim them, and both are struck**
+(owner ruling, 2026-08-02): nothing is deployed, so there are no pre-upgrade entries anywhere and
+the machinery would migrate from a state that has never existed. Pre-alpha, a cache entry an
+upgraded binary cannot read is deleted by deleting the cache directory. `WAL_VERSION` is kept, and
+the distinction is worth stating: it is a pre-existing tag on a *durable* artefact and it protects
+an in-place dev upgrade, where the fragment cache is a derived one that rebuilds itself. And, for
+the compaction spec: persisted
 fragments surviving a restart at pre-flush stamps would falsify lifecycle §3.2's "the cache restarts
 cold" premise, which is what scopes the future retirement floor worker-locally. With the watermark in
 the key, a pre-flush fragment is never found by a post-flush lookup and the premise holds.
@@ -762,8 +767,11 @@ commit windows.
   it, and C4's timing closure remains a claim about identical outcomes rather than identical work.
 - **A new register row for §3.3's staleness hint**, scoped to include its clock and correlation
   properties.
-- **I11** — a pin taken before a flush serves pre-flush geometry with the current overlay. Already the
-  specified behaviour; flush is the first mechanism that exercises it.
+- **I11** — the within-request rule only: a request resolves geometry once and uses it throughout.
+  Flush is the first mechanism that moves geometry often enough for that to be exercised. The
+  cross-request half, and the retention that served it, are deleted (`geometry-pinning.md`);
+  **conformance §4.4 tested I11 through the pin, so I11 moves from covered to uncovered** and that is
+  recorded as a negative result rather than left silent.
 - **I7, I9** — untouched. Flush allocates no IDs and moves no selection route; the direct-evaluation
   set merely shrinks as items acquire postings.
 - **The retirement floor** — does not exist and is not created here. §9's watermark-keyed disk cache is
@@ -802,8 +810,8 @@ Extending the lifecycle §7.3 fault switchboard rather than building a second be
 16. A flushed item answers `/v1/items` after rotation (§3.6).
 17. `seg_id` never reused across flush or merge; `SEGMENTS-<n>` strictly monotonic and unpadded
     (decision 0016).
-18. A pin taken across a flush serves pre-flush geometry and applies a post-flush deny.
-19. Both §4 relations refuse a violating configuration at startup.
+18. A stamp presented across a flush is answered normally with the staleness signal set — never a refusal — and the response reflects a post-flush deny.
+19. §4's merge-size relation refuses a violating configuration at startup.
 20. `check-layers.sh`'s one-`.store(` rule still passes — publication stayed single-owner.
 21. An out-of-extent ingest is refused before ack and leaves no WAL record; a pre-existing one is
     quarantined rather than retried (§6).
@@ -839,7 +847,7 @@ with the code:
 Six decision records: the geometry/overlay publication split and the single geometry cadence (§1.3);
 dropping the Morton re-rank decorator (§2.3); refusing out-of-extent coordinates at ingest (§6); the
 overlay snapshot as the WAL's rotation rule (§7.2); `tessera build` as initial-load only (§11);
-`drain_depth_max` becoming admin-configurable, reversing `pins.rs`'s recorded choice (§4).
+the row-projection retention depth replacing the drain list as what bounds superseded-generation entries (§1.4, §9).
 
 Issues closed or reduced: #3 (flush), #59 (the second publisher), #8's design decision (§12).
 

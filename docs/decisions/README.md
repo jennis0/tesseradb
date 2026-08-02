@@ -56,3 +56,6 @@ prevent.
 | [0036](0036-per-connection-body-ceiling-not-a-connection-cap.md) | 2026-08-01 | The buffered-body window gets a per-connection ceiling, not a connection cap |
 | [0037](0037-canary-canonicalisation-joins-on-tessera-id.md) | 2026-08-01 | The canary comparison canonicalises on `tessera_id`, not on `fx_key` |
 | [0038](0038-fsync-offset-is-a-sidecar-not-a-command.md) | 2026-08-01 | Crash realism reads the WAL's sync sidecar; `fsync_offset()` is not built |
+| [0039](0039-multi-valued-categoricals-are-slow-path-only.md) | 2026-08-01 | Multi-valued categoricals are a slow-path capability only |
+| [0040](0040-quantisation-is-slice-scoped-index-config.md) | 2026-08-02 | The quantisation extent is slice-scoped index configuration, immutable at runtime |
+| [0041](0041-pins-become-a-staleness-stamp.md) | 2026-08-03 | A pin becomes a staleness stamp, not retained geometry |

@@ -78,7 +78,8 @@ use tessera_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, W
 use tessera_lifecycle::{IngestBuffer, Overlay};
 
 use crate::cache::RowProjectionCache;
-use crate::pins::{GeometryRefused, PinManager, Reclaimed};
+use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
+use crate::geometry::{check_publishable, GeometryRefused};
 use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::{Bundle, StoreError};
@@ -1337,7 +1338,6 @@ impl WritePath {
     pub(crate) fn start_executor(
         &mut self,
         generation: Arc<GenerationHandle>,
-        pins: Arc<PinManager>,
         row_projection_cache: Arc<RowProjectionCache>,
         queue_bound: usize,
         flush: FlushDeps,
@@ -1383,7 +1383,6 @@ impl WritePath {
                     wal: exec_wal,
                     live,
                     generation,
-                    pins,
                     row_projection_cache,
                     queues: LifecycleQueues {
                         work: work_rx,
@@ -1509,7 +1508,7 @@ impl WritePath {
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
         delta_postings: Vec<Arc<DeltaTier>>,
-    ) -> std::result::Result<Vec<Reclaimed>, PublishGeometryError> {
+    ) -> std::result::Result<(), PublishGeometryError> {
         self.handle
             .as_ref()
             .ok_or(PublishGeometryError::NoExecutor)?
@@ -1697,7 +1696,7 @@ pub(crate) enum ExecutorWork {
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
         delta_postings: Vec<Arc<DeltaTier>>,
-        respond: SyncSender<std::result::Result<Vec<Reclaimed>, GeometryRefused>>,
+        respond: SyncSender<std::result::Result<(), GeometryRefused>>,
     },
 }
 
@@ -1816,7 +1815,7 @@ impl LifecycleHandle {
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
         delta_postings: Vec<Arc<DeltaTier>>,
-    ) -> std::result::Result<Vec<Reclaimed>, PublishGeometryError> {
+    ) -> std::result::Result<(), PublishGeometryError> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.work
             .send(ExecutorWork::PublishGeometry {
@@ -2165,12 +2164,9 @@ struct Executor {
     /// **The only publishing capability in the write path.** Not in [`LiveState`], which the
     /// handler side shares.
     generation: Arc<GenerationHandle>,
-    /// The pin drain list, shared with [`crate::Engine`]: a geometry publication retires against
-    /// it and reclaims from it, and `Engine::viewport` resolves every request's pin through it.
-    pins: Arc<PinManager>,
-    /// The row-projection cache, shared for the one thing this thread does with it: pruning the
-    /// projections of every geometry a publication released. Coupled to the `Reclaimed` values,
-    /// never to the swap — see `RowProjectionCache::prune_generation`.
+    /// The row-projection cache, shared for the one thing this thread does with it: dropping the
+    /// projections of generations now older than the retention depth. Runs at the swap — see
+    /// `RowProjectionCache::prune_generations_below`.
     row_projection_cache: Arc<RowProjectionCache>,
     queues: LifecycleQueues,
     health: Arc<ExecutorHealth>,
@@ -2384,15 +2380,6 @@ impl Executor {
         }
         drop(generation);
 
-        // Lifecycle §2.1: reclaim ran only as a side effect of the next geometry publication, and
-        // a process that published once and went quiescent held a whole superseded bundle
-        // indefinitely — at drain depth 1, which is *at* the alarm and so invisible in every gauge.
-        // This is the periodic caller that gap was waiting for.
-        let reclaimed = self.pins.reclaim();
-        for entry in &reclaimed {
-            self.row_projection_cache
-                .prune_generation(entry.segments_version);
-        }
     }
 
     /// Apply every completed flush waiting from the pool, and report whether any did.
@@ -2479,28 +2466,6 @@ impl Executor {
             ));
         }
         if contexts.is_empty() {
-            return;
-        }
-
-        // **⊘ GATED: the read path cannot serve a second segment yet.**
-        //
-        // `Engine::viewport` refuses a slice holding more than one segment
-        // (`EngineError::MultiSegmentSlice`), and it is right to: `tile_ranges` returns
-        // *segment-local* row indices while the mask is in slice row space, so iterating "just in
-        // case" would mis-count and mis-index. Publishing a flush segment before that is lifted
-        // would make every viewport on the slice fail — visible ingest bought at the cost of the
-        // map.
-        //
-        // What is missing is multi-segment tile lookup and **selection**: counting is a matter of
-        // offsetting each segment's ranges by its `row_base` and summing, but `Selection::of`
-        // reads one segment's identity column over one range, and §7.2's cap and floor clauses are
-        // per *tile* rather than per segment — so the k budget has to be spent across the union.
-        // That is a change to the path I7 lives on and where the B9 decode-tier measurements were
-        // taken, and it is its own piece of work rather than a step of this one.
-        //
-        // Everything above this line is built and exercised: the plan, the segment, the tier, the
-        // side-manifest, the rebase. Only the dispatch is held.
-        if !cfg!(feature = "flush-publication") {
             return;
         }
 
@@ -3768,29 +3733,22 @@ impl Executor {
         };
         let _published = self.publish(next, started);
 
-        // A flush supersedes geometry, so it retires and reclaims exactly as any other geometry
-        // publication does (§1.3): one swap, one `segments_version` bump, one drain entry.
-        let live_now = self.generation.load_full();
-        let mut reclaimed = self
-            .pins
-            .retire(&live, &live_now.prefix, live_now.segments_version);
-        reclaimed.extend(self.pins.reclaim());
-        for entry in &reclaimed {
-            self.row_projection_cache
-                .prune_generation(entry.segments_version);
-        }
+        // A flush supersedes geometry, so it prunes exactly as any other geometry publication
+        // does: one swap, one `segments_version` bump, one retention pass. The superseded
+        // generation itself is held by nothing but the requests already in flight against it.
+        self.row_projection_cache
+            .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
         self.health.flushes.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Publish new geometry: check, swap, retire, reclaim, prune. **The executor's own arm of
-    /// lifecycle §1.3's swap-only publication step.**
+    /// Publish new geometry: check, swap, prune. **The executor's own arm of lifecycle §1.3's
+    /// swap-only publication step.**
     ///
     /// This ran in `Engine::publish_geometry` until flush needed a second publisher and made the
     /// arrangement untenable. It was a compare-and-swap in a retry loop there — safe against
     /// *itself*, but not against this thread's unconditional `store`, which could clobber a
-    /// publication it had already observed and strand the **live** generation on the pin drain
-    /// list, where the cache's prune evicts projections still in use. On this thread there is
-    /// nothing to race, so there is no loop: one load, one check, one store.
+    /// publication it had already observed. On this thread there is nothing to race, so there is
+    /// no loop: one load, one check, one store.
     ///
     /// `check_publishable` is evaluated against the generation actually being replaced, which is
     /// the one loaded here, because this is the only thread that can replace it.
@@ -3802,10 +3760,10 @@ impl Executor {
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
         delta_postings: Vec<Arc<DeltaTier>>,
-    ) -> std::result::Result<Vec<Reclaimed>, GeometryRefused> {
+    ) -> std::result::Result<(), GeometryRefused> {
         let started = std::time::Instant::now();
         let previous = self.generation.load_full();
-        crate::pins::check_publishable(&previous, &prefix, segments_version)?;
+        check_publishable(&previous, &prefix, segments_version)?;
 
         let next = Generation {
             prefix,
@@ -3821,22 +3779,12 @@ impl Executor {
         };
         let _published = self.publish(next, started);
 
-        // Retired against the generation this call replaced, with no "identity observed live"
-        // dance: the compare-and-swap version had to re-read the pointer because a `WritePath`
-        // store could make the superseded geometry live again under a fresh `Arc` between the swap
-        // and the retire. That window was this thread's own store, and this *is* that thread.
-        let live_now = self.generation.load_full();
-        let mut reclaimed =
-            self.pins
-                .retire(&previous, &live_now.prefix, live_now.segments_version);
-        // Reclaim after retiring, so the drain list is self-bounding for as long as geometry keeps
-        // moving. Not a substitute for a periodic pass — the flush tick becomes that caller.
-        reclaimed.extend(self.pins.reclaim());
-        for entry in &reclaimed {
-            self.row_projection_cache
-                .prune_generation(entry.segments_version);
-        }
-        Ok(reclaimed)
+        // The retention pass, at the swap rather than at a reclaim — see
+        // `RowProjectionCache::prune_generations_below` for why depth 1 rather than depth 0, which
+        // would delete the input to the very patch it exists to enable.
+        self.row_projection_cache
+            .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
+        Ok(())
     }
 
     /// The generation swap. **The only `store` in the write path**, and the only producer of a

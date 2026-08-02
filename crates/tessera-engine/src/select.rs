@@ -319,9 +319,102 @@ pub fn decode_tier(visible: u64, range_len: u64) -> DecodeTier {
     }
 }
 
+/// One segment's contribution to one tile: the segment, its own row range for that tile, and
+/// where its rows begin in the slice's row space.
+///
+/// **Why a tile is a list of these rather than one range.** `tile_ranges` searches a *segment's*
+/// Morton column and returns indices local to it, while the mask is a bitmap over the whole
+/// **slice** row space — the base segment at 0, each flush or merge segment at its extent's
+/// `row_base`. A slice holding more than one segment therefore resolves each one separately and
+/// the tile is their union. Every mask operation below takes a slice-space range
+/// (`row_base + local`); every identity-column and gather read takes the local one.
+#[derive(Debug, Clone)]
+pub struct SelectionPart<'a> {
+    pub segment: &'a SegmentData,
+    /// Segment-local, as [`tessera_store::tile_ranges`] returns it.
+    pub range: Range<u32>,
+    /// This segment's `row_base` in the slice's row space; 0 for the build segment.
+    pub row_base: u32,
+    /// `mask.count_range` over this part's **slice-space** range. Supplied by the caller because
+    /// it is already needed to decide whether the tile is empty at all.
+    pub visible: u64,
+}
+
+impl<'a> SelectionPart<'a> {
+    /// The single-segment case: a slice whose only segment is the build one, whose rows therefore
+    /// begin at 0, so segment-local and slice-space rows coincide. What a bundle straight out of
+    /// `tessera build` presents, and what the equivalence tests and the route-saving example
+    /// construct.
+    pub fn base(segment: &'a SegmentData, range: Range<u32>, visible: u64) -> Self {
+        SelectionPart {
+            segment,
+            range,
+            row_base: 0,
+            visible,
+        }
+    }
+
+    /// This part's range in slice row space — what every mask operation takes.
+    fn slice_range(&self) -> Range<u32> {
+        self.row_base + self.range.start..self.row_base + self.range.end
+    }
+
+    fn is_empty(&self) -> bool {
+        self.range.start >= self.range.end
+    }
+}
+
+/// The parts of one tile, with the slice-space↔segment-local resolution they define.
+///
+/// **The union is a genuine union, not a concatenation, and that is §7.2's requirement rather than
+/// a convenience.** `cap` and `k_min` are per *tile*: a tile spanning three segments has one `k`
+/// budget to spend across all three, one `C_θ` counted over all three, and one served set that is
+/// the `m` smallest `tessera_id`s in the union. Selecting per segment and concatenating would
+/// serve up to `parts × cap` marks and would break I7's floor in the other direction too — a tile
+/// with one visible row in each of three segments would draw `3·k_min`, not `k_min`.
+pub struct SelectionParts<'a> {
+    parts: &'a [SelectionPart<'a>],
+}
+
+impl<'a> SelectionParts<'a> {
+    pub fn new(parts: &'a [SelectionPart<'a>]) -> Self {
+        SelectionParts { parts }
+    }
+
+    /// The parts themselves, for the callers that need to do their own per-segment work over the
+    /// same decomposition — the §3.3 underlay, which resolves sub-cells inside each part's range.
+    pub fn as_slice(&self) -> &'a [SelectionPart<'a>] {
+        self.parts
+    }
+
+    /// The part owning `slice_row`, and that row's segment-local index.
+    ///
+    /// A reverse linear scan rather than a binary search: the part list is the slice's live
+    /// segment count, which the merge policy bounds to a handful, and at that size the scan is
+    /// both faster and obviously correct. Parts are ascending in `row_base` (row space is built by
+    /// appending extents), so the first part starting at or below `slice_row` owns it.
+    pub fn resolve(&self, slice_row: u32) -> (&'a SegmentData, u32) {
+        for part in self.parts.iter().rev() {
+            if slice_row >= part.row_base {
+                return (part.segment, slice_row - part.row_base);
+            }
+        }
+        // Unreachable for a row this module itself produced: every such row came from a part's own
+        // slice range, and the first part's `row_base` is 0. A panic rather than a fallback,
+        // because a wrong answer here gathers one entity's coordinates under another's identity.
+        panic!("slice row {slice_row} lies below every part's row_base — not a row of this tile");
+    }
+
+    fn id_at(&self, slice_row: u32) -> u64 {
+        let (segment, local) = self.resolve(slice_row);
+        segment.columns.tessera_id()[local as usize]
+    }
+}
+
 /// One tile's selected rows, ascending by `tessera_id`.
 pub struct Selection {
-    /// Row indices, **ascending by the row's `tessera_id`** — not by row index.
+    /// Row indices in **slice row space**, **ascending by the row's `tessera_id`** — not by row
+    /// index. Resolve each to its segment with [`SelectionParts::resolve`] before gathering.
     pub rows: Vec<u32>,
     /// How many rows this call actually read, counted **inside** the loops that read them.
     ///
@@ -340,14 +433,21 @@ impl Selection {
     /// client-truncation clause needs the payload to be a *prefix*, and a branch-dependent order
     /// would be a differential-oracle landmine.
     ///
-    /// `visible` must be `mask.count_range(range)` exactly. It always carried correctness (the
-    /// serve-all predicate and the `m` clamp read it); the [`DecodeTier::FullRange`] tier now
-    /// also decodes by it — `visible == range.len()` is taken as proof that the whole range is
-    /// visible, which is only true of the *composed* count.
+    /// `visible` must be `Σ part.visible` exactly, and each `part.visible` must be
+    /// `mask.count_range(part.slice_range())`. It always carried correctness (the serve-all
+    /// predicate and the `m` clamp read it); the [`DecodeTier::FullRange`] tier also decodes by it
+    /// — `visible == range.len()` is taken as proof that the whole range is visible, which is only
+    /// true of the *composed* count.
+    ///
+    /// **The tier is chosen per part, the definition is evaluated over the union.** Density is a
+    /// property of how the mask sits over one contiguous range, so a slice whose base segment is
+    /// dense and whose fresh flush segment is sparse should decode each the way that segment's own
+    /// density warrants — but `C_θ`, the heap, the cap and the floor are all single, tile-wide
+    /// quantities. A single-part tile takes exactly the path it took before segments could be
+    /// unioned, which is what keeps the existing byte-equality claims intact.
     pub fn of(
         mask: &EffectiveMask,
-        segment: &SegmentData,
-        range: Range<u32>,
+        parts: &SelectionParts<'_>,
         params: &SelectParams,
         visible: u64,
     ) -> Self {
@@ -360,26 +460,16 @@ impl Selection {
                 rows_visited: 0,
             };
         }
-        // An empty (or inverted) range holds nothing — decoded identically by every mechanism,
-        // but the FullRange tier's slice indexing needs the well-formedness guarantee explicit.
-        if range.start >= range.end {
-            return Selection {
-                rows: Vec::new(),
-                rows_visited: 0,
-            };
-        }
-
-        let ids = segment.columns.tessera_id();
-        let range_len = u64::from(range.end - range.start);
-
-        // The decode mechanism is chosen per tile (`decode_tier`): the measured per-row cost of
+        // The decode mechanism is chosen per part (`decode_tier`): the measured per-row cost of
         // the retired always-per-value code was dominated by decode machinery, not column loads
         // (memo `2026-07-30-viewport-hot-path-and-bundle-size-review.md` §B9), but run decoding
         // only wins where runs are long — see `RUN_DECODE_MIN_DENSITY_PCT` for the measured
         // crossover. Every tier reads the same rows in the same ascending order, so the output
         // is bit-identical whichever fires.
-        let tier = decode_tier(visible, range_len);
-
+        //
+        // An empty (or inverted) part holds nothing — decoded identically by every mechanism, but
+        // the FullRange tier's slice indexing needs the well-formedness guarantee explicit, so
+        // every loop below skips one rather than relying on the ranges being well-behaved.
         let mut rows_visited: u64 = 0;
         let rows: Vec<u32> = if serves_all_visible(params, visible) {
             // Everything visible is served, so there is nothing to count and nothing to select —
@@ -399,47 +489,59 @@ impl Selection {
             // decoded value — which is the field's meaning. Capacity is exact — this branch runs
             // only when `visible <= cap`.
             let mut rows: Vec<u32> = Vec::with_capacity(params.cap.min(visible as usize));
-            match tier {
-                DecodeTier::FullRange => {
-                    rows_visited += range_len;
-                    rows.extend(range.start..range.end);
+            for part in parts.parts {
+                if part.is_empty() {
+                    continue;
                 }
-                DecodeTier::Runs => mask.for_each_visible_run(range, |run| {
-                    rows_visited += u64::from(run.end - run.start);
-                    rows.extend(run);
-                }),
-                DecodeTier::Values => {
-                    // Reads are bounded by `visible`, not just by the range-end check: after the
-                    // seek, the next `visible` values of the source are exactly the tile's
-                    // visible set (diffs empty ⇒ source is the composed mask; diffs present ⇒
-                    // the source is already range-clamped), so an unbounded final `next_many`
-                    // would decode up to a buffer's worth of rows past the tile and throw them
-                    // away — measured at ~15% of the whole request on ~500-visible tiles, since
-                    // the waste is per tile. The `>= range.end` check stays as the fail-safe for
-                    // a caller-miscounted `visible`.
-                    let source = mask.decode_source(range.clone());
-                    let mut iter = source.bitmap().iter();
-                    iter.reset_at_or_after(range.start);
-                    let mut buf = [0u32; VALUE_BUF_LEN];
-                    let mut remaining = visible;
-                    'decode: while remaining > 0 {
-                        let want = remaining.min(VALUE_BUF_LEN as u64) as usize;
-                        let n = iter.next_many(&mut buf[..want]);
-                        if n == 0 {
-                            break;
-                        }
-                        for &row in &buf[..n] {
-                            if row >= range.end {
-                                break 'decode;
+                let slice_range = part.slice_range();
+                let range_len = u64::from(slice_range.end - slice_range.start);
+                match decode_tier(part.visible, range_len) {
+                    DecodeTier::FullRange => {
+                        rows_visited += range_len;
+                        rows.extend(slice_range.clone());
+                    }
+                    DecodeTier::Runs => mask.for_each_visible_run(slice_range.clone(), |run| {
+                        rows_visited += u64::from(run.end - run.start);
+                        rows.extend(run);
+                    }),
+                    DecodeTier::Values => {
+                        // Reads are bounded by this part's `visible`, not just by the range-end
+                        // check: after the seek, the next `visible` values of the source are
+                        // exactly the part's visible set (diffs empty ⇒ source is the composed
+                        // mask; diffs present ⇒ the source is already range-clamped), so an
+                        // unbounded final `next_many` would decode up to a buffer's worth of rows
+                        // past the part and throw them away — measured at ~15% of the whole
+                        // request on ~500-visible tiles, since the waste is per tile. The
+                        // `>= slice_range.end` check stays as the fail-safe for a caller-
+                        // miscounted `visible`.
+                        let source = mask.decode_source(slice_range.clone());
+                        let mut iter = source.bitmap().iter();
+                        iter.reset_at_or_after(slice_range.start);
+                        let mut buf = [0u32; VALUE_BUF_LEN];
+                        let mut remaining = part.visible;
+                        'decode: while remaining > 0 {
+                            let want = remaining.min(VALUE_BUF_LEN as u64) as usize;
+                            let n = iter.next_many(&mut buf[..want]);
+                            if n == 0 {
+                                break;
                             }
-                            rows_visited += 1;
-                            rows.push(row);
+                            for &row in &buf[..n] {
+                                if row >= slice_range.end {
+                                    break 'decode;
+                                }
+                                rows_visited += 1;
+                                rows.push(row);
+                            }
+                            remaining -= n as u64;
                         }
-                        remaining -= n as u64;
                     }
                 }
             }
-            rows.sort_unstable_by_key(|&row| ids[row as usize]);
+            // One sort over the union, not one per part followed by a merge: the payload must be
+            // a single `tessera_id` prefix across the whole tile (the nesting argument's
+            // client-truncation clause), and a per-part sort would only be a prefix within each
+            // segment.
+            rows.sort_unstable_by_key(|&row| parts.id_at(row));
             rows
         } else {
             // One pass. `m(T) <= cap` always, so the `cap` smallest ids in the tile contain the
@@ -502,65 +604,81 @@ impl Selection {
                 }
             }
 
-            match tier {
-                DecodeTier::FullRange => {
-                    scan_slice(
-                        range.start,
-                        &ids[range.start as usize..range.end as usize],
-                        params,
-                        &mut rows_visited,
-                        &mut c_theta,
-                        &mut heap,
-                    );
+            // **One `c_theta`, one heap, across every part.** This is where §7.2's "per tile, not
+            // per segment" actually lands: the counting pass accumulates over the union, and the
+            // heap's `cap` is the tile's whole budget, so the `cap` smallest ids in the *union*
+            // are what survive. Selecting per part and concatenating would serve up to
+            // `parts × cap` marks and would inflate the I7 floor by the same factor.
+            for part in parts.parts {
+                if part.is_empty() {
+                    continue;
                 }
-                DecodeTier::Runs => mask.for_each_visible_run(range, |run| {
-                    scan_slice(
-                        run.start,
-                        &ids[run.start as usize..run.end as usize],
-                        params,
-                        &mut rows_visited,
-                        &mut c_theta,
-                        &mut heap,
-                    );
-                }),
-                DecodeTier::Values => {
-                    // The loop is driven here rather than fed through a closure, and that is a
-                    // measured decision, not style: routing this per-value state through a
-                    // closure environment cost ~2× the whole scan (`examples/decode_tiers.rs`,
-                    // its doc records the history).
-                    // Bounded by `visible` for the same reason as the serve-all arm above: the
-                    // final unbounded read would decode a buffer's worth of rows past the tile.
-                    let source = mask.decode_source(range.clone());
-                    let mut iter = source.bitmap().iter();
-                    iter.reset_at_or_after(range.start);
-                    let mut buf = [0u32; VALUE_BUF_LEN];
-                    let mut remaining = visible;
-                    'decode: while remaining > 0 {
-                        let want = remaining.min(VALUE_BUF_LEN as u64) as usize;
-                        let n = iter.next_many(&mut buf[..want]);
-                        if n == 0 {
-                            break;
-                        }
-                        for &row in &buf[..n] {
-                            if row >= range.end {
-                                break 'decode;
+                let ids = part.segment.columns.tessera_id();
+                let base = part.row_base;
+                let slice_range = part.slice_range();
+                let range_len = u64::from(slice_range.end - slice_range.start);
+                match decode_tier(part.visible, range_len) {
+                    DecodeTier::FullRange => {
+                        scan_slice(
+                            slice_range.start,
+                            &ids[part.range.start as usize..part.range.end as usize],
+                            params,
+                            &mut rows_visited,
+                            &mut c_theta,
+                            &mut heap,
+                        );
+                    }
+                    DecodeTier::Runs => mask.for_each_visible_run(slice_range.clone(), |run| {
+                        // `run` is in slice space; the identity column is indexed segment-locally.
+                        scan_slice(
+                            run.start,
+                            &ids[(run.start - base) as usize..(run.end - base) as usize],
+                            params,
+                            &mut rows_visited,
+                            &mut c_theta,
+                            &mut heap,
+                        );
+                    }),
+                    DecodeTier::Values => {
+                        // The loop is driven here rather than fed through a closure, and that is a
+                        // measured decision, not style: routing this per-value state through a
+                        // closure environment cost ~2× the whole scan (`examples/decode_tiers.rs`,
+                        // its doc records the history).
+                        // Bounded by this part's `visible` for the same reason as the serve-all
+                        // arm above: the final unbounded read would decode a buffer's worth of
+                        // rows past the part.
+                        let source = mask.decode_source(slice_range.clone());
+                        let mut iter = source.bitmap().iter();
+                        iter.reset_at_or_after(slice_range.start);
+                        let mut buf = [0u32; VALUE_BUF_LEN];
+                        let mut remaining = part.visible;
+                        'decode: while remaining > 0 {
+                            let want = remaining.min(VALUE_BUF_LEN as u64) as usize;
+                            let n = iter.next_many(&mut buf[..want]);
+                            if n == 0 {
+                                break;
                             }
-                            rows_visited += 1;
-                            let id = ids[row as usize];
-                            if params.threshold.admits(id) {
-                                c_theta += 1;
-                            }
-                            if heap.len() == params.cap {
-                                // Safe: len == cap >= 1 here, since cap == 0 returned early
-                                // above.
-                                if id >= heap.peek().expect("non-empty at len == cap").0 {
-                                    continue;
+                            for &row in &buf[..n] {
+                                if row >= slice_range.end {
+                                    break 'decode;
                                 }
-                                heap.pop();
+                                rows_visited += 1;
+                                let id = ids[(row - base) as usize];
+                                if params.threshold.admits(id) {
+                                    c_theta += 1;
+                                }
+                                if heap.len() == params.cap {
+                                    // Safe: len == cap >= 1 here, since cap == 0 returned early
+                                    // above.
+                                    if id >= heap.peek().expect("non-empty at len == cap").0 {
+                                        continue;
+                                    }
+                                    heap.pop();
+                                }
+                                heap.push((id, row));
                             }
-                            heap.push((id, row));
+                            remaining -= n as u64;
                         }
-                        remaining -= n as u64;
                     }
                 }
             }
@@ -572,9 +690,12 @@ impl Selection {
             kept.into_iter().map(|(_, row)| row).collect()
         };
 
+        // Across the union, not just within one segment — which is the stronger claim, and the one
+        // that matters now that a tile can draw rows from several segments at once. Two segments
+        // holding a row for the same entity would alias here rather than anywhere louder.
         debug_assert!(
             rows.windows(2)
-                .all(|w| ids[w[0] as usize] != ids[w[1] as usize]),
+                .all(|w| parts.id_at(w[0]) != parts.id_at(w[1])),
             "two rows in one tile share a tessera_id — the identity is a bijection over 2^64 with \
              one row per entity (contracts §2.6), and the determinism of the whole selection rests \
              on that being true"

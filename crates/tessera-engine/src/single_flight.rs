@@ -479,6 +479,12 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// `Err(Building)` immediately (see this module's doc for why that is correct rather than a
     /// shortcut).
     ///
+    /// A hit clones the `Arc`, moves the entry to the young end of the recency order and returns
+    /// without calling `make` at all. A miss makes this call the builder: publish `Building`, drop
+    /// the lock, run `make` outside it, re-lock, evict to fit, publish `Ready`. A *different*
+    /// concurrent miss on the same key observed while this is in flight gets `Err(Building)`
+    /// immediately (see this module's doc for why that is correct rather than a shortcut).
+    ///
     /// **Exactly two lock acquisitions on a miss, exactly one on a hit**, asserted by this module's
     /// tests against [`CacheStats::slot_locks`]. The LRU touch and the eviction pass both happen
     /// *inside* those acquisitions and add none of their own; a recency index behind its own mutex,
@@ -497,17 +503,38 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     /// stuffs an error into `V` — use `tessera-authz`'s `SingleFlightCache::get_or_try_build` twin
     /// instead, which carries the `Result` through the slot state machine properly (fail-closed,
     /// not a cached failure — I13a).
-    pub(crate) fn get_or_build(
+    /// Look up `key`, with the chance to build a miss's value **from another key's entry**.
+    ///
+    /// `make` is handed `Some(source)` when `derive_from` names a key that is `Ready` at the moment
+    /// this call claims its own slot, and `None` otherwise. Everything else — the single-flight
+    /// state machine, the two lock acquisitions, the panic safety, rule 3 — is identical, because
+    /// this is the one entry point.
+    ///
+    /// **`derive_from` is a hint and must be treated as one.** A source that has been evicted, is
+    /// still building, or was never inserted yields `None`, and `make` must then produce exactly the
+    /// value it would have produced from scratch. That is what keeps a derived entry
+    /// indistinguishable from a built one — the property `crate::cache`'s own doc rests on, and the
+    /// reason this takes one closure with an `Option` rather than two closures: two closures are two
+    /// places for the answers to diverge.
+    ///
+    /// **The source is read inside the same acquisition that claims the target slot**, so it cannot
+    /// be evicted between the decision to derive and the derivation. It is `Arc`-cloned, so the
+    /// derivation itself runs outside the lock like any other build, and the source entry is
+    /// **not** touched for recency: deriving from an entry is not a use of it, and counting it as
+    /// one would keep a superseded generation's entries young for as long as anything derived from
+    /// them.
+    pub(crate) fn get_or_derive(
         &self,
         key: K,
-        build: impl FnOnce() -> V,
+        derive_from: Option<&K>,
+        make: impl FnOnce(Option<&V>) -> V,
     ) -> Result<Arc<V>, Building> {
         // Declared before any lock guard so that, whatever path is taken below, these drop AFTER
         // the guard goes out of scope (Rust drops locals in reverse declaration order) — rule 4.
         // Every locked block below writes evicted values here rather than dropping them in place.
         let mut dead: Vec<Arc<V>> = Vec::new();
 
-        let (owned_key, seq) = {
+        let (owned_key, seq, source) = {
             let mut slots = self.lock_slots();
             // Read before the `get_mut` borrow opens, so the whole touch — bumping `uses`, stamping
             // the new tick — happens inside the one lookup. Consumed only on the hit branch; a
@@ -532,6 +559,13 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
                     Some((Arc::clone(value), Arc::clone(slot_key), old_tick))
                 }
             };
+            // Read under the same lock that is about to claim this key's slot. Deliberately
+            // *before* the miss branch inserts `Building`, and deliberately not a recency touch —
+            // see this method's doc.
+            let source = derive_from.and_then(|from| match slots.map.get(from) {
+                Some(Slot::Ready { value, .. }) => Some(Arc::clone(value)),
+                _ => None,
+            });
             if let Some((value, slot_key, old_tick)) = hit {
                 // The rest of the touch, inside the same acquisition: the index moved to match the
                 // tick already stamped above. Both halves of the bijection updated together.
@@ -550,7 +584,7 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
                 .insert(Arc::clone(&owned_key), Slot::Building { seq });
             self.entries.store(slots.map.len(), Ordering::Relaxed);
             slots.check();
-            (owned_key, seq)
+            (owned_key, seq, source)
         };
         self.misses.fetch_add(1, Ordering::Relaxed);
 
@@ -564,7 +598,7 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
             disarmed: false,
         };
 
-        let value = Arc::new(build());
+        let value = Arc::new(make(source.as_deref()));
 
         // **Outside the lock, deliberately.** `get_serialized_size_in_bytes` is O(containers) —
         // ~15 k at the 125 MB operating point — and computing it inside the critical section would
@@ -819,6 +853,21 @@ const _: () = {
 
 #[cfg(test)]
 mod tests {
+    /// The two-argument form the cases below are written in: no source key, so `make`'s `Option`
+    /// is always `None`. Production has exactly one call site and it always offers a source.
+    trait GetOrBuild<K, V> {
+        fn get_or_build(&self, key: K, build: impl FnOnce() -> V) -> Result<Arc<V>, Building>;
+    }
+
+    impl<K: Eq + std::hash::Hash + Clone, V: CacheWeight> GetOrBuild<K, V> for SingleFlightCache<K, V> {
+        fn get_or_build(&self, key: K, build: impl FnOnce() -> V) -> Result<Arc<V>, Building> {
+            self.get_or_derive(key, None, |source| {
+                assert!(source.is_none(), "no source key was offered");
+                build()
+            })
+        }
+    }
+
     use super::*;
     use std::sync::mpsc;
     use std::thread;

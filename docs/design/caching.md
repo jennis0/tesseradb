@@ -239,10 +239,12 @@ version and not mask identity alone.
   labels' `node_handle`) is excluded from shared entries. S1/S2 are entity/row space and never leave
   the server.
 - **The three retirement rules.** No cache interprets deny semantics. All invalidation binds to
-  §6.2's tiers: identity generation voids everything; content version voids the delta; pin/segment
+  §6.2's tiers: identity generation voids everything; content version voids the delta; segment
   version voids nothing client-visible.
-- **Pins fix geometry, never authorisation.** S5 keys on overlay version independently of any pin,
-  so a suppression voids cached tiles even under a pinned request.
+- **Geometry identity never fixes authorisation.** S5 keys on overlay version independently of the
+  geometry stamp, so a suppression voids cached tiles whatever stamp the request carried. Since
+  2026-08-03 the stamp is advisory in any case — it selects no geometry, so there is no "pinned
+  request" for a suppression to have to reach past.
 - **New register entry required:** cross-session cache warmth (S3/S5 where grant sets are shared) is
   a timing channel — a hit whose warmth another session caused. Scoped to identical grant sets it
   discloses only "someone with your exact visibility was recently active", which is C15-adjacent and

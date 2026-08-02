@@ -35,6 +35,20 @@ use tessera_types::{EntityId, TermId};
 /// / `contains`, both O(containers touched), never re-derives it from the fragment.
 pub struct RowProjection {
     rows: Bitmap,
+    /// How many of the slice's extents this projection already covers — the index
+    /// `RowSpace::project_extents_from` resumes at when a flush extends it (see
+    /// [`RowProjection::extend`]).
+    extents_covered: usize,
+    /// The `seg_id` of the last extent covered, or `None` when only the base is.
+    ///
+    /// **This is what makes the patch sound across a merge**, and it is the whole of the check.
+    /// A flush appends, so extents `[0, extents_covered)` are untouched and the patch is exact. A
+    /// merge collapses an adjacent run into one segment with a **new** `seg_id` — ids are never
+    /// reused, across merges or prefixes (contracts §2.1) — so if the run it collapsed overlapped
+    /// this projection's covered prefix, the extent now sitting at `extents_covered - 1` is either
+    /// a different segment or out of range. Comparing that one id is therefore exact rather than
+    /// heuristic, and costs one string comparison against a *measured* 10.7 s rebuild.
+    boundary_seg_id: Option<String>,
     /// `rows.cardinality()`, computed once at construction.
     ///
     /// Memoised because §7.2's θ anchor needs the projection's total cardinality on **every**
@@ -49,14 +63,67 @@ impl RowProjection {
     /// Project `fragment`'s entity-space bitmap into this slice's row space. Do not call this on
     /// the per-viewport path — see this struct's doc.
     pub fn new(fragment: &FrozenFragment, rows: &RowSpace) -> Self {
-        Self::from_rows(rows.project(&fragment.view()))
+        Self::over(rows.project(&fragment.view()), rows)
+    }
+
+    /// This projection extended to `rows`, adding only the extents it does not already cover.
+    ///
+    /// **Equal to `RowProjection::new` over the same inputs, not an approximation.** An extent's
+    /// rows begin exactly where row space ended, so the parts are disjoint and projecting the whole
+    /// is projecting the parts unioned. `projecting_the_whole_equals_the_union_of_the_parts` in
+    /// `tessera-store` pins the row-space half of that, and `tests/projection_patch.rs` pins this
+    /// one end to end.
+    ///
+    /// Callers must check [`Self::extends_to`] first — this does not, because the answer decides
+    /// whether the caller derives at all, and re-deriving it here would be a second place to get it
+    /// wrong.
+    pub fn extend(&self, fragment: &FrozenFragment, rows: &RowSpace) -> Self {
+        let mut extended = self.rows.clone();
+        extended.or_inplace(&rows.project_extents_from(&fragment.view(), self.extents_covered));
+        Self::over(extended, rows)
+    }
+
+    /// Whether this projection is a valid starting point for a projection over `rows` — i.e.
+    /// whether `rows` **extends** the row space this was built over rather than permuting it.
+    ///
+    /// See [`Self::boundary_seg_id`] for why one id comparison settles it.
+    pub fn extends_to(&self, rows: &RowSpace) -> bool {
+        let extents = rows.extents();
+        if extents.len() < self.extents_covered {
+            return false;
+        }
+        match (&self.boundary_seg_id, self.extents_covered) {
+            (None, 0) => true,
+            (Some(seg_id), n) => extents[n - 1].seg_id == *seg_id,
+            // Unreachable from `over`, which sets the two together. Refusing is the fail-safe
+            // direction: a needless rebuild, never a wrong projection.
+            _ => false,
+        }
+    }
+
+    fn over(rows: Bitmap, space: &RowSpace) -> Self {
+        let extents = space.extents();
+        let mut projection = Self::from_rows(rows);
+        projection.extents_covered = extents.len();
+        projection.boundary_seg_id = extents.last().map(|e| e.seg_id.clone());
+        projection
     }
 
     /// Build directly from an already-projected row-space bitmap (e.g. in tests, or when a
     /// caller has its own reason to hold the projection independently of a `FrozenFragment`).
+    ///
+    /// The result covers no extents, so [`Self::extends_to`] holds only over a row space with none.
+    /// A projection meant to be extended must come from [`Self::new`].
     pub fn from_rows(rows: Bitmap) -> Self {
         let cardinality = rows.cardinality();
-        RowProjection { rows, cardinality }
+        RowProjection {
+            rows,
+            // Covering no extents, which is what an unattached bitmap can honestly claim. A caller
+            // that wants a derivable projection goes through `RowProjection::new`.
+            extents_covered: 0,
+            boundary_seg_id: None,
+            cardinality,
+        }
     }
 
     /// The number of rows in this projection — O(1), memoised at construction.

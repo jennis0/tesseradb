@@ -26,7 +26,7 @@ flowchart TB
         control["admin plane<br/>operator credential<br/>unix socket"]
         viewer["viewer plane<br/>token-bearing<br/>the only untrusted surface"]
         gate["ComputeGate — admission + backpressure"]
-        engine["tessera-engine<br/>compose · select · pins · caches"]
+        engine["tessera-engine<br/>compose · select · flush · caches"]
         exec["write executor<br/>owns the WAL by value"]
     end
     bundle[("bundle/<br/>versioned prefixes")]
@@ -123,7 +123,8 @@ crates/
                      gated out of shipped builds.
   tessera-engine     composition root: the typed narrow API; mask composition per I1;
                      selection (§7.2, and the argued absence of a candidate-list route);
-                     pins and the drain list; the row-projection and fragment caches with
+                     the generation swap and its publication guard; the row-projection and
+                     fragment caches with
                      single-flight; cooperative cancellation; the write path and its
                      executor thread.
   tessera-wire       Arrow IPC payload encoding. Payload builders never see EntityId (I10).
@@ -163,7 +164,7 @@ It remains **a grep-based approximation** of spec rules: passing it is necessary
 | no `EntityId` in `tessera-wire`'s payload module | I10 at the serialisation boundary |
 | no `entity_id` accessor on the store's column reader | I10 after contracts r6 removed the column |
 | no `IdentityKey` and no `identity_key_hex` in the wire or server layers | the key inverts every `tessera_id` and must never reach a response, log or metric label |
-| exactly one generation-publishing call form outside `write.rs`, carrying a `PUBLISHER-EXEMPT` marker — and **exactly one such marker** | a second unconditional publisher is the lost-update race that leaves the *live* generation on the pin drain list, where prune evicts projections still in use |
+| exactly one generation-publishing call form outside `write.rs`, carrying a `PUBLISHER-EXEMPT` marker — and **exactly one such marker** | a second unconditional publisher is a lost-update race: a publication this thread had already observed is clobbered, and the geometry it named is never served |
 | `Published::` — the ack-proof token — constructible only in `write.rs` | lifecycle §4's ack ordering: a client must never hold a 200 for a suppression not yet in force |
 | `fault-injection` never enabled on a normal dependency edge (asked of cargo, not grepped from a manifest) | the fault switchboard cannot reach a `cargo build` artifact |
 | the `NO CANDIDATE-LIST ROUTE` block must remain in `select.rs` | the declined route's refusal argument; deleting it reintroduces the empty-tile cliff for the sparsest principals (I7) |
@@ -203,7 +204,7 @@ Every boundary is a versioned contract; everything else is internal and free to 
 
 ### 4.1 The bundle format (build ↔ serve)
 
-The unit of storage, deployment, backup and rollback: a directory tree of versioned prefixes and one mutable pointer. The mutability rule, stated precisely because it is easy to get wrong: **files are immutable; the live prefix is append-only; retired prefixes are frozen.** Streaming ingest may add files to the live prefix; nothing ever rewrites or deletes a file except retirement of a whole prefix. The pin is the triple *(prefix, segments-version, watermark)*, and I11's discipline — a request's geometry is fixed for its lifetime — applies to the triple.
+The unit of storage, deployment, backup and rollback: a directory tree of versioned prefixes and one mutable pointer. The mutability rule, stated precisely because it is easy to get wrong: **files are immutable; the live prefix is append-only; retired prefixes are frozen.** Streaming ingest may add files to the live prefix; nothing ever rewrites or deletes a file except retirement of a whole prefix. The geometry stamp is the triple *(prefix, segments-version, watermark)*, and I11's discipline — a request's geometry is fixed for its lifetime — applies to the triple. **The stamp is advisory across requests** and retains nothing (`geometry-pinning.md`); within a request it is simply which generation the request loaded.
 
 ```
 bundle/
@@ -265,9 +266,9 @@ HTTP on every surface, Arrow IPC bodies for anything columnar, JSON for control 
 | Verb | Request | Response |
 |---|---|---|
 | `GET /v1/meta` | — | slices, coordinate extent, max tile depth, declared-scalar schema, contract versions, idset, filter-operand *names*, and the **C11** containment-filtered label vocabulary — the one data-derived field, gated on `M_auth` (the viewer's authorised set) |
-| `POST /v1/viewport` | slice, zoom, tile range or bbox, filter set, k (server-capped), optional pin | Arrow: per-tile exact masked counts, matched-and-visible alongside total-visible; sampled points (`tessera_id`, x, y, declared scalars); optional density-underlay stream; session pin |
+| `POST /v1/viewport` | slice, zoom, tile range or bbox, filter set, k (server-capped), optional geometry stamp | Arrow: per-tile exact masked counts, matched-and-visible alongside total-visible; sampled points (`tessera_id`, x, y, declared scalars); optional density-underlay stream; the geometry stamp answered from, and whether the presented one is stale |
 | `POST /v1/items/{tessera_id}` | drill-down; the identifier is assumed current (§6.8) — there is no rotation parameter | item detail |
-| `POST /v1/labels` | slice, viewport, filter set, optional pin | frontier nodes with at most one gated label each, plus tier |
+| `POST /v1/labels` | slice, viewport, filter set, optional geometry stamp | frontier nodes with at most one gated label each, plus tier |
 | `POST /v1/region` | slice, polygon or box, filter set, optional pin | exact masked count; sampled preview; masked breakdowns |
 
 > **⊘ Specified, not implemented.** Three verbs are mounted: `/v1/meta`, `/v1/viewport`, `/v1/items/{tessera_id}`. `/v1/labels` and `/v1/region` are absent — not stubbed, so a caller gets a 404 rather than an empty or partial answer, which is the right failure. Both depend on machinery (the node table, the label ladder) that does not exist.

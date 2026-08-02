@@ -461,8 +461,6 @@ pub struct FragmentCache {
     dir: PathBuf,
     bundle_identity: [u8; 32],
     auth_plugin_hash: [u8; 32],
-    /// The on-disk entry format this cache reads and writes — see [`FRAGMENT_FORMAT`].
-    format_version: u32,
     key_memo: Mutex<FxHashMap<KeyMemoKey, [u8; 32]>>,
     slots: SingleFlightCache<[u8; 32], FrozenFragment>,
     rebuilds: AtomicU64,
@@ -529,17 +527,11 @@ impl FragmentCache {
     /// A cache built this way is therefore **unbounded**. That is correct for tests, benches and
     /// embedders; it is not correct for a server, and `tessera_server::prepare` is what makes sure
     /// a server never gets one.
-    pub fn new(
-        dir: &Path,
-        bundle_identity: [u8; 32],
-        auth_plugin_hash: [u8; 32],
-        format_version: u32,
-    ) -> Self {
+    pub fn new(dir: &Path, bundle_identity: [u8; 32], auth_plugin_hash: [u8; 32]) -> Self {
         FragmentCache {
             dir: dir.to_path_buf(),
             bundle_identity,
             auth_plugin_hash,
-            format_version,
             key_memo: Mutex::new(FxHashMap::default()),
             slots: SingleFlightCache::new(u64::MAX),
             rebuilds: AtomicU64::new(0),
@@ -624,22 +616,21 @@ impl FragmentCache {
         self.key_memo.lock().unwrap().len()
     }
 
-    /// The directory this cache's entries live in: `<dir>/v<format>/`.
+    /// Entries live flat in `dir`, named by their canonical key.
     ///
-    /// Versioned because the *key* changed shape when the watermark joined it (§9). Every
-    /// pre-upgrade entry is unreachable under the new key — a leak rather than a fail-open, since
-    /// new code can never read one — and nothing on this path ever deleted anything, so without a
-    /// version there would be no way to tell an orphan from a live entry and no safe sweep.
-    fn version_dir(&self) -> PathBuf {
-        self.dir.join(format!("v{}", self.format_version))
-    }
-
+    /// **No format version and no orphan sweep** (owner ruling, 2026-08-02, flush §9). Both existed
+    /// because the key changed shape when the watermark joined it, leaving every pre-upgrade entry
+    /// unreachable — a leak rather than a fail-open, since new code can never read one — with
+    /// nothing on this path deleting anything. Pre-alpha there are no pre-upgrade entries anywhere,
+    /// so the machinery migrated from a state that has never existed. A cache an upgraded binary
+    /// cannot read is reclaimed by deleting the cache directory; it is a derived artefact and
+    /// rebuilds itself.
     fn frag_path(&self, key: &[u8; 32]) -> PathBuf {
-        self.version_dir().join(format!("{}.frag", hex_encode(key)))
+        self.dir.join(format!("{}.frag", hex_encode(key)))
     }
 
     fn meta_path(&self, key: &[u8; 32]) -> PathBuf {
-        self.version_dir().join(format!("{}.meta", hex_encode(key)))
+        self.dir.join(format!("{}.meta", hex_encode(key)))
     }
 
     /// The `.frag` path an entry for `satisfied` at `watermark` occupies. Exposed so that "two
@@ -652,45 +643,6 @@ impl FragmentCache {
             satisfied,
             watermark,
         ))
-    }
-
-    /// Delete every entry this cache cannot read: anything outside its own version directory.
-    ///
-    /// **Nothing else on this path deletes anything**, so without this the entries a previous
-    /// format left behind stay for ever. Run once at `Engine::open`, where a scan of a cache
-    /// directory is affordable and a stale entry has not yet cost anyone a lookup.
-    ///
-    /// Returns the number of files removed. A file it cannot delete is skipped rather than
-    /// failing the open: an unreadable orphan is wasted disk, not a correctness problem, and a
-    /// node that will not start over one is a worse outcome.
-    pub fn sweep_orphans(&self) -> io::Result<usize> {
-        let mine = self.version_dir();
-        let entries = match std::fs::read_dir(&self.dir) {
-            Ok(entries) => entries,
-            // No cache directory yet is not an error: there is nothing to sweep.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e),
-        };
-        let mut swept = 0usize;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path == mine {
-                continue;
-            }
-            if path.is_dir() {
-                // A previous *version* directory: everything under it is unreachable.
-                for stale in std::fs::read_dir(&path).into_iter().flatten().flatten() {
-                    if std::fs::remove_file(stale.path()).is_ok() {
-                        swept += 1;
-                    }
-                }
-                let _ = std::fs::remove_dir(&path);
-            } else if std::fs::remove_file(&path).is_ok() {
-                // A pre-versioning entry, written flat into the cache root.
-                swept += 1;
-            }
-        }
-        Ok(swept)
     }
 
     /// Return the frozen fragment for `satisfied` (the terms a viewer's credential grants),
@@ -820,7 +772,7 @@ impl FragmentCache {
                     return Ok(frozen);
                 }
 
-                create_private_dir_all(&self.version_dir())?;
+                create_private_dir_all(&self.dir)?;
                 let bitmap = build_fragment_with_deltas(satisfied, postings, deltas)?;
                 self.rebuilds.fetch_add(1, Ordering::Relaxed);
                 FrozenFragment::build_and_persist(&frag_path, &meta_path, &bitmap, watermark)
@@ -856,12 +808,7 @@ mod tests {
         crate::postings::write_postings(&postings_path, &[vec![1u32, 2, 3]], 32).unwrap();
         let reader = PostingsReader::open(&postings_path, false).unwrap();
 
-        let cache = FragmentCache::new(
-            &temp.path().join("frag"),
-            [7u8; 32],
-            [9u8; 32],
-            crate::FRAGMENT_FORMAT,
-        );
+        let cache = FragmentCache::new(&temp.path().join("frag"), [7u8; 32], [9u8; 32]);
 
         // Every call presents a *distinct* credential digest and an empty grant set — the exact
         // shape the doc describes: one canonical key, one build, unbounded distinct hashes.

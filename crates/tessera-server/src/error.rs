@@ -26,8 +26,6 @@ pub enum ApiError {
     Unknown(String),
     /// 409: an ingest batch id replayed with a body that does not match what was accepted before.
     Conflict(String),
-    /// 410: a presented pin's `(prefix, segments_version)` no longer matches the live generation.
-    PinExpired,
     /// 422: a request that parsed as JSON/Arrow but violates this API's own contract (a malformed
     /// bbox, an ambiguous slice header, an unknown change op, non-UTF-8 `access` bytes, ...).
     Contract(String),
@@ -104,7 +102,7 @@ pub enum ApiError {
     /// in force. Answering 503 there would tell an operator nothing happened while a suppression
     /// was live, which is the fail-open this table exists to avoid.
     ///
-    /// A unit variant with a fixed detail, like [`ApiError::PinExpired`]: there is one thing to
+    /// A unit variant with a fixed detail, like [`ApiError::BadCredential`]: there is one thing to
     /// say, and a parameterised detail would invite a future handler into distinguishing executor
     /// postures for a caller. The posture belongs on the bearer-gated `/control/status` (SA §9);
     /// `/readyz`, which answers the same question unauthenticated on the viewer and session
@@ -142,11 +140,6 @@ impl ApiError {
             ),
             ApiError::Unknown(detail) => (StatusCode::NOT_FOUND, "unknown", detail.clone()),
             ApiError::Conflict(detail) => (StatusCode::CONFLICT, "conflict", detail.clone()),
-            ApiError::PinExpired => (
-                StatusCode::GONE,
-                "pin-expired",
-                "pinned geometry is no longer current".to_string(),
-            ),
             ApiError::Contract(detail) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "contract", detail.clone())
             }
@@ -208,7 +201,6 @@ impl ApiError {
             | ApiError::ExpiredToken
             | ApiError::Unknown(_)
             | ApiError::Conflict(_)
-            | ApiError::PinExpired
             | ApiError::Contract(_)
             | ApiError::FailClosed(_)
             // Deliberately none: a `Retry-After` on the 503 would hand an unauthenticated caller a
@@ -276,12 +268,11 @@ pub fn admission_retry_after_s(stats: &tessera_engine::ExecutorStats) -> u64 {
     tessera_engine::estimate_retry_after_s(1, stats.service_nanos_for_estimate())
 }
 
-/// Map an `EngineError` to the R5 code list. `MultiSegmentSlice`, `Store`/`Wal`/`Overlay`/
-/// `Plugin`/`Io`/`Malformed` are all fail-closed engine-internal failures (500); `PinExpired`,
-/// `UnknownSlice` and `StaleIdSet` have a more specific code.
+/// Map an `EngineError` to the R5 code list. `SegmentWithoutRowBase`, `Store`/`Wal`/`Overlay`/
+/// `Plugin`/`Io`/`Malformed` are all fail-closed engine-internal failures (500); `UnknownSlice`
+/// and `StaleIdSet` have a more specific code.
 pub fn map_engine_error(e: EngineError) -> ApiError {
     match e {
-        EngineError::PinExpired => ApiError::PinExpired,
         EngineError::UnknownSlice(slice) => ApiError::Unknown(format!("unknown slice '{slice}'")),
         // Contracts §2.2/§3.2: `POST /v1/items/{tessera_id}`'s caller-supplied `idset` did not
         // match the generation `Engine::item` validated it against. Fixed detail string, named
@@ -297,12 +288,6 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // Also a request the caller can fix by asking for less, and its Display names only the
         // caller's own numbers and the configured limit.
         too_many @ EngineError::TooManyTiles { .. } => ApiError::Contract(too_many.to_string()),
-        // Lifecycle §2.2's per-session pin cap, the third member of the same family: contracts
-        // §3.1's 422 row is "malformed request, bounds exceeded, unknown filter operand", and this
-        // is a bound exceeded. Deliberately NOT 429 — the cap clears when a pin expires, on the
-        // TTL's timescale, so `Retry-After: 1` would be a lie. Named explicitly rather than left
-        // to the catch-all below, which would turn a caller-fixable bound into a fail-closed 500.
-        cap @ EngineError::PinCapExceeded { .. } => ApiError::Contract(cap.to_string()),
         // `Store`/`Io` wrap a `StoreError`/`io::Error` whose `Display` names a filesystem path —
         // the same leak `map_store_error` closes, reached through the engine's error enum instead
         // of directly. One sanitiser for both doors.
@@ -1041,23 +1026,6 @@ mod tests {
         let (status, code, _) = map_engine_error(EngineError::FragmentBuilding).parts();
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(code, "backpressure");
-    }
-
-    /// The per-session pin cap is a **bound exceeded**, so contracts §3.1 puts it on the 422
-    /// `contract` row beside `TooManyTiles`, not on 429 — and it is named in `map_engine_error`'s
-    /// match rather than left to the catch-all, which would make a caller-fixable refusal a
-    /// fail-closed 500. No production path constructs `PinCapExceeded` yet, so this test is what
-    /// stops the mapping rotting before one does.
-    #[test]
-    fn map_engine_error_takes_a_pin_cap_refusal_to_422_contract() {
-        let (status, code, detail) =
-            map_engine_error(EngineError::PinCapExceeded { held: 4, limit: 4 }).parts();
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(code, "contract");
-        assert!(
-            detail.contains('4') && !detail.contains('/'),
-            "the body must name the caller's own numbers and no server path, got: {detail}"
-        );
     }
 
     /// `StaleIdSet` — raised by `Engine::item` itself, against the one generation it loads — maps

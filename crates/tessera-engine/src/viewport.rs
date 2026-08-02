@@ -1,10 +1,9 @@
 //! The masked viewport query (design §2.6, retrieve steps 1–9).
 //!
-//! [`Engine::viewport`] loads the generation pointer exactly once, validates or mints the pin
-//! (I11: geometry identity only, `(prefix, segments_version)` — never `overlay_version`, so an
-//! overlay swap never invalidates an outstanding pin), gets-or-builds the session's cached row
-//! projection, composes the effective mask (I1), and for every tile touching `bbox` counts and
-//! selects.
+//! [`Engine::viewport`] loads the generation pointer exactly once — which is the whole of I11's
+//! within-request rule, and the reason nothing here has to resolve anything against a superseded
+//! generation (`crate::geometry`) — gets-or-builds the session's cached row projection, composes
+//! the effective mask (I1), and for every tile touching `bbox` counts and selects.
 //!
 //! Selection is §7.2's real definition — floor ∪ threshold ∪ cap over `tessera_id`, evaluated
 //! inside the mask (I7). It lives in [`crate::select`], which carries the definition, the nesting
@@ -43,16 +42,17 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
+use tessera_authz::FrozenFragment;
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Extent, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::{tile_ranges_all, tile_ranges_within};
-use tessera_types::{EntityId, PinId, TesseraId, API_VERSION};
+use tessera_types::{EntityId, GenerationStamp, TesseraId, API_VERSION};
 
 use crate::cache::RowProjectionKey;
 use crate::cancel::CancelToken;
 use crate::compose::{compose, visible_to, EffectiveMask, RowProjection};
-use crate::select::{SelectParams, Selection, Threshold};
+use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
 use crate::session::{Engine, EngineError, Result, Session};
 use crate::timing::{Probe, StageTimings, TileProbe, TileStats};
 use crate::Generation;
@@ -150,8 +150,14 @@ pub struct ViewportRequest<'a> {
     /// cap; lowering `k` on descent forfeits it and marks will pop out. The engine sees one request
     /// at a time and cannot enforce this — see [`crate::select`]'s module doc.
     pub k: usize,
-    /// Re-pin geometry to a prior response's `(prefix, segments_version)` (I11).
-    pub pin: Option<PinId>,
+    /// The stamp of the response the client is currently holding, echoed back.
+    ///
+    /// **Advisory, and the request is answered from live geometry regardless.** It never selects a
+    /// generation, never expires and never produces an error; all it does is set
+    /// [`ViewportOut::stale`] when the live geometry has moved since. Presenting a stamp from a
+    /// superseded generation — or from a superseded *prefix* — is an ordinary request with an
+    /// ordinary answer (`geometry-pinning.md` §7, §12's obligations 3 and 4).
+    pub stamp: Option<GenerationStamp>,
     /// Request §3.3 underlay sub-cell counts at depth `zoom + offset`. `None` or `Some(0)` serves
     /// none and costs nothing.
     pub underlay_offset: Option<u8>,
@@ -165,21 +171,21 @@ pub struct ViewportRequest<'a> {
 }
 
 impl<'a> ViewportRequest<'a> {
-    /// The required parameters; `pin` and `underlay_offset` default to absent.
+    /// The required parameters; `stamp` and `underlay_offset` default to absent.
     pub fn new(slice: &'a str, zoom: u8, bbox: [f64; 4], k: usize) -> Self {
         ViewportRequest {
             slice,
             zoom,
             bbox,
             k,
-            pin: None,
+            stamp: None,
             underlay_offset: None,
             cancel: None,
         }
     }
 
-    pub fn pin(mut self, pin: Option<PinId>) -> Self {
-        self.pin = pin;
+    pub fn stamp(mut self, stamp: Option<GenerationStamp>) -> Self {
+        self.stamp = stamp;
         self
     }
 
@@ -199,7 +205,22 @@ impl<'a> ViewportRequest<'a> {
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
 #[derive(Debug, Clone)]
 pub struct ViewportOut {
-    pub pin: PinId,
+    /// The geometry this response was answered from — what a client echoes back next time.
+    pub stamp: GenerationStamp,
+    /// Whether the geometry moved since the stamp the request presented.
+    ///
+    /// `false` when no stamp was presented (there is nothing to be stale relative to) and when the
+    /// presented stamp equals this response's. A client learns its held view is out of date at the
+    /// moment it asks, and decides what to do — the server does nothing on its behalf.
+    ///
+    /// **This is the broadcast form: no per-session mask intersection.** It reports that *the
+    /// corpus* moved, not that anything this principal can see moved, so a viewer whose visible set
+    /// is unchanged is still told the geometry advanced. That is a deliberate ruling — knowing that
+    /// data has been ingested is not a security leak (`geometry-pinning.md` §14) — and it is what
+    /// makes this one comparison rather than a per-session diff. `client-interaction.md` §6.1's
+    /// argument for per-session scoping survives as an efficiency argument (do not wake clients
+    /// whose view did not change), not a security one.
+    pub stale: bool,
     pub tiles: Vec<TileCount>,
     pub points: Vec<PointOut>,
     /// The §3.3 density underlay, when requested — empty otherwise. Only non-empty cells appear.
@@ -218,11 +239,14 @@ pub struct ViewportOut {
 
 /// `PartialEq` ignoring `timings`, hand-written rather than derived.
 ///
-/// Two responses carrying the same pin, tiles, points and scalar names *are* the same response;
+/// Two responses carrying the same stamp, tiles, points and scalar names *are* the same response;
 /// the wall-clock it took to produce them is not part of that identity. A derived impl would make
 /// every `assert_eq!` over a whole `ViewportOut` in the test suite timing-dependent, and
 /// therefore flaky the moment `bench-timing` is enabled — which is exactly when those tests
 /// matter most.
+///
+/// `stale` joins it for the same reason: it is a function of the request's own stamp and the
+/// generation the response came from, both already compared.
 ///
 /// `scalar_names` joins the comparison: it is drawn from the same manifest as `points`'
 /// values, in the same generation, so two responses that agree on `points` already agree on it —
@@ -230,7 +254,8 @@ pub struct ViewportOut {
 /// never to differ in practice.
 impl PartialEq for ViewportOut {
     fn eq(&self, other: &Self) -> bool {
-        self.pin == other.pin
+        self.stamp == other.stamp
+            && self.stale == other.stale
             && self.tiles == other.tiles
             && self.points == other.points
             && self.sub_cells == other.sub_cells
@@ -288,9 +313,21 @@ impl Engine {
     /// probes, no `RowProjection` constructed or consulted, so this costs the same whether
     /// `entity` exists and is visible, exists and is not, or does not exist at all (Critical
     /// C-5, closed rather than narrowed).
-    pub fn visible_to(&self, session: &Session, generation: &Generation, entity: EntityId) -> bool {
+    ///
+    /// **Takes the fragment as an argument rather than reading `session.fragment`.** A session's
+    /// own fragment goes stale at every flush — see [`Engine::fragment_for`] — and a drill-down
+    /// that answered from the stale one would report a flushed item as invisible while the viewport
+    /// beside it drew the mark. The caller has already resolved the generation once (lifecycle
+    /// §1.1) and brings the fragment forward against that same snapshot.
+    pub fn visible_to(
+        &self,
+        fragment: &FrozenFragment,
+        session: &Session,
+        generation: &Generation,
+        entity: EntityId,
+    ) -> bool {
         visible_to(
-            &session.fragment,
+            fragment,
             &session.satisfied,
             &generation.overlay,
             &generation.buffer,
@@ -351,8 +388,13 @@ impl Engine {
             return Ok(None);
         }
 
+        // Brought forward before the visibility test, not after: the whole point of the test is
+        // that it is the same three probes for every identifier (C-5), and a fragment resolved
+        // per-entity would make the cost depend on which entity was asked for.
+        let fragment = self.fragment_for(session, &generation)?;
+
         // ONE BIT, in entity space, O(1), before anything is looked up in row space.
-        if !self.visible_to(session, &generation, entity) {
+        if !self.visible_to(&fragment, session, &generation, entity) {
             return Ok(None);
         }
 
@@ -416,7 +458,7 @@ impl Engine {
             zoom,
             bbox,
             k,
-            pin,
+            stamp,
             underlay_offset,
             cancel,
         } = req;
@@ -429,22 +471,28 @@ impl Engine {
         let generation = self.generation.load_full();
         probe.lap(|t| &mut t.generation_resolve_ns);
 
-        // I11 is enforced in `pins`; the whole rule, and both failures it names, are stated in that
-        // module's doc and nowhere else. Three consequences land *here*, and each is checkable by
-        // reading the lines below rather than by trusting this comment:
-        //
-        // 1. `resolve` hands back `PinnedGeometry` — geometry ONLY. Overlay, buffer and
-        //    `overlay_version` are read from the LIVE `generation` below, as this loop always has,
-        //    so a suppression accepted mid-request applies to a pinned request too (R-open).
-        // 2. This call takes no lock unless `pin` names a superseded generation (`pins` module doc,
-        //    property 1). It is on the path of every admitted request at 48-way concurrency.
-        // 3. A `410` from here after a restart is correct and must stay correct: a restarted
-        //    worker's drain list is empty, and both tempting repairs are forbidden — see
-        //    `PinManager::resolve_drained`, which names them at the site that would implement them.
-        let geometry = self.pins.resolve(pin, session.token_id, &generation)?;
-        let effective_pin = geometry.pin_id();
+        // The stamp: what this response was answered from, and whether that is newer than what the
+        // client is holding. **No lock, no drain list, no lookup** — one clone and one comparison
+        // against the generation already loaded above. Everything below reads `generation`, so
+        // geometry, overlay and buffer all come from the one snapshot, which is I11's
+        // within-request rule in full (`crate::geometry`).
+        let answered_from = GenerationStamp {
+            prefix: generation.prefix.clone(),
+            segments_version: generation.segments_version,
+        };
+        // A presented stamp that names a superseded generation, or a superseded prefix, is
+        // answered here exactly as an absent one is. It sets a flag; it never selects, refuses or
+        // expires.
+        let stale = stamp.is_some_and(|presented| presented != answered_from);
 
-        probe.lap(|t| &mut t.pin_resolve_ns);
+        probe.lap(|t| &mut t.stamp_compare_ns);
+
+        // The session's fragment, brought forward to this generation's watermark if a flush has
+        // moved it since the session authorised. Resolved once, here, against the one generation
+        // snapshot this request loaded — see `Engine::fragment_for` for why a stale fragment is
+        // not merely suboptimal but silently drops every item flushed since.
+        let fragment = self.fragment_for(session, &generation)?;
+        probe.lap(|t| &mut t.fragment_forward_ns);
 
         let k = k.min(self.config.max_k);
 
@@ -454,7 +502,7 @@ impl Engine {
         // "below the cut" means different things in different partitions). The build emits one
         // partition, so this is unreachable; it is here so a §12 bundle cannot be served
         // half-masked with no error, which is the failure the multi-segment guard already refuses.
-        let carriers = geometry
+        let carriers = generation
             .bundle
             .partitions
             .values()
@@ -463,29 +511,65 @@ impl Engine {
         if carriers > 1 {
             return Err(EngineError::MultiPartitionSlice(slice.to_string()));
         }
-        let slice_data = geometry
+        let slice_data = generation
             .bundle
             .partitions
             .values()
             .find_map(|partition| partition.slices.get(slice))
             .ok_or_else(|| EngineError::UnknownSlice(slice.to_string()))?;
 
-        // Fail closed on more than one segment (see `EngineError::MultiSegmentSlice`'s doc):
-        // `tile_ranges` returns segment-local row indices, but `mask` is built from the slice's
-        // single `Permutation`, which addresses exactly one segment's row space. The build
-        // never produces more than one, so this is not reachable today — but silently iterating
-        // "just in case" would mis-count/mis-index the moment it became reachable, which is worse
-        // than refusing outright.
-        if slice_data.segments.len() > 1 {
-            return Err(EngineError::MultiSegmentSlice(slice.to_string()));
+        // Every segment of the slice, each with where its rows begin in the slice's row space.
+        //
+        // **Keyed on `seg_id`, never on position.** `Bundle::with_segment` appends a flush
+        // segment to `segments` while `RowSpace::with_extent` appends its extent, so the two lists
+        // agree positionally after a flush — but `Bundle::with_merged` pushes the merged segment
+        // at the *end* of `segments` while `RowSpace::collapsing` puts the merged extent where the
+        // consumed run was. After one merge the positions diverge, and a positional zip would
+        // silently pair a segment with another segment's `row_base`: every count right, every
+        // point drawn from the wrong entity. `seg_id`s are never reused (contracts §2.1), so the
+        // lookup is exact.
+        //
+        // The build segment is the one `permutation.bin` addresses and has no extent; it is
+        // therefore the one with no entry here, and its rows begin at 0.
+        let row_bases: std::collections::HashMap<&str, u32> = slice_data
+            .row_space
+            .extents()
+            .iter()
+            .map(|extent| (extent.seg_id.as_str(), extent.row_base))
+            .collect();
+        let mut base_seen = false;
+        let mut segments: Vec<(&SegmentData, u32)> = Vec::with_capacity(slice_data.segments.len());
+        for segment in &slice_data.segments {
+            let row_base = match row_bases.get(segment.seg_id.as_str()) {
+                Some(&row_base) => row_base,
+                // No extent: the build segment, at 0. Legitimate exactly once — see
+                // `EngineError::SegmentWithoutRowBase` for why a second one is a 500 rather than
+                // another segment defaulted to 0.
+                None if !base_seen => {
+                    base_seen = true;
+                    0
+                }
+                None => {
+                    return Err(EngineError::SegmentWithoutRowBase {
+                        slice: slice.to_string(),
+                        seg_id: segment.seg_id.clone(),
+                    })
+                }
+            };
+            segments.push((segment.as_ref(), row_base));
         }
-        let segment = slice_data.segments.first().map(|s| s.as_ref());
+        // Ascending in `row_base`, which `SelectionParts::resolve`'s reverse scan relies on.
+        // Sorted rather than assumed: `Bundle::with_merged` pushes the merged segment to the end
+        // of `segments` while its extent takes the consumed run's place in the row space, so the
+        // segment list is not in row order after a merge.
+        segments.sort_unstable_by_key(|&(_, row_base)| row_base);
         probe.lap(|t| &mut t.slice_lookup_ns);
 
         let cache_key = RowProjectionKey {
             token_id: session.token_id,
             slice: slice.to_string(),
-            segments_version: geometry.segments_version,
+            segments_version: generation.segments_version,
+            prefix: generation.prefix.clone(),
         };
         // D-G slot-state single-flight (F4, `tessera-bench/src/arms/load.rs:34-76`): the map
         // lock (`SingleFlightCache`) is held only for the O(1) `Building`/`Ready` transition —
@@ -506,22 +590,46 @@ impl Engine {
         // same as any other concurrent caller. That safety is incidental, not a licence — the
         // design intent is that this cache is touched once per request, from the serial prefix,
         // full stop.
+        // **The patch, and why it is on the ordinary request path rather than in the publication.**
+        // Every flush advances `segments_version`, so every flush rotates this key for every live
+        // session. Rebuilding is a *measured* 10.7 s at 10⁹, and a publication that pushed the work
+        // to every session at once would synchronise that across the whole population at every
+        // tick. Derived here instead: the session that asks pays, once, and pays a union over the
+        // new extents rather than a projection over the whole fragment.
+        //
+        // The source is the generation exactly one below — the only one the retention depth keeps
+        // (`crate::cache::KEEP_SUPERSEDED_GENERATIONS`) and the only one an append can be derived
+        // across. A miss on it, an eviction, a merge that permuted the covered prefix
+        // (`RowProjection::extends_to`), or a `segments_version` of 0 all fall through to the full
+        // build, which produces the identical value.
+        let derive_from =
+            cache_key
+                .segments_version
+                .checked_sub(1)
+                .map(|previous| RowProjectionKey {
+                    segments_version: previous,
+                    ..cache_key.clone()
+                });
         let base: Arc<RowProjection> = self
             .row_projection_cache
-            .get_or_build(cache_key, || {
-                // Crosses entity space into row space over the *whole* fragment
-                // (`Permutation::project`'s cost note: seconds at 10⁹ rows) — paid once per
-                // (token, slice, segments_version) and cached here, never recomputed on a
-                // per-viewport path.
-                probe.mark_projection_built();
+            .get_or_derive(cache_key, derive_from.as_ref(), |source| {
                 // `Permutation::project` parallelises internally (ambient rayon,
                 // `par_chunks`/`par_sort_unstable`) but owns no pool of its own — this is the
                 // one call site that supplies one, the same shared pool `Engine::viewport`'s
                 // tile sweep uses (D-D: no second, per-request pool). Wrapping only this build,
-                // not the whole `get_or_build`, keeps the single-flight map lock's O(1) hold
-                // time (D-G) unaffected by the pool boundary.
-                self.pool
-                    .install(|| RowProjection::new(&session.fragment, &slice_data.row_space))
+                // not the whole cache call, keeps the single-flight map lock's O(1) hold time
+                // (D-G) unaffected by the pool boundary.
+                let space = &slice_data.row_space;
+                match source.filter(|s| s.extends_to(space)) {
+                    Some(source) => self.pool.install(|| source.extend(&fragment, space)),
+                    None => {
+                        // Crosses entity space into row space over the *whole* fragment
+                        // (`Permutation::project`'s cost note: seconds at 10⁹ rows).
+                        probe.mark_projection_built();
+                        self.full_projection_builds.fetch_add(1, Ordering::Relaxed);
+                        self.pool.install(|| RowProjection::new(&fragment, space))
+                    }
+                }
             })
             .map_err(|_busy| EngineError::ProjectionBuilding)?;
         probe.lap(|t| &mut t.row_projection_ns);
@@ -533,7 +641,7 @@ impl Engine {
         check_cancelled(&cancel)?;
 
         let mask = compose(
-            &session.fragment,
+            &fragment,
             &session.satisfied,
             &generation.overlay,
             &generation.buffer,
@@ -542,7 +650,7 @@ impl Engine {
         );
         probe.lap(|t| &mut t.compose_ns);
 
-        let q = &geometry.bundle.manifest.quantisation;
+        let q = &generation.bundle.manifest.quantisation;
         let extent = Extent {
             x_min: q.x_min,
             x_max: q.x_max,
@@ -571,7 +679,7 @@ impl Engine {
         probe.lap(|t| &mut t.tiles_for_bbox_ns);
         probe.count(|t| &mut t.tiles_resolved, tiles.len() as u64);
 
-        let declared_scalars = &geometry.bundle.manifest.declared_scalars;
+        let declared_scalars = &generation.bundle.manifest.declared_scalars;
 
         // §3.3 underlay bounds, all three checked up front and all three *rejecting* rather than
         // clamping (see `EngineError::UnderlayRefused`). The cell budget is checked before any
@@ -652,12 +760,28 @@ impl Engine {
         // response's tile order, and the wire payload's points are a flat concatenation in it) —
         // the sweep's own Morton order stays inside `tile_ranges_all` and never reaches here.
         //
-        // A slice with zero segments (an empty build) has nothing visible in any tile: `ranges` is
-        // empty, the zip yields nothing, and the response is empty — as before.
-        let ranges: Vec<Range<u32>> = match segment {
-            Some(segment) => tile_ranges_all(segment, &tiles),
-            None => Vec::new(),
-        };
+        // One sweep **per segment**, each in that segment's own Morton column. Transposed below
+        // into per-tile part lists, because a tile is the union of its parts across segments
+        // (`select::SelectionParts`) while the sweep's monotone advantage is per column.
+        //
+        // A slice with zero segments (an empty build) has nothing visible in any tile: every
+        // tile's part list is empty, and the response is empty — as before.
+        let per_segment: Vec<Vec<Range<u32>>> = segments
+            .iter()
+            .map(|&(segment, _)| tile_ranges_all(segment, &tiles))
+            .collect();
+        let ranges: Vec<Vec<(usize, Range<u32>)>> = (0..tiles.len())
+            .map(|t| {
+                per_segment
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(s, sweep)| {
+                        let range = sweep[t].clone();
+                        (range.start < range.end).then_some((s, range))
+                    })
+                    .collect()
+            })
+            .collect();
         probe.lap(|t| &mut t.tile_ranges_ns);
 
         // Calibration task: the predictor decides serial-fold vs `pool.install` fan-out, and it
@@ -688,7 +812,11 @@ impl Engine {
         // sweep starts and before any mask is consulted, so summing it once is mask-free by
         // construction and cannot regress the same way — see `TileStats`'s doc, which no longer
         // carries this field at all, for the other half of this fix.
-        let rows_in_ranges: u64 = ranges.iter().map(|r| r.len() as u64).sum();
+        let rows_in_ranges: u64 = ranges
+            .iter()
+            .flat_map(|parts| parts.iter())
+            .map(|(_, r)| r.len() as u64)
+            .sum();
         probe.count(|t| &mut t.rows_in_ranges, rows_in_ranges);
         let total_rows_in_ranges: u64 = rows_in_ranges + underlay_cells_demanded;
 
@@ -727,12 +855,12 @@ impl Engine {
         // `Sync` for free and usable from both the serial `Iterator::map` below and rayon's
         // parallel `map` inside `pool.install` — no new bound this file did not already require of
         // these captures for the parallel branch to compile before this change.
-        let run = |tile: &Tile, range: Range<u32>| {
+        let run = |tile: &Tile, tile_parts: &[(usize, Range<u32>)]| {
             tile_result(
                 tile,
-                range,
+                tile_parts,
                 &mask,
-                segment,
+                &segments,
                 declared_scalars,
                 &params,
                 zoom,
@@ -756,16 +884,16 @@ impl Engine {
             if should_fold_serially(total_rows_in_ranges, serial_fallback_max_rows, tiles.len()) {
                 tiles
                     .iter()
-                    .zip(ranges)
-                    .map(|(tile, range)| run(tile, range))
+                    .zip(&ranges)
+                    .map(|(tile, tile_parts)| run(tile, tile_parts))
                     .collect::<Vec<Result<Option<TileResult>>>>()
             } else {
                 self.pool.install(|| {
                     tiles
                         .par_iter()
-                        .zip(ranges.into_par_iter())
+                        .zip(ranges.par_iter())
                         .with_min_len(TILE_PAR_MIN_LEN)
-                        .map(|(tile, range)| run(tile, range))
+                        .map(|(tile, tile_parts)| run(tile, tile_parts))
                         .collect::<Vec<Result<Option<TileResult>>>>()
                 })
             };
@@ -794,7 +922,8 @@ impl Engine {
         }
 
         Ok(ViewportOut {
-            pin: effective_pin,
+            stamp: answered_from,
+            stale,
             tiles: tile_counts,
             points,
             sub_cells,
@@ -1057,9 +1186,9 @@ const TILE_PAR_MIN_LEN: usize = 8;
 #[allow(clippy::too_many_arguments)]
 fn tile_result(
     tile: &Tile,
-    range: Range<u32>,
+    tile_parts: &[(usize, Range<u32>)],
     mask: &EffectiveMask,
-    segment: Option<&SegmentData>,
+    segments: &[(&SegmentData, u32)],
     declared_scalars: &[DeclaredScalar],
     params: &SelectParams,
     zoom: u8,
@@ -1068,9 +1197,9 @@ fn tile_result(
 ) -> Result<Option<TileResult>> {
     check_cancelled(cancel)?;
 
-    let Some(segment) = segment else {
+    if tile_parts.is_empty() {
         return Ok(None);
-    };
+    }
 
     // §14.2 fix: `rows_in_ranges` is no longer counted here. It is now summed once, mask-free,
     // over `ranges` in `Engine::viewport`'s serial prefix — see that call site's comment. Counting
@@ -1080,7 +1209,24 @@ fn tile_result(
     // empty.
     let mut stats = TileProbe::new();
 
-    let visible = mask.count_range(range.clone());
+    // **The count is the sum over the segments the tile touches** — each segment's own tile range
+    // shifted into slice row space by its `row_base`, counted there, and added. §7.1's exact
+    // masked count is a property of the tile, not of whichever segment happens to hold the rows,
+    // so a tile straddling a build segment and a fresh flush segment must report their union.
+    let parts: Vec<SelectionPart<'_>> = tile_parts
+        .iter()
+        .map(|(s, range)| {
+            let (segment, row_base) = segments[*s];
+            let visible = mask.count_range(row_base + range.start..row_base + range.end);
+            SelectionPart {
+                segment,
+                range: range.clone(),
+                row_base,
+                visible,
+            }
+        })
+        .collect();
+    let visible: u64 = parts.iter().map(|p| p.visible).sum();
     stats.lap(|t| &mut t.count_ns);
 
     if visible == 0 {
@@ -1091,7 +1237,8 @@ fn tile_result(
     stats.count(|t| &mut t.tiles_nonempty, 1);
     stats.count(|t| &mut t.sigma_visible, visible);
 
-    let selected = Selection::of(mask, segment, range.clone(), params, visible);
+    let parts = SelectionParts::new(&parts);
+    let selected = Selection::of(mask, &parts, params, visible);
     stats.lap(|t| &mut t.select_ns);
     // Counted by `Selection::of` itself, inside the loops that do the reading — not from
     // `visible`, which would make the `visited == sigma_visible` cross-check a tautology.
@@ -1105,10 +1252,15 @@ fn tile_result(
         served: selected.rows.len() as u64,
     };
 
+    // Each selected row is a **slice-space** row; `resolve` gives back the segment holding it and
+    // its index within that segment, which is what indexes `morton.u32` and `columns.arrow`.
     let points: Vec<PointOut> = selected
         .rows
         .into_iter()
-        .map(|row| row_to_point(segment, row, declared_scalars))
+        .map(|row| {
+            let (segment, local) = parts.resolve(row);
+            row_to_point(segment, local, declared_scalars)
+        })
         .collect();
     stats.lap(|t| &mut t.gather_ns);
     stats.count(|t| &mut t.points_gathered, points.len() as u64);
@@ -1125,10 +1277,19 @@ fn tile_result(
                 prefix: cell,
                 depth: sub_depth,
             };
-            // Search only the parent's range: sub-cells partition their parent, so this is exactly
-            // `tile_ranges` would return, over tens of kilobytes already touched by the parent's
-            // own `count_range` rather than ~30 levels of a 4 GB mmap.
-            let sub_count = mask.count_range(tile_ranges_within(segment, &sub_tile, range.clone()));
+            // Search only the parent's range **in each segment**: sub-cells partition their
+            // parent, so this is exactly what `tile_ranges` would return, over tens of kilobytes
+            // already touched by the parent's own `count_range` rather than ~30 levels of a 4 GB
+            // mmap. Summed across segments for the same reason the whole-tile count is: a sub-cell
+            // count is an exact masked count of the cell, not of one segment's share of it.
+            let sub_count: u64 = parts
+                .as_slice()
+                .iter()
+                .map(|part| {
+                    let local = tile_ranges_within(part.segment, &sub_tile, part.range.clone());
+                    mask.count_range(part.row_base + local.start..part.row_base + local.end)
+                })
+                .sum();
             if sub_count > 0 {
                 sub_cells.push(SubCellCount {
                     cell,

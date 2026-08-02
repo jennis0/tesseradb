@@ -236,9 +236,6 @@ fn main() {
         max_underlay_cells: 8192,
         max_tiles_per_request: 262_144,
         compute_threads,
-        pin_ttl_secs: 300,
-        pins_per_session_max: 4,
-        drain_depth_max: 4,
         flush_max_age_secs: 90,
         flush_max_items: 100_000,
     };

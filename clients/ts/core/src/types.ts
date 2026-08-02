@@ -30,6 +30,12 @@ export type ViewportRequest = {
    */
   k?: number;
   underlayOffset?: number;
+  /**
+   * The {@link ViewportResponse.pin} of the response currently being displayed, echoed back so the
+   * server can report whether geometry has moved since. Advisory in both directions: omitting it
+   * simply means every response comes back `stale: false`.
+   */
+  stamp?: string | null;
 };
 
 /**
@@ -81,7 +87,24 @@ export type Timings = {
 export type ViewportResponse = {
   result: ViewportResult;
   timings: Timings;
+  /**
+   * The geometry this response was answered from (`x-tessera-pin`), to echo back on the next
+   * request as {@link ViewportRequest.stamp}.
+   *
+   * **A stamp, not a selector.** It does not pin anything: the server always answers from live
+   * geometry, presenting a superseded one is never an error, and nothing is retained on its
+   * behalf. Its only effect is {@link ViewportResponse.stale}. The header keeps the name
+   * `x-tessera-pin` for compatibility; the meaning is contracts §3.1/§3.2's advisory stamp.
+   */
   pin: string | null;
+  /**
+   * Whether the geometry moved since the stamp this request presented — `false` when none was
+   * presented.
+   *
+   * Advisory. The client decides what to do: refetch now, refetch on the next idle, or ignore it.
+   * Nothing expires and no response is withheld while it is `true`.
+   */
+  stale: boolean;
   bytes: number;
 };
 

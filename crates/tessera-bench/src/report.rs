@@ -165,7 +165,7 @@ impl Timing {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stages {
     pub generation_resolve_ns: u64,
-    pub pin_resolve_ns: u64,
+    pub stamp_compare_ns: u64,
     pub slice_lookup_ns: u64,
     pub row_projection_ns: u64,
     pub compose_ns: u64,
@@ -195,7 +195,7 @@ impl Stages {
     pub fn from_engine(t: &tessera_engine::StageTimings, clock_lap_ns: u64) -> Self {
         Stages {
             generation_resolve_ns: t.generation_resolve_ns,
-            pin_resolve_ns: t.pin_resolve_ns,
+            stamp_compare_ns: t.stamp_compare_ns,
             slice_lookup_ns: t.slice_lookup_ns,
             row_projection_ns: t.row_projection_ns,
             compose_ns: t.compose_ns,

@@ -136,7 +136,7 @@ fn viewports(n: usize, extent: f64, seed: u64, zoom: u8) -> Vec<[f64; 4]> {
 #[derive(Default, Clone, Copy)]
 struct Sums {
     generation_resolve_ns: u128,
-    pin_resolve_ns: u128,
+    stamp_compare_ns: u128,
     slice_lookup_ns: u128,
     row_projection_ns: u128,
     compose_ns: u128,
@@ -198,9 +198,6 @@ fn main() {
                 max_underlay_cells: 8192,
                 max_tiles_per_request: 262_144,
                 compute_threads,
-                pin_ttl_secs: 300,
-                pins_per_session_max: 4,
-                drain_depth_max: 4,
                 flush_max_age_secs: 90,
                 flush_max_items: 100_000,
             },
@@ -228,7 +225,7 @@ fn main() {
                 .expect("viewport");
             let t = out.timings;
             sums.generation_resolve_ns += t.generation_resolve_ns as u128;
-            sums.pin_resolve_ns += t.pin_resolve_ns as u128;
+            sums.stamp_compare_ns += t.stamp_compare_ns as u128;
             sums.slice_lookup_ns += t.slice_lookup_ns as u128;
             sums.row_projection_ns += t.row_projection_ns as u128;
             sums.compose_ns += t.compose_ns as u128;
@@ -247,7 +244,7 @@ fn main() {
         let n = REPS as u128;
         let avg = |x: u128| x / n;
         let serial_prefix = avg(sums.generation_resolve_ns)
-            + avg(sums.pin_resolve_ns)
+            + avg(sums.stamp_compare_ns)
             + avg(sums.slice_lookup_ns)
             + avg(sums.row_projection_ns)
             + avg(sums.compose_ns)
@@ -266,7 +263,7 @@ fn main() {
             "    generation_resolve_ns  {:>8}",
             avg(sums.generation_resolve_ns)
         );
-        println!("    pin_resolve_ns         {:>8}", avg(sums.pin_resolve_ns));
+        println!("    stamp_compare_ns         {:>8}", avg(sums.stamp_compare_ns));
         println!(
             "    slice_lookup_ns        {:>8}",
             avg(sums.slice_lookup_ns)

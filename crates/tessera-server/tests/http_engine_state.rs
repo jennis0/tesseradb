@@ -66,8 +66,15 @@ async fn c_revoke_then_viewport_is_rejected() {
     );
 }
 
+/// **A superseded stamp is answered normally, with the staleness signal set**
+/// (`geometry-pinning.md` §12, obligations 3 and 4). It used to be a `410 pin-expired`; the
+/// retention that made that meaningful is gone, and the stamp is advisory.
+///
+/// The presented stamp names a superseded *prefix* as well as an impossible `segments_version`, so
+/// this covers obligation 4 too — under decision 0040 a Morton prefix is a permanently stable
+/// address, so a prefix change is a freshness question and not a correctness one.
 #[tokio::test]
-async fn g_stale_pin_is_410() {
+async fn a_superseded_stamp_is_answered_with_the_staleness_signal() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -84,24 +91,48 @@ async fn g_stale_pin_is_410() {
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
+    let body = serde_json::json!({
+        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0],
+        "pin": { "prefix": "v99999", "segments_version": 999 }
+    });
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "a stamp never refuses a request");
+    assert_eq!(
+        resp.headers().get("x-tessera-stale").unwrap(),
+        "1",
+        "and the client is told its held view is out of date"
+    );
+    let stale_tiles = decode_viewport(&resp.bytes().await.unwrap()).0;
+
+    // Presenting no stamp at all answers identically and reports fresh — the flag is about the
+    // client's own stamp, not about the corpus having a history.
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0],
-            "pin": { "prefix": "v00000", "segments_version": 999 }
+            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 410);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"], "pin-expired");
+    assert_eq!(resp.headers().get("x-tessera-stale").unwrap(), "0");
+    assert_eq!(
+        decode_viewport(&resp.bytes().await.unwrap()).0,
+        stale_tiles,
+        "a stale stamp changes the signal and nothing about the answer"
+    );
 }
 
 #[tokio::test]
-async fn g2_pins_survive_overlay_swaps() {
+async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -151,8 +182,10 @@ async fn g2_pins_survive_overlay_swaps() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    // Re-query WITH the pin taken before the suppression: 200 (not 410 — a pin fixes geometry,
-    // never authorisation), and the count reflects the suppression immediately.
+    // Re-query WITH the stamp taken before the suppression. A suppression moves the overlay and
+    // not geometry, so the stamp is still current — `x-tessera-stale` stays 0 — and the count
+    // reflects the suppression immediately. That second half is the one that matters: the stamp
+    // has never had any bearing on authorisation state, and does not acquire one by being echoed.
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -164,7 +197,12 @@ async fn g2_pins_survive_overlay_swaps() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "a pin must survive an overlay swap");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("x-tessera-stale").unwrap(),
+        "0",
+        "an overlay swap moves no geometry, so the stamp is not stale"
+    );
     let (tiles_after, _) = decode_viewport(&resp.bytes().await.unwrap());
     assert_eq!(tiles_after[0].1, tiles_before[0].1 - 1);
 }

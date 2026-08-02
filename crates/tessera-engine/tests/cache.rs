@@ -58,16 +58,6 @@ fn reopen(bundle_root: &Path) -> Arc<Bundle> {
     Arc::new(open_bundle(bundle_root).expect("the fixture bundle re-opens"))
 }
 
-fn segments_version_of(bundle: &Bundle) -> u64 {
-    bundle
-        .partitions
-        .values()
-        .next()
-        .expect("the fixture bundle has one partition")
-        .manifest
-        .segments_version
-}
-
 fn watermark_of(bundle: &Bundle) -> u64 {
     bundle
         .partitions
@@ -81,19 +71,21 @@ fn watermark_of(bundle: &Bundle) -> u64 {
 /// Publish a second, materially different geometry over `engine`, and return its
 /// `segments_version`. The corpus size differs so the swap genuinely moves counts — otherwise every
 /// assertion that a pin still sees the *old* geometry is vacuous.
-fn publish_second_geometry(engine: &Engine, tmp: &TempDir) -> u64 {
-    let second_root = tmp.path().join("bundle2");
+fn publish_second_geometry(engine: &Engine, tmp: &TempDir, prefix: &str, n: u64) -> u64 {
+    let second_root = tmp.path().join(format!("bundle-{prefix}"));
     build_fixture_n(
         &second_root,
-        &tmp.path().join("points2.parquet"),
-        &tmp.path().join("pairs2.parquet"),
-        N_ITEMS / 2,
+        &tmp.path().join(format!("points-{prefix}.parquet")),
+        &tmp.path().join(format!("pairs-{prefix}.parquet")),
+        n,
     );
     let second = reopen(&second_root);
-    let next_version = segments_version_of(&second) + 1;
+    // From the **live** generation, not the freshly-built bundle's own (always 0): a second
+    // publication must strictly increase what is live, not what it was built from.
+    let next_version = engine.generation().segments_version + 1;
     engine
         .publish_geometry(
-            "v00001".to_string(),
+            prefix.to_string(),
             next_version,
             watermark_of(&second),
             second,
@@ -165,13 +157,20 @@ fn revoke_prunes_the_token() {
     );
 }
 
-/// A reclaim pass releases the projections of the geometry it reclaimed.
+/// **The retention depth, both sides.** One publication must *keep* the superseded generation's
+/// projections, and a second must drop the first.
 ///
-/// The TTL is zero, so `publish_geometry`'s own reclaim pass removes the superseded drain entry in
-/// the same call — which is also the route that actually fires today, since nothing calls
-/// `reclaim_pins` periodically.
+/// The keep half is the one a mutation breaks silently. A flush extends row space, so the
+/// superseded entry is the input the next request's projection patch derives from — pruning at the
+/// swap deletes that input before anything can use it, and every session pays the full rebuild
+/// (a *measured* 10.7 s at 10⁹) at every tick. There is no error and no wrong answer, only the
+/// steady-state cost flush §9 names. So the assertion is on the entry still being *there*.
+///
+/// This replaces a test that asserted the same coupling through a pinned request being a cache
+/// hit. Pins are gone (`geometry-pinning.md`); the coupling they stood in for is not, and
+/// `KEEP_SUPERSEDED_GENERATIONS` is what expresses it now.
 #[test]
-fn reclaim_prunes_the_generation() {
+fn a_publication_keeps_one_superseded_generation_and_drops_the_one_before_it() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -179,14 +178,7 @@ fn reclaim_prunes_the_generation() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    let engine = open_with(
-        EngineConfig {
-            pin_ttl_secs: 0,
-            ..config()
-        },
-        &tmp,
-        &bundle_root,
-    );
+    let engine = open_with(config(), &tmp, &bundle_root);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
     engine.viewport(&session, whole_extent()).unwrap();
@@ -196,72 +188,37 @@ fn reclaim_prunes_the_generation() {
         "the first viewport populates the cache"
     );
 
-    publish_second_geometry(&engine, &tmp);
-
-    assert_eq!(
-        engine.row_projection_cache_stats().entries,
-        0,
-        "the reclaimed generation's projections must be released"
-    );
-}
-
-/// **The wrong-coupling test.** A swap alone must NOT prune: between the swap and the reclaim the
-/// superseded geometry is still resolvable from the drain list, so a pinned request is still
-/// entitled to its projection — and paying a rebuild for it, measured in seconds at 10⁹, in the
-/// middle of a drill-down is the cost of getting this coupling wrong.
-///
-/// The mutation this must fail for is **pruning `previous.segments_version` at the swap** — not
-/// "calling `prune_generation` from `publish_geometry`", which is what the plan's text suggests and
-/// which is *correct* behaviour: `publish_geometry` legitimately prunes over the `Reclaimed` values
-/// it returns. The distinction is the whole point, so the assertion is on the pinned request being
-/// a cache **hit**, which is exactly what a premature prune destroys.
-#[test]
-fn a_pinned_generations_projection_is_not_pruned_by_a_swap() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    // The default 300 s TTL: the superseded geometry drains but is nowhere near reclaimable.
-    let engine = open_with(config(), &tmp, &bundle_root);
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-
-    let before = engine.viewport(&session, whole_extent()).unwrap();
-    let pinned_version = before.pin.segments_version;
-
-    let next_version = publish_second_geometry(&engine, &tmp);
-    assert_ne!(
-        pinned_version, next_version,
-        "the swap must move segments_version, or this test is vacuous"
-    );
-
+    let second = publish_second_geometry(&engine, &tmp, "v00001", N_ITEMS / 2);
     assert_eq!(
         engine.row_projection_cache_stats().entries,
         1,
-        "a swap must not prune: the drain list still resolves this geometry"
+        "one publication back is retained -- it is the input to the projection patch, and \
+         pruning it at the swap costs every session a full rebuild at every tick"
     );
 
-    let misses_before = engine.row_projection_cache_stats().misses;
-    let pinned = engine
-        .viewport(&session, whole_extent().pin(Some(before.pin.clone())))
-        .expect("the pin is still resolvable from the drain list");
-    assert_eq!(
-        engine.row_projection_cache_stats().misses,
-        misses_before,
-        "the pinned request must be served from cache — a swap-triggered prune deletes exactly \
-         the key an outstanding pin is about to ask for, charging it a full rebuild"
+    // A second viewport populates the live generation's key too, so the cache now holds both.
+    engine.viewport(&session, whole_extent()).unwrap();
+    assert_eq!(engine.row_projection_cache_stats().entries, 2);
+
+    let third = publish_second_geometry(&engine, &tmp, "v00002", N_ITEMS / 4);
+    assert!(
+        third > second,
+        "the versions must advance, or this is vacuous"
     );
     assert_eq!(
-        pinned.tiles, before.tiles,
-        "and it must still see the geometry it pinned"
+        engine.row_projection_cache_stats().entries,
+        1,
+        "and the generation two back is released -- retention is a depth, not an accumulation"
     );
 }
 
-/// A projection evicted for capacity and then rebuilt is the same projection, byte for byte —
-/// **across a geometry swap**, so that "the miss path built from the live generation rather than
-/// the pinned one" is a mutation that can actually fail this test rather than a no-op.
+/// A projection evicted for capacity and then rebuilt is the same projection, byte for byte.
+///
+/// **This used to re-read across a geometry swap through a pin**, which made "the miss path built
+/// from the live generation rather than the pinned one" a mutation it could catch. With pins gone
+/// there is no way to address a superseded generation at all — which is the point of deleting them
+/// — so the mutation the current shape catches is narrower: a miss path that composes against
+/// anything other than the session's own frozen fragment and the live row space.
 #[test]
 fn an_evicted_then_rebuilt_projection_is_byte_identical() {
     let tmp = TempDir::new().unwrap();
@@ -275,23 +232,9 @@ fn an_evicted_then_rebuilt_projection_is_byte_identical() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
     let first = engine.viewport(&session, whole_extent()).unwrap();
-    let pin = first.pin.clone();
 
-    let next_version = publish_second_geometry(&engine, &tmp);
-    let live = engine.viewport(&session, whole_extent()).unwrap();
-    assert_eq!(live.pin.segments_version, next_version);
-    assert_ne!(
-        live.tiles, first.tiles,
-        "the two geometries must differ, or the pinned/live distinction is untestable"
-    );
-
-    // The pinned re-read, warm, is the reference.
-    let warm = engine
-        .viewport(&session, whole_extent().pin(Some(pin.clone())))
-        .unwrap();
-    assert_eq!(warm, first, "a warm pinned re-read is the same response");
-
-    // Now force the pinned generation's entry out and re-read it cold.
+    // Force this session's entry out by round-robinning another principal through a one-entry
+    // bound.
     tighten_to_one_entry(&engine);
     let other = engine.authorise(&subset_credential()).unwrap();
     engine.viewport(&other, whole_extent()).unwrap();
@@ -302,9 +245,7 @@ fn an_evicted_then_rebuilt_projection_is_byte_identical() {
     );
 
     let misses_before = engine.row_projection_cache_stats().misses;
-    let cold = engine
-        .viewport(&session, whole_extent().pin(Some(pin)))
-        .unwrap();
+    let cold = engine.viewport(&session, whole_extent()).unwrap();
     assert!(
         engine.row_projection_cache_stats().misses > misses_before,
         "the re-read must be a genuine rebuild, not a hit"

@@ -56,18 +56,26 @@ use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache};
 ///    and design §10.2 makes the prefix name *be* the segment-set version. Relax that guard and
 ///    this pruner starts removing the wrong generation's entries.
 ///
-/// A multi-segment slice would widen this with `seg_id` — N segments means N row spaces and
-/// therefore N projections — and a named struct makes that additive.
+/// 3. **`prefix` is carried, and is not redundant with `segments_version`.** Within one process
+///    `segments_version` is a sufficient discriminator (fact 2), and that is what the pruner keys
+///    on. `prefix` is here for the case fact 2 does not cover: a compaction publishes a new prefix,
+///    and if a future change ever let `n` restart within one — or let this cache outlive the
+///    process — a prefix-A projection would answer a prefix-B request, which is I11's *"selects
+///    arbitrary rows"*. It costs a string comparison on a path that already hashes one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RowProjectionKey {
     /// The session's process-local identity (`Session::token_id`), never the bearer token itself.
     pub token_id: u64,
     /// The slice this projection addresses — its `Permutation` is what defines the row space.
     pub slice: String,
-    /// The geometry generation the row space belongs to. A bundle swap changes it, and the old
-    /// entries become [`RowProjectionCache::prune_generation`]'s work at drain-list reclaim; an
-    /// *overlay* swap must not (I11).
+    /// The geometry generation the row space belongs to. A bundle swap changes it, and entries
+    /// more than [`KEEP_SUPERSEDED_GENERATIONS`] behind become
+    /// [`RowProjectionCache::prune_generations_below`]'s work at the next publication; an *overlay*
+    /// swap must not (I11).
     pub segments_version: u64,
+    /// The prefix that geometry belongs to — see fact 3 above for why this is here when
+    /// `segments_version` already discriminates within a process.
+    pub prefix: String,
 }
 
 /// A losing arrival's outcome: another caller is already building this key, and this call did not
@@ -149,18 +157,58 @@ impl RowProjectionCache {
         self.inner.stats()
     }
 
-    /// Look up `key`, building it on this call if nobody else already is.
+    /// Look up `key`, building it on this call if nobody else already is — **deriving from the
+    /// immediately-preceding generation's entry when it is still resident**.
     ///
     /// **Fallible on purpose, and `Err` does not mean failure.** `Err(CacheBusy)` means some other
-    /// caller is building this key right now and this call declined to wait. `build` runs with no
-    /// lock held and must be infallible — see [`SingleFlightCache::get_or_build`].
-    pub(crate) fn get_or_build(
+    /// caller is building this key right now and this call declined to wait. `make` runs with no
+    /// lock held and must be infallible — see [`SingleFlightCache::get_or_derive`].
+    ///
+    /// # Why this exists, in one number
+    ///
+    /// Every flush publishes a new `segments_version`, so every flush rotates **every** session's
+    /// projection key. A miss is a full `Permutation::project` over the session's whole fragment —
+    /// a *measured* 10.7 s at 10⁹ — and flush §9 states the consequence plainly: *"the fallback is
+    /// not an edge case but the steady state: a full 10.7 s projection per session per tick,
+    /// synchronised across the session population"*. Without this, the flush tick's real floor is
+    /// that rebuild, not any configured knob.
+    ///
+    /// # Why the patch equals a rebuild
+    ///
+    /// A flush **appends**: the new extent's rows begin exactly where row space ended, so they are
+    /// disjoint from every row the previous projection contains. The new projection is therefore
+    /// the old bitmap unioned with the new extents' own contribution
+    /// (`RowSpace::project_extents_from`), and that is *equal to*, not merely close to, what
+    /// `RowSpace::project` would return over the whole space. Four premises hold it up, each a
+    /// thing this design must maintain rather than happen to have (flush §3.4):
+    ///
+    /// 1. The flushed entity range is contiguous, disjoint from everything below, and entirely at
+    ///    or above the pre-flush watermark — I9's append-only allocation.
+    /// 2. A flush never rewrites the base `permutation.bin` or any earlier extent.
+    /// 3. The session's `satisfied` set is fixed at authorise and never re-resolved, so the
+    ///    fragment the projection is taken over is the same one throughout.
+    /// 4. `segments_version` strictly increases, so the source key names exactly one geometry
+    ///    (`crate::geometry::check_publishable`).
+    ///
+    /// **Premise 2 is what a merge breaks, and a merge is why the source key must be exact.** A
+    /// merge permutes row space within the merged span (`geometry-pinning.md` §4), so a projection
+    /// from before it cannot be extended into one from after it. The caller supplies
+    /// `derive_from` as the generation exactly one below the target and nothing else, and a merge —
+    /// which advances `segments_version` like any other publication — therefore presents no source
+    /// whose row space it has permuted **provided the caller derives only across an append**. That
+    /// is the caller's obligation, and `Engine::viewport` discharges it by deriving only when the
+    /// extents it is adding are the ones the source's row space does not already contain.
+    ///
+    /// A source miss is not a failure: `derive` falls back to the full build, so the answer is
+    /// identical either way and only the cost differs.
+    pub(crate) fn get_or_derive(
         &self,
         key: RowProjectionKey,
-        build: impl FnOnce() -> RowProjection,
+        derive_from: Option<&RowProjectionKey>,
+        make: impl FnOnce(Option<&RowProjection>) -> RowProjection,
     ) -> Result<Arc<RowProjection>, CacheBusy> {
         self.inner
-            .get_or_build(key, build)
+            .get_or_derive(key, derive_from, make)
             .map_err(|_busy| CacheBusy)
     }
 
@@ -202,33 +250,43 @@ impl RowProjectionCache {
         self.inner.retain_keys(|key| key.token_id != token_id)
     }
 
-    /// Remove every projection built against `segments_version`. Called when the pin drain list
-    /// reclaims that geometry.
+    /// Drop every projection built against a generation older than `floor`, keeping `floor` and
+    /// everything above it. Called by the publication, with
+    /// `live - `[`KEEP_SUPERSEDED_GENERATIONS`].
     ///
-    /// # Why reclaim and not the swap — the coupling is the point
+    /// # Why a retention depth rather than a reclaim hook
     ///
-    /// A pinned request still needs its generation's projection, and its `segments_version` is
-    /// exactly the key a swap-triggered prune would delete. Between the swap and the reclaim the
-    /// geometry is *still resolvable* — `PinManager::resolve_drained` finds it on the drain list —
-    /// so pruning at the swap would delete the very key an outstanding pin is about to ask for, and
-    /// charge that request a multi-second rebuild in the middle of an interaction. Tying cache
-    /// lifetime to the rule that governs the geometry those entries describe is why this hangs off
-    /// the drain list rather than off the swap.
+    /// This used to hang off the pin drain list: the licence to prune a generation was a
+    /// `Reclaimed` value, produced when a drain entry expired. With pins deleted
+    /// (`geometry-pinning.md`) there is no drain list, and what remains is the thing the coupling
+    /// was standing in for — **an explicit N-generations-back policy, stated where the cache is
+    /// bounded**.
     ///
-    /// **The licence to prune is a `Reclaimed` value, not any particular method.** `Engine` prunes
-    /// from every site that produces one — see `Engine::prune_reclaimed`, called from both
-    /// `reclaim_pins` and `publish_geometry`, the latter producing them from *two* places (the
-    /// drain-depth trim and its own reclaim pass). Coupling to `reclaim_pins` alone would leave two
-    /// live routes reclaiming generations that are never pruned, and since nothing calls
-    /// `reclaim_pins` periodically yet, those are in practice the routes that fire.
+    /// **Pruning at the swap, with depth zero, would be wrong**, and it is worth being precise
+    /// about why since the pin argument for that is gone. A flush *extends* row space: the new
+    /// generation's projection for a session is the old one plus the new extent's rows, so the
+    /// superseded entry is the input to the patch that avoids a *measured* 10.7 s rebuild at 10⁹.
+    /// Deleting it at the instant of the swap deletes the input before any request can use it,
+    /// and every session pays the full rebuild at every tick — which is exactly the steady-state
+    /// cost flush §9 names. The depth is what keeps the input alive for one tick.
     ///
-    /// Pruning on `segments_version` alone, ignoring `Reclaimed::prefix`, rests on
-    /// [`RowProjectionKey`]'s fact 2.
+    /// Pruning on `segments_version` alone, ignoring the prefix, rests on [`RowProjectionKey`]'s
+    /// fact 2 — and a merge is why it must: row ids inside a merged span name different entities
+    /// afterwards, so the prefix is *not* a safe discriminator and `segments_version` is
+    /// (`geometry-pinning.md` §4).
     ///
     /// Same cost note as [`Self::prune_token`], with one difference in its favour: this runs on the
-    /// lifecycle path, not on a request handler.
-    pub(crate) fn prune_generation(&self, segments_version: u64) -> usize {
-        self.inner
-            .retain_keys(|key| key.segments_version != segments_version)
+    /// publication path, not on a request handler.
+    pub(crate) fn prune_generations_below(&self, floor: u64) -> usize {
+        self.inner.retain_keys(|key| key.segments_version >= floor)
     }
 }
+
+/// How many superseded generations' projections the cache keeps after a publication.
+///
+/// **One, and the number is the patch's input rather than a margin.** A flush appends, so the
+/// generation immediately below the live one holds exactly the projection the next request's patch
+/// derives from; a second one back is derivable from the first and is never consulted. Raising this
+/// buys nothing and costs a *measured* 125.12 MB per entry per session at 10⁹; lowering it to zero
+/// forfeits the patch and reinstates the full rebuild at every tick.
+pub(crate) const KEEP_SUPERSEDED_GENERATIONS: u64 = 1;

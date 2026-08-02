@@ -51,7 +51,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C12** | Caller-declared generating sets | High | Accepted — caller's control |
 | **C13** | Cross-partition node metadata | Medium | Closed |
 | **C14** | Partition fan-out width | Low | Accepted |
-| **C15** | Session pin rate of change | Low | Accepted |
+| **C15** | Generation stamp rate of change | Low | Accepted |
 | **C16** | Router-held label presence registry | Low | Accepted |
 | **C17** | Stable wire identity across sessions and principals | Medium | Accepted — the point of the r21 mechanism change |
 | **C18** | Mark count and sub-cell counts track the masked visible count | Low | Accepted — no new channel |

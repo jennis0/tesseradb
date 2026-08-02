@@ -2,9 +2,9 @@
 
 **Status:** Draft r5 — audited against the built system; every claim about absent machinery is now marked at the claim (Appendix R)
 
-**Owns:** the mechanism level of the lifecycle — thread and state ownership, the generation/pin machinery, the fragment-stamp and deny-retirement ledgers, merge-versus-snapshot interaction, the WAL, caching, and the router/worker protocol. Everything here is engine-internal — none of it is contract (contracts §6) — but it is *invariant-bearing* internal, so it gets design-and-review treatment.
+**Owns:** the mechanism level of the lifecycle — thread and state ownership, the generation lifecycle, the fragment-stamp and deny-retirement ledgers, merge-versus-snapshot interaction, the WAL, caching, and the router/worker protocol. Everything here is engine-internal — none of it is contract (contracts §6) — but it is *invariant-bearing* internal, so it gets design-and-review treatment.
 
-**The simplicity rule applied here:** one mutation discipline — **immutable artifacts, atomic pointer swaps, refcounted pins, and a single writer thread per partition** — with every surviving subtlety given a named ledger and an explicit rule.
+**The simplicity rule applied here:** one mutation discipline — **immutable artifacts, atomic pointer swaps, refcounted generations, and a single writer thread per partition** — with every surviving subtlety given a named ledger and an explicit rule.
 
 **How to read the markers.** This document specifies a target; parts of it are not built. Wherever that is true it is marked **⊘** at the claim, with what happens instead. The three that matter most, because a reader could otherwise take them as assurances about a security property, are the deletion-retirement ledger (§3.2), the evaluate-entry fold (§3.4), and flush (§5.1).
 
@@ -36,7 +36,7 @@ The specified shape carried a `segments: Arc<[SegmentRef]>` with per-file `Arc<M
 
 ### 1.2 Two version axes, deliberately not one
 
-`segments_version` moves with row-space and postings shape; `overlay_version` moves on every accepted change batch (security state). They match design §8.5's cache keys and have opposite pinning semantics (§2.3). Every mutation builds a new Generation sharing unchanged parts by `Arc` and swaps the pointer; a change-only generation is two small allocations.
+`segments_version` moves with row-space and postings shape; `overlay_version` moves on every accepted change batch (security state). They match design §8.5's cache keys and are independent: a geometry publication never bumps `overlay_version`, and an accepted change never moves `segments_version` (§2.4). Every mutation builds a new Generation sharing unchanged parts by `Arc` and swaps the pointer; a change-only generation is two small allocations.
 
 `segments_version` is specified to move on flush and compaction.
 
@@ -54,54 +54,60 @@ The command queue has a **priority lane for deny-disposition changes**, so a com
 
 Publication-by-rebase resolves the merge-versus-flush race by construction: whatever completed work arrives, the lifecycle thread rebases it on the then-current generation, so concurrently flushed segments are carried forward automatically (§5).
 
-## 2. Pins and retirement
+## 2. Generations and retirement
 
 ```mermaid
 flowchart TD
-  A["accepted change, or a newly built bundle"] --> B["build the next Generation<br/>(unchanged parts shared by Arc)"]
+  A["accepted change, or a flush"] --> B["build the next Generation<br/>(unchanged parts shared by Arc)"]
   B --> C["WAL append + fsync"]
   C --> D["atomic pointer swap"]
   D --> E["200 to the caller (§4)"]
-  D --> F["superseded geometry recorded<br/>as a slimmed DrainEntry (§2.1)"]
-  F --> G{"a session pin names it?"}
-  G -- "yes" --> H["pin resolves: pinned geometry served,<br/>current overlay applied (§2.3)"]
-  G -- "no, or TTL expired" --> I["remove → verify → drop"]
-  H -- "TTL expires, or depth trim" --> I
-  I --> J["bundle Arc released;<br/>local retired-prefix files deletable"]
+  D --> F["row-projection retention pass:<br/>drop entries more than one<br/>generation back (§2.2)"]
+  D --> G{"requests still in flight<br/>against the old generation?"}
+  G -- "yes" --> H["they complete against it —<br/>their own Arc keeps it mapped (§2.1)"]
+  H --> I["last Arc released"]
+  G -- "no" --> I
+  I --> J["bundle freed;<br/>local retired-prefix files deletable (§2.3)"]
 ```
-*The generation and pin lifecycle. The swap is the only publication event; everything downstream of it is reclamation.*
+*The generation lifecycle. The swap is the only publication event; everything downstream of it is refcounting.*
 
-### 2.1 The pin manager is Arc plus a drain list — with one ordering rule
+### 2.1 A superseded generation is retained by its readers and by nothing else
 
-A pin names a superseded generation's **geometry**, recorded on a drain list as a slimmed entry: the prefix, its `segments_version`, an advisory watermark, the `Arc<Bundle>` that geometry lives in, a retirement instant, and the sessions holding it.
+**There is no drain list, no pin manager, no TTL and no per-session cap.** All of it existed to answer a *later* request against an *earlier* generation, and `geometry-pinning.md` is the argument that nothing a client holds needs that: a tile is a Morton prefix resolvable against any generation's own sorted codes, and an item is a `tessera_id` invertible to an entity independently of geometry, so a re-issued request re-locates everything it needs. What it cost was ~94 GB of mapped files at depth 2 against a *measured* 47.02 GB bundle, ~2,000 lines across six crates, an error code, three config keys and a startup relation.
 
-**A drain entry is deliberately not an `Arc<Generation>`.** Holding a whole generation would also retain the superseded *overlay* and *buffer* — which is exactly the R-open failure I11 names: a pinned request would then compose against stale authorisation state instead of current. Slimming the entry makes that structural rather than a rule policed by whoever next writes the resolve path.
+**What survives is I11's within-request rule, and it is free.** A request loads the generation pointer exactly once at its start (§1.1) and holds the `Arc` for its duration, so tile ranges, columns, row space and mask all come from one generation and every file it reads stays mapped by refcount. Mixing generations *within* a request is I11's "not stale-restrictive but simply wrong" — a `200` over unrelated rows — and one pointer load is the whole of the defence. A superseded generation is freed when the last request holding it completes; nothing observes that moment and nothing needs to.
 
-**Reclaim ordering:** the lifecycle thread first *removes* the entry from the drain list, then verifies no holder remains, then reclaims. A racing session-pin resolution that misses the removed entry gets `410 pin-expired` — correct — rather than cloning an `Arc` mid-reclaim. **Verify-then-remove is the use-after-free the review caught; remove-then-verify is the fix, and it costs nothing.** Files shared across generations survive either generation's reclaim, because the geometry they belong to is an `Arc` every referencing entry holds. (Lucene's `SnapshotDeletionPolicy` and `SearcherLifetimeManager` exist for this case; read them before writing this module regardless.)
+**The one guard that remains is `check_publishable`**: a publication whose `segments_version` does not strictly increase is refused. Its justification changed with the pins and did not weaken — it used to be "outstanding pins would answer against new geometry", and it is now "the row-projection cache keys on `segments_version`, so a non-increasing version serves a projection built against one row space to a request answered from another". Same mixing hazard, reached from the cache rather than from a pin.
 
-**Reclaim has no periodic caller.** It runs as a side effect of the next geometry publication, and from an explicit engine method nothing but tests calls. Memory held by drained generations is therefore released only when something else is published — a liveness gap, not a safety one, and one the stage that introduces a periodic publisher must close.
+**`segments_version`, never the prefix, is the safe discriminator for a row-space artefact.** A merge is row-count preserving in that no *later* extent's `row_base` moves, but inside the merged span it is a linear merge-sort producing globally sorted output, so a row id there names a **different entity** afterwards. Anything keyed on the prefix would survive a merge and serve one entity's rows under another's mask.
 
-### 2.2 Session pins, worker restart, and durable retention
+### 2.2 What bounds retention now: a cache depth, not a clock
 
-The router holds session pin id → per-partition `(n, W)` vector with TTL and a per-session cap. Presenting a pin resolves each partition's entry against that worker's drain list; absent → `410` for the whole request.
+The thing a publication genuinely must manage is the **row-projection cache**, whose key carries `segments_version` — so every publication rotates every live session's key.
 
-**Two bounds and their sizing obligation.** The drain list is capped at `DRAIN_DEPTH_MAX = 4` superseded generations, alarming from `DRAIN_DEPTH_ALARM = 1`. Beyond the cap, pins are dropped by the trim rather than by their TTL, and the alarm saturates — stopping signalling exactly when depth matters. Whichever stage introduces a periodic publisher must therefore keep **`pin_ttl_secs < DRAIN_DEPTH_MAX × publication_period`**. At the 300 s default TTL that is a publication no more often than every 75 s.
+**Retention is one generation deep, and depth zero would be wrong.** A flush *extends* row space, so the superseded generation's projection is exactly the input the next request's patch derives from (§7.2): the new projection is the old bitmap unioned with the new extents' rows, which is equal to — not an approximation of — a projection over the whole space. Pruning at the swap would delete that input before anything could use it, and every session would pay a full `Permutation::project` — a *measured* 10.7 s at 10⁹ — at every tick, synchronised across the session population. So a publication drops entries **more than one generation back** and keeps the one immediately below it.
 
-**The per-session pin cap is politeness, not the page-cache defence.** It bounds one *well-behaved* session's use of superseded geometry and makes it visible. It does not bound an adversary: authorisation mints a fresh token per call against an already-cached fragment, so session rotation is free and the cap is bypassable by rotating. The same shape recurs on the cache byte bound (§7.2); a reader meeting it twice should recognise it rather than rediscover it.
+**Depth two and beyond buys nothing**: a projection two generations back is derivable from the one generation back, and is never consulted. It costs a *measured* 125.12 MB per session per entry at 10⁹.
 
-**A restarted worker serves no pre-restart pins.** Its drain list is empty and every pin touching it fails `410` — safe under I11. The tempting alternatives — reloading old side-manifests to reconstruct `(n_old, W)`, or silently reinterpreting to current — are **forbidden**, because half-reconstruction mixes old rows with a fresh fragment cache and replayed overlay in combinations only §3.3's build rule keeps safe, and a restart is exactly when that rule's state is coldest. Both look like helpfulness; that is why they are named.
+**A restarted worker serves nothing pre-restart, and that is now trivially true** rather than a rule — there is no state to reconstruct. The two tempting repairs an earlier revision had to forbid (reloading old side-manifests to reconstruct `(n_old, W)`, or silently reinterpreting to current) have nothing left to repair.
 
-**Prefix retention is recorded durably — in the local cache, not the bundle.** Deciding a prefix is retired is router-level knowledge (session pins span partitions), so the **router** writes `retired/<prefix>-<timestamp>` under the engine's local cache directory when the last generation referencing a prefix drains; local copies of a non-current prefix are deletable only after (marker + session-pin TTL). The marker deliberately does not live in the bundle: the bundle layout is contract, `CURRENT` is its only mutable file, and node-local retention is a serving concern the contracts spec's out-of-contract list already covers. Deletion of retired prefixes from the *bundle* itself is operator or object-store lifecycle policy, out of scope here. Without the marker, alternating crashes either leak local prefix copies forever or delete one a live pin still references.
+### 2.3 Durable prefix retention
 
-> **⊘ Specified, not implemented.** There is no router, so no `RETIRED` marker is written and no local prefix copy is ever deleted. That is safe *only* while nothing deletes a file — the moment a stage adds prefix deletion, the marker must land in the same change.
+**Prefix retention is recorded durably — in the local cache, not the bundle.** When the last generation referencing a prefix is freed, `retired/<prefix>-<timestamp>` is written under the engine's local cache directory, and local copies of a non-current prefix are deletable only after it. The marker deliberately does not live in the bundle: the bundle layout is contract, `CURRENT` is its only mutable file, and node-local retention is a serving concern the contracts spec's out-of-contract list already covers. Deletion of retired prefixes from the *bundle* itself is operator or object-store lifecycle policy, out of scope here.
 
-### 2.3 Pins fix geometry, never authorisation
+**The bound lost its clock and has not been given its replacement.** It used to be `marker + session-pin TTL`. With no TTL the condition is "no in-flight request holds it", which is an `Arc` strong count rather than a deadline — and **nothing can observe a strong count reaching zero**. `Arc::strong_count` is a sample, not an event, so the mechanism is a registry of `Weak` handles and something that polls it, which is a drain list wearing a different type. Roughly 100 of the deleted lines come back the day prefix deletion lands. That is scoped to prefixes (compactions) rather than to every flush, and it is recorded here so it is a known cost rather than a surprise.
 
-A pinned request uses the pinned `segments_version` for tiles, columns and permutation, but composes `M_auth` against the **current** overlay — deny entries apply the moment they are accepted, pinned or not.
+> **⊘ Specified, not implemented.** There is no router, no `RETIRED` marker is written, and no local prefix copy is ever deleted. That is safe *only* while nothing deletes a file — the moment a stage adds prefix deletion, the marker and its `Weak` registry must land in the same change.
 
-The composition is coherent under mixed versions: `M_auth` is computed entirely in entity space with the *fragment's* watermark defining the live set, so every entity falls in exactly one of `fragment \ L` or `direct_eval(L)`; projection through the pinned permutation then drops row-absent entities via the sentinel — no gap, no double count. **The observable consequence — a pinned drill-down can return fewer items than the viewport before it — is correct behaviour**, not a bug to be fixed.
+### 2.4 Geometry never fixes authorisation
 
-The effective watermark in composition is always the fragment's own; a pin vector's `W` is advisory, carried for status and debugging. Design §11.2's "a request pins its watermark alongside the segment-set version" and SA §6.4's "binds the triple to the fragment stamp at load" are to be read that way.
+A request uses one generation's `segments_version` for tiles, columns and permutation, and composes `M_auth` against **that same generation's** overlay — deny entries apply the moment they are accepted.
+
+The composition is coherent because `M_auth` is computed entirely in entity space with the *fragment's* watermark defining the live set, so every entity falls in exactly one of `fragment \ L` or `direct_eval(L)`; projection through the permutation then drops row-absent entities via the sentinel — no gap, no double count.
+
+The effective watermark in composition is always the fragment's own. Design §11.2's "a request pins its watermark alongside the segment-set version" and SA §6.4's "binds the triple to the fragment stamp at load" are to be read as the within-request rule and nothing more.
+
+**The fragment itself is brought forward, and this is where a flush would otherwise fail silently.** A fragment is materialised once per session and frozen. A flush publishes a delta postings tier and advances the watermark, and composition treats entities *below* the watermark as fragment-resident — so an entity a flush moved out of the buffer and into a tier is in neither the session's frozen fragment nor the buffer, and is invisible to that session until it re-authorises. Not fail-open, but it is the property the flush exists to deliver, undone for exactly the sessions open when it happened. The request path therefore rebuilds the fragment at the live watermark when its own is behind, through the same cache (§7.2), keyed so every session sharing a credential shares one build. §11.2's incremental form — OR in the flushed segment's contribution for the already-satisfied terms — is what the rebuild is equal to, on the premises flush §3.4 sets out, and is **⊘ specified, not implemented**.
 
 ## 3. The overlay, fragment stamps, and the two retirement ledgers
 
@@ -146,7 +152,7 @@ A deletion's deny entry (tombstone stamp *d*) may leave the overlay only when **
 
 - **Scope: all of this is per partition, per worker, in memory.** Stamps are per-partition segments-versions, denies live in their partition's overlay, and fragments never leave their worker — so the stamp counts and the floor are worker-local structures, and losing them on restart is safe by construction: the cache restarts cold and §3.3 forces every rebuild from current postings.
 - The fragment cache maintains `stamp_counts: BTreeMap<postings_stamp, usize>`; `min_live_stamp()` is its first key (+∞ when empty).
-- The cache additionally tracks `retirement_floor` = **the highest stamp of *any* retired overlay entry — a deletion's tombstone stamp *d* or an evaluate entry's fold stamp *f* alike** — and **refuses insertion of any fragment with stamp < retirement_floor**. Without this, a pinned or slow request could rebuild an old-stamp fragment *after* the entries predating it were retired and resurrect a deleted item or a revoked term. The floor is deliberately defined over both retirement kinds: **a floor raised only on deletion retirements passes the deletion test and still fails open through a pre-fold fragment.** That is the only sentence explaining why deletion and evaluate share a floor while suppression touches neither. Refusal is cheap: the builder retries against current postings (§3.3).
+- The cache additionally tracks `retirement_floor` = **the highest stamp of *any* retired overlay entry — a deletion's tombstone stamp *d* or an evaluate entry's fold stamp *f* alike** — and **refuses insertion of any fragment with stamp < retirement_floor**. Without this, a slow request could rebuild an old-stamp fragment *after* the entries predating it were retired and resurrect a deleted item or a revoked term. The floor is deliberately defined over both retirement kinds: **a floor raised only on deletion retirements passes the deletion test and still fails open through a pre-fold fragment.** That is the only sentence explaining why deletion and evaluate share a floor while suppression touches neither. Refusal is cheap: the builder retries against current postings (§3.3).
 - The lifecycle thread retires the retirable-entry prefix below `min_live_stamp()` after evictions and periodically.
 - Compaction may force-refresh all fragments to advance the floor; overlay size is the pressure gauge.
 
@@ -156,7 +162,7 @@ An overlay soft limit exists as the pressure gauge this section describes, and i
 
 ### 3.3 Fragment builds always read current postings
 
-Fragments are built by request threads on miss (single-flight per key, §7.2) **from the current generation's postings view, never from a pinned one** — consistent with §2.3: pins fix geometry, and a fragment is authorisation state. Together with the insertion floor in §3.2 this closes the stamp-regression path.
+Fragments are built by request threads on miss (single-flight per key, §7.2) **from the current generation's postings view** — consistent with §2.4: geometry identity does not fix authorisation state, and a fragment is authorisation state. Together with the insertion floor in §3.2 this closes the stamp-regression path.
 
 This half *is* built: a fragment is always constructed against the live bundle's postings. Only the floor that backstops it (§3.2) is absent.
 
@@ -264,7 +270,7 @@ Internal, versioned by the binary; postcard frames over unix socketpairs; per-re
 
 **`Hello` carries the worker's allocation high-water, and the worker's WAL always wins.** On (re)connect the router advances its allocator journal to max(journal, every reported high-water) before granting any lease. This arbitrates divergent replay — a router journal restored from an older backup would otherwise re-grant ranges workers already consumed, an I9 violation with I5-scale blast radius. The worker's WAL is authoritative because it records IDs actually written.
 
-Failure semantics: worker timeout fails the request (**I13c**, outage asymmetry — an unreachable-by-failure partition makes the answer unknown, never empty); respawn with backoff, rebuild from bundle + WAL, fragment cache cold and rebuilt on demand; pre-restart session pins fail `410` (§2.2); router exit kills workers via the supervision-pipe watchdog.
+Failure semantics: worker timeout fails the request (**I13c**, outage asymmetry — an unreachable-by-failure partition makes the answer unknown, never empty); respawn with backoff, rebuild from bundle + WAL, fragment cache cold and rebuilt on demand; nothing pre-restart is retained and nothing needs to be (§2.2); router exit kills workers via the supervision-pipe watchdog.
 
 > **⊘ Specified, not implemented — none of this section exists.** The system is a single process serving a single partition. There is no router, no worker, no socketpair, no `Hello`, no `BuildFragment`, no heartbeat and no lease arbitration; nothing spawns anything. **What holds instead:** the write executor is in-process, the allocator's high-water lives in the one WAL that writes it, and the arbitration problem the `Hello` rule solves cannot arise because there is exactly one journal. The rule is nonetheless the constraint the multi-process stage inherits — a router journal is never authoritative over a worker's WAL — and I13's partition half has no implementation and no test, so a reader must not take a partition-related `I13` annotation in the code as covering it.
 
@@ -289,7 +295,7 @@ The motivation is measured, not aesthetic. The original row-projection cache ran
 3. **The building caller always receives what it built**, retained or not. This is what makes forward progress structural: a bound below the working set costs rebuilds, never a refusal.
 4. **Evicted values are collected under the lock and dropped after it is released.** Dropping a ~125 MB bitmap frees ~15 k containers; doing that inside a lock whose O(1) hold time is load-bearing convoys every admitted request. Every removal path returns the value rather than dropping it, and the removal function is `#[must_use]` so the natural lapse is a compile error.
 
-**What the byte bound bounds.** It bounds bytes resident *in the map*, not process memory: every in-flight caller holds its value for the duration of its request whether or not the map still contains it, so the peak is `bound + admission_width × per_entry`. A per-entry floor turns the byte bound into an entry ceiling as well — without it, a caller can insert unbounded near-empty entries that never trip a byte bound while each costs hundreds of bytes, the same session-rotation bypass §2.2's pin cap has.
+**What the byte bound bounds.** It bounds bytes resident *in the map*, not process memory: every in-flight caller holds its value for the duration of its request whether or not the map still contains it, so the peak is `bound + admission_width × per_entry`. A per-entry floor turns the byte bound into an entry ceiling as well — without it, a caller can insert unbounded near-empty entries that never trip a byte bound while each costs hundreds of bytes, the same session-rotation bypass every per-session bound in this design has: authorisation mints a fresh token per call against an already-cached fragment, so rotation is free.
 
 **The duplication is deliberate and must not be removed.** A near-identical single-flight cache exists in the authorisation layer, which sits *below* the engine in the crate graph; `scripts/check-layers.sh` enforces that direction, so reuse is forbidden, and the two use sites need different signatures anyway (one build is fallible). The consequence to respect: **every rule above can be right in one crate and wrong in the other, and a test written once covers only the crate it lives in.** Both modules carry a table naming, per rule, the test in each crate, so a missing twin shows up by reading. This is exactly the shape a reviewer deletes as redundancy.
 
@@ -312,7 +318,7 @@ Two pause sites, not one, because one cannot discriminate the ordering it exists
 | After ack (fsync + swap done) | replay rebuilds identically | none |
 | Mid-flush (files, no manifest) ⊘ | orphans unreferenced; replay re-flushes | none |
 | Mid-merge / mid-compaction (no flip) ⊘ | outputs orphaned / old prefix authoritative | none |
-| Worker crash ⊘ | respawn; bundle + WAL; pins on it `410` | pins (by design) |
+| Worker crash ⊘ | respawn; bundle + WAL | nothing — no cross-request geometry is retained |
 | Router crash ⊘ | watchdog kills workers; supervisor restarts; allocator re-arbitrated from worker high-waters (§6) | sessions (by design) |
 | Durability failure (append or fsync), then restart | undurable tail truncated; nothing acked is lost | an under-durable deny's hiding, which no ack claimed |
 | Mid-log WAL corruption (below fsync point) | **fail closed**; restore from bundle + object store | availability, never denies |
@@ -325,7 +331,7 @@ Two pause sites, not one, because one cannot discriminate the ordering it exists
 
 1. **Single lifecycle writer, minimally loaded**: decisions and swaps on the thread, all IO on the pool, deny priority lane. *Two publishers exist in the built system — §1.3.*
 2. **Generations immutable and Arc-shared; drain-list reclaim is remove → verify → reclaim.** A drain entry is slimmed geometry, never an `Arc<Generation>` — §2.1.
-3. **Pins fix geometry, never authorisation.** The effective watermark in composition is the fragment's own; a pin vector's `W` is advisory.
+3. **Geometry identity never fixes authorisation.** The effective watermark in composition is the fragment's own, and a request composes against the same generation's overlay whatever stamp it presented.
 4. **Two version axes** matching design §8.5.
 5. **Three retirement rules, not one**: deletion denies by the stamp ledger with an insertion floor; suppressions only by unsuppress; evaluate entries at their compaction fold. A single rule is fail-open for two of the three. *One of the three is built — §3.*
 6. **Fragments build from current postings only**, with the cache refusing stamps below the retirement floor. *The build rule is built; the floor is not — §3.2, §3.3.*
@@ -348,6 +354,6 @@ Corrected in this revision, against the built system:
 2. **§5.1's flush sentence** is true of the current system as well as the end state, and its marker says so explicitly: it misleads in the fail-*closed* direction, which is why it survived unchallenged.
 3. **§1.3's latency framing** ("bounded by fsync") is corrected by measurement: under sustained ingest a deny acks in 165 ms p50 at 1 M buffered, dominated by an `O(buffered)` clone, not by fsync. The lane's unboundedness in memory, and ingest starvation under a deny flood, are stated.
 
-Added in this revision, from mechanisms the corpus did not describe: single-flight caching's non-blocking waiters, its 429, its four eviction rules and its deliberate cross-crate duplication (§7.2); fault injection and its fidelity rule, with the note that it pre-empts conformance §5 (§7.3); `ExecutorPosture` (§4); the pin drain bounds and their sizing obligation, and the pin cap's stated non-defence (§2.2); the WAL's type-enforced ack contract and the two positional-CRC guards (§4); reclaim's missing periodic caller (§2.1); the commit window's honest calibration, its closed idempotency item, and its refusal to carry denies (§5.1); the overlay's three-field representation as the structural reason `delete → suppress → unsuppress` cannot re-expose (§3.1).
+Added in this revision, from mechanisms the corpus did not describe: single-flight caching's non-blocking waiters, its 429, its four eviction rules and its deliberate cross-crate duplication (§7.2); fault injection and its fidelity rule, with the note that it pre-empts conformance §5 (§7.3); `ExecutorPosture` (§4); the WAL's type-enforced ack contract and the two positional-CRC guards (§4); the commit window's honest calibration, its closed idempotency item, and its refusal to carry denies (§5.1); the overlay's three-field representation as the structural reason `delete → suppress → unsuppress` cannot re-expose (§3.1).
 
-**Actions raised against companions, all applied**: compaction's fold obligation extends to evaluate entries and the carry-forward rule to post-snapshot tombstones and the suppression set (SA §6.6); the effective watermark in I1 composition is always the fragment's own (design §11.2, §2.6, I11; SA §6.4; contracts §2.3); `seg_id`s never reused (contracts §2.1); five lifecycle conformance tests raised against the plan — suppression persistence; the eviction→retire→pinned-miss rebuild excluding deleted items; its fold variant; post-snapshot tombstone survival; positional CRC fail-closed. **Four of those five test the machinery §3.2, §3.4 and §5.3 mark as unbuilt**; conformance's own audit (conformance r4 §F) records which are written.
+**Actions raised against companions, all applied**: compaction's fold obligation extends to evaluate entries and the carry-forward rule to post-snapshot tombstones and the suppression set (SA §6.6); the effective watermark in I1 composition is always the fragment's own (design §11.2, §2.6, I11; SA §6.4; contracts §2.3); `seg_id`s never reused (contracts §2.1); five lifecycle conformance tests raised against the plan — suppression persistence; the eviction→retire→cold-miss rebuild excluding deleted items; its fold variant; post-snapshot tombstone survival; positional CRC fail-closed. **Four of those five test the machinery §3.2, §3.4 and §5.3 mark as unbuilt**; conformance's own audit (conformance r4 §F) records which are written.

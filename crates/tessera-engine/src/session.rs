@@ -32,7 +32,6 @@ use tessera_store::{Bundle, StoreError};
 use tessera_types::{EntityId, IdentityError, IdentityKey, TermId, TesseraId};
 
 use crate::cache::RowProjectionCache;
-use crate::pins::{PinManager, PinStats, Reclaimed};
 use crate::write::{PublishGeometryError, WritePath};
 use crate::{Generation, GenerationHandle};
 
@@ -102,41 +101,14 @@ pub struct EngineConfig {
     /// rayon's own default (`RAYON_NUM_THREADS` or the logical core count), so a `0` here is
     /// harmless rather than a zero-width pool that can run nothing.
     pub compute_threads: usize,
-    /// Lifecycle §2.2's pin TTL, in seconds — how long a pin stays resolvable once the generation
-    /// it names has been superseded. Handed to [`crate::pins::PinManager`] at open, where it bounds
-    /// the drain list: it is enforced at resolve as well as at reclaim, and it is (with
-    /// `crate::pins::DRAIN_DEPTH_MAX`, and with a reclaim pass actually running) what bounds
-    /// retention. Mirrors `tessera-server::config`'s `serve.pin_ttl_secs`, whose doc carries the
-    /// page-cache argument that sizes it.
-    pub pin_ttl_secs: u64,
-    /// Lifecycle §2.2's per-session pin cap: the most **superseded** geometries one session may
-    /// hold resolvable at once. Presenting a further one is
-    /// [`EngineError::PinCapExceeded`] (422). Mirrors `tessera-server::config`'s
-    /// `serve.pins_per_session_max`.
-    ///
-    /// **Counted at presentation of a drained pin, never at mint** — see
-    /// `crate::pins::PinManager::resolve_drained`. A mint always names the live generation, of
-    /// which a session can hold exactly one and which holds nothing alive that is not already live,
-    /// so a mint consumes no resource and there is nothing there to cap; refusing at mint would
-    /// `422` an ordinary unpinned viewport and would put the drain lock on the common request path.
-    /// This is **not** the page-cache defence — `crate::pins::PinManager::pins_per_session_max`
-    /// says what it does and does not bound.
-    pub pins_per_session_max: usize,
-    /// Lifecycle §2.2's drain-list ceiling: superseded generations retained.
-    ///
-    /// A field rather than `pins::DRAIN_DEPTH_MAX`, which it replaces. That constant's own doc
-    /// argued for a constant — "the stage-2.1 plan's rule 2 lands every config key in the seam
-    /// commit, and no key exists for this" — and §1.4's cost model is what changes the answer: it
-    /// was chosen when a drain entry meant a whole distinct bundle, and under §1.2's incremental
-    /// construction consecutive generations share their base geometry, so an entry costs roughly
-    /// one flush segment. That makes it the cheaper of the two knobs an admin has for visibility
-    /// latency, and a knob compiled in is no knob.
-    pub drain_depth_max: usize,
     /// The flush tick, in seconds: the period at which geometry is published.
     ///
-    /// Bounded from below by `pin_ttl_secs < drain_depth_max × flush_max_age_secs`, which
-    /// `tessera-server`'s loader refuses to start without (§4's relation 1). An embedder
-    /// constructing this struct directly is on its own honour, as it is for `k_min`.
+    /// **No longer bounded from below by a pin TTL.** It used to be, through
+    /// `pin_ttl_secs < drain_depth_max × flush_max_age_secs`, and that relation went with the pin
+    /// retention (`geometry-pinning.md` §0). What *does* bound it is the row-projection rebuild —
+    /// a measured 10.7 s at 10⁹ per session — so a tick shorter than a projection patch can absorb
+    /// costs every session that rebuild at every tick. That is a real floor and a different one;
+    /// see `crate::cache`.
     pub flush_max_age_secs: u64,
     /// Buffer occupancy at which a flush becomes **ready** — publication still waits for the tick
     /// (§1.3).
@@ -170,8 +142,23 @@ pub struct Session {
     /// The credential's granted terms, resolved to bundle-relative `TermId`s. An unknown
     /// descriptor (no dictionary entry) is simply absent here — never an error.
     pub satisfied: FxHashSet<TermId>,
-    /// The materialised mask fragment (I2): the union of every satisfied term's postings.
+    /// The materialised mask fragment (I2): the union of every satisfied term's postings, over
+    /// the base and every delta tier live at the moment this session authorised.
+    ///
+    /// **It goes stale, and [`Engine::fragment_for`] is what brings it forward.** A flush publishes
+    /// a delta tier and moves the generation's watermark, and composition treats entities *below*
+    /// the watermark as fragment-resident — so a flushed entity is in neither this fragment nor the
+    /// ingest buffer until the fragment is rebuilt at the new watermark. Nothing on the request
+    /// path may read this field directly for that reason; see `Engine::fragment_for`.
     pub fragment: Arc<FrozenFragment>,
+    /// `satisfied`, sorted — the [`tessera_authz::FragmentCache`] key component, kept rather than
+    /// re-sorted per request so bringing the fragment forward costs no allocation on a hit.
+    pub(crate) satisfied_sorted: Vec<TermId>,
+    /// `sha256(auth_data)` — the cache's caller obligation, kept for the same reason.
+    ///
+    /// A digest of the credential, never the credential: this lives for the session's lifetime in
+    /// a struct the server holds per connection, and the bearer secret must not.
+    pub(crate) auth_data_hash: [u8; 32],
     /// Unix timestamp (seconds) after which this session is no longer valid.
     pub expires_at: u64,
 }
@@ -185,39 +172,28 @@ pub enum EngineError {
     Overlay(OverlayError<StoreError>),
     Plugin(PluginError),
     Io(io::Error),
-    /// A presented pin's `(prefix, segments_version)` does not match the live generation (I11) —
-    /// maps to HTTP 410 at the server boundary.
-    PinExpired,
-    /// This session already holds `pins_per_session_max` pins and asked for another (lifecycle
-    /// §2.2's per-session cap). Maps to **422 `contract`** — contracts §3.1's 422 row is
-    /// "malformed request, **bounds exceeded**, unknown filter operand", the same row
-    /// [`Self::TooManyTiles`] and [`Self::UnderlayRefused`] take. Not a 429: a cap that clears
-    /// only when a pin TTLs out is not backpressure, and `Retry-After: 1` would be a lie at a
-    /// five-minute TTL.
-    ///
-    /// Raised where a session would come to hold more than its configured number of pins;
-    /// `a_session_cannot_exceed_its_pin_cap` is the test. It is a named variant rather than a
-    /// fall-through so that `map_engine_error`'s catch-all cannot report a caller-fixable bound as
-    /// a fail-closed 500. Both counts are the caller's own and the configured limit; no corpus fact
-    /// rides on this error.
-    PinCapExceeded {
-        held: usize,
-        limit: usize,
-    },
     /// A viewport request named a slice this bundle doesn't have.
     UnknownSlice(String),
-    /// A slice with more than one segment. `tile_ranges` returns **segment-local** row indices
-    /// (contracts §2.4), while the slice's mask is built from one `Permutation` addressing
-    /// exactly one segment's row space — the build produces exactly one segment per
-    /// (partition, slice). Summing `count_range`/`iter_range` over a second segment's
-    /// ranges through that same row space would silently mis-count or mis-index rows belonging to
-    /// a different segment; there is no segment-row offset table to fold them together correctly
-    /// yet, so this fails closed rather than produce a wrong (not even necessarily *obviously*
-    /// wrong) answer.
-    MultiSegmentSlice(String),
+    /// A slice holding a segment whose rows have no known place in the slice's row space.
+    ///
+    /// `tile_ranges` returns **segment-local** row indices (contracts §2.4) while the mask is a
+    /// bitmap over the whole **slice** row space, so serving a segment requires knowing its
+    /// `row_base`. Exactly one segment — the build segment, the one `permutation.bin` addresses —
+    /// legitimately has no extent and begins at 0; every other arrives with one, from a flush or
+    /// from a merge. A second segment with no extent means the row space and the segment list
+    /// disagree about what the slice holds.
+    ///
+    /// **Fails closed because the wrong answer is quiet.** Defaulting such a segment to `row_base
+    /// 0` would count its rows against the base segment's mask positions and gather points from
+    /// one entity under another's identity — every count plausible, every mark wrong, no error
+    /// anywhere. That is a worse outcome than a 500.
+    SegmentWithoutRowBase {
+        slice: String,
+        seg_id: String,
+    },
     /// A slice carried by more than one partition.
     ///
-    /// The symmetric case to [`Self::MultiSegmentSlice`], and it fails closed for the symmetric
+    /// The symmetric case to [`Self::SegmentWithoutRowBase`], and it fails closed for the symmetric
     /// reason: `Engine::viewport` resolves a slice by taking the first partition that carries the
     /// id, and θ's anchor plus every rank is then computed over **that partition alone**. Design
     /// §12.3 requires the anchor to be session-global across partitions — a per-partition anchor
@@ -298,17 +274,12 @@ impl std::fmt::Display for EngineError {
             EngineError::Overlay(e) => write!(f, "overlay error: {e}"),
             EngineError::Plugin(e) => write!(f, "plugin error: {e}"),
             EngineError::Io(e) => write!(f, "io error: {e}"),
-            EngineError::PinExpired => write!(f, "pin expired"),
-            EngineError::PinCapExceeded { held, limit } => write!(
-                f,
-                "this session already holds {held} pins, at its configured maximum of {limit}; \
-                 reuse a pin it holds, or let one expire"
-            ),
             EngineError::UnknownSlice(slice) => write!(f, "unknown slice '{slice}'"),
-            EngineError::MultiSegmentSlice(slice) => write!(
+            EngineError::SegmentWithoutRowBase { slice, seg_id } => write!(
                 f,
-                "slice '{slice}' has more than one segment, which this engine's row-space \
-                 handling does not yet support (see EngineError::MultiSegmentSlice's doc)"
+                "slice '{slice}' holds segment '{seg_id}', which has no extent and so no known \
+                 row_base — the row space and the segment list disagree about what this slice \
+                 holds (see EngineError::SegmentWithoutRowBase's doc)"
             ),
             EngineError::MultiPartitionSlice(slice) => write!(
                 f,
@@ -371,9 +342,6 @@ pub struct Engine {
     pub(crate) prefix_dir: std::path::PathBuf,
     pub(crate) config: EngineConfig,
     next_token_id: AtomicU64,
-    /// The pin seam (I11) — see [`PinManager`]. Stateless today; `Engine::viewport` resolves
-    /// every request's pin through it rather than comparing fields inline.
-    pub(crate) pins: Arc<PinManager>,
     /// The write path: the WAL, the I9 allocator, the live external-id maps, the resolver's
     /// extension state and the idempotency index. Every mutating engine method below is
     /// a thin delegation to this; the read paths that need write-side state (`resolve_external_id`
@@ -401,6 +369,14 @@ pub struct Engine {
     /// `pub(crate)`: `viewport.rs`'s `Engine::viewport` (a different module, same crate) reads it
     /// on every request.
     pub(crate) serial_fallback_max_rows: AtomicU64,
+    /// How many row projections were built from the whole fragment rather than derived from the
+    /// preceding generation's — the observable behind [`Engine::full_projection_builds`].
+    ///
+    /// **Unconditional, not `bench-timing`-gated**, unlike `StageTimings::row_projection_built`.
+    /// The property it makes testable — that a flush does not cost every session a full rebuild —
+    /// is a correctness-shaped one for a deployment's latency, and a test that only runs under a
+    /// feature flag is a test that does not run.
+    pub(crate) full_projection_builds: AtomicU64,
 }
 
 /// Every deny disposition the bundle's side-manifests carry, as overlay operations.
@@ -492,6 +468,48 @@ impl Engine {
         let postings =
             Arc::new(PostingsReader::open(&postings_path, true).map_err(EngineError::Io)?);
 
+        // **Every live delta postings tier, reopened.** A flush publishes one tier per segment
+        // (§5.2) and a fragment build unions across all of them; without this an engine that
+        // restarted would build every fragment from base postings alone, and every item flushed
+        // since the last compaction would silently vanish from every principal's map — visible
+        // before the restart, gone after it, with no error anywhere.
+        //
+        // **The paths are derived, and the manifest's `deltas` is what makes that safe.** A tier
+        // lives beside the segment that produced it, so its path is a function of `(phash, slice,
+        // seg_id)` — `deltas` carries only the `n` each tier arrived at, which is not a path. The
+        // count is the check: `deltas.len()` is the manifest's own declaration of how many tiers
+        // it has, and finding a different number means the derivation and the manifest disagree,
+        // which is corruption rather than a state to serve past. The bytes are already
+        // digest-verified — `open_bundle` refuses a `SEGMENTS-<n>.json` unless every file it names
+        // verifies, and the tier is one of them.
+        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
+        let mut slices_seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for seg_desc in &partition.manifest.segments {
+            // The first segment named for a slice is its build segment, which has no tier: base
+            // postings already carry its items.
+            if slices_seen.insert(seg_desc.slice.as_str()) {
+                continue;
+            }
+            let rel = format!(
+                "partitions/{phash}/slices/{}/segments/{}/delta.arrow",
+                seg_desc.slice, seg_desc.seg_id
+            );
+            if !partition.manifest.files.contains_key(&rel) {
+                continue;
+            }
+            delta_postings.push(Arc::new(
+                DeltaTier::open(&prefix_dir.join(&rel)).map_err(EngineError::Io)?,
+            ));
+        }
+        if delta_postings.len() != partition.manifest.deltas.len() {
+            return Err(EngineError::Malformed(format!(
+                "manifest declares {} delta tiers but {} were found beside its segments — a \
+                 fragment built from the ones present would omit whatever the missing tiers carry",
+                partition.manifest.deltas.len(),
+                delta_postings.len()
+            )));
+        }
+
         // The sidecar is lazy for real: nothing here is opened, mapped or verified —
         // `ExternalIdSidecar::deferred_from_manifest` only reads already-parsed JSON manifest
         // data (paths and digests), never the filesystem. No extent descriptor, digest, ordinal
@@ -536,21 +554,7 @@ impl Engine {
             cache_dir,
             bundle_identity,
             auth_plugin_hash,
-            tessera_authz::FRAGMENT_FORMAT,
         ));
-        // **Entries a previous format version left behind are unreachable, and nothing else
-        // deletes them** (§9). Swept once here, where a directory scan is affordable and a stale
-        // entry has not yet cost anyone a lookup. A failure is logged and not fatal: an
-        // undeletable orphan is wasted disk, and a node that refuses to start over one is worse.
-        match fragment_cache.sweep_orphans() {
-            Ok(0) => {}
-            Ok(swept) => tracing::info!(swept, "swept fragment cache entries of an older format"),
-            Err(e) => tracing::warn!(
-                error = %e,
-                "could not sweep older-format fragment cache entries; they are unreachable and \
-                 will simply occupy disk"
-            ),
-        }
 
         // D-D: build the shared compute pool now, not lazily on first request — a pool that
         // cannot be built is an `Engine` that cannot serve any viewport, and that is a fact about
@@ -572,20 +576,12 @@ impl Engine {
             bundle: Arc::new(bundle),
             dict: Arc::clone(&dict),
             postings: Arc::clone(&postings),
-            delta_postings: Vec::new(),
+            delta_postings,
             overlay_version: 0,
             overlay: Arc::new(overlay),
             buffer: Arc::new(buffer),
         })));
 
-        // Shared with the write executor by `Arc`, because a geometry publication happens on that
-        // thread now (lifecycle §1.3) and it is the step that retires pins and prunes the
-        // projections of what it released. Two owners of one value, never two values.
-        let pins = Arc::new(PinManager::new(
-            config.pin_ttl_secs,
-            config.pins_per_session_max,
-            config.drain_depth_max,
-        ));
         // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
         // after `open`, having validated the figure; every other embedder (tests, benches,
         // examples) gets unbounded caches, which is what a read-only embedder wants.
@@ -603,11 +599,11 @@ impl Engine {
             prefix_dir,
             config,
             next_token_id: AtomicU64::new(0),
-            pins: Arc::clone(&pins),
             write: WritePath::new(write_state),
             external_index,
             identity_key,
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
+            full_projection_builds: AtomicU64::new(0),
         })
     }
 
@@ -720,6 +716,8 @@ impl Engine {
             token_id,
             satisfied,
             fragment,
+            satisfied_sorted,
+            auth_data_hash,
             expires_at,
         })
     }
@@ -730,14 +728,12 @@ impl Engine {
         self.write.allocator_high_water()
     }
 
-    /// Publish a new row-space geometry, retiring the outgoing one onto the pin manager's drain
-    /// list (I11, lifecycle §2.1–§2.3). Returns everything the depth trim and the reclaim pass
-    /// removed — the cache pruner's hook, see [`Reclaimed`].
+    /// Publish a new row-space geometry. **The outgoing one is not retained**: nothing holds it
+    /// but the requests already in flight against it, each through the `Arc` it loaded at its
+    /// start, and it is freed when the last of those completes (`geometry-pinning.md` §1).
     ///
     /// **The single seam a geometry swap may go through**, and the only thing in this process that
-    /// moves `segments_version`. A flush and a compaction are its production callers; until one
-    /// exists, its callers are the tests that prove the drain list works — which is why it is a
-    /// real API and not a test hook, a drain list with no producer being untestable.
+    /// moves `segments_version`. A flush is its production caller.
     ///
     /// **It structurally cannot regress authorisation state.** `overlay`, `buffer` and
     /// `overlay_version` are carried forward *unchanged* from whatever generation is live at the
@@ -762,17 +758,16 @@ impl Engine {
     /// what makes "one publisher" structural rather than a discipline (`write.rs`'s module doc;
     /// `scripts/check-layers.sh` rule 1). It used to swap the pointer here, under a
     /// compare-and-swap — safe against another caller of this method, but not against the
-    /// executor's own unconditional `store`, which could lose the publication and leave the
-    /// **live** generation on the pin drain list, where a later prune evicts projections still in
-    /// use. The window was narrowed by re-reading the identity and never closed. It is closed now:
-    /// there is one publisher and nothing to race. Closes #59.
+    /// executor's own unconditional `store`, which could lose the publication entirely. The window
+    /// was narrowed by re-reading the identity and never closed. It is closed now: there is one
+    /// publisher and nothing to race. Closes #59.
     ///
     /// `prefix`, `segments_version` and `watermark` are the values from the new prefix's own
     /// SEGMENTS manifest; they are taken separately from `bundle` rather than read out of it
     /// because the caller — a flush or a compaction publication — is the thing that decides what
     /// `n` the new manifest carries. `segments_version` must strictly increase; see
-    /// [`GeometryRefused`] and `pins::check_publishable` for why that is a refusal and not a
-    /// warning.
+    /// [`GeometryRefused`] and `crate::geometry::check_publishable` for why that is a refusal and
+    /// not a warning.
     ///
     /// `dict` and `delta_postings` are published with the geometry rather than read out of the
     /// engine, because a flush produces both: it promotes novel descriptors to durable ordinals
@@ -790,7 +785,7 @@ impl Engine {
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
         delta_postings: Vec<Arc<DeltaTier>>,
-    ) -> std::result::Result<Vec<Reclaimed>, PublishGeometryError> {
+    ) -> std::result::Result<(), PublishGeometryError> {
         self.write.publish_geometry(
             prefix,
             segments_version,
@@ -832,51 +827,6 @@ impl Engine {
     /// cannot accidentally take two.
     pub fn generation(&self) -> Arc<Generation> {
         self.generation.load_full()
-    }
-
-    /// One reclaim pass over the pin drain list — remove → verify → drop (lifecycle §2.1).
-    ///
-    /// The lifecycle thread's periodic call, and the cache pruner's other hook, since
-    /// [`Reclaimed::segments_version`] is exactly the row-projection cache key component to prune.
-    ///
-    /// **A periodic caller is required, not optional.** This is the only thing that releases a
-    /// superseded bundle's memory; the TTL bounds availability at resolve and frees nothing. Until
-    /// one exists, memory is released only by the next [`Self::publish_geometry`], so a process
-    /// that publishes once and goes quiescent holds a whole superseded bundle indefinitely — at
-    /// drain depth 1 — *at* `DRAIN_DEPTH_ALARM`, which alarms only above it. [`PinStats::oldest_retired_secs`]
-    /// is the gauge that makes that state visible.
-    pub fn reclaim_pins(&self) -> Vec<Reclaimed> {
-        let reclaimed = self.pins.reclaim();
-        self.prune_reclaimed(&reclaimed);
-        reclaimed
-    }
-
-    /// Prune the row-projection cache for every geometry a reclaim pass released.
-    ///
-    /// **The licence to prune is a [`Reclaimed`] value, not any particular method**, and that is
-    /// the whole of the coupling argument. `Reclaimed`s are produced at three sites — this
-    /// method's caller, [`Self::publish_geometry`]'s drain-depth trim, and the reclaim pass
-    /// `publish_geometry` runs itself — and the safety property is identical at all three: the
-    /// drain entry naming that `segments_version` is gone, so `PinManager::resolve_drained` now
-    /// returns `PinExpired` and no request can produce that key again. Hanging the prune off
-    /// `reclaim_pins` alone would leave the other two routes reclaiming geometries whose
-    /// projections are never freed — and since nothing calls `reclaim_pins` periodically yet
-    /// (see its doc), those are in practice the routes that fire.
-    ///
-    /// **Never from the swap.** Between a swap and the reclaim, the superseded geometry is still
-    /// resolvable from the drain list, so a swap-triggered prune deletes exactly the key an
-    /// outstanding pin is about to ask for. See `RowProjectionCache::prune_generation`.
-    ///
-    /// The window this does *not* close, stated rather than implied: a request that resolved its
-    /// pin before the drain entry was removed can construct that key after this prune and
-    /// re-publish it. That entry is that session's own projection over the geometry it pinned,
-    /// reachable by nobody else, and the byte bound reclaims it. It is a bounded memory effect,
-    /// never a disclosure — removal cannot widen a mask.
-    fn prune_reclaimed(&self, reclaimed: &[Reclaimed]) {
-        for entry in reclaimed {
-            self.row_projection_cache
-                .prune_generation(entry.segments_version);
-        }
     }
 
     /// Drop every cached row projection belonging to `token_id` — the revoke hook.
@@ -1021,9 +971,62 @@ impl Engine {
         self.fragment_cache.evict(key)
     }
 
-    /// The pin drain-list gauges — see [`PinStats`]. Published on `/control/status` as `pins`.
-    pub fn pin_stats(&self) -> PinStats {
-        self.pins.stats()
+    /// `session`'s mask fragment **at `generation`'s watermark** — the one thing on the request
+    /// path that may stand in for `Session::fragment`.
+    ///
+    /// # Why a session's fragment cannot simply be the one it authorised with
+    ///
+    /// A fragment is materialised once per session (I2) and frozen. A flush then publishes a delta
+    /// postings tier and advances the watermark, and `compose`'s rule 4 admits buffered entities at
+    /// or above **the fragment's own** watermark — so an entity that a flush moved out of the
+    /// buffer and into a tier falls between the two: no longer buffered, not yet in this fragment.
+    /// It is invisible to that session until it re-authorises. Not fail-open — the item is missing,
+    /// not wrongly shown — but it is the very property the flush exists to deliver, silently
+    /// undone for exactly the sessions that were open when it happened.
+    ///
+    /// # Why this is a rebuild and not §11.2's patch, stated rather than glossed
+    ///
+    /// Design §11.2 specifies advancing the fragment by OR-ing in the flushed segment's
+    /// contribution for the session's already-satisfied terms — *"a small, monotone patch rather
+    /// than a rebuild"* — and flush §3.4 sets out the four premises under which that patch is
+    /// **equal** to what a rebuild produces. **This is the rebuild.** It is correct for the same
+    /// reason the patch would be — `satisfied` is fixed at authorise and never re-resolved (premise
+    /// 3), so the terms unioned are exactly the terms a rebuild consults — and it is what makes the
+    /// flush observable to a live session today. The incremental form is plan Task 12, with its
+    /// byte-equality property test, and is not built (⊘).
+    ///
+    /// **What that costs, honestly.** One `build_fragment_with_deltas` per *credential* per flush,
+    /// not per session: [`tessera_authz::FragmentCache`] keys on
+    /// `(satisfied, auth_data_hash, dict_len, watermark)`, so every session sharing a credential
+    /// shares the build, and every later request in the same generation is a hit. That is the
+    /// authorise path's own cost, paid again at each tick, against the row projection's *measured*
+    /// 10.7 s at 10⁹, which `RowProjectionCache::get_or_derive` does patch.
+    ///
+    /// **Fail-closed on a busy build**: a concurrent build of the same key yields
+    /// [`EngineError::FragmentBuilding`] (429) rather than a silent fall back to the stale
+    /// fragment. Serving the stale one would be the quiet wrong answer this method exists to
+    /// remove.
+    pub(crate) fn fragment_for(
+        &self,
+        session: &Session,
+        generation: &Generation,
+    ) -> Result<Arc<FrozenFragment>> {
+        if session.fragment.watermark >= generation.watermark {
+            return Ok(Arc::clone(&session.fragment));
+        }
+        self.fragment_cache
+            .get_or_build(
+                &session.satisfied_sorted,
+                session.auth_data_hash,
+                generation.dict.len(),
+                &generation.postings,
+                &generation.delta_postings,
+                generation.watermark,
+            )
+            .map_err(|e| match e {
+                FragmentCacheError::Building => EngineError::FragmentBuilding,
+                FragmentCacheError::Io(io_err) => EngineError::Io(io_err),
+            })
     }
 
     /// The number of cached row-space projection slots currently held (`Building` and `Ready`
@@ -1032,6 +1035,16 @@ impl Engine {
     /// cold, unlike `Engine::viewport`'s path, which populates this cache deliberately.
     pub fn row_projection_cache_len(&self) -> usize {
         self.row_projection_cache.len()
+    }
+
+    /// How many row projections this engine has built from the whole fragment, rather than derived
+    /// from the preceding generation's by unioning the new extents' rows.
+    ///
+    /// The number to watch after a flush: a deployment where this rises once per session per tick
+    /// is paying `Permutation::project` — a *measured* 10.7 s at 10⁹ — on the steady-state path,
+    /// which is the failure flush §9 names. See `RowProjectionCache::get_or_derive`.
+    pub fn full_projection_builds(&self) -> u64 {
+        self.full_projection_builds.load(Ordering::Relaxed)
     }
 
     /// Whether the external-id sidecar has opened any extent (or its locator) yet — exposed for
@@ -1195,7 +1208,6 @@ impl Engine {
         let generation = Arc::clone(&self.generation);
         self.write.start_executor(
             generation,
-            Arc::clone(&self.pins),
             Arc::clone(&self.row_projection_cache),
             queue_bound,
             crate::write::FlushDeps {
@@ -1219,7 +1231,6 @@ impl Engine {
         let generation = Arc::clone(&self.generation);
         self.write.start_executor(
             generation,
-            Arc::clone(&self.pins),
             Arc::clone(&self.row_projection_cache),
             queue_bound,
             crate::write::FlushDeps {

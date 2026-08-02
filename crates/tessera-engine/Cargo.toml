@@ -4,12 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-# **⊘ The flush's publication step, off by default.** Everything a flush does is built --
-# planning, the segment, the tier, the side-manifest, the rebase -- but publishing a second
-# segment into a slice is unserveable until `Engine::viewport` can union tile ranges across
-# segments and spend one tile's k budget over them (§7.2's cap and floor are per tile). Enabling
-# this without that lands visible ingest at the cost of every viewport on the slice.
-flush-publication = []
 default = []
 # Per-stage viewport timing (see `src/timing.rs`). OFF by default and must stay off in anything
 # shipped: `tessera-server` additionally gates header emission on a config flag, and CI asserts a

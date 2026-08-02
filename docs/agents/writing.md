@@ -141,9 +141,9 @@ never warranted.
 **Comments record decisions and evidence, not backlog.** There are essentially no `TODO` or
 `FIXME` markers here, deliberately. Open work is an issue, where it can be found and closed.
 
-**State each rule once, where it belongs.** `crates/tessera-engine/src/pins.rs` states its rule
-under a heading saying so, then annotates each guard with which half it defends. A rule repeated
-in five places is four chances to disagree with yourself.
+**State each rule once, where it belongs.** `crates/tessera-engine/src/geometry.rs` states the
+within-request half of I11 under a heading saying so, and every other site refers to it rather than
+restating it. A rule repeated in five places is four chances to disagree with yourself.
 
 **Prefer stable citations.** `§4`, `contracts §2.5` survive edits. `file.rs:184` does not — it
 drifts on any change above the cited line, and a stale one has already stranded a worker

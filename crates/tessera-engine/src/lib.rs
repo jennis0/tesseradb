@@ -10,7 +10,7 @@ mod cache;
 pub mod cancel;
 pub mod compose;
 mod flush;
-mod pins;
+mod geometry;
 pub mod select;
 pub mod session;
 mod single_flight;
@@ -28,20 +28,14 @@ use tessera_store::Bundle;
 
 pub use cancel::CancelToken;
 pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
-// The pin drain list's public surface. `pins` itself stays private — `PinManager` and
-// `PinnedGeometry` are engine-internal, and `PinnedGeometry` in particular exists to constrain
-// what `viewport.rs` can reach, which a public type would undo. What escapes is only what a
-// caller outside this crate genuinely needs: the reclaim record the cache pruner hooks, the
-// refusal a publisher must handle, the gauges `/control/status` publishes, and the two depths —
-// the one an operator alarms above and the one `tests/pins.rs` asserts the trim against.
-pub use pins::{
-    GeometryRefused, GeometryRefusedReason, PinStats, Reclaimed, DEFAULT_DRAIN_DEPTH_MAX,
-    DRAIN_DEPTH_ALARM,
-};
+// The publication guard's refusal, which a publisher outside this crate must handle.
+// `check_publishable` itself stays private: whether a geometry may be published is this crate's
+// judgement, and a caller that could ask separately could also act on a stale answer.
+pub use geometry::{GeometryRefused, GeometryRefusedReason};
 pub use session::{default_compute_threads, Engine, EngineConfig, EngineError, Session};
-// The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot state
-// machine and its four eviction rules are engine-internal — but the numbers `/control/status`
-// publishes have to cross the crate boundary, exactly as `PinStats` does above.
+// The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
+// state machine and its four eviction rules are engine-internal — but the numbers
+// `/control/status` publishes have to cross the crate boundary.
 pub use single_flight::CacheStats;
 // The fragment tier's gauges, under a distinguishing name because the two are the same shape and a
 // bare second `CacheStats` in one namespace would be a coin toss at every call site.
@@ -141,6 +135,7 @@ pub struct Generation {
 /// **once**, at request start, before acquiring any fragment or cache entry — loading it more
 /// than once within a single request risks composing a fragment built against one generation's
 /// bundle/watermark against an overlay or buffer swapped in from a later one, which is exactly
-/// the kind of cross-generation mismatch `RowProjection`'s cache key (token, slice, pin) and
-/// `FrozenFragment`'s stored watermark both assume cannot happen.
+/// the kind of cross-generation mismatch `RowProjection`'s cache key and `FrozenFragment`'s
+/// stored watermark both assume cannot happen. It is also the whole of I11's within-request rule
+/// — see `crate::geometry`.
 pub type GenerationHandle = ArcSwap<Generation>;

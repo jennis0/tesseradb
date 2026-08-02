@@ -155,7 +155,8 @@ measurement will reasonably conclude the product is slow.
 - **The three retirement rules.** The adapter holds responses, not overlay state, and re-evaluates
   on any view-key change. It never interprets deny semantics.
 - **Pins fix geometry, never authorisation.** The cache key carries overlay version independently of
-  any pin, so a suppression voids cached tiles even under a pinned request.
+  the geometry stamp, so a suppression voids cached tiles whatever stamp the request carried — and
+  the stamp selects no geometry in any case (`geometry-pinning.md` §7).
 - **CDN posture, unchanged from §8.3.** Per-viewer masked tiles are intrinsically CDN-hostile;
   `Cache-Control: private`, view-key-scoped URL segments using a **session nonce and never the bearer
   token** (URLs reach history and proxies), max-age inside the deny-visibility budget.

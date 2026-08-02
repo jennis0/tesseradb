@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use tessera_types::{PinId, TesseraId};
+use tessera_types::{GenerationStamp, TesseraId};
 use tessera_wire::{viewport_ipc, ScalarColumn, ViewportColumns};
 
 use tessera_engine::viewport::ViewportRequest;
@@ -40,26 +40,33 @@ pub fn router(state: Arc<AppState>) -> Router {
     }
 }
 
-/// The wire shape of a pin, both in `POST /v1/viewport`'s request body and the `x-tessera-pin`
-/// response header (JSON either way — the header carries the same shape as a plain string so a
-/// client can round-trip it without inventing its own encoding).
+/// The wire shape of a generation stamp, both in `POST /v1/viewport`'s request body and the
+/// `x-tessera-pin` response header (JSON either way — the header carries the same shape as a plain
+/// string so a client can round-trip it without inventing its own encoding).
+///
+/// **The header keeps its name and loses its meaning** (contracts §3.1, §3.2). It used to select
+/// geometry: presenting a superseded one was a `410 pin-expired`, and the server retained
+/// superseded generations so it could be honoured. It is now a stamp — the client echoes back what
+/// it is holding, the server answers from live geometry regardless, and the only effect is the
+/// `stale` flag on the response (`geometry-pinning.md` §7). The name is kept because renaming a
+/// header is a client-visible break that buys nothing; the meaning change is in the contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PinDto {
     prefix: String,
     segments_version: u64,
 }
 
-impl From<PinDto> for PinId {
+impl From<PinDto> for GenerationStamp {
     fn from(p: PinDto) -> Self {
-        PinId {
+        GenerationStamp {
             prefix: p.prefix,
             segments_version: p.segments_version,
         }
     }
 }
 
-impl From<&PinId> for PinDto {
-    fn from(p: &PinId) -> Self {
+impl From<&GenerationStamp> for PinDto {
+    fn from(p: &GenerationStamp) -> Self {
         PinDto {
             prefix: p.prefix.clone(),
             segments_version: p.segments_version,
@@ -196,14 +203,16 @@ struct ViewportReq {
 }
 
 /// Everything a `spawn_blocking` viewport closure hands back to the async side: the wire bytes
-/// already framed by `viewport_ipc`, the pin to echo in `x-tessera-pin`, and the timing figures
+/// already framed by `viewport_ipc`, the stamp to echo in `x-tessera-pin`, whether the client's own
+/// stamp is stale, and the timing figures
 /// `x-tessera-stage-ns` needs — computed inside the closure since they describe work done there
 /// (`arrow_serialise_ns`) or by the engine call it wraps (`timings`). Response/header
 /// construction is deliberately NOT here: that stays on the reactor, since it neither blocks nor
 /// costs measurable CPU.
 struct ViewportOutcome {
     bytes: Vec<u8>,
-    pin: PinId,
+    stamp: GenerationStamp,
+    stale: bool,
     timings: tessera_engine::StageTimings,
     arrow_serialise_ns: u64,
 }
@@ -218,7 +227,7 @@ fn run_viewport(
     req: ViewportReq,
     cancel: CancelToken,
 ) -> Result<ViewportOutcome, ApiError> {
-    let pin = req.pin.map(PinId::from);
+    let stamp = req.pin.map(GenerationStamp::from);
     // Contracts §3.2's default. It is the deployment's own overplot ceiling rather than a
     // literal, so a client that expresses no preference gets the full budget this deployment will
     // serve and §7.2's proportional window is realised in full — at the old default of 30 against a
@@ -234,7 +243,7 @@ fn run_viewport(
         .viewport(
             session,
             ViewportRequest::new(&req.slice, req.zoom, req.bbox, k)
-                .pin(pin)
+                .stamp(stamp)
                 .underlay_offset(req.underlay_offset)
                 .cancel(Some(cancel)),
         )
@@ -300,7 +309,8 @@ fn run_viewport(
 
     Ok(ViewportOutcome {
         bytes,
-        pin: out.pin,
+        stamp: out.stamp,
+        stale: out.stale,
         timings: out.timings,
         arrow_serialise_ns,
     })
@@ -387,7 +397,7 @@ async fn viewport(
     // wrong-looking.
     cancel_guard.disarm();
 
-    let pin_header = serde_json::to_string(&PinDto::from(&outcome.pin))
+    let pin_header = serde_json::to_string(&PinDto::from(&outcome.stamp))
         .expect("PinDto serialisation cannot fail");
     let server_us = start.elapsed().as_micros().to_string();
 
@@ -395,6 +405,11 @@ async fn viewport(
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
         .header("x-tessera-pin", pin_header)
+        // The staleness signal (`geometry-pinning.md` §7). A header rather than a body field
+        // because the body is Arrow IPC and this is one bit that every client — including one that
+        // only reads counts — should be able to see without decoding a batch. Always present, so a
+        // client never has to distinguish "fresh" from "the server did not say".
+        .header("x-tessera-stale", if outcome.stale { "1" } else { "0" })
         .header("x-tessera-server-us", server_us)
         .header("x-tessera-admission-us", admission_us.to_string());
 
@@ -450,7 +465,7 @@ fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Op
     Some(format!(
         "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         t.generation_resolve_ns,
-        t.pin_resolve_ns,
+        t.stamp_compare_ns,
         t.slice_lookup_ns,
         t.row_projection_ns,
         t.compose_ns,

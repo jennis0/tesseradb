@@ -305,6 +305,101 @@ pub struct SegmentExtent {
 }
 
 impl SegmentExtent {
+    /// Recover a flush or merge segment's extent from the segment itself, at open.
+    ///
+    /// **Why this exists rather than a file.** §2.1 describes an extent as four scalars —
+    /// `{entity_lo, entity_hi, seg_id, row_base}` — which is only a mapping if the segment's rows
+    /// are in entity order. The same section requires every segment to be Morton-sorted, and that
+    /// sort *is* the tile index, so the mapping is an arbitrary permutation of the entity range and
+    /// four scalars cannot express it. Something has to carry it across a restart.
+    ///
+    /// The alternative was to write `rows` beside `morton.u32` (4 bytes × entities in the segment,
+    /// one more file, one more manifest field, a contracts §2.1 change). This construction stores
+    /// **nothing**: `columns.arrow` already carries `tessera_id` at the row, the identity is a
+    /// bijection over 2⁶⁴ ([`tessera_types::IdentityKey`]), and `MANIFEST.json` already carries the
+    /// key — so the mapping is derivable from artefacts that must exist anyway. Ruled on
+    /// 2026-08-02 in favour of adding no artefact.
+    ///
+    /// **The invariant it spends, stated so it is not spent again silently.** Row space above the
+    /// build bound is now recoverable *only* while the identity permutation is invertible at open.
+    /// A future construction that made `tessera_id` one-way — a keyed hash, a key held outside the
+    /// bundle, a per-session blinding — would silently strand every flushed entity's row, exactly
+    /// the failure this replaces. I10 is unaffected: nothing here leaves the engine, and the
+    /// inversion is the same one `Engine::item` already performs per request.
+    ///
+    /// **Cost.** One Feistel inversion per row of each flush segment, at every open, bounded by
+    /// what merge leaves unmerged rather than by the corpus. Deliberately not parallelised: it runs
+    /// once at open, inside a loop that is already mapping and digest-verifying files.
+    pub fn rebuild(
+        seg_id: &str,
+        entity_lo: u64,
+        entity_hi: u64,
+        row_base: u32,
+        tessera_ids: &[u64],
+        key: &tessera_types::IdentityKey,
+        shard_id: u32,
+    ) -> Result<Self> {
+        let malformed = |detail: String| StoreError::MalformedBundle { detail };
+        let span = entity_hi
+            .checked_sub(entity_lo)
+            .and_then(|d| d.checked_add(1))
+            .and_then(|d| usize::try_from(d).ok())
+            .ok_or_else(|| {
+                malformed(format!(
+                    "segment '{seg_id}': entity span {entity_lo}..={entity_hi} is inverted or too \
+                     wide to address"
+                ))
+            })?;
+
+        let mut rows = vec![ROW_ABSENT; span];
+        for (local, &raw) in tessera_ids.iter().enumerate() {
+            let (shard, entity) = key.invert(tessera_types::TesseraId::new(raw));
+            // A wrong shard means this segment was written under a different identity
+            // configuration than the manifest declares — corruption, not a row to skip. Serving
+            // past it would put a row under an entity id that names a different item.
+            if shard != shard_id {
+                return Err(malformed(format!(
+                    "segment '{seg_id}': row {local}'s tessera_id inverts to shard {shard}, but \
+                     the manifest declares shard {shard_id}"
+                )));
+            }
+            let raw_entity = entity.raw();
+            if raw_entity < entity_lo || raw_entity > entity_hi {
+                return Err(malformed(format!(
+                    "segment '{seg_id}': row {local} belongs to entity {raw_entity}, outside the \
+                     descriptor's range {entity_lo}..={entity_hi}"
+                )));
+            }
+            let slot = &mut rows[(raw_entity - entity_lo) as usize];
+            if *slot != ROW_ABSENT {
+                return Err(malformed(format!(
+                    "segment '{seg_id}': entity {raw_entity} is claimed by rows {} and {local} — \
+                     the identity is a bijection, so two rows cannot invert to one entity",
+                    *slot
+                )));
+            }
+            *slot = local as u32;
+        }
+
+        let extent = SegmentExtent {
+            entity_lo,
+            entity_hi,
+            seg_id: seg_id.to_string(),
+            row_base,
+            rows,
+        };
+        // The same check `with_extent` applies to an extent arriving from a flush. Applied here
+        // too rather than left to the caller, so a rebuild that produced a malformed extent says
+        // which segment it was reading rather than surfacing as "does not continue row space".
+        if !extent.is_well_formed() {
+            return Err(malformed(format!(
+                "segment '{seg_id}': the extent rebuilt from its tessera_id column is not a \
+                 bijection onto its own rows"
+            )));
+        }
+        Ok(extent)
+    }
+
     /// How many rows this extent actually owns — the non-absent slots, not the entity span.
     pub fn row_count(&self) -> u32 {
         self.rows.iter().filter(|&&r| r != ROW_ABSENT).count() as u32

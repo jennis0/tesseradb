@@ -300,7 +300,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// **Nothing is lost by not serving the probes here.** `healthz` is a constant and `readyz` is a
 /// bare `StatusCode` with no body (`health.rs`), so all three listeners answered identically —
 /// mounting it three times was three copies of one bit. The richer operator view (posture *string*,
-/// executor counters, WAL appends and fsyncs, pin drain depth, cache stats, ingest admission gauges)
+/// executor counters, WAL appends and fsyncs, cache stats, ingest admission gauges)
 /// is on the bearer-gated `/control/status` and is untouched; the boolean/string split is SA §9's.
 ///
 /// **The one bit that IS lost, written down so it is not rediscovered as a surprise.** An
@@ -1405,10 +1405,11 @@ async fn changes(
 /// `POST /control/flush` (contracts §3.4): **accepted at any time, executed at the next tick.**
 ///
 /// The 202 already means "accepted, not yet done", which is the whole reason this can be deferred
-/// without changing what a caller was promised. Publishing on request instead would move the real
-/// publication period below the one §4's relation 1 validated at startup, and §2.2's depth trim
-/// would then drop pins before their TTL while the depth alarm saturates — the same reason
-/// `flush_max_items` marks the buffer flush-ready rather than publishing.
+/// without changing what a caller was promised. Publishing on request instead would make the real
+/// publication period a function of who calls this rather than of `flush_max_age_secs` — and every
+/// publication rotates the row-projection cache key, so that is the rate at which every live
+/// session pays to bring its projection forward. Same reason `flush_max_items` marks the buffer
+/// flush-ready rather than publishing.
 ///
 /// Idempotent: two requests before one tick are satisfied by that tick together, because what is
 /// recorded is a flag and not a count.
@@ -1446,10 +1447,6 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     // lives inside `write_executor` rather than claiming the top-level `readiness` key the
     // per-partition form will need.
     let executor = state.engine.write_executor_stats();
-    // Lifecycle §2.2's drain list: `drain_depth` above `DRAIN_DEPTH_ALARM` is the operator alarm,
-    // and `oldest_retired_secs` is what distinguishes "deep because busy" from "deep because reclaim
-    // is not running".
-    let pins = state.engine.pin_stats();
     // **`tessera_engine::FragmentCacheStats`, never `tessera_authz::...`** — `check-layers.sh`
     // denies a `tessera-server → tessera-authz` edge (SA §3), and the re-export at
     // `tessera-engine`'s crate root exists precisely so this call site has a nameable type.
@@ -1513,10 +1510,6 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         "overlay": {
             "depth": state.engine.overlay_depth(),
             "soft_limit_alarms": executor.overlay_soft_limit_alarms,
-        },
-        "pins": {
-            "drain_depth": pins.drain_depth,
-            "oldest_retired_secs": pins.oldest_retired_secs,
         },
         // Contracts §3.4's `fragmentation`. Design §11.1 assigns entity ids in term-signature order
         // within one allocation run and nothing repairs the ordering afterwards, so the posting

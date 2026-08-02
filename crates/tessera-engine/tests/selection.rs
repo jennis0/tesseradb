@@ -19,7 +19,9 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
-use tessera_engine::select::{decode_tier, DecodeTier, SelectParams, Selection, Threshold};
+use tessera_engine::select::{
+    decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
+};
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_spatial::{fixed32, morton_of, tiler::sort_batch, Extent, Tile, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
@@ -107,7 +109,7 @@ fn mask_over_with(
     write_postings(&postings_path, &[visible_rows.to_vec()], 32).unwrap();
     let postings = PostingsReader::open(&postings_path, false).unwrap();
 
-    let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32], tessera_authz::FRAGMENT_FORMAT);
+    let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
     let fragment = cache
         .get_or_build(&[TermId::new(0)], [3u8; 32], 0, &postings, &[], bound)
         .unwrap();
@@ -158,11 +160,16 @@ fn tile_of(x: f32, y: f32, depth: u8) -> Tile {
 fn served_ids(seg: &Segment, mask: &EffectiveMask, tile: &Tile, p: &SelectParams) -> Vec<u64> {
     let range = tile_ranges(&seg.data, tile);
     let visible = mask.count_range(range.clone());
-    Selection::of(mask, &seg.data, range, p, visible)
-        .rows
-        .into_iter()
-        .map(|row| seg.id_at(row))
-        .collect()
+    Selection::of(
+        mask,
+        &SelectionParts::new(&[SelectionPart::base(&seg.data, range, visible)]),
+        p,
+        visible,
+    )
+    .rows
+    .into_iter()
+    .map(|row| seg.id_at(row))
+    .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -601,7 +608,16 @@ fn selection_matches_the_definition_over_both_internal_branches() {
                         if vis == 0 {
                             continue;
                         }
-                        let got = Selection::of(&mask, &seg.data, range.clone(), &p, vis);
+                        let got = Selection::of(
+                            &mask,
+                            &SelectionParts::new(&[SelectionPart::base(
+                                &seg.data,
+                                range.clone(),
+                                vis,
+                            )]),
+                            &p,
+                            vis,
+                        );
                         let want = reference_served(&seg, &mask, range, &p);
                         assert_eq!(
                             got.rows, want,
@@ -666,7 +682,12 @@ fn a_saturated_tile_over_the_cap_is_still_capped() {
     let vis = mask.count_range(range.clone());
     assert_eq!(vis, 40);
 
-    let got = Selection::of(&mask, &seg.data, range, &p, vis);
+    let got = Selection::of(
+        &mask,
+        &SelectionParts::new(&[SelectionPart::base(&seg.data, range, vis)]),
+        &p,
+        vis,
+    );
     assert_eq!(got.rows.len(), 10, "the cap must still bind");
 }
 
@@ -686,7 +707,12 @@ fn a_zero_cap_serves_no_points() {
     let vis = mask.count_range(range.clone());
     for threshold in [Threshold::Saturated, Threshold::Cut(1)] {
         let p = params(2, 0, threshold);
-        let got = Selection::of(&mask, &seg.data, range.clone(), &p, vis);
+        let got = Selection::of(
+            &mask,
+            &SelectionParts::new(&[SelectionPart::base(&seg.data, range.clone(), vis)]),
+            &p,
+            vis,
+        );
         assert!(
             got.rows.is_empty(),
             "cap 0 must serve nothing ({threshold:?})"
@@ -731,7 +757,14 @@ fn every_served_row_is_visible() {
             if vis == 0 {
                 continue;
             }
-            for row in Selection::of(&mask, &seg.data, range, &p, vis).rows {
+            for row in Selection::of(
+                &mask,
+                &SelectionParts::new(&[SelectionPart::base(&seg.data, range, vis)]),
+                &p,
+                vis,
+            )
+            .rows
+            {
                 assert!(
                     mask.contains_row(row),
                     "row {row} was served but is not visible (I7)"
@@ -971,7 +1004,16 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
                             if vis == 0 {
                                 continue;
                             }
-                            let got = Selection::of(&mask, &seg.data, range.clone(), &p, vis);
+                            let got = Selection::of(
+                                &mask,
+                                &SelectionParts::new(&[SelectionPart::base(
+                                    &seg.data,
+                                    range.clone(),
+                                    vis,
+                                )]),
+                                &p,
+                                vis,
+                            );
                             let (want_rows, want_visited) =
                                 per_value_selection(&seg, &mask, range.clone(), &p, vis);
                             assert_eq!(

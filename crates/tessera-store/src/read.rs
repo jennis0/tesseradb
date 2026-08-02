@@ -27,7 +27,7 @@ use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 
 use tessera_spatial::Tile;
-use tessera_types::BUNDLE_FORMAT;
+use tessera_types::{IdentityKey, BUNDLE_FORMAT};
 
 use crate::error::{read_to_vec, Result, StoreError};
 use crate::manifest::{CurrentPointer, FileDigest, Honourability, Manifest, SegmentsManifest};
@@ -290,6 +290,16 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
     // settles on.
     verify_files(&prefix_dir, &manifest.files)?;
 
+    // Row space above the build bound is rebuilt from each flush segment's own `tessera_id`
+    // column — see [`SegmentExtent::rebuild`] for why nothing is stored for it and what that
+    // costs. Parsed once here rather than per segment: `validate()` above has already refused a
+    // manifest whose identity configuration this reader cannot honour.
+    let identity_key = IdentityKey::from_hex(&manifest.identity.key).map_err(|source| {
+        StoreError::InvalidIdentity {
+            detail: format!("MANIFEST.json's identity key is unusable: {source}"),
+        }
+    })?;
+
     let mut partitions = HashMap::with_capacity(manifest.partitions.len());
     for partition_desc in &manifest.partitions {
         sanitize_component("partition phash", &partition_desc.phash)?;
@@ -383,6 +393,45 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
                     .row_space
                     .base()
                     .validate_rows(seg_desc.row_count)?;
+            }
+
+            // Every segment after the first is one a flush appended or a merge collapsed, and it
+            // owns row space above the base. Its entity→row mapping is rebuilt here from its own
+            // `tessera_id` column — nothing on disk carries it, deliberately; see
+            // [`SegmentExtent::rebuild`]. `with_extent` then re-checks contiguity and
+            // well-formedness, so a manifest listing segments out of entity order, or one whose
+            // `row_count` disagrees with what the extent actually owns, fails closed here rather
+            // than serving rows under the wrong entity.
+            if !is_new_slice {
+                let row_base = u32::try_from(slice_entry.row_space.total_rows()).map_err(|_| {
+                    StoreError::MalformedBundle {
+                        detail: format!(
+                            "slice '{}' already holds {} rows, so segment '{}' cannot begin \
+                             inside a u32 row space",
+                            seg_desc.slice,
+                            slice_entry.row_space.total_rows(),
+                            seg_desc.seg_id
+                        ),
+                    }
+                })?;
+                let extent = SegmentExtent::rebuild(
+                    &seg_desc.seg_id,
+                    seg_desc.entity_lo,
+                    seg_desc.entity_hi,
+                    row_base,
+                    columns.tessera_id(),
+                    &identity_key,
+                    manifest.identity.shard_id,
+                )?;
+                slice_entry.row_space =
+                    slice_entry.row_space.with_extent(extent).ok_or_else(|| {
+                        StoreError::MalformedBundle {
+                            detail: format!(
+                                "segment '{}' does not continue slice '{}'s row space",
+                                seg_desc.seg_id, seg_desc.slice
+                            ),
+                        }
+                    })?;
             }
 
             slice_entry.segments.push(Arc::new(SegmentData {

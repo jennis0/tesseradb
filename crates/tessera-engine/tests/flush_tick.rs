@@ -8,7 +8,6 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -24,15 +23,10 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     }
 }
 
-fn engine_with_tick(tmp: &tempfile::TempDir, root: &std::path::Path, secs: u64) -> Engine {
-    engine_with(tmp, root, secs, config().pin_ttl_secs)
-}
-
-fn engine_with(
+fn engine_with_tick(
     tmp: &tempfile::TempDir,
     root: &std::path::Path,
     flush_max_age_secs: u64,
-    pin_ttl_secs: u64,
 ) -> Engine {
     let mut engine = Engine::open(
         root,
@@ -41,7 +35,6 @@ fn engine_with(
         tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs,
-            pin_ttl_secs,
             ..config()
         },
     )
@@ -53,58 +46,6 @@ fn engine_with(
 }
 
 use tessera_engine::{Engine, EngineConfig};
-
-/// **Lifecycle §2.1's missing periodic caller, supplied.** Reclaim ran only as a side effect of the
-/// next geometry publication, so a process that published once and went quiescent held a whole
-/// superseded bundle indefinitely — at drain depth 1, which is *at* `DRAIN_DEPTH_ALARM` and so
-/// invisible in every gauge. §2.1 assigns the gap to "whichever stage introduces a periodic
-/// publisher"; the tick is that publisher.
-#[test]
-fn the_tick_reclaims_without_a_further_publication() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    // A one-second TTL against a one-second tick. Not zero: at zero the publication's *own*
-    // reclaim takes the entry before it is ever quiescent, and the test would pass without a tick
-    // existing at all. What is under test is that a **periodic caller** exists — the TTL itself is
-    // `tests/pins.rs`'s subject.
-    let engine = engine_with(&tmp, &root, 1, 1);
-
-    // One publication, then quiescence: the superseded geometry goes on the drain list and, before
-    // the tick existed, stayed there until something else published.
-    {
-        let live = engine.generation();
-        engine
-            .publish_geometry(
-                "v00001".to_string(),
-                live.segments_version + 1,
-                live.watermark,
-                Arc::clone(&live.bundle),
-                Arc::clone(&live.dict),
-                Vec::new(),
-            )
-            .unwrap();
-    }
-    assert_eq!(
-        engine.pin_stats().drain_depth,
-        1,
-        "the entry is retired and not yet past its TTL"
-    );
-    let published = engine.generation().segments_version;
-
-    wait_until("the tick to reclaim the quiescent drain entry", || {
-        engine.pin_stats().drain_depth == 0
-    });
-    assert_eq!(
-        engine.generation().segments_version,
-        published,
-        "and it was reclaimed by the tick, not by a second publication"
-    );
-}
 
 /// The tick fires on its own, with no traffic at all. A cadence that only advanced when something
 /// else woke the executor would make visibility latency a function of load rather than of
@@ -191,10 +132,5 @@ fn an_accepted_deny_moves_no_geometry() {
         after.segments_version, before.segments_version,
         "an overlay publication supersedes no geometry, so it must not rotate the row-projection \
          cache key"
-    );
-    assert_eq!(
-        engine.pin_stats().drain_depth,
-        0,
-        "and it creates no drain entry"
     );
 }

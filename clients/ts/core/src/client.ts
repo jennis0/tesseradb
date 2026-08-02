@@ -115,6 +115,9 @@ export class TesseraClient {
     const body: Record<string, unknown> = {slice: req.slice, zoom: req.zoom, bbox: req.bbox};
     if (req.k !== undefined) body.k = req.k;
     if (req.underlayOffset) body.underlay_offset = req.underlayOffset;
+    // The stamp travels as the parsed object the server sent, under the wire name `pin`. Kept as
+    // an opaque string on this side so a client never has to know its shape.
+    if (req.stamp) body.pin = JSON.parse(req.stamp);
 
     const response = await fetch(`${this.opts.viewerUrl}/v1/viewport`, {
       method: 'POST',
@@ -133,6 +136,7 @@ export class TesseraClient {
         stageNs: stage ? stage.split(',').map(Number) : null
       },
       pin: response.headers.get('x-tessera-pin'),
+      stale: response.headers.get('x-tessera-stale') === '1',
       bytes: bytes.byteLength
     };
   }

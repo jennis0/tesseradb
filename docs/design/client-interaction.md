@@ -176,8 +176,8 @@ handled by rule rather than structure — cross-principal **persistence** (a cac
 outliving a user switch; §10) and cross-principal **style sharing** (§9).
 
 **On staleness** (owner ruling, 2026-07-31). The boundary is **the request, not the
-pixel**. No accepted change may be invisible to the *next* response — lifecycle §2.3,
-"a suppression applies to a pinned request the moment it is accepted", which is the
+pixel**. No accepted change may be invisible to the *next* response — lifecycle §2.4,
+"geometry identity never fixes authorisation state", which is the
 server's behaviour and non-negotiable. What a client has already drawn persists until
 it refreshes, bounded by token lifetime, which I6 already makes the caller's to set.
 **The server never relies on the client to forget.** One corollary the cache must
@@ -275,7 +275,9 @@ single-ordered. §7.2's keyed per-viewer priority prefix is the instance of a sh
 field keeps rediscovering, which is a stronger and more checkable claim than novelty.
 
 **Declarations key on tile identity, not row ranges.** A row range dies at every
-compaction (I11); a Morton prefix is deliberately stable across pins.
+compaction (I11); a Morton prefix is a **permanently** stable address — under decision 0040
+quantisation is slice-scoped index configuration, immutable at runtime, and compaction
+carries it forward byte-for-byte, so not even a re-quantisation moves it.
 
 **What it saves:** the column gather and the wire bytes. Not the `tessera_id` read —
 §7.2's comparator reads the full identity during selection regardless.
@@ -388,8 +390,10 @@ one coherent snapshot. A client holds one cache entry per view key and flips ato
 between them, which is why it is a *key* — something that identifies — rather than a
 *state*, which would invite a reader to assume the camera was included.
 
-Distinct from `x-tessera-pin`, which is row-space geometry and deliberately not
-authorisation state (I11).
+Distinct from `x-tessera-pin`, which names row-space geometry and is deliberately not
+authorisation state (I11). It is also **advisory** since 2026-08-03: it selects no
+geometry and cannot refuse a request, so it can never be the thing that voids a view key
+— it can only report that one has moved.
 
 **The change signal is the one renderer-relevant primitive that is not derivable from
 what the principal may see.** "Something in your view changed" is metadata about corpus
@@ -404,8 +408,8 @@ bounding staleness explicitly. No other access-control system in the survey give
 clients authorisation state at all; the Zanzibar family is the exception and the model.
 
 **The reconcile table** — which signal voids which client state — is the artifact a
-mode-3 integrator most needs, and this document owes it: token expiry, pin drain
-(`410`), overlay version, idset advance (`409`), and key rotation each void a
+mode-3 integrator most needs, and this document owes it: token expiry, the geometry
+staleness signal, overlay version, idset advance (`409`), and key rotation each void a
 different subset of {attribute cache, prefix declarations, held identities, θ
 constants, node handles}. Writing it out is a task for the phase that implements the
 signal; naming it here is what stops five invalidation paths being discovered one at a
@@ -426,15 +430,21 @@ adequate. SSE is the mild favourite because `Last-Event-ID` gives view-key resum
 and it is proxy-friendly; nothing here needs bidirectional push. The field agrees: live
 layers over tiled maps are universally poll-or-invalidate, never per-tile push.
 
-**Scope the signal per session, which makes the register entry smaller rather than
-larger.** A broadcast "the corpus changed" is C15's shape. But the server can intersect
-an accepted change's entities against each live session's mask — one `and_cardinality`,
-machinery that exists — and signal only sessions whose **own view** moved. The signal
-then carries information that session's next §7.1 counts would disclose exactly anyway,
-which is C18's accepted argument, and the entry narrows from *corpus activity rate* to
-*your-view activity rate*. A residual remains — the timing of *not* being signalled
-correlates weakly with others' activity — and still needs the entry, but it is a
-strictly smaller channel than the broadcast design.
+**Scope the signal per session — an efficiency argument, no longer a security one**
+*(owner ruling, 2026-08-02)*. This paragraph used to argue that a broadcast "the corpus
+changed" is C15's shape and that per-session scoping *narrows the leak*. The ruling is
+that **knowing data has been ingested is not a security leak**, so the geometry staleness
+signal ships in its broadcast form (`geometry-pinning.md` §7, §14) and C15 is accepted
+without mitigation.
+
+What survives is the efficiency case, and it is a good one: the server can intersect an
+accepted change's entities against each live session's mask — one `and_cardinality`,
+machinery that exists — and signal only sessions whose **own view** moved, so a client
+whose visible set did not change is not woken and does not refetch. Under continuous
+ingest that is the difference between every session refetching every tick and only the
+affected ones doing so. It is worth building for that reason; it is not required for a
+disclosure reason, and a future reader must not treat the broadcast form as a regression
+to be closed.
 
 **Three client rules, which are the reconcile table's behavioural half.**
 
@@ -467,14 +477,21 @@ them together forces a full re-render for a change whose delta is tiny.
 |---|---|---|
 | **Identity generation** | key rotation, idset advance | **everything** — every held `tessera_id` becomes meaningless and row order changes with it |
 | **Content version** | flush; accepted deny | what is visible — a small delta (below) |
-| **Pin / segment-set version** | compaction | **nothing** |
+| **Segment-set version** | flush *(every tick)*; merge; compaction | **nothing** |
 
-**The pin is invisible to a client, and the draft was wrong to fold it in.** A client
-holds identities, coordinates and scalars; it never sees a row ID. Compaction rewrites
-row IDs and nothing else, so nothing the client holds goes stale. A drained pin still
-returns `410` on an in-flight *pinned* request — but that is request continuity, not
-cache validity, and I10 and I11 are what make the distinction real rather than
-convenient.
+**The geometry stamp is invisible to a client, and the draft was wrong to fold it in.** A
+client holds identities, coordinates and scalars; it never sees a row ID. Compaction
+rewrites row IDs and nothing else, so nothing the client holds goes stale. There is no
+longer even a request-continuity exception: the stamp is advisory, selects no geometry
+and cannot refuse a request (`geometry-pinning.md` §7). I10 and I11 are what make the
+distinction real rather than convenient.
+
+**Two corrections to this row, both from 2026-08-03.** The tier used to be labelled
+"pin / segment-set version" and to advance on **compaction** alone. Flush moves
+`segments_version` at **every tick**, which is orders of magnitude more often, so the tier
+that voids nothing is also the tier that moves most — worth stating plainly, because a
+client wiring invalidation off `x-tessera-pin` would re-render its whole view every tick
+for no reason. Content version is the tier to watch; this one is a freshness label.
 
 **Content version is the tier that matters, and ingest dominates it, not denial**
 *(owner, 2026-08-01: continuous streams of 10²–10⁶ items/hour, or batches of 10²–10⁷ a

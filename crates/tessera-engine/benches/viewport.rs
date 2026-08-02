@@ -123,7 +123,7 @@ fn bench_compose(c: &mut Criterion) {
     let terms: Vec<TermId> = (0..vocab.min(1000)).map(TermId::new).collect();
 
     let cache_tmp = TempDir::new().unwrap();
-    let cache = FragmentCache::new(cache_tmp.path(), [0u8; 32], [1u8; 32], tessera_authz::FRAGMENT_FORMAT);
+    let cache = FragmentCache::new(cache_tmp.path(), [0u8; 32], [1u8; 32]);
     let fragment = cache
         .get_or_build(&terms, [2u8; 32], 0, &postings, &[], ITEM_LIMIT)
         .expect("fragment build should succeed");
@@ -179,9 +179,6 @@ fn bench_viewport(c: &mut Criterion) {
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
             compute_threads: tessera_engine::default_compute_threads(),
-            pin_ttl_secs: 300,
-            pins_per_session_max: 4,
-            drain_depth_max: 4,
             flush_max_age_secs: 90,
             flush_max_items: 100_000,
         },

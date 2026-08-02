@@ -192,9 +192,6 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         compute_threads: config.compute_threads,
         // Lifecycle §2.2's two pin bounds. `Engine::open` hands both to `PinManager::new`, which
         // holds them for the drain list they bound.
-        pin_ttl_secs: config.pin_ttl_secs,
-        pins_per_session_max: config.pins_per_session_max,
-        drain_depth_max: config.drain_depth_max,
         flush_max_age_secs: config.flush_max_age_secs,
         flush_max_items: config.flush_max_items,
     };
