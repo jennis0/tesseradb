@@ -19,10 +19,18 @@
 //! | §3.1 condition | discharged | where |
 //! |---|---|---|
 //! | **verified** (bundle digests) | at `prepare` — the process refuses to start | `open_bundle`'s digest checks → `Engine::open` → [`crate::prepare`] returns `Err` before [`crate::run`] binds a listener |
-//! | **pinned** (a verifying `SEGMENTS-<n>.json` per partition) | at `prepare` — the process refuses to start | `Honourability::Unready` → `StoreError::UnhonourableManifest` → the per-partition loop propagates it out of `open_bundle` |
+//! | **pinned** (a verifying `SEGMENTS-<n>.json` per partition) | at `prepare` — the process refuses to start | a deny-carrying candidate that fails verification → `StoreError::UnverifiedDenyManifest` → the per-partition loop propagates it out of `open_bundle` |
 //! | **plugin loaded** | at `prepare` — the process refuses to start | `Engine::open` loads it |
 //! | **workers ready** | **here** | `Engine::write_executor_posture()` — see [`is_ready`] |
-//! | **fresh** (step-down lag bound) | **not enforced** ⊘ | the *signal* exists — `tessera_store`'s `PartitionData::stepped_down()` — but the configured lag bound does not (contracts §2.3, roadmap O4), so a replica arbitrarily far behind its primary still answers 200 here |
+//! | **fresh** (step-down lag bound) | **here, as a refusal rather than a bound** | `Engine::any_partition_stepped_down()` — see [`readyz`] |
+//!
+//! The freshness row is not the *lag bound* contracts §2.3 describes and roadmap O4 tracks: there
+//! is no configured bound, and none is needed for correctness here. A candidate carrying
+//! deny-disposition state is never stepped past at all (it is `UnverifiedDenyManifest`), so a
+//! step-down can only cost *items*. What makes even that unacceptable is that every node writes:
+//! the ingest buffer is reconstructed from the **served** watermark, so a stepped-down node that
+//! flushed would lose the acked rows between the two watermarks. Hence an unconditional refusal
+//! where a bound would otherwise go.
 //!
 //! **The first three are conditions on a process that started at all**, and they hold only while
 //! nothing re-opens a bundle at runtime. Nothing does: `open_bundle`'s only caller in the serving
@@ -112,7 +120,17 @@ pub(crate) fn is_ready(posture: ExecutorPosture) -> bool {
 }
 
 pub async fn readyz(State(state): State<Arc<AppState>>) -> StatusCode {
-    if is_ready(state.engine.write_executor_posture()) {
+    // A stepped-down partition fails readiness **unconditionally**, and the qualifier a reader
+    // expects — "unless this node is a read-only replica" — deliberately is not here. Every node
+    // today writes, and §7.1 reconstructs the ingest buffer from the *served* watermark: after a
+    // rotation the WAL rows between an older manifest's watermark and the newest one's are gone,
+    // so re-flushing from a stepped-down watermark silently loses acked ingest. Lifecycle §6's
+    // reader/writer distinction is what would make the qualifier meaningful; it is unbuilt.
+    //
+    // Failing closed costs availability on a node whose newest segment files are damaged, which
+    // is the trade SA §9 prescribes.
+    if is_ready(state.engine.write_executor_posture()) && !state.engine.any_partition_stepped_down()
+    {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE

@@ -377,6 +377,30 @@ pub struct Engine {
     pub(crate) serial_fallback_max_rows: AtomicU64,
 }
 
+/// Every deny disposition the bundle's side-manifests carry, as overlay operations.
+///
+/// `deny` is the current *suppression* set and `tombstones` names entities already deleted — the
+/// two deny-disposition fields of contracts §2.3, and the two `HONOURED_STATE` claims this
+/// function discharges. Read across every partition, because the overlay is engine-wide while a
+/// side-manifest is per-partition.
+///
+/// **`Suppress` and `Delete`, never `Unsuppress`.** A manifest carries the suppression set as it
+/// currently stands, so an unsuppressed entity is simply absent from it; inventing an
+/// `Unsuppress` for an absent entity would let an older manifest clear a suppression the WAL
+/// still holds.
+fn initial_deny_of(bundle: &Bundle) -> Vec<(EntityId, ChangeOp)> {
+    let mut out = Vec::new();
+    for partition in bundle.partitions.values() {
+        for entry in &partition.manifest.deny {
+            out.push((EntityId::new(entry.entity_id), ChangeOp::Suppress));
+        }
+        for &entity_id in &partition.manifest.tombstones {
+            out.push((EntityId::new(entity_id), ChangeOp::Delete));
+        }
+    }
+    out
+}
+
 impl Engine {
     /// This engine's resolved configuration.
     ///
@@ -463,10 +487,17 @@ impl Engine {
         // the idempotency index — is rebuilt behind **one** call, and it lives with the type that
         // owns it. Spelling it out here would put write-path reconstruction in the middle of a
         // function whose subject is the bundle.
+        //
+        // The side-manifest's deny state travels with it: contracts §2.3 makes a
+        // `SEGMENTS-<n>.json` complete current state for its partition, and the loader honours
+        // `deny` and `tombstones` (`HONOURED_STATE`), which means acting on them here. A manifest
+        // that opened and whose deny state went nowhere would serve every entity it names.
+        let initial_deny = initial_deny_of(&bundle);
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
             bundle.manifest.entity_id_high_water,
             &dict,
+            &initial_deny,
             |external_id| external_index.resolve(external_id),
         )?;
 
@@ -776,6 +807,28 @@ impl Engine {
         // `Engine::prune_reclaimed`.
         self.prune_reclaimed(&reclaimed);
         Ok(reclaimed)
+    }
+
+    /// Whether any partition of the live bundle is serving an older `SEGMENTS-<n>.json` than the
+    /// newest one present — [`tessera_store::PartitionData::stepped_down`], across the bundle.
+    ///
+    /// **A stepped-down candidate carries no deny state** (`UnverifiedDenyManifest` refuses those
+    /// outright), so what a step-down costs is *items*, not re-exposure. For a read-only replica
+    /// that is fail-safe staleness. For a node that **writes** it is not: the ingest buffer is
+    /// reconstructed as the WAL rows at or above the *served* watermark, so after a rotation the
+    /// rows between an older manifest's watermark and the newest one's are gone, and re-flushing
+    /// from a stepped-down watermark would silently lose them.
+    ///
+    /// Every node today is a writing node — `tessera-server` starts the write executor
+    /// unconditionally — so `readyz` fails on this unconditionally. Lifecycle §6's reader/writer
+    /// distinction is what would make a qualifier meaningful, and it does not exist.
+    pub fn any_partition_stepped_down(&self) -> bool {
+        self.generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .any(|p| p.stepped_down())
     }
 
     /// The live generation.

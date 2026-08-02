@@ -1282,6 +1282,72 @@ async fn readyz_status(server: &TestServer, url: String) -> u16 {
         .as_u16()
 }
 
+/// **A stepped-down partition is not ready, unconditionally** (§8.2).
+///
+/// The node is otherwise perfectly healthy — bundle verified, executor running — and it still
+/// answers 503, because every node writes: §7.1 reconstructs the ingest buffer from the *served*
+/// watermark, so a flush from a stepped-down node loses the acked rows between that watermark and
+/// the newest manifest's. The qualifier a reader expects ("unless this is a read-only replica")
+/// needs lifecycle §6's reader/writer distinction, which does not exist.
+///
+/// The fixture is the mid-sync replica the rule is for: the newest candidate names a file that
+/// has not arrived, carries no deny state, and is therefore legitimately stepped past — the walk
+/// serves the older manifest and the node refuses to call itself ready about it.
+#[tokio::test]
+async fn a_stepped_down_partition_is_not_ready() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    // Copy SEGMENTS-0 to a newer SEGMENTS-1 naming a file that does not exist, so the walk steps
+    // down to SEGMENTS-0 and serves.
+    let partition_dir = bundle_root.join("v00000/partitions/default");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(partition_dir.join("SEGMENTS-0.json")).unwrap())
+            .unwrap();
+    value["segments_version"] = serde_json::json!(1);
+    value["files"]["partitions/default/slices/s0/segments/seg-unsynced/columns.arrow"] =
+        serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
+    std::fs::write(
+        partition_dir.join("SEGMENTS-1.json"),
+        serde_json::to_vec_pretty(&value).unwrap(),
+    )
+    .unwrap();
+
+    let engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        default_engine_config(),
+    )
+    .expect("a candidate with no deny state may be stepped past, so the bundle still opens");
+    assert!(
+        engine.any_partition_stepped_down(),
+        "the fixture must actually step down, or this test asserts nothing"
+    );
+
+    let server = spawn_server_from_engine(engine, 200, generous_test_gate()).await;
+    for url in [server.viewer_url("/readyz"), server.session_url("/readyz")] {
+        assert_eq!(
+            readyz_status(&server, url.clone()).await,
+            503,
+            "a stepped-down node must not report ready on {url}: re-flushing from the served \
+             watermark would lose the acked rows above it"
+        );
+    }
+
+    // Liveness is a different question: the process is up and serving the older manifest.
+    assert_eq!(
+        readyz_status(&server, server.viewer_url("/healthz")).await,
+        200
+    );
+}
+
 /// **The readiness wiring**: `/readyz` reports the write executor's posture, on every listener.
 ///
 /// Driven with `NotStarted` rather than `Dead`, and the reason is a **dependency**, not a race.

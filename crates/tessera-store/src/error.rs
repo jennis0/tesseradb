@@ -70,6 +70,24 @@ pub enum StoreError {
         n: u64,
         fields: Vec<&'static str>,
     },
+    /// A `SEGMENTS-<n>.json` carrying deny-disposition state (contracts §2.3) failed file
+    /// verification. **Unready, never stepped past** — which is the whole of the distinction from
+    /// the ordinary verification failure that continues the candidate walk.
+    ///
+    /// The classification guard cannot catch this one: once `deny` and `tombstones` are honoured
+    /// a deny-carrying manifest is `Honourable`, so it reaches `verify_files` like any other, and
+    /// a `continue` there would step down to an older manifest that re-exposes every entity
+    /// denied since it was written — the fail-open decision 0018 promoted into contract, in
+    /// exactly the damaged-newest case this reader names as most likely.
+    ///
+    /// `detail` is the underlying verification failure, so an operator still learns which file
+    /// went wrong; the posture is not negotiable regardless of which one it was.
+    UnverifiedDenyManifest {
+        partition: String,
+        n: u64,
+        fields: Vec<&'static str>,
+        detail: String,
+    },
     /// A manifest referenced a partition/slice/segment directory structure that doesn't exist
     /// or doesn't match the expected `columns.arrow` / `morton.u32` / `permutation.bin` shape.
     MalformedBundle { detail: String },
@@ -153,6 +171,16 @@ impl fmt::Display for StoreError {
                  not honour ({}); the writer is ahead of this reader — upgrade the reader, or \
                  roll back the writer that published these fields. The partition is unready \
                  until then, deliberately: stepping down past this would undo an accepted deny",
+                fields.join(", ")
+            ),
+            StoreError::UnverifiedDenyManifest {
+                partition,
+                n,
+                fields,
+                detail,
+            } => write!(
+                f,
+                "SEGMENTS-{n}.json for partition '{partition}' carries deny-disposition state                  ({}) and its files did not verify: {detail}. The partition is unready. It is                  NOT stepped past to an older manifest, deliberately: that would re-expose every                  entity denied since the older one was written. Repair or re-sync the files this                  manifest names",
                 fields.join(", ")
             ),
             StoreError::MalformedBundle { detail } => write!(f, "malformed bundle: {detail}"),

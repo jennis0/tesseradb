@@ -367,56 +367,58 @@ fn add_segments_manifest(root: &Path, n: u64, edit: impl FnOnce(&mut serde_json:
 }
 
 // -------------------------------------------------------------------------------------------
-// The honourable-state guard (contracts §2.3's publication rule, SA §9).
+// Honoured deny state, and the refusal to step past it (contracts §2.3, SA §9).
 //
-// `SegmentsManifest` parses `deltas`, `tombstones` and `deny`, and the read path acts on none
-// of them. That is inert only while nothing writes them — the moment something does, a manifest
-// carrying `"tombstones": [17]` would open and serve entity 17. These tests pin the two
-// dispositions apart:
+// `deltas`, `deny` and `tombstones` are all honoured now: a fragment build unions every live
+// tier, and the loader seeds the initial overlay from `deny`/`tombstones`. So a manifest
+// carrying any of them OPENS — which moves the whole guard from classification to verification.
 //
-//   * `deltas` alone is missing data — step down, staleness in the fail-safe direction.
-//   * `tombstones` or `deny` means a deny was ACCEPTED. Stepping down past one silently undoes
-//     every suppression and deletion since the last honourable manifest, indefinitely, and the
-//     freshness gate §2.3 pairs with step-down does not exist. The partition is unready instead.
+// The rule that remains, and that these tests pin, is the one that matters:
 //
-// Each test therefore asserts the *disposition*, not merely "an error happened": a guard that
-// refused everything would pass a test that only checked for `Err`.
+//   * a candidate whose files do not verify and which carries NO deny-disposition state is
+//     stepped past — missing items, staleness in the fail-safe direction, the mid-sync replica's
+//     availability argument;
+//   * a candidate whose files do not verify and which DOES carry deny-disposition state is
+//     UNREADY. Stepping past it serves an older manifest in which every entity denied since is
+//     visible again — indefinitely, since the freshness gate §2.3 pairs with step-down does not
+//     exist.
+//
+// Each test asserts the *disposition*, not merely "an error happened": a guard that refused
+// everything would pass a test that only checked for `Err`.
+//
+// The fixtures withhold a file rather than corrupting a shared one. Corrupting `columns.arrow`
+// fails SEGMENTS-0's verification too, so a stepping-down reader would merely return a different
+// error instead of *serving* — and serving is the failure being guarded against.
 // -------------------------------------------------------------------------------------------
 
+/// Name a file in this manifest's `files` map that does not exist on disk, so verification fails
+/// for this candidate and no other. Any digest will do: the file cannot be opened, so it never
+/// reaches the comparison.
+fn name_a_missing_file(value: &mut serde_json::Value) {
+    value["files"]["partitions/default/slices/main/segments/seg-unsynced/columns.arrow"] =
+        serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
+}
+
 #[test]
-fn a_manifest_carrying_tombstones_does_not_open() {
+fn a_manifest_carrying_tombstones_opens_and_carries_them_forward() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 50);
 
-    // A tombstone names a deleted entity. Nothing in this reader folds it away, so opening
-    // would serve entity 17's row to every viewer authorised for it.
     edit_segments_manifest(dir.path(), |value| {
         value["tombstones"] = serde_json::json!([17]);
     });
 
-    let err = open_bundle(dir.path())
-        .expect_err("a manifest naming a tombstone this build cannot honour must not open");
-    match err {
-        StoreError::UnhonourableManifest {
-            partition,
-            n,
-            fields,
-        } => {
-            // Bundle-root-relative, not the bare phash: this process swaps bundles at runtime,
-            // so an error naming only `default` cannot say which bundle's `default` it means.
-            assert_eq!(partition, "v00000/partitions/default");
-            assert_eq!(n, 0);
-            assert!(
-                fields.contains(&"tombstones"),
-                "the error must name the field that decided the posture, got: {fields:?}"
-            );
-        }
-        other => panic!("expected UnhonourableManifest, got: {other}"),
-    }
+    let bundle = open_bundle(dir.path()).expect("tombstones are honoured, so this opens");
+    assert_eq!(
+        bundle.partitions["default"].manifest.tombstones,
+        vec![17],
+        "the loader must carry the deletion to whoever seeds the overlay from it — an opened \
+         manifest whose tombstones went nowhere serves entity 17"
+    );
 }
 
 #[test]
-fn a_manifest_carrying_a_deny_entry_does_not_open() {
+fn a_manifest_carrying_a_deny_entry_opens_and_carries_it_forward() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 50);
 
@@ -424,65 +426,80 @@ fn a_manifest_carrying_a_deny_entry_does_not_open() {
         value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
     });
 
-    let err = open_bundle(dir.path())
-        .expect_err("a manifest carrying a suppression this build cannot honour must not open");
-    match err {
-        StoreError::UnhonourableManifest { fields, .. } => assert!(
-            fields.contains(&"deny"),
-            "the error must name `deny`, got: {fields:?}"
-        ),
-        other => panic!("expected UnhonourableManifest, got: {other}"),
-    }
+    let bundle = open_bundle(dir.path()).expect("deny is honoured, so this opens");
+    let deny = &bundle.partitions["default"].manifest.deny;
+    assert_eq!(deny.len(), 1);
+    assert_eq!(deny[0].entity_id, 17);
 }
 
-/// **The fail-open this task exists to close.** The obvious implementation — check inside the
-/// candidate loop, step down on failure — fails all three of the deny tests here, but this is
-/// the only one where it *serves data*: the two above assert the typed variant, so a stepping-
-/// down implementation fails them by erring with the wrong variant, while here it returns `Ok`
-/// and hands back the pre-suppression state.
+/// **The fail-open this task exists to close, and the one the honouring change re-opened if the
+/// two halves had been separated.**
 ///
-/// The distinction matters for anyone tempted to weaken those two to a bare `is_err()` on the
-/// grounds that the typing is redundant. It is not: with `is_err()` they would both pass a
-/// stepping-down reader whenever it happened to have nothing to step down *to*, and the suite's
-/// only remaining objection to that reader would be this one test.
+/// With `deny` honoured the classification arm no longer objects to this manifest at all: it is
+/// `Honourable`, goes to `verify_files`, and a `continue` there steps down to a SEGMENTS-0 that
+/// verifies perfectly and in which entity 17 is visible again. Not an error of the wrong type —
+/// an `Ok` that serves the pre-suppression state.
+///
+/// The fixture is the mid-sync replica this is really about: the newest manifest carries an
+/// accepted suppression and names a segment file that has not arrived yet.
 #[test]
-fn an_unhonourable_deny_is_not_stepped_past_to_an_older_manifest() {
+fn a_deny_carrying_candidate_that_fails_verification_is_unready_never_stepped_past() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 50);
 
-    // SEGMENTS-1 is the newest and carries an accepted suppression; SEGMENTS-0 is clean, older,
-    // and verifies perfectly. Serving it is precisely "reconstruct a state in which a suppressed
-    // item is visible" (contracts §2.3).
     add_segments_manifest(dir.path(), 1, |value| {
         value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
+        name_a_missing_file(value);
     });
 
-    let err = open_bundle(dir.path())
-        .expect_err("a deny-carrying manifest must make the partition unready, not step down");
+    let err = open_bundle(dir.path()).expect_err(
+        "a deny-carrying candidate whose files do not verify must make the partition unready",
+    );
     match err {
-        StoreError::UnhonourableManifest { n, fields, .. } => {
+        StoreError::UnverifiedDenyManifest { n, fields, .. } => {
             assert_eq!(
                 n, 1,
-                "the refusal must name the manifest that carried the deny"
+                "the refusal must name the candidate that carried the deny"
             );
             assert!(fields.contains(&"deny"), "got: {fields:?}");
         }
         other => panic!(
-            "expected UnhonourableManifest — stepping down to SEGMENTS-0 here undoes an \
+            "expected UnverifiedDenyManifest — stepping down to SEGMENTS-0 here re-exposes an \
              accepted suppression. Got: {other}"
         ),
+    }
+}
+
+/// The same for a tombstone, which is the other deny-disposition field: a deletion re-exposed is
+/// no better than a suppression re-exposed.
+#[test]
+fn a_tombstone_carrying_candidate_that_fails_verification_is_unready_too() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+
+    add_segments_manifest(dir.path(), 1, |value| {
+        value["tombstones"] = serde_json::json!([17]);
+        name_a_missing_file(value);
+    });
+
+    match open_bundle(dir.path())
+        .expect_err("a tombstone-carrying candidate must not be stepped past")
+    {
+        StoreError::UnverifiedDenyManifest { fields, .. } => {
+            assert!(fields.contains(&"tombstones"), "got: {fields:?}")
+        }
+        other => panic!("expected UnverifiedDenyManifest, got: {other}"),
     }
 }
 
 /// **The shape §2.3 actually publishes, and the one-identifier fail-open.** A side-manifest is
 /// "full current state, not a diff" and `deny` is "the current suppression set", so every
 /// manifest published while any suppression is live carries `deny` **and** whatever `deltas`
-/// exist — `deny` alone, which the two tests above use, is the rarer case.
+/// exist — `deny` alone is the rarer case.
 ///
-/// The reader classifies from a list of carried field names, and over `["deny", "deltas"]` the
-/// difference between `any` and `all` is the difference between refusing and serving the
-/// suppressed entity. `manifest.rs`'s `a_deny_alongside_deltas_is_unready_not_steppable` pins
-/// the classification; this pins that `open_bundle` acts on it, which no unit test can reach.
+/// Over `["deny", "deltas"]` the difference between "carries deny-disposition state" and
+/// "carries only steppable state" is the difference between refusing and serving the suppressed
+/// entity, and `deny_disposition_state`'s filter is the one identifier that decides it.
 #[test]
 fn a_deny_alongside_deltas_is_not_stepped_past_either() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -491,71 +508,28 @@ fn a_deny_alongside_deltas_is_not_stepped_past_either() {
     add_segments_manifest(dir.path(), 1, |value| {
         value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
         value["deltas"] = serde_json::json!([1]);
+        name_a_missing_file(value);
     });
 
-    let err = open_bundle(dir.path()).expect_err(
-        "a manifest carrying a deny *and* deltas is a deny-carrying manifest; stepping down to \
+    match open_bundle(dir.path()).expect_err(
+        "a candidate carrying a deny *and* deltas is a deny-carrying candidate; stepping down to \
          SEGMENTS-0 here serves the suppressed entity",
-    );
-    match err {
-        StoreError::UnhonourableManifest { n, fields, .. } => {
-            assert_eq!(n, 1, "the refusal must name the deny-carrying manifest");
-            assert!(
-                fields.contains(&"deny") && fields.contains(&"deltas"),
-                "both carried fields must be reported, got: {fields:?}"
-            );
-        }
-        other => panic!(
-            "expected UnhonourableManifest — a deny beside a delta is still a deny. Got: {other}"
-        ),
-    }
-}
-
-/// **The ordering the honourable-state check depends on.** The check runs *before*
-/// `verify_files`, and every other arm of that loop verifies bytes before interpreting them —
-/// so a maintainer moving this one into line with the rest is the expected mistake, and this is
-/// the test that objects.
-///
-/// The fixture is the mid-sync replica the ordering exists for: SEGMENTS-1 carries an accepted
-/// suppression and names a segment file that has not arrived yet; SEGMENTS-0 is clean and
-/// verifies perfectly. Reordered, `verify_files` fails on the missing file first, the candidate
-/// steps down, and SEGMENTS-0 **serves the suppressed entity** — not an error of the wrong type,
-/// an `Ok`. That is why the fixture withholds a file rather than corrupting a shared one:
-/// corrupting `columns.arrow` would fail SEGMENTS-0's verification too, and the reordered reader
-/// would merely return the wrong error instead of serving.
-#[test]
-fn a_deny_carrying_manifest_whose_files_are_missing_is_still_refused() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    build_bundle(dir.path(), 50);
-
-    add_segments_manifest(dir.path(), 1, |value| {
-        value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
-        // A second segment, named and digested but not yet synced to this replica. Any digest
-        // will do: the file cannot be opened, so verification fails before it is compared.
-        value["files"]["partitions/default/slices/main/segments/seg1/columns.arrow"] =
-            serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
-    });
-
-    let err = open_bundle(dir.path())
-        .expect_err("a deny-carrying manifest must be refused whether or not its files verify");
-    match err {
-        StoreError::UnhonourableManifest { n, fields, .. } => {
+    ) {
+        StoreError::UnverifiedDenyManifest { n, fields, .. } => {
             assert_eq!(n, 1);
             assert!(fields.contains(&"deny"), "got: {fields:?}");
         }
-        // `NoVerifyingSegmentsManifest` here would mean the ordering has been swapped and the
-        // deny was never looked at; `Ok` would mean the suppressed entity is being served.
         other => panic!(
-            "expected UnhonourableManifest. Verifying files before classifying state steps this \
-             candidate down and serves the pre-suppression state. Got: {other}"
+            "expected UnverifiedDenyManifest — a deny beside a delta is still a deny. Got: {other}"
         ),
     }
 }
 
-/// The step-down's safety rests on **every** intervening candidate being examined and refused —
-/// it is a property of the loop, not of `deltas`. Four manifests deep, the deny two steps down
-/// the walk must still stop it: SEGMENTS-3 and SEGMENTS-2 carry deltas (steppable), SEGMENTS-1
-/// carries a deny, SEGMENTS-0 is clean and would verify.
+/// The step-down's safety rests on **every** intervening candidate being examined — it is a
+/// property of the loop, not of any one field. Four manifests deep, the deny two steps down the
+/// walk must still stop it: SEGMENTS-3 and SEGMENTS-2 fail verification and carry no deny state
+/// (so they are stepped past), SEGMENTS-1 carries a deny and fails verification, SEGMENTS-0 is
+/// clean and would verify.
 ///
 /// A reader that examined only the top candidate, or only the top few, would step past
 /// SEGMENTS-1 unseen and serve SEGMENTS-0 — the same fail-open reintroduced from the other end,
@@ -571,41 +545,40 @@ fn the_walk_refuses_a_deny_it_reaches_only_after_stepping_down() {
     build_bundle(dir.path(), 50);
     add_segments_manifest(dir.path(), 1, |value| {
         value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
+        name_a_missing_file(value);
     });
-    add_segments_manifest(dir.path(), 2, |value| {
-        value["deltas"] = serde_json::json!([1]);
-    });
-    add_segments_manifest(dir.path(), 3, |value| {
-        value["deltas"] = serde_json::json!([1, 2]);
-    });
+    add_segments_manifest(dir.path(), 2, name_a_missing_file);
+    add_segments_manifest(dir.path(), 3, name_a_missing_file);
 
-    let err = open_bundle(dir.path())
-        .expect_err("the deny at n=1 must stop the walk before it reaches the clean SEGMENTS-0");
-    match err {
-        StoreError::UnhonourableManifest { n, fields, .. } => {
+    match open_bundle(dir.path())
+        .expect_err("the deny at n=1 must stop the walk before it reaches the clean SEGMENTS-0")
+    {
+        StoreError::UnverifiedDenyManifest { n, fields, .. } => {
             assert_eq!(
                 n, 1,
                 "the walk must reach and refuse the deny-carrying candidate, not stop at the \
-                 steppable one above it"
+                 steppable ones above it"
             );
             assert!(fields.contains(&"deny"), "got: {fields:?}");
         }
-        other => panic!("expected UnhonourableManifest at n=1, got: {other}"),
+        other => panic!("expected UnverifiedDenyManifest at n=1, got: {other}"),
     }
 }
 
-/// The other half of the split, and the reason it is not a uniform refusal: missing deltas are
-/// staleness in the fail-safe direction — items absent, never items re-exposed — so the
-/// availability argument for a mid-sync replica holds here and only here.
+/// The other half of the split, and the reason it is not a uniform refusal: a candidate carrying
+/// no deny-disposition state can only be missing items — staleness in the fail-safe direction —
+/// so the availability argument for a mid-sync replica holds here and only here.
 #[test]
-fn a_manifest_carrying_only_deltas_steps_down_and_serves() {
+fn a_candidate_with_no_deny_state_steps_down_and_serves() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 50);
     add_segments_manifest(dir.path(), 1, |value| {
         value["deltas"] = serde_json::json!([1]);
+        name_a_missing_file(value);
     });
 
-    let bundle = open_bundle(dir.path()).expect("a deltas-only manifest must step down and serve");
+    let bundle =
+        open_bundle(dir.path()).expect("a candidate with no deny state may be stepped past");
     let partition = bundle.partitions.get("default").expect("default partition");
     assert_eq!(
         partition.manifest.segments_version, 0,
@@ -618,7 +591,7 @@ fn a_manifest_carrying_only_deltas_steps_down_and_serves() {
 
     // The step-down is a *success* return, so the only trace of it is a `warn!` — which nothing
     // can gate on. Contracts §2.3 pairs step-down with a `readyz` freshness gate, and this is the
-    // data that gate is built from.
+    // data that gate is built from; `readyz` fails outright while it is true (§8.2).
     assert_eq!(partition.segments_n, 0, "served SEGMENTS-0");
     assert_eq!(
         partition.highest_candidate_n, 1,
@@ -628,43 +601,34 @@ fn a_manifest_carrying_only_deltas_steps_down_and_serves() {
     assert!(partition.stepped_down());
 }
 
-/// Not "serves the oldest". When every candidate is steppable the walk runs off the end of the
-/// list, which is ordinary candidate exhaustion — `NoVerifyingSegmentsManifest`, not the deny
-/// disposition's `UnhonourableManifest`. (The name says "steppable", not "unready": *unready*
-/// is this reader's word for the deny disposition, and asserting it here would describe the
-/// opposite of what the test does.) It must still carry the reason, so an operator is told what
-/// the reader could not honour rather than left with "nothing verified".
+/// Not "serves the oldest". When no candidate verifies the walk runs off the end of the list,
+/// which is ordinary candidate exhaustion — `NoVerifyingSegmentsManifest`, never the deny
+/// disposition's refusal. It must still carry the reason, so an operator is told what went wrong
+/// rather than left with "nothing verified".
 ///
-/// The reason must be the **highest** candidate's — `SEGMENTS-1`'s two deltas, not
-/// `SEGMENTS-0`'s one — because the newest manifest is the one an operator must fix.
+/// The reason must be the **highest** candidate's, because the newest manifest is the one an
+/// operator must fix.
 #[test]
-fn every_candidate_steppable_exhausts_the_candidate_list() {
+fn every_candidate_failing_verification_exhausts_the_candidate_list() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 50);
-    edit_segments_manifest(dir.path(), |value| {
-        value["deltas"] = serde_json::json!([1]);
-    });
+    edit_segments_manifest(dir.path(), name_a_missing_file);
     add_segments_manifest(dir.path(), 1, |value| {
-        value["deltas"] = serde_json::json!([1, 2]);
+        value["files"]["partitions/default/slices/main/segments/seg-newest/columns.arrow"] =
+            serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
     });
 
-    let err = open_bundle(dir.path())
-        .expect_err("with no honourable candidate the partition must not open");
-    match err {
+    match open_bundle(dir.path())
+        .expect_err("with no verifying candidate the partition must not open")
+    {
         StoreError::NoVerifyingSegmentsManifest {
             highest_candidate_error: Some(reason),
             ..
-        } => {
-            assert!(
-                reason.contains("deltas"),
-                "the reason must name the unhonourable state, got: {reason}"
-            );
-            assert!(
-                reason.contains("SEGMENTS-1.json"),
-                "the reason must be the newest candidate's, not the oldest's, got: {reason}"
-            );
-        }
-        other => panic!("expected NoVerifyingSegmentsManifest naming `deltas`, got: {other}"),
+        } => assert!(
+            reason.contains("seg-newest"),
+            "the reason must be the newest candidate's, not the oldest's, got: {reason}"
+        ),
+        other => panic!("expected NoVerifyingSegmentsManifest, got: {other}"),
     }
 }
 

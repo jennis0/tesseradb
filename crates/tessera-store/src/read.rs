@@ -477,6 +477,23 @@ fn load_verifying_segments_manifest(
                 })
             }
             Err(e) => {
+                // **A candidate carrying deny-disposition state is never stepped past, whether
+                // the objection came from classification or from verification.** The
+                // classification arm above no longer catches this one: `deny` and `tombstones`
+                // are honoured, so such a manifest is `Honourable` and arrives here like any
+                // other. A `continue` would then serve an older manifest that re-exposes every
+                // entity denied since it was written — the fail-open decision 0018 promoted into
+                // contract, reached in exactly the damaged-newest case this reader calls most
+                // likely.
+                let fields = segments_manifest.deny_disposition_state();
+                if !fields.is_empty() {
+                    return Err(StoreError::UnverifiedDenyManifest {
+                        partition: partition_label,
+                        n,
+                        fields,
+                        detail: e.to_string(),
+                    });
+                }
                 highest_candidate_error.get_or_insert_with(|| e.to_string());
                 continue;
             }

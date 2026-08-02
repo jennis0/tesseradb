@@ -1140,10 +1140,18 @@ impl WritePath {
     /// Returns the first generation's `(overlay, buffer)` alongside the write-path state, because
     /// replay produces all four in one pass and the caller needs the first two to build the
     /// `Generation` the executor will then publish through.
+    ///
+    /// `initial_deny` is the side-manifest's own deny state — its `deny` (suppressions) and
+    /// `tombstones` (deleted entities), which contracts §2.3 makes complete current state for the
+    /// partition rather than a diff. It seeds the overlay **before** replay, and WAL replay
+    /// unions on top: where the two differ the WAL is the superset and wins, and dispositions are
+    /// idempotent, so the union is well-defined. Without this seeding the reader honours `deny` in
+    /// name only — the manifest opens and every entity it names is served.
     pub(crate) fn reconstruct(
         wal_path: &Path,
         manifest_high_water: u64,
         dict: &Dict,
+        initial_deny: &[(EntityId, ChangeOp)],
         resolve_from_bundle: impl Fn(&[u8]) -> std::result::Result<Option<EntityId>, StoreError>,
     ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
@@ -1161,8 +1169,17 @@ impl WritePath {
             ))
         })?;
 
-        let (overlay, buffer, established, resolver) =
+        let (mut overlay, buffer, established, resolver) =
             replay(&records, dict, resolve_from_bundle).map_err(EngineError::Overlay)?;
+
+        // Seeded after `replay` rather than before it only because `replay` constructs the
+        // overlay; the *semantics* are seed-then-union, and they are order-independent here
+        // because a disposition is idempotent and neither source can un-set what the other set.
+        // (`Unsuppress` is the one op that clears, and no manifest carries one: `deny` is the
+        // current suppression set, so an unsuppressed entity is simply absent from it.)
+        for (entity, op) in initial_deny {
+            overlay.apply(*entity, *op, None);
+        }
 
         let established_inverse: FxHashMap<EntityId, Vec<u8>> = established
             .iter()
