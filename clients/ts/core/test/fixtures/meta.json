@@ -5,10 +5,10 @@
   "filter_operands": [],
   "idset": 1,
   "quantisation": {
-    "x_max": 18.44,
-    "x_min": -17.18,
-    "y_max": 23.2,
-    "y_min": -21.13
+    "x_max": 65536,
+    "x_min": 0,
+    "y_max": 65536,
+    "y_min": 0
   },
   "selection": {
     "k_max_marks": 500,
