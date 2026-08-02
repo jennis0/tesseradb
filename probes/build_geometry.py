@@ -109,10 +109,21 @@ def interleave16(v):
     return v
 
 
-morton = (interleave16(g[:, 0]) << 1 | interleave16(g[:, 1])).astype(np.uint32)
+# x occupies the EVEN bit positions and y the odd ones — contracts §2.5 and its worked example
+# (x=6, y=3 -> 30). This script had the two axes the other way round until 2026-08-02, so the
+# `morton`, `gx`/`gy`-derived and `row_id` columns of an artifact built before that are a
+# transpose. Nothing read them on any path that could notice: the importer takes this file's
+# `x`/`y` and quantises them itself, and `build_scaled_corpus.py` reads `x`/`y` too.
+#
+# **The shipped `data/geometry.parquet` is NOT regenerated to correct this.** It is the one
+# hashed artifact (see this module's doc): GPU UMAP is not bit-reproducible, so the file is
+# built once and reused by hash, and rebuilding it would change every coordinate rather than
+# just these derived columns. Its `morton`/`row_id` therefore remain transposed and remain
+# unread; its `x`/`y`, which everything actually consumes, were never affected.
+morton = (interleave16(g[:, 0]) | interleave16(g[:, 1]) << 1).astype(np.uint32)
 # Same axis convention as `morton`, so concatenating the two words gives the 64-bit interleave
 # of the two 32-bit coordinates.
-residual = (interleave16(r[:, 0]) << 1 | interleave16(r[:, 1])).astype(np.uint32)
+residual = (interleave16(r[:, 0]) | interleave16(r[:, 1]) << 1).astype(np.uint32)
 order = np.lexsort((np.arange(n), morton))  # entity_id as intra-cell tiebreak
 row_id = np.empty(n, dtype=np.uint32)
 row_id[order] = np.arange(n, dtype=np.uint32)

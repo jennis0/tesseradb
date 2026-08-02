@@ -120,11 +120,19 @@ def quantise32(t):
 
 
 def split_code(qx, qy):
-    """(cell code, sub-cell residual) from a pair of 32-bit fixed-point axes."""
-    m = (interleave16(qx >> np.uint32(16)) << np.uint64(1)
-         | interleave16(qy >> np.uint32(16)))
-    r = (interleave16(qx & np.uint32(0xFFFF)) << np.uint64(1)
-         | interleave16(qy & np.uint32(0xFFFF)))
+    """(cell code, sub-cell residual) from a pair of 32-bit fixed-point axes.
+
+    **x occupies the EVEN bit positions and y the odd ones**, which is contracts §2.5 and its
+    worked example (x=6, y=3 -> 30). Earlier revisions of this script had the two axes the other
+    way round, so every corpus built from them was a transpose of the coordinates it came from.
+    Nothing caught it, for exactly the reason the note above `Q_BITS` gives about the scale
+    factor: the Morton-input build path reads the stored code and never re-quantises, so a
+    self-consistently wrong corpus agrees with itself at every later stage.
+    """
+    m = (interleave16(qx >> np.uint32(16))
+         | interleave16(qy >> np.uint32(16)) << np.uint64(1))
+    r = (interleave16(qx & np.uint32(0xFFFF))
+         | interleave16(qy & np.uint32(0xFFFF)) << np.uint64(1))
     return m, r.astype(np.uint32)
 
 

@@ -71,18 +71,25 @@ the identity extent `[0, 65536)`, under which `cell(v) = v` and the reproduction
 errors under any other extent rather than re-quantising cell indices as though they were
 coordinates. That guard is tested.
 
-The loss is upstream. `build_scaled_corpus.py` reads `["entity_id", "morton"]` from
-`geometry.parquet` — which carries `x`/`y` — and its 64-bit sort key is `morton << 32 | entity_id`,
-so **no sub-cell information survives into any 10⁸ or 10⁹ corpus and none is recoverable from one.**
-Those corpora hold 16 bits per axis and the pipeline is faithful to them.
+The loss was upstream, and is now closed. `build_scaled_corpus.py` used to read
+`["entity_id", "morton"]` from `geometry.parquet` — discarding the sub-cell position before it
+could be carried — so no corpus built before 2026-08-02 holds more than 16 bits per axis and none
+of it is recoverable from one. It now reads `x`/`y`, quantises with the engine's own `fixed32`,
+and emits a `residual` column; **the shipped 10⁹ corpus carries the full 32 bits per axis**, and
+every corpus built from it inherits them.
 
-So on a 360-unit extent the step is **5.5×10⁻³** units for a Morton-sourced corpus against
-**8.4×10⁻⁸** for a coordinate-sourced one (arithmetic, not measured). `geometry.parquet` itself
-takes the `x`/`y` branch and already gets `f32`; only the scaled corpora are grid-resolution.
+So on a 360-unit extent the step is **8.4×10⁻⁸** units where a Morton-sourced corpus gave
+**5.5×10⁻³** (arithmetic, not measured).
 
-Realising the gain at scale therefore means **regenerating the scaled corpora from coordinates**,
-which is probe-script work, not engine work. This design supplies the capacity and the 4 B/row
-saving regardless; it does not by itself make any existing corpus more precise.
+Two things the regeneration cost, both inherent rather than chosen. **Codes are not comparable
+across it**: the generator previously quantised as `round(t × (2¹⁶ − 1))` where the engine floors
+at `2¹⁶`, so about a quarter of points move cell, and every benchmark figure taken against an
+older corpus re-baselines. And the generators had **x and y interleaved the wrong way round**
+against contracts §2.5, so those corpora were a transpose of the coordinates they came from —
+invisible for the same reason the scale factor was, since the Morton-input build path reads the
+stored code and never re-quantises. `data/geometry.parquet` itself is *not* regenerated: it is the
+one hashed artifact, GPU UMAP is not bit-reproducible, and only its unread derived columns were
+affected — the `x`/`y` everything consumes never were.
 
 **Neither wire bounds the result.** The points batch carries the full code, so nothing is clipped
 outbound; and the batch build reads Parquet directly, so `read_f32_column`'s `Float64 → f32`
