@@ -130,7 +130,7 @@ fn bench_compose(c: &mut Criterion) {
 
     let bundle = open_bundle(&bundle_root).expect("bundle should open");
     let slice = &bundle.partitions["default"].slices["s0"];
-    let base = Arc::new(RowProjection::new(&fragment, &slice.permutation));
+    let base = Arc::new(RowProjection::new(&fragment, &slice.row_space));
 
     let satisfied: rustc_hash::FxHashSet<TermId> = terms.iter().copied().collect();
     let overlay = Overlay::new();
@@ -144,7 +144,7 @@ fn bench_compose(c: &mut Criterion) {
                 &overlay,
                 &buffer,
                 Arc::clone(&base),
-                &slice.permutation,
+                &slice.row_space,
             )
         });
     });

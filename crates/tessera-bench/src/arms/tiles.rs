@@ -76,7 +76,7 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
             let fragment = crate::postings::union(&postings, &grant.terms)?;
             let containers = crate::metrics::containers(&fragment);
             let frozen = frozen_fragment(&postings, &grant.terms)?;
-            let projection = Arc::new(RowProjection::new(&frozen, &slice.permutation));
+            let projection = Arc::new(RowProjection::new(&frozen, &slice.row_space));
             let satisfied: rustc_hash::FxHashSet<tessera_types::TermId> =
                 grant.terms.iter().copied().collect();
 
@@ -90,7 +90,7 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
                 &Overlay::new(),
                 &IngestBuffer::new(),
                 Arc::clone(&projection),
-                &slice.permutation,
+                &slice.row_space,
             );
 
             for &zoom in zooms {

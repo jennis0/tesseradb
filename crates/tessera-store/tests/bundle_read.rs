@@ -235,12 +235,12 @@ fn permutation_project_matches_per_entity_row_of_loop() {
     }
     mask.add(10_000); // out of bound: must be dropped, not panic
 
-    let projected = slice.permutation.project(&mask);
+    let projected = slice.row_space.project(&mask);
 
     // Independently recompute the expected row set via `row_of`, one entity at a time.
     let mut expected_rows: Vec<u32> = Vec::new();
     for e in mask.iter() {
-        if let Some(row) = slice.permutation.row_of(EntityId::new(e as u64)) {
+        if let Some(row) = slice.row_space.row_of(EntityId::new(e as u64)) {
             expected_rows.push(row.raw());
         }
     }

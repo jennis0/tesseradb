@@ -21,7 +21,7 @@ use tessera_authz::{write_postings, FragmentCache, FrozenFragment, PostingsReade
 use tessera_engine::compose::{compose, visible_to, EffectiveMask, RowProjection};
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_store::write::write_permutation;
-use tessera_store::Permutation;
+use tessera_store::{Permutation, RowSpace};
 use tessera_types::{EntityId, TermId};
 
 const UNIVERSE: u32 = 10_000;
@@ -48,7 +48,7 @@ const UNSATISFIED_TERM: u32 = 77;
 
 struct Fixture {
     _temp: TempDir,
-    perm: Permutation,
+    perm: RowSpace,
     postings: PostingsReader,
     satisfied: FxHashSet<TermId>,
     base: Arc<RowProjection>,
@@ -76,7 +76,7 @@ fn build_fixture() -> Fixture {
     let perm_path = temp.path().join("permutation.bin");
     let identity: Vec<EntityId> = (0..BOUND).map(EntityId::new).collect();
     write_permutation(&perm_path, &identity, BOUND).unwrap();
-    let perm = Permutation::load(&perm_path).unwrap();
+    let perm = RowSpace::new(Arc::new(Permutation::load(&perm_path).unwrap()), BOUND as u32);
 
     let base = Arc::new(RowProjection::new(&fragment, &perm));
 

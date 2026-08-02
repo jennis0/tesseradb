@@ -447,11 +447,11 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
 
     // ---- permutation is a bijection over the segment's rows ------------------------------
     let slice = &part.slices["s0"];
-    assert_eq!(slice.permutation.bound(), N_ITEMS);
+    assert_eq!(slice.row_space.base().bound(), N_ITEMS);
     let mut rows: BTreeSet<u32> = BTreeSet::new();
     for e in 0..N_ITEMS {
         let row = slice
-            .permutation
+            .row_space
             .row_of(tessera_types::EntityId::new(e))
             .expect("every entity has a row");
         assert!(rows.insert(row.raw()), "row {} assigned twice", row.raw());

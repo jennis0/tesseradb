@@ -261,7 +261,7 @@ pub fn run(
             }
             // Entity space -> row space, once, outside every timed loop (I4's only bridge).
             let entity_mask = crate::postings::union(&postings, &grant.terms)?;
-            let row_mask: Bitmap = slice.permutation.project(&entity_mask);
+            let row_mask: Bitmap = slice.row_space.project(&entity_mask);
             let containers = crate::metrics::containers(&row_mask);
             let run_ratio = crate::metrics::run_ratio(&row_mask, total_rows as u64);
 

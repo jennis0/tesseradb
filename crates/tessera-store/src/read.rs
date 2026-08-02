@@ -31,15 +31,19 @@ use tessera_types::BUNDLE_FORMAT;
 
 use crate::error::{read_to_vec, Result, StoreError};
 use crate::manifest::{CurrentPointer, FileDigest, Honourability, Manifest, SegmentsManifest};
-use crate::permutation::Permutation;
+use crate::permutation::{Permutation, RowSpace};
 
-/// One loaded (partition, slice) pair: the permutation addressing its rows, and every segment
+/// One loaded (partition, slice) pair: the row space addressing its rows, and every segment
 /// in that slice — a build writes exactly one (contracts §2.1's "one segment per
 /// (partition, slice) at build"); the field is a `Vec` because the on-disk shape, and the
 /// engine's tile-lookup interface with it, already generalises to streamed segments.
+///
+/// `row_space` is the built `permutation.bin` plus whatever extents flush has appended — see
+/// [`RowSpace`]. A bundle straight out of `tessera build` carries no extents, so it behaves
+/// exactly as the bare permutation did.
 #[derive(Debug)]
 pub struct SliceData {
-    pub permutation: Permutation,
+    pub row_space: RowSpace,
     pub segments: Vec<SegmentData>,
 }
 
@@ -175,10 +179,16 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
                     );
                     ensure_verified(&perm_rel, &segments_manifest, &manifest.files, &perm_path)?;
                     let permutation = Permutation::load(&perm_path)?;
+                    // The first segment named for a slice is its build segment: `permutation.bin`
+                    // addresses that one's row space, and every later segment arrives as an
+                    // extent above it.
                     slices.insert(
                         seg_desc.slice.clone(),
                         SliceData {
-                            permutation,
+                            row_space: RowSpace::new(
+                                std::sync::Arc::new(permutation),
+                                seg_desc.row_count,
+                            ),
                             segments: Vec::new(),
                         },
                     );
@@ -234,7 +244,10 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
             // a corrupt permutation must never hand out a `RowId` that indexes `columns.arrow`
             // out of range). Only meaningful once, against the one segment a Phase-1 slice has.
             if is_new_slice {
-                slice_entry.permutation.validate_rows(seg_desc.row_count)?;
+                slice_entry
+                    .row_space
+                    .base()
+                    .validate_rows(seg_desc.row_count)?;
             }
 
             slice_entry.segments.push(SegmentData {

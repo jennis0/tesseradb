@@ -686,12 +686,13 @@ pub fn verify(root: &Path) -> Result<VerifyReport> {
             // some entity, or `columns.arrow` holds a row no entity can ever address. Built as
             // a row-indexed array (rather than just a count) so the identity check below can
             // reuse it instead of inverting the permutation a second time.
-            slice.permutation.validate_rows(row_count)?;
+            slice.row_space.base().validate_rows(row_count)?;
             let mut entity_of_row: Vec<Option<u64>> = vec![None; row_count as usize];
             let mut claimed = 0u64;
-            for entity in 0..slice.permutation.bound() {
+            for entity in 0..slice.row_space.base().bound() {
                 if let Some(row) = slice
-                    .permutation
+                    .row_space
+                    .base()
                     .row_of(tessera_types::EntityId::new(entity))
                 {
                     entity_of_row[row.raw() as usize] = Some(entity);

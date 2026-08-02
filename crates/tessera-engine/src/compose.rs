@@ -22,7 +22,7 @@ use rustc_hash::FxHashSet;
 
 use tessera_authz::FrozenFragment;
 use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_store::Permutation;
+use tessera_store::RowSpace;
 use tessera_types::{EntityId, TermId};
 
 /// A cached row-space projection of one frozen fragment, for one `(token, slice, pin)`.
@@ -46,10 +46,10 @@ pub struct RowProjection {
 }
 
 impl RowProjection {
-    /// Project `fragment`'s entity-space bitmap into this segment's row space via `perm`. Do not
-    /// call this on the per-viewport path — see this struct's doc.
-    pub fn new(fragment: &FrozenFragment, perm: &Permutation) -> Self {
-        Self::from_rows(perm.project(&fragment.view()))
+    /// Project `fragment`'s entity-space bitmap into this slice's row space. Do not call this on
+    /// the per-viewport path — see this struct's doc.
+    pub fn new(fragment: &FrozenFragment, rows: &RowSpace) -> Self {
+        Self::from_rows(rows.project(&fragment.view()))
     }
 
     /// Build directly from an already-projected row-space bitmap (e.g. in tests, or when a
@@ -342,15 +342,15 @@ fn verdict(
 /// was built against — a buffered entity below it would mean a bundle/WAL inconsistency and is
 /// excluded from `L` defensively, even though nothing actually produces one). `satisfied`
 /// is the viewer's granted term set (already resolved to `TermId`s by the auth plugin path).
-/// `base` is the cached row-space projection (see [`RowProjection`]'s doc); `perm` is used only
-/// for per-entity `row_of` lookups (O(1)-ish, not the O(bound) `project` cost).
+/// `base` is the cached row-space projection (see [`RowProjection`]'s doc); `row_space` is used
+/// only for per-entity `row_of` lookups (O(log k), not the O(bound) `project` cost).
 pub fn compose(
     fragment: &FrozenFragment,
     satisfied: &FxHashSet<TermId>,
     overlay: &Overlay,
     buffer: &IngestBuffer,
     base: Arc<RowProjection>,
-    perm: &Permutation,
+    row_space: &RowSpace,
 ) -> EffectiveMask {
     let watermark = fragment.watermark;
 
@@ -365,7 +365,7 @@ pub fn compose(
     // `minus` rather than a special case.
     for (&entity, _) in overlay.iter() {
         if let Some(pass) = verdict(overlay, buffer, satisfied, watermark, entity) {
-            if let Some(row) = perm.row_of(entity) {
+            if let Some(row) = row_space.row_of(entity) {
                 if pass {
                     pass_rows.push(row.raw());
                 } else {
@@ -388,7 +388,7 @@ pub fn compose(
             continue;
         }
         if let Some(pass) = verdict(overlay, buffer, satisfied, watermark, entity) {
-            if let Some(row) = perm.row_of(entity) {
+            if let Some(row) = row_space.row_of(entity) {
                 if pass {
                     pass_rows.push(row.raw());
                 } else {

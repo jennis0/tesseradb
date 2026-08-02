@@ -363,7 +363,7 @@ impl Engine {
             for slice_data in partition.slices.values() {
                 // The permutation is the only entity→row bridge (I4, §5.1) — an O(1)
                 // bounds-checked slot read, not a scan.
-                let Some(row) = slice_data.permutation.row_of(entity) else {
+                let Some(row) = slice_data.row_space.row_of(entity) else {
                     continue;
                 };
                 // There is exactly one segment per (partition, slice) — the same
@@ -521,7 +521,7 @@ impl Engine {
                 // not the whole `get_or_build`, keeps the single-flight map lock's O(1) hold
                 // time (D-G) unaffected by the pool boundary.
                 self.pool
-                    .install(|| RowProjection::new(&session.fragment, &slice_data.permutation))
+                    .install(|| RowProjection::new(&session.fragment, &slice_data.row_space))
             })
             .map_err(|_busy| EngineError::ProjectionBuilding)?;
         probe.lap(|t| &mut t.row_projection_ns);
@@ -538,7 +538,7 @@ impl Engine {
             &generation.overlay,
             &generation.buffer,
             base,
-            &slice_data.permutation,
+            &slice_data.row_space,
         );
         probe.lap(|t| &mut t.compose_ns);
 

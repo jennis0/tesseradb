@@ -2,9 +2,25 @@
 //! Backed by `permutation.bin` (R4): `"TSPM"` ‖ `u16 version` ‖ `u16 reserved` ‖ `u64 bound` ‖
 //! `bound` little-endian `u32` slots, sentinel `0xFFFF_FFFF` for an entity never assigned a row
 //! in this segment.
+//!
+//! ## Row space is that file plus an ordered extent list
+//!
+//! A build writes one segment per (partition, slice) and one `permutation.bin` covering it. A
+//! flush appends a segment beside it, and [`RowSpace`] is what makes the pair addressable as one
+//! row space: the base file below the build bound, an ordered list of [`SegmentExtent`]s above it.
+//!
+//! **The dispatch lives here rather than in the engine, and that is I4 rather than tidiness.**
+//! The claim this module makes about itself — that it is the only legal EntityId→RowId path — is
+//! falsified by an engine that learns to select an extent and index a segment. Every caller still
+//! sees `row_of` and `project`; which segment answered is this module's business.
+//!
+//! Two bounds hold by construction and are checked at the one place an extent enters
+//! ([`RowSpace::with_extent`]): total rows per slice stay under 2³², and the extent list is
+//! bounded by the live segment count, which the merge policy bounds.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use memmap2::Mmap;
 use rayon::prelude::*;
@@ -261,5 +277,273 @@ impl Permutation {
     /// The path this permutation was loaded from (for diagnostics only).
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+/// One flush or merge segment's slice of row space: the entity range it covers, and where in
+/// row space its rows live.
+///
+/// `rows` is **dense over `[entity_lo, entity_hi]`** and holds each entity's row *relative to*
+/// `row_base`, or [`ROW_ABSENT`] for an entity the segment never got a row for — a
+/// deleted-at-flush entity, whose ID stays burned (I9) while no row is created for it. Dense
+/// rather than sparse because the range is contiguous by construction: entity IDs are issued
+/// monotonically from the high-water, so a flush segment covers a contiguous ascending range
+/// (§2.1), and one `u32` per entity is smaller than any keyed form over the same span.
+///
+/// It is not a `permutation.bin`. That file's length is the *bundle's* whole entity space, which
+/// is the wrong shape for a segment covering a few thousand ids at the top of it; an extent's rows
+/// live in the side-manifest's file set instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentExtent {
+    pub entity_lo: u64,
+    /// Inclusive.
+    pub entity_hi: u64,
+    pub seg_id: String,
+    pub row_base: u32,
+    /// `rows[e - entity_lo]`, relative to `row_base`; [`ROW_ABSENT`] where the entity has no row.
+    pub rows: Vec<u32>,
+}
+
+impl SegmentExtent {
+    /// How many rows this extent actually owns — the non-absent slots, not the entity span.
+    pub fn row_count(&self) -> u32 {
+        self.rows.iter().filter(|&&r| r != ROW_ABSENT).count() as u32
+    }
+
+    /// Whether this extent is internally well-formed: its `rows` cover its entity span exactly,
+    /// and the non-absent slots are a bijection onto `[0, row_count)`.
+    ///
+    /// The same property [`Permutation::validate_rows`] enforces for the base, and for the same
+    /// reason: a slot outside the range, or two entities aliased onto one row, would let `row_of`
+    /// hand out a `RowId` that indexes the segment's `columns.arrow` out of bounds (I4/I11).
+    fn is_well_formed(&self) -> bool {
+        if self.entity_hi < self.entity_lo {
+            return false;
+        }
+        let Some(span) = self
+            .entity_hi
+            .checked_sub(self.entity_lo)
+            .and_then(|d| d.checked_add(1))
+            .and_then(|d| usize::try_from(d).ok())
+        else {
+            return false;
+        };
+        if self.rows.len() != span {
+            return false;
+        }
+        let count = self.row_count();
+        let mut seen = vec![false; count as usize];
+        for &row in &self.rows {
+            if row == ROW_ABSENT {
+                continue;
+            }
+            if row >= count || seen[row as usize] {
+                return false;
+            }
+            seen[row as usize] = true;
+        }
+        true
+    }
+
+    /// This extent's contribution to a projection: the rows of every entity of `mask` that falls
+    /// inside it. Nothing else in `mask` can be answered here, so nothing else is looked at.
+    fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
+        let mut rows: Vec<u32> = Vec::new();
+        // `entity_hi` is inclusive and the range end is exclusive; both ends are already inside
+        // `u32` because a `mask` is entity-space and entity ids are capped at `u32::MAX` (I9).
+        let lo = u32::try_from(self.entity_lo).unwrap_or(u32::MAX);
+        let hi = u32::try_from(self.entity_hi).unwrap_or(u32::MAX);
+        for entity in mask.iter() {
+            if entity < lo {
+                continue;
+            }
+            if entity > hi {
+                break;
+            }
+            let slot = self.rows[(entity - lo) as usize];
+            if slot != ROW_ABSENT {
+                rows.push(self.row_base + slot);
+            }
+        }
+        croaring::Bitmap::of(&rows)
+    }
+
+    fn row_of(&self, entity: u64) -> Option<RowId> {
+        if entity < self.entity_lo || entity > self.entity_hi {
+            return None;
+        }
+        let slot = self.rows[(entity - self.entity_lo) as usize];
+        (slot != ROW_ABSENT).then(|| RowId::new(self.row_base + slot))
+    }
+}
+
+/// One slice's whole entity→row mapping: the built base permutation, plus the extents flush has
+/// appended and merge has collapsed since.
+///
+/// **Constructed incrementally, never rebuilt.** [`Self::with_extent`] and [`Self::collapsing`]
+/// return a new value sharing the base by `Arc`, because re-opening it would re-pay
+/// `Permutation::load`'s `O(bound)` `validate_rows` — more than the flush that prompted it.
+///
+/// The extent list is ordered, ascending and disjoint, and each extent begins exactly where row
+/// space currently ends. That is what makes `total_rows` a running sum rather than a scan, and it
+/// is what a merge preserves: a merge emits exactly as many rows as it consumed, so no later
+/// extent's `row_base` ever moves.
+#[derive(Debug, Clone)]
+pub struct RowSpace {
+    base: Arc<Permutation>,
+    /// The build segment's row count — the base owns `[0, base_rows)`. Not derivable from the
+    /// permutation, whose `bound` is an entity-space width and may exceed its row count.
+    base_rows: u32,
+    /// Ordered, ascending, disjoint.
+    extents: Vec<SegmentExtent>,
+    /// `base_rows` plus every extent's `row_count`, maintained rather than recomputed.
+    total_rows: u64,
+}
+
+impl RowSpace {
+    pub fn new(base: Arc<Permutation>, base_rows: u32) -> Self {
+        RowSpace {
+            base,
+            base_rows,
+            extents: Vec::new(),
+            total_rows: base_rows as u64,
+        }
+    }
+
+    /// This row space plus one more segment, sharing the base.
+    ///
+    /// `None` if `extent` is malformed, does not begin strictly above the last extent's
+    /// `entity_hi`, does not begin at or above the base's bound, or does not continue row space
+    /// exactly (`row_base == total_rows()`). Every one of those is corruption rather than a state
+    /// to tolerate: a gap or an overlap makes some other segment's rows unreachable or aliased.
+    pub fn with_extent(&self, extent: SegmentExtent) -> Option<Self> {
+        if !extent.is_well_formed() {
+            return None;
+        }
+        let entity_floor = match self.extents.last() {
+            Some(last) => last.entity_hi + 1,
+            None => self.base.bound(),
+        };
+        if extent.entity_lo < entity_floor {
+            return None;
+        }
+        if u64::from(extent.row_base) != self.total_rows {
+            return None;
+        }
+        let total_rows = self.total_rows + u64::from(extent.row_count());
+        // Row ids are `u32` (bundle_format 1), so a slice that would cross 2^32 rows must fail
+        // here rather than at the first `row_base + slot` that wraps.
+        if total_rows > u64::from(u32::MAX) {
+            return None;
+        }
+        let mut extents = self.extents.clone();
+        extents.push(extent);
+        Some(RowSpace {
+            base: Arc::clone(&self.base),
+            base_rows: self.base_rows,
+            extents,
+            total_rows,
+        })
+    }
+
+    /// This row space with the adjacent run `seg_ids` replaced by the single extent `merged`.
+    ///
+    /// `None` if any input `seg_id` is absent from the current generation — which is how a merge
+    /// planned against a superseded generation is discarded rather than published. It is ABA-safe
+    /// because `seg_id`s are never reused, across merges or prefixes (contracts §2.1), so a
+    /// present `seg_id` is the same segment the merge consumed.
+    ///
+    /// Also `None` unless the inputs form a *contiguous run* and `merged` covers exactly their
+    /// entity range at exactly their `row_base` and row count. A merge is row-count preserving, so
+    /// anything else would move a later extent's rows.
+    pub fn collapsing(&self, seg_ids: &[String], merged: SegmentExtent) -> Option<Self> {
+        if seg_ids.is_empty() || !merged.is_well_formed() {
+            return None;
+        }
+        let start = self
+            .extents
+            .iter()
+            .position(|e| e.seg_id == seg_ids[0])
+            .filter(|&i| i + seg_ids.len() <= self.extents.len())?;
+        let run = &self.extents[start..start + seg_ids.len()];
+        if run.iter().zip(seg_ids).any(|(e, id)| &e.seg_id != id) {
+            return None;
+        }
+        let consumed_rows: u32 = run.iter().map(SegmentExtent::row_count).sum();
+        if merged.entity_lo != run[0].entity_lo
+            || merged.entity_hi != run[run.len() - 1].entity_hi
+            || merged.row_base != run[0].row_base
+            || merged.row_count() != consumed_rows
+        {
+            return None;
+        }
+        let mut extents = Vec::with_capacity(self.extents.len() - seg_ids.len() + 1);
+        extents.extend_from_slice(&self.extents[..start]);
+        extents.push(merged);
+        extents.extend_from_slice(&self.extents[start + seg_ids.len()..]);
+        Some(RowSpace {
+            base: Arc::clone(&self.base),
+            base_rows: self.base_rows,
+            extents,
+            // Row-count preserving, by the check above.
+            total_rows: self.total_rows,
+        })
+    }
+
+    /// Row ID currently occupied by `e`, or `None` if it has none — the base lookup below the
+    /// build bound, otherwise a binary search over the extent list, `O(log k)`.
+    pub fn row_of(&self, e: EntityId) -> Option<RowId> {
+        if e.raw() < self.base.bound() {
+            return self.base.row_of(e);
+        }
+        let raw = e.raw();
+        let i = self
+            .extents
+            .partition_point(|extent| extent.entity_lo <= raw)
+            .checked_sub(1)?;
+        self.extents[i].row_of(raw)
+    }
+
+    /// Project an entity-space bitmap into this slice's row space: the base projection unioned
+    /// with each extent's own. The parts are disjoint — an extent's rows lie at or above
+    /// `row_base`, which is where every earlier part ended — so the union is exact rather than
+    /// merely a superset, and that is what lets a flush patch a cached projection instead of
+    /// rebuilding it.
+    ///
+    /// Inherits [`Permutation::project`]'s cost note in full: never call this on a per-viewport
+    /// path.
+    pub fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
+        let mut rows = self.base.project(mask);
+        rows.or_inplace(&self.project_extents_from(mask, 0));
+        rows
+    }
+
+    /// The rows contributed by the extents at or after `from` — the only part a flush recomputes.
+    pub fn project_extents_from(&self, mask: &croaring::Bitmap, from: usize) -> croaring::Bitmap {
+        let mut rows = croaring::Bitmap::new();
+        for extent in &self.extents[from.min(self.extents.len())..] {
+            rows.or_inplace(&extent.project(mask));
+        }
+        rows
+    }
+
+    pub fn extent_count(&self) -> usize {
+        self.extents.len()
+    }
+
+    pub fn extents(&self) -> &[SegmentExtent] {
+        &self.extents
+    }
+
+    /// Every row this slice holds, across the base and every extent.
+    pub fn total_rows(&self) -> u64 {
+        self.total_rows
+    }
+
+    /// The base permutation, for the callers that legitimately need the built segment alone —
+    /// `tessera build`'s own verification, and the sharing assertion incremental generation
+    /// construction rests on.
+    pub fn base(&self) -> &Arc<Permutation> {
+        &self.base
     }
 }

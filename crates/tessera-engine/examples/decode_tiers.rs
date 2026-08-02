@@ -38,7 +38,7 @@ use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::write::write_permutation;
-use tessera_store::Permutation;
+use tessera_store::{Permutation, RowSpace};
 use tessera_types::{EntityId, TermId};
 
 const ROWS: u32 = 1 << 20;
@@ -349,7 +349,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
     let perm_path = temp.path().join("permutation.bin");
     let identity: Vec<EntityId> = (0..bound).map(EntityId::new).collect();
     write_permutation(&perm_path, &identity, bound).unwrap();
-    let perm = Permutation::load(&perm_path).unwrap();
+    let perm = RowSpace::new(std::sync::Arc::new(Permutation::load(&perm_path).unwrap()), bound as u32);
 
     let base = Arc::new(RowProjection::new(&fragment, &perm));
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
