@@ -1,9 +1,9 @@
 # Flush and Merge — Design
 
-**Status:** Draft r2 — r1 was independently reviewed (verdict: needs-rework; the
-publication/rebase/one-cadence architecture survived, the WAL's reclaimability did not). All
-eighteen findings are closed or escalated below; see Appendix R. Not yet normative — `docs/design/`
-wins until this is folded in.
+**Status:** Draft r3 — r1 was independently reviewed (verdict: needs-rework; the
+publication/rebase/one-cadence architecture survived, the WAL's reclaimability did not); r2 closed
+all eighteen findings; r3 adds mask staleness (§3.3). **§3.3 and every r2 section have had no
+independent review.** Not yet normative — `docs/design/` wins until this is folded in.
 
 **Owns:** the row-space segment lifecycle. Flush turns WAL-durable buffered items into a published
 segment, which is what makes an ingested item visible at all; merge bounds the segment and
@@ -161,7 +161,7 @@ a slice carries an ordered list of extents, each `{entity_lo, entity_hi, seg_id,
 - **`row_of(e)`** — the base lookup below `W_build`, otherwise a binary search over a short ordered
   list. O(log k).
 - **`project(mask)`** — the base projection unioned with a per-extent projection. Only the extent
-  part is recomputed on a flush, which is what makes §3.3's patch cheap.
+  part is recomputed on a flush, which is what makes §3.4's patch cheap.
 - **tile lookup** — unchanged per segment. Every flush segment is internally Morton-sorted against
   the *same* global `quantisation` (contracts §2.5), so a tile still resolves to one contiguous range
   per segment through the existing binary search, and the engine unions across segments.
@@ -200,7 +200,7 @@ make conditional on a document count.
 
 Per segment: `morton.u32`, `columns.arrow`, a **sparse delta postings file** (term → entities, only
 for terms present in the flushed set), a `dict_extents` entry (§3.2), an `external_id_extents` entry
-**and a locator extent** giving the entity→external_id direction (§3.5).
+**and a locator extent** giving the entity→external_id direction (§3.6).
 
 Every one is listed in the new `SEGMENTS-<n+1>.json`'s `files` map — which is exactly where contracts
 §2.2/§2.3 put files that appeared after build time. **Flush and merge never touch `MANIFEST.json` or
@@ -236,9 +236,82 @@ flush — touching authorise, the write path and the resolver. §13 lists the si
 - An item still buffered under an old extension id for an already-promoted descriptor stays
   invisible until *its own* flush, even to a viewer holding the term.
 
-The first of these is also what makes §3.3's equality hold, and §3.3 relies on it explicitly.
+The first of these is also what makes §3.4's equality hold, and §3.4 relies on it explicitly.
 
-### 3.3 The patch equals a rebuild — the load-bearing claim
+### 3.3 Mask staleness is a session-invalidation cause, not a new signal
+
+§3.2's first consequence — a promoted descriptor is satisfiable only by sessions authorised after
+its flush — leaves an older session permanently under-seeing with no way to find out. **The remedy
+adds no new mechanism and no new wire surface: staleness becomes a third cause of session
+invalidation, expressed through the expiry machinery that already exists.**
+
+**The condition is already computed and thrown away.** `Session::satisfied` is built as
+`auth_terms.filter_map(|d| dict.lookup(d))` over the plugin's granted descriptors, over a module
+whose own doc records the design: *"an unknown descriptor is simply unsatisfied, never an error"*.
+The descriptors that resolved to `None` are precisely the session's exposure to promotion.
+
+**The condition is two integers, and retains nothing new.** A session records `unresolved_count`
+(how many granted descriptors the dictionary did not know) and `dict_len_at_authorise`. It is stale
+iff:
+
+```
+unresolved_count > 0  &&  current dict length > dict_len_at_authorise
+```
+
+`Dict` is generation-scoped under §3.2, so the current length is `generation.dict.len()` — monotone
+across flushes, and read from the generation the request already loaded once at its start
+(lifecycle §1.1's ordering invariant). Two loads and a branch. **Decision 0020 is untouched: a count
+and an integer are not authorisation data.**
+
+**The effect reuses `Session::expires_at`.** A stale session is treated as expired, so the next
+request receives the ordinary expired-token response and the client re-authorises — behaviour every
+client must already implement. Three properties follow, and each is why this shape is better than a
+new staleness flag:
+
+- **No new wire field.** `expires_at` is already returned at authorise and already published.
+- **Early invalidation is already precedented and already contractual.** Decision 0025 makes a key
+  rotation a session-invalidation event, so `expires_at` is an upper bound on validity rather than a
+  guarantee of it, and a client that assumed otherwise was already wrong.
+- **The remedy is structurally a *new session*, never a re-resolution in place.** Re-resolving
+  `satisfied` inside a live session would break §3.4's premise 3 and with it the
+  patch-equals-rebuild equality. Expressing staleness as expiry makes that impossible rather than
+  forbidden.
+
+**Evaluated lazily at request time, never swept.** The check is made where expiry is already
+checked; nothing walks the session registry when a flush promotes a term. That keeps the executor
+free of an O(sessions) publication step and is consistent with decision 0035 — the session sweep
+runs on growth, not on a timer, and this adds neither.
+
+Invalidation is **immediate** rather than graced. The cost is a burst of re-authorisations at a
+promoting flush, bounded by how rare promotion is: a novel *descriptor* is rare in a way a novel
+*item* is not.
+
+**Precise where it matters, over-reporting where it does not.** A session with no unresolved
+descriptors is *never* invalidated — the common case, and the one that must not regress. A session
+with one is invalidated whenever any term is promoted, not only its own. The asymmetry is the right
+way round: the false direction costs a needless re-authorisation. The refinement available later
+without a wire change is to compare digests of the unresolved descriptors against digests of the
+promoted ones; noted rather than built, because it retains more than a count does, and because the
+coarse form leaks **less** (below).
+
+**Two rules that keep this from becoming something it must not be:**
+
+- **It moves in one direction only, and nothing may ever be wired to make a revocation take effect
+  through it.** A stale session sees *fewer* items than its principal is entitled to — fail-closed.
+  Grant changes are not covered here and must not be made to look as though they are; decision 0025
+  governs rotation, and a future reader must not read this as a general "the mask changed" channel.
+- **It needs a leak-register row.** An invalidation tells a viewer that *some* descriptor was
+  interned since they authorised — weak corpus-level inference, but not nothing (decision 0024
+  scopes the register to viewer inference). The coarse form leaks strictly less than the digest
+  refinement would: coarse says "a term appeared", precise would confirm that *their specific
+  descriptor* now exists. Cheaper and less disclosive is an unusual pairing, and is the reason to
+  prefer it.
+
+**Compaction inherits one obligation:** dictionary length is the monotone counter this rests on, so
+a compaction that renumbers the dictionary must not reduce it, or must introduce a counter that
+never decreases.
+
+### 3.4 The patch equals a rebuild — the load-bearing claim
 
 §11.2 specifies that flush advances `W` by OR-ing in the flushed segment's contribution for the
 token's already-known satisfied terms — "a small, monotone patch rather than a rebuild". SA §6.4
@@ -264,7 +337,7 @@ argument carries the row projection: the new extent's rows are disjoint from eve
 Without the equality the alternative is rebuilding both on every flush, which `Permutation::project`
 prices at a measured 10.7 s at 10⁹ rows — per session, per flush.
 
-### 3.4 Entities under a deny at flush time
+### 3.5 Entities under a deny at flush time
 
 **The rules are relative to the buffer snapshot the flush took**, not absolute, and the cut is stated
 because it is where a reader would otherwise assume more than holds: a delete accepted *after* the
@@ -292,7 +365,7 @@ the delete record, leaving the item in no segment and no buffer — the un-acked
 poisoned costs ingest visibility during WAL degradation, when nothing new is being made durable
 anyway.
 
-### 3.5 The external-id directions
+### 3.6 The external-id directions
 
 `external_id_extents` gives external_id → entity. The **reverse** direction is served live-map-first,
 locator-second (contracts §2.4), where the live map is rebuilt by WAL replay and `ext-locator.u32` is
@@ -511,7 +584,7 @@ is a **measured 10.7 s**. So the patch publishes into the **new** key a value de
 entry — which respects "invalidation is key rotation, never mutation" (lifecycle §7.2), because
 nothing modifies a cached value. Two consequences to hold: the old entry must still be readable at
 patch time, so `prune_segments_version` runs only after the patch publishes; and where the old entry
-has already been evicted, the patch path falls back to a full build, which is correct by §3.3 and
+has already been evicted, the patch path falls back to a full build, which is correct by §3.4 and
 merely slow.
 
 **The authorisation fragment cache is a persistent disk cache whose key excludes the watermark**
@@ -537,7 +610,7 @@ tick".
 - **Repeated flush failure** — the buffer grows until `ingest_queue_bound` 429s ingest. Intended
   backpressure, stated rather than discovered. The WAL headroom rule (§4) is untouched, so **denies
   always have room and are never refused for load**.
-- **`WalPoisoned`** — no flush publishes (§3.4).
+- **`WalPoisoned`** — no flush publishes (§3.5).
 - **Out-of-extent coordinates** — refused at ingest; pre-existing ones quarantined (§6).
 
 **One cost this design adds to the deny path, modelled not measured.** The executor's rebase removes
@@ -607,23 +680,23 @@ needs large commit windows.
 
 Extending the lifecycle §7.3 fault switchboard rather than building a second beside it.
 
-1. `patch == rebuild`, **byte-equal**, as a property test over random corpora and tokens (§3.3),
+1. `patch == rebuild`, **byte-equal**, as a property test over random corpora and tokens (§3.4),
    including a concurrent-build-during-flush case for premise 4.
 2. Crash-replay idempotence at every ordering point of §7.3: no duplicated or lost row.
 3. **A suppression accepted before a rotation is still in force after a restart** (§7.2). The r1
    fail-open, as a test.
 4. Deleted-at-snapshot acquires no row; suppressed-at-snapshot does, and a later unsuppress reveals
-   it; a delete arriving *mid-flush* leaves a row hidden by its overlay entry (§3.4) — the timing
+   it; a delete arriving *mid-flush* leaves a row hidden by its overlay entry (§3.5) — the timing
    cases, not just the quiescent ones.
 5. A `WalPoisoned` node publishes no flush, and an under-durable delete's item is visible again after
-   restart (§3.4, contracts §3.1's residual).
+   restart (§3.5, contracts §3.1's residual).
 6. Segment count **and delta-tier count** bounded under sustained ingest; merge keeps both bounded
    (soak).
 7. The ack→visibility gap is bounded by `flush_max_age_secs`, including when `flush_max_items` trips
    between ticks (§1.3).
 8. A node whose newest manifest is damaged stays unready rather than re-flushing from a stepped-down
    watermark (§8.2).
-9. A flushed item answers `/v1/items` after rotation (§3.5).
+9. A flushed item answers `/v1/items` after rotation (§3.6).
 10. `seg_id` never reused across flush or merge; `SEGMENTS-<n>` strictly monotonic and unpadded
     (decision 0016).
 11. A pin taken across a flush serves pre-flush geometry and applies a post-flush deny.
@@ -632,6 +705,10 @@ Extending the lifecycle §7.3 fault switchboard rather than building a second be
 14. An out-of-extent ingest is refused before ack and leaves no WAL record; a pre-existing one is
     quarantined rather than retried (§6).
 15. `tessera build` refuses a bundle root containing a `CURRENT` (§11).
+16. A session holding an unresolved descriptor is invalidated by a promoting flush, and
+    re-authorising resolves the descriptor and sees the items (§3.3) — **and a session holding none
+    is not invalidated by any flush**, which is the half that regresses silently if the condition is
+    ever loosened.
 
 ## 15. Out of scope
 
@@ -650,10 +727,15 @@ with the code:
 - **architecture** — §11.2 (flush as the visibility mechanism), §11.3 (the re-rank decorator and the
   deletes trigger).
 - **contracts** — §2.3 (a flush-published manifest's deny state, §8.1), §2.4 (the locator extent,
-  §3.5), §3.4 (`POST /control/flush` executes at the next tick; the idempotency horizon, §7.4).
+  §3.6), §3.4 (`POST /control/flush` executes at the next tick; the idempotency horizon, §7.4).
 - **inventory, conformance** — the flush- and merge-dependent markers.
 - **`HONOURED_STATE`** — gains `"deltas"`, `"deny"`, `"tombstones"` (§8.1).
 - **`buffer.rs`** — its "until the next build assigns a durable term id" now names flush (§3.2).
+- **Appendix C** — a leak-register row for the staleness invalidation: a viewer learns that some
+  descriptor was interned since they authorised (§3.3).
+- **`session.rs` / contracts §3.2** — `expires_at` is an upper bound on validity, not a guarantee of
+  it. Decision 0025 already made that true for rotation; staleness is the second cause, and the
+  place it is stated should name both rather than either.
 
 Five decision records: the single publication cadence and its minimum interval (§1.3); dropping the
 Morton re-rank decorator (§2.3); refusing out-of-extent coordinates at ingest (§6); the overlay
@@ -676,11 +758,11 @@ WAL as reclaimable and of the side-manifest as flush-only state did not.
    carries deny state and the reader honours it (§8.1), which also makes step-down past accepted
    denies refused rather than time-bounded, keeping #58 out of scope.
 3. **`WalPoisoned` publication made an un-durable delete permanent** (B3) — r1 permitted it
-   explicitly. §3.4 now forbids it.
+   explicitly. §3.5 now forbids it.
 
 Also corrected: the pin relation was validated against the age bound while `flush_max_items` set the
 real period (B6, §1.3); delta tiers were unbounded while segments were not (B5, §5.2); flushed
-entities had no durable entity→external_id path (B4, §3.5); dictionary promotion needed
+entities had no durable entity→external_id path (B4, §3.6); dictionary promotion needed
 generation-scoped `Dict` and had two unstated visibility consequences (B7, §3.2); step-down plus
 rotation lost rows silently (B8, §8.2); the watermark was off by one (N2, §3.1); the cache story was
 absent (N1, §9); `WalRow` carries no slice (N6, §2.1); and §1.4's Arc-sharing claim depended on
@@ -689,3 +771,16 @@ incremental generation construction that nothing owned (N7, §1.2).
 Escalated to the owner and ruled: the overlay's durable home under a truncatable WAL → the rotation
 snapshot; `tessera build`'s semantics post-initial-load → initial-load only (§11), which also
 dissolves r1's rebuild-fencing question.
+
+**r3** adds §3.3, mask staleness, raised by the owner. r2 stated that a promoted descriptor is
+satisfiable only by sessions authorised after its flush and then left such a session permanently
+under-seeing with no way to find out. The first draft of §3.3 introduced a staleness flag; the owner
+observed that the existing session-lifespan machinery already provides the comparison, and it does —
+`Session::expires_at` exists, is already published at authorise, and decision 0025 already
+established that a session can be invalidated before it. Staleness is therefore a **third
+invalidation cause** rather than a new signal, which removes the wire work entirely instead of
+deferring it, and makes "the remedy is a new session, never a re-resolution in place" structural
+rather than a rule — which is what protects §3.4's patch-equals-rebuild premise 3.
+
+**Unreviewed.** The second review round was not run. §3.3 in particular, and r2's new §5.2, §6, §7.2,
+§8, §9 and §11, have had no independent scrutiny; r1's review covered none of them.
