@@ -25,8 +25,20 @@
 //! - **Carrying an evaluate entry → the buffered row's terms are written, and the entry stands.**
 //!   Writing the *entry's* current terms instead would be the fold, which is invariant-bearing and
 //!   compaction's. This is the sentence that stops the fold arriving as a simplification.
+//!
+//! ## Out-of-extent rows are quarantined, not retried for ever (§6)
+//!
+//! `/control/ingest` refuses a coordinate outside the bundle's declared quantisation before
+//! anything is acked. A row that was already WAL-durable when that validation landed has no such
+//! protection, and it has no cell to occupy — so it is excluded from the plan and counted rather
+//! than failing the flush. The alternative is worse than it looks: one such row would fail its
+//! flush on **every** tick, turning §10's "buffer retained, retried next tick" into a permanent
+//! visibility outage for the whole partition.
+//!
+//! A quarantined row stays invisible, which is the state it was already in.
 
 use tessera_lifecycle::{BufferedItem, Overlay};
+use tessera_store::manifest::Quantisation;
 use tessera_types::EntityId;
 
 use crate::Generation;
@@ -37,6 +49,10 @@ use crate::Generation;
 /// a copy here would be a second answer to a question that has one.
 #[derive(Debug)]
 pub(crate) struct FlushPlan {
+    /// Rows excluded because their coordinates fall outside the bundle's declared extent (§6).
+    /// Counted rather than dropped silently: they remain invisible for ever until the deployment
+    /// re-quantises, which is compaction's shape, and an operator has to be able to see that.
+    pub(crate) quarantined: usize,
     /// **Ascending by entity id, deleted entities already removed.** Contiguity is I9's doing —
     /// ids are issued monotonically from the high-water — and it is what makes the segment's
     /// extent dense.
@@ -88,6 +104,7 @@ pub(crate) fn plan_flush(
     wal_poisoned: bool,
     overlay_diverged: bool,
 ) -> Result<FlushPlan, NoFlush> {
+    let quantisation = generation.bundle.manifest.quantisation;
     // The gates first, and before any work: a poisoned or diverged node publishes nothing, and
     // deciding that after building a plan would only mean building one to throw away.
     if wal_poisoned {
@@ -97,10 +114,18 @@ pub(crate) fn plan_flush(
         return Err(NoFlush::OverlayDiverged);
     }
 
+    let mut quarantined = 0usize;
     let mut items: Vec<(EntityId, BufferedItem)> = generation
         .buffer
         .iter()
         .filter(|(entity, item)| item.slice == slice && !is_deleted(&generation.overlay, **entity))
+        .filter(|(_, item)| {
+            let inside = in_extent(item, &quantisation);
+            if !inside {
+                quarantined += 1;
+            }
+            inside
+        })
         .map(|(entity, item)| (*entity, item.clone()))
         .collect();
     if items.is_empty() {
@@ -110,7 +135,7 @@ pub(crate) fn plan_flush(
     // `write_flush_segment` requires and what makes the extent dense.
     items.sort_unstable_by_key(|(entity, _)| entity.raw());
 
-    Ok(FlushPlan { items })
+    Ok(FlushPlan { items, quarantined })
 }
 
 /// Whether `entity` is deleted as of this overlay.
@@ -121,6 +146,18 @@ pub(crate) fn plan_flush(
 /// simplification; see this module's doc.
 fn is_deleted(overlay: &Overlay, entity: EntityId) -> bool {
     overlay.get(entity).is_some_and(|entry| entry.deleted)
+}
+
+/// Whether this item's coordinates fall inside the bundle's declared extent (§6).
+///
+/// Inclusive of the maximum, matching the quantiser's own domain: a point exactly at `x_max`
+/// occupies the top of the grid and belongs there. NaN fails in both directions and is therefore
+/// quarantined, which is right — a NaN coordinate has no cell.
+fn in_extent(item: &BufferedItem, q: &Quantisation) -> bool {
+    (item.x as f64) >= q.x_min
+        && (item.x as f64) <= q.x_max
+        && (item.y as f64) >= q.y_min
+        && (item.y as f64) <= q.y_max
 }
 
 #[cfg(test)]
@@ -329,6 +366,44 @@ mod tests {
         let mut other = item(&[1]);
         other.slice = "elsewhere".to_string();
         let generation = generation_with(&[(7, other)], &[]);
+        assert!(matches!(plan(&generation), Err(NoFlush::NothingToFlush)));
+    }
+
+    /// **A pre-existing out-of-extent row is quarantined, not retried for ever** (§6). One such
+    /// row failing its flush on every tick would turn §10's "buffer retained, retried next tick"
+    /// into a permanent visibility outage for the whole partition — every other item in the buffer
+    /// held hostage by one bad coordinate.
+    #[test]
+    fn an_out_of_extent_row_is_quarantined_and_the_rest_still_flushes() {
+        let mut adrift = item(&[1]);
+        adrift.x = 500.0;
+        let generation = generation_with(&[(7, adrift), (8, item(&[1]))], &[]);
+
+        let plan = plan(&generation).expect("the rest of the range still flushes");
+        assert_eq!(plan.quarantined, 1);
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].0, EntityId::new(8));
+    }
+
+    /// A point exactly at the extent's maximum belongs there: it occupies the top of the grid,
+    /// and quarantining it would refuse legitimately edge-located data.
+    #[test]
+    fn a_point_on_the_boundary_is_inside() {
+        let mut edge = item(&[1]);
+        edge.x = 1.0;
+        edge.y = 1.0;
+        let generation = generation_with(&[(7, edge)], &[]);
+        let plan = plan(&generation).expect("the boundary is inside");
+        assert_eq!(plan.quarantined, 0);
+        assert_eq!(plan.items.len(), 1);
+    }
+
+    /// NaN has no cell, so it is quarantined rather than placed wherever the comparison lands.
+    #[test]
+    fn a_nan_coordinate_is_quarantined() {
+        let mut nan = item(&[1]);
+        nan.y = f32::NAN;
+        let generation = generation_with(&[(7, nan)], &[]);
         assert!(matches!(plan(&generation), Err(NoFlush::NothingToFlush)));
     }
 

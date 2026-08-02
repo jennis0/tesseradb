@@ -7,9 +7,9 @@
 //! `tessera build` advances the bundle.
 
 mod cache;
-mod flush;
 pub mod cancel;
 pub mod compose;
+mod flush;
 mod pins;
 pub mod select;
 pub mod session;
@@ -62,6 +62,11 @@ pub use viewport::{
 // type needs to be nameable from the crate that reads it. `/v1/meta` gets away without naming it
 // only because it reads the two fields straight into JSON.
 pub use tessera_store::manifest::DeclaredScalar;
+// `EngineMeta::quantisation`'s type, re-exported for the same layering reason `DeclaredScalar` is:
+// `check-layers.sh` denies a `tessera-server → tessera-store` edge (SA §3), and `/control/ingest`
+// validates an ingested coordinate against this declaration (§6), so the type needs to be nameable
+// from the crate that reads it.
+pub use tessera_store::manifest::Quantisation;
 // The write path's **outcome** vocabulary, and nothing else.
 //
 // `LifecycleHandle`, `LifecycleQueues`, `Job` and `Responder` are deliberately **not** here, and

@@ -226,6 +226,9 @@ pub struct ExecutorHealth {
     /// grows without bound on one whose flush keeps failing, which are the two states
     /// `buffered_items` alone cannot tell apart from healthy backlog.
     pub(crate) flushable_items: AtomicUsize,
+    /// Durable buffered rows excluded from every flush because their coordinates fall outside the
+    /// bundle's declared extent (§6). They never leave this state on their own.
+    pub(crate) quarantined_items: AtomicUsize,
     /// Total nanoseconds spent in **the whole apply step** — the `IngestBuffer`/`Overlay` clone,
     /// the per-row inserts, the `Generation` construction and the swap.
     ///
@@ -392,6 +395,9 @@ pub struct ExecutorStats {
     /// Items that would acquire geometry at the last tick (§3.5) — zero on a gated node, growing
     /// without bound on one whose flush keeps failing.
     pub flushable_items: usize,
+    /// Durable rows excluded from every flush for having coordinates outside the declared extent
+    /// (§6). Non-zero means the deployment must re-quantise before those items can ever be seen.
+    pub quarantined_items: usize,
     /// Whether a `POST /control/flush` is awaiting the next tick.
     pub flush_requested: bool,
     /// Whether this node's overlay has diverged from its durable WAL (§7.2). **Latching**: it
@@ -515,6 +521,7 @@ impl ExecutorHealth {
             overlay_diverged: AtomicBool::new(false),
             buffered_items: AtomicUsize::new(0),
             flushable_items: AtomicUsize::new(0),
+            quarantined_items: AtomicUsize::new(0),
             apply_nanos_total: AtomicU64::new(0),
             apply_nanos_max: AtomicU64::new(0),
             work_completed: AtomicU64::new(0),
@@ -605,6 +612,7 @@ impl ExecutorHealth {
             ticks: self.ticks.load(Ordering::Relaxed),
             overlay_diverged: self.overlay_diverged.load(Ordering::SeqCst),
             flushable_items: self.flushable_items.load(Ordering::SeqCst),
+            quarantined_items: self.quarantined_items.load(Ordering::SeqCst),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
         }
@@ -2199,6 +2207,7 @@ impl Executor {
         // one whose flush is failing.
         let generation = self.generation.load();
         let mut flushable = 0usize;
+        let mut quarantined = 0usize;
         for slice in slices_of(&generation) {
             match crate::flush::plan_flush(
                 &generation,
@@ -2206,7 +2215,10 @@ impl Executor {
                 self.wal.is_poisoned(),
                 self.health.overlay_diverged.load(Ordering::SeqCst),
             ) {
-                Ok(plan) => flushable += plan.items.len(),
+                Ok(plan) => {
+                    flushable += plan.items.len();
+                    quarantined += plan.quarantined;
+                }
                 Err(crate::flush::NoFlush::NothingToFlush) => {}
                 Err(gate) => {
                     // Per tick, and deliberately: a gated node is gated until an operator acts, and
@@ -2223,6 +2235,24 @@ impl Executor {
         self.health
             .flushable_items
             .store(flushable, Ordering::SeqCst);
+        if self
+            .health
+            .quarantined_items
+            .swap(quarantined, Ordering::SeqCst)
+            != quarantined
+            && quarantined > 0
+        {
+            // Edge-triggered on the count *changing*: a quarantined row never leaves that state on
+            // its own — the deployment has to re-quantise, which is compaction — so a line per tick
+            // would be an unbounded stream about a condition that is not moving.
+            tracing::error!(
+                quarantined,
+                "ALARM: durable ingest rows have coordinates outside this bundle's declared \
+                 extent, so they have no cell to occupy and are excluded from every flush. They \
+                 stay invisible until the deployment re-quantises (compaction). New ingest at \
+                 such a coordinate is refused at /control/ingest"
+            );
+        }
 
         // Lifecycle §2.1: reclaim ran only as a side effect of the next geometry publication, and
         // a process that published once and went quiescent held a whole superseded bundle

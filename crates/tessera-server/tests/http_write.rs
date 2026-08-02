@@ -519,7 +519,7 @@ async fn a_batch_resolution_opens_each_extent_at_most_once() {
     .await;
 
     let rows: Vec<(u64, f32, f32, &str)> = (0..2_000)
-        .map(|i| (N_ITEMS + 10_000 + i, i as f32, i as f32, "0"))
+        .map(|i| (N_ITEMS + 10_000 + i, in_extent(i), in_extent(i), "0"))
         .collect();
     let body = build_ingest_batch(&rows);
     let resp = server
@@ -1160,7 +1160,7 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
         let rows: Vec<(u64, f32, f32, &str)> = (0..CONCURRENT_INGEST_ROWS_PER_BATCH)
             .map(|row| {
                 let id = CONCURRENT_INGEST_BASE_ID + batch * CONCURRENT_INGEST_ROWS_PER_BATCH + row;
-                (id, row as f32, row as f32, "0")
+                (id, in_extent(row), in_extent(row), "0")
             })
             .collect();
         let body = build_ingest_batch(&rows);
@@ -1944,10 +1944,28 @@ async fn post_ingest(
 
 /// Fresh source ids for the bound fixtures below. Offset well clear of `N_ITEMS`, or every batch here
 /// collides with the bundle's own external ids and answers 409 before any bound is consulted.
+/// A coordinate inside the fixture bundle's declared extent (0..1000 on both axes).
+///
+/// **The wrap is not cosmetic.** `/control/ingest` refuses a coordinate outside the declared
+/// quantisation (§6), because Morton codes are computed against it and an out-of-extent point has
+/// no cell to occupy. A fixture that walks its row index straight into a coordinate leaves the
+/// extent at row 1000 and is refused — which is the validation working, not the test being
+/// awkward.
+fn in_extent(i: u64) -> f32 {
+    (i % 1000) as f32
+}
+
 fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
     const INGEST_BOUND_ID_BASE: u64 = 1_000_000;
     (0..n)
-        .map(|i| (INGEST_BOUND_ID_BASE + base + i, i as f32, i as f32, "0"))
+        .map(|i| {
+            (
+                INGEST_BOUND_ID_BASE + base + i,
+                in_extent(i),
+                in_extent(i),
+                "0",
+            )
+        })
         .collect()
 }
 
@@ -2015,6 +2033,51 @@ async fn ingest_is_refused_by_buffer_occupancy() {
         response.headers().contains_key("retry-after"),
         "a shed ingest must be told when to return"
     );
+}
+
+/// **An out-of-extent coordinate is refused before ack and leaves no WAL record** (§6).
+///
+/// Nothing validated this before flush existed, and it never mattered: Morton codes are computed
+/// against `MANIFEST.json`'s `quantisation`, fixed at build, and a buffered item never acquired
+/// geometry. Flush is the moment it does, so the choice becomes refuse here or misplace the item
+/// in the grid there.
+///
+/// Refused rather than clamped: a clamped point at the boundary cannot be told from one that
+/// belongs there, so clamping would move data with nothing left to notice afterwards.
+#[tokio::test]
+async fn an_out_of_extent_ingest_is_refused_and_leaves_no_wal_record() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let wal_path = tmp.path().join("wal.log");
+    let server = spawn_server(&bundle_root, &tmp.path().join("cache"), &wal_path).await;
+
+    let before = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+
+    // The fixture's extent is 0..1000 on both axes; 5000 is outside it.
+    let (status, _) = post_ingest(
+        &server,
+        "out-of-extent",
+        &[(9_000_001, 5000.0, 5000.0, "0")],
+        true,
+    )
+    .await;
+    assert_eq!(status, 422, "a coordinate with no cell is a contract error");
+
+    assert_eq!(
+        std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0),
+        before,
+        "refused before ack: no entity id, no queue slot, no WAL append"
+    );
+
+    // And an in-extent row on the same server is unaffected — the refusal is per row, not a
+    // posture the endpoint enters.
+    let (status, _) = post_ingest(&server, "fine", &[(9_000_002, 5.0, 5.0, "0")], true).await;
+    assert_eq!(status, 200);
 }
 
 /// `POST /control/flush` is **accepted at any time and executed at the next tick** (contracts
