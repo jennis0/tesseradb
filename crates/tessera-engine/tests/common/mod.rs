@@ -224,6 +224,21 @@ pub fn source_id_key(source_id: u64) -> Vec<u8> {
     source_id.to_le_bytes().to_vec()
 }
 
+/// An engine with its write executor running.
+///
+/// **Publication is a submission now** (lifecycle §1.3): `Engine::publish_geometry` hands the
+/// swap to the executor thread, so an engine that never started one answers `NoExecutor` rather
+/// than publishing. That is the correct posture — there is no honest "published" when there is no
+/// publisher — so a test that publishes starts the thread, exactly as one that submits a
+/// `/control/changes` entry already had to.
+pub fn open_engine_publishing(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Engine {
+    let mut engine = open_engine(bundle_root, cache_dir, wal_path);
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    engine
+}
+
 pub fn open_engine(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Engine {
     Engine::open(
         bundle_root,

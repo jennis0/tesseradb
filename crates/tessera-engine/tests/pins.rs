@@ -14,6 +14,19 @@
 
 mod common;
 
+/// A publication is a submission to the write executor now (lifecycle §1.3), so a refusal arrives
+/// wrapped: `NoExecutor` means the engine has no writer thread, which is a different fact from
+/// "this geometry was refused". These tests always start one, so anything but `Refused` here is
+/// the test's own setup being wrong.
+fn refusal(e: tessera_engine::PublishGeometryError) -> tessera_engine::GeometryRefused {
+    match e {
+        tessera_engine::PublishGeometryError::Refused(refused) => refused,
+        tessera_engine::PublishGeometryError::NoExecutor => {
+            panic!("the executor must be started before a publication is submitted")
+        }
+    }
+}
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,15 +49,21 @@ fn whole_extent() -> ViewportRequest<'static> {
     ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5)
 }
 
+/// **With the write executor running**, because publication is a submission to it (lifecycle
+/// §1.3): every caller here publishes, and an engine without a writer thread answers `NoExecutor`.
 fn open_with(config: EngineConfig, tmp: &TempDir, bundle_root: &Path) -> Engine {
-    Engine::open(
+    let mut engine = Engine::open(
         bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
         tessera_plugin::Passthrough::new(),
         config,
     )
-    .expect("engine should open against a freshly built bundle")
+    .expect("engine should open against a freshly built bundle");
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    engine
 }
 
 /// A second `Arc<Bundle>` over the same bundle directory. Distinct from the engine's own — which
@@ -171,7 +190,7 @@ fn a_pin_survives_a_generation_swap() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    let engine = open_engine(
+    let engine = open_engine_publishing(
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
@@ -247,14 +266,11 @@ fn a_suppression_applies_to_a_pinned_request_immediately() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    let mut engine = open_engine(
+    let engine = open_engine_publishing(
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
     );
-    engine
-        .start_write_executor(8)
-        .expect("the executor starts once");
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
     let before = engine.viewport(&session, whole_extent()).unwrap();
@@ -394,7 +410,7 @@ fn a_pinned_request_composes_with_the_fragment_watermark_not_the_pinned_one() {
 
     // 0. The buffer-free baseline: same bundle, same credential, empty WAL, its OWN cache dir.
     let baseline = {
-        let clean = open_engine(
+        let clean = open_engine_publishing(
             &bundle_root,
             &tmp.path().join("cache-baseline"),
             &tmp.path().join("wal-baseline.log"),
@@ -407,7 +423,7 @@ fn a_pinned_request_composes_with_the_fragment_watermark_not_the_pinned_one() {
     //    for, carrying no terms.
     let wal_path = tmp.path().join("wal.log");
     seed_buffered_row(&wal_path, BUFFERED_ENTITY);
-    let engine = open_engine(&bundle_root, &tmp.path().join("cache"), &wal_path);
+    let engine = open_engine_publishing(&bundle_root, &tmp.path().join("cache"), &wal_path);
     // Read the base version off the bundle, NOT through a viewport — a viewport needs a session,
     // and authorising here is exactly the vacuity trap described above.
     let base_version = segments_version_of(&reopen(&bundle_root));
@@ -750,7 +766,7 @@ fn a_session_cannot_exceed_its_pin_cap() {
                 0,
                 reopen(&bundle_root),
                 engine.generation().dict.clone(),
-            Vec::new(),
+                Vec::new(),
             )
             .unwrap();
         pins.push(PinId {
@@ -820,7 +836,7 @@ fn a_bundle_swap_under_an_unchanged_pin_identity_is_refused() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    let engine = open_engine(
+    let engine = open_engine_publishing(
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
@@ -846,6 +862,7 @@ fn a_bundle_swap_under_an_unchanged_pin_identity_is_refused() {
             Vec::new(),
         )
         .expect_err("a bundle swap under an unchanged pin identity must be refused");
+    let refused = refusal(refused);
     assert_eq!(
         refused.reason,
         GeometryRefusedReason::SegmentsVersionNotIncreasing
@@ -899,7 +916,7 @@ fn a_bundle_swap_under_an_unchanged_pin_identity_is_refused() {
         )
         .expect_err("republishing an older segments_version must be refused");
     assert_eq!(
-        rolled_back.reason,
+        refusal(rolled_back).reason,
         GeometryRefusedReason::SegmentsVersionNotIncreasing
     );
     assert_eq!(
@@ -941,7 +958,7 @@ fn the_drain_list_is_trimmed_to_drain_depth_max() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    let engine = open_engine(
+    let engine = open_engine_publishing(
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
@@ -957,7 +974,7 @@ fn the_drain_list_is_trimmed_to_drain_depth_max() {
                 watermark_of(&reopen(&bundle_root)),
                 reopen(&bundle_root),
                 engine.generation().dict.clone(),
-            Vec::new(),
+                Vec::new(),
             )
             .expect("each publication strictly increases segments_version")
     };
@@ -1027,7 +1044,7 @@ fn resolve_takes_no_lock_when_no_pin_is_presented() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    let engine = open_engine(
+    let engine = open_engine_publishing(
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),

@@ -119,34 +119,23 @@ fi
 #    "properly fixing" the race. `.swap(` on a slice or a `Vec` would false-positive here; there is
 #    no such call in this crate today, and a mechanical `.swap(i, j)` is a one-line exclusion to
 #    argue at review, which is the right cost for keeping the publishing form covered.
-#    ONE EXEMPTION, AND IT COUNTS ITSELF (controller, 2026-08-01, integrating Tracks B and C).
-#    Track C's `Engine::publish_geometry` lands a CAS in `session.rs` in the same stage that this
-#    rule forbids one. Both are right: C needs a publication seam because nothing else in 2.1 moves
-#    `segments_version`, so without it the drain list is untestable; B needs the rule because a
-#    second *unconditional* publisher is S2. Rather than exempt the file — which would cover every
-#    future line in it, including the `store` form that is the actual defect — the exemption is a
-#    marker on the single line, and the rule FAILS ON A SECOND MARKER. So the cheap escape (add
-#    another) is exactly as visible as the honest fix, which is what an exemption has to be to not
-#    become a precedent. Lifecycle §1.3 already requires 2.2's flush to publish through the
-#    lifecycle thread; the marker names that as its own retirement condition.
+#    THE EXEMPTION IS SPENT, AND THE RULE IS NOW UNCONDITIONAL (#59, 2026-08-02). There was one
+#    marker: `Engine::publish_geometry`'s compare-and-swap in `session.rs`, which existed because
+#    nothing else moved `segments_version` and without it the drain list was untestable. It named
+#    its own retirement condition -- lifecycle §1.3 requires a flush's swap-only publication step to
+#    run on the lifecycle thread -- and that is what happened: publication is an `ExecutorWork`
+#    variant the executor performs, `Engine::publish_geometry` is a blocking submission, and there
+#    is no publisher outside `write.rs` at all. The marker-counting rule went with the marker, per
+#    its own instruction. There is no supported way to publish from another thread, so a new marker
+#    is not an exemption to argue for -- it is the defect.
 if grep -rnE '\.(store|swap|rcu|compare_and_swap)\(' --include=*.rs crates/tessera-engine/src/ \
      | grep -v '^crates/tessera-engine/src/write\.rs:' \
-     | grep -v 'Ordering::' \
-     | grep -v 'PUBLISHER-EXEMPT'; then
+     | grep -v 'Ordering::'; then
   echo "FAIL: a generation is published outside crates/tessera-engine/src/write.rs."
-  echo "      Stage 2.1 made the executor thread the sole publisher (Track C finding S2); a second"
-  echo "      publisher reintroduces the lost-update race. Submit a Command instead (lifecycle §1.3)."
-  fail=1
-fi
-
-exempt_count=$(grep -rc 'PUBLISHER-EXEMPT' --include=*.rs crates/tessera-engine/src/ \
-                 | awk -F: '{n+=$2} END {print n+0}')
-if [ "$exempt_count" -ne 1 ]; then
-  echo "FAIL: expected exactly 1 PUBLISHER-EXEMPT marker in tessera-engine/src, found $exempt_count."
-  echo "      The single exemption is Engine::publish_geometry's CAS (session.rs), and it retires"
-  echo "      when stage 2.2's flush publishes through the lifecycle thread (§1.3). A second marker"
-  echo "      is a second publisher: submit a Command instead. Removing the last one means the"
-  echo "      exemption is spent -- delete this check with it."
+  echo "      The executor thread is the sole publisher (lifecycle §1.3, #59); a second publisher"
+  echo "      reintroduces the lost-update race, in which a lost publication strands the LIVE"
+  echo "      generation on the pin drain list and a later prune evicts projections still in use."
+  echo "      Submit an ExecutorWork::PublishGeometry instead."
   fail=1
 fi
 

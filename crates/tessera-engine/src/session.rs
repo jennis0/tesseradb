@@ -30,8 +30,8 @@ use tessera_store::{Bundle, StoreError};
 use tessera_types::{EntityId, IdentityError, IdentityKey, TermId, TesseraId};
 
 use crate::cache::RowProjectionCache;
-use crate::pins::{self, GeometryRefused, PinManager, PinStats, Reclaimed};
-use crate::write::WritePath;
+use crate::pins::{PinManager, PinStats, Reclaimed};
+use crate::write::{PublishGeometryError, WritePath};
 use crate::{Generation, GenerationHandle};
 
 /// Engine-wide configuration — the subset of SA §7's `[disclosure]`/`[serve]` sections the engine
@@ -336,7 +336,7 @@ pub struct Engine {
     pub(crate) plugin: Arc<dyn Plugin>,
     pub(crate) fragment_cache: Arc<FragmentCache>,
     /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
-    pub(crate) row_projection_cache: RowProjectionCache,
+    pub(crate) row_projection_cache: Arc<RowProjectionCache>,
     /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
     /// onto (`Engine::viewport`). Built once, here, at open — never per request, and never a
     /// second pool anywhere else in this crate (no nested throttling). `pool.install` from more
@@ -347,7 +347,7 @@ pub struct Engine {
     next_token_id: AtomicU64,
     /// The pin seam (I11) — see [`PinManager`]. Stateless today; `Engine::viewport` resolves
     /// every request's pin through it rather than comparing fields inline.
-    pub(crate) pins: PinManager,
+    pub(crate) pins: Arc<PinManager>,
     /// The write path: the WAL, the I9 allocator, the live external-id maps, the resolver's
     /// extension state and the idempotency index. Every mutating engine method below is
     /// a thin delegation to this; the read paths that need write-side state (`resolve_external_id`
@@ -536,6 +536,18 @@ impl Engine {
             buffer: Arc::new(buffer),
         })));
 
+        // Shared with the write executor by `Arc`, because a geometry publication happens on that
+        // thread now (lifecycle §1.3) and it is the step that retires pins and prunes the
+        // projections of what it released. Two owners of one value, never two values.
+        let pins = Arc::new(PinManager::new(
+            config.pin_ttl_secs,
+            config.pins_per_session_max,
+        ));
+        // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
+        // after `open`, having validated the figure; every other embedder (tests, benches,
+        // examples) gets unbounded caches, which is what a read-only embedder wants.
+        let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
+
         Ok(Engine {
             generation: Arc::clone(&generation),
             plugin,
@@ -543,11 +555,11 @@ impl Engine {
             // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
             // after `open`, having validated the figure; every other embedder (tests, benches,
             // examples) gets unbounded caches, which is what a read-only embedder wants.
-            row_projection_cache: RowProjectionCache::new(u64::MAX),
+            row_projection_cache: Arc::clone(&row_projection_cache),
             pool,
             config,
             next_token_id: AtomicU64::new(0),
-            pins: PinManager::new(config.pin_ttl_secs, config.pins_per_session_max),
+            pins: Arc::clone(&pins),
             write: WritePath::new(write_state),
             external_index,
             identity_key,
@@ -702,17 +714,14 @@ impl Engine {
     /// stale fragment, so it goes unseen — but it is wrong, and a flush must widen this signature
     /// or swap those fields alongside.
     ///
-    /// **This is the one publisher outside `write.rs`, and it is a genuine second publisher.**
-    /// Every other generation swap in this process happens on the executor thread, which is what
-    /// makes "one publisher" structural rather than a discipline (`write.rs`'s module doc;
-    /// `scripts/check-layers.sh` rule 1). The compare-and-swap below cannot itself *lose* a
-    /// concurrent overlay swap — but the executor's unconditional `store` can lose the geometry
-    /// published here, after which the live generation is one whose identity this method has
-    /// already retired, and a later `prune_generation` evicts the live generation's own
-    /// projections. The identity check below narrows that window; **nothing in this file closes
-    /// it**, and it must not be read as a defence that makes the executor's `store` safe. Closing
-    /// it means the geometry publisher running on the writer thread, which lifecycle §1.3 requires
-    /// of a flush anyway.
+    /// **Publication happens on the write executor, and this is a submission to it.** That is
+    /// what makes "one publisher" structural rather than a discipline (`write.rs`'s module doc;
+    /// `scripts/check-layers.sh` rule 1). It used to swap the pointer here, under a
+    /// compare-and-swap — safe against another caller of this method, but not against the
+    /// executor's own unconditional `store`, which could lose the publication and leave the
+    /// **live** generation on the pin drain list, where a later prune evicts projections still in
+    /// use. The window was narrowed by re-reading the identity and never closed. It is closed now:
+    /// there is one publisher and nothing to race. Closes #59.
     ///
     /// `prefix`, `segments_version` and `watermark` are the values from the new prefix's own
     /// SEGMENTS manifest; they are taken separately from `bundle` rather than read out of it
@@ -726,6 +735,9 @@ impl Engine {
     /// and publishes the assignment as a `dict_extents` entry (§3.2), and it publishes one sparse
     /// delta postings tier per segment (§5.2). A caller with neither passes the current
     /// generation's own.
+    ///
+    /// Blocks until the executor has performed the swap, so a returned `Ok` means the geometry is
+    /// live — the same promise a `Receipt` carries for a lifecycle command.
     pub fn publish_geometry(
         &self,
         prefix: String,
@@ -734,79 +746,15 @@ impl Engine {
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
         delta_postings: Vec<Arc<PostingsReader>>,
-    ) -> std::result::Result<Vec<Reclaimed>, GeometryRefused> {
-        // An explicit compare-and-swap loop rather than `ArcSwap::rcu`, for two reasons. The guard
-        // has to be evaluated against the generation actually being replaced, which means inside
-        // the loop and able to abandon it — `rcu`'s closure has no way to say no. And the retire
-        // below must run on the generation the swap *actually* replaced, exactly once: `rcu` may
-        // run its closure several times under contention, so retiring from inside it would push
-        // duplicate — or entirely spurious — drain entries.
-        let previous = loop {
-            let live = self.generation.load_full();
-            pins::check_publishable(&live, &prefix, segments_version)?;
-            let next = Arc::new(Generation {
-                prefix: prefix.clone(),
-                segments_version,
-                watermark,
-                bundle: Arc::clone(&bundle),
-                dict: Arc::clone(&dict),
-                postings: Arc::clone(&live.postings),
-                delta_postings: delta_postings.clone(),
-                overlay_version: live.overlay_version,
-                overlay: Arc::clone(&live.overlay),
-                buffer: Arc::clone(&live.buffer),
-            });
-            // The one generation publication outside `write.rs`, and it is deliberately
-            // temporary. The executor thread is the sole publisher — structurally, because a
-            // `load_full` + `store` racing a geometry publication loses it and strands the LIVE
-            // generation on the drain list. `check-layers.sh` rule 1 enforces that, and the marker
-            // on the statement below is its single permitted exception. The rule **counts** those
-            // markers and fails on a second, so the cheap escape (add another) is exactly as
-            // visible as the honest fix.
-            //
-            // **Why it is tolerable meanwhile.** Nothing in `tessera-server` calls
-            // `publish_geometry`; it exists because nothing else moves `segments_version`, so
-            // without it the drain list is untestable. It is a CAS in a retry loop, not an
-            // unconditional store, so it cannot itself *lose* a publication — but the executor's
-            // stores can still clobber it, which is why the retire below reads the identity
-            // observed live rather than trusting this swap.
-            //
-            // **What retires it.** Lifecycle §1.3 already requires a flush's swap-only publication
-            // step to run on the lifecycle thread. When a flush lands, this becomes a `Command` the
-            // executor performs and the marker goes with it. Leaving a second publisher in place
-            // because "the CAS is safe" reintroduces the race against every publication the
-            // executor makes concurrently.
-            let seen = arc_swap::Guard::into_inner(self.generation.compare_and_swap(&live, next)); // PUBLISHER-EXEMPT(2.2)
-            if Arc::ptr_eq(&live, &seen) {
-                break live;
-            }
-        };
-
-        // Retire against the geometry identity that is live *now* — the observation
-        // `PinManager::retire` decides on, not the identity offered above. The compare-and-swap
-        // proves `previous` was superseded at the instant it ran; a `WritePath` `store` that began
-        // before it and lands after it makes `previous`'s geometry live again under a **fresh
-        // `Arc`** (`write.rs` copies `prefix` and `segments_version` forward), and draining a live
-        // identity is what `retire`'s guard refuses.
-        //
-        // Pointer identity cannot express that: an `Arc::ptr_eq` here is a no-op, because nothing
-        // ever re-`store`s `previous`'s own pointer, so the comparison is false both in the case it
-        // would be meant to catch and in every other. It does not mitigate the clobber.
-        //
-        // **This narrows the window; it does not close it.** A store landing after this load is
-        // unobserved. The obligation above is therefore load-bearing, not belt-and-braces.
-        let live_now = self.generation.load_full();
-        let mut reclaimed =
-            self.pins
-                .retire(&previous, &live_now.prefix, live_now.segments_version);
-        // Reclaim *after* retiring, so the list is self-bounding for as long as geometry keeps
-        // moving. This is not a substitute for a periodic pass — see `reclaim_pins`.
-        reclaimed.extend(self.pins.reclaim());
-        // Prune the projections of every geometry this call released — the trim above and
-        // the reclaim pass alike. Coupled to the `Reclaimed` values, never to the swap; see
-        // `Engine::prune_reclaimed`.
-        self.prune_reclaimed(&reclaimed);
-        Ok(reclaimed)
+    ) -> std::result::Result<Vec<Reclaimed>, PublishGeometryError> {
+        self.write.publish_geometry(
+            prefix,
+            segments_version,
+            watermark,
+            bundle,
+            dict,
+            delta_postings,
+        )
     }
 
     /// Whether any partition of the live bundle is serving an older `SEGMENTS-<n>.json` than the
@@ -1197,6 +1145,8 @@ impl Engine {
         let generation = Arc::clone(&self.generation);
         self.write.start_executor(
             generation,
+            Arc::clone(&self.pins),
+            Arc::clone(&self.row_projection_cache),
             queue_bound,
             #[cfg(feature = "fault-injection")]
             None,
@@ -1211,8 +1161,13 @@ impl Engine {
         faults: Arc<tessera_lifecycle::faults::FaultSwitchboard>,
     ) -> std::result::Result<(), crate::write::ExecutorStartError> {
         let generation = Arc::clone(&self.generation);
-        self.write
-            .start_executor(generation, queue_bound, Some(faults))
+        self.write.start_executor(
+            generation,
+            Arc::clone(&self.pins),
+            Arc::clone(&self.row_projection_cache),
+            queue_bound,
+            Some(faults),
+        )
     }
 
     /// The write executor's posture — **the liveness signal `readyz` reads**. Ready iff

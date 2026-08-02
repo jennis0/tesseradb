@@ -67,7 +67,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustc_hash::FxHashMap;
 
-use tessera_authz::Dict;
+use tessera_authz::{Dict, PostingsReader};
 use tessera_lifecycle::alloc::{high_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
@@ -76,8 +76,11 @@ use tessera_lifecycle::overlay::replay;
 use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord};
 use tessera_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
 use tessera_lifecycle::{IngestBuffer, Overlay};
+
+use crate::cache::RowProjectionCache;
+use crate::pins::{GeometryRefused, PinManager, Reclaimed};
 use tessera_plugin::Descriptor;
-use tessera_store::StoreError;
+use tessera_store::{Bundle, StoreError};
 use tessera_types::{EntityId, TermId};
 
 use crate::session::EngineError;
@@ -1245,6 +1248,8 @@ impl WritePath {
     pub(crate) fn start_executor(
         &mut self,
         generation: Arc<GenerationHandle>,
+        pins: Arc<PinManager>,
+        row_projection_cache: Arc<RowProjectionCache>,
         queue_bound: usize,
         #[cfg(feature = "fault-injection")] faults: Option<
             Arc<tessera_lifecycle::faults::FaultSwitchboard>,
@@ -1286,6 +1291,8 @@ impl WritePath {
                     wal: exec_wal,
                     live,
                     generation,
+                    pins,
+                    row_projection_cache,
                     queues: LifecycleQueues {
                         work: work_rx,
                         deny: deny_rx,
@@ -1390,6 +1397,31 @@ impl WritePath {
     /// is by construction unsatisfiable by any session's `satisfied` set, so a live/replay mismatch
     /// in *which* extension id a novel descriptor got renumbers internal bookkeeping only, never a
     /// visibility outcome.
+    /// Submit a geometry publication to the executor and block until it has been performed.
+    ///
+    /// Rides the work lane and is never shed — see [`LifecycleHandle::publish_geometry`].
+    pub(crate) fn publish_geometry(
+        &self,
+        prefix: String,
+        segments_version: u64,
+        watermark: u64,
+        bundle: Arc<Bundle>,
+        dict: Arc<Dict>,
+        delta_postings: Vec<Arc<PostingsReader>>,
+    ) -> std::result::Result<Vec<Reclaimed>, PublishGeometryError> {
+        self.handle
+            .as_ref()
+            .ok_or(PublishGeometryError::NoExecutor)?
+            .publish_geometry(
+                prefix,
+                segments_version,
+                watermark,
+                bundle,
+                dict,
+                delta_postings,
+            )
+    }
+
     pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
         self.live.resolve_terms(dict, descriptors)
     }
@@ -1542,13 +1574,66 @@ pub(crate) struct Job {
     respond: Responder,
 }
 
+/// What the executor's **work** lane carries: a lifecycle command, or a geometry publication.
+///
+/// **The split is deliberate, and the store-shaped half cannot live in `tessera-lifecycle`.**
+/// `command.rs`'s module doc says why: that crate has no `tessera-store` dependency and must not
+/// acquire one (a cycle cargo refuses), so a `Command` variant carrying an `Arc<Bundle>` is not
+/// expressible there. `Command` stays entity-space and store-free; this enum is
+/// `tessera-engine`'s own executor vocabulary, and it exists so that the executor thread is the
+/// **only** publisher of a generation (lifecycle §1.3). Before it, `Engine::publish_geometry`
+/// swapped the pointer itself from whatever thread called it — a second publisher whose
+/// compare-and-swap could not stop the executor's own `store` from clobbering it.
+///
+/// A publication carries its own response channel rather than a [`Responder`]: its answer is a
+/// `Vec<Reclaimed>`, which is engine-local and has no place in [`Ack`].
+pub(crate) enum ExecutorWork {
+    Lifecycle(Job),
+    PublishGeometry {
+        prefix: String,
+        segments_version: u64,
+        watermark: u64,
+        bundle: Arc<Bundle>,
+        dict: Arc<Dict>,
+        delta_postings: Vec<Arc<PostingsReader>>,
+        respond: SyncSender<std::result::Result<Vec<Reclaimed>, GeometryRefused>>,
+    },
+}
+
+/// Why a geometry publication produced no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishGeometryError {
+    /// The live generation refused it — see [`GeometryRefused`].
+    Refused(GeometryRefused),
+    /// There is no write executor to publish through. **Not a refusal of the geometry**: a
+    /// publication is a swap on the executor thread, so an engine that never started one cannot
+    /// publish at all. Reachable only by an embedder that skipped `start_write_executor`;
+    /// `tessera-server` starts it unconditionally.
+    NoExecutor,
+}
+
+impl std::fmt::Display for PublishGeometryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PublishGeometryError::Refused(refused) => write!(f, "{refused}"),
+            PublishGeometryError::NoExecutor => f.write_str(
+                "this engine has no write executor, and a geometry publication is a swap on that                  thread (lifecycle §1.3)",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PublishGeometryError {}
+
 /// The handler-side end of the write executor: two queues, and the asymmetry between them.
 ///
 /// **Not `Clone`, and that is load-bearing** — [`WritePath::drop`] joins the executor thread, which
 /// terminates only when every sender has disconnected. One owner means the join always completes.
 pub(crate) struct LifecycleHandle {
-    /// Bounded by `ingest_queue_bound`; full → [`SubmitError::QueueFull`].
-    work: SyncSender<Job>,
+    /// Bounded by `ingest_queue_bound`; full → [`SubmitError::QueueFull`] for an ingest, and a
+    /// **blocking** send for a geometry publication, which is not a client request and may not be
+    /// shed (lifecycle §1.3: completed units arrive on the work lane, never the deny lane).
+    work: SyncSender<ExecutorWork>,
     /// Unbounded: a deny is never refused for load.
     deny: Sender<Job>,
     /// Capacity-one wake signal. `std::sync::mpsc` has no select over two receivers, and the two
@@ -1612,6 +1697,43 @@ impl LifecycleHandle {
     /// its job queued with nothing to wake it — on an idle node, indefinitely. A deny that is
     /// silently never applied is a worse outcome than an extra fsync, so the ring stays at the
     /// enqueue and the residual race is measured rather than designed away.
+    /// Submit a geometry publication and block until the executor has performed it.
+    ///
+    /// **A blocking `send`, not `try_send`.** A publication is not a client request and may not be
+    /// shed for load: shedding one would leave a completed flush unpublished with nothing to retry
+    /// it, and there is no 429 for a caller that is not a client. It rides the *work* lane
+    /// regardless, never the deny lane — the loop drains deny to empty before touching work, which
+    /// is what keeps a suppression from queueing behind a flush's IO (lifecycle §1.3).
+    ///
+    /// The bell is rung after the enqueue, exactly as [`Self::enqueue`] does and for the same
+    /// reason: a token may be spurious, never missing.
+    pub(crate) fn publish_geometry(
+        &self,
+        prefix: String,
+        segments_version: u64,
+        watermark: u64,
+        bundle: Arc<Bundle>,
+        dict: Arc<Dict>,
+        delta_postings: Vec<Arc<PostingsReader>>,
+    ) -> std::result::Result<Vec<Reclaimed>, PublishGeometryError> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.work
+            .send(ExecutorWork::PublishGeometry {
+                prefix,
+                segments_version,
+                watermark,
+                bundle,
+                dict,
+                delta_postings,
+                respond: tx,
+            })
+            .map_err(|_| PublishGeometryError::NoExecutor)?;
+        let _ = self.bell.try_send(());
+        rx.recv()
+            .map_err(|_| PublishGeometryError::NoExecutor)?
+            .map_err(PublishGeometryError::Refused)
+    }
+
     pub(crate) fn enqueue(&self, command: Command) -> std::result::Result<Pending, SubmitError> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let job = Job {
@@ -1625,24 +1747,26 @@ impl LifecycleHandle {
             // "the deny is queued" as a condition rather than betting on a sleep.
             self.health.deny_submitted.fetch_add(1, Ordering::SeqCst);
         } else {
-            self.work.try_send(job).map_err(|e| match e {
-                // Derived, not a placeholder — see [`estimate_retry_after_s`], which also
-                // states what makes it an estimator rather than a bound. Both operands are plain
-                // atomic loads on a path that must sustain 10⁹-scale ingest.
-                TrySendError::Full(_) => {
-                    let stats = self.health.stats();
-                    SubmitError::QueueFull {
-                        retry_after_s: estimate_retry_after_s(
-                            stats.work_depth,
-                            // Not the raw EWMA — see `ExecutorStats::service_nanos_for_estimate`.
-                            // This is the shed path, so the in-flight job is precisely the one the
-                            // caller is queued behind.
-                            stats.service_nanos_for_estimate(),
-                        ),
+            self.work
+                .try_send(ExecutorWork::Lifecycle(job))
+                .map_err(|e| match e {
+                    // Derived, not a placeholder — see [`estimate_retry_after_s`], which also
+                    // states what makes it an estimator rather than a bound. Both operands are plain
+                    // atomic loads on a path that must sustain 10⁹-scale ingest.
+                    TrySendError::Full(_) => {
+                        let stats = self.health.stats();
+                        SubmitError::QueueFull {
+                            retry_after_s: estimate_retry_after_s(
+                                stats.work_depth,
+                                // Not the raw EWMA — see `ExecutorStats::service_nanos_for_estimate`.
+                                // This is the shed path, so the in-flight job is precisely the one the
+                                // caller is queued behind.
+                                stats.service_nanos_for_estimate(),
+                            ),
+                        }
                     }
-                }
-                TrySendError::Disconnected(_) => SubmitError::ExecutorDead,
-            })?;
+                    TrySendError::Disconnected(_) => SubmitError::ExecutorDead,
+                })?;
             self.health.work_submitted.fetch_add(1, Ordering::SeqCst);
         }
 
@@ -1695,7 +1819,7 @@ impl Pending {
 /// including the one case that costs two closes rather than one, is stated at
 /// [`Executor::run_work_pass`].
 pub(crate) struct LifecycleQueues {
-    work: Receiver<Job>,
+    work: Receiver<ExecutorWork>,
     deny: Receiver<Job>,
     /// The wake signal. Capacity one — see [`LifecycleHandle::bell`] and [`Executor::run`].
     bell: Receiver<()>,
@@ -1887,6 +2011,13 @@ struct Executor {
     /// **The only publishing capability in the write path.** Not in [`LiveState`], which the
     /// handler side shares.
     generation: Arc<GenerationHandle>,
+    /// The pin drain list, shared with [`crate::Engine`]: a geometry publication retires against
+    /// it and reclaims from it, and `Engine::viewport` resolves every request's pin through it.
+    pins: Arc<PinManager>,
+    /// The row-projection cache, shared for the one thing this thread does with it: pruning the
+    /// projections of every geometry a publication released. Coupled to the `Reclaimed` values,
+    /// never to the swap — see `RowProjectionCache::prune_generation`.
+    row_projection_cache: Arc<RowProjectionCache>,
     queues: LifecycleQueues,
     health: Arc<ExecutorHealth>,
     /// The last window's sequence number. [`BatchState::Held`] is what it is for; all it has to be
@@ -2425,8 +2556,42 @@ impl Executor {
                 self.close_window(window);
                 return true;
             }
-            let Ok(job) = self.queues.work.try_recv() else {
+            let Ok(work) = self.queues.work.try_recv() else {
                 break;
+            };
+            let job = match work {
+                ExecutorWork::Lifecycle(job) => job,
+                ExecutorWork::PublishGeometry {
+                    prefix,
+                    segments_version,
+                    watermark,
+                    bundle,
+                    dict,
+                    delta_postings,
+                    respond,
+                } => {
+                    // **The open window closes first, and that is ordering rather than tidiness.**
+                    // A publication swaps the whole generation; performing it while a window holds
+                    // ingest that has not been applied would publish geometry against a buffer the
+                    // window is about to replace, and the window's own swap would then carry the
+                    // pre-publication bundle forward — losing the publication entirely. The same
+                    // hazard the `Change`-shaped arm below is warned about, reached by the one
+                    // variant that does make it here.
+                    if !window.is_empty() {
+                        window = self.close_and_reopen(window);
+                    }
+                    let _ = respond.send(self.publish_geometry(
+                        prefix,
+                        segments_version,
+                        watermark,
+                        bundle,
+                        dict,
+                        delta_postings,
+                    ));
+                    self.health.note_work_refused();
+                    did_work = true;
+                    continue;
+                }
             };
             let Job { command, respond } = job;
             let Command::Ingest {
@@ -2486,6 +2651,10 @@ impl Executor {
     ///    The only candidate is the conflicting entry itself.
     /// 3. And that entry is refused: `apply_window` inserts its predecessor's external ids into
     ///    `established` before this function returns, so `established_collisions` sees them.
+    ///
+    /// **The second caller is the geometry-publication arm of [`Executor::run_work_pass`]**, which
+    /// closes the open window before swapping the generation. It cannot mis-stamp: it does not
+    /// admit an entry into the replacement at all, and the very next `try_recv` decides what does.
     ///
     /// A held `batch_id` is **not** a route into this function — it joins or 409s in place — so the
     /// only other ways in are two exceptions, both of which leave the ordering unobservable anyway:
@@ -3026,6 +3195,63 @@ impl Executor {
             buffer: Arc::clone(&generation.buffer),
         };
         self.publish(next, started)
+    }
+
+    /// Publish new geometry: check, swap, retire, reclaim, prune. **The executor's own arm of
+    /// lifecycle §1.3's swap-only publication step.**
+    ///
+    /// This ran in `Engine::publish_geometry` until flush needed a second publisher and made the
+    /// arrangement untenable. It was a compare-and-swap in a retry loop there — safe against
+    /// *itself*, but not against this thread's unconditional `store`, which could clobber a
+    /// publication it had already observed and strand the **live** generation on the pin drain
+    /// list, where the cache's prune evicts projections still in use. On this thread there is
+    /// nothing to race, so there is no loop: one load, one check, one store.
+    ///
+    /// `check_publishable` is evaluated against the generation actually being replaced, which is
+    /// the one loaded here, because this is the only thread that can replace it.
+    fn publish_geometry(
+        &mut self,
+        prefix: String,
+        segments_version: u64,
+        watermark: u64,
+        bundle: Arc<Bundle>,
+        dict: Arc<Dict>,
+        delta_postings: Vec<Arc<PostingsReader>>,
+    ) -> std::result::Result<Vec<Reclaimed>, GeometryRefused> {
+        let started = std::time::Instant::now();
+        let previous = self.generation.load_full();
+        crate::pins::check_publishable(&previous, &prefix, segments_version)?;
+
+        let next = Generation {
+            prefix,
+            segments_version,
+            watermark,
+            bundle,
+            dict,
+            postings: Arc::clone(&previous.postings),
+            delta_postings,
+            overlay_version: previous.overlay_version,
+            overlay: Arc::clone(&previous.overlay),
+            buffer: Arc::clone(&previous.buffer),
+        };
+        let _published = self.publish(next, started);
+
+        // Retired against the generation this call replaced, with no "identity observed live"
+        // dance: the compare-and-swap version had to re-read the pointer because a `WritePath`
+        // store could make the superseded geometry live again under a fresh `Arc` between the swap
+        // and the retire. That window was this thread's own store, and this *is* that thread.
+        let live_now = self.generation.load_full();
+        let mut reclaimed =
+            self.pins
+                .retire(&previous, &live_now.prefix, live_now.segments_version);
+        // Reclaim after retiring, so the drain list is self-bounding for as long as geometry keeps
+        // moving. Not a substitute for a periodic pass — the flush tick becomes that caller.
+        reclaimed.extend(self.pins.reclaim());
+        for entry in &reclaimed {
+            self.row_projection_cache
+                .prune_generation(entry.segments_version);
+        }
+        Ok(reclaimed)
     }
 
     /// The generation swap. **The only `store` in the write path**, and the only producer of a

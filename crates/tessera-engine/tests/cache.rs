@@ -36,15 +36,22 @@ fn whole_extent() -> ViewportRequest<'static> {
     ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5)
 }
 
+/// **The executor is started here, because publication is a submission to it** (lifecycle §1.3):
+/// `Engine::publish_geometry` hands the swap to the writer thread, so an engine without one
+/// answers `NoExecutor` rather than publishing. Every test in this file publishes.
 fn open_with(config: EngineConfig, tmp: &TempDir, bundle_root: &Path) -> Engine {
-    Engine::open(
+    let mut engine = Engine::open(
         bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
         tessera_plugin::Passthrough::new(),
         config,
     )
-    .expect("engine should open against a freshly built bundle")
+    .expect("engine should open against a freshly built bundle");
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    engine
 }
 
 fn reopen(bundle_root: &Path) -> Arc<Bundle> {

@@ -48,7 +48,7 @@ fn the_write_path_resolves_against_the_generations_dict() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    let engine = open_engine(
+    let engine = open_engine_publishing(
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
@@ -101,7 +101,7 @@ fn authorise_resolves_against_the_generations_dict() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    let engine = open_engine(
+    let engine = open_engine_publishing(
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
