@@ -2,6 +2,7 @@ pub mod dict;
 pub mod fragment;
 pub mod postings;
 mod single_flight;
+pub mod tier;
 
 pub use dict::{Dict, DictStreamWriter, DictWriter};
 pub use fragment::{
@@ -11,3 +12,4 @@ pub use postings::{
     encode_posting, write_posting_records, write_postings, PostingRef, PostingsReader,
     PostingsSpool,
 };
+pub use tier::{write_delta_tier, DeltaTier};

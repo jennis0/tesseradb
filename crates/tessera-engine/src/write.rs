@@ -67,7 +67,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustc_hash::FxHashMap;
 
-use tessera_authz::{Dict, PostingsReader};
+use tessera_authz::{DeltaTier, Dict};
 use tessera_lifecycle::alloc::{high_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
@@ -1407,7 +1407,7 @@ impl WritePath {
         watermark: u64,
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
-        delta_postings: Vec<Arc<PostingsReader>>,
+        delta_postings: Vec<Arc<DeltaTier>>,
     ) -> std::result::Result<Vec<Reclaimed>, PublishGeometryError> {
         self.handle
             .as_ref()
@@ -1595,7 +1595,7 @@ pub(crate) enum ExecutorWork {
         watermark: u64,
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
-        delta_postings: Vec<Arc<PostingsReader>>,
+        delta_postings: Vec<Arc<DeltaTier>>,
         respond: SyncSender<std::result::Result<Vec<Reclaimed>, GeometryRefused>>,
     },
 }
@@ -1714,7 +1714,7 @@ impl LifecycleHandle {
         watermark: u64,
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
-        delta_postings: Vec<Arc<PostingsReader>>,
+        delta_postings: Vec<Arc<DeltaTier>>,
     ) -> std::result::Result<Vec<Reclaimed>, PublishGeometryError> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.work
@@ -3216,7 +3216,7 @@ impl Executor {
         watermark: u64,
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
-        delta_postings: Vec<Arc<PostingsReader>>,
+        delta_postings: Vec<Arc<DeltaTier>>,
     ) -> std::result::Result<Vec<Reclaimed>, GeometryRefused> {
         let started = std::time::Instant::now();
         let previous = self.generation.load_full();

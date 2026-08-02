@@ -19,7 +19,9 @@ use rand::RngCore;
 use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
-use tessera_authz::{Dict, FragmentCache, FragmentCacheError, FrozenFragment, PostingsReader};
+use tessera_authz::{
+    DeltaTier, Dict, FragmentCache, FragmentCacheError, FrozenFragment, PostingsReader,
+};
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::{ChangeOp, WalError};
 use tessera_lifecycle::OverlayError;
@@ -745,7 +747,7 @@ impl Engine {
         watermark: u64,
         bundle: Arc<Bundle>,
         dict: Arc<Dict>,
-        delta_postings: Vec<Arc<PostingsReader>>,
+        delta_postings: Vec<Arc<DeltaTier>>,
     ) -> std::result::Result<Vec<Reclaimed>, PublishGeometryError> {
         self.write.publish_geometry(
             prefix,

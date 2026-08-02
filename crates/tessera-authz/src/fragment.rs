@@ -32,6 +32,7 @@ use tessera_types::TermId;
 
 use crate::postings::{PostingRef, PostingsReader};
 use crate::single_flight::{CacheWeight, SingleFlightCache, SingleFlightError};
+use crate::tier::DeltaTier;
 
 /// The in-memory tier's operator gauges, re-exported here so that [`FragmentCache::stats`]'s
 /// return type is **nameable** by a caller outside this crate.
@@ -75,19 +76,25 @@ pub fn build_fragment(terms: &[TermId], postings: &PostingsReader) -> io::Result
 pub fn build_fragment_with_deltas(
     terms: &[TermId],
     postings: &PostingsReader,
-    deltas: &[Arc<PostingsReader>],
+    deltas: &[Arc<DeltaTier>],
 ) -> io::Result<Bitmap> {
     let mut views: Vec<BitmapView<'_>> = Vec::new();
     let mut small: Vec<u32> = Vec::new();
 
-    // The base and the tiers are read by the same arm, because a tier is a `PostingsReader` and
-    // the union does not care which file an entity came from — only that the term is satisfied.
-    let readers = std::iter::once(postings).chain(deltas.iter().map(|d| d.as_ref()));
-    for reader in readers {
-        for &term in terms {
-            let Some(posting) = reader.posting(term)? else {
-                continue;
-            };
+    // The base and the tiers are read by one loop over one `PostingRef` shape: the two files
+    // differ in how a term is *found* (an ordinal index against a binary search) and not in what
+    // a posting is, and the union does not care which file an entity came from — only that the
+    // term is satisfied.
+    for term in terms.iter().copied() {
+        let base = postings.posting(term)?;
+        for posting in base.into_iter().chain(
+            deltas
+                .iter()
+                .map(|tier| tier.posting(term))
+                .collect::<io::Result<Vec<_>>>()?
+                .into_iter()
+                .flatten(),
+        ) {
             match posting {
                 PostingRef::Roaring(view) => views.push(view),
                 PostingRef::Array(bytes) => {
@@ -666,7 +673,7 @@ impl FragmentCache {
         auth_data_hash: [u8; 32],
         dict_len: u32,
         postings: &PostingsReader,
-        deltas: &[Arc<PostingsReader>],
+        deltas: &[Arc<DeltaTier>],
         watermark: u64,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
         let memo_key = (auth_data_hash, dict_len);

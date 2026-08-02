@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use tessera_authz::{Dict, PostingsReader};
+use tessera_authz::{DeltaTier, Dict, PostingsReader};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
@@ -122,7 +122,7 @@ pub struct Generation {
     /// (§5.2). They live on the generation rather than on the engine for the same reason the
     /// dictionary does: a flush publishes one, and a merge coalesces several into one, so the set
     /// changes exactly when geometry does. Empty in a bundle straight out of `tessera build`.
-    pub delta_postings: Vec<Arc<PostingsReader>>,
+    pub delta_postings: Vec<Arc<DeltaTier>>,
     /// Monotone counter bumped on every overlay/buffer swap (independent of `segments_version` —
     /// an overlay change never touches the bundle).
     pub overlay_version: u64,

@@ -334,29 +334,37 @@ impl PostingsReader {
         if idx >= self.array.len() {
             return Ok(None);
         }
+        read_posting(&self.array, idx).map(Some)
+    }
+}
 
-        let bytes = self.array.value(idx);
-        let (tag, payload) = bytes
-            .split_first()
-            .ok_or_else(|| invalid_data(format!("postings.arrow: term {idx} has no tag byte")))?;
+/// Decode record `idx` of a validated posting column into a borrowed [`PostingRef`].
+///
+/// Shared by [`PostingsReader`] and [`crate::DeltaTier`]: the two files differ in how a term is
+/// *found* — an ordinal index against a binary search — and not in what a posting *is*. One
+/// decoder means the `unsafe` below is discharged in one place, against one validation.
+pub(crate) fn read_posting(array: &LargeBinaryArray, idx: usize) -> io::Result<PostingRef<'_>> {
+    let bytes = array.value(idx);
+    let (tag, payload) = bytes
+        .split_first()
+        .ok_or_else(|| invalid_data(format!("posting record {idx} has no tag byte")))?;
 
-        match tag {
-            0 => Ok(Some(PostingRef::Array(payload))),
-            1 => {
-                // SAFETY: every tag-1 payload in `self.array` was validated once, at `open`
-                // time, by `validate_records` — which round-trips it through
-                // `Bitmap::try_deserialize::<Portable>` (bounds-checked, internally validated)
-                // and confirms the payload is *exactly* the bitmap's serialised size with no
-                // truncation or trailing garbage. `BitmapView::deserialize`'s own safety
-                // contract (valid portable bytes, no length mismatch) is therefore already
-                // discharged before we ever reach this unsafe block.
-                let view = unsafe { BitmapView::deserialize::<Portable>(payload) };
-                Ok(Some(PostingRef::Roaring(view)))
-            }
-            other => Err(invalid_data(format!(
-                "postings.arrow: term {idx} has unknown tag byte {other}"
-            ))),
+    match tag {
+        0 => Ok(PostingRef::Array(payload)),
+        1 => {
+            // SAFETY: every tag-1 payload was validated once, at open time, by
+            // `validate_records` — which round-trips it through
+            // `Bitmap::try_deserialize::<Portable>` (bounds-checked, internally validated) and
+            // confirms the payload is *exactly* the bitmap's serialised size with no truncation
+            // or trailing garbage. `BitmapView::deserialize`'s own safety contract (valid
+            // portable bytes, no length mismatch) is therefore already discharged before we ever
+            // reach this unsafe block. Both callers validate on open; a third must too.
+            let view = unsafe { BitmapView::deserialize::<Portable>(payload) };
+            Ok(PostingRef::Roaring(view))
         }
+        other => Err(invalid_data(format!(
+            "posting record {idx} has unknown tag byte {other}"
+        ))),
     }
 }
 
@@ -365,7 +373,7 @@ impl PostingsReader {
 /// bytes. A malformed record here — corrupt file, truncated write, wrong tag — fails `open`
 /// closed (`InvalidData`) rather than causing undefined behaviour or a panic deep inside
 /// CRoaring on first lookup.
-fn validate_records(array: &LargeBinaryArray) -> io::Result<()> {
+pub(crate) fn validate_records(array: &LargeBinaryArray) -> io::Result<()> {
     for idx in 0..array.len() {
         let bytes = array.value(idx);
         let (tag, payload) = bytes
@@ -412,7 +420,7 @@ fn validate_records(array: &LargeBinaryArray) -> io::Result<()> {
 
 /// Decode the (single) record batch of an Arrow IPC FILE held in `buffer`, without copying its
 /// buffers (subject to alignment — see [`FileDecoder::with_require_alignment`]'s default).
-fn decode_single_batch(buffer: &Buffer) -> io::Result<RecordBatch> {
+pub(crate) fn decode_single_batch(buffer: &Buffer) -> io::Result<RecordBatch> {
     const FOOTER_TRAILER_LEN: usize = 10; // 4-byte footer length + 6-byte "ARROW1" magic
     if buffer.len() < FOOTER_TRAILER_LEN {
         return Err(invalid_data(
@@ -499,7 +507,7 @@ fn checked_block_range(block: &arrow::ipc::Block, buffer_len: usize) -> io::Resu
     Ok((offset, block_len))
 }
 
-fn invalid_data(msg: impl Into<String>) -> io::Error {
+pub(crate) fn invalid_data(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
