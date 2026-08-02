@@ -77,11 +77,27 @@ um = UMAP(n_neighbors=15, min_dist=0.1, n_components=2,
 xy = np.asarray(um.fit_transform(Xp), dtype=np.float32)
 
 log("quantise + Morton + rank")
-gmax = (1 << GRID_BITS) - 1
-g = np.empty((n, 2), dtype=np.uint32)
+
+# 32 bits per axis, and the 16-bit cell is its high half — so the cell a point lands in is
+# the same whether it is derived here or from the full-precision value, and the residual is
+# what is left over rather than a separately-rounded quantity.
+#
+# `floor(t * 2**32)`, clamped, is the engine's `cell()` (contracts §2.5) widened from 16 bits
+# to 32: `q >> 16 == floor(t * 65536)` clamped to 65535, exactly. An earlier revision of this
+# script used `round(t * 65535)`, which is a *different* quantiser from the engine's in both
+# the scale factor and the rounding mode. That was invisible because the Morton-input build
+# path reads the stored code and never re-quantises — but it makes the corpus and the engine
+# disagree about which cell a coordinate belongs to, and there is no way to define a residual
+# against a cell boundary the two do not share.
+Q_BITS = 32
+q = np.empty((n, 2), dtype=np.uint32)
 for a in range(2):
     lo, hi = xy[:, a].min(), xy[:, a].max()
-    g[:, a] = np.clip(((xy[:, a] - lo) / (hi - lo) * gmax).round(), 0, gmax).astype(np.uint32)
+    t = (xy[:, a].astype(np.float64) - lo) / (float(hi) - float(lo))
+    q[:, a] = np.clip(np.floor(t * 2.0**Q_BITS), 0, 2**Q_BITS - 1).astype(np.uint32)
+
+g = q >> np.uint32(16)          # the 16-bit cell: the code's high half
+r = q & np.uint32(0xFFFF)       # the sub-cell residual: its low half
 
 
 def interleave16(v):
@@ -94,6 +110,9 @@ def interleave16(v):
 
 
 morton = (interleave16(g[:, 0]) << 1 | interleave16(g[:, 1])).astype(np.uint32)
+# Same axis convention as `morton`, so concatenating the two words gives the 64-bit interleave
+# of the two 32-bit coordinates.
+residual = (interleave16(r[:, 0]) << 1 | interleave16(r[:, 1])).astype(np.uint32)
 order = np.lexsort((np.arange(n), morton))  # entity_id as intra-cell tiebreak
 row_id = np.empty(n, dtype=np.uint32)
 row_id[order] = np.arange(n, dtype=np.uint32)
@@ -107,6 +126,7 @@ table = pa.table({
     "gx": pa.array(g[order, 0].astype(np.uint16), pa.uint16()),
     "gy": pa.array(g[order, 1].astype(np.uint16), pa.uint16()),
     "morton": pa.array(morton[order], pa.uint32()),
+    "residual": pa.array(residual[order], pa.uint32()),
     "row_id": pa.array(np.arange(n, dtype=np.uint32), pa.uint32()),
 })
 pq.write_table(table, OUT)

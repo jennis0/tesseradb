@@ -63,8 +63,6 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-GRID_BITS = 16
-GMAX = (1 << GRID_BITS) - 1
 CHUNK = 8_000_000
 
 ap = argparse.ArgumentParser()
@@ -100,6 +98,28 @@ def interleave16(v):
     return v
 
 
+# 32 bits per axis, whose high half IS the 16-bit cell: `q >> 16 == floor(t * 65536)` clamped
+# to 65535, which is the engine's `cell()` (contracts §2.5). Matching the engine's scale factor
+# and rounding mode is what lets the residual be defined against a shared cell boundary — an
+# earlier revision rounded against 65535 instead, a different quantiser that happened not to
+# show because the Morton-input build path reads the stored code and never re-quantises.
+Q_BITS = 32
+
+
+def quantise32(t):
+    """Normalised [0, 1] -> 32-bit fixed point, floor, clamped."""
+    return np.clip(np.floor(t * 2.0**Q_BITS), 0, 2**Q_BITS - 1).astype(np.uint32)
+
+
+def split_code(qx, qy):
+    """(cell code, sub-cell residual) from a pair of 32-bit fixed-point axes."""
+    m = (interleave16(qx >> np.uint32(16)) << np.uint64(1)
+         | interleave16(qy >> np.uint32(16)))
+    r = (interleave16(qx & np.uint32(0xFFFF)) << np.uint64(1)
+         | interleave16(qy & np.uint32(0xFFFF)))
+    return m, r.astype(np.uint32)
+
+
 def splitmix(x):
     h = (x + np.uint64(0x9E3779B97F4A7C15)).astype(np.uint64)
     h ^= h >> np.uint64(30); h *= np.uint64(0xBF58476D1CE4E5B9)
@@ -115,18 +135,32 @@ if args.pairs_only:
     scale_rows = {s_["entity_id_limit"]: s_["rows"] for s_ in _m["scales"]}
     log(f"pairs-only: {N:,} points, {R} replicas, base {n_base:,}")
 else:
-  base = pq.read_table(args.geometry, columns=["entity_id", "gx", "gy"])
+  # Read the *coordinates*, not the grid cells. Reading `gx`/`gy` discarded the sub-cell
+  # position before this script had a chance to carry it, so no corpus built from those
+  # columns holds more than 16 bits per axis and none of it is recoverable afterwards.
+  base = pq.read_table(args.geometry, columns=["entity_id", "x", "y"])
   n_base = base.num_rows
   o = np.argsort(base.column("entity_id").to_numpy())
-  base_gx = base.column("gx").to_numpy()[o].astype(np.uint32)
-  base_gy = base.column("gy").to_numpy()[o].astype(np.uint32)
+  base_x = base.column("x").to_numpy()[o].astype(np.float64)
+  base_y = base.column("y").to_numpy()[o].astype(np.float64)
   del base, o
-  # normalised copy for the transformed replicas; replica 0 uses the
-  # integer grid coordinates verbatim so the 2.4M scale is bit-identical
-  # to the hashed geometry artifact.
-  bx = base_gx.astype(np.float64) / GMAX
-  by = base_gy.astype(np.float64) / GMAX
-  bx -= bx.mean(); by -= by.mean()
+
+  # Normalise each axis onto [0, 1) by its own min/max — the mapping `build_geometry.py`
+  # applies, reproduced here from the columns rather than carried, so the two agree without
+  # a shared constant.
+  def _unit(v):
+      lo, hi = v.min(), v.max()
+      return (v - lo) / (float(hi) - float(lo))
+
+  tx, ty = _unit(base_x), _unit(base_y)
+  del base_x, base_y
+  base_qx, base_qy = quantise32(tx), quantise32(ty)
+
+  # Normalised copy for the transformed replicas, taken from the continuous value rather than
+  # from the grid cell: transforming an already-quantised coordinate would bake the base's
+  # 16-bit step into every replica.
+  bx = tx - tx.mean(); by = ty - ty.mean()
+  del tx, ty
   half = max(np.abs(bx).max(), np.abs(by).max())
   bx /= 2 * half; by /= 2 * half
 
@@ -161,13 +195,17 @@ else:
                             jit=float(s * rng.uniform(0.002, 0.03))))
 
   # ---------------------------------------- geometry: key = morton<<32|eid
+  # The residual is held in a separate entity-indexed array rather than packed into the sort
+  # key: the key is already a full u64 and widening the sort to 96 bits would cost far more
+  # than the one gather this needs at write time. 4 bytes per point.
   key = np.empty(N, dtype=np.uint64)
+  resid = np.empty(N, dtype=np.uint32)
   for r, sp in enumerate(specs):
       lo = r * n_base
       hi = min(lo + n_base, N)
       n_r = hi - lo
       if sp.get("identity"):
-          gx, gy = base_gx[:n_r], base_gy[:n_r]
+          qx, qy = base_qx[:n_r], base_qy[:n_r]
       else:
           th, s, fx = sp["th"], sp["s"], sp["fx"]
           x = (bx[:n_r] * fx) * np.cos(th) - by[:n_r] * np.sin(th)
@@ -178,21 +216,25 @@ else:
           if sp["jit"]:
               x += rng.normal(0, sp["jit"], n_r)
               y += rng.normal(0, sp["jit"], n_r)
-          gx = np.clip(np.rint(x * GMAX), 0, GMAX).astype(np.uint32)
-          gy = np.clip(np.rint(y * GMAX), 0, GMAX).astype(np.uint32)
+          qx, qy = quantise32(x), quantise32(y)
           del x, y
-      m = (interleave16(gx) << np.uint64(1)) | interleave16(gy)
+      m, res = split_code(qx, qy)
       key[lo:hi] = (m << np.uint64(32)) | np.arange(lo, hi, dtype=np.uint64)
-      del m
+      resid[lo:hi] = res
+      del m, res
       if r % 50 == 0:
           log(f"  replica {r}/{R}")
-  del bx, by, base_gx, base_gy
+  del bx, by, base_qx, base_qy
   log("keys built; sorting in place")
   key.sort()                                # introsort, in place, no buffer
   log("sorted; writing geometry")
 
   geo_f = out / "geometry.parquet"
+  # `residual` gets no delta encoding: it is the low bits of a coordinate, so it is
+  # high-entropy and near-incompressible by construction — delta packing would cost CPU to
+  # store the same bytes. `morton` still deltas well, the rows being sorted by it.
   schema = pa.schema([("entity_id", pa.uint32()), ("morton", pa.uint32()),
+                      ("residual", pa.uint32()),
                       ("row_id", pa.uint32()), ("priority", pa.uint16())])
   w = pq.ParquetWriter(geo_f, schema, compression="zstd", use_dictionary=False,
                        column_encoding={"morton": "DELTA_BINARY_PACKED",
@@ -204,6 +246,9 @@ else:
       w.write_table(pa.table({
           "entity_id": pa.array(eid, pa.uint32()),
           "morton": pa.array((k >> np.uint64(32)).astype(np.uint32), pa.uint32()),
+          # Gathered by entity id: the rows are in Morton order here, the residual array is
+          # in entity order.
+          "residual": pa.array(resid[eid], pa.uint32()),
           "row_id": pa.array(np.arange(lo, min(lo + CHUNK, N), dtype=np.uint32), pa.uint32()),
           "priority": pa.array((splitmix(eid.astype(np.uint64)) >> np.uint64(48)
                                 ).astype(np.uint16), pa.uint16()),

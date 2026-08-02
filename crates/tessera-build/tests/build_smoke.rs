@@ -829,3 +829,89 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
         "the error should name the identity check, got: {err}"
     );
 }
+
+/// A points file carrying `morton` **and** `residual` holds 32 bits per axis, and the importer
+/// must reassemble both words rather than reading the cell and discarding the rest.
+///
+/// The fixture puts every point in **one** Morton cell and separates them only by residual, so a
+/// reader that ignores the residual column collapses all of them onto the cell origin and this
+/// test fails. That is the whole precision claim, stated as a fixture rather than as prose.
+#[test]
+fn morton_plus_residual_recovers_sub_cell_position() {
+    use tessera_build::input::{read_points, IDENTITY_EXTENT};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("points.parquet");
+
+    // One cell, four corners of it: residual interleaves (rx, ry) with x on the even bits.
+    let cell = tessera_spatial::interleave(1234, 5678).raw() as u64;
+    let residual_of = |rx: u32, ry: u32| -> u64 {
+        let spread = |v: u32| {
+            let mut x = v as u64;
+            x = (x | (x << 8)) & 0x00FF_00FF;
+            x = (x | (x << 4)) & 0x0F0F_0F0F;
+            x = (x | (x << 2)) & 0x3333_3333;
+            x = (x | (x << 1)) & 0x5555_5555;
+            x
+        };
+        spread(rx) | (spread(ry) << 1)
+    };
+    let corners = [(0u32, 0u32), (0, 65535), (65535, 0), (65535, 65535)];
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("morton", DataType::UInt64, false),
+        Field::new("residual", DataType::UInt64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from((0..4u64).collect::<Vec<_>>())),
+            Arc::new(UInt64Array::from(vec![cell; 4])),
+            Arc::new(UInt64Array::from(
+                corners.iter().map(|(a, b)| residual_of(*a, *b)).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(&points).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+
+    let mut rows = read_points(&points, &IDENTITY_EXTENT, None).unwrap();
+    rows.sort_by_key(|r| r.source_id);
+    assert_eq!(rows.len(), 4);
+
+    for (row, (rx, ry)) in rows.iter().zip(corners) {
+        // Every point keeps the shared cell...
+        assert_eq!(row.qx >> 16, 1234, "cell x must survive");
+        assert_eq!(row.qy >> 16, 5678, "cell y must survive");
+        // ...and its own distinct sub-cell position.
+        assert_eq!(row.qx & 0xFFFF, rx, "residual x must survive");
+        assert_eq!(row.qy & 0xFFFF, ry, "residual y must survive");
+    }
+
+    // And the four are genuinely distinct, which is what a residual-ignoring reader loses.
+    let distinct: std::collections::HashSet<(u32, u32)> =
+        rows.iter().map(|r| (r.qx, r.qy)).collect();
+    assert_eq!(distinct.len(), 4, "all four sub-cell positions must differ");
+}
+
+/// A bare `morton` column carries 16 bits per axis and no more, so the importer widens it with a
+/// **zero** residual — the point sits at its cell's origin. Not a defect: inventing precision the
+/// file does not hold would be the defect.
+#[test]
+fn bare_morton_widens_with_a_zero_residual() {
+    use tessera_build::input::{read_points, IDENTITY_EXTENT};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("points.parquet");
+    write_morton_points(&points);
+
+    let rows = read_points(&points, &IDENTITY_EXTENT, None).unwrap();
+    assert!(!rows.is_empty());
+    for row in &rows {
+        assert_eq!(row.qx & 0xFFFF, 0, "a bare morton column has no sub-cell part");
+        assert_eq!(row.qy & 0xFFFF, 0, "a bare morton column has no sub-cell part");
+    }
+}

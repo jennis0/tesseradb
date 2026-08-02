@@ -63,6 +63,56 @@ pub fn cell(v: f64, min: f64, max: f64) -> u16 {
     }
 }
 
+/// Quantise a coordinate value into a 32-bit fixed-point position: [`cell`] widened by 16 bits.
+///
+/// `fixed32(v) = clamp( floor( (v - min) / (max - min) * 2^32 ), 0, 2^32 - 1 )`, computed in f64.
+///
+/// **`fixed32(v) >> 16 == cell(v)`, exactly and at both clamps**, which is the property the whole
+/// cell-plus-residual representation rests on: the cell a point lands in is the same whether it is
+/// derived from the coarse quantiser or from the fine one, so a residual is always the remainder
+/// within *that* cell rather than a separately-rounded quantity. Flooring and then shifting equals
+/// flooring at the coarser scale, and the clamp `2^32 - 1` shifts to exactly 65535. Pinned by
+/// [`tests::fixed32_high_half_is_cell`].
+///
+/// This is why the quantiser must be a *widening* of `cell` rather than any other 32-bit mapping.
+/// A scale factor of `2^32 - 1`, or round-to-nearest instead of floor, each disagree with `cell`
+/// about which cell a coordinate belongs to for a large fraction of inputs — measured at ~25% of
+/// uniformly distributed values for `round(t × (2^16 - 1))`, the mapping the corpus generator used
+/// before this function existed. Nothing detected it, because a corpus that stores Morton codes is
+/// read back through the code and never re-quantised.
+///
+/// Same domain conditions as [`cell`]: finite `v`, valid extent, debug-asserted only.
+pub fn fixed32(v: f64, min: f64, max: f64) -> u32 {
+    debug_assert!(v.is_finite(), "fixed32(): v must be finite, got {v}");
+    debug_assert!(
+        min.is_finite() && max.is_finite() && max > min,
+        "fixed32(): invalid extent [{min}, {max})"
+    );
+    const SCALE: f64 = 4_294_967_296.0; // 2^32
+    let scaled = (v - min) / (max - min) * SCALE;
+    let floored = scaled.floor();
+    if floored <= 0.0 {
+        0
+    } else if floored >= (u32::MAX as f64) {
+        u32::MAX
+    } else {
+        floored as u32
+    }
+}
+
+/// Split a pair of 32-bit fixed-point axes into the stored `(cell code, sub-cell residual)`.
+///
+/// The two words concatenate to the 64-bit interleave of the inputs — `(morton << 32) | residual`
+/// — because interleaving is bit-local: bit *i* of an axis lands at a fixed position of the code
+/// regardless of the other bits, so the high half of the 64-bit form is exactly the 32-bit
+/// interleave of the two high halves. The residual uses the same axis convention as the cell code,
+/// which is what makes that concatenation meaningful rather than merely well-typed.
+pub fn split32(qx: u32, qy: u32) -> (MortonCode, u32) {
+    let cell = interleave((qx >> 16) as u16, (qy >> 16) as u16);
+    let residual = spread(qx as u16) | (spread(qy as u16) << 1);
+    (cell, residual)
+}
+
 /// Spread the low 16 bits of `v` into the even bit positions of a 32-bit value.
 ///
 /// Bit *i* of `v` moves to bit `2*i` of the result; odd bits are zero.
@@ -214,6 +264,76 @@ mod tests {
     #[test]
     fn worked_example_from_contracts_2_5() {
         assert_eq!(interleave(6, 3).raw(), 30); // contracts §2.5
+    }
+
+    /// The property the cell-plus-residual representation rests on: the 32-bit quantiser is a
+    /// *widening* of the 16-bit one, so both agree on which cell a coordinate belongs to. A
+    /// different scale factor or rounding mode passes every other test in this file and fails
+    /// this one — which is the whole reason it exists.
+    #[test]
+    fn fixed32_high_half_is_cell() {
+        let (min, max) = (-12.0, 25.5);
+        // Both clamps, both boundaries, and a spread of interior values including ones that
+        // land exactly on a cell edge.
+        let mut vs = vec![min, max, min - 1.0, max + 1.0, 0.0, 0.5, -11.999_999];
+        for i in 0..2000 {
+            vs.push(min + (max - min) * (i as f64) / 2000.0);
+        }
+        for v in vs {
+            assert_eq!(
+                (fixed32(v, min, max) >> 16) as u16,
+                cell(v, min, max),
+                "fixed32(v) >> 16 must equal cell(v) at v = {v}"
+            );
+        }
+    }
+
+    /// Concatenating the two stored words yields the 64-bit interleave of the two 32-bit axes.
+    /// Checked at every single-bit position, which is what a change to the bit ordering breaks.
+    #[test]
+    fn split32_concatenates_to_the_64_bit_interleave() {
+        fn reference_interleave64(qx: u32, qy: u32) -> u64 {
+            let mut out = 0u64;
+            for i in 0..32 {
+                out |= (((qx >> i) & 1) as u64) << (2 * i);
+                out |= (((qy >> i) & 1) as u64) << (2 * i + 1);
+            }
+            out
+        }
+        let mut cases: Vec<(u32, u32)> = Vec::new();
+        for i in 0..32 {
+            cases.push((1 << i, 0));
+            cases.push((0, 1 << i));
+        }
+        cases.extend([(0, 0), (u32::MAX, u32::MAX), (0xDEAD_BEEF, 0x0BAD_F00D)]);
+        for (qx, qy) in cases {
+            let (cell_code, residual) = split32(qx, qy);
+            let joined = ((cell_code.raw() as u64) << 32) | residual as u64;
+            assert_eq!(
+                joined,
+                reference_interleave64(qx, qy),
+                "split32({qx:#x}, {qy:#x}) must concatenate to the 64-bit interleave"
+            );
+        }
+    }
+
+    /// The cell half of `split32` is the code `morton_of` would produce for the same point, so
+    /// adding a residual leaves every existing Morton code byte-identical.
+    #[test]
+    fn split32_cell_half_agrees_with_morton_of() {
+        let e = Extent {
+            x_min: -3.0,
+            x_max: 11.0,
+            y_min: 0.25,
+            y_max: 9.75,
+        };
+        for i in 0..500 {
+            let t = (i as f64) / 500.0;
+            let (x, y) = (-3.0 + 14.0 * t, 0.25 + 9.5 * (1.0 - t));
+            let qx = fixed32(x, e.x_min, e.x_max);
+            let qy = fixed32(y, e.y_min, e.y_max);
+            assert_eq!(split32(qx, qy).0, morton_of(x, y, &e), "at ({x}, {y})");
+        }
     }
 
     #[test]

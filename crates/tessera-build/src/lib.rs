@@ -25,6 +25,7 @@ pub mod observer;
 mod pipeline;
 pub(crate) mod spill;
 
+use crate::input::dequantise32;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -240,8 +241,10 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
 /// second, unsorted copy alongside it would only create a way for the two to disagree.
 struct StagedItem {
     source_id: u64,
-    x: f32,
-    y: f32,
+    /// 32-bit fixed point per axis against the build extent, as `input::PointRow` carries it —
+    /// not coordinates. Same width as the `f32` pair it replaces.
+    qx: u32,
+    qy: u32,
     signature: Vec<u32>,
 }
 
@@ -332,8 +335,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         let terms: Vec<TermId> = descriptors.iter().map(|d| dict.intern(d)).collect();
         staged.push(StagedItem {
             source_id: point.source_id,
-            x: point.x,
-            y: point.y,
+            qx: point.qx,
+            qy: point.qy,
             signature: signature_sort_key(&terms),
         });
     }
@@ -444,8 +447,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         let tessera_id = args.identity_key.forward(args.shard_id, entity_id)?;
         tiler_items.push(TilerItem {
             tessera_id,
-            x: item.x,
-            y: item.y,
+            // Interim, matching the streaming pipeline: the tiler and the stored columns are
+            // still `f32` coordinates. `sort_batch` re-quantises these to get the code, which is
+            // exact because `dequantise32` inverts `fixed32` well within a cell.
+            x: dequantise32(item.qx, args.extent.x_min, args.extent.x_max),
+            y: dequantise32(item.qy, args.extent.y_min, args.extent.y_max),
             scalars: Vec::new(),
         });
     }

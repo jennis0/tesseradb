@@ -128,12 +128,12 @@ use rustc_hash::FxHashMap;
 
 use tessera_authz::encode_posting;
 use tessera_plugin::{Passthrough, Plugin};
-use tessera_spatial::morton::morton_of;
+use tessera_spatial::split32;
 use tessera_store::write::{write_columns, write_morton_codes, write_permutation_iter};
 use tessera_types::{EntityId, IdentityKey, SMALL_TERM_THRESHOLD_DEFAULT};
 
 use crate::error::{BuildError, Result};
-use crate::input;
+use crate::input::{self, dequantise32};
 use crate::observer::{BuildObserver, BuildStage, StageTimer};
 use crate::spill;
 use crate::{
@@ -1069,15 +1069,17 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // (A file that repeats or substitutes ids since the first pass fails the id-anchor check
     // below — a row count alone would accept a repeat that compensates a removal, and this was
     // previously last-write-wins silent.)
-    let mut x_of_entity: Vec<f32> = vec![0.0; n as usize];
-    let mut y_of_entity: Vec<f32> = vec![0.0; n as usize];
+    // 32-bit fixed point per axis, not coordinates: the cell code and its residual both
+    // fall out by shift and mask, so no stage re-quantises (see `input::PointRow`).
+    let mut x_of_entity: Vec<u32> = vec![0; n as usize];
+    let mut y_of_entity: Vec<u32> = vec![0; n as usize];
     let mut points_seen = 0u64;
     let mut geom_anchor = 0u64;
     let mut failure: Option<BuildError> = None;
-    let mut chunk: Vec<(u64, (f32, f32))> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
-    let resolve = |chunk: &mut Vec<(u64, (f32, f32))>,
-                   x_of_entity: &mut Vec<f32>,
-                   y_of_entity: &mut Vec<f32>,
+    let mut chunk: Vec<(u64, (u32, u32))> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
+    let resolve = |chunk: &mut Vec<(u64, (u32, u32))>,
+                   x_of_entity: &mut Vec<u32>,
+                   y_of_entity: &mut Vec<u32>,
                    points_seen: &mut u64,
                    geom_anchor: &mut u64| {
         join_chunk(chunk, &source_ids, |ordinal, source_id, (x, y)| {
@@ -1095,7 +1097,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         })
     };
     input::scan_points(&args.points, &args.extent, args.limit, |point| {
-        chunk.push((point.source_id, (point.x, point.y)));
+        chunk.push((point.source_id, (point.qx, point.qy)));
         if chunk.len() == JOIN_CHUNK_ROWS {
             if let Err(e) = resolve(
                 &mut chunk,
@@ -1155,12 +1157,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 .identity_key
                 .forward(args.shard_id, EntityId::new(entity as u64))?;
             Ok(RowRec {
-                morton: morton_of(
-                    x_of_entity[entity] as f64,
-                    y_of_entity[entity] as f64,
-                    &args.extent,
-                )
-                .raw(),
+                // From the quantised form directly: `split32`'s cell half is by
+                // construction the code `morton_of` would give for the same point.
+                morton: split32(x_of_entity[entity], y_of_entity[entity]).0.raw(),
                 entity: entity as u32,
                 priority: tessera_id.priority(),
                 _pad: 0,
@@ -1196,13 +1195,15 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         // this build ever holds, so nothing that can be dropped first is kept alongside it.
         // Indexed parallel gathers — collect preserves row order, so bytes are unchanged; at
         // 10⁹ rows the serial versions are a billion random 4-byte reads each.
+        // Interim: the stored columns are still `f32` coordinates, so the quantised value is
+        // converted back here and only here. The codes above never take this path.
         let x_row: Vec<f32> = rows
             .par_iter()
-            .map(|r| x_of_entity[r.entity as usize])
+            .map(|r| dequantise32(x_of_entity[r.entity as usize], args.extent.x_min, args.extent.x_max))
             .collect();
         let y_row: Vec<f32> = rows
             .par_iter()
-            .map(|r| y_of_entity[r.entity as usize])
+            .map(|r| dequantise32(y_of_entity[r.entity as usize], args.extent.y_min, args.extent.y_max))
             .collect();
         drop(x_of_entity);
         drop(y_of_entity);

@@ -4,10 +4,11 @@
 //! when the file does not (the *build's* in-memory item vector is the memory ceiling, not the
 //! decoder's):
 //!
-//! * **points** — `entity_id` plus geometry. Geometry is accepted either as explicit `x`/`y`
-//!   columns or, when the corpus stores Morton codes instead (the probe corpus's
-//!   `data/scaled/geometry.parquet` does), as a `morton` column that is de-interleaved back to
-//!   grid-cell coordinates. See [`read_points`].
+//! * **points** — `entity_id` plus geometry, in any of three shapes and always yielding the same
+//!   32-bit fixed-point form (see [`PointRow`]): explicit `x`/`y` columns; `morton` + `residual`,
+//!   which the probe corpus writes and which carries the full 32 bits per axis; or a bare
+//!   `morton` column, which carries 16 and is widened without pretending otherwise. See
+//!   [`read_points`].
 //! * **pairs** — the exploded `(entity_id, term_id)` relation.
 //!
 //! Both honour a `limit`: `entity_id < limit` selects a prefix of entity space, which is a
@@ -27,16 +28,34 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
-use tessera_spatial::Extent;
+use tessera_spatial::{fixed32, Extent};
 
 use crate::error::{BuildError, Result};
 
 /// One input point: its source-corpus entity ID (which becomes the external ID) and geometry.
+///
+/// Geometry is carried **already quantised**, as 32-bit fixed point per axis against the build's
+/// extent ([`tessera_spatial::fixed32`]), rather than as the coordinates the file held. Three
+/// reasons, in the order they matter:
+///
+/// - It is the only form that can represent every input source without loss. A file holding
+///   coordinates quantises exactly once, here; a file holding Morton codes plus residuals is
+///   already in this form and is reassembled rather than converted; and a file holding bare
+///   Morton codes carries 16 bits per axis, which widens into this form with zero residual and
+///   no pretence that more precision exists.
+/// - It is the same width as the `f32` pair it replaces, so the build's per-entity geometry
+///   arrays do not grow. An `f64` pair would have carried the precision too, at twice the memory
+///   on the one structure the build allocates per entity.
+/// - The cell code and its residual both fall out by shift and mask
+///   ([`tessera_spatial::split32`]), so no downstream stage re-quantises and none can disagree
+///   with another about which cell a point belongs to.
 #[derive(Debug, Clone, Copy)]
 pub struct PointRow {
     pub source_id: u64,
-    pub x: f32,
-    pub y: f32,
+    /// 32-bit fixed-point x against the build extent; `qx >> 16` is the cell.
+    pub qx: u32,
+    /// 32-bit fixed-point y against the build extent; `qy >> 16` is the cell.
+    pub qy: u32,
 }
 
 /// The only extent under which the Morton input branch is meaningful: the grid's own
@@ -50,17 +69,21 @@ pub const IDENTITY_EXTENT: Extent = Extent {
 
 /// Read `points`, keeping rows with `source_id < limit` when `limit` is `Some`.
 ///
-/// Accepted schemas (checked in this order):
-/// 1. `entity_id` + `x` + `y` — coordinates used as given, quantised against `extent`.
-/// 2. `entity_id` + `morton` — the 32-bit Morton code is de-interleaved into its `(x_cell,
-///    y_cell)` grid coordinates and those are returned as the coordinates. This reproduces the
-///    source corpus's own Morton codes **exactly** — but only against [`IDENTITY_EXTENT`], where
-///    `cell(v) = floor(v / 65536 × 65536) = v` for an integer `v ≤ 65535`. Under any other
-///    extent the cell indices would be re-quantised as if they were coordinates in that extent's
-///    units, silently collapsing or stretching the grid while `MANIFEST.json` went on declaring
-///    the extent the caller passed — a bundle whose geometry and whose declared quantisation
-///    disagree. So this branch **requires** the identity extent and errors otherwise; a corpus
-///    with real coordinates must ship `x`/`y` and take branch 1.
+/// Accepted schemas (checked in this order), all yielding [`PointRow`]'s 32-bit fixed point:
+/// 1. `entity_id` + `x` + `y` — coordinates quantised against `extent`, the one place that
+///    happens.
+/// 2. `entity_id` + `morton` + `residual` — the two words are *reassembled*, not converted: the
+///    file already holds the fixed-point position split across a cell code and a sub-cell
+///    remainder, in this build's own axis convention. Full 32 bits per axis.
+/// 3. `entity_id` + `morton` — 16 bits per axis, widened with a zero residual. The point sits at
+///    its cell's origin because that is genuinely all the file says about it.
+///
+/// **Both Morton branches require [`IDENTITY_EXTENT`]**, where `cell(v) = v` for an integer
+/// `v ≤ 65535`, and error otherwise. Under any other extent the cell indices would be
+/// re-quantised as if they were coordinates in that extent's units, silently collapsing or
+/// stretching the grid while `MANIFEST.json` went on declaring the extent the caller passed — a
+/// bundle whose geometry and whose declared quantisation disagree. A corpus with real coordinates
+/// ships `x`/`y` and takes branch 1.
 pub fn read_points(path: &Path, extent: &Extent, limit: Option<u64>) -> Result<Vec<PointRow>> {
     let mut out = Vec::new();
     scan_points(path, extent, limit, |row| {
@@ -117,6 +140,22 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     let wanted: Vec<&str> =
         if schema.column_with_name("x").is_some() && schema.column_with_name("y").is_some() {
             vec!["entity_id", "x", "y"]
+        } else if schema.column_with_name("morton").is_some()
+            && schema.column_with_name("residual").is_some()
+        {
+            if *extent != IDENTITY_EXTENT {
+                return Err(BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "this points file stores Morton codes rather than coordinates, which is \
+                         exact only against the grid's own extent (0,65536,0,65536); \
+                         ({},{},{},{}) was given. Pass the identity extent, or supply a points \
+                         file with 'x' and 'y' columns.",
+                        extent.x_min, extent.x_max, extent.y_min, extent.y_max
+                    ),
+                });
+            }
+            vec!["entity_id", "morton", "residual"]
         } else if schema.column_with_name("morton").is_some() {
             if *extent != IDENTITY_EXTENT {
                 return Err(BuildError::Schema {
@@ -148,7 +187,13 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
 
     let keep = prunable_row_groups(builder.metadata(), id_idx_in_file, limit);
     drop(builder);
-    let morton_input = !wanted.contains(&"x");
+    let geometry_kind = if wanted.contains(&"x") {
+        GeometryKind::Xy
+    } else if wanted.contains(&"residual") {
+        GeometryKind::MortonResidual
+    } else {
+        GeometryKind::Morton
+    };
     let workers = decode_worker_count(keep.len());
     let shards: Vec<Vec<usize>> = keep
         .chunks(keep.len().div_ceil(workers).max(1))
@@ -158,7 +203,10 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     /// One decoded batch's columns, extracted on a worker thread.
     enum PointCols {
         Xy(Vec<u64>, Vec<f32>, Vec<f32>),
+        /// Codes only: 16 bits per axis, all a bare `morton` column can carry.
         Morton(Vec<u64>, Vec<u64>),
+        /// Codes plus sub-cell residuals: the full 32 bits per axis.
+        MortonResidual(Vec<u64>, Vec<u64>, Vec<u64>),
     }
 
     let (tx, rx) =
@@ -182,13 +230,18 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                         .map_err(|e| BuildError::parquet(path, e))?;
                     let projected = arrow::array::RecordBatchReader::schema(&reader);
                     let id_idx = column_index(path, &projected, "entity_id")?;
-                    let geometry = if morton_input {
-                        Geometry::Morton(column_index(path, &projected, "morton")?)
-                    } else {
-                        Geometry::Xy(
+                    let geometry = match geometry_kind {
+                        GeometryKind::Xy => Geometry::Xy(
                             column_index(path, &projected, "x")?,
                             column_index(path, &projected, "y")?,
-                        )
+                        ),
+                        GeometryKind::Morton => {
+                            Geometry::Morton(column_index(path, &projected, "morton")?)
+                        }
+                        GeometryKind::MortonResidual => Geometry::MortonResidual(
+                            column_index(path, &projected, "morton")?,
+                            column_index(path, &projected, "residual")?,
+                        ),
                     };
                     for batch in reader {
                         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
@@ -202,6 +255,11 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             Geometry::Morton(mi) => {
                                 PointCols::Morton(ids, read_u64_column(path, &batch, mi, "morton")?)
                             }
+                            Geometry::MortonResidual(mi, ri) => PointCols::MortonResidual(
+                                ids,
+                                read_u64_column(path, &batch, mi, "morton")?,
+                                read_u64_column(path, &batch, ri, "residual")?,
+                            ),
                         };
                         if tx.send(Ok(cols)).is_err() {
                             // The consumer went away (its own error path); stop quietly.
@@ -225,10 +283,12 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             if limit.is_some_and(|l| ids[i] >= l) {
                                 continue;
                             }
+                            // The one place a coordinate is quantised. `f32` widens to `f64`
+                            // exactly, so this loses nothing the file had not already lost.
                             if visit(PointRow {
                                 source_id: ids[i],
-                                x: xs[i],
-                                y: ys[i],
+                                qx: fixed32(xs[i] as f64, extent.x_min, extent.x_max),
+                                qy: fixed32(ys[i] as f64, extent.y_min, extent.y_max),
                             })
                             .is_break()
                             {
@@ -241,15 +301,40 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             if limit.is_some_and(|l| ids[i] >= l) {
                                 continue;
                             }
-                            let code = u32::try_from(codes[i]).map_err(|_| BuildError::Schema {
-                                path: path.to_path_buf(),
-                                detail: format!("morton code {} does not fit in u32", codes[i]),
-                            })?;
+                            let code = narrow_code(path, codes[i], "morton")?;
                             let (cx, cy) = deinterleave(code);
+                            // A bare `morton` column holds 16 bits per axis and no more, so the
+                            // sub-cell position is *zero*, not unknown: the point sits at its
+                            // cell's origin. Widening rather than inventing precision is what
+                            // makes this branch honest, and it is why the source having no
+                            // residual is a property of the corpus rather than a defect here.
                             if visit(PointRow {
                                 source_id: ids[i],
-                                x: cx as f32,
-                                y: cy as f32,
+                                qx: (cx as u32) << 16,
+                                qy: (cy as u32) << 16,
+                            })
+                            .is_break()
+                            {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    PointCols::MortonResidual(ids, codes, residuals) => {
+                        for i in 0..ids.len() {
+                            if limit.is_some_and(|l| ids[i] >= l) {
+                                continue;
+                            }
+                            let code = narrow_code(path, codes[i], "morton")?;
+                            let residual = narrow_code(path, residuals[i], "residual")?;
+                            let (cx, cy) = deinterleave(code);
+                            let (rx, ry) = deinterleave(residual);
+                            // Reassembly, not conversion: the file already holds the 32-bit
+                            // fixed-point position, split across two words in the same axis
+                            // convention this build stores it in.
+                            if visit(PointRow {
+                                source_id: ids[i],
+                                qx: ((cx as u32) << 16) | rx as u32,
+                                qy: ((cy as u32) << 16) | ry as u32,
                             })
                             .is_break()
                             {
@@ -383,6 +468,35 @@ pub fn count_point_rows(path: &Path) -> Result<u64> {
 enum Geometry {
     Xy(usize, usize),
     Morton(usize),
+    MortonResidual(usize, usize),
+}
+
+/// Which geometry schema the points file offers, decided once from the file's columns and then
+/// carried to every decode worker (each resolves its own column indices against its own reader).
+#[derive(Clone, Copy)]
+enum GeometryKind {
+    Xy,
+    Morton,
+    MortonResidual,
+}
+
+/// The inverse of [`fixed32`], to the precision `f32` can hold.
+///
+/// **Interim.** It exists only because `columns.arrow` still stores `x`/`y` as `f32` while the
+/// build now carries 32-bit fixed point end to end: the *codes* are computed from the quantised
+/// form and are exact, and this is used solely to fill the stored coordinate columns. It goes when
+/// those columns become the residual, and nothing should grow a second caller meanwhile.
+pub(crate) fn dequantise32(q: u32, min: f64, max: f64) -> f32 {
+    (min + (q as f64) * (max - min) / 4_294_967_296.0) as f32
+}
+
+/// Narrow a `u64` column value to the `u32` a Morton or residual word must fit in, as a typed
+/// error rather than a truncation — a truncated code is a different position, silently.
+fn narrow_code(path: &Path, value: u64, name: &str) -> Result<u32> {
+    u32::try_from(value).map_err(|_| BuildError::Schema {
+        path: path.to_path_buf(),
+        detail: format!("{name} value {value} does not fit in u32"),
+    })
 }
 
 /// Inverse of the Morton interleave (contracts §2.5 / R2): bit `2i` of `code` is bit `i` of the
