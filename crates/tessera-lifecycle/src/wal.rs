@@ -102,10 +102,20 @@ pub enum WalScalar {
 /// `tessera_id` — a pure function of `(key, shard_id, entity_id)`, so nothing needs to be stored
 /// to make that identity durable. `None` here must never collide with `None` elsewhere, and must
 /// never be treated as "an external id happens to be empty".
+///
+/// `slice` names the row space the row's future row belongs to. It is durable rather than
+/// re-derived because a flush segment covers a contiguous entity range only *within one slice*:
+/// with more than one slice a commit window's entity range interleaves across them, and a
+/// segment's range becomes ascending-with-holes. The row is the only place that fact survives a
+/// restart, and the WAL is append-only — so the field goes in while the layout is still being
+/// revised, not once a published segment depends on it. The handler resolves it against the
+/// bundle's declared slices and refuses anything else; nothing defaults it, because a defaulted
+/// slice is how a row silently joins the wrong row space.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalRow {
     pub external_id: Option<Vec<u8>>,
     pub entity_id: EntityId,
+    pub slice: String,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f32,
     pub y: f32,
@@ -213,8 +223,10 @@ pub type Result<T> = std::result::Result<T, WalError>;
 /// File format magic, checked at open.
 const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// File format version, checked at open. Bump on any incompatible change to record framing or
-/// the header itself.
-const WAL_VERSION: u16 = 1;
+/// the header itself — and on any change to a record's *field* layout, since postcard encodes
+/// struct fields positionally and would otherwise decode a missing field as whatever bytes follow
+/// it. Version 2 added [`WalRow::slice`].
+const WAL_VERSION: u16 = 2;
 /// Header size in bytes (`WAL_MAGIC` ‖ `WAL_VERSION` LE). Every record offset in this module —
 /// including the ones compared against the sidecar's last-fsync offset — is a byte offset from
 /// the start of the file, so it already accounts for the header living at the front.

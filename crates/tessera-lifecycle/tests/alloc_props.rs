@@ -67,6 +67,7 @@ proptest! {
                         rows: vec![WalRow {
                             external_id: Some(id.to_le_bytes().to_vec()),
                             entity_id: EntityId::new(id),
+                            slice: "default".to_string(),
                             descriptors: Vec::new(),
                             x: 0.0,
                             y: 0.0,

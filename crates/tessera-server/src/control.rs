@@ -574,17 +574,16 @@ fn parse_ingest_batch(
 /// contradiction inside a closed list. §3.4's 422 is licensed for *ambiguity*, which is the second
 /// row, not the third.
 ///
-/// **⊘ Partially implemented: the header is validated and not stored.** There is no
-/// slice-partitioned ingest buffer for a named slice to route a row into, so naming a slice selects
-/// nothing — a reader must not assume otherwise. Validating it anyway is what stops a client's
-/// slice-aware batch from being accepted and then silently misrouted the day partitioning lands.
-/// This is `node_id`'s situation one function over, and the same disposition: accepted so a
-/// well-formed request is never refused for including it, stored nowhere.
+/// **The resolved id is what every row of the batch is stored under** — `WalRow::slice`, and from
+/// there `BufferedItem::slice` and the flush segment's row space. Absent-with-one-slice resolves to
+/// that slice's id; it is never defaulted to a literal, because a defaulted slice is how a row
+/// silently joins the wrong row space the day partitioning lands. A bundle declaring no slice at
+/// all has no row space to ingest into, so it is refused here rather than accepted into nothing.
 ///
 /// No build path emits a multi-slice bundle (`tessera-build` writes exactly one `SliceDescriptor`),
 /// so the second row is unreachable. It is implemented rather than asserted-away because it is a
 /// contract clause and it costs one comparison.
-fn validate_slice(slice: Option<&str>, slices: &[(String, String)]) -> Result<(), ApiError> {
+fn resolve_slice(slice: Option<&str>, slices: &[(String, String)]) -> Result<String, ApiError> {
     match slice {
         None if slices.len() > 1 => Err(ApiError::Contract(format!(
             "this bundle has {} slices ({}), so x-tessera-slice is required — which one a batch \
@@ -596,8 +595,11 @@ fn validate_slice(slice: Option<&str>, slices: &[(String, String)]) -> Result<()
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
-        None => Ok(()),
-        Some(id) if slices.iter().any(|(known, _)| known == id) => Ok(()),
+        None => slices
+            .first()
+            .map(|(id, _)| id.clone())
+            .ok_or_else(|| ApiError::Contract("this bundle declares no slice to ingest into".into())),
+        Some(id) if slices.iter().any(|(known, _)| known == id) => Ok(id.to_string()),
         Some(id) => Err(ApiError::Unknown(format!("unknown slice '{id}'"))),
     }
 }
@@ -681,7 +683,7 @@ fn run_ingest(
     // narrower accessor on purpose: it is the one definition of what this bundle declares, the one
     // `/v1/meta` publishes, and a second accessor is a second definition that can drift from it.
     let meta = state.engine.meta();
-    validate_slice(slice, &meta.slices)?;
+    let slice = resolve_slice(slice, &meta.slices)?;
 
     let items = parse_ingest_batch(body, &meta.declared_scalars)?;
 
@@ -848,6 +850,7 @@ fn run_ingest(
         .zip(descriptor_lists)
         .map(|((item, terms), descriptors)| UnallocatedRow {
             external_id: item.external_id,
+            slice: slice.clone(),
             descriptors,
             x: item.x,
             y: item.y,

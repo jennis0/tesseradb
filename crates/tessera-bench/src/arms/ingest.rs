@@ -318,6 +318,7 @@ pub(crate) fn synth_rows(count: usize, start: u64, terms: &[TermId]) -> Vec<Unal
             let n = start + i as u64;
             UnallocatedRow {
                 external_id: Some(format!("bench-{n}").into_bytes()),
+                slice: "s0".to_string(),
                 descriptors: Vec::new(),
                 x: ((n * 37) % 65536) as f32,
                 y: ((n * 53) % 65536) as f32,

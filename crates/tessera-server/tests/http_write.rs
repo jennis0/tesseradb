@@ -732,6 +732,7 @@ fn concurrent_ingest_and_change_both_survive() {
         // name the entity id at all.
         let row = tessera_lifecycle::UnallocatedRow {
             external_id: Some(new_external_id.clone()),
+            slice: "s0".to_string(),
             descriptors: vec![b"0".to_vec()],
             x: 5.0,
             y: 5.0,

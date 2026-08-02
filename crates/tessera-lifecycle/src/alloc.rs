@@ -238,6 +238,7 @@ mod tests {
             rows: vec![crate::wal::WalRow {
                 external_id: Some(entity_id.to_le_bytes().to_vec()),
                 entity_id: EntityId::new(entity_id),
+                slice: "default".to_string(),
                 descriptors: Vec::new(),
                 x: 0.0,
                 y: 0.0,

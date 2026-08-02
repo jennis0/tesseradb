@@ -87,6 +87,7 @@ fn seed_buffered_row(path: &Path, entity: u64) {
         rows: vec![WalRow {
             external_id: None,
             entity_id: EntityId::new(entity),
+            slice: "s0".to_string(),
             descriptors: Vec::new(),
             x: 0.0,
             y: 0.0,

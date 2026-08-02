@@ -42,9 +42,13 @@ use crate::wal::{ChangeOp, WalError, WalRow, WalScalar};
 /// `external_id` is optional (contracts §3.4 r6) and `None` must never collide with `None`: an
 /// item with no external ID is addressable only by its `tessera_id`, is established in no live
 /// map, and is not a duplicate of any other such item.
+///
+/// `slice` is resolved by the handler against the bundle's declared slices — never defaulted here
+/// — for the reason given at [`WalRow`]'s own field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnallocatedRow {
     pub external_id: Option<Vec<u8>>,
+    pub slice: String,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f32,
     pub y: f32,
@@ -100,6 +104,7 @@ impl UnallocatedRow {
             WalRow {
                 external_id: pending.external_id,
                 entity_id,
+                slice: self.slice,
                 descriptors: self.descriptors,
                 x: self.x,
                 y: self.y,
@@ -428,6 +433,7 @@ mod tests {
     fn row() -> UnallocatedRow {
         UnallocatedRow {
             external_id: Some(b"ext-1".to_vec()),
+            slice: "default".to_string(),
             descriptors: vec![b"dept:eng".to_vec(), b"region:emea".to_vec()],
             x: 1.5,
             y: -2.5,
