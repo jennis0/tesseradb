@@ -70,13 +70,16 @@ fn build_fixture() -> Fixture {
     let cache_dir = temp.path().join("cache");
     let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32]);
     let fragment = cache
-        .get_or_build(&granted, [3u8; 32], &postings, WATERMARK)
+        .get_or_build(&granted, [3u8; 32], 0, &postings, WATERMARK)
         .unwrap();
 
     let perm_path = temp.path().join("permutation.bin");
     let identity: Vec<EntityId> = (0..BOUND).map(EntityId::new).collect();
     write_permutation(&perm_path, &identity, BOUND).unwrap();
-    let perm = RowSpace::new(Arc::new(Permutation::load(&perm_path).unwrap()), BOUND as u32);
+    let perm = RowSpace::new(
+        Arc::new(Permutation::load(&perm_path).unwrap()),
+        BOUND as u32,
+    );
 
     let base = Arc::new(RowProjection::new(&fragment, &perm));
 
@@ -118,7 +121,7 @@ fn fragment_for(fx: &Fixture) -> Arc<FrozenFragment> {
     let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32]);
     let granted: Vec<TermId> = vec![TermId::new(0), TermId::new(1)];
     cache
-        .get_or_build(&granted, [3u8; 32], &fx.postings, WATERMARK)
+        .get_or_build(&granted, [3u8; 32], 0, &fx.postings, WATERMARK)
         .unwrap()
 }
 

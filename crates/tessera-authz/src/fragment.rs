@@ -369,6 +369,11 @@ impl CacheWeight for FrozenFragment {
 /// between clears" — assumed, not measured; at ~80 B per entry it caps this map at ~330 KB.
 const KEY_MEMO_MAX_ENTRIES: usize = 4096;
 
+/// What a canonical key is memoised against: the credential, and the dictionary length its terms
+/// were resolved through. Both, because a flush's promotion makes one credential resolve to two
+/// different term sets over time — see [`FragmentCache::get_or_build`].
+type KeyMemoKey = ([u8; 32], u32);
+
 /// Directory-backed frozen fragment store.
 ///
 /// Cache key: SHA-256 over `bundle_identity ‖ auth_plugin_hash ‖ sorted term_id u32 LEs`
@@ -418,7 +423,7 @@ pub struct FragmentCache {
     dir: PathBuf,
     bundle_identity: [u8; 32],
     auth_plugin_hash: [u8; 32],
-    key_memo: Mutex<FxHashMap<[u8; 32], [u8; 32]>>,
+    key_memo: Mutex<FxHashMap<KeyMemoKey, [u8; 32]>>,
     slots: SingleFlightCache<[u8; 32], FrozenFragment>,
     rebuilds: AtomicU64,
 }
@@ -583,8 +588,18 @@ impl FragmentCache {
     ///
     /// **Caller obligation:** `auth_data_hash` must identify the *credential* whose evaluation
     /// produced `satisfied` — i.e. it must be a (collision-resistant) function of the same
-    /// `auth_data` that the auth plugin evaluated to obtain `satisfied`, such that the same
-    /// `auth_data_hash` never arrives paired with two different term sets. The in-memory
+    /// `auth_data` that the auth plugin evaluated to obtain `satisfied`; and `dict_len` must be
+    /// the length of the dictionary that resolution went through. Together they must never arrive
+    /// paired with two different term sets.
+    ///
+    /// **`dict_len` is in the memo key because the same credential legitimately resolves to
+    /// different term sets over time.** A flush promotes a novel descriptor to a durable ordinal
+    /// (§3.2), so a credential naming it resolves to *more* terms after that flush than before —
+    /// and `auth_data_hash` alone would then map to the older, smaller set, silently defeating the
+    /// promotion and, if a dictionary could ever renumber, returning a fragment for the wrong
+    /// grant set outright. Dictionary length is monotone across flushes and is exactly what the
+    /// resolution depended on besides the credential itself, so the pair identifies the
+    /// resolution. Compaction inherits the obligation to keep it monotone (§3.3). The in-memory
     /// canonical-key fast path trusts this: on a memo hit it returns the previously-computed
     /// canonical key *without* re-deriving it from `satisfied`, so a caller that violates the
     /// obligation would silently get back a fragment built for a *different* grant set — an I2
@@ -614,21 +629,25 @@ impl FragmentCache {
         &self,
         satisfied: &[TermId],
         auth_data_hash: [u8; 32],
+        dict_len: u32,
         postings: &PostingsReader,
         watermark: u64,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
+        let memo_key = (auth_data_hash, dict_len);
         let key = {
-            let cached = self.key_memo.lock().unwrap().get(&auth_data_hash).copied();
+            let cached = self.key_memo.lock().unwrap().get(&memo_key).copied();
             match cached {
                 Some(key) => {
                     debug_assert_eq!(
                         key,
                         canonical_key(&self.bundle_identity, &self.auth_plugin_hash, satisfied),
                         "get_or_build: auth_data_hash {auth_data_hash:02x?} was previously \
-                         associated with a different term set than `satisfied` now hashes to — \
-                         callers must derive auth_data_hash from the same auth_data that produced \
-                         `satisfied` (see this method's doc: a violation silently returns a \
-                         fragment for the wrong grant set, an I2 disclosure risk)"
+                         and dict_len {dict_len} were previously associated with a different term \
+                         set than `satisfied` now hashes to — callers must derive auth_data_hash \
+                         from the same auth_data that produced `satisfied`, and dict_len from the \
+                         dictionary it resolved through (see this method's doc: a violation \
+                         silently returns a fragment for the wrong grant set, an I2 disclosure \
+                         risk)"
                     );
                     key
                 }
@@ -644,7 +663,7 @@ impl FragmentCache {
                     if memo.len() >= KEY_MEMO_MAX_ENTRIES {
                         memo.clear();
                     }
-                    memo.insert(auth_data_hash, key);
+                    memo.insert(memo_key, key);
                     key
                 }
             }
@@ -711,7 +730,7 @@ mod tests {
             let mut auth_data_hash = [0u8; 32];
             auth_data_hash[..8].copy_from_slice(&(n as u64).to_le_bytes());
             cache
-                .get_or_build(&[], auth_data_hash, &reader, 0)
+                .get_or_build(&[], auth_data_hash, 0, &reader, 0)
                 .expect("an empty grant set builds once and hits thereafter");
             high_water = high_water.max(cache.key_memo_len());
             assert!(

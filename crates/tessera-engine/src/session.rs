@@ -334,7 +334,6 @@ pub struct Engine {
     /// read paths own the load, and both must see one pointer or a swap would be invisible.
     pub(crate) generation: Arc<GenerationHandle>,
     pub(crate) plugin: Arc<dyn Plugin>,
-    pub(crate) dict: Arc<Dict>,
     pub(crate) postings: Arc<PostingsReader>,
     pub(crate) fragment_cache: Arc<FragmentCache>,
     /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
@@ -499,6 +498,7 @@ impl Engine {
             segments_version,
             watermark,
             bundle: Arc::new(bundle),
+            dict: Arc::clone(&dict),
             overlay_version: 0,
             overlay: Arc::new(overlay),
             buffer: Arc::new(buffer),
@@ -507,7 +507,6 @@ impl Engine {
         Ok(Engine {
             generation: Arc::clone(&generation),
             plugin,
-            dict: Arc::clone(&dict),
             postings,
             fragment_cache,
             // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
@@ -518,7 +517,7 @@ impl Engine {
             config,
             next_token_id: AtomicU64::new(0),
             pins: PinManager::new(config.pin_ttl_secs, config.pins_per_session_max),
-            write: WritePath::new(write_state, dict),
+            write: WritePath::new(write_state),
             external_index,
             identity_key,
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
@@ -583,10 +582,16 @@ impl Engine {
             .terms_of_auth(auth_data)
             .map_err(EngineError::Plugin)?;
 
+        // Loaded once, here, and used for both the dictionary and the watermark below — the
+        // ordering invariant lifecycle §1.1 states: a request resolves everything against one
+        // generation, or it can resolve `satisfied` against a dictionary a later flush published
+        // while building a fragment against the watermark that preceded it.
+        let generation = self.generation.load();
+
         let satisfied: FxHashSet<TermId> = auth_terms
             .terms
             .iter()
-            .filter_map(|descriptor| self.dict.lookup(descriptor))
+            .filter_map(|descriptor| generation.dict.lookup(descriptor))
             .collect();
 
         let mut satisfied_sorted: Vec<TermId> = satisfied.iter().copied().collect();
@@ -596,12 +601,12 @@ impl Engine {
         // a function of the exact `auth_data` that produced `satisfied` above, which it is.
         let auth_data_hash: [u8; 32] = Sha256::digest(auth_data).into();
 
-        let generation = self.generation.load();
         let fragment = self
             .fragment_cache
             .get_or_build(
                 &satisfied_sorted,
                 auth_data_hash,
+                generation.dict.len(),
                 &self.postings,
                 generation.watermark,
             )
@@ -683,12 +688,18 @@ impl Engine {
     /// `n` the new manifest carries. `segments_version` must strictly increase; see
     /// [`GeometryRefused`] and `pins::check_publishable` for why that is a refusal and not a
     /// warning.
+    ///
+    /// `dict` is published with the geometry rather than read out of the engine, because a flush
+    /// promotes novel descriptors to durable ordinals and publishes the assignment as a
+    /// `dict_extents` entry (§3.2) — so the dictionary moves with the segments that carry it. A
+    /// caller with nothing to promote passes the current generation's own.
     pub fn publish_geometry(
         &self,
         prefix: String,
         segments_version: u64,
         watermark: u64,
         bundle: Arc<Bundle>,
+        dict: Arc<Dict>,
     ) -> std::result::Result<Vec<Reclaimed>, GeometryRefused> {
         // An explicit compare-and-swap loop rather than `ArcSwap::rcu`, for two reasons. The guard
         // has to be evaluated against the generation actually being replaced, which means inside
@@ -704,6 +715,7 @@ impl Engine {
                 segments_version,
                 watermark,
                 bundle: Arc::clone(&bundle),
+                dict: Arc::clone(&dict),
                 overlay_version: live.overlay_version,
                 overlay: Arc::clone(&live.overlay),
                 buffer: Arc::clone(&live.buffer),
@@ -759,6 +771,17 @@ impl Engine {
         // `Engine::prune_reclaimed`.
         self.prune_reclaimed(&reclaimed);
         Ok(reclaimed)
+    }
+
+    /// The live generation.
+    ///
+    /// **A request must load this exactly once, at its start** (lifecycle §1.1): resolving a
+    /// session's terms against one generation's dictionary and then building its fragment against
+    /// a later generation's watermark is the cross-generation mismatch every cache key in this
+    /// crate assumes cannot happen. This accessor returns an owned snapshot precisely so a caller
+    /// cannot accidentally take two.
+    pub fn generation(&self) -> Arc<Generation> {
+        self.generation.load_full()
     }
 
     /// One reclaim pass over the pin drain list — remove → verify → drop (lifecycle §2.1).
@@ -990,7 +1013,8 @@ impl Engine {
     /// renders none of its docs for a reader of this public API, and a bare pointer to an invisible
     /// page is not an obligation a caller can honour.)*
     pub fn resolve_terms(&self, descriptors: &[Descriptor]) -> Vec<TermId> {
-        self.write.resolve_terms(descriptors)
+        self.write
+            .resolve_terms(&self.generation.load().dict, descriptors)
     }
 
     /// Resolve an external id to its `EntityId`, checking every item established live (bundle

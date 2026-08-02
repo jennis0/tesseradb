@@ -211,12 +211,15 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
     let postings = PostingsReader::open(&postings_path, false).unwrap();
     let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
     let fragment = cache
-        .get_or_build(&[TermId::new(0)], [3u8; 32], &postings, bound)
+        .get_or_build(&[TermId::new(0)], [3u8; 32], 0, &postings, bound)
         .unwrap();
     let perm_path = temp.path().join("permutation.bin");
     let identity: Vec<EntityId> = (0..bound).map(EntityId::new).collect();
     write_permutation(&perm_path, &identity, bound).unwrap();
-    let perm = RowSpace::new(std::sync::Arc::new(Permutation::load(&perm_path).unwrap()), bound as u32);
+    let perm = RowSpace::new(
+        std::sync::Arc::new(Permutation::load(&perm_path).unwrap()),
+        bound as u32,
+    );
     let base = Arc::new(RowProjection::new(&fragment, &perm));
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
     let mask = compose(

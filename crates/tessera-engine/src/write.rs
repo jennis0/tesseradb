@@ -941,7 +941,6 @@ pub(crate) struct LiveState {
     /// the executor *after* its own append has been fsynced.
     resolver_state: Mutex<ResolverState>,
     accepted_batches: Mutex<AcceptedBatches>,
-    dict: Arc<Dict>,
 }
 
 impl LiveState {
@@ -971,10 +970,10 @@ impl LiveState {
         lock_recover(&self.accepted_batches).get(batch_id).cloned()
     }
 
-    fn resolve_terms(&self, descriptors: &[Descriptor]) -> Vec<TermId> {
+    fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
         let mut state = lock_recover(&self.resolver_state);
         let (extension, next_extension_id) = std::mem::take(&mut *state);
-        let mut resolver = DescriptorResolver::resume(&self.dict, extension, next_extension_id);
+        let mut resolver = DescriptorResolver::resume(dict, extension, next_extension_id);
         let ids = descriptors.iter().map(|d| resolver.resolve(d)).collect();
         *state = resolver.into_state();
         ids
@@ -1203,7 +1202,7 @@ impl WritePath {
     ///
     /// No executor is running yet, and no generation pointer is held here. Both arrive at
     /// [`WritePath::start_executor`].
-    pub(crate) fn new(state: WritePathState, dict: Arc<Dict>) -> Self {
+    pub(crate) fn new(state: WritePathState) -> Self {
         WritePath {
             live: Arc::new(LiveState {
                 allocator: Mutex::new(state.allocator),
@@ -1211,7 +1210,6 @@ impl WritePath {
                 established_inverse: Mutex::new(state.established_inverse),
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),
-                dict,
             }),
             wal: Some(state.wal),
             handle: None,
@@ -1375,8 +1373,8 @@ impl WritePath {
     /// is by construction unsatisfiable by any session's `satisfied` set, so a live/replay mismatch
     /// in *which* extension id a novel descriptor got renumbers internal bookkeeping only, never a
     /// visibility outcome.
-    pub(crate) fn resolve_terms(&self, descriptors: &[Descriptor]) -> Vec<TermId> {
-        self.live.resolve_terms(descriptors)
+    pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
+        self.live.resolve_terms(dict, descriptors)
     }
 
     // --- submission -----------------------------------------------------------------------------
@@ -2216,6 +2214,11 @@ impl Executor {
         // needed only for the apply below, so there is no reason to mint an extension id for a
         // record that might never become durable. `Delete`/`Suppress`/`Unsuppress` carry no
         // descriptors, so a window of pure denies resolves nothing at all.
+        //
+        // Against the **current** generation's dictionary (§3.2): a descriptor a flush has since
+        // promoted must resolve to its durable ordinal, or every later change would go on minting
+        // a fresh extension id for a term that already has one.
+        let dict = Arc::clone(&self.generation.load().dict);
         let applied: Vec<(EntityId, ChangeOp, Option<Vec<TermId>>)> = entries
             .iter()
             .map(|e| {
@@ -2224,7 +2227,7 @@ impl Executor {
                     e.op,
                     e.raw_descriptors
                         .as_ref()
-                        .map(|ds| self.live.resolve_terms(ds)),
+                        .map(|ds| self.live.resolve_terms(&dict, ds)),
                 )
             })
             .collect();
@@ -2931,6 +2934,7 @@ impl Executor {
             segments_version: generation.segments_version,
             watermark: generation.watermark,
             bundle: Arc::clone(&generation.bundle),
+            dict: Arc::clone(&generation.dict),
             overlay: Arc::clone(&generation.overlay),
         };
         self.publish(next, started)
@@ -2997,6 +3001,7 @@ impl Executor {
             segments_version: generation.segments_version,
             watermark: generation.watermark,
             bundle: Arc::clone(&generation.bundle),
+            dict: Arc::clone(&generation.dict),
             buffer: Arc::clone(&generation.buffer),
         };
         self.publish(next, started)

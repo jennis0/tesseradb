@@ -770,6 +770,7 @@ mod tests {
                 manifest,
                 partitions: HashMap::new(),
             }),
+            dict: Arc::new(tessera_authz::Dict::load(&[]).expect("an empty dict needs no file")),
             overlay_version: 0,
             overlay: Arc::new(Overlay::new()),
             buffer: Arc::new(IngestBuffer::new()),

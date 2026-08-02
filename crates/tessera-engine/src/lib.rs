@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use tessera_authz::Dict;
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
@@ -102,6 +103,17 @@ pub struct Generation {
     /// permutations (I1 composition rule 4).
     pub watermark: u64,
     pub bundle: Arc<Bundle>,
+    /// The dictionary this generation's postings and buffered items resolve against.
+    ///
+    /// **Generation-scoped rather than process-scoped, because a flush promotes.** A novel
+    /// descriptor buffers an item under an unsatisfiable extension id and becomes a durable
+    /// ordinal only when the flush that carries it publishes a `dict_extents` entry (§3.2), so
+    /// the dictionary grows with geometry and has to be republished alongside it. Ordinals are
+    /// preserved across a promotion ([`tessera_authz::Dict::load_extending`]), so a session
+    /// authorised against an older generation keeps evaluating the terms it was granted; what it
+    /// does *not* get is the newly promoted one, which is fail-closed and is what §3.3's
+    /// staleness hint exists to advertise.
+    pub dict: Arc<Dict>,
     /// Monotone counter bumped on every overlay/buffer swap (independent of `segments_version` —
     /// an overlay change never touches the bundle).
     pub overlay_version: u64,

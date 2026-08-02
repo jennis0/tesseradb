@@ -195,6 +195,7 @@ fn a_pin_survives_a_generation_swap() {
             next_version,
             watermark_of(&second),
             second,
+            engine.generation().dict.clone(),
         )
         .unwrap();
 
@@ -268,6 +269,7 @@ fn a_suppression_applies_to_a_pinned_request_immediately() {
             before.pin.segments_version + 1,
             watermark_of(&republished),
             republished,
+            engine.generation().dict.clone(),
         )
         .unwrap();
 
@@ -416,6 +418,7 @@ fn a_pinned_request_composes_with_the_fragment_watermark_not_the_pinned_one() {
             base_version + 1,
             LOW,
             reopen(&bundle_root),
+            engine.generation().dict.clone(),
         )
         .unwrap();
     let session = engine.authorise(&full_coverage_credential()).unwrap();
@@ -444,6 +447,7 @@ fn a_pinned_request_composes_with_the_fragment_watermark_not_the_pinned_one() {
             base_version + 2,
             HIGH,
             reopen(&bundle_root),
+            engine.generation().dict.clone(),
         )
         .unwrap();
     let pin = PinId {
@@ -457,6 +461,7 @@ fn a_pinned_request_composes_with_the_fragment_watermark_not_the_pinned_one() {
             base_version + 3,
             LOW,
             reopen(&bundle_root),
+            engine.generation().dict.clone(),
         )
         .unwrap();
 
@@ -506,6 +511,7 @@ fn a_drained_pin_is_410() {
             before.pin.segments_version + 1,
             watermark_of(&reopen(&bundle_root)),
             reopen(&bundle_root),
+            engine.generation().dict.clone(),
         )
         .unwrap();
 
@@ -575,7 +581,13 @@ fn reclaim_is_remove_then_verify() {
     // never be uniquely owned.
     let held = reopen(&bundle_root);
     engine
-        .publish_geometry("v_held".to_string(), base_version + 1, 0, Arc::clone(&held))
+        .publish_geometry(
+            "v_held".to_string(),
+            base_version + 1,
+            0,
+            Arc::clone(&held),
+            engine.generation().dict.clone(),
+        )
         .unwrap();
     engine
         .publish_geometry(
@@ -583,6 +595,7 @@ fn reclaim_is_remove_then_verify() {
             base_version + 2,
             0,
             reopen(&bundle_root),
+            engine.generation().dict.clone(),
         )
         .unwrap();
 
@@ -658,6 +671,7 @@ fn a_pin_past_its_ttl_is_410() {
             before.pin.segments_version + 1,
             watermark_of(&reopen(&bundle_root)),
             reopen(&bundle_root),
+            engine.generation().dict.clone(),
         )
         .unwrap();
 
@@ -726,6 +740,7 @@ fn a_session_cannot_exceed_its_pin_cap() {
                 pins[0].segments_version + step,
                 0,
                 reopen(&bundle_root),
+                engine.generation().dict.clone(),
             )
             .unwrap();
         pins.push(PinId {
@@ -739,6 +754,7 @@ fn a_session_cannot_exceed_its_pin_cap() {
             pins[0].segments_version + 4,
             0,
             reopen(&bundle_root),
+            engine.generation().dict.clone(),
         )
         .unwrap();
     assert_eq!(engine.pin_stats().drain_depth, 4);
@@ -815,6 +831,7 @@ fn a_bundle_swap_under_an_unchanged_pin_identity_is_refused() {
             before.pin.segments_version,
             watermark_of(&reopen(&second_root)),
             reopen(&second_root),
+            engine.generation().dict.clone(),
         )
         .expect_err("a bundle swap under an unchanged pin identity must be refused");
     assert_eq!(
@@ -855,6 +872,7 @@ fn a_bundle_swap_under_an_unchanged_pin_identity_is_refused() {
             before.pin.segments_version + 1,
             watermark_of(&reopen(&bundle_root)),
             reopen(&bundle_root),
+            engine.generation().dict.clone(),
         )
         .expect("a strictly increasing segments_version is publishable");
     let rolled_back = engine
@@ -863,6 +881,7 @@ fn a_bundle_swap_under_an_unchanged_pin_identity_is_refused() {
             before.pin.segments_version,
             watermark_of(&reopen(&bundle_root)),
             reopen(&bundle_root),
+            engine.generation().dict.clone(),
         )
         .expect_err("republishing an older segments_version must be refused");
     assert_eq!(
@@ -882,6 +901,7 @@ fn a_bundle_swap_under_an_unchanged_pin_identity_is_refused() {
             before.pin.segments_version + 2,
             watermark_of(&reopen(&bundle_root)),
             reopen(&bundle_root),
+            engine.generation().dict.clone(),
         )
         .expect("the refusals above are about the version, not about publication");
 }
@@ -921,6 +941,7 @@ fn the_drain_list_is_trimmed_to_drain_depth_max() {
                 oldest.segments_version + step as u64,
                 watermark_of(&reopen(&bundle_root)),
                 reopen(&bundle_root),
+                engine.generation().dict.clone(),
             )
             .expect("each publication strictly increases segments_version")
     };
@@ -1004,6 +1025,7 @@ fn resolve_takes_no_lock_when_no_pin_is_presented() {
             drained.segments_version + 1,
             watermark_of(&reopen(&bundle_root)),
             reopen(&bundle_root),
+            engine.generation().dict.clone(),
         )
         .unwrap();
     let live = engine.viewport(&session, whole_extent()).unwrap().pin;

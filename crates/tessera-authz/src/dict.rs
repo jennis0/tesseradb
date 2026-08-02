@@ -220,6 +220,42 @@ impl Dict {
         })
     }
 
+    /// A dictionary covering this one's descriptors plus the extents at `paths`, whose ordinals
+    /// continue from `self.len()`.
+    ///
+    /// **Existing ordinals are preserved, and that is a correctness property rather than an
+    /// efficiency one.** A session's granted terms are resolved to ordinals once, at authorise,
+    /// and never re-resolved; renumbering an existing term would leave every session authorised
+    /// before the extension evaluating against a *different* term than the one it was granted.
+    /// Preservation is structural — the extents append and ordinals are assignment order — and
+    /// the caller-visible test asserts it anyway, because it is what a flush's patch-equals-a-
+    /// rebuild argument rests on.
+    ///
+    /// A descriptor already present is *not* re-interned: the extent's copy is skipped and the
+    /// original ordinal stands, so a promotion that races another promotion of the same
+    /// descriptor cannot produce two ids for one term.
+    pub fn load_extending(&self, paths: &[PathBuf]) -> io::Result<Dict> {
+        let extension = Dict::load(paths)?;
+        let mut lookup_map = self.lookup_map.clone();
+        let mut len = self.len;
+        // Extent order is ordinal order, so walk it in that order rather than iterating the
+        // extension's own (unordered) map, or the ids assigned here would depend on hash order.
+        let mut by_ordinal: Vec<(&Box<[u8]>, TermId)> = extension
+            .lookup_map
+            .iter()
+            .map(|(d, &id)| (d, id))
+            .collect();
+        by_ordinal.sort_unstable_by_key(|(_, id)| id.raw());
+        for (descriptor, _) in by_ordinal {
+            if lookup_map.contains_key(descriptor) {
+                continue;
+            }
+            lookup_map.insert(descriptor.clone(), TermId::new(len));
+            len += 1;
+        }
+        Ok(Dict { lookup_map, len })
+    }
+
     /// Look up a descriptor and return its term ID if present.
     pub fn lookup(&self, descriptor: &[u8]) -> Option<TermId> {
         self.lookup_map.get(descriptor).copied()
