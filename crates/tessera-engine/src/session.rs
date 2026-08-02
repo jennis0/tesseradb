@@ -363,7 +363,12 @@ pub struct Engine {
     /// second pool anywhere else in this crate (no nested throttling). `pool.install` from more
     /// external (server-side) threads than this pool has workers only queues on rayon's injector;
     /// it does not deadlock.
-    pub(crate) pool: rayon::ThreadPool,
+    /// D-D's one shared compute pool — and, since flush, the pool a segment write executes on
+    /// (§1.1). `Arc` because the executor thread holds it too; still exactly one pool.
+    pub(crate) pool: Arc<rayon::ThreadPool>,
+    /// The bundle's current prefix directory. A flush writes inside it and never touches
+    /// `MANIFEST.json` or `CURRENT`, which is what separates it from a compaction.
+    pub(crate) prefix_dir: std::path::PathBuf,
     pub(crate) config: EngineConfig,
     next_token_id: AtomicU64,
     /// The pin seam (I11) — see [`PinManager`]. Stateless today; `Engine::viewport` resolves
@@ -551,10 +556,12 @@ impl Engine {
         // cannot be built is an `Engine` that cannot serve any viewport, and that is a fact about
         // this engine's *open*-time health, not a fact to discover on whichever request happens
         // to be first (fail-closed: this engine simply does not open).
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.compute_threads)
-            .build()
-            .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?;
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(config.compute_threads)
+                .build()
+                .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?,
+        );
 
         // `Arc`-wrapped from the start: the `Engine` and its `WritePath` share this one
         // pointer, so a swap published by an acceptance is the swap every read path observes.
@@ -593,6 +600,7 @@ impl Engine {
             // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: Arc::clone(&row_projection_cache),
             pool,
+            prefix_dir,
             config,
             next_token_id: AtomicU64::new(0),
             pins: Arc::clone(&pins),
@@ -1190,7 +1198,12 @@ impl Engine {
             Arc::clone(&self.pins),
             Arc::clone(&self.row_projection_cache),
             queue_bound,
-            self.config.flush_max_age_secs,
+            crate::write::FlushDeps {
+                max_age_secs: self.config.flush_max_age_secs,
+                prefix_dir: self.prefix_dir.clone(),
+                identity_key: self.identity_key,
+                pool: Arc::clone(&self.pool),
+            },
             #[cfg(feature = "fault-injection")]
             None,
         )
@@ -1209,7 +1222,12 @@ impl Engine {
             Arc::clone(&self.pins),
             Arc::clone(&self.row_projection_cache),
             queue_bound,
-            self.config.flush_max_age_secs,
+            crate::write::FlushDeps {
+                max_age_secs: self.config.flush_max_age_secs,
+                prefix_dir: self.prefix_dir.clone(),
+                identity_key: self.identity_key,
+                pool: Arc::clone(&self.pool),
+            },
             Some(faults),
         )
     }

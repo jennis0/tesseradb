@@ -60,7 +60,7 @@
 //! [`LifecycleHandle::submit`]. That is not tidiness: `submit(Command::Change { .. })` putting a
 //! suppression on the bounded queue would 429 a security operation, which contracts §3.1 forbids.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -80,8 +80,9 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 use crate::cache::RowProjectionCache;
 use crate::pins::{GeometryRefused, PinManager, Reclaimed};
 use tessera_plugin::Descriptor;
+use tessera_spatial::tiler::ScalarType;
 use tessera_store::{Bundle, StoreError};
-use tessera_types::{EntityId, TermId};
+use tessera_types::{EntityId, IdentityKey, TermId};
 
 use crate::session::EngineError;
 use crate::{Generation, GenerationHandle};
@@ -229,6 +230,17 @@ pub struct ExecutorHealth {
     /// Durable buffered rows excluded from every flush because their coordinates fall outside the
     /// bundle's declared extent (§6). They never leave this state on their own.
     pub(crate) quarantined_items: AtomicUsize,
+    /// Flushes published since the executor started — what "an acked ingest became visible" is
+    /// observed on, rather than on a sleep.
+    pub(crate) flushes: AtomicU64,
+    /// Ticks that found a flush already in flight and skipped rather than queued (§1.1).
+    ///
+    /// **Alarmed, because `flush_max_age_secs` would otherwise miss it**: a flush persistently
+    /// slower than the tick is a visibility-latency breach, and the period an operator configured
+    /// is not the period they are getting.
+    pub(crate) flush_skips: AtomicU64,
+    /// Flushes that failed and left the buffer intact for the next tick (§10).
+    pub(crate) flush_failures: AtomicU64,
     /// Total nanoseconds spent in **the whole apply step** — the `IngestBuffer`/`Overlay` clone,
     /// the per-row inserts, the `Generation` construction and the swap.
     ///
@@ -398,6 +410,13 @@ pub struct ExecutorStats {
     /// Durable rows excluded from every flush for having coordinates outside the declared extent
     /// (§6). Non-zero means the deployment must re-quantise before those items can ever be seen.
     pub quarantined_items: usize,
+    /// Flushes published since the executor started.
+    pub flushes: u64,
+    /// Ticks skipped because a flush was already in flight (§1.1) — a rising count is a flush
+    /// persistently slower than the tick, i.e. a visibility-latency breach.
+    pub flush_skips: u64,
+    /// Flushes that failed and left the buffer intact for the next tick (§10).
+    pub flush_failures: u64,
     /// Whether a `POST /control/flush` is awaiting the next tick.
     pub flush_requested: bool,
     /// Whether this node's overlay has diverged from its durable WAL (§7.2). **Latching**: it
@@ -522,6 +541,9 @@ impl ExecutorHealth {
             buffered_items: AtomicUsize::new(0),
             flushable_items: AtomicUsize::new(0),
             quarantined_items: AtomicUsize::new(0),
+            flushes: AtomicU64::new(0),
+            flush_skips: AtomicU64::new(0),
+            flush_failures: AtomicU64::new(0),
             apply_nanos_total: AtomicU64::new(0),
             apply_nanos_max: AtomicU64::new(0),
             work_completed: AtomicU64::new(0),
@@ -613,6 +635,9 @@ impl ExecutorHealth {
             overlay_diverged: self.overlay_diverged.load(Ordering::SeqCst),
             flushable_items: self.flushable_items.load(Ordering::SeqCst),
             quarantined_items: self.quarantined_items.load(Ordering::SeqCst),
+            flushes: self.flushes.load(Ordering::Relaxed),
+            flush_skips: self.flush_skips.load(Ordering::Relaxed),
+            flush_failures: self.flush_failures.load(Ordering::Relaxed),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
         }
@@ -1315,7 +1340,7 @@ impl WritePath {
         pins: Arc<PinManager>,
         row_projection_cache: Arc<RowProjectionCache>,
         queue_bound: usize,
-        flush_max_age_secs: u64,
+        flush: FlushDeps,
         #[cfg(feature = "fault-injection")] faults: Option<
             Arc<tessera_lifecycle::faults::FaultSwitchboard>,
         >,
@@ -1329,6 +1354,8 @@ impl WritePath {
         // ever blocks on this having **observed both queues empty**, which is what makes discarding
         // safe — see [`Executor::run`].
         let (bell_tx, bell_rx) = std::sync::mpsc::sync_channel(1);
+        // Completed flushes have their own, unbounded channel — see `Executor::flush_done`.
+        let (flush_tx, flush_rx) = std::sync::mpsc::channel();
 
         // A clone, not a move: `ExecutorHealth` keeps the other end, which is what gives the
         // counters a reader outside the executor thread (`ExecutorStats::wal_fsyncs`).
@@ -1365,7 +1392,14 @@ impl WritePath {
                     },
                     health: Arc::clone(&health),
                     window_seq: 0,
-                    flush_max_age_secs,
+                    flush_max_age_secs: flush.max_age_secs,
+                    flush_in_flight: Arc::new(AtomicBool::new(false)),
+                    flush_attempt: 0,
+                    prefix_dir: flush.prefix_dir,
+                    identity_key: flush.identity_key,
+                    pool: flush.pool,
+                    flush_done: flush_rx,
+                    flush_submit: flush_tx,
                     last_tick: std::time::Instant::now(),
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
@@ -2051,6 +2085,45 @@ pub const DENY_DURABILITY_ATTEMPTS: usize = DENY_DURABILITY_BACKOFF.len() + 1;
 /// **It bounds how long a node stays unready after its storage recovers, and nothing else.** The
 /// attempt is two small file operations, so the cost of polling is negligible; the cost of polling
 /// *too slowly* is an idle node steering traffic away from itself long after the fault cleared.
+/// What the executor needs to run a flush, gathered rather than passed one by one.
+///
+/// A struct because the alternative is a ten-argument `start_executor`, where the compiler stops
+/// distinguishing two `u64`s and a caller can transpose them silently.
+pub(crate) struct FlushDeps {
+    pub(crate) max_age_secs: u64,
+    /// The bundle's current prefix directory. A flush writes inside it, and never touches
+    /// `MANIFEST.json` or `CURRENT`.
+    pub(crate) prefix_dir: PathBuf,
+    pub(crate) identity_key: IdentityKey,
+    /// D-D's one shared compute pool — a flush's segment write runs on it, off this thread,
+    /// because this thread is the one that must reach a queued deny promptly (§1.1).
+    pub(crate) pool: Arc<rayon::ThreadPool>,
+}
+
+/// The bundle's declared scalar tail, as the segment writer wants it.
+///
+/// `None` if the manifest declares a type this build cannot write. A flush must **not** proceed
+/// then: `columns.arrow`'s schema is the fixed columns plus this tail, so a dropped column would
+/// produce a segment the reader refuses — and refusing to flush is the fail-closed answer, where
+/// writing a short segment is a bundle that no longer opens.
+fn scalar_schema_of(
+    manifest: &tessera_store::manifest::Manifest,
+) -> Option<Vec<(String, ScalarType)>> {
+    manifest
+        .declared_scalars
+        .iter()
+        .map(|d| {
+            let ty = match d.arrow_type.as_str() {
+                "u64" => ScalarType::U64,
+                "f32" => ScalarType::F32,
+                "utf8" => ScalarType::Utf8,
+                _ => return None,
+            };
+            Some((d.name.clone(), ty))
+        })
+        .collect()
+}
+
 /// Every slice the bundle holds, across partitions. A flush plans per slice, because a segment's
 /// entity range is contiguous only within one (§2.1).
 fn slices_of(generation: &Generation) -> Vec<String> {
@@ -2106,6 +2179,40 @@ struct Executor {
     window_seq: u64,
     /// §4's `flush_max_age_secs` — the tick's period.
     flush_max_age_secs: u64,
+    /// Whether a flush is executing on the pool. A tick arriving while it is set is skipped, never
+    /// queued — two concurrent flushes would double-consume the buffer range (§1.1).
+    flush_in_flight: Arc<AtomicBool>,
+    /// Distinguishes two flush attempts at the same `segments_version` — see the `seg_id` this
+    /// feeds.
+    flush_attempt: u64,
+    /// The bundle prefix directory a flush writes into. A flush publishes **inside the current
+    /// prefix** — never `MANIFEST.json`, never `CURRENT` — which is what separates it from a
+    /// compaction.
+    prefix_dir: PathBuf,
+    identity_key: IdentityKey,
+    /// The shared compute pool a flush executes on (§1.1), and the handle it submits its completed
+    /// unit back through.
+    pool: Arc<rayon::ThreadPool>,
+    /// Completed flushes arriving from the pool (§1.1).
+    ///
+    /// **Its own channel, not the bounded work queue**, for two reasons. A completed flush may not
+    /// be shed — there is no 429 for a unit whose files are already durable, and shedding one
+    /// would leave a committed side-manifest with nothing publishing it. And `LifecycleHandle` is
+    /// deliberately not `Clone` (`WritePath::drop` joins the thread, which needs one owner), so a
+    /// pool task cannot hold one.
+    ///
+    /// Drained **after** the deny lane, exactly as work is: that ordering is what keeps a
+    /// suppression from queueing behind a flush's publication.
+    flush_done: Receiver<crate::flush::CompletedFlush>,
+    /// The sender pool tasks are given a clone of.
+    ///
+    /// **Nothing rings the doorbell when a flush completes**, and that is deliberate twice over.
+    /// A completed flush is picked up at the next tick, which is what §1.3 requires anyway — every
+    /// geometry publication is on one cadence — so ringing would only publish *off* it. And an
+    /// executor holding a clone of its own doorbell sender would keep the bell channel alive for
+    /// ever, so `wait_for_work` would never observe the disconnect and `WritePath::drop`'s join
+    /// would hang: the shutdown path depends on this thread owning no sender of its own.
+    flush_submit: Sender<crate::flush::CompletedFlush>,
     /// When the last tick fired. Started at construction, so the first tick is one period after
     /// the executor starts rather than immediately at startup.
     last_tick: std::time::Instant,
@@ -2158,9 +2265,13 @@ impl Executor {
     fn run(&mut self) {
         loop {
             self.recover_wal();
+            // **Completed flushes are applied before the tick plans another**, and the order is
+            // load-bearing: until a flush is published its items are still in the buffer, so a tick
+            // that planned first would re-plan the very rows the completed unit already wrote.
+            let published = self.publish_completed_flushes();
             self.tick_if_due();
             while self.run_deny_pass() {}
-            if self.run_work_pass() {
+            if self.run_work_pass() || published {
                 continue;
             }
             if !self.wait_for_work() {
@@ -2205,9 +2316,10 @@ impl Executor {
         // today is the count an operator needs to see a stalled flush: items that *would* acquire
         // geometry at this tick, which stays at zero on a gated node and grows without bound on
         // one whose flush is failing.
-        let generation = self.generation.load();
+        let generation = self.generation.load_full();
         let mut flushable = 0usize;
         let mut quarantined = 0usize;
+        let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
         for slice in slices_of(&generation) {
             match crate::flush::plan_flush(
                 &generation,
@@ -2218,6 +2330,7 @@ impl Executor {
                 Ok(plan) => {
                     flushable += plan.items.len();
                     quarantined += plan.quarantined;
+                    plans.push((slice, plan));
                 }
                 Err(crate::flush::NoFlush::NothingToFlush) => {}
                 Err(gate) => {
@@ -2231,7 +2344,6 @@ impl Executor {
                 }
             }
         }
-        drop(generation);
         self.health
             .flushable_items
             .store(flushable, Ordering::SeqCst);
@@ -2254,6 +2366,24 @@ impl Executor {
             );
         }
 
+        // **At most one flush in flight.** A tick arriving while one runs is *skipped, not queued*:
+        // two concurrent flushes would double-consume the buffer range. Skips are counted and
+        // alarmed, because a flush persistently slower than the tick is a visibility-latency
+        // breach that `flush_max_age_secs` would otherwise silently miss.
+        if !plans.is_empty() {
+            if self.flush_in_flight.load(Ordering::SeqCst) {
+                self.health.flush_skips.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    "ALARM: a flush was still running when the next tick came due, so this tick \
+                     published nothing. The effective publication period is longer than \
+                     flush_max_age_secs, which is a visibility-latency breach"
+                );
+            } else {
+                self.dispatch_flushes(&generation, plans);
+            }
+        }
+        drop(generation);
+
         // Lifecycle §2.1: reclaim ran only as a side effect of the next geometry publication, and
         // a process that published once and went quiescent held a whole superseded bundle
         // indefinitely — at drain depth 1, which is *at* the alarm and so invisible in every gauge.
@@ -2263,6 +2393,145 @@ impl Executor {
             self.row_projection_cache
                 .prune_generation(entry.segments_version);
         }
+    }
+
+    /// Apply every completed flush waiting from the pool, and report whether any did.
+    ///
+    /// Drained after the deny lane and before work, so a publication never delays a suppression
+    /// and never waits behind a commit window.
+    fn publish_completed_flushes(&mut self) -> bool {
+        let mut any = false;
+        while let Ok(completed) = self.flush_done.try_recv() {
+            self.publish_flush(completed);
+            any = true;
+        }
+        any
+    }
+
+    /// Hand each plan to the background pool, and mark a flush in flight until all of them land.
+    ///
+    /// **Execution is off this thread** (§1.1). The segment write is file IO of unbounded duration,
+    /// and this thread is the one that drains the deny lane to empty before it touches work — so a
+    /// flush executed inline would put a suppression behind it, which is precisely what lifecycle
+    /// §1.3's priority lane exists to prevent.
+    ///
+    /// Every input is taken here, on this thread, against the live generation and then moved: the
+    /// pool holds no reference to live state, which is what makes "over immutable inputs" true.
+    fn dispatch_flushes(
+        &mut self,
+        generation: &Arc<Generation>,
+        plans: Vec<(String, crate::flush::FlushPlan)>,
+    ) {
+        let submit = self.flush_submit.clone();
+        let Some((partition, partition_data)) = generation.bundle.partitions.iter().next() else {
+            return;
+        };
+        let manifest = &generation.bundle.manifest;
+        let Some(scalar_schema) = scalar_schema_of(manifest) else {
+            tracing::error!(
+                "ALARM: this bundle declares a scalar type this build cannot write, so no flush \
+                 can produce a segment whose columns.arrow matches its schema. Ingest stays \
+                 durable and invisible until the binary understands it"
+            );
+            return;
+        };
+        let mut contexts = Vec::with_capacity(plans.len());
+        for (slice, plan) in plans {
+            let Some(slice_data) = partition_data.slices.get(&slice) else {
+                continue;
+            };
+            let Ok(row_base) = u32::try_from(slice_data.row_space.total_rows()) else {
+                // Row ids are `u32` (bundle_format 1). A slice that has crossed 2^32 rows cannot
+                // take another segment, and saying so is better than wrapping into row 0.
+                tracing::error!(
+                    slice = %slice,
+                    "ALARM: this slice's row space has reached the u32 ceiling; no further flush \
+                     can address it. The deployment must be compacted or re-sharded"
+                );
+                continue;
+            };
+            let next_n = partition_data.manifest.segments_version + 1;
+            contexts.push((
+                plan,
+                crate::flush::FlushContext {
+                    prefix_dir: self.prefix_dir.clone(),
+                    partition: partition.clone(),
+                    slice: slice.clone(),
+                    next_n,
+                    // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
+                    // merge rebase ABA-safe — and the attempt counter is not decoration. `next_n`
+                    // alone repeats whenever a flush is planned twice before it publishes, and the
+                    // second attempt would then `File::create` over files the first has memory
+                    // mapped: a truncated mapping, and SIGBUS on the next read of it. The counter
+                    // makes every attempt's path distinct, so a re-plan writes beside the earlier
+                    // one rather than through it, and the loser's files are orphans nothing
+                    // references.
+                    seg_id: format!("flush-{next_n}-{}", self.next_flush_attempt()),
+                    row_base,
+                    identity_key: self.identity_key,
+                    shard_id: manifest.identity.shard_id,
+                    quantisation: manifest.quantisation,
+                    scalar_schema: scalar_schema.clone(),
+                    manifest: partition_data.manifest.clone(),
+                    dict: Arc::clone(&generation.dict),
+                    prefix: generation.prefix.clone(),
+                },
+            ));
+        }
+        if contexts.is_empty() {
+            return;
+        }
+
+        // **⊘ GATED: the read path cannot serve a second segment yet.**
+        //
+        // `Engine::viewport` refuses a slice holding more than one segment
+        // (`EngineError::MultiSegmentSlice`), and it is right to: `tile_ranges` returns
+        // *segment-local* row indices while the mask is in slice row space, so iterating "just in
+        // case" would mis-count and mis-index. Publishing a flush segment before that is lifted
+        // would make every viewport on the slice fail — visible ingest bought at the cost of the
+        // map.
+        //
+        // What is missing is multi-segment tile lookup and **selection**: counting is a matter of
+        // offsetting each segment's ranges by its `row_base` and summing, but `Selection::of`
+        // reads one segment's identity column over one range, and §7.2's cap and floor clauses are
+        // per *tile* rather than per segment — so the k budget has to be spent across the union.
+        // That is a change to the path I7 lives on and where the B9 decode-tier measurements were
+        // taken, and it is its own piece of work rather than a step of this one.
+        //
+        // Everything above this line is built and exercised: the plan, the segment, the tier, the
+        // side-manifest, the rebase. Only the dispatch is held.
+        if !cfg!(feature = "flush-publication") {
+            return;
+        }
+
+        self.flush_in_flight.store(true, Ordering::SeqCst);
+        let in_flight = Arc::clone(&self.flush_in_flight);
+        let health = Arc::clone(&self.health);
+        self.pool.spawn(move || {
+            for (plan, ctx) in contexts {
+                match crate::flush::execute_flush(plan, ctx) {
+                    Ok(completed) => {
+                        // A send failure means the executor is gone, which is a shutdown and not a
+                        // fault: the files are orphans nothing references, and replay re-flushes.
+                        let _ = submit.send(completed);
+                    }
+                    Err(e) => {
+                        // **Nothing happened, retry next tick** (§10). The side-manifest is the
+                        // only commit point, so a failure before it leaves orphan files nothing
+                        // references and the buffer intact.
+                        health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                        tracing::error!(
+                            error = %e,
+                            "ALARM: a flush failed; the buffer is retained and it will be retried \
+                             at the next tick. Sustained failure grows the buffer until \
+                             ingest_buffer_max_items sheds ingest, which is the intended \
+                             backpressure"
+                        );
+                    }
+                }
+            }
+            in_flight.store(false, Ordering::SeqCst);
+        });
     }
 
     /// If the WAL is degraded and the degradation is one a discard can end, end it.
@@ -2889,6 +3158,11 @@ impl Executor {
         CommitWindow::new(self.next_window_seq())
     }
 
+    fn next_flush_attempt(&mut self) -> u64 {
+        self.flush_attempt += 1;
+        self.flush_attempt
+    }
+
     fn next_window_seq(&mut self) -> u64 {
         self.window_seq += 1;
         self.window_seq
@@ -3418,6 +3692,94 @@ impl Executor {
             buffer: Arc::clone(&generation.buffer),
         };
         self.publish(next, started)
+    }
+
+    /// **Publication by rebase** (§1.2): apply a completed flush to the **then-current**
+    /// generation rather than to the one it was planned against.
+    ///
+    /// The flush ran on the pool while this thread went on accepting ingest and denies, so the
+    /// generation has moved: its buffer holds rows that arrived meanwhile and its overlay holds
+    /// dispositions accepted meanwhile. So the rebase removes **exactly the entity ids the flush
+    /// consumed** — never a range, which would take the late arrivals with it — and appends the
+    /// segment to whatever is live now.
+    ///
+    /// A flush planned against a superseded *prefix* is discarded: its row bases were computed
+    /// against a row space that no longer exists. Its files are orphans nothing references, and the
+    /// next tick re-plans.
+    fn publish_flush(&mut self, completed: crate::flush::CompletedFlush) {
+        let started = std::time::Instant::now();
+        let live = self.generation.load_full();
+        if live.prefix != completed.prefix {
+            // A compaction moved the prefix under this flush. Nothing to apply it to.
+            tracing::warn!(
+                planned = %completed.prefix,
+                live = %live.prefix,
+                "discarding a completed flush planned against a superseded prefix"
+            );
+            return;
+        }
+
+        let next_bundle = match live.bundle.with_segment(
+            &completed.partition,
+            &completed.slice,
+            completed.segment,
+            completed.extent,
+            completed.manifest,
+        ) {
+            Ok(bundle) => bundle,
+            Err(e) => {
+                // The row space moved under this flush — another publication landed between the
+                // plan and here. Discarded, not forced: forcing would put the segment at a
+                // `row_base` that is no longer the end of row space, aliasing rows.
+                tracing::warn!(error = %e, "discarding a completed flush that no longer rebases");
+                return;
+            }
+        };
+
+        // **Exactly what was consumed, from the then-current buffer.** O(buffered) on this thread,
+        // which is the term the deny-ack memo measured as dominant at 1 M buffered (165 ms p50);
+        // one such stall lands ahead of the deny lane per tick, and §10 records it as a cost this
+        // design adds rather than one it avoids.
+        let mut buffer = (*live.buffer).clone();
+        for entity in &completed.consumed {
+            buffer.remove(*entity);
+        }
+
+        let watermark = next_bundle
+            .partitions
+            .get(&completed.partition)
+            .map(|p| p.manifest.watermark)
+            .unwrap_or(live.watermark);
+        let segments_version = live.segments_version + 1;
+        let mut delta_postings = live.delta_postings.clone();
+        delta_postings.push(completed.tier);
+
+        let next = Generation {
+            prefix: live.prefix.clone(),
+            segments_version,
+            watermark,
+            bundle: next_bundle,
+            dict: completed.dict,
+            postings: Arc::clone(&live.postings),
+            delta_postings,
+            overlay_version: live.overlay_version,
+            overlay: Arc::clone(&live.overlay),
+            buffer: Arc::new(buffer),
+        };
+        let _published = self.publish(next, started);
+
+        // A flush supersedes geometry, so it retires and reclaims exactly as any other geometry
+        // publication does (§1.3): one swap, one `segments_version` bump, one drain entry.
+        let live_now = self.generation.load_full();
+        let mut reclaimed = self
+            .pins
+            .retire(&live, &live_now.prefix, live_now.segments_version);
+        reclaimed.extend(self.pins.reclaim());
+        for entry in &reclaimed {
+            self.row_projection_cache
+                .prune_generation(entry.segments_version);
+        }
+        self.health.flushes.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Publish new geometry: check, swap, retire, reclaim, prune. **The executor's own arm of

@@ -199,6 +199,16 @@ impl IngestBuffer {
         );
     }
 
+    /// Remove one item — **what a flush's publication does with exactly the entities it
+    /// consumed** (§1.2).
+    ///
+    /// By entity id and never by range: the flush ran while the executor went on accepting ingest,
+    /// so a range spanning the consumed ids would also take the rows that arrived meanwhile, which
+    /// have no geometry and would be lost from both the buffer and every segment.
+    pub fn remove(&mut self, entity: EntityId) {
+        self.items.remove(&entity);
+    }
+
     pub fn get(&self, entity: EntityId) -> Option<&BufferedItem> {
         self.items.get(&entity)
     }

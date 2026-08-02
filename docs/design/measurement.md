@@ -191,6 +191,40 @@ Six, and the constraint on them matters more than the list.
 6. **Latency against points-in-view**, never against viewport area — the geometry is UMAP output and
    heavily concentrated, so area is not a workload.
 
+### 6.1 A concurrency number is not a user count
+
+Figures 3 and 4 are the two most likely to be read as *"the system serves N users"*, and nothing in
+the suite today measures a user. `viewport`'s `Pan` and `Zoom` are geometry generators — a box
+translated across the extent, and nested boxes about a centre — measured one position at a time with
+`metrics::repeat`, which repeats each position **in place**. Every sample is therefore warm on
+itself, and the locality a real pan has (warmth from the *adjacent* viewport, not the same one) is
+the one thing the measurement removes.
+
+`load`'s closed loop compounds it from the other side: N workers each issuing the next request the
+instant the last returns is not N viewers, it is N viewers with no think time, and the gap is about
+two orders of magnitude. The open-loop `--rate` mode is the honest one and exists; what does not
+exist is a per-user arrival model to set the rate from.
+
+**A `session` arm closes both.** A scripted trajectory — cold first request, then interleaved pans,
+zooms and dwells at a realistic zoom distribution, with think time — replayed by N virtual users
+open-loop, each starting cold. It reports per-verb latency, and the two session-level figures a
+viewer actually feels: **time to first map**, and **p99 within a session** rather than across a
+population.
+
+Three consequences worth stating, because each is a convention this document otherwise sets:
+
+- **A step cannot be repeated.** Repeating it destroys the locality being measured, so N comes from
+  users × sessions, never from `repeat`. The arm is distribution-mode by construction (spec §4), and
+  it is the one arm where min-of-N is not merely uninformative but actively wrong.
+- **The cold/warm ratio is a reported axis**, not a constant. It is what decides how much of the
+  population meets the F4 projection lock.
+- ⊘ **Pins and mid-session filter toggles are trajectory verbs the arm should carry and cannot yet.**
+  A pin across a flush is flush-and-merge §14.18; a filter toggle needs the attribute tail.
+
+The zoom distribution and think-time model are **assumed, not measured** — this project has no
+telemetry and cannot produce them. State the assumed parameters beside every figure the arm
+produces, and treat a change in them as re-baselining rather than as a regression.
+
 **Every one carries its coverage.** A figure taken at 100% coverage measures the absence of masking;
 the suite already flags such a cell `degenerate`, but a rendered plot does not inherit a flag.
 Whatever renders these must **refuse** a `degenerate` or `generator_bound` cell rather than footnote
@@ -205,6 +239,9 @@ publishing half of C4.
 **New.**
 
 - **`soak`** (spec §2.2).
+- **`session`** (spec §6.1) — the only arm that represents a viewer rather than a request. Shares
+  `load`'s generator and ceiling calibration; adds the trajectory script, think time and the
+  cold-start arc.
 - **`filter`** — vocabulary-filter cost against vocabulary size × **principal sparsity** × overlay
   depth, at cold and cached fingerprints. per-point-attributes §3.3 predicts sparse principals are
   cheapest; an arm that does not vary sparsity cannot check the prediction it most needs to. Second
@@ -295,3 +332,7 @@ Not yet reviewed. Drafted 2026-08-02 from the benchmark obligations recorded in
 findings from reading the harness: `p99_ns` is identically `max_ns` at the matrix's own repetition
 counts (spec §4), and the load arm emits a stubbed `work` block despite already decoding the
 columns that would fill it (spec §5.1).
+
+Spec §6.1 was added after drafting, on the observation that `Pan` and `Zoom` repeat each position in
+place — so the sequential locality a real pan has is precisely what the repetition removes, and no
+arm represented a viewer rather than a request.

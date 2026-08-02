@@ -37,11 +37,31 @@
 //!
 //! A quarantined row stays invisible, which is the state it was already in.
 
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use sha2::{Digest, Sha256};
+
+use tessera_authz::{write_delta_tier, DeltaTier, Dict};
+use tessera_lifecycle::wal::WalScalar;
 use tessera_lifecycle::{BufferedItem, Overlay};
-use tessera_store::manifest::Quantisation;
-use tessera_types::EntityId;
+use tessera_spatial::tiler::{ScalarType, ScalarValue};
+use tessera_store::manifest::{DictExtent, FileDigest, Quantisation, SegmentsManifest};
+use tessera_store::permutation::SegmentExtent;
+use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
+use tessera_store::{write_flush_segment, FlushInput, FlushRow};
+use tessera_types::{EntityId, IdentityKey, TermId};
 
 use crate::Generation;
+
+/// The tag rule a tier's postings use — `postings.arrow`'s, unchanged (see
+/// [`tessera_authz::write_delta_tier`]). Taken from the bundle's own `small_term_threshold` would
+/// be better still; it is a constant here because a flush's postings are small by construction
+/// (one tick's arrivals) and the threshold only decides an encoding, never a content.
+const SMALL_TERM_THRESHOLD: u32 = 32;
 
 /// One flush's immutable plan: the items of one slice that will acquire geometry.
 ///
@@ -136,6 +156,293 @@ pub(crate) fn plan_flush(
     items.sort_unstable_by_key(|(entity, _)| entity.raw());
 
     Ok(FlushPlan { items, quarantined })
+}
+
+/// Everything the background pool needs to turn a [`FlushPlan`] into durable files.
+///
+/// Taken from the generation on the executor thread and then **immutable**: the pool holds no
+/// reference to live state, which is what makes "execute on the pool over immutable inputs" (§1.1)
+/// true rather than a description of intent.
+pub(crate) struct FlushContext {
+    pub(crate) prefix_dir: PathBuf,
+    pub(crate) partition: String,
+    pub(crate) slice: String,
+    /// The `n` this flush's side-manifest will be written at: one past the served one.
+    pub(crate) next_n: u64,
+    pub(crate) seg_id: String,
+    pub(crate) row_base: u32,
+    pub(crate) identity_key: IdentityKey,
+    pub(crate) shard_id: u32,
+    pub(crate) quantisation: Quantisation,
+    pub(crate) scalar_schema: Vec<(String, ScalarType)>,
+    /// The manifest this flush extends. Contracts §2.3 makes a side-manifest complete current
+    /// state for its partition, so the new one is this plus what the flush adds — never a diff.
+    pub(crate) manifest: SegmentsManifest,
+    /// The dictionary the plan's terms were resolved against, and the one promotion extends.
+    pub(crate) dict: Arc<Dict>,
+    pub(crate) prefix: String,
+}
+
+/// A flush whose files and side-manifest are durable, awaiting the swap-only publication step.
+///
+/// **The side-manifest is the commit point** (§7.3): by the time one of these exists, a crash
+/// leaves a bundle that opens at the new `n` with everything it names present. What remains is
+/// in-memory.
+pub(crate) struct CompletedFlush {
+    pub(crate) partition: String,
+    pub(crate) slice: String,
+    /// The entity ids removed from the buffer at publication. **Exactly what was consumed**, not a
+    /// range: the rebase removes these from the *then-current* buffer, whatever arrived while the
+    /// flush ran (§1.2).
+    pub(crate) consumed: Vec<EntityId>,
+    pub(crate) segment: SegmentData,
+    pub(crate) extent: SegmentExtent,
+    pub(crate) manifest: SegmentsManifest,
+    pub(crate) tier: Arc<DeltaTier>,
+    /// The dictionary including this flush's promotions (§3.2), republished with the geometry.
+    pub(crate) dict: Arc<Dict>,
+    pub(crate) prefix: String,
+}
+
+/// Turn a plan into durable files. **Runs on the background pool, over immutable inputs** (§1.1).
+///
+/// The order is §7.3's, and the side-manifest is last because it is the commit point: a crash
+/// before it leaves orphan files nothing references, and replay re-flushes deterministically.
+pub(crate) fn execute_flush(
+    plan: FlushPlan,
+    ctx: FlushContext,
+) -> Result<CompletedFlush, FlushFailed> {
+    let consumed: Vec<EntityId> = plan.items.iter().map(|(entity, _)| *entity).collect();
+
+    // ---- promotion (§3.2) -------------------------------------------------------------------
+    //
+    // `buffer.rs` allocates term ids for descriptors the dictionary has never seen from the top of
+    // the `u32` range downward, precisely so they are unsatisfiable: a novel descriptor can buffer
+    // an item but can never make it visible. This is where that ends for the items being flushed.
+    //
+    // **The tier's postings are written in promoted ordinals, never extension ids.** An extension
+    // id is process-local and its meaning changes at the next replay, so a tier carrying one would
+    // name whatever descriptor interned into that slot next — the same hazard `buffer.rs` counts
+    // downward from `u32::MAX` to avoid, arriving by a different route.
+    let promotion = promote(&plan, &ctx)?;
+
+    // ---- the segment, its extents and its locator -------------------------------------------
+    let rows: Vec<FlushRow> = plan
+        .items
+        .iter()
+        .map(|(entity, item)| FlushRow {
+            entity_id: *entity,
+            external_id: None,
+            x: item.x,
+            y: item.y,
+            scalars: item.scalars.iter().map(to_scalar_value).collect(),
+        })
+        .collect();
+    let out = write_flush_segment(
+        &ctx.prefix_dir,
+        &ctx.partition,
+        &ctx.slice,
+        FlushInput {
+            seg_id: &ctx.seg_id,
+            rows,
+            quantisation: ctx.quantisation,
+            identity_key: &ctx.identity_key,
+            shard_id: ctx.shard_id,
+            scalar_schema: &ctx.scalar_schema,
+            row_base: ctx.row_base,
+        },
+    )
+    .map_err(|e| FlushFailed(format!("segment: {e}")))?;
+
+    // ---- the delta postings tier ------------------------------------------------------------
+    let tier_rel = format!(
+        "partitions/{}/slices/{}/segments/{}/delta.arrow",
+        ctx.partition, ctx.slice, ctx.seg_id
+    );
+    let tier_path = ctx.prefix_dir.join(&tier_rel);
+    write_delta_tier(&tier_path, &promotion.postings, SMALL_TERM_THRESHOLD)
+        .map_err(|e| FlushFailed(format!("delta tier: {e}")))?;
+    let tier =
+        Arc::new(DeltaTier::open(&tier_path).map_err(|e| FlushFailed(format!("tier: {e}")))?);
+
+    // ---- the side-manifest: the commit point ------------------------------------------------
+    let mut manifest = ctx.manifest.clone();
+    manifest.segments_version = ctx.next_n;
+    manifest.watermark = out.watermark;
+    manifest.entity_id_high_water = manifest.entity_id_high_water.max(out.entity_id_high_water);
+    manifest.segments.push(out.segment.clone());
+    manifest.deltas.push(ctx.next_n);
+    manifest.external_id_extents.push(out.external_id_extent);
+    manifest.locator_extents.push(out.locator_extent);
+    manifest.files.extend(out.files);
+    manifest
+        .files
+        .insert(tier_rel, digest_of(&tier_path).map_err(FlushFailed)?);
+    if let Some(extent) = promotion.extent {
+        manifest.files.insert(
+            extent.path.clone(),
+            digest_of(&ctx.prefix_dir.join(&extent.path)).map_err(FlushFailed)?,
+        );
+        manifest.dict_extents.push(extent);
+    }
+    write_segments_manifest(&ctx.prefix_dir, &ctx.partition, ctx.next_n, &manifest)?;
+
+    let seg_dir = ctx
+        .prefix_dir
+        .join("partitions")
+        .join(&ctx.partition)
+        .join("slices")
+        .join(&ctx.slice)
+        .join("segments")
+        .join(&ctx.seg_id);
+    let segment = SegmentData {
+        seg_id: ctx.seg_id.clone(),
+        row_count: out.segment.row_count,
+        morton: MortonSlice::load(&seg_dir.join("morton.u32"))
+            .map_err(|e| FlushFailed(format!("morton: {e}")))?,
+        columns: ColumnsRef::load(&seg_dir.join("columns.arrow"))
+            .map_err(|e| FlushFailed(format!("columns: {e}")))?,
+    };
+
+    Ok(CompletedFlush {
+        partition: ctx.partition,
+        slice: ctx.slice,
+        consumed,
+        segment,
+        extent: out.extent,
+        manifest,
+        tier,
+        dict: promotion.dict,
+        prefix: ctx.prefix,
+    })
+}
+
+/// Why a flush produced nothing. **Every failure is "nothing happened, retry next tick"** (§10):
+/// the side-manifest is the only commit point, so a failure before it leaves orphan files nothing
+/// references and a failure after it cannot happen — there is nothing left to fail.
+#[derive(Debug)]
+pub(crate) struct FlushFailed(pub(crate) String);
+
+impl std::fmt::Display for FlushFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// What promotion produced: the dictionary to republish, the extent naming the new ordinals, and
+/// the tier's postings in those ordinals.
+struct Promotion {
+    dict: Arc<Dict>,
+    extent: Option<DictExtent>,
+    /// `(term, entities)` ascending by term — [`write_delta_tier`]'s contract.
+    postings: Vec<(TermId, Vec<u32>)>,
+}
+
+/// Promote every extension-id descriptor the plan carries to a durable dictionary ordinal, and
+/// express the plan's postings in those ordinals (§3.2).
+///
+/// **Two fail-closed consequences, neither obvious and both left standing.** A promoted descriptor
+/// is satisfiable only by sessions authorised *after* this flush, because `satisfied` is fixed per
+/// session at authorise — which is also what makes §3.4's patch-equals-a-rebuild equality hold. And
+/// an item still buffered under an old extension id for an already-promoted descriptor stays
+/// invisible until *its own* flush, even to a viewer holding the term.
+///
+/// ⊘ **Nothing is promoted yet, because the buffer does not retain the descriptor bytes.**
+/// `BufferedItem` carries resolved `TermId`s and the raw descriptors live only in the WAL record.
+/// An extension id therefore cannot be turned into an ordinal here without a WAL read, so a term
+/// this dictionary does not know is **left out of the tier entirely** — which is exactly the
+/// fail-closed state it was already in: an extension id is unsatisfiable by any session's
+/// `satisfied`, so a posting under one could never have made the item visible. Retaining the
+/// descriptors on `BufferedItem` is what unblocks this, and it is a WAL-format-adjacent change.
+fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFailed> {
+    let dict_len = ctx.dict.len();
+    let mut by_term: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for (entity, item) in &plan.items {
+        let Ok(entity) = u32::try_from(entity.raw()) else {
+            return Err(FlushFailed(format!(
+                "entity {} does not fit the u32 posting space (I9's ceiling)",
+                entity.raw()
+            )));
+        };
+        for term in &item.terms {
+            // A term at or above the dictionary's length is an extension id: unsatisfiable, and
+            // unpromotable here for want of its descriptor bytes. Excluded rather than written,
+            // because writing a process-local id into a durable tier is the hazard above.
+            if term.raw() >= dict_len {
+                continue;
+            }
+            by_term.entry(term.raw()).or_default().push(entity);
+        }
+    }
+
+    let mut postings = Vec::with_capacity(by_term.len());
+    for (term, mut entities) in by_term {
+        // `encode_posting` hard-fails on a non-strictly-ascending list, and a buffered item's
+        // descriptors are not deduplicated on the write path, so this is required rather than
+        // defensive. Set semantics, so it folds no authorisation state.
+        entities.sort_unstable();
+        entities.dedup();
+        postings.push((TermId::new(term), entities));
+    }
+
+    Ok(Promotion {
+        dict: Arc::clone(&ctx.dict),
+        extent: None,
+        postings,
+    })
+}
+
+fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
+    match scalar {
+        WalScalar::U64(v) => ScalarValue::U64(*v),
+        WalScalar::F32(v) => ScalarValue::F32(*v),
+        WalScalar::Utf8(v) => ScalarValue::Utf8(v.clone()),
+    }
+}
+
+/// Write `SEGMENTS-<n>.json`, fsynced, and fsync its directory entry.
+///
+/// **This is the commit point** (§7.3). Everything it names is already durable; a crash before the
+/// rename leaves orphan files nothing references, and a crash after it leaves a bundle that opens
+/// at `n` with everything present.
+fn write_segments_manifest(
+    prefix_dir: &Path,
+    partition: &str,
+    n: u64,
+    manifest: &SegmentsManifest,
+) -> Result<(), FlushFailed> {
+    let dir = prefix_dir.join("partitions").join(partition);
+    let path = dir.join(format!("SEGMENTS-{n}.json"));
+    let bytes = serde_json::to_vec_pretty(manifest)
+        .map_err(|e| FlushFailed(format!("side-manifest: {e}")))?;
+    let io = |what: &str, e: std::io::Error| FlushFailed(format!("side-manifest {what}: {e}"));
+
+    // Written to a temporary sibling and renamed, so a reader walking the candidate list never
+    // sees a partial one: `SEGMENTS-<n>.json` existing at all must mean it is complete.
+    let tmp = dir.join(format!("SEGMENTS-{n}.json.tmp"));
+    {
+        let mut file = File::create(&tmp).map_err(|e| io("create", e))?;
+        file.write_all(&bytes).map_err(|e| io("write", e))?;
+        file.sync_all().map_err(|e| io("fsync", e))?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| io("rename", e))?;
+    File::open(&dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| io("dir fsync", e))?;
+    Ok(())
+}
+
+fn digest_of(path: &Path) -> Result<FileDigest, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("digest {}: {e}", path.display()))?;
+    let digest = Sha256::digest(&bytes);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    Ok(FileDigest {
+        size: bytes.len() as u64,
+        sha256: hex,
+    })
 }
 
 /// Whether `entity` is deleted as of this overlay.
