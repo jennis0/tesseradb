@@ -240,12 +240,44 @@ def _fixture_build_argv(
     return args
 
 
-def fixture_recipe(argv: list[str]) -> dict:
-    """The stamped input set for [`ensure_fixture_bundle`]: the whole `tessera build` invocation.
+def _input_stamp(argv: list[str]) -> dict:
+    """`(size, mtime_ns)` of every input file the build reads, keyed by flag.
 
-    Everything this fixture is a function of *is* an argument to that command — there is no
-    synthesised corpus here, unlike the mask catalogue's — so recording the argv records the
-    recipe. The binary's path and the `--out` path are dropped: neither is a property of the
+    **The argv alone is not the recipe.** `--points` and `--pairs` name paths, and a probe script
+    that regenerates a corpus *in place* leaves both paths identical while changing every byte
+    behind them — which is not hypothetical: `data/scaled/geometry.parquet` was regenerated on
+    2026-08-02 to carry sub-cell residuals and to correct an axis transposition, and an argv-only
+    receipt would have handed every test a bundle built from the file that no longer exists,
+    reporting a reuse rather than a staleness.
+
+    Size and mtime rather than a digest, deliberately: the points file is 10 GB and this runs at
+    the top of every test session, so hashing it would cost more than the rebuild it is protecting
+    against. The failure it cannot see — a same-size edit that preserves mtime — is not a shape any
+    generator here produces, and the structural gate in `_fixture_bundle_is_usable` is the second
+    line against damage a receipt cannot observe.
+    """
+    stamp = {}
+    for flag in ("--points", "--pairs"):
+        if flag not in argv:
+            continue
+        path = Path(argv[argv.index(flag) + 1])
+        try:
+            st = path.stat()
+            stamp[flag] = [st.st_size, st.st_mtime_ns]
+        except OSError:
+            # An input that cannot be stat'd is recorded as absent rather than raised on: the
+            # build itself is about to fail on it and will say so far better than this would.
+            stamp[flag] = None
+    return stamp
+
+
+def fixture_recipe(argv: list[str]) -> dict:
+    """The stamped input set for [`ensure_fixture_bundle`]: the whole `tessera build` invocation,
+    plus a stamp of the input *files* it names ([`_input_stamp`]).
+
+    Everything this fixture is a function of is either an argument to that command or a file that
+    command reads — there is no synthesised corpus here, unlike the mask catalogue's.
+    The binary's path and the `--out` path are dropped: neither is a property of the
     fixture, and including them would force a rebuild per worktree.
 
     Note what the recipe cannot pin, and why that is correct: `--mint-id-key` mints a fresh
@@ -256,7 +288,7 @@ def fixture_recipe(argv: list[str]) -> dict:
     argv = argv[1:]
     out = argv.index("--out")
     argv = argv[:out] + argv[out + 2 :]
-    return {"recipe_version": 1, "build_argv": argv}
+    return {"recipe_version": 2, "build_argv": argv, "inputs": _input_stamp(argv)}
 
 
 def _fixture_bundle_is_usable(bundle_root: Path, wanted: dict) -> bool:

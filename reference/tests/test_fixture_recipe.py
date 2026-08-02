@@ -116,6 +116,49 @@ def test_the_receipt_lives_beside_the_bundle_and_not_inside_it(work_dir: Path):
     assert bundle_root not in harness.recipe_path(bundle_root).parents
 
 
+def test_regenerating_an_input_in_place_changes_the_recipe(work_dir: Path):
+    """A points file rewritten **at the same path** must not be reused.
+
+    This is the failure the argv-only receipt could not see, and it is not hypothetical: the
+    scaled corpus was regenerated in place on 2026-08-02 to carry sub-cell residuals and to
+    correct an axis transposition, and every path in the build command stayed identical. A receipt
+    that only recorded the command would have reported a reuse of a bundle built from a file that
+    no longer exists — which is worse than a stale fixture, because it reads as a pass.
+    """
+    points = work_dir / "points.parquet"
+    pairs = work_dir / "pairs.parquet"
+    points.write_bytes(b"first corpus")
+    pairs.write_bytes(b"pairs")
+
+    def recipe_now():
+        return harness.fixture_recipe(
+            harness._fixture_build_argv(
+                work_dir / "bundle",
+                points=str(points),
+                pairs=str(pairs),
+                limit=250_000,
+                extent="0,65536,0,65536",
+                slice_id="s0",
+            )
+        )
+
+    before = recipe_now()
+    assert before["build_argv"] == recipe_now()["build_argv"], "the argv itself must be stable"
+
+    # Same path, different contents and a different length — exactly a regeneration.
+    points.write_bytes(b"second corpus, regenerated in place")
+    after = recipe_now()
+
+    assert before != after, (
+        "regenerating a build input in place left the recipe unchanged, so a stale fixture "
+        "would be reused and reported as a match"
+    )
+    assert before["build_argv"] == after["build_argv"], (
+        "the argv is unchanged by definition here — the stamp is what must have moved, and if "
+        "this fails the test is detecting the wrong thing"
+    )
+
+
 def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
     """`ensure_fixture_bundle`'s inputs are all `tessera build` arguments, so the argv is the
     recipe — with `--out` and the binary path dropped, since neither is a property of the fixture
