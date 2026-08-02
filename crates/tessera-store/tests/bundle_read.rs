@@ -123,6 +123,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         deltas: vec![],
         dict_extents: vec![],
         external_id_extents: vec![],
+        locator_extents: vec![],
         tombstones: vec![],
         deny: vec![],
         files: segments_files,

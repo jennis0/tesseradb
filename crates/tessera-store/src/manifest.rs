@@ -212,6 +212,30 @@ pub struct DictExtent {
     pub records: u64,
 }
 
+/// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
+/// entity range (§3.6).
+///
+/// The build's `entities/ext-locator.u32` is one file whose length is the entity space *at build
+/// time*, so it says nothing about an entity a flush created. Without a durable reverse path for
+/// those, an item visible on the map would answer `/v1/items` with a typed error forever once its
+/// WAL region is reclaimed — contracts §2.4 serves that direction live-map-first,
+/// locator-second, and rotation empties the live map at restart.
+///
+/// The file is a dense `u32` array over `[entity_lo, entity_hi]`, no header, `0xFFFFFFFF` for an
+/// entity with no caller-supplied external id (contracts §3.4 r6 makes it optional). Each slot is
+/// an **ordinal into `external_id_extent`**, named here rather than inferred, because a segment's
+/// extent is its own file and the concatenation order that gives the base locator its meaning does
+/// not extend across flushes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocatorExtent {
+    pub path: String,
+    pub entity_lo: u64,
+    /// Inclusive.
+    pub entity_hi: u64,
+    /// Prefix-relative path of the `external_id_extents` entry these ordinals index.
+    pub external_id_extent: String,
+}
+
 /// `SEGMENTS-<n>.json` (contracts §2.3): complete current state for one partition, written by
 /// that partition's worker only after every file it names is durable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +250,11 @@ pub struct SegmentsManifest {
     pub dict_extents: Vec<DictExtent>,
     #[serde(default)]
     pub external_id_extents: Vec<String>,
+    /// The reverse external-id direction for each flush segment — see [`LocatorExtent`]. Empty in
+    /// a bundle straight out of `tessera build`, whose one `ext-locator.u32` covers every entity
+    /// it knows about.
+    #[serde(default)]
+    pub locator_extents: Vec<LocatorExtent>,
     #[serde(default)]
     pub tombstones: Vec<u64>,
     #[serde(default)]
@@ -417,6 +446,7 @@ mod tests {
             deltas: Vec::new(),
             dict_extents: Vec::new(),
             external_id_extents: Vec::new(),
+            locator_extents: Vec::new(),
             tombstones: Vec::new(),
             deny: Vec::new(),
             files: BTreeMap::new(),

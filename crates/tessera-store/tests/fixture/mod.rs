@@ -3,6 +3,10 @@
 //! Separate from `bundle_read.rs`'s own copy because that file's fixture returns the tiler items
 //! it built (its assertions compare against them) and hard-codes one segment. This one exists to
 //! be *added to*.
+//!
+//! Each test binary compiles this module on its own, so a helper only one of them uses is dead
+//! code in the others. That is what the allow below is for, and it is scoped to this fixture.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,8 +23,8 @@ use tessera_store::manifest::{
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::write::{write_permutation, write_segment};
-use tessera_store::Bundle;
-use tessera_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use tessera_store::{write_flush_segment, Bundle, FlushInput, FlushRow};
+use tessera_types::{EntityId, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 pub const PARTITION: &str = "default";
 pub const SLICE: &str = "main";
@@ -107,6 +111,7 @@ pub fn build_bundle(root: &Path, n: u64) {
         deltas: vec![],
         dict_extents: vec![],
         external_id_extents: vec![],
+        locator_extents: vec![],
         tombstones: vec![],
         deny: vec![],
         files,
@@ -163,11 +168,12 @@ pub fn build_bundle(root: &Path, n: u64) {
     .expect("write CURRENT");
 }
 
-/// Write a segment covering `[entity_lo, entity_lo + count)` and return it loaded, with the extent
-/// that places it at the end of `bundle`'s current row space.
+/// A flush segment covering `[entity_lo, entity_lo + count)`, loaded, with the extent that places
+/// it at the end of `bundle`'s current row space.
 ///
-/// A stand-in for what Task 8's `write_flush_segment` will produce: the shape publication consumes
-/// is the same whether a flush or a merge made it.
+/// **Goes through the real [`write_flush_segment`]** rather than hand-rolling the same files: a
+/// second writer here would be a second definition of what a flush produces, and the publication
+/// tests would then be asserting against a shape production never writes.
 pub fn flush_segment(
     root: &Path,
     bundle: &Bundle,
@@ -178,6 +184,37 @@ pub fn flush_segment(
         .row_space
         .total_rows() as u32;
     let seg_id = format!("seg-{entity_lo}-{count}");
+    let key = IdentityKey::from_hex("0123456789abcdef0123456789abcdef").expect("test key");
+
+    let out = write_flush_segment(
+        &root.join("v00000"),
+        PARTITION,
+        SLICE,
+        FlushInput {
+            seg_id: &seg_id,
+            rows: (entity_lo..entity_lo + count)
+                .map(|e| FlushRow {
+                    entity_id: EntityId::new(e),
+                    external_id: Some(format!("ext-{e}").into_bytes()),
+                    x: ((e * 37) % 100) as f32 / 100.0,
+                    y: ((e * 61) % 100) as f32 / 100.0,
+                    scalars: vec![],
+                })
+                .collect(),
+            quantisation: Quantisation {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            identity_key: &key,
+            shard_id: 0,
+            scalar_schema: &[],
+            row_base,
+        },
+    )
+    .expect("write_flush_segment");
+
     let seg_dir = root
         .join("v00000/partitions")
         .join(PARTITION)
@@ -185,34 +222,13 @@ pub fn flush_segment(
         .join(SLICE)
         .join("segments")
         .join(&seg_id);
-    fs::create_dir_all(&seg_dir).expect("mkdir");
-
-    let mut items = items_for(entity_lo, count);
-    let mut entity_ids: Vec<EntityId> = (entity_lo..entity_lo + count).map(EntityId::new).collect();
-    let codes = sort_batch(&mut items, &mut entity_ids);
-    write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
-
-    // `rows[e - entity_lo]` is the entity's position in the Morton-sorted order, relative to
-    // `row_base` — exactly what a flush computes.
-    let mut rows = vec![0u32; count as usize];
-    for (row, entity) in entity_ids.iter().enumerate() {
-        rows[(entity.raw() - entity_lo) as usize] = row as u32;
-    }
-
     let segment = SegmentData {
-        seg_id: seg_id.clone(),
-        row_count: count as u32,
+        seg_id,
+        row_count: out.segment.row_count,
         morton: MortonSlice::load(&seg_dir.join("morton.u32")).expect("morton"),
         columns: ColumnsRef::load(&seg_dir.join("columns.arrow")).expect("columns"),
     };
-    let extent = SegmentExtent {
-        entity_lo,
-        entity_hi: entity_lo + count - 1,
-        seg_id,
-        row_base,
-        rows,
-    };
-    (segment, extent)
+    (segment, out.extent)
 }
 
 /// `bundle`'s side-manifest with `segments_version` advanced and `watermark` moved past the

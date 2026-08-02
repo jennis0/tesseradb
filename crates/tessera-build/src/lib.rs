@@ -562,6 +562,7 @@ fn write_manifests(
         deltas: Vec::new(),
         dict_extents,
         external_id_extents,
+        locator_extents: Vec::new(),
         tombstones: Vec::new(),
         deny: Vec::new(),
         // Nothing has been added since MANIFEST.json — see the note above.
