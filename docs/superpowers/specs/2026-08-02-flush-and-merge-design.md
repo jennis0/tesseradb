@@ -1,9 +1,7 @@
 # Flush and Merge — Design
 
-**Status:** Draft r4 — independently reviewed twice, needs-rework both times, reworked both times.
-The architecture survived each; the mechanisms did not. Every finding from both rounds is closed or
-escalated-and-ruled (Appendix R); the review texts are in
-[`reviews/`](reviews/). Not yet normative — `docs/design/` wins until this is folded in.
+**Status:** Draft — reviewed twice independently (Appendix R). Not yet normative; `docs/design/`
+wins until this is folded in.
 
 **Owns:** the row-space segment lifecycle. Flush turns WAL-durable buffered items into a published
 segment, which is what makes an ingested item visible at all; merge bounds the segment and
@@ -11,8 +9,8 @@ delta-tier counts flush would otherwise grow without limit. Both are **invariant
 folds authorisation state, neither retires an overlay entry, neither can re-expose anything.
 
 **Does not own:** compaction and its fold, the deletion stamp ledger, the retirement floor, the
-evaluate-entry fold. Those are the invariant-bearing half of the write journey and are specified
-separately, after this lands, because their inputs are artefacts this document creates.
+evaluate-entry fold. Those are the invariant-bearing half of the write journey, specified separately
+after this lands, because their inputs are artefacts this document creates.
 
 `§n` unprefixed refers to `docs/design/architecture.md`. `lifecycle §n` refers to
 `docs/design/concurrency-lifecycle.md`, `contracts §n` to `docs/design/contracts.md`, `SA §n` to
@@ -27,41 +25,37 @@ durability receipt, and the gap between it and visibility is unbounded, because 
 no row in any segment and every map verb asks a row-space question (§11.2).
 
 Flush ends that condition. Merge is not a separate ambition — it is the cost control without which
-flush is a serving cliff, on **two** axes: a tile resolves to one contiguous range per live segment
+flush is a serving cliff on **two** axes: a tile resolves to one contiguous range per live segment
 (§11.3), and a fragment build unions across every live delta postings tier. A 90 s flush period
 produces roughly a thousand of each per day.
 
-**What this is not:** it is not the mechanism that lets anything retire. After this lands, deletion
-denies still never retire, evaluate entries are still immortal, and the overlay still grows
-monotonically under deletion and predicate churn. That remains fail-closed and remains not the
-specified mechanism. Compaction owns it.
+**What this is not:** the mechanism that lets anything retire. After this lands, deletion denies
+still never retire, evaluate entries are still immortal, and the overlay still grows monotonically
+under deletion and predicate churn. Fail-closed, and not the specified mechanism. Compaction owns it.
 
-**And one thing this makes load-bearing.** Under §11's ruling, `tessera build` is initial-load only.
-Compaction therefore becomes the *only* route to re-quantisation, the fold, re-ranking and a
-batch-grid change — no longer merely desirable, but the deployment's sole reorganisation path.
+**And one thing this makes load-bearing.** Under §11, `tessera build` is initial-load only, so
+compaction becomes the *only* route to re-quantisation, the fold, re-ranking and a batch-grid change
+— the deployment's sole reorganisation path rather than merely a desirable one.
 
-## 1. Publication: one owner, one cadence
+## 1. Publication
 
-### 1.1 The single publisher
+### 1.1 One publisher
 
 Flush and merge execute on the background pool over immutable inputs and submit a completed,
 immutable result to the write executor for a **swap-only** publication step (lifecycle §1.3).
 
-This is what closes #59. Today there are two publishers: the write executor, and geometry
-publication which swaps the pointer from any caller. `crates/tessera-engine/src/write.rs` says so at
-the publication site and names the reason — *"a flush would be precisely a second publisher"*. It
-would be a third. So geometry publication ceases to be callable off-thread and becomes a command;
-the engine keeps exactly one non-atomic `.store(`, and `scripts/check-layers.sh` goes on policing
-that.
+This closes #59. Geometry publication is today callable from any thread, which `write.rs` records at
+the publication site along with the reason it matters — *"a flush would be precisely a second
+publisher"*. So geometry publication becomes a command rather than a method any caller can reach:
+the engine keeps exactly one non-atomic `.store(`, and `scripts/check-layers.sh` goes on policing it.
 
 Completed units arrive on the **work** lane, never the deny lane. The loop's existing discipline —
-drain deny to empty before touching work — is what keeps a suppression from queueing behind a
-flush's IO, and is unchanged.
+drain deny to empty before touching work — keeps a suppression from queueing behind a flush's IO.
 
-**At most one flush and one merge are in flight at a time.** A tick arriving while a flush runs is
-skipped, not queued: two concurrent flushes would double-consume the buffer range. Skips are counted
-and alarmed, because a flush persistently slower than the tick is a visibility-latency breach the
-`flush_max_age_secs` bound would otherwise silently miss.
+**At most one flush and one merge are in flight.** A tick arriving while a flush runs is skipped, not
+queued: two concurrent flushes would double-consume the buffer range. Skips are counted and alarmed,
+because a flush persistently slower than the tick is a visibility-latency breach that
+`flush_max_age_secs` would otherwise silently miss.
 
 ### 1.2 Publication by rebase, over a shared bundle
 
@@ -73,98 +67,86 @@ applies it to the **then-current** generation rather than to the one it was plan
 - A **merge** publishes only if every input `seg_id` is still present in the current generation.
   ABA-safe because `seg_id`s are never reused, across merges or prefixes (contracts §2.1). A merge
   whose inputs are gone is discarded; its outputs are orphans nothing references.
-- A tick with an empty buffer **still publishes a pending merge**. Otherwise a completed merge on an
-  idle deployment waits indefinitely.
+- A tick with an empty buffer **still publishes a pending merge**, or a completed merge on an idle
+  deployment waits indefinitely.
 
-**Generations are constructed incrementally, not by reopening the bundle.** A published generation
-shares the previous generation's base `Arc<Bundle>` and adds (flush) or substitutes (merge) segment
-entries and permutation extents. This is required, not an optimisation: `open_bundle` maps every
-file afresh and `Permutation::load` re-pays an O(bound) `validate_rows`, so re-opening per flush
-would cost more than the flush. §1.4's memory claim depends on this being built, and it is named
-here so it is not assumed.
+**Generations are constructed incrementally, never by reopening the bundle.** A published generation
+shares the previous one's base `Arc<Bundle>` and adds (flush) or substitutes (merge) segment entries
+and permutation extents. This is required rather than an optimisation: `open_bundle` maps every file
+afresh and `Permutation::load` re-pays an O(bound) `validate_rows`, so re-opening would cost more
+than the flush it followed. §1.4's memory claim rests on it.
 
-### 1.3 One geometry cadence, and what is not on it
+### 1.3 Two kinds of publication, and only one is on a cadence
 
-**Every geometry publication is on one cadence, and a completed merge rides along with the next
-flush publication.** One swap, one `segments_version` bump, one drain entry.
-
-The reason is lifecycle §2.2's sizing obligation, which constrains the **publication period** and
-does not care which publisher moved it. Sizing flush and merge as independent publishers costs a
-factor of two, which at the current defaults forbids flushing more often than 150 s for no benefit a
-viewer can observe. A merge changes query cost and nothing else, so deferring its effect by up to one
-flush period is free.
-
-**Two kinds of publication, and only one of them is on the tick.** The distinction is what §2.2's
-sizing obligation is actually about, and conflating the two is the error an earlier revision made:
+The distinction is what lifecycle §2.2's sizing obligation is actually about, and the two are easy to
+conflate because both write a side-manifest:
 
 - A **geometry publication** supersedes geometry, so it creates a drain entry and bumps
-  `segments_version`. Flush and merge are the only ones. These are the publications §2.2 sizes.
+  `segments_version`. Flush and merge are the only ones, and these are what §2.2 sizes.
 - An **overlay publication** — a side-manifest written because a deny disposition was accepted
   (contracts §2.3) — changes no geometry. Nothing is superseded, **no drain entry is created, and
-  `segments_version` does not move.** It is therefore not governed by the pin relation at all, and
-  contracts §2.3's rule that an accepted deny publishes **immediately, not deferred to the next
-  flush**, stands unaltered.
+  `segments_version` does not move.** It is not governed by the pin relation, and contracts §2.3's
+  rule that an accepted deny publishes **immediately, never deferred to the next flush**, stands.
 
-That last point is not a concession, it is the only workable answer: the deny lane is unbounded and
-can never be load-shed, so a sized deny cadence would be unvalidatable under an adversarial deny
-rate. Two consequences to carry: `segments_version` must **not** move on an overlay publication, or
-every deny would rotate the row-projection cache key and cost a full projection rebuild; and the
-side-manifest `n` therefore advances faster than `segments_version`, which `read.rs` already
-tolerates and documents ("the two agree in every bundle a conforming writer produces, and where they
-do not it is the filename that decided").
+Immediacy is not a concession but the only workable answer: the deny lane is unbounded and can never
+be load-shed, so a sized deny cadence would be unvalidatable under an adversarial deny rate. Two
+consequences follow. `segments_version` must **not** move on an overlay publication, or every deny
+would rotate the row-projection cache key and cost a full projection rebuild. And the side-manifest
+`n` therefore advances faster than `segments_version` — which `read.rs` already tolerates and
+documents ("the two agree in every bundle a conforming writer produces, and where they do not it is
+the filename that decided").
+
+**Every geometry publication is on one cadence, and a completed merge rides along with the next flush
+publication.** One swap, one `segments_version` bump, one drain entry. Sizing flush and merge as
+independent publishers would cost a factor of two — forbidding a flush more often than 150 s at the
+current defaults — for no benefit a viewer can observe, since a merge changes query cost and nothing
+else.
 
 **The three geometry publishers, all on the tick:**
 
 - `flush_max_age_secs` — the tick itself.
 - `flush_max_items` — trips under load, and can trip far faster than the tick. **It does not publish
-  early.** It marks the buffer flush-ready; publication still waits for the next tick. A bound that
-  published on trip would move the real period below the validated one, and lifecycle §2.2's depth
-  trim would drop pins before their TTL while the depth alarm saturates.
-- `POST /control/flush` (contracts §3.4, 202 accepted) — operator-triggered, accepted at any time,
-  **executed at the next tick**. The 202 already means "accepted, not yet done", so nothing in the
-  contract changes.
+  early**; it marks the buffer flush-ready and publication waits for the next tick. Publishing on
+  trip would move the real period below the validated one, and §2.2's depth trim would then drop pins
+  before their TTL while the depth alarm saturates.
+- `POST /control/flush` (contracts §3.4) — operator-triggered, accepted at any time, **executed at
+  the next tick**. Its 202 already means "accepted, not yet done".
 
-**What bounds the buffer between ticks is a new mechanism, and calling it existing was wrong.**
-`ingest_queue_bound` bounds the *command queue* — `sync_channel(queue_bound)`, 32 jobs by default —
-and its 429 fires when submission outruns the executor's service rate. The executor drains a job
-into the buffer in milliseconds, so **no ingest rate produces a 429 by buffer size**; nothing in the
-system compares buffer occupancy to anything. Deferring `flush_max_items` to the tick therefore
-leaves the buffer unbounded unless something new bounds it.
-
-So this design adds `ingest_buffer_max_items`: a **buffer-occupancy admission bound**, checked in the
-handler before submission, 429 on exceed. It is a distinct knob from `ingest_queue_bound` because it
-bounds a distinct thing, and it is new — the previous revision's "the excess is 429'd exactly as
-today" described a mechanism that does not exist.
-
-With every geometry publisher on the tick, the relation is exact over the *actual* minimum period:
+The relation is then exact over the actual minimum period, **validated at startup with a violating
+configuration refused**:
 
 ```
 pin_ttl_secs < drain_depth_max × flush_max_age_secs
 ```
 
-**Validated at startup; a violating configuration is refused.**
+**Deferring `flush_max_items` to the tick requires a bound on the buffer that does not yet exist.**
+`ingest_queue_bound` bounds the *command queue* — `sync_channel(queue_bound)`, 32 jobs by default —
+and its 429 fires when submission outruns the executor's service rate. The executor drains a job into
+the buffer in milliseconds, and nothing in the system compares buffer occupancy to anything, so no
+ingest rate produces a 429 by buffer size. This design therefore adds `ingest_buffer_max_items`: a
+buffer-occupancy admission bound, checked in the handler before submission, 429 on exceed. It is a
+distinct knob from `ingest_queue_bound` because it bounds a distinct thing.
 
-### 1.4 The marginal cost of drain depth, corrected
+### 1.4 The marginal cost of drain depth
 
 Lifecycle §2.2 caps the drain list at four superseded generations, and the natural reading is that
 raising the cap is expensive because each entry pins an `Arc<Bundle>`.
 
-**That reading is true of the pre-flush system and false after §1.2.** Before flush, consecutive
-generations were whole distinct bundles. With incremental construction they share base geometry by
-`Arc` and differ by a handful of small segments, so the marginal cost of a drain entry is roughly one
-flush segment, not one bundle.
+That reading holds only while consecutive generations are whole distinct bundles. Under §1.2's
+incremental construction they share base geometry by `Arc` and differ by a handful of small segments,
+so the marginal cost of a drain entry is roughly one flush segment.
 
-*Modelled, not measured.* The figure to measure before an admin leans on it is resident bytes per
-drain entry under sustained flush.
+*Modelled, not measured.* The figure to take before an admin leans on it is resident bytes per drain
+entry under sustained flush.
 
-`drain_depth_max` is therefore the cheaper knob, and an admin who wants 15 s visibility raises it
-rather than shortening `pin_ttl_secs`.
+`drain_depth_max` is therefore the cheaper knob, and an admin wanting 15 s visibility raises it rather
+than shortening `pin_ttl_secs`.
 
-### 1.5 Reclaim gets its caller
+### 1.5 Reclaim's periodic caller
 
-Lifecycle §2.1 records that reclaim has no periodic caller and runs only as a side effect of the
-next geometry publication — a liveness gap it assigns to "whichever stage introduces a periodic
-publisher". This is that stage. **The flush tick drives reclaim.**
+Lifecycle §2.1 records that reclaim runs only as a side effect of the next geometry publication, and
+assigns the gap to "whichever stage introduces a periodic publisher". **The flush tick drives
+reclaim.**
 
 ## 2. Row space
 
@@ -174,15 +156,14 @@ I9 makes entity IDs append-only and allocation issues them monotonically from th
 **each flush segment covers a contiguous, ascending entity range**.
 
 > **Assumption, stated because it is load-bearing and currently unenforced: one slice per
-> partition.** `WalRow` carries no slice (`crates/tessera-lifecycle/src/wal.rs`), and with more than
-> one slice a commit window's entity range interleaves across slices, making a segment's range
-> ascending-with-holes rather than contiguous. The design survives that — extents become
-> ascending-with-holes and §5.1's adjacency becomes list-adjacency — but the arithmetic in this
-> section does not, and nothing today would catch the change. **`WalRow` gains a `slice` field in
-> this change**, while the WAL layout is still being revised for rotation, because the format is
-> append-only and flush freezes it.
+> partition.** `WalRow` carries no slice, and with more than one a commit window's entity range
+> interleaves across slices, making a segment's range ascending-with-holes rather than contiguous.
+> The design survives that — extents become ascending-with-holes and §5.1's adjacency becomes
+> list-adjacency — but this section's arithmetic does not, and nothing today would catch the change.
+> **`WalRow` gains a `slice` field in this change**, while the WAL layout is already being revised
+> for rotation, because the format is append-only and flush freezes it.
 
-Row IDs remain a flat `u32` space per slice. Segment *k* owns
+Row IDs remain a flat `u32` space per slice, segment *k* owning
 `[row_base_k, row_base_k + row_count_k)`. Beside the built base permutation covering `[0, W_build)`,
 a slice carries an ordered list of extents, each `{entity_lo, entity_hi, seg_id, row_base}`:
 
@@ -191,8 +172,8 @@ a slice carries an ordered list of extents, each `{entity_lo, entity_hi, seg_id,
 - **`project(mask)`** — the base projection unioned with a per-extent projection. Only the extent
   part is recomputed on a flush, which is what makes §3.4's patch cheap.
 - **tile lookup** — unchanged per segment. Every flush segment is internally Morton-sorted against
-  the *same* global `quantisation` (contracts §2.5), so a tile still resolves to one contiguous range
-  per segment through the existing binary search, and the engine unions across segments.
+  the *same* global `quantisation` (contracts §2.5), so a tile resolves to one contiguous range per
+  segment through the existing binary search, and the engine unions across segments.
 
 **The extent dispatch lives inside `tessera-store`'s permutation module.** I4's claim that the
 permutation is "the only legal EntityId→RowId path in the codebase" is a claim that module makes
@@ -203,22 +184,20 @@ the live segment count, which §5 bounds.
 
 ### 2.2 Merge is row-count preserving
 
-Dropping rows is a fold, and folds belong to compaction. A merge therefore emits exactly as many
-rows as it consumed, so **no later segment's `row_base` ever moves**, and merging *k* adjacent
-extents collapses them to one. The extent list grows only under flush and shrinks only under merge.
+Dropping rows is a fold, and folds belong to compaction. A merge emits exactly as many rows as it
+consumed, so **no later segment's `row_base` ever moves**, and merging *k* adjacent extents collapses
+them to one. The extent list grows only under flush and shrinks only under merge.
 
-Merging two Morton-sorted code arrays is a linear merge-sort whose output is unconditionally sorted.
-
-### 2.3 The Morton re-rank decorator is dropped
+### 2.3 No Morton re-rank decorator
 
 §11.3 imports from Lucene the idea of re-ranking as a decorator on the merge policy — reorder only
 above 2¹⁸ documents, skip rather than fail when memory is short, always reorder on forced merges.
 
-**It does not transfer.** Lucene reorders for doc-id locality, an optimisation. Here the Morton sort
-*is* the tile index: a segment that is not internally sorted breaks `tile_ranges`' binary search
-outright, so sorting is not optional and cannot be skipped under memory pressure. And §2.2's linear
-merge-sort needs no extra memory and produces sorted output unconditionally, so there is nothing to
-make conditional on a document count.
+It does not transfer. Lucene reorders for doc-id locality, an optimisation. Here the Morton sort *is*
+the tile index: a segment that is not internally sorted breaks `tile_ranges`' binary search outright,
+so sorting is not optional and cannot be skipped under memory pressure. And merging two Morton-sorted
+code arrays is a linear merge-sort — no extra memory, sorted output unconditionally — so there is
+nothing to make conditional on a document count.
 
 *A departure from §11.3, recorded as a decision rather than applied silently.*
 
@@ -228,190 +207,173 @@ make conditional on a document count.
 
 Per segment: `morton.u32`, `columns.arrow`, a **sparse delta postings file** (term → entities, only
 for terms present in the flushed set), a `dict_extents` entry (§3.2), an `external_id_extents` entry
-**and a locator extent** giving the entity→external_id direction (§3.6).
+and a **locator extent** giving the entity→external_id direction (§3.6).
 
-Every one is listed in the new `SEGMENTS-<n+1>.json`'s `files` map — which is exactly where contracts
-§2.2/§2.3 put files that appeared after build time. **Flush and merge never touch `MANIFEST.json` or
-`CURRENT`.**
+Every one is listed in the new `SEGMENTS-<n+1>.json`'s `files` map — where contracts §2.2/§2.3 put
+files that appeared after build time. **Flush and merge never touch `MANIFEST.json` or `CURRENT`.**
 
-The watermark advances to **`entity_hi + 1`**. Composition treats entities `≥ W` as buffer-resident
-(`compose.rs`; `Generation.watermark`'s own doc: "at or past this value live only in buffer"), so
-`W = entity_hi` would leave the highest flushed entity excluded from the fragment *and* absent from
-the buffer — invisible.
+The manifest also carries `entity_id_high_water`, which §7.3 depends on.
+
+The watermark advances to **`entity_hi + 1`**. Composition treats entities `≥ W` as buffer-resident,
+so `W = entity_hi` would leave the highest flushed entity excluded from the fragment *and* absent
+from the buffer — invisible.
 
 ### 3.2 Novel descriptors become durable at flush
 
-`crates/tessera-lifecycle/src/buffer.rs` allocates term ids for descriptors the dictionary has never
-seen from the top of the `u32` range downward, precisely so they are **unsatisfiable**: a novel
-descriptor can buffer an item but can never make it visible.
+`buffer.rs` allocates term ids for descriptors the dictionary has never seen from the top of the
+`u32` range downward, precisely so they are **unsatisfiable**: a novel descriptor can buffer an item
+but can never make it visible.
 
-Flush promotes each extension descriptor to a durable dictionary ordinal and publishes the
-assignment as a `dict_extents` entry. The downward-counting ids become a *pre-flush stopgap* rather
-than a permanent state. The collision argument that motivates counting downward is unaffected —
+Flush promotes each extension descriptor to a durable dictionary ordinal and publishes the assignment
+as a `dict_extents` entry. The collision argument that motivates counting downward is unaffected —
 nothing in the promotion path assigns an extension id to a real descriptor, and the extension range
 stays reserved.
 
 **The plumbing this requires, named rather than assumed.** `satisfied` is resolved once per session
 at authorise against `Engine.dict`, an `Arc<Dict>` loaded at `Engine::open` and threaded into
-`WritePath::new` and the `DescriptorResolver` (`session.rs`). Promotion requires the dictionary to
-become **generation-scoped** — `Arc<Dict>` moves into `Generation` and is republished with each
-flush — touching authorise, the write path and the resolver. §13 lists the sites.
+`WritePath::new` and the `DescriptorResolver`. Promotion requires the dictionary to become
+**generation-scoped** — `Arc<Dict>` moves into `Generation` and is republished with each flush —
+touching authorise, the write path and the resolver. §16 lists the sites.
 
-**Two fail-closed consequences, stated because neither is obvious:**
+**Two fail-closed consequences, neither obvious:**
 
 - A promoted descriptor is satisfiable only by sessions authorised **after** the flush that promoted
   it, because `satisfied` is fixed per session at authorise.
-- An item still buffered under an old extension id for an already-promoted descriptor stays
-  invisible until *its own* flush, even to a viewer holding the term.
+- An item still buffered under an old extension id for an already-promoted descriptor stays invisible
+  until *its own* flush, even to a viewer holding the term.
 
-The first of these is also what makes §3.4's equality hold, and §3.4 relies on it explicitly.
+The first is also what makes §3.4's equality hold, and §3.4 relies on it explicitly.
 
 ### 3.3 Mask staleness is advertised, never forced
 
-§3.2's first consequence — a promoted descriptor is satisfiable only by sessions authorised after
-its flush — leaves an older session under-seeing with no way to find out. This section gives it a
-way. **What is specified here is the internal condition and the rules governing it; the wire
-representation, and a client's policy for acting on it, are client-facing work.**
+§3.2's first consequence leaves an older session under-seeing with no way to find out. This section
+gives it one. **What is specified here is the internal condition; the wire representation and a
+client's policy for acting on it are client-facing work.**
 
-**It is a hint, and the client chooses when to act on it.** The tempting construction — treat a
-stale session as expired and reuse the existing expiry path — is rejected, and the reason is load,
-not correctness. Re-authorising rebuilds the mask fragment, and the session's first viewport
-afterwards pays a row projection at a **measured 10.7 s** at 10⁹ rows. Forcing that on every
-affected session at the instant of a promoting flush synchronises the most expensive operation in
-the request path across the whole session population. A hint lets each client absorb it when it
-suits — during an idle moment, or at its next natural re-authorisation — and spreads the same total
-work over the interval instead of stacking it on one tick.
+**The condition is already computed and discarded.** `Session::satisfied` is built as
+`auth_terms.filter_map(|d| dict.lookup(d))`, over a module whose own doc records the design: *"an
+unknown descriptor is simply unsatisfied, never an error"*. The descriptors that resolved to `None`
+are precisely the session's exposure to promotion.
 
-**What bounds staleness if a client ignores the hint is machinery that already exists.**
-`token_max_lifetime_secs` caps every session's life, so the maximum time a session can stay stale is
-already bounded and needs nothing new. The hint is the fast path, not the safety net — which is why
-it can afford to be purely advisory.
-
-**The condition is already computed and thrown away.** `Session::satisfied` is built as
-`auth_terms.filter_map(|d| dict.lookup(d))` over the plugin's granted descriptors, over a module
-whose own doc records the design: *"an unknown descriptor is simply unsatisfied, never an error"*.
-The descriptors that resolved to `None` are precisely the session's exposure to promotion.
-
-**The condition is two integers, and retains nothing new.** A session records `unresolved_count`
-(how many granted descriptors the dictionary did not know) and `dict_len_at_authorise`. It is stale
-iff:
+**It is two integers, and retains nothing new.** A session records `unresolved_count` and
+`dict_len_at_authorise`, and is stale iff:
 
 ```
 unresolved_count > 0  &&  current dict length > dict_len_at_authorise
 ```
 
 `Dict` is generation-scoped under §3.2, so the current length is `generation.dict.len()` — monotone
-across flushes, and read from the generation the request already loaded once at its start
-(lifecycle §1.1's ordering invariant). Two loads and a branch. **Decision 0020 is untouched: a count
-and an integer are not authorisation data.**
+across flushes, read from the generation the request already loaded once at its start (lifecycle
+§1.1's ordering invariant). Two loads and a branch. **Decision 0020 is untouched: a count and an
+integer are not authorisation data.**
 
-**Evaluated lazily at request time, never swept.** The comparison sits beside the expiry check the
-request already makes; nothing walks the session registry when a flush promotes a term. That keeps
-the executor free of an O(sessions) publication step and is consistent with decision 0035 — the
-session sweep runs on growth, not on a timer, and this adds neither.
+**It is a hint, and the client chooses when to act.** The tempting construction is to treat a stale
+session as expired and reuse the existing expiry path — no new wire field, and early invalidation is
+already contractual under decision 0025. It is rejected on load: re-authorising rebuilds the mask
+fragment and the next viewport pays a **measured 10.7 s** row projection at 10⁹, so forcing it on
+every affected session at one tick synchronises the most expensive operation in the request path
+across the session population. A hint lets each client absorb the cost when it suits and spreads the
+same total work over the interval.
+
+**What bounds staleness for a client that ignores the hint already exists**: `token_max_lifetime_secs`
+caps every session's life. The hint is the fast path, not the safety net, which is what lets it be
+purely advisory.
+
+**Evaluated lazily at request time, never swept** — beside the expiry check the request already
+makes. Nothing walks the session registry when a flush promotes a term, which keeps the executor free
+of an O(sessions) publication step and is consistent with decision 0035.
 
 **Precise where it matters, over-reporting where it does not.** A session with no unresolved
-descriptors is *never* hinted — the common case, and the one that must not regress. A session with
-one is hinted whenever any term is promoted, not only its own. The asymmetry is the right way round:
-the false direction costs a client one voluntary re-authorisation it did not need. The refinement
-available later without changing this design is to compare digests of the unresolved descriptors
+descriptors is *never* hinted — the common case, and the one that must not regress. A session with one
+is hinted whenever any term is promoted, not only its own; the false direction costs one voluntary
+re-authorisation. The refinement available later is to compare digests of the unresolved descriptors
 against digests of the promoted ones; noted rather than built, because it retains more than a count
-does, and because the coarse form leaks **less** (below).
+does and leaks more (below).
 
 **Three rules that keep this from becoming something it must not be:**
 
 - **It moves in one direction only, and nothing may ever be wired to make a revocation take effect
   through it.** A stale session sees *fewer* items than its principal is entitled to — fail-closed,
-  which is what makes an advisory hint a legitimate response at all. Grant changes are not covered
-  here and must not be made to look as though they are; decision 0025 governs rotation, and a future
-  reader must not read this as a general "the mask changed" channel.
+  which is what makes an advisory response legitimate at all. Grant changes are not covered and must
+  not be made to look as though they are; decision 0025 governs rotation, and this is not a general
+  "the mask changed" channel.
 - **The only remedy is a new session; `satisfied` is never re-resolved in place.** Re-resolving it
   inside a live session would break §3.4's premise 3 and with it the patch-equals-rebuild equality.
-  **This is a rule rather than a structural impossibility, and the honest note is that the rejected
-  expiry construction made it structural.** That is the one property given up to avoid the load
-  spike, and it is the thing to check first in any future change to session handling.
-- **It needs a leak-register row.** A hint tells a viewer that *some* descriptor was interned since
-  they authorised — weak corpus-level inference, but not nothing (decision 0024 scopes the register
-  to viewer inference). **The row must be scoped wider than the per-session fact**: the hint is also
-  a *clock*, since a viewer holding one unresolved descriptor observes the flip at its first request
-  after a promoting flush, giving a repeating monitor of corpus write activity that colluding
-  sessions can correlate. Decision 0024 treats timing and cross-session correlation as distinct row
-  kinds. The coarse form leaks strictly less than the digest refinement would: coarse
-  says "a term appeared", precise would confirm that *their specific descriptor* now exists. Cheaper
-  and less disclosive is an unusual pairing, and is the reason to prefer it.
+  **This is a rule rather than a structural impossibility** — the rejected expiry construction made
+  it structural, and that is the property given up to avoid the load spike. It is the first thing to
+  check in any future change to session handling.
+- **It needs a leak-register row, scoped wider than the per-session fact.** A hint tells a viewer that
+  some descriptor was interned since they authorised. It is also a *clock*: a viewer holding one
+  unresolved descriptor observes the flip at its first request after a promoting flush, giving a
+  repeating monitor of corpus write activity that colluding sessions can correlate — and decision
+  0024 treats timing and cross-session correlation as distinct row kinds. The coarse form leaks
+  strictly less than the digest refinement would, which says "a term appeared" where the precise one
+  would confirm that *their specific descriptor* now exists.
 
-**Compaction inherits one obligation:** dictionary length is the monotone counter this rests on, so
-a compaction that renumbers the dictionary must not reduce it, or must introduce a counter that
-never decreases.
+**Compaction inherits one obligation:** dictionary length is the monotone counter this rests on, so a
+compaction that renumbers the dictionary must not reduce it, or must introduce a counter that never
+decreases.
 
-### 3.4 The patch equals a rebuild — the load-bearing claim
+### 3.4 The patch equals a rebuild
 
 §11.2 specifies that flush advances `W` by OR-ing in the flushed segment's contribution for the
 token's already-known satisfied terms — "a small, monotone patch rather than a rebuild". SA §6.4
 claims correctness never depends on patching a fragment, and lifecycle §3.3 requires fragments to be
-built from current postings. **These coexist only if the patch produces the value a rebuild would
-produce, exactly.** Here it does, on four premises, each of which is a thing this design must
-maintain rather than a happy accident:
+built from current postings. **These coexist only if the patch produces exactly the value a rebuild
+would.** Here it does, on four premises, each a thing this design must maintain rather than a happy
+accident:
 
 1. The flushed entity range is contiguous, disjoint from everything below, and entirely at or above
    the pre-flush `W` — from I9's append-only allocation (§2.1).
-2. Base postings are untouched by a flush (§5.2's merge/compaction line).
-3. **The session's `satisfied` set is fixed at authorise and never re-resolved**, so the terms
-   unioned by the patch are exactly the terms a rebuild would consult (§3.2). A design that
-   re-resolved `satisfied` per request would break the equality, not merely widen it.
+2. Base postings are untouched by a flush (§5.3's merge/compaction line).
+3. **The session's `satisfied` set is fixed at authorise and never re-resolved**, so the terms unioned
+   are exactly the terms a rebuild would consult (§3.2). A design that re-resolved `satisfied` per
+   request would break the equality, not merely widen it.
 4. A flush publishes a *new* `segments_version`, and a fragment build in flight against the old one
-   publishes into its own slot under the single-flight sequence-number rule (lifecycle §7.2, rule 2)
-   — so a concurrent build cannot interleave with a patch.
+   publishes into its own slot under the single-flight sequence-number rule (lifecycle §7.2, rule 2),
+   so a concurrent build cannot interleave with a patch.
 
-Given those, `old ∪ (delta ∩ satisfied)` is *identical* to a rebuild from current postings. The same
+Given those, `old ∪ (delta ∩ satisfied)` is identical to a rebuild from current postings. The same
 argument carries the row projection: the new extent's rows are disjoint from every existing row.
 
 **Asserted by a property test for byte-equality against a full rebuild, not by this paragraph.**
-Without the equality the alternative is rebuilding both on every flush, which `Permutation::project`
-prices at a measured 10.7 s at 10⁹ rows — per session, per flush.
 
 ### 3.5 Entities under a deny at flush time
 
-**The rules are relative to the buffer snapshot the flush took**, not absolute, and the cut is stated
-because it is where a reader would otherwise assume more than holds: a delete accepted *after* the
-snapshot produces a deleted entity that does have a row, hidden by its standing overlay entry alone.
-That is safe today only because nothing retires, and it is an obligation the compaction spec
-inherits.
+**The rules are relative to the buffer snapshot the flush took.** A delete accepted *after* the
+snapshot produces a deleted entity that does have a row, hidden by its standing overlay entry alone —
+safe today only because nothing retires, and an obligation the compaction spec inherits.
 
-For dispositions visible at the snapshot, the two behave differently because lifecycle §3.1's
+For dispositions visible at the snapshot, the three behave differently because lifecycle §3.1's
 relationship between each and the postings differs:
 
 - **Suppressed → flushed normally.** A suppression never touches postings and retires only on
-  unsuppress. A flush that skipped it would leave a later unsuppress with nothing to reveal.
-- **Deleted → never written into the segment.** The ID stays burned (I9), no row is created, the
-  deny entry stands.
+  unsuppress; a flush that skipped it would leave a later unsuppress with nothing to reveal.
+- **Deleted → never written into the segment.** The ID stays burned (I9), no row is created, the deny
+  entry stands.
 - **Carrying an evaluate entry → the WAL row's terms are written, and the evaluate entry stands.**
-  Writing the *entry's* current terms instead would be the fold — invariant-bearing, and
-  compaction's. This is the sentence that stops the fold arriving as a simplification.
+  Writing the *entry's* current terms instead would be the fold — invariant-bearing, and compaction's.
+  This is the sentence that stops the fold arriving as a simplification.
 
-**A flush acts only on WAL-durable dispositions, and a node in `WalPoisoned` publishes nothing.**
-Under the apply-anyway rule (lifecycle §4) an under-durable delete is in force in memory and answered
-500, and contracts §3.1's stated residual is that a restart makes the item visible again. A flush
-that honoured such a delete would skip the entity and advance `W` past it; replay would then discard
-the delete record, leaving the item in no segment and no buffer — the un-acked delete made
-**permanent**, contradicting the contract in the fail-closed direction. Not publishing while
-poisoned costs ingest visibility during WAL degradation, when nothing new is being made durable
-anyway.
+**A node in `WalPoisoned` publishes nothing.** Under the apply-anyway rule (lifecycle §4) an
+under-durable delete is in force in memory and answered 500, and contracts §3.1's residual is that a
+restart makes the item visible again. A flush honouring such a delete would skip the entity and
+advance `W` past it; replay would then discard the delete record, leaving the item in no segment and
+no buffer — the un-acked delete made **permanent**. Not publishing while poisoned costs ingest
+visibility during WAL degradation, when nothing new is being made durable anyway.
 
 ### 3.6 The external-id directions
 
-`external_id_extents` gives external_id → entity. The **reverse** direction is served live-map-first,
-locator-second (contracts §2.4), where the live map is rebuilt by WAL replay and `ext-locator.u32` is
-one file of build-time length. Without a durable reverse path for flushed entities, an item that is
-visible on the map would answer `/v1/items` with a typed error forever once its WAL region is
-reclaimed.
-
-So a flush publishes a **locator extent** for its entity range alongside the forward extent, and the
-loader consults base locator then extents.
+`external_id_extents` gives external_id → entity. The **reverse** direction is served
+live-map-first, locator-second (contracts §2.4), where the live map is rebuilt by WAL replay and
+`ext-locator.u32` is one file of build-time length. Without a durable reverse path for flushed
+entities, an item visible on the map would answer `/v1/items` with a typed error forever once its WAL
+region is reclaimed. So a flush publishes a **locator extent** for its entity range alongside the
+forward extent, and the loader consults base locator then extents.
 
 **The ingest duplicate check must consult flush extents too.** `LiveState::established_collisions`
 justifies its bundle-side check as unable to go stale, because the sidecar it reads is immutable —
-which stops being true once flush publishes new external-id extents and rotation empties the live map
+which ceases to hold once flush publishes new external-id extents and rotation empties the live map
 at restart. The failure it guards is the worst one the write path documents: a byte-identical copy of
 a suppressed document that no external id names, so no deny can ever reach it.
 
@@ -422,7 +384,8 @@ Admin-configurable, all validated at startup:
 | Knob | Governs |
 |---|---|
 | `flush_max_age_secs` | the tick: visibility latency, and the publication period |
-| `flush_max_items` | buffer size at which a flush becomes ready (executed at the next tick — §1.3) |
+| `flush_max_items` | buffer size at which a flush becomes ready (executed at the next tick) |
+| `ingest_buffer_max_items` | buffer-occupancy admission bound (§1.3) |
 | `pin_ttl_secs` | session pin lifetime |
 | `drain_depth_max` | superseded generations retained |
 | `segment_floor_bytes` | below this, segments compare equal for selection |
@@ -432,26 +395,22 @@ Admin-configurable, all validated at startup:
 Two relations are enforced — a configuration **violating** either is refused at startup:
 
 1. `pin_ttl_secs < drain_depth_max × flush_max_age_secs` — §1.3.
-2. `max_merged_segment_bytes < base segment bytes` — §5.2.
+2. `max_merged_segment_bytes < base segment bytes` — §5.3.
 
 Defaults: `flush_max_age_secs` 90–120 s. The **floor** the current `pin_ttl_secs` (300 s) and
-`drain_depth_max` (4) permit is 75 s; the default sits above it with margin. Ingest visibility
-latency is therefore bounded below by the pin relation rather than by an arbitrary choice, and an
-admin wanting it lower raises `drain_depth_max` (§1.4).
+`drain_depth_max` (4) permit is 75 s, so the default sits above it with margin. Ingest visibility
+latency is bounded below by the pin relation rather than by an arbitrary choice, and an admin wanting
+it lower raises `drain_depth_max` (§1.4).
 
-**The shipped default violates relation 1 and must move in the same change.**
-`DEFAULT_FLUSH_MAX_AGE_SECS` is 60, which against `pin_ttl_secs` 300 and `drain_depth_max` 4 fails
-`300 < 4 x 60`. Landing the validation without moving the default gives a server that refuses to
-start on its own defaults.
+Two things about the existing code this change has to move with it. **`DEFAULT_FLUSH_MAX_AGE_SECS` is
+60**, which fails relation 1 against the current pin defaults — landing the validation without moving
+the default gives a server that refuses to start on its own configuration. And **`drain_depth_max`
+becoming a knob reverses a recorded choice**: `DRAIN_DEPTH_MAX` is a compile-time constant that
+`pins.rs` describes as "a constant rather than a config key deliberately". §1.4's cost model is what
+changes the answer — the constant was chosen when a drain entry meant a whole bundle.
 
-**`drain_depth_max` becoming a knob reverses a recorded choice**, deliberately rather than by
-oversight: `DRAIN_DEPTH_MAX` is a compile-time constant today and `pins.rs` records that as "a
-constant rather than a config key deliberately". §1.4's corrected cost model is what changes the
-answer — the constant was chosen when a drain entry meant a whole bundle.
-
-`flush_max_items` and `flush_max_age_secs` are today parsed and asserted **inert** by a test. That
-test is replaced by one asserting both bounds are honoured — epic #3's "honoured rather than
-parsed".
+`flush_max_items` and `flush_max_age_secs` are today parsed and asserted **inert** by a test, replaced
+by one asserting both bounds are honoured — epic #3's "honoured rather than parsed".
 
 ## 5. Merge policy
 
@@ -464,23 +423,24 @@ inputs; publication rebases (§1.2).
 
 **Merge selects only entity-adjacent runs**, so k extents collapse to one and the extent list stays
 minimal and ordered. A size-only policy would produce segments covering discontiguous entity sets and
-the extent list would fragment monotonically with nothing but compaction to repair it. The cost is
-stated rather than hidden: a large segment can block a merge of its neighbours.
+the list would fragment monotonically with nothing but compaction to repair it. The cost is stated
+rather than hidden: a large segment can block a merge of its neighbours.
 
-### 5.2 Merge coalesces delta postings, and that is still not a fold
+### 5.2 Merge coalesces delta postings, and that is not a fold
 
 Flush produces one delta postings tier per segment, and a fragment build unions across every live
 tier. Bounding segments while leaving tiers unbounded moves §0's serving cliff from the tile path to
-the authorise path — where it is worse, because a fragment build is a session's first-viewport cost.
+the authorise path, where it is worse, because a fragment build is a session's first-viewport cost.
 
-**A merge coalesces its inputs' delta postings into one tier**, as a content-preserving re-encode:
-the same (term, entity) pairs, concatenated, **deduplicated** and re-sorted, nothing dropped and
-nothing rewritten. The dedup is not optional and not a fold: `encode_posting` hard-fails on any
-non-strictly-ascending entity list, so "concatenated and re-sorted" alone specifies an artefact the
-encoder refuses. Dedup is set-semantics, so invariant-neutrality is untouched. No
-tombstone is applied, no evaluate entry's terms are consulted, no overlay entry becomes retirable.
-Merge stays invariant-neutral — coalescing is to postings exactly what §2.2's merge-sort is to Morton
-codes.
+**A merge coalesces its inputs' delta postings into one tier**, as a content-preserving re-encode: the
+same (term, entity) pairs, concatenated, **deduplicated** and re-sorted, nothing dropped and nothing
+rewritten. No tombstone is applied, no evaluate entry's terms are consulted, no overlay entry becomes
+retirable. Coalescing is to postings exactly what §2.2's merge-sort is to Morton codes.
+
+The dedup is neither optional nor a fold: `WalRow.descriptors` are not deduplicated on the buffer
+path and `encode_posting` hard-fails on any non-strictly-ascending entity list, so
+concatenate-and-sort alone specifies an artefact the encoder refuses. Dedup is set semantics, so
+invariant-neutrality is untouched.
 
 ### 5.3 The line between merge and compaction
 
@@ -500,9 +460,9 @@ objection is that it pays compaction's entire cost — a full permutation rewrit
 columns re-emitted — and banks none of compaction's benefit: the overlay still grows, deletion denies
 still never retire, evaluate entries stay immortal.
 
-There is a sharper form. Base files live in `MANIFEST.files`. A merge consuming base must either
-leave them digested there with nothing referencing them, or write a new prefix — at which point it
-*is* compaction under another name. Hence relation 2 in §4.
+There is a sharper form. Base files live in `MANIFEST.files`. A merge consuming base must either leave
+them digested there with nothing referencing them, or write a new prefix — at which point it *is*
+compaction under another name. Hence relation 2 in §4.
 
 ### 5.4 No deletes-percentage trigger
 
@@ -512,8 +472,8 @@ to preserve rather than an accident.
 
 ## 6. Coordinates outside the quantisation extent
 
-Morton codes are computed against `MANIFEST.json`'s `quantisation` (contracts §2.5), fixed at build.
-**Nothing today validates an ingested item's coordinates against it** — it has never mattered,
+Morton codes are computed against `MANIFEST.json`'s `quantisation` (contracts §2.5), fixed at build,
+and nothing today validates an ingested item's coordinates against it — which has never mattered,
 because a buffered item never acquires geometry. Flush is the moment it does.
 
 `/control/ingest` **refuses** such a row with a typed 4xx naming the extent, before anything is acked
@@ -521,10 +481,10 @@ or WAL-durable. Fail-closed: nothing is silently misplaced, and a clamped item a
 be indistinguishable from a legitimately edge-located one.
 
 **Rows already WAL-durable when this validation lands are quarantined, not retried forever.** A
-pre-existing out-of-extent row would otherwise fail its flush on every tick, and §8's "buffer
-retained, retried next tick" would become a permanent visibility outage for the whole partition.
-Such rows are moved to a quarantine list, counted, alarmed, and excluded from flush; they remain
-invisible, which is the state they were already in.
+pre-existing out-of-extent row would otherwise fail its flush on every tick, turning §10's "buffer
+retained, retried next tick" into a permanent visibility outage for the whole partition. Such rows
+are moved to a quarantine list, counted, alarmed and excluded from flush; they remain invisible,
+which is the state they were already in.
 
 The stated cost: a deployment whose data drifts outside its declared extent cannot ingest those items
 until it re-quantises, which is compaction's shape and is recorded as a compaction obligation.
@@ -540,15 +500,14 @@ precisely which. Replay therefore cannot duplicate or lose a row at *any* crash 
 `Flush{n, wal_pos}` is purely a replay-start optimisation and the authority for rotation — never a
 correctness device.
 
-### 7.2 The overlay is not rows, and truncation must not treat it as such
+### 7.2 The overlay is not rows, and rotation must not treat it as such
 
-**This is the finding that reworked r1, and the rule that replaces it.** The overlay's only durable
-home is the WAL: recovery is `replay(&records, …)`, and nothing else persists it —
-`SegmentsManifest::deny` has exactly one writer in the tree and it writes `Vec::new()`. `Change`
-records are captured by no segment, and a suppression retires **only** on unsuppress (lifecycle
-§3.1), so a suppression's record must outlive every checkpoint. Reclaiming WAL files below a flush
-checkpoint would therefore delete accepted denies and re-expose their items on the next restart —
-the row lifecycle §8 says must never exist.
+The overlay's only durable home is the WAL: recovery is `replay(&records, …)`, and nothing else
+persists it — `SegmentsManifest::deny` has exactly one writer in the tree and it writes `Vec::new()`.
+`Change` records are captured by no segment, and a suppression retires **only** on unsuppress
+(lifecycle §3.1), so a suppression's record must outlive every checkpoint. Reclaiming WAL files below
+a flush checkpoint would delete accepted denies and re-expose their items on the next restart — the
+row lifecycle §8 says must never exist.
 
 **So each rotation writes a compacted overlay snapshot at the head of the new WAL file**, fsynced
 **before** any older file is deleted. The overlay's durable home stays the WAL; no contract changes;
@@ -556,43 +515,41 @@ and because dispositions are idempotent, re-writing them is safe by construction
 O(live overlay) — the quantity the overlay soft limit already gauges, which makes the existing gauge
 the right alarm for rotation cost too.
 
-**The snapshot's shape is load-bearing, and two details of it are not free choices.**
+**Two details of the snapshot's shape are not free choices.**
 
-- **Entries are keyed by `EntityId`, never by external id.** A `Change`-shaped snapshot would have to
+- **Entries are keyed by `EntityId`, never by external id.** A `Change`-shaped snapshot would
   re-resolve each external id at replay, and a deleted-at-flush entity has no row and may have no
   extent entry, so `replay` would return `UnknownExternalId` and **the node would refuse to open**.
 - **Evaluate entries carry raw descriptors, never `TermId`s.** Extension ids are assigned in replay
   order by `DescriptorResolver`, and rotation changes replay order, so a persisted extension `TermId`
-  dangles — pointing at whatever descriptor happens to intern into that slot next. This is the same
-  hazard `buffer.rs` counts downward from `u32::MAX` to avoid, arriving by a different route.
+  dangles — pointing at whatever descriptor interns into that slot next. The same hazard `buffer.rs`
+  counts downward from `u32::MAX` to avoid, arriving by a different route.
 
-**A node whose live overlay has diverged from its durable WAL publishes nothing and rotates
-nothing.** `Wal::discard_undurable` deliberately does not un-apply — its own doc says "a restart will
-not carry them" — so after an in-process recovery the node returns to `Running` while holding
-dispositions no record backs. §3.5's `WalPoisoned` gate does not cover this, because the node is no
-longer poisoned. Writing the snapshot or a flush manifest from that overlay would make a 500'd,
-never-acked deny **permanent**, contradicting contracts §3.1's residual.
+**A node whose live overlay has diverged from its durable WAL publishes nothing and rotates nothing.**
+`Wal::discard_undurable` deliberately does not un-apply — "a restart will not carry them" — so after
+an in-process recovery the node returns to `Running` while holding dispositions no record backs, and
+§3.5's `WalPoisoned` gate no longer covers it because the node is no longer poisoned. Writing the
+snapshot or a flush manifest from that overlay would make a 500'd, never-acked deny **permanent**,
+contradicting contracts §3.1's residual.
 
 So the executor tracks divergence, and a node that has recovered in-process keeps serving and keeps
-applying denies but **publishes no flush and rotates no WAL until it is restarted**, alarmed
-throughout. This preserves lifecycle §4's central argument without exception — the resulting state is
-always one some restart could have produced — at a stated cost: ingest visibility stops until an
-operator restarts the node, and the alarm is what makes that an operator's decision rather than a
-silent stall. The alternative, re-appending the divergent entries to converge the WAL, was rejected:
-it produces a state no restart could have produced, which is the property §4 leans on hardest.
+applying denies but **publishes no flush and rotates no WAL until restarted**, alarmed throughout.
+This keeps lifecycle §4's central argument true without exception — the resulting state is always one
+some restart could have produced — at a stated cost: ingest visibility stops until an operator
+restarts the node, and the alarm is what makes that an operator's decision rather than a silent
+stall. Re-appending the divergent entries to converge the WAL was the alternative, and is rejected
+because it produces a state no restart could have produced.
 
 ### 7.3 The order, the commit point, and what `wal_pos` means
 
-**`wal_pos` is the offset of the flush's buffer-snapshot point — the position below which every
-ingest row has been consumed into a segment.** It is *not* the offset of the `Flush` record itself,
-and the distinction is the whole of this section's safety. Group-commit allocation makes entity order
-equal WAL append order, so such a position always exists and is exact.
+**`wal_pos` is the offset of the flush's buffer-snapshot point — the position below which every ingest
+row has been consumed into a segment.** It is *not* the offset of the `Flush` record, and the
+distinction is the whole of this section's safety. Group-commit allocation makes entity order equal
+WAL append order, so such a position always exists and is exact.
 
-The natural misreading is that `wal_pos` names where the `Flush` record was written. Under it,
-rotation deletes rows acked *during* the flush — appended after the snapshot point, never consumed,
-carrying entity ids at or above the new watermark — and §7.1 then reconstructs them from nothing.
-**Acked ingest, silently lost at the next restart**: r1's fail-open in the row lane rather than the
-deny lane.
+Under the other reading, rotation deletes rows acked *during* the flush — appended after the snapshot
+point, never consumed, carrying entity ids at or above the new watermark — and §7.1 then reconstructs
+them from nothing: acked ingest, silently lost at the next restart.
 
 ```
 pool:     segment files, delta postings, dict / external-id / locator extents durable
@@ -605,226 +562,208 @@ executor: generation swap                                 ← the publication ev
 ```
 
 A crash before the side-manifest leaves orphan files nothing references, and replay re-flushes
-deterministically — lifecycle §8's "mid-flush (files, no manifest)" row, which becomes tested
-behaviour rather than an inherited obligation.
+deterministically — lifecycle §8's "mid-flush (files, no manifest)" row, as tested behaviour rather
+than an inherited obligation.
 
-**Deletion is oldest-first**, because a crash midway through a non-ordered deletion leaves a gap in
-the sequence, and §7.3 fails closed on a gap — turning a benign crash into a permanently unopenable
-node.
-
-**Steady-state retention is two files, not one.** The file holding the snapshot point is generally
-still live above it, so it survives its own rotation.
+**Deletion is oldest-first**, because a crash midway through an unordered deletion leaves a gap in the
+sequence, and this section fails closed on a gap — turning a benign crash into a permanently
+unopenable node. **Steady-state retention is two files**: the file holding the snapshot point is
+generally still live above it, so it survives its own rotation.
 
 **Recovery walks every surviving file in sequence order, applying the snapshot at the position it
-occupies** — it does not start *at* the snapshot. Those are different algorithms, and the second
-skips the surviving older file's post-snapshot-point rows, losing them by the recovery path instead
-of by the deletion path.
+occupies** — it does not start *at* the snapshot. Those are different algorithms, and the second skips
+the surviving older file's post-snapshot-point rows.
 
-Each file carries its own fsync-offset sidecar (decision 0038), and **every §4 rule applies per file,
-unchanged**: the positional CRC rule ("position decides, not damage"), the three sidecar guards, and
-truncate-and-fsync before a handle is issued. The snapshot is an ordinary record under all of them —
-a torn snapshot below the fsync point is corruption of acked state and fails closed; above it, it is
-discarded with the rest of the undurable tail and the older file, not yet deleted, still carries the
-overlay. A gap in the middle of the sequence fails closed.
+Each file carries its own fsync-offset sidecar (decision 0038), and **every lifecycle §4 rule applies
+per file, unchanged**: the positional CRC rule ("position decides, not damage"), the three sidecar
+guards, and truncate-and-fsync before a handle is issued. The snapshot is an ordinary record under all
+of them — a torn snapshot below the fsync point is corruption of acked state and fails closed; above
+it, it is discarded with the rest of the undurable tail, and the older file, not yet deleted, still
+carries the overlay. A gap mid-sequence fails closed.
 
 **The allocator floor survives rotation via the side-manifest, not the WAL.** `WritePath::reconstruct`
 seeds the allocator from `max(manifest high-water, WAL high-water)`, and rotation deletes the `Lease`
-and `IngestBatch` records the WAL term is derived from. So **flush writes `entity_id_high_water` into
-its side-manifest** (contracts §2.3 already has the field) and recovery seeds from *that* manifest,
-never from the build `MANIFEST.json`. Without this, leased-but-unwritten ranges are reallocated —
-an I9 violation; seeding from the build manifest instead would reallocate every flushed entity id.
+and `IngestBatch` records the WAL term derives from. So recovery seeds from the **side-manifest's**
+`entity_id_high_water` (§3.1), never from the build `MANIFEST.json`. Without this, leased-but-unwritten
+ranges are reallocated — an I9 violation; seeding from the build manifest instead would reallocate
+every flushed entity id.
 
-### 7.4 The idempotency horizon is the WAL retention, and it is an observable
+### 7.4 The idempotency horizon is the WAL retention
 
-`accepted_batches` is WAL-replay-derived, and `write.rs` already records that a retired WAL segment
-regresses old batch ids to `Unknown`. Rotation makes that reachable for the first time: after a
-restart, a byte-identical retry of a batch older than the retained WAL is no longer recognised as a
-duplicate, and rows carrying no `external_id` would be ingested twice (rows that carry one are still
-caught by the live external-id map).
+`accepted_batches` is WAL-replay-derived, and `write.rs` records that a retired WAL segment regresses
+old batch ids to `Unknown`. Rotation makes that reachable: after a restart, a byte-identical retry of
+a batch older than the retained WAL is no longer recognised as a duplicate, and rows carrying no
+`external_id` would be ingested twice (rows that carry one are caught by the live external-id map).
 
-This is stated as a contract-visible observable rather than fixed here: **the idempotency window
-equals the WAL retention window**, and a client retrying across it must carry external IDs.
+**The idempotency window equals the WAL retention window**, and a client retrying across it must carry
+external IDs. This is a client-visible weakening of contracts §3.4's replay rule and needs recording
+there as such.
 
 ## 8. Side-manifest deny state, and step-down
 
-### 8.1 A flush-published manifest carries the deny state, and the reader honours it
+### 8.1 A flush-published manifest carries deny state, and the reader honours it
 
 Contracts §2.3 makes each `SEGMENTS-<n>.json` **complete current state for its partition, not a
 diff**. Flush is the first thing in the system to publish a side-manifest after build, so it inherits
 that obligation: its manifest carries `deny` (the active suppression set) and `tombstones` (deleted
 entities that already have rows).
 
-Omitting them would publish a manifest that silently claims an empty deny state — a fail-open at the
+Omitting them would publish a manifest silently claiming an empty deny state — a fail-open at the
 interchange layer and a decision-0013 violation. Carrying them while `HONOURED_STATE` stays empty
-would classify every such manifest `Unready` (`manifest.rs`), so **the node could not reopen its own
-bundle** once any suppression existed.
+would classify every such manifest `Unready`, so **the node could not reopen its own bundle** once any
+suppression existed.
 
 So `HONOURED_STATE` gains `"deltas"`, `"deny"` and `"tombstones"` — **each in the same change as the
 code that acts on it**, per that constant's own rule. The loader applies `deny` and `tombstones` to
-the initial overlay; WAL replay unions on top. The two agree, and where they do not the WAL is the
-superset and wins; dispositions are idempotent, so the union is well-defined.
+the initial overlay; WAL replay unions on top. Where the two differ the WAL is the superset and wins;
+dispositions are idempotent, so the union is well-defined.
 
-**And that change, made alone, re-opens the fail-open it is meant to serve.** `unhonourable_state()`
-filters out honoured fields *before* `DENY_DISPOSITION_STATE` is consulted, so the moment `"deny"` is
-honoured a deny-carrying manifest classifies `Honourable`, proceeds to `verify_files`, and on a
-digest failure the candidate walk simply does `continue` — **stepping down past accepted denies**,
-which is precisely the fail-open decision 0018 promoted into contract, in exactly the damaged-newest
-case `read.rs` names as most likely. The claim that `Honourability`'s existing classification refuses
-this is true *before* this change and false after it, and the test pinning the behaviour
-(`a_deny_carrying_manifest_whose_files_are_missing_is_still_refused`) loses its protection silently.
+**Honouring a field changes what the reader does with a *valid* manifest, and must not change what it
+does with an invalid one.** `unhonourable_state()` filters honoured fields out *before*
+`DENY_DISPOSITION_STATE` is consulted, so honouring `"deny"` alone would reclassify a deny-carrying
+manifest as `Honourable`, send it to `verify_files`, and let a digest failure `continue` the candidate
+walk — **stepping down past accepted denies**, which is the fail-open decision 0018 promoted into
+contract, in exactly the damaged-newest case `read.rs` names as most likely. So the branch lands with
+the constant: **an honoured deny-carrying candidate that fails verification is `Unready`, never
+stepped past.**
 
-**So the branch lands with the constant, not after it: an honoured deny-carrying candidate that fails
-verification is `Unready` — never stepped past.** Honouring a field changes what the reader *does*
-with a valid manifest; it must not change what the reader does with an invalid one.
+### 8.2 Step-down, and where the refusal lives
 
-### 8.2 Step-down, and where the refusal actually lives
-
-With §8.1's branch in place, a manifest carrying deny state is never stepped past, which is why the
+With §8.1's branch in place a manifest carrying deny state is never stepped past, which is why the
 `readyz` freshness gate (#58) is **not** dragged into this epic: step-down past accepted denies is
 refused outright rather than time-bounded. #58 remains an availability obligation for a lagging
-replica, not a correctness one here, and there are no replicas today (lifecycle §6 is unbuilt in its
-entirety).
+replica, not a correctness one here, and there are no replicas today (lifecycle §6 is unbuilt
+entirely).
 
-A `deltas`-only step-down remains classified `Steppable`, and for a read-only replica it is still
-fail-safe staleness. **For a node that writes it is not**: §7.1 reconstructs the buffer as WAL rows
-at or above the *served* watermark, and after rotation the rows between an older manifest's watermark
-and the newest one's are gone, so re-flushing from a stepped-down watermark would silently lose them.
+A `deltas`-only step-down remains `Steppable`, and for a read-only replica it is still fail-safe
+staleness. **For a node that writes it is not**: §7.1 reconstructs the buffer as WAL rows at or above
+the *served* watermark, and after rotation the rows between an older manifest's watermark and the
+newest one's are gone, so re-flushing from a stepped-down watermark would silently lose them.
 
-**The refusal needs a site, and naming it is part of this spec** — an earlier revision stated the
-rule and left it a sentence. Today every node is a writing node: `tessera-server` starts the write
-executor unconditionally, and `PartitionData::stepped_down()` exists but is consumed by nothing. So
-the rule is: **`readyz` fails when `stepped_down()` is true**, unconditionally, until lifecycle §6
-introduces a reader/writer distinction that makes the qualifier meaningful. Failing closed costs
-availability on a node whose newest segment files are damaged, which is the trade SA §9 already
-prescribes.
+Today every node is a writing node — `tessera-server` starts the write executor unconditionally, and
+`PartitionData::stepped_down()` exists but is consumed by nothing. So the rule is: **`readyz` fails
+while `stepped_down()` is true**, unconditionally, until lifecycle §6 introduces a reader/writer
+distinction that makes the qualifier meaningful. Failing closed costs availability on a node whose
+newest segment files are damaged, which is the trade SA §9 prescribes.
 
 ## 9. Caches
-
-r1 omitted this entirely; it is not a detail.
 
 **The row-projection cache** is keyed `(token_id, slice, segments_version)`, and its own doc notes a
 multi-segment slice would widen the key. A flush bumps `segments_version` every tick, and a full miss
 is a **measured 10.7 s**. So the patch publishes into the **new** key a value derived from the old
-entry — which respects "invalidation is key rotation, never mutation" (lifecycle §7.2), because
-nothing modifies a cached value.
+entry, which respects "invalidation is key rotation, never mutation" (lifecycle §7.2) because nothing
+modifies a cached value.
 
-**Two pieces of machinery that do not exist have to be built for that sentence to mean anything**, and
-naming them is the point of this section:
+**Two pieces of machinery have to be built for that to mean anything:**
 
 - **A derive-capable build path.** The cache's only entry point is `get_or_build` with an infallible
-  closure, and there is no way to read another key's entry — so "derived from the old entry" is not
-  expressible today, and would silently degrade to "rebuild from scratch".
+  closure and no way to read another key's entry, so "derived from the old entry" is not expressible
+  today and would silently degrade to "rebuild from scratch".
 - **Retention of superseded-generation entries until patched or drain-expired.** `prune_generation`
   runs *synchronously inside* `publish_geometry`, so with no pins outstanding the old entries are
-  gone at the instant of the swap — before any request-driven patch could possibly run. "Prune runs
-  only after the patch publishes" is unsequenceable against today's callers, because patching is
-  request-driven and unbounded in time.
+  gone at the instant of the swap — before any request-driven patch could run. Patching is
+  request-driven and unbounded in time, so "prune after the patch publishes" is unsequenceable
+  against today's callers.
 
 Without both, the fallback is not an edge case but the steady state: a full 10.7 s projection per
-session per tick, synchronised across the session population — the same spike §3.3 rejected the
-expiry construction to avoid, arriving through the cache instead.
+session per tick, synchronised across the session population — the spike §3.3 rejects the expiry
+construction to avoid, arriving through the cache instead.
 
 **The authorisation fragment cache is a persistent disk cache, and the watermark lives in the value
-rather than the key** (`tessera-authz/src/fragment.rs`). After flush, same-key entries would exist at
-heterogeneous watermarks, and `tmp_sibling`'s "both writers wrote byte-identical content" argument
-would no longer hold. **The watermark joins the disk cache key.**
+rather than the key.** After flush, same-key entries would exist at heterogeneous watermarks, and
+`tmp_sibling`'s "both writers wrote byte-identical content" argument would no longer hold. **The
+watermark joins the disk cache key.**
 
 Two consequences. Every pre-upgrade on-disk entry becomes unreachable — a leak rather than a
-fail-open, since new code can never read one, but nothing on the disk cache path ever deletes
-anything, so **the orphans need a sweep and the cache needs a format version**. And, worth recording
-for the compaction spec: persisted fragments surviving a restart at pre-flush stamps would falsify
-lifecycle §3.2's "the cache restarts cold" premise, which is what scopes the future retirement floor
-worker-locally. With the watermark in the key, a pre-flush fragment is never found by a post-flush
-lookup, and the premise holds.
+fail-open, since new code can never read one, but nothing on that path ever deletes anything, so the
+orphans need a sweep and the cache needs a format version. And, for the compaction spec: persisted
+fragments surviving a restart at pre-flush stamps would falsify lifecycle §3.2's "the cache restarts
+cold" premise, which is what scopes the future retirement floor worker-locally. With the watermark in
+the key, a pre-flush fragment is never found by a post-flush lookup and the premise holds.
 
 ## 10. Failure handling
 
-The side-manifest being the only commit point makes every failure "nothing happened, retry next
-tick".
+The side-manifest being the only commit point makes every failure "nothing happened, retry next tick".
 
 - **Flush task fails, or the disk fills mid-flush** — flush abandoned, buffer retained intact, alarm,
-  retried next tick. Orphans are unreferenced and swept. Repeated failure raises the skip alarm
-  (§1.1).
-- **Merge fails, or its inputs are gone at publish** — output discarded, inputs still live, retried
-  by the next selection.
-- **Repeated flush failure** — the buffer grows until `ingest_queue_bound` 429s ingest. Intended
-  backpressure, stated rather than discovered. The WAL headroom rule (§4) is untouched, so **denies
-  always have room and are never refused for load**.
-- **`WalPoisoned`** — no flush publishes (§3.5).
+  retried next tick. Orphans are unreferenced and swept. Repeated failure raises the skip alarm (§1.1).
+- **Merge fails, or its inputs are gone at publish** — output discarded, inputs still live, retried by
+  the next selection.
+- **Repeated flush failure** — the buffer grows until `ingest_buffer_max_items` 429s ingest (§1.3).
+  Intended backpressure. The WAL headroom rule (lifecycle §4) is untouched, so **denies always have
+  room and are never refused for load**.
+- **`WalPoisoned`, or an overlay diverged from the WAL** — no flush publishes and no rotation runs
+  (§3.5, §7.2).
 - **Out-of-extent coordinates** — refused at ingest; pre-existing ones quarantined (§6).
 
 **One cost this design adds to the deny path, modelled not measured.** The executor's rebase removes
-the consumed range from the then-current buffer, which is O(buffered) on the executor thread — the
-same shape the deny-ack memo measured as the dominant term at 1 M buffered (165 ms p50). A publication
-per tick therefore adds one such stall ahead of the deny lane per tick. The memo's method prices it;
-it should be re-run rather than reasoned about.
+the consumed range from the then-current buffer, O(buffered) on the executor thread — the shape the
+deny-ack memo measured as the dominant term at 1 M buffered (165 ms p50). A publication per tick adds
+one such stall ahead of the deny lane per tick. The memo's method prices it; it should be re-run
+rather than reasoned about.
 
 ## 11. `tessera build` is initial-load only
 
-Flush forces a question build has never had to answer. Today `tessera build` is an **overwrite**: it
-reads a source corpus and writes a complete bundle at a new prefix, and nothing in it reads the WAL,
-the buffer or the overlay. That is harmless only while ingest is invisible — an omitted buffered item
-has no geometry, so a rebuild that drops it changes nothing observable, and the WAL replays it into
-the buffer against the new bundle.
+Today `tessera build` is an **overwrite**: it reads a source corpus and writes a complete bundle at a
+new prefix, and nothing in it reads the WAL, the buffer or the overlay. That is harmless only while
+ingest is invisible — an omitted buffered item has no geometry, so a rebuild that drops it changes
+nothing observable, and the WAL replays it into the buffer against the new bundle.
 
-**Once flush exists, an overwrite silently deletes acked, visible items**, whose acknowledgement was
-a durability receipt (contracts §3.1). §5.1's "entity IDs stable across rebuilds" tacitly assumes the
-rebuild's input contains the same items, which stops being true at the first ingest.
+**Once flush exists, an overwrite silently deletes acked, visible items**, whose acknowledgement was a
+durability receipt (contracts §3.1). §5.1's "entity IDs stable across rebuilds" tacitly assumes the
+rebuild's input contains the same items, which ceases to be true at the first ingest.
 
-**The ruling: `tessera build` runs against an empty bundle root and never again.** After that the
-deployment is the durable record. Additions enter by ingest → flush. Reorganisation —
-re-quantisation, the fold, re-ranking, a batch-grid change — is **compaction**, which reads the
-deployment rather than the source. A from-source rebuild remains available as an explicitly
-identity-breaking migration producing a *new* deployment, on §12.5's build-under-a-new-prefix-and-flip
-precedent.
+**So `tessera build` runs against an empty bundle root and never again.** After that the deployment is
+the durable record. Additions enter by ingest → flush. Reorganisation — re-quantisation, the fold,
+re-ranking, a batch-grid change — is **compaction**, which reads the deployment rather than the
+source. A from-source rebuild remains available as an explicitly identity-breaking migration producing
+a *new* deployment, on §12.5's build-under-a-new-prefix-and-flip precedent.
 
 Enforced, not documented: build refuses a bundle root containing a `CURRENT`.
 
-**This breaks nothing, checked concretely rather than assumed.** The refusal already exists in
-`validate_args`, and every invocation in the tree already complies: `scripts/build_full.sh` builds
-into a fresh `--out` (`--carry-id-key-from` reads a *different* root, which is not forbidden),
+**This breaks nothing, checked rather than assumed.** The refusal already exists in `validate_args`,
+and every invocation in the tree complies: `scripts/build_full.sh` builds into a fresh `--out`
+(`--carry-id-key-from` reads a *different* root, which is not forbidden),
 `scripts/bench_build_fixtures.sh` removes the directory first, the oracle harness `rmtree`s before
-rebuilding and conformance rides it, and every Rust test and bench uses a temporary directory or a
-pre-removed one. `run_demo.sh` contains no build at all. What this ruling changes is the *meaning*
-and the message, not the behaviour — so §14's obligation is to test the messaging, and the existing
-advice "remove it or choose another `--out`" must be reworded, since deleting the root is
+rebuilding and conformance rides it, and every Rust test and bench uses a temporary or pre-removed
+directory. `run_demo.sh` contains no build. What changes is the *meaning* and the message: the
+existing advice "remove it or choose another `--out`" must be reworded, since deleting the root is
 catastrophic once the deployment is the durable record.
-
-This is why §0 records that compaction becomes load-bearing. It also settles the question r1 raised
-as an escalation — build never meets a flushed deployment, so there is nothing to fence.
 
 ## 12. Epic #8: how a batch enters an existing bundle
 
 #8 opens with a design decision that must be recorded before code is written: appended as a new
 segment, merged, or staged.
 
-**Appended.** A batch enters by the ordinary ingest path and becomes a flush segment. Never merged
+**Appended.** A batch enters by the ordinary ingest path and becomes a flush segment — never merged
 into base, never staged. Entity IDs remain append-only and never reused (I9), and the batch's sort
 scope is the commit window, exactly as for streamed arrivals.
 
-#8's remaining work is therefore not about entry shape: it is the batch-grid identity guard
-(recording batch size in the bundle and refusing a rebuild at a different one) and bulk-ingest
-ergonomics. The measured caveat carries across and is #8's to answer: §11.1 records that a bulk load
-chunked into small requests forfeits the entire signature-sort win **permanently**, so bulk ingest
-needs large commit windows.
+#8's remaining work is therefore not about entry shape: it is the batch-grid identity guard (recording
+batch size in the bundle and refusing a rebuild at a different one) and bulk-ingest ergonomics. The
+measured caveat carries across and is #8's to answer: §11.1 records that a bulk load chunked into
+small requests forfeits the entire signature-sort win **permanently**, so bulk ingest needs large
+commit windows.
 
 ## 13. Invariant and leak-register interactions
 
 - **I4** — the extent dispatch stays inside the permutation module (§2.1).
 - **I2 / §7.2 r24** — θ's anchor `V_total` is counted in row space, so it advances **at flush
-  boundaries**, not per arrival. §11.2 already says this; flush makes it the normal steady state of
-  an ingesting deployment. Stated as an expected observable so it is not filed as a bug.
+  boundaries**, not per arrival. §11.2 already says this; flush makes it the normal steady state of an
+  ingesting deployment. Stated as an expected observable so it is not filed as a bug.
 - **C4** — drill-down resolves a bit in entity space before looking up a row, so a still-buffered item
   passes the entity-space test and then finds no row, and must return the same *unknown* outcome as an
   identifier naming nothing. Flush **shrinks** that window to `flush_max_age_secs`; it does not close
   it, and C4's timing closure remains a claim about identical outcomes rather than identical work.
+- **A new register row for §3.3's staleness hint**, scoped to include its clock and correlation
+  properties.
 - **I11** — a pin taken before a flush serves pre-flush geometry with the current overlay. Already the
   specified behaviour; flush is the first mechanism that exercises it.
 - **I7, I9** — untouched. Flush allocates no IDs and moves no selection route; the direct-evaluation
   set merely shrinks as items acquire postings.
-- **The retirement floor** — does not exist and is not created here. §9's watermark-keyed disk cache
-  is what keeps lifecycle §3.2's worker-local scoping argument true across a restart, which is the
-  one place this design could have made the floor unimplementable.
+- **The retirement floor** — does not exist and is not created here. §9's watermark-keyed disk cache is
+  what keeps lifecycle §3.2's worker-local scoping argument true across a restart, which is the one
+  place this design could have made the floor unimplementable.
 
 ## 14. What must be proven
 
@@ -833,51 +772,40 @@ Extending the lifecycle §7.3 fault switchboard rather than building a second be
 1. `patch == rebuild`, **byte-equal**, as a property test over random corpora and tokens (§3.4),
    including a concurrent-build-during-flush case for premise 4.
 2. Crash-replay idempotence at every ordering point of §7.3: no duplicated or lost row.
-3. **A suppression accepted before a rotation is still in force after a restart** (§7.2). The r1
-   fail-open, as a test.
-4. Deleted-at-snapshot acquires no row; suppressed-at-snapshot does, and a later unsuppress reveals
-   it; a delete arriving *mid-flush* leaves a row hidden by its overlay entry (§3.5) — the timing
-   cases, not just the quiescent ones.
-5. A `WalPoisoned` node publishes no flush, and an under-durable delete's item is visible again after
+3. A suppression accepted before a rotation is still in force after a restart (§7.2).
+4. A row acked *during* a flush survives rotation and a restart (§7.3) — the case that pins `wal_pos`'s
+   definition rather than its prose.
+5. Deleted-at-snapshot acquires no row; suppressed-at-snapshot does, and a later unsuppress reveals it;
+   a delete arriving *mid-flush* leaves a row hidden by its overlay entry (§3.5).
+6. A `WalPoisoned` node publishes no flush, and an under-durable delete's item is visible again after
    restart (§3.5, contracts §3.1's residual).
-6. Segment count **and delta-tier count** bounded under sustained ingest; merge keeps both bounded
-   (soak).
-7. The ack→visibility gap is bounded by `flush_max_age_secs`, including when `flush_max_items` trips
-   between ticks (§1.3).
-8. A node whose newest manifest is damaged stays unready rather than re-flushing from a stepped-down
-   watermark (§8.2).
-9. A flushed item answers `/v1/items` after rotation (§3.6).
-10. `seg_id` never reused across flush or merge; `SEGMENTS-<n>` strictly monotonic and unpadded
+7. A node that recovered its WAL in-process publishes no flush and rotates no WAL (§7.2).
+8. A deny-carrying manifest whose files fail verification is `Unready`, never stepped past (§8.1).
+9. `readyz` fails while `PartitionData::stepped_down()` is true (§8.2).
+10. Segment count **and delta-tier count** bounded under sustained ingest; merge keeps both bounded
+    (soak).
+11. The ack→visibility gap is bounded by `flush_max_age_secs`, including when `flush_max_items` trips
+    between ticks (§1.3).
+12. Ingest is refused by buffer occupancy, not only by queue depth (§1.3).
+13. A flush patches a session's row projection rather than rebuilding it (§9), asserted on the absence
+    of a full projection build rather than on timing, and the superseded entry survives long enough to
+    be patched.
+14. The allocator floor survives rotation: after rotation and restart no entity id is reallocated,
+    seeded from the side-manifest's `entity_id_high_water` (§7.3).
+15. An evaluate entry round-trips a rotation with its descriptors intact, and a deleted entity with no
+    row is recoverable from the snapshot rather than failing the open (§7.2).
+16. A flushed item answers `/v1/items` after rotation (§3.6).
+17. `seg_id` never reused across flush or merge; `SEGMENTS-<n>` strictly monotonic and unpadded
     (decision 0016).
-11. A pin taken across a flush serves pre-flush geometry and applies a post-flush deny.
-12. Both §4 relations refuse a violating configuration at startup.
-13. `check-layers.sh`'s one-`.store(` rule still passes — publication stayed single-owner.
-14. An out-of-extent ingest is refused before ack and leaves no WAL record; a pre-existing one is
+18. A pin taken across a flush serves pre-flush geometry and applies a post-flush deny.
+19. Both §4 relations refuse a violating configuration at startup.
+20. `check-layers.sh`'s one-`.store(` rule still passes — publication stayed single-owner.
+21. An out-of-extent ingest is refused before ack and leaves no WAL record; a pre-existing one is
     quarantined rather than retried (§6).
-15. `tessera build` refuses a bundle root containing a `CURRENT` (§11).
-16. **A row acked *during* a flush survives rotation and a restart** (§7.3's `wal_pos` definition).
-    The natural misreading of `wal_pos` loses it silently, so this is the test that pins the
-    definition rather than the prose.
-17. **A node that recovered its WAL in-process publishes no flush and rotates no WAL** (§7.2), and
-    the un-durable deny it still holds is gone after a restart — contracts §3.1's residual.
-18. **A deny-carrying manifest whose files fail verification is `Unready`, never stepped past**
-    (§8.1) — the existing test, re-pinned against the `HONOURED_STATE` change that would otherwise
-    silently remove its protection.
-19. **`readyz` fails while `PartitionData::stepped_down()` is true** (§8.2).
-20. **Ingest is refused by buffer occupancy, not only by queue depth** (§1.3): an arrival rate that
-    fills the buffer between ticks 429s on `ingest_buffer_max_items` rather than growing unbounded.
-21. **A flush patches a session's row projection instead of rebuilding it** (§9), asserted on the
-    absence of a full projection build rather than on timing — and the superseded entry survives
-    long enough to be patched.
-22. **The allocator floor survives rotation**: after rotation and restart, no entity id is
-    reallocated, seeded from the side-manifest's `entity_id_high_water` (§7.3).
-23. **An evaluate entry round-trips a rotation with its descriptors intact** (§7.2), and a deleted
-    entity with no row is recoverable from the snapshot rather than failing the open.
-24. A session holding an unresolved descriptor is hinted stale by a promoting flush, and
-    re-authorising resolves the descriptor and sees the items; **a session holding none is never
-    hinted by any flush** — the half that regresses silently if the condition is loosened; and **a
-    hinted session continues to serve normally**, since the hint is advisory and no request may fail
-    because of it (§3.3).
+22. `tessera build` refuses a bundle root containing a `CURRENT`, with the reworded message (§11).
+23. A session holding an unresolved descriptor is hinted stale by a promoting flush and re-authorising
+    sees the items; a session holding none is **never** hinted; and a hinted session continues to
+    serve normally, since no request may fail on an advisory signal (§3.3).
 
 ## 15. Out of scope
 
@@ -890,116 +818,43 @@ the `readyz` freshness gate (#58, and §8.2 records why it is not needed for cor
 Present tense about absent machinery reads as an assurance (decision 0013), so the ⊘ markers come out
 with the code:
 
-- **concurrency-lifecycle** — §1.1 (generation shape), §1.2 (`segments_version` movement), §1.3 (the
+- **concurrency-lifecycle** — §1.1 (generation shape), §1.2 (`segments_version`'s movement), §1.3 (the
   two-publisher marker), §2.1 (reclaim's caller), §4 (the `Flush` record, rotation, the overlay
   snapshot), §5.1 (flush), §5.2 (merge), and the flush and merge rows of §8's crash matrix.
 - **architecture** — §11.2 (flush as the visibility mechanism), §11.3 (the re-rank decorator and the
   deletes trigger).
 - **contracts** — §2.3 (a flush-published manifest's deny state, §8.1), §2.4 (the locator extent,
-  §3.6), §3.4 (`POST /control/flush` executes at the next tick; the idempotency horizon, §7.4).
+  §3.6), §3.2 (the staleness hint's wire representation, when client-facing work specifies it), §3.4
+  (`POST /control/flush` executes at the next tick; the idempotency horizon, §7.4).
+- **Appendix C** — the staleness-hint row (§3.3, §13).
 - **inventory, conformance** — the flush- and merge-dependent markers.
-- **`HONOURED_STATE`** — gains `"deltas"`, `"deny"`, `"tombstones"` (§8.1).
+- **`HONOURED_STATE`** — gains `"deltas"`, `"deny"`, `"tombstones"`, each with its acting code (§8.1).
 - **`buffer.rs`** — its "until the next build assigns a durable term id" now names flush (§3.2).
-- **Appendix C** — a leak-register row for the staleness hint: a viewer learns that some
-  descriptor was interned since they authorised (§3.3).
-- **contracts §3.2** — the staleness hint's wire representation, when the client-facing work
-  specifies it. Nothing in this change alters `expires_at`'s meaning.
 
 Six decision records: the geometry/overlay publication split and the single geometry cadence (§1.3);
 dropping the Morton re-rank decorator (§2.3); refusing out-of-extent coordinates at ingest (§6); the
-overlay snapshot as the WAL's rotation rule (§7.2); `tessera build` as initial-load only (§11); and
-`drain_depth_max` becoming admin-configurable, which reverses `pins.rs`'s recorded choice (§4).
+overlay snapshot as the WAL's rotation rule (§7.2); `tessera build` as initial-load only (§11);
+`drain_depth_max` becoming admin-configurable, reversing `pins.rs`'s recorded choice (§4).
 
 Issues closed or reduced: #3 (flush), #59 (the second publisher), #8's design decision (§12).
 
 ## Appendix R — Review record
 
-**r1** — drafted 2026-08-02; independently reviewed the same day (verdict: **needs-rework**). The
-single-publisher, publication-by-rebase and one-cadence architecture survived; the treatment of the
-WAL as reclaimable and of the side-manifest as flush-only state did not.
+Reviewed independently twice; both rounds returned needs-rework, and both texts are in
+[`reviews/`](reviews/).
 
-**r2** closes all eighteen findings. The three that changed the design rather than sharpening it:
+The architecture survived both — single publisher, publication by rebase, one geometry cadence,
+snapshot-at-rotation, `tessera build` as initial-load-only. What did not survive was the treatment of
+the WAL as reclaimable: the overlay's only durable home is the WAL and `Change` records are captured
+by no segment, so reclaiming below a flush checkpoint deleted accepted denies (§7.2). The second round
+found the same class of defect twice more in the fix itself — an undefined `wal_pos` deleting rows
+acked during a flush (§7.3), and a `HONOURED_STATE` change that reopened step-down past accepted
+denies (§8.1).
 
-1. **WAL truncation deleted acked denies** (B1) — the overlay's only durable home is the WAL and
-   `Change` records are captured by no segment. §7.2's rotation snapshot replaces reclamation-by-
-   checkpoint. This was a fail-open of the class lifecycle §8 names as the row that must never exist.
-2. **A flush-published side-manifest inherits contracts §2.3's completeness obligation** (B2) — so it
-   carries deny state and the reader honours it (§8.1), which also makes step-down past accepted
-   denies refused rather than time-bounded, keeping #58 out of scope.
-3. **`WalPoisoned` publication made an un-durable delete permanent** (B3) — r1 permitted it
-   explicitly. §3.5 now forbids it.
+Ruled by the owner: the overlay's durable home is the rotation snapshot rather than retention-by-pin
+(§7.2); a node whose overlay has diverged from its WAL refuses publication until restart rather than
+converging the WAL (§7.2); `tessera build` is initial-load only (§11); contracts §2.3's immediate deny
+publication stands, on the geometry/overlay split (§1.3); and the staleness signal is advisory rather
+than an expiry (§3.3).
 
-Also corrected: the pin relation was validated against the age bound while `flush_max_items` set the
-real period (B6, §1.3); delta tiers were unbounded while segments were not (B5, §5.2); flushed
-entities had no durable entity→external_id path (B4, §3.6); dictionary promotion needed
-generation-scoped `Dict` and had two unstated visibility consequences (B7, §3.2); step-down plus
-rotation lost rows silently (B8, §8.2); the watermark was off by one (N2, §3.1); the cache story was
-absent (N1, §9); `WalRow` carries no slice (N6, §2.1); and §1.4's Arc-sharing claim depended on
-incremental generation construction that nothing owned (N7, §1.2).
-
-Escalated to the owner and ruled: the overlay's durable home under a truncatable WAL → the rotation
-snapshot; `tessera build`'s semantics post-initial-load → initial-load only (§11), which also
-dissolves r1's rebuild-fencing question.
-
-**r3** adds §3.3, mask staleness, raised by the owner. r2 stated that a promoted descriptor is
-satisfiable only by sessions authorised after its flush, and then left such a session under-seeing
-with no way to find out.
-
-The section was drafted three times and the third is the one to keep. A staleness *flag* was drafted
-first; reusing `Session::expires_at` to invalidate the session was drafted second, and looked
-strictly better — no wire field, early invalidation already contractual under decision 0025, and the
-"never re-resolve `satisfied` in place" rule became structurally impossible rather than merely
-forbidden. **It was rejected on load.** Re-authorising rebuilds the mask fragment and the next
-viewport pays a measured 10.7 s row projection at 10⁹; forcing that on every affected session at one
-tick synchronises the most expensive operation in the request path across the session population. So
-the hint is advisory, and what bounds staleness for a client that ignores it is
-`token_max_lifetime_secs`, which already exists.
-
-The property given up is recorded at the rule rather than buried: the expiry construction made
-"never re-resolve in place" structural, and the hint makes it a rule again.
-
-**r4** answers a second independent review (needs-rework; text in
-[`reviews/2026-08-02-flush-and-merge-r3-review.md`](reviews/2026-08-02-flush-and-merge-r3-review.md)).
-It was asked to verify r1's findings were closed **by a mechanism** rather than by prose, and to
-attack the material nobody had seen. It downgraded five of r1's findings to *partially closed* and
-raised six new blocking ones — three of them in the sections that exist to fix r1's fail-open.
-
-The three that mattered most, and all three are the same failure wearing different clothes:
-
-1. **`wal_pos` was never defined** (NB1). Under its natural reading — the offset of the `Flush`
-   record — rotation deletes rows acked *during* the flush, which sit above the new watermark and so
-   reconstruct from nothing. r1's fail-open in the row lane instead of the deny lane. §7.3 now
-   defines `wal_pos` as the buffer-snapshot point and specifies recovery as walk-all-surviving-files,
-   because "read the snapshot then the records after it" loses the same rows by the other path.
-2. **Honouring `"deny"` re-opened the step-down fail-open** (NB3). `unhonourable_state()` filters
-   honoured fields *before* `DENY_DISPOSITION_STATE` is consulted, so §8.1's own change would have
-   reclassified a deny-carrying manifest as `Honourable`, sent it to `verify_files`, and let a digest
-   failure `continue` past accepted denies — decision 0018's fail-open, restored by the sentence
-   claiming it was refused. The `Unready`-on-verification-failure branch now lands with the constant.
-3. **The live overlay is not the durable overlay** (NB2). `discard_undurable` deliberately does not
-   un-apply, so a node that recovers in-process returns to `Running` holding dispositions no record
-   backs, and §3.5's poisoned-gate no longer covers it. Ruled by the owner: such a node publishes no
-   flush and rotates no WAL until restarted, alarmed — which keeps lifecycle §4's "the resulting
-   state is one some restart could have produced" true without exception.
-
-Also corrected: the backpressure story was refuted by the code (NB4) — `ingest_queue_bound` bounds
-the *command queue*, not the buffer, so nothing bounded the buffer between ticks and
-`ingest_buffer_max_items` is new machinery rather than existing behaviour; §9's cache patch was not
-expressible and `prune_generation` runs inside `publish_geometry`, making the 10.7 s fallback the
-steady state (NB5); the allocator floor regressed at rotation; the ingest duplicate check goes stale
-once extents exist; the snapshot must key on `EntityId` and carry raw descriptors; deletion is
-oldest-first; coalescing must deduplicate; and the shipped `DEFAULT_FLUSH_MAX_AGE_SECS` violates the
-relation this spec asks to be validated.
-
-**Ruled by the owner in this round:** contracts §2.3's immediate deny publication stands, because
-r3 had conflated *geometry* publication (drain entry, `segments_version`, sized by §2.2) with
-*overlay* publication (no drain entry, no version bump, ungoverned by the pin relation) — §1.3; and
-the overlay-divergence remedy is to refuse publication until restart rather than to converge the WAL.
-
-**Confirmed clean, and worth not re-litigating:** §11 breaks nothing — the refusal already exists in
-`validate_args` and every invocation in the tree complies, checked file by file (§11). §2's row-space
-arithmetic, §3.4's four premises, §3.3's code claims, and §5.2's no-entity-in-two-tiers property all
-survived attack.
-
-**Still unreviewed:** r4's own corrections. Every change above was made in response to a review, and
-none of them has been reviewed in turn.
+**Not reviewed:** the corrections made in response to the second round.
