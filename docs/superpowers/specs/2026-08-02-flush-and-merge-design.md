@@ -1,9 +1,9 @@
 # Flush and Merge — Design
 
-**Status:** Draft r3 — r1 was independently reviewed (verdict: needs-rework; the
-publication/rebase/one-cadence architecture survived, the WAL's reclaimability did not); r2 closed
-all eighteen findings; r3 adds mask staleness (§3.3). **§3.3 and every r2 section have had no
-independent review.** Not yet normative — `docs/design/` wins until this is folded in.
+**Status:** Draft r4 — independently reviewed twice, needs-rework both times, reworked both times.
+The architecture survived each; the mechanisms did not. Every finding from both rounds is closed or
+escalated-and-ruled (Appendix R); the review texts are in
+[`reviews/`](reviews/). Not yet normative — `docs/design/` wins until this is folded in.
 
 **Owns:** the row-space segment lifecycle. Flush turns WAL-durable buffered items into a published
 segment, which is what makes an ingested item visible at all; merge bounds the segment and
@@ -83,9 +83,9 @@ file afresh and `Permutation::load` re-pays an O(bound) `validate_rows`, so re-o
 would cost more than the flush. §1.4's memory claim depends on this being built, and it is named
 here so it is not assumed.
 
-### 1.3 One cadence, and the minimum inter-publication interval
+### 1.3 One geometry cadence, and what is not on it
 
-**The executor publishes on exactly one cadence, and a completed merge rides along with the next
+**Every geometry publication is on one cadence, and a completed merge rides along with the next
 flush publication.** One swap, one `segments_version` bump, one drain entry.
 
 The reason is lifecycle §2.2's sizing obligation, which constrains the **publication period** and
@@ -94,21 +94,49 @@ factor of two, which at the current defaults forbids flushing more often than 15
 viewer can observe. A merge changes query cost and nothing else, so deferring its effect by up to one
 flush period is free.
 
-**Three publishers exist, not one, and all three are governed by a minimum interval.** The age bound
-is not by itself the publication period:
+**Two kinds of publication, and only one of them is on the tick.** The distinction is what §2.2's
+sizing obligation is actually about, and conflating the two is the error an earlier revision made:
 
-- `flush_max_age_secs` — the tick.
+- A **geometry publication** supersedes geometry, so it creates a drain entry and bumps
+  `segments_version`. Flush and merge are the only ones. These are the publications §2.2 sizes.
+- An **overlay publication** — a side-manifest written because a deny disposition was accepted
+  (contracts §2.3) — changes no geometry. Nothing is superseded, **no drain entry is created, and
+  `segments_version` does not move.** It is therefore not governed by the pin relation at all, and
+  contracts §2.3's rule that an accepted deny publishes **immediately, not deferred to the next
+  flush**, stands unaltered.
+
+That last point is not a concession, it is the only workable answer: the deny lane is unbounded and
+can never be load-shed, so a sized deny cadence would be unvalidatable under an adversarial deny
+rate. Two consequences to carry: `segments_version` must **not** move on an overlay publication, or
+every deny would rotate the row-projection cache key and cost a full projection rebuild; and the
+side-manifest `n` therefore advances faster than `segments_version`, which `read.rs` already
+tolerates and documents ("the two agree in every bundle a conforming writer produces, and where they
+do not it is the filename that decided").
+
+**The three geometry publishers, all on the tick:**
+
+- `flush_max_age_secs` — the tick itself.
 - `flush_max_items` — trips under load, and can trip far faster than the tick. **It does not publish
-  early.** It marks the buffer flush-ready; publication still waits for the next tick, and if the
-  buffer meanwhile exceeds `ingest_queue_bound` the excess is 429'd exactly as today. A bound that
+  early.** It marks the buffer flush-ready; publication still waits for the next tick. A bound that
   published on trip would move the real period below the validated one, and lifecycle §2.2's depth
-  trim would drop pins before their TTL while the depth alarm saturates — the failure §1.3 exists to
-  make unconfigurable.
-- `POST /control/flush` (contracts §3.4, 202 accepted) — an operator-triggered publication. Accepted
-  at any time; **executed at the next tick**. The 202 already means "accepted, not yet done", so
-  nothing in the contract changes.
+  trim would drop pins before their TTL while the depth alarm saturates.
+- `POST /control/flush` (contracts §3.4, 202 accepted) — operator-triggered, accepted at any time,
+  **executed at the next tick**. The 202 already means "accepted, not yet done", so nothing in the
+  contract changes.
 
-With every publisher on the tick, the relation is exact over the *actual* minimum period:
+**What bounds the buffer between ticks is a new mechanism, and calling it existing was wrong.**
+`ingest_queue_bound` bounds the *command queue* — `sync_channel(queue_bound)`, 32 jobs by default —
+and its 429 fires when submission outruns the executor's service rate. The executor drains a job
+into the buffer in milliseconds, so **no ingest rate produces a 429 by buffer size**; nothing in the
+system compares buffer occupancy to anything. Deferring `flush_max_items` to the tick therefore
+leaves the buffer unbounded unless something new bounds it.
+
+So this design adds `ingest_buffer_max_items`: a **buffer-occupancy admission bound**, checked in the
+handler before submission, 429 on exceed. It is a distinct knob from `ingest_queue_bound` because it
+bounds a distinct thing, and it is new — the previous revision's "the excess is 429'd exactly as
+today" described a mechanism that does not exist.
+
+With every geometry publisher on the tick, the relation is exact over the *actual* minimum period:
 
 ```
 pin_ttl_secs < drain_depth_max × flush_max_age_secs
@@ -304,7 +332,11 @@ does, and because the coarse form leaks **less** (below).
   spike, and it is the thing to check first in any future change to session handling.
 - **It needs a leak-register row.** A hint tells a viewer that *some* descriptor was interned since
   they authorised — weak corpus-level inference, but not nothing (decision 0024 scopes the register
-  to viewer inference). The coarse form leaks strictly less than the digest refinement would: coarse
+  to viewer inference). **The row must be scoped wider than the per-session fact**: the hint is also
+  a *clock*, since a viewer holding one unresolved descriptor observes the flip at its first request
+  after a promoting flush, giving a repeating monitor of corpus write activity that colluding
+  sessions can correlate. Decision 0024 treats timing and cross-session correlation as distinct row
+  kinds. The coarse form leaks strictly less than the digest refinement would: coarse
   says "a term appeared", precise would confirm that *their specific descriptor* now exists. Cheaper
   and less disclosive is an unusual pairing, and is the reason to prefer it.
 
@@ -377,6 +409,12 @@ reclaimed.
 So a flush publishes a **locator extent** for its entity range alongside the forward extent, and the
 loader consults base locator then extents.
 
+**The ingest duplicate check must consult flush extents too.** `LiveState::established_collisions`
+justifies its bundle-side check as unable to go stale, because the sidecar it reads is immutable —
+which stops being true once flush publishes new external-id extents and rotation empties the live map
+at restart. The failure it guards is the worst one the write path documents: a byte-identical copy of
+a suppressed document that no external id names, so no deny can ever reach it.
+
 ## 4. Policy and configuration
 
 Admin-configurable, all validated at startup:
@@ -400,6 +438,16 @@ Defaults: `flush_max_age_secs` 90–120 s. The **floor** the current `pin_ttl_se
 `drain_depth_max` (4) permit is 75 s; the default sits above it with margin. Ingest visibility
 latency is therefore bounded below by the pin relation rather than by an arbitrary choice, and an
 admin wanting it lower raises `drain_depth_max` (§1.4).
+
+**The shipped default violates relation 1 and must move in the same change.**
+`DEFAULT_FLUSH_MAX_AGE_SECS` is 60, which against `pin_ttl_secs` 300 and `drain_depth_max` 4 fails
+`300 < 4 x 60`. Landing the validation without moving the default gives a server that refuses to
+start on its own defaults.
+
+**`drain_depth_max` becoming a knob reverses a recorded choice**, deliberately rather than by
+oversight: `DRAIN_DEPTH_MAX` is a compile-time constant today and `pins.rs` records that as "a
+constant rather than a config key deliberately". §1.4's corrected cost model is what changes the
+answer — the constant was chosen when a drain entry meant a whole bundle.
 
 `flush_max_items` and `flush_max_age_secs` are today parsed and asserted **inert** by a test. That
 test is replaced by one asserting both bounds are honoured — epic #3's "honoured rather than
@@ -426,7 +474,10 @@ tier. Bounding segments while leaving tiers unbounded moves §0's serving cliff 
 the authorise path — where it is worse, because a fragment build is a session's first-viewport cost.
 
 **A merge coalesces its inputs' delta postings into one tier**, as a content-preserving re-encode:
-the same (term, entity) pairs, concatenated and re-sorted, nothing dropped and nothing rewritten. No
+the same (term, entity) pairs, concatenated, **deduplicated** and re-sorted, nothing dropped and
+nothing rewritten. The dedup is not optional and not a fold: `encode_posting` hard-fails on any
+non-strictly-ascending entity list, so "concatenated and re-sorted" alone specifies an artefact the
+encoder refuses. Dedup is set-semantics, so invariant-neutrality is untouched. No
 tombstone is applied, no evaluate entry's terms are consulted, no overlay entry becomes retirable.
 Merge stays invariant-neutral — coalescing is to postings exactly what §2.2's merge-sort is to Morton
 codes.
@@ -499,35 +550,89 @@ records are captured by no segment, and a suppression retires **only** on unsupp
 checkpoint would therefore delete accepted denies and re-expose their items on the next restart —
 the row lifecycle §8 says must never exist.
 
-**So each rotation writes a compacted overlay snapshot at the head of the new WAL file**, carrying
-every live suppression, deletion and evaluate entry, and it is fsynced **before** any older file is
-deleted. Retention returns to one file; the overlay's durable home stays the WAL; no contract
-changes; and because dispositions are idempotent, re-writing them is safe by construction. Recovery
-reads the snapshot, then the records after it, and is strictly faster than today's full replay rather
-than merely bounded.
+**So each rotation writes a compacted overlay snapshot at the head of the new WAL file**, fsynced
+**before** any older file is deleted. The overlay's durable home stays the WAL; no contract changes;
+and because dispositions are idempotent, re-writing them is safe by construction. The snapshot is
+O(live overlay) — the quantity the overlay soft limit already gauges, which makes the existing gauge
+the right alarm for rotation cost too.
 
-The snapshot is O(live overlay) — the quantity the overlay soft limit already gauges, which makes the
-existing gauge the right alarm for rotation cost as well.
+**The snapshot's shape is load-bearing, and two details of it are not free choices.**
 
-### 7.3 The order, and its single commit point
+- **Entries are keyed by `EntityId`, never by external id.** A `Change`-shaped snapshot would have to
+  re-resolve each external id at replay, and a deleted-at-flush entity has no row and may have no
+  extent entry, so `replay` would return `UnknownExternalId` and **the node would refuse to open**.
+- **Evaluate entries carry raw descriptors, never `TermId`s.** Extension ids are assigned in replay
+  order by `DescriptorResolver`, and rotation changes replay order, so a persisted extension `TermId`
+  dangles — pointing at whatever descriptor happens to intern into that slot next. This is the same
+  hazard `buffer.rs` counts downward from `u32::MAX` to avoid, arriving by a different route.
+
+**A node whose live overlay has diverged from its durable WAL publishes nothing and rotates
+nothing.** `Wal::discard_undurable` deliberately does not un-apply — its own doc says "a restart will
+not carry them" — so after an in-process recovery the node returns to `Running` while holding
+dispositions no record backs. §3.5's `WalPoisoned` gate does not cover this, because the node is no
+longer poisoned. Writing the snapshot or a flush manifest from that overlay would make a 500'd,
+never-acked deny **permanent**, contradicting contracts §3.1's residual.
+
+So the executor tracks divergence, and a node that has recovered in-process keeps serving and keeps
+applying denies but **publishes no flush and rotates no WAL until it is restarted**, alarmed
+throughout. This preserves lifecycle §4's central argument without exception — the resulting state is
+always one some restart could have produced — at a stated cost: ingest visibility stops until an
+operator restarts the node, and the alarm is what makes that an operator's decision rather than a
+silent stall. The alternative, re-appending the divergent entries to converge the WAL, was rejected:
+it produces a state no restart could have produced, which is the property §4 leans on hardest.
+
+### 7.3 The order, the commit point, and what `wal_pos` means
+
+**`wal_pos` is the offset of the flush's buffer-snapshot point — the position below which every
+ingest row has been consumed into a segment.** It is *not* the offset of the `Flush` record itself,
+and the distinction is the whole of this section's safety. Group-commit allocation makes entity order
+equal WAL append order, so such a position always exists and is exact.
+
+The natural misreading is that `wal_pos` names where the `Flush` record was written. Under it,
+rotation deletes rows acked *during* the flush — appended after the snapshot point, never consumed,
+carrying entity ids at or above the new watermark — and §7.1 then reconstructs them from nothing.
+**Acked ingest, silently lost at the next restart**: r1's fail-open in the row lane rather than the
+deny lane.
 
 ```
 pool:     segment files, delta postings, dict / external-id / locator extents durable
       →   SEGMENTS-<n+1>.json durable                    ← the commit point
 executor: generation swap                                 ← the publication event
-      →   Flush{n, wal_pos} appended and fsynced          ← optimisation
+      →   Flush{n, wal_pos} appended and fsynced          ← optimisation; wal_pos = snapshot point
       →   rotation: overlay snapshot written and fsynced  ← §7.2, before any deletion
-      →   WAL files wholly below wal_pos deleted          ← reclamation
+      →   WAL files wholly below wal_pos deleted,         ← reclamation, oldest first
+          oldest first
 ```
 
 A crash before the side-manifest leaves orphan files nothing references, and replay re-flushes
 deterministically — lifecycle §8's "mid-flush (files, no manifest)" row, which becomes tested
 behaviour rather than an inherited obligation.
 
-The WAL becomes a sequence of `wal-<seq>.log`, each with its own fsync-offset sidecar (decision
-0038). **Every §4 rule applies per file, unchanged**: the positional CRC rule ("position decides, not
-damage"), the three sidecar guards, and truncate-and-fsync before a handle is issued. Recovery walks
-the sequence in order; a gap in the middle is corruption of acked state and fails closed.
+**Deletion is oldest-first**, because a crash midway through a non-ordered deletion leaves a gap in
+the sequence, and §7.3 fails closed on a gap — turning a benign crash into a permanently unopenable
+node.
+
+**Steady-state retention is two files, not one.** The file holding the snapshot point is generally
+still live above it, so it survives its own rotation.
+
+**Recovery walks every surviving file in sequence order, applying the snapshot at the position it
+occupies** — it does not start *at* the snapshot. Those are different algorithms, and the second
+skips the surviving older file's post-snapshot-point rows, losing them by the recovery path instead
+of by the deletion path.
+
+Each file carries its own fsync-offset sidecar (decision 0038), and **every §4 rule applies per file,
+unchanged**: the positional CRC rule ("position decides, not damage"), the three sidecar guards, and
+truncate-and-fsync before a handle is issued. The snapshot is an ordinary record under all of them —
+a torn snapshot below the fsync point is corruption of acked state and fails closed; above it, it is
+discarded with the rest of the undurable tail and the older file, not yet deleted, still carries the
+overlay. A gap in the middle of the sequence fails closed.
+
+**The allocator floor survives rotation via the side-manifest, not the WAL.** `WritePath::reconstruct`
+seeds the allocator from `max(manifest high-water, WAL high-water)`, and rotation deletes the `Lease`
+and `IngestBatch` records the WAL term is derived from. So **flush writes `entity_id_high_water` into
+its side-manifest** (contracts §2.3 already has the field) and recovery seeds from *that* manifest,
+never from the build `MANIFEST.json`. Without this, leased-but-unwritten ranges are reallocated —
+an I9 violation; seeding from the build manifest instead would reallocate every flushed entity id.
 
 ### 7.4 The idempotency horizon is the WAL retention, and it is an observable
 
@@ -559,44 +664,78 @@ code that acts on it**, per that constant's own rule. The loader applies `deny` 
 the initial overlay; WAL replay unions on top. The two agree, and where they do not the WAL is the
 superset and wins; dispositions are idempotent, so the union is well-defined.
 
-### 8.2 Step-down, and why the writing node fails closed instead
+**And that change, made alone, re-opens the fail-open it is meant to serve.** `unhonourable_state()`
+filters out honoured fields *before* `DENY_DISPOSITION_STATE` is consulted, so the moment `"deny"` is
+honoured a deny-carrying manifest classifies `Honourable`, proceeds to `verify_files`, and on a
+digest failure the candidate walk simply does `continue` — **stepping down past accepted denies**,
+which is precisely the fail-open decision 0018 promoted into contract, in exactly the damaged-newest
+case `read.rs` names as most likely. The claim that `Honourability`'s existing classification refuses
+this is true *before* this change and false after it, and the test pinning the behaviour
+(`a_deny_carrying_manifest_whose_files_are_missing_is_still_refused`) loses its protection silently.
 
-Once deny state is honoured, a manifest carrying it is never stepped past — `Honourability`'s
-existing classification already refuses that, which is why the `readyz` freshness gate (#58) is
-**not** dragged into this epic: step-down past accepted denies is refused outright rather than
-time-bounded. #58 remains an availability obligation for a lagging replica, not a correctness one
-here, and there are no replicas today (lifecycle §6 is unbuilt in its entirety).
+**So the branch lands with the constant, not after it: an honoured deny-carrying candidate that fails
+verification is `Unready` — never stepped past.** Honouring a field changes what the reader *does*
+with a valid manifest; it must not change what the reader does with an invalid one.
+
+### 8.2 Step-down, and where the refusal actually lives
+
+With §8.1's branch in place, a manifest carrying deny state is never stepped past, which is why the
+`readyz` freshness gate (#58) is **not** dragged into this epic: step-down past accepted denies is
+refused outright rather than time-bounded. #58 remains an availability obligation for a lagging
+replica, not a correctness one here, and there are no replicas today (lifecycle §6 is unbuilt in its
+entirety).
 
 A `deltas`-only step-down remains classified `Steppable`, and for a read-only replica it is still
-fail-safe staleness. **For the writing node it is not, and the writing node therefore refuses to
-serve from a stepped-down manifest at all — it stays unready.** The reason: §7.1 reconstructs the
-buffer as WAL rows at or above the *served* watermark, and after rotation the rows between an older
-manifest's watermark and the newest one's are gone. Re-flushing from a stepped-down watermark would
-silently lose them. Failing closed costs availability on a node whose newest segment files are
-damaged, which is the correct trade and the one SA §9 already prescribes.
+fail-safe staleness. **For a node that writes it is not**: §7.1 reconstructs the buffer as WAL rows
+at or above the *served* watermark, and after rotation the rows between an older manifest's watermark
+and the newest one's are gone, so re-flushing from a stepped-down watermark would silently lose them.
+
+**The refusal needs a site, and naming it is part of this spec** — an earlier revision stated the
+rule and left it a sentence. Today every node is a writing node: `tessera-server` starts the write
+executor unconditionally, and `PartitionData::stepped_down()` exists but is consumed by nothing. So
+the rule is: **`readyz` fails when `stepped_down()` is true**, unconditionally, until lifecycle §6
+introduces a reader/writer distinction that makes the qualifier meaningful. Failing closed costs
+availability on a node whose newest segment files are damaged, which is the trade SA §9 already
+prescribes.
 
 ## 9. Caches
 
 r1 omitted this entirely; it is not a detail.
 
-**The row-projection cache** is keyed `(token_id, slice, segments_version)` and its own doc notes a
+**The row-projection cache** is keyed `(token_id, slice, segments_version)`, and its own doc notes a
 multi-segment slice would widen the key. A flush bumps `segments_version` every tick, and a full miss
 is a **measured 10.7 s**. So the patch publishes into the **new** key a value derived from the old
 entry — which respects "invalidation is key rotation, never mutation" (lifecycle §7.2), because
-nothing modifies a cached value. Two consequences to hold: the old entry must still be readable at
-patch time, so `prune_segments_version` runs only after the patch publishes; and where the old entry
-has already been evicted, the patch path falls back to a full build, which is correct by §3.4 and
-merely slow.
+nothing modifies a cached value.
 
-**The authorisation fragment cache is a persistent disk cache whose key excludes the watermark**
-(`tessera-authz/src/fragment.rs`). After flush, same-key entries would exist at heterogeneous
-watermarks, and `tmp_sibling`'s "both writers wrote byte-identical content" argument would no longer
-hold. **The watermark joins the disk cache key.**
+**Two pieces of machinery that do not exist have to be built for that sentence to mean anything**, and
+naming them is the point of this section:
 
-That has a second effect worth recording for the compaction spec: persisted fragments surviving a
-restart at pre-flush stamps would falsify lifecycle §3.2's "the cache restarts cold" premise, which
-is what scopes the future retirement floor worker-locally. With the watermark in the key, a
-pre-flush fragment is never found by a post-flush lookup, and the premise holds.
+- **A derive-capable build path.** The cache's only entry point is `get_or_build` with an infallible
+  closure, and there is no way to read another key's entry — so "derived from the old entry" is not
+  expressible today, and would silently degrade to "rebuild from scratch".
+- **Retention of superseded-generation entries until patched or drain-expired.** `prune_generation`
+  runs *synchronously inside* `publish_geometry`, so with no pins outstanding the old entries are
+  gone at the instant of the swap — before any request-driven patch could possibly run. "Prune runs
+  only after the patch publishes" is unsequenceable against today's callers, because patching is
+  request-driven and unbounded in time.
+
+Without both, the fallback is not an edge case but the steady state: a full 10.7 s projection per
+session per tick, synchronised across the session population — the same spike §3.3 rejected the
+expiry construction to avoid, arriving through the cache instead.
+
+**The authorisation fragment cache is a persistent disk cache, and the watermark lives in the value
+rather than the key** (`tessera-authz/src/fragment.rs`). After flush, same-key entries would exist at
+heterogeneous watermarks, and `tmp_sibling`'s "both writers wrote byte-identical content" argument
+would no longer hold. **The watermark joins the disk cache key.**
+
+Two consequences. Every pre-upgrade on-disk entry becomes unreachable — a leak rather than a
+fail-open, since new code can never read one, but nothing on the disk cache path ever deletes
+anything, so **the orphans need a sweep and the cache needs a format version**. And, worth recording
+for the compaction spec: persisted fragments surviving a restart at pre-flush stamps would falsify
+lifecycle §3.2's "the cache restarts cold" premise, which is what scopes the future retirement floor
+worker-locally. With the watermark in the key, a pre-flush fragment is never found by a post-flush
+lookup, and the premise holds.
 
 ## 10. Failure handling
 
@@ -640,6 +779,16 @@ identity-breaking migration producing a *new* deployment, on §12.5's build-unde
 precedent.
 
 Enforced, not documented: build refuses a bundle root containing a `CURRENT`.
+
+**This breaks nothing, checked concretely rather than assumed.** The refusal already exists in
+`validate_args`, and every invocation in the tree already complies: `scripts/build_full.sh` builds
+into a fresh `--out` (`--carry-id-key-from` reads a *different* root, which is not forbidden),
+`scripts/bench_build_fixtures.sh` removes the directory first, the oracle harness `rmtree`s before
+rebuilding and conformance rides it, and every Rust test and bench uses a temporary directory or a
+pre-removed one. `run_demo.sh` contains no build at all. What this ruling changes is the *meaning*
+and the message, not the behaviour — so §14's obligation is to test the messaging, and the existing
+advice "remove it or choose another `--out`" must be reworded, since deleting the root is
+catastrophic once the deployment is the durable record.
 
 This is why §0 records that compaction becomes load-bearing. It also settles the question r1 raised
 as an escalation — build never meets a flushed deployment, so there is nothing to fence.
@@ -706,7 +855,25 @@ Extending the lifecycle §7.3 fault switchboard rather than building a second be
 14. An out-of-extent ingest is refused before ack and leaves no WAL record; a pre-existing one is
     quarantined rather than retried (§6).
 15. `tessera build` refuses a bundle root containing a `CURRENT` (§11).
-16. A session holding an unresolved descriptor is hinted stale by a promoting flush, and
+16. **A row acked *during* a flush survives rotation and a restart** (§7.3's `wal_pos` definition).
+    The natural misreading of `wal_pos` loses it silently, so this is the test that pins the
+    definition rather than the prose.
+17. **A node that recovered its WAL in-process publishes no flush and rotates no WAL** (§7.2), and
+    the un-durable deny it still holds is gone after a restart — contracts §3.1's residual.
+18. **A deny-carrying manifest whose files fail verification is `Unready`, never stepped past**
+    (§8.1) — the existing test, re-pinned against the `HONOURED_STATE` change that would otherwise
+    silently remove its protection.
+19. **`readyz` fails while `PartitionData::stepped_down()` is true** (§8.2).
+20. **Ingest is refused by buffer occupancy, not only by queue depth** (§1.3): an arrival rate that
+    fills the buffer between ticks 429s on `ingest_buffer_max_items` rather than growing unbounded.
+21. **A flush patches a session's row projection instead of rebuilding it** (§9), asserted on the
+    absence of a full projection build rather than on timing — and the superseded entry survives
+    long enough to be patched.
+22. **The allocator floor survives rotation**: after rotation and restart, no entity id is
+    reallocated, seeded from the side-manifest's `entity_id_high_water` (§7.3).
+23. **An evaluate entry round-trips a rotation with its descriptors intact** (§7.2), and a deleted
+    entity with no row is recoverable from the snapshot rather than failing the open.
+24. A session holding an unresolved descriptor is hinted stale by a promoting flush, and
     re-authorising resolves the descriptor and sees the items; **a session holding none is never
     hinted by any flush** — the half that regresses silently if the condition is loosened; and **a
     hinted session continues to serve normally**, since the hint is advisory and no request may fail
@@ -738,9 +905,10 @@ with the code:
 - **contracts §3.2** — the staleness hint's wire representation, when the client-facing work
   specifies it. Nothing in this change alters `expires_at`'s meaning.
 
-Five decision records: the single publication cadence and its minimum interval (§1.3); dropping the
-Morton re-rank decorator (§2.3); refusing out-of-extent coordinates at ingest (§6); the overlay
-snapshot as the WAL's rotation rule (§7.2); `tessera build` as initial-load only (§11).
+Six decision records: the geometry/overlay publication split and the single geometry cadence (§1.3);
+dropping the Morton re-rank decorator (§2.3); refusing out-of-extent coordinates at ingest (§6); the
+overlay snapshot as the WAL's rotation rule (§7.2); `tessera build` as initial-load only (§11); and
+`drain_depth_max` becoming admin-configurable, which reverses `pins.rs`'s recorded choice (§4).
 
 Issues closed or reduced: #3 (flush), #59 (the second publisher), #8's design decision (§12).
 
@@ -790,5 +958,48 @@ the hint is advisory, and what bounds staleness for a client that ignores it is
 The property given up is recorded at the rule rather than buried: the expiry construction made
 "never re-resolve in place" structural, and the hint makes it a rule again.
 
-**Unreviewed.** The second review round was not run. §3.3 in particular, and r2's new §5.2, §6, §7.2,
-§8, §9 and §11, have had no independent scrutiny; r1's review covered none of them.
+**r4** answers a second independent review (needs-rework; text in
+[`reviews/2026-08-02-flush-and-merge-r3-review.md`](reviews/2026-08-02-flush-and-merge-r3-review.md)).
+It was asked to verify r1's findings were closed **by a mechanism** rather than by prose, and to
+attack the material nobody had seen. It downgraded five of r1's findings to *partially closed* and
+raised six new blocking ones — three of them in the sections that exist to fix r1's fail-open.
+
+The three that mattered most, and all three are the same failure wearing different clothes:
+
+1. **`wal_pos` was never defined** (NB1). Under its natural reading — the offset of the `Flush`
+   record — rotation deletes rows acked *during* the flush, which sit above the new watermark and so
+   reconstruct from nothing. r1's fail-open in the row lane instead of the deny lane. §7.3 now
+   defines `wal_pos` as the buffer-snapshot point and specifies recovery as walk-all-surviving-files,
+   because "read the snapshot then the records after it" loses the same rows by the other path.
+2. **Honouring `"deny"` re-opened the step-down fail-open** (NB3). `unhonourable_state()` filters
+   honoured fields *before* `DENY_DISPOSITION_STATE` is consulted, so §8.1's own change would have
+   reclassified a deny-carrying manifest as `Honourable`, sent it to `verify_files`, and let a digest
+   failure `continue` past accepted denies — decision 0018's fail-open, restored by the sentence
+   claiming it was refused. The `Unready`-on-verification-failure branch now lands with the constant.
+3. **The live overlay is not the durable overlay** (NB2). `discard_undurable` deliberately does not
+   un-apply, so a node that recovers in-process returns to `Running` holding dispositions no record
+   backs, and §3.5's poisoned-gate no longer covers it. Ruled by the owner: such a node publishes no
+   flush and rotates no WAL until restarted, alarmed — which keeps lifecycle §4's "the resulting
+   state is one some restart could have produced" true without exception.
+
+Also corrected: the backpressure story was refuted by the code (NB4) — `ingest_queue_bound` bounds
+the *command queue*, not the buffer, so nothing bounded the buffer between ticks and
+`ingest_buffer_max_items` is new machinery rather than existing behaviour; §9's cache patch was not
+expressible and `prune_generation` runs inside `publish_geometry`, making the 10.7 s fallback the
+steady state (NB5); the allocator floor regressed at rotation; the ingest duplicate check goes stale
+once extents exist; the snapshot must key on `EntityId` and carry raw descriptors; deletion is
+oldest-first; coalescing must deduplicate; and the shipped `DEFAULT_FLUSH_MAX_AGE_SECS` violates the
+relation this spec asks to be validated.
+
+**Ruled by the owner in this round:** contracts §2.3's immediate deny publication stands, because
+r3 had conflated *geometry* publication (drain entry, `segments_version`, sized by §2.2) with
+*overlay* publication (no drain entry, no version bump, ungoverned by the pin relation) — §1.3; and
+the overlay-divergence remedy is to refuse publication until restart rather than to converge the WAL.
+
+**Confirmed clean, and worth not re-litigating:** §11 breaks nothing — the refusal already exists in
+`validate_args` and every invocation in the tree complies, checked file by file (§11). §2's row-space
+arithmetic, §3.4's four premises, §3.3's code claims, and §5.2's no-entity-in-two-tiers property all
+survived attack.
+
+**Still unreviewed:** r4's own corrections. Every change above was made in response to a review, and
+none of them has been reviewed in turn.
