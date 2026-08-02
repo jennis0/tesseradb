@@ -31,7 +31,7 @@ use tessera_types::BUNDLE_FORMAT;
 
 use crate::error::{read_to_vec, Result, StoreError};
 use crate::manifest::{CurrentPointer, FileDigest, Honourability, Manifest, SegmentsManifest};
-use crate::permutation::{Permutation, RowSpace};
+use crate::permutation::{Permutation, RowSpace, SegmentExtent};
 
 /// One loaded (partition, slice) pair: the row space addressing its rows, and every segment
 /// in that slice — a build writes exactly one (contracts §2.1's "one segment per
@@ -41,10 +41,16 @@ use crate::permutation::{Permutation, RowSpace};
 /// `row_space` is the built `permutation.bin` plus whatever extents flush has appended — see
 /// [`RowSpace`]. A bundle straight out of `tessera build` carries no extents, so it behaves
 /// exactly as the bare permutation did.
-#[derive(Debug)]
+///
+/// **`Clone`, and the segments are behind `Arc`, because a generation is constructed
+/// incrementally** (§1.2): a flush publishes a bundle sharing every mapped file with its
+/// predecessor plus one new segment. `SegmentData` holds mmaps and an Arrow batch and is not
+/// `Clone`; an `Arc` per segment is what makes "share, do not re-open" expressible, and re-opening
+/// would re-pay `Permutation::load`'s O(bound) `validate_rows` per flush.
+#[derive(Debug, Clone)]
 pub struct SliceData {
     pub row_space: RowSpace,
-    pub segments: Vec<SegmentData>,
+    pub segments: Vec<Arc<SegmentData>>,
 }
 
 /// One loaded segment: its row count, its Morton codes (row order, ascending), and a zero-copy
@@ -59,7 +65,10 @@ pub struct SegmentData {
 
 /// One loaded partition: its verified side-manifest, the `n` that manifest was found at, the
 /// highest `n` present in the partition directory, and every slice it names.
-#[derive(Debug)]
+///
+/// `Clone` for [`Bundle::with_segment`]'s sake — see [`SliceData`]. Cloning one copies a manifest
+/// and two small maps of `Arc`s; it opens no file.
+#[derive(Debug, Clone)]
 pub struct PartitionData {
     pub manifest: SegmentsManifest,
     /// The `n` of the `SEGMENTS-<n>.json` actually served — taken from the **filename**, not
@@ -103,6 +112,132 @@ impl PartitionData {
 pub struct Bundle {
     pub manifest: Manifest,
     pub partitions: HashMap<String, PartitionData>,
+}
+
+impl Bundle {
+    /// This bundle plus one segment in `(partition, slice)`: a **new** `Bundle` sharing every
+    /// mapped file with this one.
+    ///
+    /// **Required, not an optimisation.** `open_bundle` maps every file afresh and
+    /// `Permutation::load` re-pays an O(bound) `validate_rows`, so re-opening the bundle per flush
+    /// would cost more than the flush it followed — and §1.4's claim that the marginal cost of a
+    /// pin drain entry is roughly one flush segment rests on consecutive generations sharing their
+    /// base geometry rather than being whole distinct bundles.
+    ///
+    /// Only the new segment's files were opened, by the caller; nothing here re-reads anything.
+    /// `manifest` is the `SEGMENTS-<n+1>.json` that named them, and it is carried whole because
+    /// contracts §2.3 makes a side-manifest complete current state for its partition rather than a
+    /// diff.
+    ///
+    /// **No verification happens here, and that is the commit point's doing rather than an
+    /// omission.** The files were made durable and the side-manifest written before this is ever
+    /// called; digest verification is what `open_bundle` does for files it did not write. A
+    /// generation constructed here is verified in the ordinary way at the next restart.
+    pub fn with_segment(
+        &self,
+        partition: &str,
+        slice: &str,
+        segment: SegmentData,
+        extent: SegmentExtent,
+        manifest: SegmentsManifest,
+    ) -> Result<Arc<Bundle>> {
+        self.substituting(partition, slice, manifest, |slice_data| {
+            let row_space = slice_data.row_space.with_extent(extent).ok_or_else(|| {
+                StoreError::MalformedBundle {
+                    detail: format!(
+                        "flush segment '{}' does not continue slice '{slice}'s row space",
+                        segment.seg_id
+                    ),
+                }
+            })?;
+            let mut segments = slice_data.segments.clone();
+            segments.push(Arc::new(segment));
+            Ok(SliceData {
+                row_space,
+                segments,
+            })
+        })
+    }
+
+    /// This bundle with the adjacent run `consumed` replaced by one merged segment.
+    ///
+    /// `Err` if any consumed `seg_id` is absent, which is how a merge planned against a generation
+    /// that has since been superseded is **discarded rather than published**. ABA-safe because
+    /// `seg_id`s are never reused, across merges or prefixes (contracts §2.1), so an absent one is
+    /// proof the inputs are gone — never a pointer comparison. An `Err`, not a panic: a discarded
+    /// merge is an expected outcome of the rebase, not a bug.
+    pub fn with_merged(
+        &self,
+        partition: &str,
+        slice: &str,
+        consumed: &[String],
+        segment: SegmentData,
+        extent: SegmentExtent,
+        manifest: SegmentsManifest,
+    ) -> Result<Arc<Bundle>> {
+        self.substituting(partition, slice, manifest, |slice_data| {
+            let row_space = slice_data
+                .row_space
+                .collapsing(consumed, extent)
+                .ok_or_else(|| StoreError::MalformedBundle {
+                    detail: format!(
+                        "merge inputs {consumed:?} are not a present, adjacent run of slice \
+                         '{slice}', or the merged segment does not preserve their rows"
+                    ),
+                })?;
+            let mut segments: Vec<Arc<SegmentData>> = slice_data
+                .segments
+                .iter()
+                .filter(|s| !consumed.contains(&s.seg_id))
+                .cloned()
+                .collect();
+            segments.push(Arc::new(segment));
+            Ok(SliceData {
+                row_space,
+                segments,
+            })
+        })
+    }
+
+    /// The shared half of [`Self::with_segment`] and [`Self::with_merged`]: clone the partition
+    /// and slice maps — `Arc`s and a manifest, no file IO — and replace the one slice.
+    fn substituting(
+        &self,
+        partition: &str,
+        slice: &str,
+        manifest: SegmentsManifest,
+        replace: impl FnOnce(&SliceData) -> Result<SliceData>,
+    ) -> Result<Arc<Bundle>> {
+        let existing =
+            self.partitions
+                .get(partition)
+                .ok_or_else(|| StoreError::MalformedBundle {
+                    detail: format!("no partition '{partition}' in this bundle"),
+                })?;
+        let slice_data = existing
+            .slices
+            .get(slice)
+            .ok_or_else(|| StoreError::MalformedBundle {
+                detail: format!("no slice '{slice}' in partition '{partition}'"),
+            })?;
+        let next_slice = replace(slice_data)?;
+
+        let mut partitions = self.partitions.clone();
+        let entry = partitions
+            .get_mut(partition)
+            .expect("looked up immediately above");
+        entry.slices.insert(slice.to_string(), next_slice);
+        // The served `n` and the highest candidate move together: this generation *is* the newest
+        // manifest, so it is not stepped down, whatever the one it was built from was.
+        entry.segments_n = manifest.segments_version;
+        entry.highest_candidate_n = manifest.segments_version;
+        entry.manifest = manifest;
+
+        Ok(Arc::new(Bundle {
+            manifest: self.manifest.clone(),
+            partitions,
+        }))
+    }
 }
 
 /// Open `root` (a bundle directory containing `CURRENT`) following the read protocol
@@ -250,12 +385,12 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
                     .validate_rows(seg_desc.row_count)?;
             }
 
-            slice_entry.segments.push(SegmentData {
+            slice_entry.segments.push(Arc::new(SegmentData {
                 seg_id: seg_desc.seg_id.clone(),
                 row_count: seg_desc.row_count,
                 morton,
                 columns,
-            });
+            }));
         }
 
         partitions.insert(

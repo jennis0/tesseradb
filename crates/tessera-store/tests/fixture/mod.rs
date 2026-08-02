@@ -1,0 +1,227 @@
+//! A hand-assembled bundle, and the pieces a flush would publish into it.
+//!
+//! Separate from `bundle_read.rs`'s own copy because that file's fixture returns the tiler items
+//! it built (its assertions compare against them) and hard-codes one segment. This one exists to
+//! be *added to*.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+
+use sha2::{Digest, Sha256};
+
+use tessera_spatial::fixed32;
+use tessera_spatial::tiler::{sort_batch, TilerItem};
+use tessera_store::manifest::{
+    CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
+    SegmentDescriptor, SegmentsManifest, SliceDescriptor,
+};
+use tessera_store::permutation::SegmentExtent;
+use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
+use tessera_store::write::{write_permutation, write_segment};
+use tessera_store::Bundle;
+use tessera_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+
+pub const PARTITION: &str = "default";
+pub const SLICE: &str = "main";
+
+fn synthetic_tessera_id(seed: u64) -> TesseraId {
+    let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    TesseraId::new(z ^ (z >> 31))
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn file_digest(path: &Path) -> FileDigest {
+    let bytes = fs::read(path).expect("read for digest");
+    FileDigest {
+        size: bytes.len() as u64,
+        sha256: hex_sha256(&bytes),
+    }
+}
+
+fn items_for(entity_lo: u64, count: u64) -> Vec<TilerItem> {
+    (entity_lo..entity_lo + count)
+        .map(|e| TilerItem {
+            tessera_id: synthetic_tessera_id(e),
+            qx: fixed32(((e * 37) % 100) as f64 / 100.0, 0.0, 1.0),
+            qy: fixed32(((e * 61) % 100) as f64 / 100.0, 0.0, 1.0),
+            scalars: vec![],
+        })
+        .collect()
+}
+
+/// A one-segment bundle over entities `[0, n)`, at prefix `v00000`.
+pub fn build_bundle(root: &Path, n: u64) {
+    let mut items = items_for(0, n);
+    let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
+    let codes = sort_batch(&mut items, &mut entity_ids);
+
+    let prefix_dir = root.join("v00000");
+    let partition_dir = prefix_dir.join("partitions").join(PARTITION);
+    let slice_dir = partition_dir.join("slices").join(SLICE);
+    let seg_dir = slice_dir.join("segments").join("seg0");
+    fs::create_dir_all(&seg_dir).expect("mkdir");
+
+    write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
+    write_permutation(&slice_dir.join("permutation.bin"), &entity_ids, n).expect("permutation");
+
+    let mut files = BTreeMap::new();
+    for (rel, path) in [
+        (
+            format!("partitions/{PARTITION}/slices/{SLICE}/permutation.bin"),
+            slice_dir.join("permutation.bin"),
+        ),
+        (
+            format!("partitions/{PARTITION}/slices/{SLICE}/segments/seg0/columns.arrow"),
+            seg_dir.join("columns.arrow"),
+        ),
+        (
+            format!("partitions/{PARTITION}/slices/{SLICE}/segments/seg0/morton.u32"),
+            seg_dir.join("morton.u32"),
+        ),
+    ] {
+        files.insert(rel, file_digest(&path));
+    }
+
+    let segments_manifest = SegmentsManifest {
+        segments_version: 0,
+        watermark: n,
+        entity_id_high_water: n,
+        segments: vec![SegmentDescriptor {
+            slice: SLICE.to_string(),
+            seg_id: "seg0".to_string(),
+            row_count: n as u32,
+            entity_lo: 0,
+            entity_hi: n.saturating_sub(1),
+        }],
+        deltas: vec![],
+        dict_extents: vec![],
+        external_id_extents: vec![],
+        tombstones: vec![],
+        deny: vec![],
+        files,
+    };
+    fs::write(
+        partition_dir.join("SEGMENTS-0.json"),
+        serde_json::to_vec_pretty(&segments_manifest).expect("serialise"),
+    )
+    .expect("write SEGMENTS-0");
+
+    let manifest = Manifest {
+        bundle_format: 1,
+        created_at: "2026-08-02T00:00:00Z".to_string(),
+        data_plugin_hash: "builtin:passthrough:1".to_string(),
+        declared_bounds: serde_json::json!({}),
+        declared_scalars: vec![],
+        small_term_threshold: 32,
+        quantisation: Quantisation {
+            x_min: 0.0,
+            x_max: 1.0,
+            y_min: 0.0,
+            y_max: 1.0,
+        },
+        entity_id_high_water: n,
+        identity: IdentityDescriptor {
+            construction: IDENTITY_CONSTRUCTION.to_string(),
+            rounds: IDENTITY_ROUNDS,
+            key: "0123456789abcdef0123456789abcdef".to_string(),
+            shard_id: 0,
+            idset: 1,
+        },
+        slices: vec![SliceDescriptor {
+            id: SLICE.to_string(),
+            display_name: SLICE.to_string(),
+        }],
+        partitions: vec![PartitionDescriptor {
+            phash: PARTITION.to_string(),
+            required_terms: vec![],
+        }],
+        provenance: serde_json::json!({}),
+        files: BTreeMap::new(),
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("serialise");
+    fs::write(prefix_dir.join("MANIFEST.json"), &manifest_bytes).expect("write MANIFEST");
+
+    fs::write(
+        root.join("CURRENT"),
+        serde_json::to_vec_pretty(&CurrentPointer {
+            prefix: "v00000".to_string(),
+            manifest_digest: hex_sha256(&manifest_bytes),
+        })
+        .expect("serialise CURRENT"),
+    )
+    .expect("write CURRENT");
+}
+
+/// Write a segment covering `[entity_lo, entity_lo + count)` and return it loaded, with the extent
+/// that places it at the end of `bundle`'s current row space.
+///
+/// A stand-in for what Task 8's `write_flush_segment` will produce: the shape publication consumes
+/// is the same whether a flush or a merge made it.
+pub fn flush_segment(
+    root: &Path,
+    bundle: &Bundle,
+    entity_lo: u64,
+    count: u64,
+) -> (SegmentData, SegmentExtent) {
+    let row_base = bundle.partitions[PARTITION].slices[SLICE]
+        .row_space
+        .total_rows() as u32;
+    let seg_id = format!("seg-{entity_lo}-{count}");
+    let seg_dir = root
+        .join("v00000/partitions")
+        .join(PARTITION)
+        .join("slices")
+        .join(SLICE)
+        .join("segments")
+        .join(&seg_id);
+    fs::create_dir_all(&seg_dir).expect("mkdir");
+
+    let mut items = items_for(entity_lo, count);
+    let mut entity_ids: Vec<EntityId> = (entity_lo..entity_lo + count).map(EntityId::new).collect();
+    let codes = sort_batch(&mut items, &mut entity_ids);
+    write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
+
+    // `rows[e - entity_lo]` is the entity's position in the Morton-sorted order, relative to
+    // `row_base` — exactly what a flush computes.
+    let mut rows = vec![0u32; count as usize];
+    for (row, entity) in entity_ids.iter().enumerate() {
+        rows[(entity.raw() - entity_lo) as usize] = row as u32;
+    }
+
+    let segment = SegmentData {
+        seg_id: seg_id.clone(),
+        row_count: count as u32,
+        morton: MortonSlice::load(&seg_dir.join("morton.u32")).expect("morton"),
+        columns: ColumnsRef::load(&seg_dir.join("columns.arrow")).expect("columns"),
+    };
+    let extent = SegmentExtent {
+        entity_lo,
+        entity_hi: entity_lo + count - 1,
+        seg_id,
+        row_base,
+        rows,
+    };
+    (segment, extent)
+}
+
+/// `bundle`'s side-manifest with `segments_version` advanced and `watermark` moved past the
+/// `added` entities the caller is publishing. The `files` map is carried forward unchanged: these
+/// tests exercise generation construction, not verification, which happened at `open_bundle`.
+pub fn next_manifest(bundle: &Bundle, added: u64) -> SegmentsManifest {
+    let mut manifest = bundle.partitions[PARTITION].manifest.clone();
+    manifest.segments_version += 1;
+    manifest.watermark += added;
+    manifest.entity_id_high_water += added;
+    manifest
+}

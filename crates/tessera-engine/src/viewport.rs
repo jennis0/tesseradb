@@ -479,7 +479,7 @@ impl Engine {
         if slice_data.segments.len() > 1 {
             return Err(EngineError::MultiSegmentSlice(slice.to_string()));
         }
-        let segment = slice_data.segments.first();
+        let segment = slice_data.segments.first().map(|s| s.as_ref());
         probe.lap(|t| &mut t.slice_lookup_ns);
 
         let cache_key = RowProjectionKey {
