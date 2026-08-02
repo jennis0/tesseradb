@@ -1,7 +1,16 @@
-# Flush and Merge — Design
+# Flush and merge — design
 
-**Status:** Draft — reviewed twice independently (Appendix R). Not yet normative; `docs/design/`
-wins until this is folded in.
+**Date:** 2026-08-02
+**Status:** Provisional — under review, and **not approved**. The rest of the corpus governs where
+they disagree. **To become normative:** owner sign-off on the design, and §16's amendments folded
+into `architecture.md`, `contracts.md` and `concurrency-lifecycle.md` as the code lands — the ⊘
+markers those documents carry are the gate, and clearing them ahead of the code would read as an
+assurance (decision 0013).
+**Reads against:** architecture §4, §5.1, §11.1–§11.3, Appendix C; contracts §2.1–§2.6, §3.1, §3.4;
+concurrency-lifecycle §1–§5, §7, §8; system-architecture §6.2, §9.
+**Citation convention:** unprefixed §n is the architecture design, per CLAUDE.md; `lifecycle §n` is
+concurrency-lifecycle, `contracts §n` contracts, `SA §n` system-architecture. This document's own
+sections are cited as **spec §n**.
 
 **Owns:** the row-space segment lifecycle. Flush turns WAL-durable buffered items into a published
 segment, which is what makes an ingested item visible at all; merge bounds the segment and
@@ -11,10 +20,6 @@ folds authorisation state, neither retires an overlay entry, neither can re-expo
 **Does not own:** compaction and its fold, the deletion stamp ledger, the retirement floor, the
 evaluate-entry fold. Those are the invariant-bearing half of the write journey, specified separately
 after this lands, because their inputs are artefacts this document creates.
-
-`§n` unprefixed refers to `docs/design/architecture.md`. `lifecycle §n` refers to
-`docs/design/concurrency-lifecycle.md`, `contracts §n` to `docs/design/contracts.md`, `SA §n` to
-`docs/design/system-architecture.md`.
 
 ---
 
@@ -840,8 +845,10 @@ Issues closed or reduced: #3 (flush), #59 (the second publisher), #8's design de
 
 ## Appendix R — Review record
 
-Reviewed independently twice; both rounds returned needs-rework, and both texts are in
-[`reviews/`](reviews/).
+Reviewed independently twice; both rounds returned needs-rework. Both texts are kept verbatim in
+`../evidence/memos/` ([r1](../evidence/memos/2026-08-02-flush-and-merge-r1-review.md),
+[r3](../evidence/memos/2026-08-02-flush-and-merge-r3-review.md)), because this trail records the
+substance of the findings that changed the design and not the ones it answered without moving.
 
 The architecture survived both — single publisher, publication by rebase, one geometry cadence,
 snapshot-at-rotation, `tessera build` as initial-load-only. What did not survive was the treatment of
@@ -857,4 +864,6 @@ converging the WAL (§7.2); `tessera build` is initial-load only (§11); contrac
 publication stands, on the geometry/overlay split (§1.3); and the staleness signal is advisory rather
 than an expiry (§3.3).
 
-**Not reviewed:** the corrections made in response to the second round.
+The corrections answering the second round have not themselves been re-reviewed, and are not
+queued for it: a third round would be confirming that edits were applied rather than attacking the
+design's shape, which the disposition did not change.

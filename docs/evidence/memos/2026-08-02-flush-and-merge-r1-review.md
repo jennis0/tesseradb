@@ -7,7 +7,8 @@ Preserved verbatim because Appendix R records the substance of only twelve of th
 which would leave the closure of the other six unauditable by anyone, now or later. The second
 reviewer raised exactly that.
 
-Section references are to r1 of `../2026-08-02-flush-and-merge-design.md`; numbering shifted in r2
+Section references are to r1 of [`../../design/flush-and-merge.md`](../../design/flush-and-merge.md);
+numbering shifted in r2
 and r3.
 
 ---
