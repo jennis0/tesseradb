@@ -25,9 +25,10 @@
 //! terms it actually holds — never its whole term set, which would hand a viewer entities outside
 //! `M_auth` (I2).
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
@@ -166,6 +167,15 @@ impl DeltaTier {
         self.terms.len() as u32
     }
 
+    /// The term ids this tier carries, ascending.
+    ///
+    /// Needed because [`Self::term_count`] is a **record count, not an id domain**: a tier holding
+    /// one posting for term 5,000 has a count of 1, so walking `0..term_count()` finds nothing at
+    /// all. Coalescing has to enumerate what is actually there.
+    pub fn terms(&self) -> impl Iterator<Item = TermId> + '_ {
+        self.terms.values().iter().map(|t| TermId::new(*t))
+    }
+
     /// This tier's posting for `t`, or `None` if it carries none. `None` is an ordinary answer:
     /// a tier holds only the terms its flushed items carried.
     pub fn posting(&self, t: TermId) -> io::Result<Option<PostingRef<'_>>> {
@@ -174,4 +184,60 @@ impl DeltaTier {
         };
         read_posting(&self.postings, idx).map(Some)
     }
+}
+
+/// Coalesce several delta tiers into one, at `out`.
+///
+/// **A content-preserving re-encode, and that phrase is the specification.** The same
+/// `(term, entity)` pairs the inputs carried, concatenated, deduplicated and re-sorted — nothing
+/// dropped, nothing consulted. This is to postings exactly what the Morton merge-sort is to a
+/// segment's codes.
+///
+/// **A merge retires nothing** (flush §5.2). No tombstone is applied, no evaluate entry's terms are
+/// read, no overlay entry becomes retirable: a merge that dropped a posting because an entity was
+/// deleted would be performing the compaction fold, which is invariant-bearing work this layer must
+/// not do. The dedup is set semantics over identical pairs, so it changes no viewer's answer.
+///
+/// **The dedup is required, not defensive.** A buffered row's descriptors are not deduplicated on
+/// the write path, and two tiers may legitimately carry the same `(term, entity)` — the same entity
+/// appearing under one term in two flushes cannot happen, but the same term appearing in both tiers
+/// certainly can, and concatenating their entity lists yields a non-ascending sequence.
+/// [`encode_posting`] hard-fails on exactly that, so "concatenate and sort" without the dedup
+/// specifies an artefact the encoder refuses to write.
+///
+/// Reads every input fully into memory: a tier holds one tick's arrivals, and the merge policy's
+/// size bound is what keeps the total in hand.
+pub fn coalesce_delta_tiers(
+    inputs: &[PathBuf],
+    out: &Path,
+    small_term_threshold: u32,
+) -> io::Result<()> {
+    let mut by_term: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for path in inputs {
+        let tier = DeltaTier::open(path)?;
+        for term in tier.terms().collect::<Vec<_>>() {
+            let Some(posting) = tier.posting(term)? else {
+                continue;
+            };
+            let entities = by_term.entry(term.raw()).or_default();
+            match posting {
+                PostingRef::Roaring(view) => entities.extend(view.iter()),
+                PostingRef::Array(bytes) => {
+                    for chunk in bytes.chunks_exact(4) {
+                        entities.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+                    }
+                }
+            }
+        }
+    }
+
+    let entries: Vec<(TermId, Vec<u32>)> = by_term
+        .into_iter()
+        .map(|(term, mut entities)| {
+            entities.sort_unstable();
+            entities.dedup();
+            (TermId::new(term), entities)
+        })
+        .collect();
+    write_delta_tier(out, &entries, small_term_threshold)
 }

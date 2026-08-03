@@ -12,4 +12,4 @@ pub use postings::{
     encode_posting, write_posting_records, write_postings, PostingRef, PostingsReader,
     PostingsSpool,
 };
-pub use tier::{write_delta_tier, DeltaTier};
+pub use tier::{coalesce_delta_tiers, write_delta_tier, DeltaTier};
