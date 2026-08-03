@@ -5,6 +5,7 @@
 pub mod error;
 pub mod flush;
 pub mod manifest;
+pub mod merge;
 pub mod permutation;
 pub mod read;
 mod sidecar;
