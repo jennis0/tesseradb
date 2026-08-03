@@ -33,7 +33,7 @@ use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_plugin::Passthrough;
-use tessera_spatial::Extent;
+use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{IdentityKey, TermId};
 
@@ -44,8 +44,8 @@ const ITEM_LIMIT: u64 = 2_422_486;
 /// same, since `IdentityKey::from_hex` refuses degenerate ones.
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
-fn extent() -> Extent {
-    Extent {
+fn extent() -> Bounds {
+    Bounds {
         x_min: 0.0,
         x_max: 65536.0,
         y_min: 0.0,

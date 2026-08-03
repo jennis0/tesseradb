@@ -84,7 +84,7 @@ pub struct FlushOutput {
     pub segment: SegmentDescriptor,
     pub extent: SegmentExtent,
     /// Prefix-relative path of the forward (external_id → entity) extent.
-    pub external_id_extent: String,
+    pub external_id_run: String,
     pub locator_extent: LocatorExtent,
     /// Every file written, prefix-relative, for the manifest's `files` map.
     pub files: BTreeMap<String, FileDigest>,
@@ -199,7 +199,7 @@ pub fn write_flush_segment(
     forward.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
     let external_id_rel = rel("external-ids.arrow");
-    write_external_id_extent(&seg_dir.join("external-ids.arrow"), &forward)?;
+    write_external_id_run(&seg_dir.join("external-ids.arrow"), &forward)?;
 
     let mut locator = vec![ROW_ABSENT; span];
     for (ordinal, (_, entity)) in forward.iter().enumerate() {
@@ -234,12 +234,12 @@ pub fn write_flush_segment(
             row_base: input.row_base,
             rows: extent_rows,
         },
-        external_id_extent: external_id_rel.clone(),
+        external_id_run: external_id_rel.clone(),
         locator_extent: LocatorExtent {
             path: locator_rel,
             entity_lo,
             entity_hi,
-            external_id_extent: external_id_rel,
+            external_id_run: external_id_rel,
         },
         files,
         // Composition treats entities at or above the watermark as buffer-resident, so this is
@@ -262,7 +262,7 @@ fn tessera_id_of(key: &IdentityKey, shard_id: u32, entity: EntityId) -> Result<T
 /// One external-id extent: `external_id: Binary` and `entity_id: UInt32`, ascending by the id
 /// bytes. The shape `crate::sidecar` binary-searches, and it verifies that sortedness at open —
 /// so an unsorted extent is a refusal there rather than a wrong answer here.
-fn write_external_id_extent(path: &Path, rows: &[(&[u8], u32)]) -> Result<()> {
+fn write_external_id_run(path: &Path, rows: &[(&[u8], u32)]) -> Result<()> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("entity_id", DataType::UInt32, false),

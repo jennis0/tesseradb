@@ -94,7 +94,7 @@ use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::UnallocatedRow;
 use tessera_plugin::Passthrough;
-use tessera_spatial::Extent;
+use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{IdentityKey, TermId};
 
@@ -202,7 +202,7 @@ pub fn run_build(
                 points: geometry.clone(),
                 pairs: pairs.clone(),
                 out: out.clone(),
-                extent: Extent {
+                extent: Bounds {
                     x_min: 0.0,
                     x_max: 65536.0,
                     y_min: 0.0,

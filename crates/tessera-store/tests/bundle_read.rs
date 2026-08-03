@@ -12,7 +12,7 @@ use croaring::Bitmap;
 use sha2::{Digest, Sha256};
 
 use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_spatial::{fixed32, split32, tiles_for_bbox, Extent, Tile};
+use tessera_spatial::{fixed32, split32, tiles_for_bbox, Bounds, Tile};
 use tessera_store::manifest::{
     CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
     SegmentDescriptor, SegmentsManifest, SliceDescriptor,
@@ -33,8 +33,8 @@ fn synthetic_tessera_id(seed: u64) -> TesseraId {
     TesseraId::new(z)
 }
 
-fn unit_extent() -> Extent {
-    Extent {
+fn unit_extent() -> Bounds {
+    Bounds {
         x_min: 0.0,
         x_max: 1.0,
         y_min: 0.0,
@@ -122,7 +122,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         }],
         deltas: vec![],
         dict_extents: vec![],
-        external_id_extents: vec![],
+        external_id_runs: vec![],
         locator_extents: vec![],
         tombstones: vec![],
         deny: vec![],

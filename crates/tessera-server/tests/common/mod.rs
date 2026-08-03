@@ -27,7 +27,7 @@ use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
 use tessera_server::state::{AppState, ComputeGate, IngestAdmission, SessionRegistry};
-use tessera_spatial::Extent;
+use tessera_spatial::Bounds;
 use tessera_types::IdentityKey;
 
 pub const N_ITEMS: u64 = 1_000;
@@ -46,8 +46,8 @@ pub fn test_key() -> IdentityKey {
     IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
 }
 
-pub fn extent() -> Extent {
-    Extent {
+pub fn extent() -> Bounds {
+    Bounds {
         x_min: 0.0,
         x_max: 1000.0,
         y_min: 0.0,

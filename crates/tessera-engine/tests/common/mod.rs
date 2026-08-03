@@ -25,7 +25,7 @@ use parquet::arrow::ArrowWriter;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{default_compute_threads, Engine, EngineConfig};
 use tessera_plugin::Passthrough;
-use tessera_spatial::Extent;
+use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::IdentityKey;
 
@@ -43,8 +43,8 @@ pub fn test_key() -> IdentityKey {
     IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
 }
 
-pub fn extent() -> Extent {
-    Extent {
+pub fn extent() -> Bounds {
+    Bounds {
         x_min: 0.0,
         x_max: 1000.0,
         y_min: 0.0,
@@ -192,7 +192,7 @@ pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64>
     let part = &bundle.partitions["default"];
     let ext_path = bundle_root
         .join(prefix)
-        .join(&part.manifest.external_id_extents[0]);
+        .join(&part.manifest.external_id_runs[0]);
     let file = File::open(&ext_path).unwrap();
     let reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
     let mut map = BTreeMap::new();

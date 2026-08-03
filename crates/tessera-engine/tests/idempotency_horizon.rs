@@ -130,7 +130,7 @@ fn a_flushed_item_answers_items_after_rotation_and_a_restart() {
 /// failure this guards is the worst one the write path documents: a byte-identical copy of a
 /// document that no external id names, so no deny can ever reach it.
 /// **⊘ Blocked on a contract question, not on an implementation gap.** Contracts §2.4 requires
-/// external-id extents to partition **one** ascending order — `scan_bounds` refuses a set that does
+/// external-id extents to partition **one** ascending order — `scan_run_keys` refuses a set that does
 /// not, and the reader's "open the one extent a key falls in" protocol depends on it. A flush
 /// appends keys in whatever order callers supplied them, so its extent cannot honour that against
 /// the build's. See this file's module doc and the handover; the resolution is an owner's.

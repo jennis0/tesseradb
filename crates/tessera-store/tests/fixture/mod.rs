@@ -110,7 +110,7 @@ pub fn build_bundle(root: &Path, n: u64) {
         }],
         deltas: vec![],
         dict_extents: vec![],
-        external_id_extents: vec![],
+        external_id_runs: vec![],
         locator_extents: vec![],
         tombstones: vec![],
         deny: vec![],

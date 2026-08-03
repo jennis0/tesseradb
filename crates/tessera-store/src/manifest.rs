@@ -245,7 +245,7 @@ pub struct DictExtent {
 ///
 /// The file is a dense `u32` array over `[entity_lo, entity_hi]`, no header, `0xFFFFFFFF` for an
 /// entity with no caller-supplied external id (contracts §3.4 r6 makes it optional). Each slot is
-/// an **ordinal into `external_id_extent`**, named here rather than inferred, because a segment's
+/// an **ordinal into `external_id_run`**, named here rather than inferred, because a segment's
 /// extent is its own file and the concatenation order that gives the base locator its meaning does
 /// not extend across flushes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,8 +254,8 @@ pub struct LocatorExtent {
     pub entity_lo: u64,
     /// Inclusive.
     pub entity_hi: u64,
-    /// Prefix-relative path of the `external_id_extents` entry these ordinals index.
-    pub external_id_extent: String,
+    /// Prefix-relative path of the `external_id_runs` entry these ordinals index.
+    pub external_id_run: String,
 }
 
 /// `SEGMENTS-<n>.json` (contracts §2.3): complete current state for one partition, written by
@@ -271,7 +271,7 @@ pub struct SegmentsManifest {
     #[serde(default)]
     pub dict_extents: Vec<DictExtent>,
     #[serde(default)]
-    pub external_id_extents: Vec<String>,
+    pub external_id_runs: Vec<String>,
     /// The reverse external-id direction for each flush segment — see [`LocatorExtent`]. Empty in
     /// a bundle straight out of `tessera build`, whose one `ext-locator.u32` covers every entity
     /// it knows about.
@@ -467,7 +467,7 @@ mod tests {
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),
-            external_id_extents: Vec::new(),
+            external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: Vec::new(),
             deny: Vec::new(),

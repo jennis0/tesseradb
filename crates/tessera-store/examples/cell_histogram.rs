@@ -49,7 +49,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use serde_json::json;
-use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Extent};
+use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds};
 use tessera_store::{open_bundle, tile_ranges_all, SegmentData};
 
 /// Ceiling on tiles a region request may resolve. `tiles_for_bbox` at depth 16 over the full
@@ -196,7 +196,7 @@ fn analyse_region(
     seg: &SegmentData,
     region: &RegionArgs,
 ) -> Result<serde_json::Value, String> {
-    let extent = Extent {
+    let extent = Bounds {
         x_min: quantisation.x_min,
         x_max: quantisation.x_max,
         y_min: quantisation.y_min,

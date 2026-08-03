@@ -28,7 +28,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
-use tessera_spatial::{fixed32, Extent};
+use tessera_spatial::{fixed32, Bounds};
 
 use crate::error::{BuildError, Result};
 
@@ -60,7 +60,7 @@ pub struct PointRow {
 
 /// The only extent under which the Morton input branch is meaningful: the grid's own
 /// coordinates, `[0, 65536)` on both axes (contracts §2.5 — the grid is 2^16 x 2^16).
-pub const IDENTITY_EXTENT: Extent = Extent {
+pub const IDENTITY_EXTENT: Bounds = Bounds {
     x_min: 0.0,
     x_max: 65536.0,
     y_min: 0.0,
@@ -84,7 +84,7 @@ pub const IDENTITY_EXTENT: Extent = Extent {
 /// stretching the grid while `MANIFEST.json` went on declaring the extent the caller passed — a
 /// bundle whose geometry and whose declared quantisation disagree. A corpus with real coordinates
 /// ships `x`/`y` and takes branch 1.
-pub fn read_points(path: &Path, extent: &Extent, limit: Option<u64>) -> Result<Vec<PointRow>> {
+pub fn read_points(path: &Path, extent: &Bounds, limit: Option<u64>) -> Result<Vec<PointRow>> {
     let mut out = Vec::new();
     scan_points(path, extent, limit, |row| {
         out.push(row);
@@ -124,7 +124,7 @@ fn decode_worker_count(row_groups: usize) -> usize {
 /// error does not decode the rest of a multi-gigabyte file first.
 pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     path: &Path,
-    extent: &Extent,
+    extent: &Bounds,
     limit: Option<u64>,
     mut visit: F,
 ) -> Result<()> {

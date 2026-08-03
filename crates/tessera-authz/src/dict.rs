@@ -238,7 +238,7 @@ impl Dict {
         let extension = Dict::load(paths)?;
         let mut lookup_map = self.lookup_map.clone();
         let mut len = self.len;
-        // Extent order is ordinal order, so walk it in that order rather than iterating the
+        // Bounds order is ordinal order, so walk it in that order rather than iterating the
         // extension's own (unordered) map, or the ids assigned here would depend on hash order.
         let mut by_ordinal: Vec<(&Box<[u8]>, TermId)> = extension
             .lookup_map

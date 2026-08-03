@@ -28,7 +28,7 @@ use tessera_engine::{
 };
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
 use tessera_plugin::Passthrough;
-use tessera_spatial::{morton_of, tiles_for_bbox, Extent};
+use tessera_spatial::{morton_of, tiles_for_bbox, Bounds};
 use tessera_store::read::open_bundle;
 use tessera_store::StoreError;
 use tessera_types::EntityId;
@@ -949,7 +949,7 @@ fn a_sidecar_error_on_drill_down_is_an_error_not_a_missing_external_id() {
     // resolves the visible entity's external id.
     let bundle = open_bundle(&bundle_root).unwrap();
     let part = &bundle.partitions["default"];
-    let ext_rel = &part.manifest.external_id_extents[0];
+    let ext_rel = &part.manifest.external_id_runs[0];
     let ext_path = bundle_root.join("v00000").join(ext_rel);
     drop(bundle);
     let mut bytes = std::fs::read(&ext_path).unwrap();
@@ -1111,7 +1111,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             out: bundle_root.clone(),
             // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes, not
             // coordinates (`read_points`'s Morton branch requires this exact extent).
-            extent: Extent {
+            extent: Bounds {
                 x_min: 0.0,
                 x_max: 65536.0,
                 y_min: 0.0,

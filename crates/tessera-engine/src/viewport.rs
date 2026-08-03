@@ -43,7 +43,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use tessera_authz::FrozenFragment;
-use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Extent, Tile};
+use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::{tile_ranges_all, tile_ranges_within};
@@ -650,7 +650,7 @@ impl Engine {
         probe.lap(|t| &mut t.compose_ns);
 
         let q = &generation.bundle.manifest.quantisation;
-        let extent = Extent {
+        let extent = Bounds {
             x_min: q.x_min,
             x_max: q.x_max,
             y_min: q.y_min,

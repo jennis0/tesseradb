@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use tessera_spatial::Extent;
+use tessera_spatial::Bounds;
 use tessera_store::manifest::identity_key_fingerprint;
 use tessera_types::{IdentityKey, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
@@ -33,7 +33,7 @@ enum Command {
         out: PathBuf,
         /// Quantisation extent as `x_min,x_max,y_min,y_max` (contracts §2.5).
         #[arg(long, value_parser = parse_extent)]
-        extent: Extent,
+        extent: Bounds,
         /// Slice identifier for this build's segment.
         #[arg(long = "slice")]
         slice_id: String,
@@ -116,7 +116,7 @@ enum Command {
     },
 }
 
-fn parse_extent(raw: &str) -> Result<Extent, String> {
+fn parse_extent(raw: &str) -> Result<Bounds, String> {
     let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
     if parts.len() != 4 {
         return Err(format!(
@@ -129,7 +129,7 @@ fn parse_extent(raw: &str) -> Result<Extent, String> {
             .parse::<f64>()
             .map_err(|e| format!("'{text}' is not a number: {e}"))?;
     }
-    let extent = Extent {
+    let extent = Bounds {
         x_min: values[0],
         x_max: values[1],
         y_min: values[2],

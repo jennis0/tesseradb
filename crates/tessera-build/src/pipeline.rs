@@ -137,7 +137,7 @@ use crate::input;
 use crate::observer::{BuildObserver, BuildStage, StageTimer};
 use crate::spill;
 use crate::{
-    fsync_file, validate_args, write_ext_locator, write_external_id_extents, write_manifests,
+    fsync_file, validate_args, write_ext_locator, write_external_id_runs, write_manifests,
     BuildArgs, BuildReport, BundleFiles, ExternalIdRow, PairsParquetWriter,
     EXTERNAL_ID_ROWS_PER_EXTENT, PHASH, PREFIX, SEG_ID,
 };
@@ -1051,7 +1051,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         // output under the parallel unstable sort.
         external.par_sort_unstable_by_key(ExternalIdRow::sort_key);
         external_ids_paths =
-            write_external_id_extents(&entities_dir, &external, EXTERNAL_ID_ROWS_PER_EXTENT)?;
+            write_external_id_runs(&entities_dir, &external, EXTERNAL_ID_ROWS_PER_EXTENT)?;
         // `external` is still in the concatenated extent order at this point (the extents
         // partition it into consecutive ranges, in order) — its index *is* each row's ordinal,
         // which is exactly what the locator addresses (contracts §2.4/§2.6 r6).

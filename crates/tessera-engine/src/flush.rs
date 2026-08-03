@@ -257,7 +257,7 @@ pub(crate) fn execute_flush(
     manifest.entity_id_high_water = manifest.entity_id_high_water.max(out.entity_id_high_water);
     manifest.segments.push(out.segment.clone());
     manifest.deltas.push(ctx.next_n);
-    manifest.external_id_extents.push(out.external_id_extent);
+    manifest.external_id_runs.push(out.external_id_run);
     manifest.locator_extents.push(out.locator_extent);
     manifest.files.extend(out.files);
     manifest

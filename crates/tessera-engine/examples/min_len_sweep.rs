@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
-use tessera_spatial::{tiles_for_bbox, Extent};
+use tessera_spatial::{tiles_for_bbox, Bounds};
 use tessera_store::{open_bundle, tile_ranges_all, Bundle};
 
 const REPS: usize = 60;
@@ -73,7 +73,7 @@ fn random_grant(all: &[String], w: usize, seed: u64) -> Vec<String> {
 /// See `calibration_sweep::true_rows_in_ranges`'s doc — same fix, same reasoning.
 fn true_rows_in_ranges(bundle: &Bundle, slice: &str, zoom: u8, bbox: [f64; 4]) -> (u64, u64) {
     let q = bundle.manifest.quantisation;
-    let extent = Extent {
+    let extent = Bounds {
         x_min: q.x_min,
         x_max: q.x_max,
         y_min: q.y_min,

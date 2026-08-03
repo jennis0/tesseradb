@@ -7,14 +7,14 @@ use tessera_types::MortonCode;
 
 /// The spatial extent (bounding box) used to quantise `(x, y)` coordinates into cells.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Extent {
+pub struct Bounds {
     pub x_min: f64,
     pub x_max: f64,
     pub y_min: f64,
     pub y_max: f64,
 }
 
-impl Extent {
+impl Bounds {
     /// Reject degenerate/non-finite extents. `cell`/`morton_of`/`tiles_for_bbox` are defined
     /// only over a valid extent (all four bounds finite, both axes non-empty) — a `min == max`
     /// or infinite bound would make `cell`'s division produce NaN/±inf silently, diverging from
@@ -25,13 +25,13 @@ impl Extent {
             && self.y_min.is_finite()
             && self.y_max.is_finite())
         {
-            return Err("Extent bounds must be finite".to_string());
+            return Err("Bounds bounds must be finite".to_string());
         }
         if self.x_max <= self.x_min {
-            return Err("Extent requires x_max > x_min".to_string());
+            return Err("Bounds requires x_max > x_min".to_string());
         }
         if self.y_max <= self.y_min {
-            return Err("Extent requires y_max > y_min".to_string());
+            return Err("Bounds requires y_max > y_min".to_string());
         }
         Ok(())
     }
@@ -43,9 +43,9 @@ impl Extent {
 /// Cells are half-open; `v = max` lands in cell 65535 (contracts §2.5).
 ///
 /// Behaviour is defined only for finite `v` over a valid extent (`min < max`, both finite) —
-/// callers that quantise against user-controlled bounds must validate the [`Extent`] first via
-/// [`Extent::validate`]. This function only asserts in debug builds; it does not itself reject
-/// degenerate input, since it takes bare `min`/`max` rather than an `Extent`.
+/// callers that quantise against user-controlled bounds must validate the [`Bounds`] first via
+/// [`Bounds::validate`]. This function only asserts in debug builds; it does not itself reject
+/// degenerate input, since it takes bare `min`/`max` rather than an `Bounds`.
 pub fn cell(v: f64, min: f64, max: f64) -> u16 {
     debug_assert!(v.is_finite(), "cell(): v must be finite, got {v}");
     debug_assert!(
@@ -133,7 +133,7 @@ pub fn interleave(x_cell: u16, y_cell: u16) -> MortonCode {
 }
 
 /// Quantise `(x, y)` against `extent` and interleave into a Morton code.
-pub fn morton_of(x: f64, y: f64, e: &Extent) -> MortonCode {
+pub fn morton_of(x: f64, y: f64, e: &Bounds) -> MortonCode {
     debug_assert!(e.validate().is_ok(), "morton_of(): invalid extent {e:?}");
     let xc = cell(x, e.x_min, e.x_max);
     let yc = cell(y, e.y_min, e.y_max);
@@ -201,7 +201,7 @@ impl Tile {
 /// each `(tx, ty)` is the interleave of the *d-bit* tile coordinates, spread over `2d` bits
 /// ([`interleave_bits`]) — not the 16-bit [`interleave`] applied to shifted inputs, which would
 /// spread over the wrong number of bits. Depth 0 yields a single tile (prefix 0, whole grid).
-pub fn tiles_for_bbox(bbox: [f64; 4], depth: u8, e: &Extent) -> Vec<Tile> {
+pub fn tiles_for_bbox(bbox: [f64; 4], depth: u8, e: &Bounds) -> Vec<Tile> {
     debug_assert!(
         depth <= 16,
         "tiles_for_bbox(): depth {depth} exceeds grid depth 16"
@@ -229,7 +229,7 @@ pub fn tiles_for_bbox(bbox: [f64; 4], depth: u8, e: &Extent) -> Vec<Tile> {
 }
 
 /// The inclusive tile-coordinate corners `bbox` spans at `depth`.
-fn tile_corners(bbox: [f64; 4], depth: u8, e: &Extent) -> (u16, u16, u16, u16) {
+fn tile_corners(bbox: [f64; 4], depth: u8, e: &Bounds) -> (u16, u16, u16, u16) {
     let [x0, y0, x1, y1] = bbox;
     let shift = 16 - depth as u32;
     let cx0 = cell(x0, e.x_min, e.x_max) >> shift;
@@ -247,7 +247,7 @@ fn tile_corners(bbox: [f64; 4], depth: u8, e: &Extent) -> (u16, u16, u16, u16) {
 /// than a slow request. Returning `u64` rather than `usize` is deliberate: the point is to compare
 /// against a budget, and a caller must be able to see the real magnitude rather than a value that
 /// has already been truncated or has already exhausted the allocator.
-pub fn tiles_for_bbox_count(bbox: [f64; 4], depth: u8, e: &Extent) -> u64 {
+pub fn tiles_for_bbox_count(bbox: [f64; 4], depth: u8, e: &Bounds) -> u64 {
     if depth == 0 {
         return 1;
     }
@@ -321,7 +321,7 @@ mod tests {
     /// adding a residual leaves every existing Morton code byte-identical.
     #[test]
     fn split32_cell_half_agrees_with_morton_of() {
-        let e = Extent {
+        let e = Bounds {
             x_min: -3.0,
             x_max: 11.0,
             y_min: 0.25,
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn tiles_for_bbox_at_max_depth_pinpoints_single_cell() {
-        let e = Extent {
+        let e = Bounds {
             x_min: 0.0,
             x_max: 1.0,
             y_min: 0.0,

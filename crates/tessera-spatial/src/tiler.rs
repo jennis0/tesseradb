@@ -109,10 +109,10 @@ pub fn sort_batch(items: &mut Vec<TilerItem>, entity_ids: &mut Vec<EntityId>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::morton::{morton_of, Extent};
+    use crate::morton::{morton_of, Bounds};
 
-    fn unit_extent() -> Extent {
-        Extent {
+    fn unit_extent() -> Bounds {
+        Bounds {
             x_min: 0.0,
             x_max: 1.0,
             y_min: 0.0,

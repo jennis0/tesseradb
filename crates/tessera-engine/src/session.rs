@@ -1408,7 +1408,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 /// Resolve an external id to an [`EntityId`] via `tessera_store::ExternalIdSidecar` — a thin
 /// newtype-free wrapper so callers in this crate keep using `EntityId` rather than the bare
-/// `tessera_types`-free type the store crate returns, and so no `ExtentDesc`, digest, ordinal or
+/// `tessera_types`-free type the store crate returns, and so no `RunDesc`, digest, ordinal or
 /// file path from the sidecar's own bookkeeping is ever named in this crate (Ruling B).
 ///
 /// The sidecar is per-extent lazy: nothing is opened, mapped or digested until the

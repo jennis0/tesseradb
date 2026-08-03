@@ -20,7 +20,7 @@ use tessera_authz::PostingsReader;
 use tessera_engine::compose::RowProjection;
 use tessera_engine::{compose, EffectiveMask};
 use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_spatial::{tiles_for_bbox, Extent};
+use tessera_spatial::{tiles_for_bbox, Bounds};
 use tessera_store::read::open_bundle;
 use tessera_store::tile_ranges_all;
 
@@ -47,7 +47,7 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
         };
 
         let q = &bundle.manifest.quantisation;
-        let extent = Extent {
+        let extent = Bounds {
             x_min: q.x_min,
             x_max: q.x_max,
             y_min: q.y_min,

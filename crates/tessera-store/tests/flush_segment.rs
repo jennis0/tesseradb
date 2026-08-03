@@ -122,7 +122,7 @@ fn a_flushed_entity_resolves_in_both_external_id_directions() {
     // refused there rather than silently resolving to the wrong entity here.
     let bundle = open_bundle(dir.path()).unwrap();
     let mut manifest = bundle.partitions[PARTITION].manifest.clone();
-    manifest.external_id_extents = vec![out.external_id_extent.clone()];
+    manifest.external_id_runs = vec![out.external_id_run.clone()];
     manifest.files.extend(out.files.clone());
     let sidecar =
         ExternalIdSidecar::deferred_from_manifest(&bundle.manifest, &manifest, &prefix).unwrap();
@@ -144,8 +144,8 @@ fn a_flushed_entity_resolves_in_both_external_id_directions() {
     assert_eq!(out.locator_extent.entity_lo, 50);
     assert_eq!(out.locator_extent.entity_hi, 52);
     assert_eq!(
-        out.locator_extent.external_id_extent,
-        out.external_id_extent
+        out.locator_extent.external_id_run,
+        out.external_id_run
     );
 
     // "alpha" sorts before "zeta", so entity 52 is ordinal 0 and entity 50 is ordinal 1.

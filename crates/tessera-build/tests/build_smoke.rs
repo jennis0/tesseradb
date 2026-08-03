@@ -18,7 +18,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 
 use tessera_build::{build, signature_sort_key, BuildArgs};
-use tessera_spatial::Extent;
+use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{IdentityKey, TermId};
 
@@ -32,8 +32,8 @@ fn test_key() -> IdentityKey {
 const N_ITEMS: u64 = 250;
 const N_TERMS: u64 = 17;
 
-fn extent() -> Extent {
-    Extent {
+fn extent() -> Bounds {
+    Bounds {
         x_min: 0.0,
         x_max: 1000.0,
         y_min: 0.0,
@@ -232,7 +232,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         part.manifest.dict_extents[0].path,
         "dictionary/terms-0.dict"
     );
-    assert_eq!(part.manifest.external_id_extents.len(), 1);
+    assert_eq!(part.manifest.external_id_runs.len(), 1);
 
     // Contracts §2.2/§2.3: `MANIFEST.files` covers every file present at build time;
     // `SEGMENTS-<n>.files` covers only what was added *since* — which at build is nothing.
@@ -270,7 +270,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     let pdir = partition_dir(&out, prefix);
 
     // ---- (f) external-ids extent: source id (8-byte LE) -> new entity id ------------------
-    let ext_path = out.join(prefix).join(&part.manifest.external_id_extents[0]);
+    let ext_path = out.join(prefix).join(&part.manifest.external_id_runs[0]);
     let ext_batches = read_arrow_ipc(&ext_path);
     let mut source_to_new: BTreeMap<u64, u64> = BTreeMap::new();
     let mut prev_key: Option<Vec<u8>> = None;
@@ -558,7 +558,7 @@ fn morton_input_requires_the_identity_extent() {
         "the error must name the extent required, got: {err}"
     );
     // A near-miss on one bound is still a miss.
-    assert!(build(&args(Extent {
+    assert!(build(&args(Bounds {
         x_min: 0.0,
         x_max: 65536.0,
         y_min: 0.0,
@@ -567,7 +567,7 @@ fn morton_input_requires_the_identity_extent() {
     .is_err());
 
     // The identity extent builds, and the bundle's Morton codes are the source codes verbatim.
-    let identity = Extent {
+    let identity = Bounds {
         x_min: 0.0,
         x_max: 65536.0,
         y_min: 0.0,

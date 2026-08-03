@@ -43,7 +43,7 @@ use sha2::{Digest, Sha256};
 use tessera_authz::{write_postings, DictWriter};
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_spatial::Extent;
+use tessera_spatial::Bounds;
 use tessera_store::manifest::{
     identity_key_fingerprint, CurrentPointer, DictExtent, FileDigest, IdentityDescriptor, Manifest,
     PartitionDescriptor, Quantisation, SegmentDescriptor, SegmentsManifest, SliceDescriptor,
@@ -75,7 +75,7 @@ pub struct BuildArgs {
     /// Bundle root to create.
     pub out: PathBuf,
     /// The quantisation extent Morton codes are computed against (contracts §2.5).
-    pub extent: Extent,
+    pub extent: Bounds,
     /// The slice this build's segment belongs to.
     pub slice_id: String,
     /// Prefix filter on the *source* entity ID: keep rows with `entity_id < limit`.
@@ -526,9 +526,9 @@ fn write_manifests(
             records: files.dict_records,
         });
     }
-    let mut external_id_extents = Vec::with_capacity(files.external_ids_paths.len());
+    let mut external_id_runs = Vec::with_capacity(files.external_ids_paths.len());
     for path in &files.external_ids_paths {
-        external_id_extents.push(relative_to(&prefix_dir, path)?);
+        external_id_runs.push(relative_to(&prefix_dir, path)?);
     }
     // Digest in parallel, one worker per file: SHA-256 is inherently sequential per file, but
     // the files are independent, and at 10⁹ this stage re-reads ~47 GB. The map is assembled
@@ -561,7 +561,7 @@ fn write_manifests(
         }],
         deltas: Vec::new(),
         dict_extents,
-        external_id_extents,
+        external_id_runs,
         locator_extents: Vec::new(),
         tombstones: Vec::new(),
         deny: Vec::new(),
@@ -869,7 +869,7 @@ fn write_external_ids(
         .map(|(position, item)| ExternalIdRow::new(item.source_id, position as u32))
         .collect();
     rows.sort_unstable_by_key(ExternalIdRow::sort_key);
-    let extent_paths = write_external_id_extents(dir, &rows, EXTERNAL_ID_ROWS_PER_EXTENT)?;
+    let extent_paths = write_external_id_runs(dir, &rows, EXTERNAL_ID_ROWS_PER_EXTENT)?;
     let locator_path = write_ext_locator(dir, &rows, entity_id_high_water)?;
     Ok((extent_paths, locator_path))
 }
@@ -968,7 +968,7 @@ impl ExternalIdRow {
 /// Arrow's `Binary` layout addresses its values buffer with **`i32`** offsets, so an extent of
 /// 8-byte external ids saturates at `i32::MAX / 8` rows — a 10⁹-item bundle cannot be written as
 /// one extent at all. Splitting well below that ceiling and listing every extent in
-/// `external_id_extents` (contracts §2.1 has always made that field a list, and the engine's
+/// `external_id_runs` (contracts §2.1 has always made that field a list, and the engine's
 /// index already loads and re-sorts across extents) is what makes the largest corpus
 /// expressible; at every scale below the split point exactly one extent is written, identical to
 /// what earlier builds wrote.
@@ -981,7 +981,7 @@ pub(crate) const EXTERNAL_ID_ROWS_PER_EXTENT: usize = 100_000_000;
 /// `rows_per_extent` is a parameter rather than a direct use of
 /// [`EXTERNAL_ID_ROWS_PER_EXTENT`] so the splitting boundary is testable without writing a
 /// hundred million rows.
-fn write_external_id_extents(
+fn write_external_id_runs(
     dir: &Path,
     rows: &[ExternalIdRow],
     rows_per_extent: usize,
@@ -990,19 +990,19 @@ fn write_external_id_extents(
     let mut paths = Vec::new();
     for chunk in rows.chunks(rows_per_extent) {
         let path = dir.join(format!("external-ids-{}.arrow", paths.len()));
-        write_external_id_extent(&path, chunk)?;
+        write_external_id_run(&path, chunk)?;
         paths.push(path);
     }
     // `chunks` yields nothing for an empty input, but a bundle always names at least one extent.
     if paths.is_empty() {
         let path = dir.join("external-ids-0.arrow");
-        write_external_id_extent(&path, &[])?;
+        write_external_id_run(&path, &[])?;
         paths.push(path);
     }
     Ok(paths)
 }
 
-fn write_external_id_extent(path: &Path, rows: &[ExternalIdRow]) -> Result<()> {
+fn write_external_id_run(path: &Path, rows: &[ExternalIdRow]) -> Result<()> {
     let schema = std::sync::Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("entity_id", DataType::UInt32, false), // r6, D8: was UInt64
@@ -1130,7 +1130,7 @@ mod tests {
             points: PathBuf::from("points.parquet"),
             pairs: PathBuf::from("pairs.parquet"),
             out: PathBuf::from("out"),
-            extent: Extent {
+            extent: Bounds {
                 x_min: 0.0,
                 x_max: 1.0,
                 y_min: 0.0,
@@ -1181,7 +1181,7 @@ mod tests {
         for rows_per_extent in [1usize, 2, 3, 6, 7, 8, 100] {
             let dir = temp.path().join(format!("split-{rows_per_extent}"));
             fs::create_dir_all(&dir).unwrap();
-            let paths = write_external_id_extents(&dir, &rows, rows_per_extent).unwrap();
+            let paths = write_external_id_runs(&dir, &rows, rows_per_extent).unwrap();
             assert_eq!(
                 paths.len(),
                 rows.len().div_ceil(rows_per_extent),
@@ -1233,7 +1233,7 @@ mod tests {
     #[test]
     fn an_empty_external_id_relation_still_names_one_extent() {
         let temp = tempfile::TempDir::new().unwrap();
-        let paths = write_external_id_extents(temp.path(), &[], 4).unwrap();
+        let paths = write_external_id_runs(temp.path(), &[], 4).unwrap();
         assert_eq!(paths.len(), 1);
         assert!(paths[0].exists());
     }

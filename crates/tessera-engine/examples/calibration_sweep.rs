@@ -48,7 +48,7 @@ use rand::{Rng, SeedableRng};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
-use tessera_spatial::{tiles_for_bbox, Extent};
+use tessera_spatial::{tiles_for_bbox, Bounds};
 use tessera_store::{open_bundle, tile_ranges_all, Bundle};
 
 const REPS: usize = 40;
@@ -59,7 +59,7 @@ const REPS: usize = 40;
 /// bundle opened directly, no session or mask involved at any point.
 fn true_rows_in_ranges(bundle: &Bundle, slice: &str, zoom: u8, bbox: [f64; 4]) -> (u64, u64) {
     let q = bundle.manifest.quantisation;
-    let extent = Extent {
+    let extent = Bounds {
         x_min: q.x_min,
         x_max: q.x_max,
         y_min: q.y_min,

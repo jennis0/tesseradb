@@ -27,7 +27,7 @@ use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
-use tessera_spatial::Extent;
+use tessera_spatial::Bounds;
 use tessera_types::IdentityKey;
 
 const ITEM_LIMIT: u64 = 2_422_486;
@@ -38,8 +38,8 @@ const ZOOM: u8 = 8;
 /// reason).
 const REPS: usize = 300;
 
-fn extent() -> Extent {
-    Extent {
+fn extent() -> Bounds {
+    Bounds {
         x_min: 0.0,
         x_max: 65536.0,
         y_min: 0.0,

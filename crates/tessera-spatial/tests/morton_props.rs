@@ -1,7 +1,7 @@
 //! Property tests for Morton interleaving and tile enumeration (contracts §2.5).
 
 use proptest::prelude::*;
-use tessera_spatial::{interleave, tiles_for_bbox, Extent, Tile};
+use tessera_spatial::{interleave, tiles_for_bbox, Bounds, Tile};
 
 /// Inverse of `interleave`: split a 32-bit Morton code back into its (x, y) 16-bit cells.
 /// Bit `2*i` of the code is bit `i` of x; bit `2*i+1` of the code is bit `i` of y.
@@ -17,8 +17,8 @@ fn deinterleave(code: u32) -> (u16, u16) {
     (compact(code), compact(code >> 1))
 }
 
-fn full_extent() -> Extent {
-    Extent {
+fn full_extent() -> Bounds {
+    Bounds {
         x_min: 0.0,
         x_max: 1.0,
         y_min: 0.0,

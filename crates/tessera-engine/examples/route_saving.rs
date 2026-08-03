@@ -37,13 +37,13 @@ use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
 use tessera_engine::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
 use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_spatial::{fixed32, tiler::sort_batch, Extent, TilerItem};
+use tessera_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{Permutation, RowSpace};
 use tessera_types::{EntityId, TermId, TesseraId};
 
-const EXTENT: Extent = Extent {
+const EXTENT: Bounds = Bounds {
     x_min: 0.0,
     x_max: 1024.0,
     y_min: 0.0,

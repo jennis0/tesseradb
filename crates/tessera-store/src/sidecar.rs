@@ -13,7 +13,7 @@
 //!
 //! **One identity, supplied or derived.** This is a *translation table* between two
 //! representations of one identity, not a store of identities: an item whose caller supplied no
-//! key has its `tessera_id` as its identifier, occupies no extent row, and carries a
+//! key has its `tessera_id` as its identifier, occupies no run row, and carries a
 //! `0xFFFFFFFF` locator slot — the ordinary case, not a missing value. Never manufacture an
 //! external ID for an item that has none.
 //!
@@ -24,15 +24,15 @@
 //! and touches no file at all.
 //!
 //! Nothing is mapped, scanned or verified until the first resolution, and then only the one
-//! extent the key falls in. At 10⁹ the previous eager mmap-and-linear-scan put 18.9 GB into the
+//! run the key falls in. At 10⁹ the previous eager mmap-and-linear-scan put 18.9 GB into the
 //! resident set at `Engine::open` for a structure the per-viewport path never touches; a single
 //! lock over the whole family would have restored most of that on the first click — laziness is
-//! per **extent**, tracked by each extent's own [`OnceLock`], not one lock over the family.
+//! per **run**, tracked by each run's own [`OnceLock`], not one lock over the family.
 //!
-//! Integrity does *not* relax. A corrupted mapping suppresses the wrong item, so an extent's
+//! Integrity does *not* relax. A corrupted mapping suppresses the wrong item, so a run's
 //! digest **and its sortedness** are both verified before any answer comes out of it — a digest
 //! proves the file is the one MANIFEST named, sortedness proves the binary search returns the
-//! right answer, and a build bug emitting an out-of-order extent produces a correctly-digested
+//! right answer, and a build bug emitting an out-of-order run produces a correctly-digested
 //! file. Every failure is a typed error ([`StoreError::InvalidSidecar`]), never a `None` that
 //! would read as "unknown external ID".
 //!
@@ -67,22 +67,22 @@ use crate::read::decode_single_batch;
 /// never a missing-data marker.
 const LOCATOR_NONE: u32 = 0xFFFF_FFFF;
 
-/// One peeked extent's bounds: `(first_key, last_key, row_count)`.
+/// One peeked run's bounds: `(first_key, last_key, row_count)`.
 type ExtentBounds = (Vec<u8>, Vec<u8>, usize);
 
-/// One `external-ids-<n>.arrow` extent's identity: its path and the digest a well-formed bundle
+/// One `external-ids-<n>.arrow` run's identity: its path and the digest a well-formed bundle
 /// records for it in a manifest's `files` map. **Internal to this module** — see the module doc
 /// for why this must never leak into `tessera-engine` or `tessera-server`.
 #[derive(Debug, Clone)]
-struct ExtentDesc {
+struct RunDesc {
     path: PathBuf,
     /// Lowercase hex SHA-256, matching [`crate::manifest::FileDigest::sha256`].
     digest: String,
 }
 
-impl ExtentDesc {
+impl RunDesc {
     fn new(path: impl Into<PathBuf>, digest: impl Into<String>) -> Self {
-        ExtentDesc {
+        RunDesc {
             path: path.into(),
             digest: digest.into(),
         }
@@ -90,7 +90,7 @@ impl ExtentDesc {
 }
 
 /// The `entities/ext-locator.u32` file's identity plus its declared length (contracts §2.4 r6:
-/// "length `entity_id_high_water` at build"). Internal, same reasoning as [`ExtentDesc`].
+/// "length `entity_id_high_water` at build"). Internal, same reasoning as [`RunDesc`].
 #[derive(Debug, Clone)]
 struct LocatorDesc {
     path: PathBuf,
@@ -99,7 +99,7 @@ struct LocatorDesc {
     len: u64,
 }
 
-/// A digest-and-sortedness-verified extent, held zero-copy over its mmap (identical technique to
+/// A digest-and-sortedness-verified run, held zero-copy over its mmap (identical technique to
 /// `crate::read::ColumnsRef` — see that type's doc).
 struct ValidatedExtent {
     batch: RecordBatch,
@@ -160,19 +160,19 @@ fn binary_search_by(
     Err(lo)
 }
 
-/// One extent's lazily-opened, per-extent state (Critical C-6). `cell` is populated on first
-/// use and never again — a corrupt extent stays corrupt (typed error, cached as a message rather
+/// One run's lazily-opened, per-run state (Critical C-6). `cell` is populated on first
+/// use and never again — a corrupt run stays corrupt (typed error, cached as a message rather
 /// than a live `StoreError` so this struct needs no `Clone` impl on `StoreError`'s I/O variant),
 /// a valid one stays valid (the bundle contract makes every named file immutable once
 /// published).
-struct ExtentSlot {
-    desc: ExtentDesc,
+struct RunSlot {
+    desc: RunDesc,
     cell: OnceLock<std::result::Result<ValidatedExtent, String>>,
 }
 
-impl ExtentSlot {
-    fn new(desc: ExtentDesc) -> Self {
-        ExtentSlot {
+impl RunSlot {
+    fn new(desc: RunDesc) -> Self {
+        RunSlot {
             desc,
             cell: OnceLock::new(),
         }
@@ -198,7 +198,7 @@ impl ExtentSlot {
     }
 }
 
-fn load_validated(desc: &ExtentDesc) -> std::result::Result<ValidatedExtent, String> {
+fn load_validated(desc: &RunDesc) -> std::result::Result<ValidatedExtent, String> {
     let file = File::open(&desc.path).map_err(|e| format!("io error: {e}"))?;
     // SAFETY: identical justification to `ColumnsRef::load`'s mmap branch — `arc` outlives every
     // `Buffer` built from it, the mapping is valid for `len` bytes for its whole lifetime, and
@@ -259,7 +259,7 @@ fn validate_schema(batch: &RecordBatch) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// R4 guarantees each extent is individually sorted ascending by external-id bytes. This is
+/// R4 guarantees each run is individually sorted ascending by external-id bytes. This is
 /// authorisation-bearing (a mis-resolved external id in `/control/changes` denies the wrong
 /// entity and leaves the intended target visible), so it fails closed rather than trust the
 /// digest to have implied it — **it does not** (Critical C-1).
@@ -289,12 +289,12 @@ fn hex_digest(digest: &[u8]) -> String {
     out
 }
 
-/// A cheap, unvalidated peek at one extent's bounds: first key, last key, row count. Reads the
+/// A cheap, unvalidated peek at one run's bounds: first key, last key, row count. Reads the
 /// Arrow IPC footer and the two boundary values only — **no digest, no sortedness scan, no
-/// caching** (Ruling B: nothing clever). Used purely to select which single extent a lookup
-/// falls in and to validate the extent *list's* ordering (Critical C-6/point 4); the extent
-/// actually resolved into is always separately, fully validated by [`ExtentSlot::get_or_load`]
-/// before an answer is returned. `Ok(None)` means the extent has zero rows.
+/// caching** (Ruling B: nothing clever). Used purely to select which single run a lookup
+/// falls in and to validate the run *list's* ordering (Critical C-6/point 4); the run
+/// actually resolved into is always separately, fully validated by [`RunSlot::get_or_load`]
+/// before an answer is returned. `Ok(None)` means the run has zero rows.
 fn peek_bounds(path: &Path) -> Result<Option<ExtentBounds>> {
     let peek = || -> std::result::Result<Option<ExtentBounds>, String> {
         let file = File::open(path).map_err(|e| format!("io error: {e}"))?;
@@ -327,17 +327,17 @@ fn peek_bounds(path: &Path) -> Result<Option<ExtentBounds>> {
     })
 }
 
-/// One extent's peeked bounds (or `None` if empty), paired with its resident, digest-verified
+/// One run's peeked bounds (or `None` if empty), paired with its resident, digest-verified
 /// full open on demand.
-struct BoundsScan {
-    /// Per-extent: `Some((first_key, last_key, row_count))`, or `None` if that extent is empty.
+struct RunKeyScan {
+    /// Per-run: `Some((first_key, last_key, row_count))`, or `None` if that run is empty.
     bounds: Vec<Option<ExtentBounds>>,
 }
 
-/// Peek every extent's bounds, in order, validating that non-empty extents partition one
-/// ascending order across the whole family (Critical: cross-extent ordering must be validated,
+/// Peek every run's bounds, in order, validating that non-empty runs partition one
+/// ascending order across the whole family (Critical: cross-run ordering must be validated,
 /// not assumed — point 4). Fresh on every call: no cache (Ruling B).
-fn scan_bounds(descs: &[ExtentDesc]) -> Result<BoundsScan> {
+fn scan_run_keys(descs: &[RunDesc]) -> Result<RunKeyScan> {
     let mut bounds = Vec::with_capacity(descs.len());
     let mut prev_non_empty: Option<(usize, Vec<u8>)> = None;
     for (idx, desc) in descs.iter().enumerate() {
@@ -348,8 +348,8 @@ fn scan_bounds(descs: &[ExtentDesc]) -> Result<BoundsScan> {
                     return Err(StoreError::InvalidSidecar {
                         path: desc.path.clone(),
                         detail: format!(
-                            "extent {prev_idx}'s last key is not strictly less than extent \
-                             {idx}'s first key — extents must partition one ascending order"
+                            "run {prev_idx}'s last key is not strictly less than run \
+                             {idx}'s first key — runs must partition one ascending order"
                         ),
                     });
                 }
@@ -358,12 +358,12 @@ fn scan_bounds(descs: &[ExtentDesc]) -> Result<BoundsScan> {
         }
         bounds.push(this);
     }
-    Ok(BoundsScan { bounds })
+    Ok(RunKeyScan { bounds })
 }
 
 /// The lazily-opened `entities/ext-locator.u32` sidecar: one raw `u32` array, no header, length
 /// `len` (`entity_id_high_water` at build), `locator[entity_id]` gives that entity's ordinal in
-/// the concatenated sorted external-id extents, or [`LOCATOR_NONE`] if the entity has no
+/// the concatenated sorted external-id runs, or [`LOCATOR_NONE`] if the entity has no
 /// caller-supplied external ID (contracts §2.4 r6).
 struct LocatorSlot {
     desc: LocatorDesc,
@@ -397,7 +397,7 @@ impl LocatorSlot {
         })
     }
 
-    /// This entity's ordinal into the concatenated external-id extents, or `None` if it has no
+    /// This entity's ordinal into the concatenated external-id runs, or `None` if it has no
     /// external ID ([`LOCATOR_NONE`] — the ordinary case, Ruling A). A corrupt or out-of-range
     /// locator is a typed error, never a `None` masquerading as "no external ID".
     fn ordinal_of(&self, entity: EntityId) -> Result<Option<u32>> {
@@ -447,46 +447,46 @@ fn load_locator(desc: &LocatorDesc) -> std::result::Result<Mmap, String> {
 /// `entity → external_id` (via the locator) for `/v1/items` drill-down. See the module doc for
 /// the transitional-placeholder framing and the design invariants this must never regress.
 pub struct ExternalIdSidecar {
-    extents: Vec<ExtentSlot>,
+    runs: Vec<RunSlot>,
     locator: Option<LocatorSlot>,
 }
 
 impl ExternalIdSidecar {
-    /// Build a sidecar over `extents`, none of which are opened, mapped or verified by this call
+    /// Build a sidecar over `runs`, none of which are opened, mapped or verified by this call
     /// (Critical C-6's laziness starts here). No locator — `external_id_of` always returns
-    /// `Ok(None)`. Exposed for this module's own tests; the type held by [`ExtentDesc`] is
-    /// private to this crate, so this constructor cannot be called, and no extent descriptor can
+    /// `Ok(None)`. Exposed for this module's own tests; the type held by [`RunDesc`] is
+    /// private to this crate, so this constructor cannot be called, and no run descriptor can
     /// be named, from `tessera-engine` or `tessera-server`.
-    fn deferred(extents: Vec<ExtentDesc>) -> Self {
+    fn deferred(runs: Vec<RunDesc>) -> Self {
         ExternalIdSidecar {
-            extents: extents.into_iter().map(ExtentSlot::new).collect(),
+            runs: runs.into_iter().map(RunSlot::new).collect(),
             locator: None,
         }
     }
 
-    fn with_locator(extents: Vec<ExtentDesc>, locator: LocatorDesc) -> Self {
+    fn with_locator(runs: Vec<RunDesc>, locator: LocatorDesc) -> Self {
         ExternalIdSidecar {
-            extents: extents.into_iter().map(ExtentSlot::new).collect(),
+            runs: runs.into_iter().map(RunSlot::new).collect(),
             locator: Some(LocatorSlot::new(locator)),
         }
     }
 
     /// The public constructor: build the sidecar directly from the bundle's top-level manifest,
     /// the partition's side-manifest, and the bundle's prefix directory. **This is the only
-    /// thing `Engine::open` calls** — no `ExtentDesc`, digest, ordinal or file path is handed
+    /// thing `Engine::open` calls** — no `RunDesc`, digest, ordinal or file path is handed
     /// back to the caller; replacing the storage behind this sidecar is a change to this file
     /// plus this constructor's call site, nothing else (Ruling B's acceptance test).
     ///
-    /// A deployment whose callers supplied no external IDs writes no extents and no locator at
-    /// all (contracts §2.4 r6) — `external_id_extents` empty is not an error, it degenerates to
+    /// A deployment whose callers supplied no external IDs writes no runs and no locator at
+    /// all (contracts §2.4 r6) — `external_id_runs` empty is not an error, it degenerates to
     /// a sidecar that always answers `Ok(None)` in both directions.
     pub fn deferred_from_manifest(
         bundle_manifest: &Manifest,
         partition_manifest: &SegmentsManifest,
         prefix_dir: &Path,
     ) -> Result<Self> {
-        let mut extents = Vec::with_capacity(partition_manifest.external_id_extents.len());
-        for rel in &partition_manifest.external_id_extents {
+        let mut runs = Vec::with_capacity(partition_manifest.external_id_runs.len());
+        for rel in &partition_manifest.external_id_runs {
             let digest = partition_manifest
                 .files
                 .get(rel)
@@ -494,18 +494,18 @@ impl ExternalIdSidecar {
                 .ok_or_else(|| StoreError::UnverifiedFile {
                     path: prefix_dir.join(rel),
                 })?;
-            extents.push(ExtentDesc::new(prefix_dir.join(rel), digest.sha256.clone()));
+            runs.push(RunDesc::new(prefix_dir.join(rel), digest.sha256.clone()));
         }
 
-        if extents.is_empty() {
-            return Ok(Self::deferred(extents));
+        if runs.is_empty() {
+            return Ok(Self::deferred(runs));
         }
 
         // The locator has no dedicated manifest field (contracts §2.4 r6 gives it a fixed name,
-        // no `<k>` suffix); it always lives alongside the extents in the same `entities/`
+        // no `<k>` suffix); it always lives alongside the runs in the same `entities/`
         // directory, so its prefix-relative path is derived from theirs rather than assumed from
         // a partition hash this constructor deliberately does not need to know.
-        let first_rel = &partition_manifest.external_id_extents[0];
+        let first_rel = &partition_manifest.external_id_runs[0];
         let locator_rel = match first_rel.rsplit_once('/') {
             Some((dir, _)) => format!("{dir}/ext-locator.u32"),
             None => "ext-locator.u32".to_string(),
@@ -523,31 +523,31 @@ impl ExternalIdSidecar {
             len: bundle_manifest.entity_id_high_water,
         };
 
-        Ok(Self::with_locator(extents, locator))
+        Ok(Self::with_locator(runs, locator))
     }
 
-    /// `true` if at least one extent (or the locator) has been opened.
+    /// `true` if at least one run (or the locator) has been opened.
     pub fn is_open(&self) -> bool {
         self.open_extents() > 0 || self.locator.as_ref().is_some_and(|l| l.is_open())
     }
 
-    /// How many extents have been fully opened (mapped, digest- and sortedness-verified) so far
+    /// How many runs have been fully opened (mapped, digest- and sortedness-verified) so far
     /// — the observable behind the residency claim, which is that steady state is *base + one
-    /// extent* rather than the whole family.
+    /// run* rather than the whole family.
     pub fn open_extents(&self) -> usize {
-        self.extents.iter().filter(|e| e.is_open()).count()
+        self.runs.iter().filter(|e| e.is_open()).count()
     }
 
     /// Resolve `external_id` to its entity id, or `Ok(None)` if it names nothing in this
-    /// sidecar. Every failure — corrupt extent, out-of-order extent, mismatched digest, a
-    /// shuffled extent list — is `Err(StoreError::InvalidSidecar)`, never folded into `Ok(None)`
+    /// sidecar. Every failure — corrupt run, out-of-order run, mismatched digest, a
+    /// shuffled run list — is `Err(StoreError::InvalidSidecar)`, never folded into `Ok(None)`
     /// (a fail-closed control-plane caller must not read "corrupt" as "not found").
     pub fn resolve(&self, external_id: &[u8]) -> Result<Option<EntityId>> {
-        if self.extents.is_empty() {
+        if self.runs.is_empty() {
             return Ok(None);
         }
-        let plain: Vec<ExtentDesc> = self.extents.iter().map(|e| e.desc.clone()).collect();
-        let scan = scan_bounds(&plain)?;
+        let plain: Vec<RunDesc> = self.runs.iter().map(|e| e.desc.clone()).collect();
+        let scan = scan_run_keys(&plain)?;
 
         let Some(idx) = scan.bounds.iter().position(|b| {
             b.as_ref()
@@ -556,37 +556,37 @@ impl ExternalIdSidecar {
             return Ok(None);
         };
 
-        let extent = self.extents[idx].get_or_load()?;
-        Ok(extent.resolve(external_id))
+        let run = self.runs[idx].get_or_load()?;
+        Ok(run.resolve(external_id))
     }
 
     /// Resolve many external ids in one batched pass over the bundle — `/control/ingest`'s
-    /// duplicate check (contracts §3.1 r6), which must not open one extent per row against a
-    /// batch that can run to thousands of keys. `scan_bounds` runs exactly once regardless of
-    /// batch size, and each extent is opened (verified, mapped) at most once even if many keys
-    /// fall inside it: the input is sorted internally so the resolved keys visit the extents in
-    /// one ascending walk, mirroring how the extents themselves partition ascending order.
+    /// duplicate check (contracts §3.1 r6), which must not open one run per row against a
+    /// batch that can run to thousands of keys. `scan_run_keys` runs exactly once regardless of
+    /// batch size, and each run is opened (verified, mapped) at most once even if many keys
+    /// fall inside it: the input is sorted internally so the resolved keys visit the runs in
+    /// one ascending walk, mirroring how the runs themselves partition ascending order.
     ///
     /// Returns one `Option<EntityId>` per input key, in the caller's original order — the input
     /// need not be pre-sorted. Every failure is `Err(StoreError::InvalidSidecar)`, exactly as
     /// [`Self::resolve`]: a batch of otherwise-fine keys must not read as "all absent" because one
-    /// extent is corrupt.
+    /// run is corrupt.
     pub fn resolve_many(&self, external_ids: &[Vec<u8>]) -> Result<Vec<Option<EntityId>>> {
         let mut results = vec![None; external_ids.len()];
-        if self.extents.is_empty() || external_ids.is_empty() {
+        if self.runs.is_empty() || external_ids.is_empty() {
             return Ok(results);
         }
-        let plain: Vec<ExtentDesc> = self.extents.iter().map(|e| e.desc.clone()).collect();
-        let scan = scan_bounds(&plain)?;
+        let plain: Vec<RunDesc> = self.runs.iter().map(|e| e.desc.clone()).collect();
+        let scan = scan_run_keys(&plain)?;
 
         // Sort input indices by key (not the keys themselves) so results can still be returned
         // in the caller's original order.
         let mut order: Vec<usize> = (0..external_ids.len()).collect();
         order.sort_by(|&a, &b| external_ids[a].cmp(&external_ids[b]));
 
-        // Extents partition one ascending order (scan_bounds already checked this), and `order`
-        // visits keys ascending too, so the extent cursor only ever moves forward — one pass,
-        // each extent opened at most once.
+        // Runs partition one ascending order (scan_run_keys already checked this), and `order`
+        // visits keys ascending too, so the run cursor only ever moves forward — one pass,
+        // each run opened at most once.
         let mut extent_idx = 0usize;
         for i in order {
             let key = &external_ids[i];
@@ -598,13 +598,13 @@ impl ExternalIdSidecar {
                 extent_idx += 1;
             }
             if extent_idx >= scan.bounds.len() {
-                // Past every extent's last key: absent from the bundle, and so is every key
+                // Past every run's last key: absent from the bundle, and so is every key
                 // still to come (they only get larger) — but other, smaller-sorted keys already
                 // resolved above may still be valid, so keep going rather than returning early.
                 continue;
             }
-            let extent = self.extents[extent_idx].get_or_load()?;
-            results[i] = extent.resolve(key);
+            let run = self.runs[extent_idx].get_or_load()?;
+            results[i] = run.resolve(key);
         }
         Ok(results)
     }
@@ -638,12 +638,12 @@ impl ExternalIdSidecar {
         high_water: u64,
     ) -> Result<Option<Vec<u8>>> {
         // A deployment that wrote no sidecar at all (contracts §2.4: callers supplied no
-        // external IDs, so the build minted none — no extents, no locator). Every item's
+        // external IDs, so the build minted none — no runs, no locator). Every item's
         // identity is its `tessera_id` and `None` is the ordinary answer, not an inconsistency.
-        // This state is unambiguous: `deferred_from_manifest` refuses a manifest whose extents
-        // exist without a verifiable locator, so "no extents and no locator" can only mean the
+        // This state is unambiguous: `deferred_from_manifest` refuses a manifest whose runs
+        // exist without a verifiable locator, so "no runs and no locator" can only mean the
         // build wrote none — a *lost* locator never reaches here as this state.
-        if self.extents.is_empty() && self.locator.is_none() {
+        if self.runs.is_empty() && self.locator.is_none() {
             return Ok(None);
         }
         if entity.raw() < self.locator_len() {
@@ -654,7 +654,7 @@ impl ExternalIdSidecar {
                 .locator
                 .as_ref()
                 .map(|l| l.desc.path.clone())
-                .unwrap_or_else(|| PathBuf::from("<no locator extent — deployment wrote none>"));
+                .unwrap_or_else(|| PathBuf::from("<no locator — deployment wrote none>"));
             return Err(StoreError::InvalidSidecar {
                 path,
                 detail: format!(
@@ -671,7 +671,7 @@ impl ExternalIdSidecar {
     /// Resolve `entity` to its caller-supplied external id via the locator, or `Ok(None)` if
     /// `entity` has none (Ruling A: the ordinary case for an item whose identity is its
     /// `tessera_id`). A missing or corrupt locator, or a locator ordinal that doesn't fall in
-    /// any extent, is `Err(StoreError::InvalidSidecar)` — never a `None` that would read as "no
+    /// any run, is `Err(StoreError::InvalidSidecar)` — never a `None` that would read as "no
     /// external ID" for an item that in fact has one.
     pub fn external_id_of(&self, entity: EntityId) -> Result<Option<Vec<u8>>> {
         let Some(locator) = &self.locator else {
@@ -681,22 +681,22 @@ impl ExternalIdSidecar {
             return Ok(None);
         };
 
-        let plain: Vec<ExtentDesc> = self.extents.iter().map(|e| e.desc.clone()).collect();
-        let scan = scan_bounds(&plain)?;
+        let plain: Vec<RunDesc> = self.runs.iter().map(|e| e.desc.clone()).collect();
+        let scan = scan_run_keys(&plain)?;
 
         let mut remaining = ordinal as u64;
         for (i, bounds) in scan.bounds.iter().enumerate() {
             let rows = bounds.as_ref().map(|(_, _, n)| *n as u64).unwrap_or(0);
             if remaining < rows {
-                let extent = self.extents[i].get_or_load()?;
-                return Ok(Some(extent.key(remaining as usize).to_vec()));
+                let run = self.runs[i].get_or_load()?;
+                return Ok(Some(run.key(remaining as usize).to_vec()));
             }
             remaining -= rows;
         }
 
         Err(StoreError::InvalidSidecar {
             path: locator.desc.path.clone(),
-            detail: "a locator ordinal exceeds the total external-id row count across all extents"
+            detail: "a locator ordinal exceeds the total external-id row count across all runs"
                 .to_string(),
         })
     }
@@ -716,7 +716,7 @@ mod tests {
 
     use super::*;
 
-    /// Write one `external-ids-<n>.arrow`-shaped extent from `rows` (not necessarily sorted —
+    /// Write one `external-ids-<n>.arrow`-shaped run from `rows` (not necessarily sorted —
     /// callers that want a fixture the build would actually produce pre-sort it themselves).
     fn write_extent(path: &Path, rows: &[(Vec<u8>, u32)]) {
         let schema = Arc::new(Schema::new(vec![
@@ -739,12 +739,12 @@ mod tests {
         hex_digest(Sha256::digest(&bytes).as_slice())
     }
 
-    fn desc(path: impl Into<PathBuf>, digest: impl Into<String>) -> ExtentDesc {
-        ExtentDesc::new(path, digest)
+    fn desc(path: impl Into<PathBuf>, digest: impl Into<String>) -> RunDesc {
+        RunDesc::new(path, digest)
     }
 
-    /// Write a correctly sorted, correctly digested extent at `path` and return its `ExtentDesc`.
-    fn sorted_extent(dir: &Path, name: &str, rows: &[(Vec<u8>, u32)]) -> ExtentDesc {
+    /// Write a correctly sorted, correctly digested run at `path` and return its `RunDesc`.
+    fn sorted_extent(dir: &Path, name: &str, rows: &[(Vec<u8>, u32)]) -> RunDesc {
         let mut sorted = rows.to_vec();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
         let path = dir.join(name);
@@ -752,7 +752,7 @@ mod tests {
         desc(path.clone(), sha256_hex(&path))
     }
 
-    /// Write a correctly-**digested** extent whose rows are deliberately NOT in ascending order
+    /// Write a correctly-**digested** run whose rows are deliberately NOT in ascending order
     /// (Critical C-1's regression fixture): the digest matches the bytes on disk exactly, but a
     /// binary search over it would be unsound.
     fn write_extent_fixture_unsorted(
@@ -780,8 +780,8 @@ mod tests {
     }
 
     fn sidecar_with_three_extents(dir: &Path) -> (ExternalIdSidecar, Vec<[u8; 4]>) {
-        // 30 distinct keys, globally sorted, split sequentially into 3 extents of 10 — mirrors
-        // `tessera_build::write_external_id_extents`'s splitting rule.
+        // 30 distinct keys, globally sorted, split sequentially into 3 runs of 10 — mirrors
+        // `tessera_build::write_external_id_runs`'s splitting rule.
         let mut keys: Vec<[u8; 4]> = (0..30u32).map(|i| (i * 7919).to_be_bytes()).collect();
         keys.sort();
         let mut descs = Vec::new();
@@ -802,13 +802,13 @@ mod tests {
 
     #[test]
     fn resolution_opens_one_extent_not_all_of_them() {
-        // CRITICAL C-6: one OnceLock over ALL extents means the first drill-down maps and
-        // digests the whole family, permanently. Laziness must be per extent — the extent is
-        // selected by an O(extents) first-key/last-key scan that never opens (fully validates)
-        // more than the one extent the answer comes from.
+        // CRITICAL C-6: one OnceLock over ALL runs means the first drill-down maps and
+        // digests the whole family, permanently. Laziness must be per run — the run is
+        // selected by an O(runs) first-key/last-key scan that never opens (fully validates)
+        // more than the one run the answer comes from.
         let dir = tempfile::TempDir::new().unwrap();
         let (sidecar, keys) = sidecar_with_three_extents(dir.path());
-        let key_in_extent_1 = keys[15]; // extents are 0..10, 10..20, 20..30
+        let key_in_extent_1 = keys[15]; // runs are 0..10, 10..20, 20..30
         let found = sidecar.resolve(&key_in_extent_1).unwrap();
         assert_eq!(found, Some(EntityId::new(15)));
         assert_eq!(sidecar.open_extents(), 1);
@@ -818,10 +818,10 @@ mod tests {
     #[test]
     fn resolve_many_opens_each_extent_at_most_once_and_preserves_order() {
         // The point of batching: `/control/ingest`'s duplicate check calls this over a whole
-        // batch, and must not open one extent per row. All 30 keys span all three extents, so a
+        // batch, and must not open one run per row. All 30 keys span all three runs, so a
         // naive per-row `resolve` would open all three anyway here, but the assertion that
         // matters is that each opens EXACTLY once regardless of how many of its keys are queried
-        // — repeat every key from extent 1 many times over.
+        // — repeat every key from run 1 many times over.
         let dir = tempfile::TempDir::new().unwrap();
         let (sidecar, keys) = sidecar_with_three_extents(dir.path());
 
@@ -829,12 +829,12 @@ mod tests {
         // internally rather than requiring a sorted or deduplicated caller, and returns answers
         // in the CALLER's original order, not sorted order.
         let query: Vec<Vec<u8>> = vec![
-            keys[25].to_vec(),           // extent 2
-            keys[5].to_vec(),            // extent 0
+            keys[25].to_vec(),           // run 2
+            keys[5].to_vec(),            // run 0
             b"not-a-real-key!".to_vec(), // absent entirely
-            keys[15].to_vec(),           // extent 1
-            keys[15].to_vec(),           // extent 1 again
-            keys[0].to_vec(),            // extent 0, smallest key
+            keys[15].to_vec(),           // run 1
+            keys[15].to_vec(),           // run 1 again
+            keys[0].to_vec(),            // run 0, smallest key
         ];
         let results = sidecar.resolve_many(&query).unwrap();
         assert_eq!(
@@ -852,7 +852,7 @@ mod tests {
         assert_eq!(
             sidecar.open_extents(),
             3,
-            "every extent that actually held a queried key opens exactly once, never once per row"
+            "every run that actually held a queried key opens exactly once, never once per row"
         );
     }
 
@@ -868,7 +868,7 @@ mod tests {
     fn an_out_of_order_extent_is_an_error_even_when_the_digest_matches() {
         // CRITICAL C-1: a digest does NOT subsume the sortedness check. The digest proves the
         // file is the one MANIFEST named; sortedness proves the binary search returns the right
-        // answer. A build bug emitting an out-of-order extent produces a correctly-digested
+        // answer. A build bug emitting an out-of-order run produces a correctly-digested
         // file, and a mis-resolved ID denies the wrong entity while leaving the intended target
         // visible.
         let (dir, path, digest) =
@@ -901,7 +901,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let (sidecar, _keys) = sidecar_with_three_extents(dir.path());
         assert_eq!(sidecar.resolve(&[0xAB; 4]).unwrap(), None);
-        // A key past the last extent's last key must also resolve to `None`, not error.
+        // A key past the last run's last key must also resolve to `None`, not error.
         assert_eq!(sidecar.resolve(&[0xFF; 4]).unwrap(), None);
     }
 
@@ -932,7 +932,7 @@ mod tests {
     fn drill_down_round_trips_through_the_locator() {
         let dir = tempfile::TempDir::new().unwrap();
         // Two entities, 0 and 1; entity 1 has no external id (locator sentinel), entity 0's key
-        // is "hello" — the locator's ordinal 0 into the single extent's one row.
+        // is "hello" — the locator's ordinal 0 into the single run's one row.
         let ext_path = dir.path().join("external-ids-0.arrow");
         write_extent(&ext_path, &[(b"hello".to_vec(), 0u32)]);
         let ext_digest = sha256_hex(&ext_path);
@@ -964,8 +964,8 @@ mod tests {
 
     #[test]
     fn rejects_extents_out_of_order_relative_to_each_other() {
-        // Each extent is individually sorted ascending, but extent 1's keys all precede extent
-        // 0's — a shuffled extent *list*, not a shuffled extent. Point 4: this must be validated,
+        // Each run is individually sorted ascending, but run 1's keys all precede run
+        // 0's — a shuffled run *list*, not a shuffled run. Point 4: this must be validated,
         // not assumed, or a shuffled list silently resolves every lookup to `None`.
         let dir = tempfile::TempDir::new().unwrap();
         let d0 = sorted_extent(dir.path(), "external-ids-0.arrow", &[(vec![5, 0, 0, 0], 0)]);

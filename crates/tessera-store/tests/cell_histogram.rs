@@ -12,7 +12,7 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_spatial::{fixed32, Extent};
+use tessera_spatial::{fixed32, Bounds};
 use tessera_store::manifest::{
     CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
     SegmentDescriptor, SegmentsManifest, SliceDescriptor,
@@ -64,7 +64,7 @@ const CELLS: [(u16, u16, u64); 6] = [
 /// unit extent. Point coordinates are cell centres, so quantisation cannot straddle a cell
 /// boundary.
 fn build_bundle(root: &Path) {
-    let extent = Extent {
+    let extent = Bounds {
         x_min: 0.0,
         x_max: 1.0,
         y_min: 0.0,
@@ -117,7 +117,7 @@ fn build_bundle(root: &Path) {
         }],
         deltas: vec![],
         dict_extents: vec![],
-        external_id_extents: vec![],
+        external_id_runs: vec![],
         locator_extents: vec![],
         tombstones: vec![],
         deny: vec![],

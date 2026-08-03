@@ -26,7 +26,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use tessera_build::{build, build_in_memory, BuildArgs};
-use tessera_spatial::Extent;
+use tessera_spatial::Bounds;
 use tessera_types::IdentityKey;
 
 const N_ITEMS: u64 = 4_000;
@@ -40,8 +40,8 @@ fn test_key() -> IdentityKey {
     IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
 }
 
-fn extent() -> Extent {
-    Extent {
+fn extent() -> Bounds {
+    Bounds {
         x_min: -20.0,
         x_max: 980.0,
         y_min: 0.0,
@@ -615,7 +615,7 @@ fn reference_build_at_scale() {
         points: PathBuf::from("data/scaled/geometry.parquet"),
         pairs: PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet"),
         out,
-        extent: Extent {
+        extent: Bounds {
             x_min: 0.0,
             x_max: 65536.0,
             y_min: 0.0,
