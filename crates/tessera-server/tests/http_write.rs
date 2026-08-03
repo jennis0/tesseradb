@@ -2034,13 +2034,15 @@ async fn ingest_is_refused_by_buffer_occupancy() {
 
 /// **An out-of-extent coordinate is refused before ack and leaves no WAL record** (§6).
 ///
-/// Nothing validated this before flush existed, and it never mattered: Morton codes are computed
-/// against `MANIFEST.json`'s `quantisation`, fixed at build, and a buffered item never acquired
-/// geometry. Flush is the moment it does, so the choice becomes refuse here or misplace the item
-/// in the grid there.
+/// Morton codes are a fraction of the declared extent, so a point outside it has no cell. Flush is
+/// where a buffered item acquires geometry, so the choice is refuse here or misplace the item in
+/// the grid there. Refused rather than clamped: a clamped point at the boundary cannot be told from
+/// one that belongs there, so clamping would move data with nothing left to notice afterwards.
 ///
-/// Refused rather than clamped: a clamped point at the boundary cannot be told from one that
-/// belongs there, so clamping would move data with nothing left to notice afterwards.
+/// **The WAL is a sequence, so the length is read from the active member and not from the base
+/// path.** An earlier form of this test read `wal.log` — which is a name for the family and never a
+/// file — so both readings were `Err`, both became 0, and it compared 0 to 0 while asserting
+/// nothing at all.
 #[tokio::test]
 async fn an_out_of_extent_ingest_is_refused_and_leaves_no_wal_record() {
     let tmp = TempDir::new().unwrap();
@@ -2053,7 +2055,10 @@ async fn an_out_of_extent_ingest_is_refused_and_leaves_no_wal_record() {
     let wal_path = tmp.path().join("wal.log");
     let server = spawn_server(&bundle_root, &tmp.path().join("cache"), &wal_path).await;
 
-    let before = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+    let active = wal_path.with_file_name("wal-000001.log");
+    let before = std::fs::metadata(&active)
+        .expect("the active WAL member exists")
+        .len();
 
     // The fixture's extent is 0..1000 on both axes; 5000 is outside it.
     let (status, _) = post_ingest(
@@ -2066,7 +2071,7 @@ async fn an_out_of_extent_ingest_is_refused_and_leaves_no_wal_record() {
     assert_eq!(status, 422, "a coordinate with no cell is a contract error");
 
     assert_eq!(
-        std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0),
+        std::fs::metadata(&active).expect("still there").len(),
         before,
         "refused before ack: no entity id, no queue slot, no WAL append"
     );

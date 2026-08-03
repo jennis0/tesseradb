@@ -1292,6 +1292,27 @@ impl Engine {
         batch_id: String,
         body_hash: [u8; 32],
     ) -> std::result::Result<Vec<EntityId>, crate::write::AcceptError> {
+        // **Every buffered row has a cell**, established here because this is the boundary rows
+        // enter the buffer through — and it has more than one caller. A check in the HTTP handler
+        // guarded one of them and left the bench arms, the tests and any future ingest route
+        // writing points the quantiser would silently clamp onto the edge of the grid.
+        //
+        // Before the submit, so an out-of-extent row is refused with nothing acked, nothing
+        // WAL-durable and no entity id burned (I9). `plan_flush` is entitled to assume this and
+        // does; a second copy of the predicate there is how the two would come to disagree.
+        let quantisation = self.meta().quantisation;
+        if let Some((index, row)) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| !quantisation.contains(row.x, row.y))
+        {
+            return Err(crate::write::AcceptError::OutsideExtent {
+                index,
+                x: row.x,
+                y: row.y,
+                quantisation,
+            });
+        }
         self.write.accept_ingest(rows, batch_id, body_hash)
     }
 

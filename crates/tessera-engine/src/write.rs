@@ -230,7 +230,6 @@ pub struct ExecutorHealth {
     pub(crate) flushable_items: AtomicUsize,
     /// Durable buffered rows excluded from every flush because their coordinates fall outside the
     /// bundle's declared extent (§6). They never leave this state on their own.
-    pub(crate) quarantined_items: AtomicUsize,
     /// Flushes published since the executor started — what "an acked ingest became visible" is
     /// observed on, rather than on a sleep.
     pub(crate) flushes: AtomicU64,
@@ -408,9 +407,6 @@ pub struct ExecutorStats {
     /// Items that would acquire geometry at the last tick (§3.5) — zero on a gated node, growing
     /// without bound on one whose flush keeps failing.
     pub flushable_items: usize,
-    /// Durable rows excluded from every flush for having coordinates outside the declared extent
-    /// (§6). Non-zero means the deployment must re-quantise before those items can ever be seen.
-    pub quarantined_items: usize,
     /// Flushes published since the executor started.
     pub flushes: u64,
     /// Ticks skipped because a flush was already in flight (§1.1) — a rising count is a flush
@@ -541,7 +537,6 @@ impl ExecutorHealth {
             overlay_diverged: AtomicBool::new(false),
             buffered_items: AtomicUsize::new(0),
             flushable_items: AtomicUsize::new(0),
-            quarantined_items: AtomicUsize::new(0),
             flushes: AtomicU64::new(0),
             flush_skips: AtomicU64::new(0),
             flush_failures: AtomicU64::new(0),
@@ -635,7 +630,6 @@ impl ExecutorHealth {
             ticks: self.ticks.load(Ordering::Relaxed),
             overlay_diverged: self.overlay_diverged.load(Ordering::SeqCst),
             flushable_items: self.flushable_items.load(Ordering::SeqCst),
-            quarantined_items: self.quarantined_items.load(Ordering::SeqCst),
             flushes: self.flushes.load(Ordering::Relaxed),
             flush_skips: self.flush_skips.load(Ordering::Relaxed),
             flush_failures: self.flush_failures.load(Ordering::Relaxed),
@@ -1195,6 +1189,21 @@ impl std::error::Error for ExecutorStartError {}
 pub enum AcceptError {
     Submit(SubmitError),
     Exec(ExecError),
+    /// A row's coordinates fall outside the slice's declared quantisation extent, so the point has
+    /// no cell to occupy — refused **before anything is acked or WAL-durable**, and refused rather
+    /// than clamped (see [`Quantisation::contains`]).
+    ///
+    /// Checked here, at the engine's own ingest boundary, rather than in an HTTP handler: the
+    /// invariant is *every buffered row has a cell*, which is a fact about the buffer, and the
+    /// buffer has more than one writer. A check guarding only the HTTP path leaves the bench arms,
+    /// the tests and any future ingest route writing points the quantiser will silently clamp onto
+    /// the edge of the grid.
+    OutsideExtent {
+        index: usize,
+        x: f32,
+        y: f32,
+        quantisation: tessera_store::manifest::Quantisation,
+    },
 }
 
 impl std::fmt::Display for AcceptError {
@@ -1202,6 +1211,21 @@ impl std::fmt::Display for AcceptError {
         match self {
             AcceptError::Submit(e) => write!(f, "{e}"),
             AcceptError::Exec(e) => write!(f, "{e}"),
+            AcceptError::OutsideExtent {
+                index,
+                x,
+                y,
+                quantisation: q,
+            } => write!(
+                f,
+                "ingest row {index} at ({x}, {y}) is outside this slice's declared extent (x {}..{}, \
+                 y {}..{}). Coordinates are quantised against that extent, which is fixed for the \
+                 slice's life (decision 0040), so an out-of-extent point has no cell to occupy; it \
+                 is refused here rather than clamped, because a clamped point at the boundary \
+                 cannot be told from one that belongs there. The remedy is to rebuild the slice \
+                 under a corrected extent, which is a migration",
+                q.x_min, q.x_max, q.y_min, q.y_max
+            ),
         }
     }
 }
@@ -2314,7 +2338,6 @@ impl Executor {
         // one whose flush is failing.
         let generation = self.generation.load_full();
         let mut flushable = 0usize;
-        let mut quarantined = 0usize;
         let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
         for slice in slices_of(&generation) {
             match crate::flush::plan_flush(
@@ -2325,7 +2348,6 @@ impl Executor {
             ) {
                 Ok(plan) => {
                     flushable += plan.items.len();
-                    quarantined += plan.quarantined;
                     plans.push((slice, plan));
                 }
                 Err(crate::flush::NoFlush::NothingToFlush) => {}
@@ -2343,24 +2365,6 @@ impl Executor {
         self.health
             .flushable_items
             .store(flushable, Ordering::SeqCst);
-        if self
-            .health
-            .quarantined_items
-            .swap(quarantined, Ordering::SeqCst)
-            != quarantined
-            && quarantined > 0
-        {
-            // Edge-triggered on the count *changing*: a quarantined row never leaves that state on
-            // its own — the deployment has to re-quantise, which is compaction — so a line per tick
-            // would be an unbounded stream about a condition that is not moving.
-            tracing::error!(
-                quarantined,
-                "ALARM: durable ingest rows have coordinates outside this bundle's declared \
-                 extent, so they have no cell to occupy and are excluded from every flush. They \
-                 stay invisible until the deployment re-quantises (compaction). New ingest at \
-                 such a coordinate is refused at /control/ingest"
-            );
-        }
 
         // **At most one flush in flight.** A tick arriving while one runs is *skipped, not queued*:
         // two concurrent flushes would double-consume the buffer range. Skips are counted and

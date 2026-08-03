@@ -28,7 +28,7 @@ use base64::Engine as _;
 use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
-use tessera_engine::{AcceptError, DeclaredScalar, Quantisation, DENY_WINDOW_MAX_ENTRIES};
+use tessera_engine::{AcceptError, DeclaredScalar, DENY_WINDOW_MAX_ENTRIES};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow, WalScalar};
 
 use tessera_types::{EntityId, TermId};
@@ -373,19 +373,6 @@ pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
 /// **Inclusive of the maximum**, matching `fixed32`'s own clamp domain: a point exactly at
 /// `x_max` quantises to the top of the grid and is a legitimate position, not an escape.
 ///
-/// NaN fails the comparison in both directions and is therefore reported — deliberately: a NaN
-/// coordinate has no cell, and letting one through would put it wherever the quantiser's
-/// comparison happened to land.
-fn first_out_of_extent(items: &[RawIngestItem], q: &Quantisation) -> Option<(usize, f32, f32)> {
-    items.iter().enumerate().find_map(|(i, item)| {
-        let inside = (item.x as f64) >= q.x_min
-            && (item.x as f64) <= q.x_max
-            && (item.y as f64) >= q.y_min
-            && (item.y as f64) <= q.y_max;
-        (!inside).then_some((i, item.x, item.y))
-    })
-}
-
 /// `Retry-After` for a buffer-occupancy 429.
 ///
 /// **A flush period, not the queue estimator's figure.** `estimate_retry_after_s` models a client
@@ -713,31 +700,6 @@ fn run_ingest(
     let slice = resolve_slice(slice, &meta.slices)?;
 
     let items = parse_ingest_batch(body, &meta.declared_scalars)?;
-
-    // **Coordinates outside the declared quantisation extent are refused (§6).**
-    //
-    // Nothing validated this before, and it never mattered: Morton codes are computed against
-    // `MANIFEST.json`'s `quantisation`, fixed at build, and a buffered item never acquired
-    // geometry. Flush is the moment it does — so the choice is refuse here, or misplace the item
-    // in the grid there.
-    //
-    // Refused **before anything is acked or WAL-durable**, and refused rather than clamped: a
-    // clamped item at the boundary is indistinguishable from a legitimately edge-located one, so
-    // clamping would silently move data and there would be nothing to notice afterwards.
-    //
-    // The stated cost: a deployment whose data drifts outside its declared extent cannot ingest
-    // those items until it re-quantises, which is compaction's shape.
-    if let Some((index, x, y)) = first_out_of_extent(&items, &meta.quantisation) {
-        let q = &meta.quantisation;
-        return Err(ApiError::Contract(format!(
-            "ingest row {index} at ({x}, {y}) is outside this bundle's declared extent \
-             (x {}..{}, y {}..{}). Coordinates are quantised against MANIFEST.json's \
-             quantisation, fixed at build, so an out-of-extent point has no cell to occupy; it is \
-             refused here rather than clamped, because a clamped point at the boundary cannot be \
-             told from one that belongs there. Re-quantising is compaction's job",
-            q.x_min, q.x_max, q.y_min, q.y_max
-        )));
-    }
 
     // The row cap. 422 per contracts §3.1's "bounds exceeded" row, naming the bound and the
     // batch's own size.
@@ -1331,6 +1293,9 @@ fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
         // Lifecycle §4: a `Delete`/`Suppress` whose append failed was applied to the live overlay
         // anyway before the error was returned — never a refusal that leaves a deny unapplied.
         AcceptError::Exec(_) => matches!(op, ChangeOp::Delete | ChangeOp::Suppress),
+        // Ingest-only, and refused before the submit — unreachable from a change, and in force in
+        // no sense even if it were.
+        AcceptError::OutsideExtent { .. } => false,
     };
     if in_force {
         tracing::error!(

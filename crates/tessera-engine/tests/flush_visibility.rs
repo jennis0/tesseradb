@@ -86,7 +86,6 @@ fn the_tick_plans_what_it_would_flush() {
     wait_until("the tick to plan", || {
         engine.write_executor_stats().flushable_items == 2
     });
-    assert_eq!(engine.write_executor_stats().quarantined_items, 0);
 }
 
 /// A tick with nothing flushable plans nothing — no empty segment, no `segments_version` bump,

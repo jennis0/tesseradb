@@ -43,6 +43,28 @@ pub struct Quantisation {
     pub y_max: f64,
 }
 
+impl Quantisation {
+    /// Whether `(x, y)` has a cell in this extent — **the one definition**, because a second copy
+    /// is how ingest and flush come to disagree about which points exist.
+    ///
+    /// Morton codes are a *fraction of the declared extent* (contracts §2.5), so a point outside it
+    /// has no cell. The quantiser clamps rather than failing, which is why this must be checked
+    /// before a point ever reaches it: a clamped point at the boundary is indistinguishable from
+    /// one that legitimately sits there, so clamping silently moves data with nothing left to
+    /// notice afterwards.
+    ///
+    /// Inclusive of the maxima, matching the quantiser's own domain: a point exactly at `x_max`
+    /// occupies the top of the grid and belongs there. **NaN fails in both directions** and is
+    /// therefore outside — right, because a NaN coordinate has no cell either, and `as u32`
+    /// saturates it to zero rather than erroring.
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        (x as f64) >= self.x_min
+            && (x as f64) <= self.x_max
+            && (y as f64) >= self.y_min
+            && (y as f64) <= self.y_max
+    }
+}
+
 /// A safe-to-print stand-in for a deployment identity key: `fp:` plus the first 8 hex characters
 /// of a domain-separated SHA-256 over the key's canonical hex form.
 ///

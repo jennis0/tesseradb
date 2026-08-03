@@ -455,6 +455,12 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
                     .to_string(),
             )
         }
+        // **The detail *does* reach the caller here, unlike every other arm.** The rule those arms
+        // follow is about errors whose text carries filesystem paths and OS strings; this one
+        // carries the row index and the declared extent, which are the caller's own request and the
+        // deployment's published `/v1/meta`. Withholding it would leave a 422 the caller cannot act
+        // on — and the whole point of refusing rather than clamping is that someone notices.
+        e @ AcceptError::OutsideExtent { .. } => ApiError::Contract(e.to_string()),
     }
 }
 
@@ -533,6 +539,9 @@ pub fn map_change_batch_error(
         || failures.iter().any(|(_, f)| match f {
             AcceptError::Exec(_) => true,
             AcceptError::Submit(e) => e.may_have_taken_effect(),
+            // Refused before the submit, so it never reached the executor. Ingest-only in
+            // practice; named rather than folded, per this function's own rule.
+            AcceptError::OutsideExtent { .. } => false,
         });
     if !reached_executor {
         tracing::error!(
@@ -546,6 +555,7 @@ pub fn map_change_batch_error(
         || failures.iter().any(|(op, f)| match f {
             AcceptError::Exec(e) => exec_failure_may_be_in_force(*op, e),
             AcceptError::Submit(e) => e.may_have_taken_effect(),
+            AcceptError::OutsideExtent { .. } => false,
         });
     // The exact negation, item by item, so no item can be counted in both halves or in neither. A
     // `ReceiptLost` is in neither category's *certain* sense — it lands in `may_be_in_force` and out
@@ -554,6 +564,8 @@ pub fn map_change_batch_error(
     let some_not_applied = failures.iter().any(|(op, f)| match f {
         AcceptError::Exec(e) => !exec_failure_may_be_in_force(*op, e),
         AcceptError::Submit(e) => !e.may_have_taken_effect(),
+        // Refused before the submit: certainly not applied, which is this half's sense exactly.
+        AcceptError::OutsideExtent { .. } => true,
     });
 
     tracing::error!(

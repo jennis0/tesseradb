@@ -127,6 +127,55 @@ fn entity_of(engine: &Engine, source_id: u64) -> EntityId {
 /// **The test asserts the id it gets *back*, and that is the point.** A caller cannot choose an
 /// entity id: `Command::Ingest` carries `UnallocatedRow`, which has no id field, because the
 /// executor must be free to assign a whole window's ids in one signature-sorted run. Whatever
+/// **The extent check guards the engine's own boundary, not one HTTP handler** (§6).
+///
+/// This is the whole reason it moved. `Engine::accept_ingest` has more than one caller — the
+/// server, every bench arm, and these tests — and the invariant it establishes is *every buffered
+/// row has a cell*, which is a fact about the buffer. Guarding only the HTTP path left every other
+/// caller writing points the quantiser silently clamps onto the edge of the grid, with a clamped
+/// boundary point indistinguishable from one that belongs there.
+///
+/// It is also what lets `plan_flush` quantise the buffer without re-checking: the state a second
+/// check would detect cannot arise, and a second copy of the predicate is how the two would come to
+/// disagree.
+#[test]
+fn an_out_of_extent_row_is_refused_at_the_engine_boundary_with_no_id_burned() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, _faults) = engine_with_faults(&tmp, 8);
+
+    let before = engine.allocator_high_water();
+    let mut adrift = row("adrift");
+    adrift.x = 5000.0; // the fixture's extent is 0..1000 on both axes
+
+    let err = engine
+        .accept_ingest(vec![adrift], "batch-adrift".to_string(), [0u8; 32])
+        .expect_err("a coordinate with no cell is refused");
+    assert!(matches!(
+        err,
+        tessera_engine::AcceptError::OutsideExtent { index: 0, .. }
+    ));
+    assert_eq!(
+        engine.allocator_high_water(),
+        before,
+        "refused before the submit: no entity id is burned, so I9 loses nothing to a bad row"
+    );
+
+    // NaN has no cell either, and `as u32` would saturate it to zero rather than erroring.
+    let mut nan = row("nan");
+    nan.y = f32::NAN;
+    assert!(engine
+        .accept_ingest(vec![nan], "batch-nan".to_string(), [0u8; 32])
+        .is_err());
+
+    // A point exactly at the maximum occupies the top of the grid and belongs there.
+    let mut edge = row("edge");
+    edge.x = 1000.0;
+    edge.y = 1000.0;
+    engine
+        .accept_ingest(vec![edge], "batch-edge".to_string(), [0u8; 32])
+        .expect("the boundary is inside");
+}
+
 /// assigns the id, the live map answers for it before the build's locator does.
 #[test]
 fn the_executor_assigns_the_ids_and_the_live_map_answers_for_them() {
