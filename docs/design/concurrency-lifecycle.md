@@ -129,6 +129,10 @@ Suppression count is a metric — a monotonically growing active-suppression set
 
 The precedence over the three fields is `deleted > suppressed > evaluate_terms`, single-sourced in one function. Two transcriptions of a precedence rule is how a suppression stops suppressing.
 
+**The row-space half is a derived mask, not a walk.** `deleted ∪ suppressed` is also materialised per slice as a row-space bitmap on the generation, and composition subtracts it with one `andnot` — so per-request work no longer grows with denies **ever accepted**, which matters because two of the three retirement rules do not exist and the deny set only grows. The three entity-space stores stay authoritative: `visible_to`, label gating and cluster visibility all still answer from the precedence function above, and the mask governs row-space questions only. Two representations of one truth are licensed by the differential obligation that they agree for every entity with a row.
+
+**Its derivation rule is the fail-open to watch.** The mask is only ever equal to a fresh derivation from the union. A window of additions may grow it incrementally; **any removal re-derives**, because subtracting a row on unsuppress would re-expose an item `deleted` still holds — the same `delete → suppress → unsuppress` counterexample that made the three fields separate, arriving by a second route. It is rebuilt by every geometry publication, row ids being meaningful only within one `segments_version`, so it never outlives the row space it addresses and can never be stale.
+
 ```mermaid
 flowchart TD
   subgraph deletion["deny / deletion — ⊘ ledger not built"]

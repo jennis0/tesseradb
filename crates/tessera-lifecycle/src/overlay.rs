@@ -101,8 +101,26 @@ impl Overlay {
         self.is_deleted(entity) || self.is_suppressed(entity) || self.evaluate.contains_key(&entity)
     }
 
-    /// Every entity any store has an opinion on, ascending, without duplicates — the set
-    /// `compose` walks.
+    /// `deleted ∪ suppressed` — every entity denied outright, in entity space.
+    ///
+    /// **The one input to the row-space deny mask** (`Generation::denied`), and the reason it is a
+    /// union rather than two accessors: the mask's derivation rule turns on the union, so an
+    /// unsuppress may not subtract a row while `deleted` still holds the entity. Handing callers
+    /// the union makes the rule the only expressible thing.
+    ///
+    /// The two predicate-change stores are deliberately absent: an `evaluate` entry is not a deny,
+    /// it replaces a verdict in both directions, and it stays in `compose`'s per-entity walk.
+    pub fn denied(&self) -> Bitmap {
+        self.deleted.or(&self.suppressed)
+    }
+
+    /// The entities carrying a predicate change — with the buffer, the whole of what `compose`
+    /// still walks per request once the deny mask covers the rest.
+    pub fn evaluate_keys(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.evaluate.keys().copied()
+    }
+
+    /// Every entity any store has an opinion on, ascending, without duplicates.
     pub fn touched(&self) -> Vec<EntityId> {
         let mut ids = self.deleted.or(&self.suppressed);
         for entity in self.evaluate.keys() {

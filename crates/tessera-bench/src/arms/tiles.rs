@@ -90,6 +90,9 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
                 &IngestBuffer::new(),
                 Arc::clone(&projection),
                 &slice.row_space,
+                // Nothing denied: this arm measures tile enumeration and counting, and the deny
+                // mask's own cost is one `andnot` regardless of depth.
+                &croaring::Bitmap::new(),
             );
 
             for &zoom in zooms {

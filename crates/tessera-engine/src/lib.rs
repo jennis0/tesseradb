@@ -27,7 +27,7 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
 pub use cancel::CancelToken;
-pub use compose::{compose, visible_to, EffectiveMask, RowProjection};
+pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProjection};
 // The publication guard's refusal, which a publisher outside this crate must handle.
 // `check_publishable` itself stays private: whether a geometry may be published is this crate's
 // judgement, and a caller that could ask separately could also act on a stale answer.
@@ -129,7 +129,35 @@ pub struct Generation {
     pub overlay_version: u64,
     pub overlay: Arc<Overlay>,
     pub buffer: Arc<IngestBuffer>,
+    /// **The deny mask**: per slice, the row-space image of `deleted ∪ suppressed`, subtracted
+    /// from every composed mask (I1).
+    ///
+    /// **Derived, never persisted, never a second source of truth.** The three entity-space stores
+    /// on [`Overlay`] remain authoritative, and `compose::verdict` remains the single answer for
+    /// every entity-space verb — `visible_to`, label gating, cluster visibility. This exists
+    /// because the *row-space* question was being answered by walking the deny sets and resolving
+    /// `row_of` per denied entity on every request, which made per-request work grow with denies
+    /// **ever accepted**. Folded in as a bitmap, the deny half of composition costs one `andnot`.
+    ///
+    /// **It cannot go stale, because it never outlives its generation.** Row ids mean something
+    /// only within one `segments_version`, so the mask is rebuilt by every geometry publication and
+    /// travels with the row space it addresses — a request that loads one generation pointer gets
+    /// the overlay, the buffer and the mask that agree.
+    ///
+    /// **The derivation rule is in [`crate::compose::derive_denied`]**, and the trap it names —
+    /// that an unsuppress may not subtract a row — is the one way this could silently re-expose a
+    /// deleted item. `publish` re-derives in debug and asserts equality, so a build site that gets
+    /// it wrong fails in the test suite rather than in a viewer's map.
+    ///
+    /// Keyed by slice, because row space is. A slice the bundle carries always has an entry, empty
+    /// when nothing is denied; a missing entry means the mask and the bundle disagree about what
+    /// this generation holds, and the read path treats that as fail-closed rather than as "nothing
+    /// denied".
+    pub denied: Arc<DenyMask>,
 }
+
+/// Per-slice row-space deny masks — see [`Generation::denied`].
+pub type DenyMask = rustc_hash::FxHashMap<String, croaring::Bitmap>;
 
 /// The process-wide handle to the current generation. A request must load this pointer exactly
 /// **once**, at request start, before acquiring any fragment or cache entry — loading it more

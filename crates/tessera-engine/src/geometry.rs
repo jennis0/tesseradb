@@ -181,6 +181,8 @@ mod tests {
             overlay_version: 0,
             overlay: Arc::new(Overlay::new()),
             buffer: Arc::new(IngestBuffer::new()),
+            // The fixture bundle carries no slices, so a fresh derivation is empty.
+            denied: Arc::new(crate::DenyMask::default()),
         }
     }
 

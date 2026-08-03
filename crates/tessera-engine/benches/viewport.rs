@@ -135,6 +135,9 @@ fn bench_compose(c: &mut Criterion) {
     let satisfied: rustc_hash::FxHashSet<TermId> = terms.iter().copied().collect();
     let overlay = Overlay::new();
     let buffer = IngestBuffer::new();
+    // Derived once, outside the timed loop, exactly as a publication derives it: the deny half of
+    // composition is one `andnot` inside the loop whatever the deny depth, which is the point.
+    let denied = tessera_engine::denied_rows_of(&overlay, &slice.row_space);
 
     c.bench_function("compose", |b| {
         b.iter(|| {
@@ -144,6 +147,7 @@ fn bench_compose(c: &mut Criterion) {
                 &buffer,
                 Arc::clone(&base),
                 &slice.row_space,
+                &denied,
             )
         });
     });

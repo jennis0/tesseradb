@@ -247,6 +247,8 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
         &IngestBuffer::default(),
         base,
         &perm,
+        // Nothing denied — this example measures the selection route.
+        &croaring::Bitmap::new(),
     );
     (temp, seg, mask)
 }

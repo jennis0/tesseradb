@@ -3758,6 +3758,9 @@ impl Executor {
             postings: Arc::clone(&generation.postings),
             delta_postings: generation.delta_postings.clone(),
             overlay: Arc::clone(&generation.overlay),
+            // Neither the deny sets nor the row space moved, so the mask is unchanged. An ingest
+            // adds a *buffered* row, which has no row id to be denied at.
+            denied: Arc::clone(&generation.denied),
         };
         self.publish(next, started)
     }
@@ -3789,7 +3792,16 @@ impl Executor {
         // The change is **moved** into the overlay rather than borrowed: it is per entry, and
         // cloning it here would be a per-entry cost on the one thread every write is serialised
         // through.
+        // What the window did, for the mask below: which entities it denied, and whether any
+        // removal happened at all.
+        let mut newly_denied: Vec<EntityId> = Vec::new();
+        let mut unsuppressed = false;
         for (entity, op, predicate) in changes {
+            match op {
+                ChangeOp::Delete | ChangeOp::Suppress => newly_denied.push(entity),
+                ChangeOp::Unsuppress => unsuppressed = true,
+                ChangeOp::Predicate => {}
+            }
             overlay.apply(entity, op, predicate);
         }
 
@@ -3819,6 +3831,30 @@ impl Executor {
             );
         }
 
+        // **The deny mask, by the cheaper of the two licensed modes** (`derive_denied`). A window
+        // of `Delete`/`Suppress` only grows the union, so adding each entity's row is provably
+        // equal to re-deriving and costs the window rather than the whole deny set. A window
+        // carrying an `Unsuppress` re-derives — subtracting the row would re-expose an entity that
+        // `deleted` still holds, which is the one way this mask can fail open.
+        let denied = if unsuppressed {
+            Arc::new(crate::compose::derive_denied(&overlay, &generation.bundle))
+        } else {
+            let mut denied = (*generation.denied).clone();
+            for partition in generation.bundle.partitions.values() {
+                for (slice, slice_data) in &partition.slices {
+                    let Some(rows) = denied.get_mut(slice) else {
+                        continue;
+                    };
+                    for entity in &newly_denied {
+                        if let Some(row) = slice_data.row_space.row_of(*entity) {
+                            rows.add(row.raw());
+                        }
+                    }
+                }
+            }
+            Arc::new(denied)
+        };
+
         let next = Generation {
             overlay_version: generation.overlay_version + 1,
             overlay: Arc::new(overlay),
@@ -3830,6 +3866,7 @@ impl Executor {
             postings: Arc::clone(&generation.postings),
             delta_postings: generation.delta_postings.clone(),
             buffer: Arc::clone(&generation.buffer),
+            denied,
         };
         self.publish(next, started)
     }
@@ -3916,6 +3953,11 @@ impl Executor {
         let mut delta_postings = live.delta_postings.clone();
         delta_postings.push(completed.tier);
 
+        // **Rebuilt against the segment this flush just added**, which is what gives a suppressed
+        // or deleted item its place in the mask the moment it acquires a row: until now it was
+        // buffered, had no row, and so appeared in no mask at all.
+        let denied = Arc::new(crate::compose::derive_denied(&live.overlay, &next_bundle));
+
         let next = Generation {
             prefix: live.prefix.clone(),
             segments_version,
@@ -3927,6 +3969,7 @@ impl Executor {
             overlay_version: live.overlay_version,
             overlay: Arc::clone(&live.overlay),
             buffer: Arc::new(buffer),
+            denied,
         };
         let _published = self.publish(next, started);
 
@@ -4052,6 +4095,11 @@ impl Executor {
         let previous = self.generation.load_full();
         check_publishable(&previous, &prefix, segments_version)?;
 
+        // Rebuilt against the new row space: row ids mean something only within one
+        // `segments_version`, so a geometry publication invalidates every row in the old mask
+        // (`derive_denied`). Taken before `bundle` moves into the generation.
+        let denied = Arc::new(crate::compose::derive_denied(&previous.overlay, &bundle));
+
         let next = Generation {
             prefix,
             segments_version,
@@ -4063,6 +4111,7 @@ impl Executor {
             overlay_version: previous.overlay_version,
             overlay: Arc::clone(&previous.overlay),
             buffer: Arc::clone(&previous.buffer),
+            denied,
         };
         let _published = self.publish(next, started);
 
@@ -4086,10 +4135,23 @@ impl Executor {
     /// use. `scripts/check-layers.sh` refuses any non-atomic `.store(` in this crate's sources
     /// outside this file — and that rule is demonstrated going red, not merely written.
     fn publish(&self, next: Generation, started: std::time::Instant) -> Published {
+        // **The deny mask's derivation rule, enforced at the one place a generation becomes live.**
+        // `crate::compose::derive_denied` states the rule; every build site — the incremental
+        // addition on a deny window, the rebuild at each geometry publication, the carry-forward
+        // when neither the overlay nor the row space moved — is licensed only if it lands on the
+        // same value. Checked here rather than trusted, in debug only because it is O(denies): a
+        // site that gets it wrong then fails the suite instead of silently re-exposing a deleted
+        // item in a viewer's map, which is the one failure this mask can produce.
+        debug_assert!(
+            *next.denied == crate::compose::derive_denied(&next.overlay, &next.bundle),
+            "the deny mask does not equal a fresh derivation — a build site broke the rule at \
+             `derive_denied`; an unsuppress subtracting a row while `deleted` still holds the \
+             entity is the classic way"
+        );
         self.generation.store(Arc::new(next));
-        // The clone above is O(total buffered items) and, there being no flush, the buffer only
-        // grows. This counter is what makes the deny-ack floor measurable rather than asserted —
-        // see `ExecutorHealth::apply_nanos_total`.
+        // The overlay/buffer clone above is O(total buffered items). This counter is what makes
+        // the deny-ack floor measurable rather than asserted — see
+        // `ExecutorHealth::apply_nanos_total`.
         self.health
             .record_apply(started.elapsed().as_nanos() as u64);
         #[cfg(feature = "fault-injection")]

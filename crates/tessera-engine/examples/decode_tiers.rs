@@ -362,6 +362,8 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
         &IngestBuffer::default(),
         base,
         &perm,
+        // Nothing denied — this example measures decode tiers.
+        &croaring::Bitmap::new(),
     );
     (temp, mask)
 }

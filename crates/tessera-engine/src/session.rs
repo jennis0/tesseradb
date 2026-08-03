@@ -256,6 +256,20 @@ pub enum EngineError {
         slice: String,
         seg_id: String,
     },
+    /// This generation's deny mask has no entry for a slice its bundle carries.
+    ///
+    /// **Fails closed for the same reason [`Self::SegmentWithoutRowBase`] does: the wrong answer
+    /// is silent.** `compose::derive_denied` gives every slice an entry, empty when nothing is
+    /// denied, precisely so that a missing one cannot be read as "nothing is denied here". Reading
+    /// it that way would compose a mask with the deny half simply absent — every suppressed and
+    /// deleted row served on the map, every count including them, and no error anywhere. A 500 is
+    /// the better outcome.
+    ///
+    /// Unreachable while the mask and the bundle are built together, which `Executor::publish`
+    /// asserts in debug.
+    DenyMaskMissing {
+        slice: String,
+    },
     /// A slice carried by more than one partition.
     ///
     /// The symmetric case to [`Self::SegmentWithoutRowBase`], and it fails closed for the symmetric
@@ -345,6 +359,11 @@ impl std::fmt::Display for EngineError {
                 "slice '{slice}' holds segment '{seg_id}', which has no extent and so no known \
                  row_base — the row space and the segment list disagree about what this slice \
                  holds (see EngineError::SegmentWithoutRowBase's doc)"
+            ),
+            EngineError::DenyMaskMissing { slice } => write!(
+                f,
+                "this generation's deny mask has no entry for slice '{slice}', so the mask and \
+                 the bundle disagree about what it holds (see EngineError::DenyMaskMissing's doc)"
             ),
             EngineError::MultiPartitionSlice(slice) => write!(
                 f,
@@ -661,17 +680,25 @@ impl Engine {
 
         // `Arc`-wrapped from the start: the `Engine` and its `WritePath` share this one
         // pointer, so a swap published by an acceptance is the swap every read path observes.
+        // The mask this engine opens with, derived from the overlay replay reconstructed and the
+        // row space the bundle carries — the same derivation every later publication repeats
+        // (`compose::derive_denied`). A node restarting into a live suppression set gets it here,
+        // not on its first request.
+        let bundle = Arc::new(bundle);
+        let denied = Arc::new(crate::compose::derive_denied(&overlay, &bundle));
+
         let generation = Arc::new(ArcSwap::new(Arc::new(Generation {
             prefix,
             segments_version,
             watermark,
-            bundle: Arc::new(bundle),
+            bundle: Arc::clone(&bundle),
             dict: Arc::clone(&dict),
             postings: Arc::clone(&postings),
             delta_postings,
             overlay_version: 0,
             overlay: Arc::new(overlay),
             buffer: Arc::new(buffer),
+            denied,
         })));
 
         // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately

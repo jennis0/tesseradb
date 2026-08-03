@@ -614,12 +614,24 @@ impl Engine {
         // on to do itself.
         check_cancelled(&cancel)?;
 
+        // **Fail-closed on a missing entry.** Every slice the bundle carries has one, empty when
+        // nothing is denied (`compose::derive_denied`), so an absent key means the mask and the
+        // bundle disagree about what this generation holds. Serving that as "nothing is denied
+        // here" would publish suppressed and deleted rows on the map with no error anywhere —
+        // the same shape as `SegmentWithoutRowBase`, and refused the same way.
+        let denied = generation.denied.get(slice).ok_or_else(|| {
+            EngineError::DenyMaskMissing {
+                slice: slice.to_string(),
+            }
+        })?;
+
         let mask = compose(
             &session.satisfied,
             &generation.overlay,
             &generation.buffer,
             base,
             &slice_data.row_space,
+            denied,
         );
         probe.lap(|t| &mut t.compose_ns);
 

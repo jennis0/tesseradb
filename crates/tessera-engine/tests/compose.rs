@@ -147,6 +147,9 @@ fn compose_with(fx: &Fixture, overlay: &Overlay, buffer: &IngestBuffer) -> Effec
         buffer,
         Arc::clone(&fx.base),
         &fx.perm,
+        // Derived here exactly as a publication derives it, so every case in this file exercises
+        // the deny mask rather than the walk that used to answer for deletions and suppressions.
+        &tessera_engine::denied_rows_of(overlay, &fx.perm),
     )
 }
 
@@ -840,6 +843,7 @@ fn visible_to_agrees_with_compose_over_every_precedence_case() {
         &buffer,
         Arc::clone(&fx.base),
         &fx.perm,
+        &tessera_engine::denied_rows_of(&overlay, &fx.perm),
     );
     assert!(mask.check_structural_invariants());
 

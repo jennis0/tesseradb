@@ -5,14 +5,27 @@
 //! computed once — seconds at 10⁹ rows — and reused across every
 //! viewport and every `compose` call in that session, never recomputed on a per-viewport path.
 //!
-//! [`compose`] walks `L = keys(overlay) ∪ keys(buffer)` exactly once
-//! per entity, resolving each with the fixed precedence `deleted > suppressed > evaluate_terms >
-//! buffered`, and turns the result into two row-space bitmaps against `base`:
+//! [`compose`] walks `L = keys(evaluate) ∪ keys(buffer)` exactly once per entity, resolving each
+//! with the fixed precedence `deleted > suppressed > evaluate_terms > buffered`, and turns the
+//! result into two row-space bitmaps against `base`:
 //! `minus = {row(e) : e fails} ∩ base` and `plus = {row(e) : e passes} ∖ base`. The `∩ base` /
 //! `∖ base` clamps are load-bearing, not cosmetic: without them, denying an entity the session's
 //! fragment never contained would corrupt every count over its tile (a spurious −1, possibly
 //! driving a count negative), and an evaluate-pass already inside the fragment would double-count
 //! its tile by the same mechanism in the other direction.
+//!
+//! **Deletions and suppressions are not in that walk.** They arrive as `Generation::denied` — the
+//! row-space image of `deleted ∪ suppressed`, derived by [`derive_denied`] — and are folded in as
+//! `minus ∪= denied ∩ base`, `plus ∖= denied`. Two reasons, and the second is the load-bearing
+//! one. The walk was O(denies **ever accepted**) per request, which is a cost curve nothing
+//! retires: two of the three retirement rules do not exist, so the deny set only grows. And
+//! `andnot` is self-clamping, so the deny half can no longer get the clamps above wrong at all —
+//! a deny cannot lose an ordering argument it never enters.
+//!
+//! [`verdict`] remains the single expression of the precedence, for the entity-space verbs
+//! ([`visible_to`], label gating, cluster visibility) and for this walk alike. The two
+//! representations are licensed by the differential obligation that they agree for every entity
+//! with a row (`tests/deny_mask.rs`).
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -22,8 +35,10 @@ use rustc_hash::FxHashSet;
 
 use tessera_authz::FrozenFragment;
 use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_store::RowSpace;
+use tessera_store::{Bundle, RowSpace};
 use tessera_types::{EntityId, TermId};
+
+use crate::DenyMask;
 
 /// A cached row-space projection of one frozen fragment, for one `(token, slice, pin)`.
 ///
@@ -403,6 +418,55 @@ fn verdict(
         .map(|item| item.terms.iter().any(|t| satisfied.contains(t)))
 }
 
+/// Derive the row-space deny mask from the authoritative entity-space stores.
+///
+/// **`{row_of(e) : e ∈ deleted ∪ suppressed}`, per slice, and nothing else.** The union is taken
+/// from [`Overlay::denied`] rather than assembled here, so the rule below has one expression.
+///
+/// **The derivation rule, stated where it is derived.** This function's result is the *only* legal
+/// value of [`Generation::denied`]. Two update modes are licensed:
+///
+/// - **Additions may be incremental.** A window of `Delete`/`Suppress` only grows the union, so
+///   adding `row_of(e)` per entry is provably equal to re-deriving.
+/// - **Any removal re-derives.** A window containing an `Unsuppress` rebuilds from the union.
+///   Subtracting `row_of(e)` on unsuppress **is wrong**: after `delete → suppress → unsuppress` the
+///   row must stay masked, because `deleted` still holds the entity. That is the one way this mask
+///   could silently re-expose a deleted item, and re-derivation makes it unmistakable. An
+///   implementation wanting the incremental subtraction must prove `e ∉ deleted` at the site.
+///
+/// Every geometry publication re-derives too, row ids being meaningful only within one
+/// `segments_version`. `Executor::publish` asserts this equality in debug builds, so a build site
+/// that breaks the rule fails the suite rather than a viewer's map.
+///
+/// An entity with no row — still buffered, or belonging to another slice — contributes nothing:
+/// the mask is complete for what it governs, which is row-space questions, and `verdict` answers
+/// the entity-space ones.
+pub(crate) fn derive_denied(overlay: &Overlay, bundle: &Bundle) -> DenyMask {
+    let mut out = DenyMask::default();
+    for partition in bundle.partitions.values() {
+        for (slice, slice_data) in &partition.slices {
+            // Every slice gets an entry, empty or not: a missing one must mean "the mask and the
+            // bundle disagree", never "nothing is denied here".
+            out.insert(
+                slice.clone(),
+                denied_rows_of(overlay, &slice_data.row_space),
+            );
+        }
+    }
+    out
+}
+
+/// One slice's deny mask — see [`derive_denied`], whose per-slice body this is.
+pub fn denied_rows_of(overlay: &Overlay, row_space: &RowSpace) -> Bitmap {
+    let mut rows = Bitmap::new();
+    for entity in overlay.denied().iter() {
+        if let Some(row) = row_space.row_of(EntityId::new(entity as u64)) {
+            rows.add(row.raw());
+        }
+    }
+    rows
+}
+
 /// Compose the effective mask for one request. See this module's doc for the precedence rule and
 /// the clamp rationale.
 ///
@@ -421,17 +485,21 @@ pub fn compose(
     buffer: &IngestBuffer,
     base: Arc<RowProjection>,
     row_space: &RowSpace,
+    denied: &Bitmap,
 ) -> EffectiveMask {
     let mut fail_rows: Vec<u32> = Vec::new();
     let mut pass_rows: Vec<u32> = Vec::new();
 
-    // Rules 1–3: every entity the overlay has an opinion on, resolved exactly once via the
-    // shared `verdict` function. A neutral entry yields no verdict at all — it is correctly
-    // already reflected in `base`, and rule 4 does not pick it up either (see `verdict`'s doc),
-    // so it contributes nothing to the diff. This is deliberate, not an oversight: recomputing
-    // "no verdict" from scratch every time is what makes unsuppress a pure subtraction from
-    // `minus` rather than a special case.
-    for entity in overlay.touched() {
+    // **Rules 1–3, over the predicate changes only.** Deletions and suppressions are not walked
+    // here any more: they are `denied`, folded in below as one `andnot`, which is what stops
+    // per-request work growing with denies ever accepted. An entity carrying *both* an evaluate
+    // entry and a deny is walked here and may be resolved `pass` — and the fold then removes its
+    // row regardless, so the precedence `deleted > suppressed > evaluate` holds without this loop
+    // transcribing it. A deny cannot lose an ordering argument it never enters.
+    //
+    // `verdict` is still the single expression of that precedence and is called unchanged, so the
+    // entity-space verbs and this walk cannot drift apart.
+    for entity in overlay.evaluate_keys() {
         if let Some(pass) = verdict(overlay, buffer, satisfied, entity) {
             if let Some(row) = row_space.row_of(entity) {
                 if pass {
@@ -460,9 +528,9 @@ pub fn compose(
                     fail_rows.push(row.raw());
                 }
             }
-            // Buffered entities have no row anywhere, there being no flush (⊘) — this branch is
-            // kept and tested (with a synthetic permutation) against the day buffered items get
-            // provisional rows, but today it always takes the "no row" path above.
+            // A buffered entity has no row by definition — that is what being buffered means — so
+            // this always takes the "no row" path above. The branch is kept and tested against a
+            // synthetic permutation, for the day buffered items get provisional rows.
         }
     }
 
@@ -472,8 +540,15 @@ pub fn compose(
     let pass_bitmap = Bitmap::of(&pass_rows);
 
     let base_bitmap = base.bitmap();
-    let minus = fail_bitmap.and(base_bitmap);
-    let plus = pass_bitmap.andnot(base_bitmap);
+    // **The deny mask is folded in last, unconditionally.** `minus` gains every denied row that
+    // `base` carries and `plus` loses every denied row it proposed, so a denied entity is masked
+    // whatever any other rule concluded about it.
+    //
+    // `andnot` is self-clamping, which is the second half of why this is worth doing: the deny
+    // half can no longer get the `∩ base` / `∖ base` clamps wrong, and the spurious-`−1` hazard
+    // this module's doc describes cannot arise for denies at all (I2).
+    let minus = fail_bitmap.and(base_bitmap).or(&denied.and(base_bitmap));
+    let plus = pass_bitmap.andnot(base_bitmap).andnot(denied);
 
     debug_assert!(
         minus.is_subset(base_bitmap),
