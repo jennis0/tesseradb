@@ -304,15 +304,16 @@ pub enum EngineError {
     /// arm measures the alternative): a parked waiter would hold the server's admission budget
     /// while burning zero CPU, so this call returns immediately and the caller is expected to
     /// retry.
-    /// **⊘ Specified, not implemented:** the intended mapping is HTTP 429 with `Retry-After`. What
-    /// happens instead is the server's fail-closed 500 arm — honest, never fail-open, but not the
-    /// retryable signal a client can act on.
+    /// Maps to **429 `backpressure` with `Retry-After`** at the server boundary
+    /// (`tessera-server::error::map_engine_error`'s explicit arm, pinned by
+    /// `map_engine_error_takes_projection_building_to_backpressure`): a build that never blocks
+    /// makes the honest answer retryable rather than fail-closed.
     ProjectionBuilding,
     /// This credential's mask fragment (lifecycle §3.3), keyed by the canonical `(bundle_identity, auth_plugin_hash, satisfied terms)` key, never
     /// `auth_data_hash` — see `tessera_authz::FragmentCache::get_or_build`'s doc — is being built
     /// by a concurrent `authorise` call right now. Same non-blocking-waiters rule and the same
-    /// unbuilt mapping as [`Self::ProjectionBuilding`] (⊘): this call does not wait, the caller
-    /// retries, and the server takes the fail-closed 500 arm.
+    /// **429** mapping as [`Self::ProjectionBuilding`]: this call does not wait, and the caller is
+    /// told to retry rather than handed a fail-closed 500.
     FragmentBuilding,
     /// D-C: the caller's [`crate::cancel::CancelToken`] was observed flipped mid-request (the
     /// rapid-pan case — a client aborted a fetch it no longer needs). Whole-request abort:

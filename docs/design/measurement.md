@@ -37,7 +37,7 @@ Two conventions follow from it, and they are the part most easily got wrong:
 
 ---
 
-## 2. The state axis
+## 2. The two missing axes
 
 Every arm today holds the bundle constant and varies the request. Nothing varies the bundle under a
 constant request, because until flush there was nothing to vary: `tessera build` produced one
@@ -85,6 +85,52 @@ them. §14.13 and §14.18 fit here for the same reason.
 > correctly reports a flat read latency and an unbounded ack→visible gap, because there is no flush.
 > That is a useful negative baseline and it is not a partial pass — the gates in spec §8 stay
 > unarmed until there is a flush to bound.
+
+### 2.3 Residency, and why it cannot be measured naively
+
+Appendix A's residency arithmetic is the justification for several shipped decisions, and **none of
+it has ever been measured**. hot-row-geometry §7 states the reason plainly: the bench has no
+memory-pressure mechanism, and a residency saving becomes latency only under contention. The
+`cold_*` arms are a token-cache split, not a page-cache one.
+
+Three obvious mechanisms fail, and the reasons are worth recording so they are not retried:
+
+- **`drop_caches`** needs root, is global, and is one-shot. It evicts the binary along with the
+  bundle, can only run between cells, and the first request re-warms everything — one cold sample
+  per invocation, and none thereafter.
+- **`madvise(MADV_DONTNEED)`** on the mappings does not do what the name suggests here. The store
+  mmaps its files, and on a file-backed mapping `DONTNEED` drops the page-table entries while
+  leaving the pages in page cache, so the next touch is a **minor** fault. That measures fault and
+  TLB cost, not IO. Genuine eviction needs unmap → `posix_fadvise(DONTNEED)` → remap, which means an
+  engine re-open per trial — and re-open digest-verifies the bundle, reading it all back in.
+- **Outgrowing RAM** is unavailable on the hardware this project measures on: 47 GB against a 10⁹
+  bundle whose hot columns are ~14 GB.
+
+**The mechanism is cgroup v2**, which is delegated on this box and drives unprivileged:
+`systemd-run --user --scope -p MemoryMax=<N> -p MemorySwapMax=0`. `MemorySwapMax=0` is not optional
+— with swap available the experiment measures swap thrash rather than page-cache reclaim.
+
+The axis is not cold-versus-hot. It is the **residency ratio** *r* = memory available to the page
+cache ÷ bytes the workload actually touches, swept *r* ≥ 1, 0.5, 0.25, 0.1. That matches the
+deployment question, which is never "is the cache cold" but "the working set exceeds RAM and the
+kernel is reclaiming continuously".
+
+Three consequences:
+
+- **The limit counts anon and page cache together**, so a limit low enough is an OOM kill rather
+  than an eviction. The floor is set by the anon working set — masks, row projections, session
+  caches — which is `load`'s Arm A memory question. The floor is therefore itself a measurement, and
+  each cell reports the anon/cache split from `memory.stat` rather than only the limit it was given.
+- **`major_faults` inverts.** Today a cell taking major faults is flagged suspect and excluded from
+  gating (`Env::bundle_fits_in_ram`), because its latency is a page-cache artefact. In this arm the
+  major faults *are* the measurement. The flag must be arm-aware or the arm excludes itself.
+- **min-of-N is fatal**, and more directly than anywhere else in spec §4: minimum-over-repetitions
+  selects the warmest sample by construction, which is exactly what it was chosen to do. Cells are
+  first-touch, or a distribution over independent trials at steady-state pressure.
+
+What this unblocks is the comparison hot-row-geometry §7 records as open. 18 → 14 B/row is
+arithmetic against Appendix A and **must not be quoted as a measurement**; a `variant` field
+(spec §7) plus a residency sweep is the first construction in which it could become one.
 
 ---
 
@@ -242,6 +288,9 @@ publishing half of C4.
 - **`session`** (spec §6.1) — the only arm that represents a viewer rather than a request. Shares
   `load`'s generator and ceiling calibration; adds the trajectory script, think time and the
   cold-start arc.
+- **`residency`** (spec §2.3) — any read arm re-run inside a memory-limited scope, swept over *r*.
+  Not a new measurement so much as a new environment for existing ones, so it is a wrapper plus an
+  `Env` extension rather than an arm with its own axes.
 - **`filter`** — vocabulary-filter cost against vocabulary size × **principal sparsity** × overlay
   depth, at cold and cached fingerprints. per-point-attributes §3.3 predicts sparse principals are
   cheapest; an arm that does not vary sparsity cannot check the prediction it most needs to. Second
@@ -314,9 +363,11 @@ gives: putting an hours-long cell beside a two-microsecond one makes the default
 
 - **No new corpus.** Every axis here is constructible within the existing fixtures plus an attribute
   tail. Signature-sorted contiguity still cannot be synthesised and still costs a rebuild.
-- **No memory-pressure mechanism.** hot-row-geometry §7's residency saving becomes latency only
-  under contention, and the `cold_*` arms are a token-cache split, not a page-cache one. Unchanged
-  here, and the saving stays arithmetic against Appendix A.
+- **No residency figure yet.** Spec §2.3 specifies the mechanism; until it runs, hot-row-geometry
+  §7 stands unchanged and the 18 → 14 B/row saving stays arithmetic against Appendix A.
+- **No claim that the residency sweep is representative.** A cgroup limit reclaims by the kernel's
+  LRU, not by a deployment's access pattern, and the ratio *r* is chosen rather than observed. It
+  establishes a curve's **shape**; it does not predict a given deployment's point on it.
 - **No published figure for anything unbuilt.** ⊘ Four of the six spec §6 figures cannot be produced
   today: ack→visible and the soak curve need flush; the attribute split needs the tail; the wire
   ingest number needs the arm.
@@ -336,3 +387,8 @@ columns that would fill it (spec §5.1).
 Spec §6.1 was added after drafting, on the observation that `Pan` and `Zoom` repeat each position in
 place — so the sequential locality a real pan has is precisely what the repetition removes, and no
 arm represented a viewer rather than a request.
+
+Spec §2.3 was added on the objection that cold-page effects cannot be measured naively, which is
+correct: the three mechanisms a reader would reach for first each fail for a different reason, and
+the corpus cannot outgrow this hardware's RAM. `MemoryMax` under an unprivileged
+`systemd-run --user --scope` was verified to apply on this box before being specified.

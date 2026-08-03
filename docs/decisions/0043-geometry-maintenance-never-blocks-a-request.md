@@ -29,8 +29,18 @@ request do work. Today that work is:
   only. Small, but on the request thread;
 - **after a merge** — a full rebuild, **measured 10.7 s at 10⁹**, on the request thread, because
   `RowSpace::collapsing` shortens the extent list and `RowProjection::extends_to` then refuses the
-  patch. A concurrent request from the same session gets `EngineError::ProjectionBuilding`, which
-  maps to a fail-closed **500** today (its 429 + `Retry-After` mapping is ⊘).
+  patch. A concurrent request from the same session gets `EngineError::ProjectionBuilding`.
+
+> **Correction, 2026-08-03, same day.** This entry as first written said `ProjectionBuilding` maps
+> to a fail-closed 500 and that its 429 mapping was unbuilt. **That is wrong.** It maps to **429
+> `backpressure` with `Retry-After`**, in `map_engine_error`'s explicit arm, pinned by
+> `map_engine_error_takes_projection_building_to_backpressure`. The error came from trusting a ⊘
+> marker on `EngineError::ProjectionBuilding` that had gone stale when the mapping was built — the
+> exact failure decision 0013 exists to prevent, arriving from the other direction: not an absent
+> marker for present machinery, but a present marker for machinery that had since arrived. The two
+> stale markers are removed. Recorded here rather than edited away, because the reasoning below
+> does not depend on it: a viewer waiting 10.7 s is what this rule forbids, and a retryable 429 is
+> a better symptom of it than a 500, not an absent one.
 
 So the ruling is violated by merge severely and by flush mildly, and the second reading matters: if
 it binds flush too, it is a much larger change than merge alone.
@@ -65,8 +75,9 @@ eager per-session rebuild does not obviously fit, and §3.3's original objection
 
 - **Merge must not be scheduled until the mechanism exists.** Tasks 20 and 21 are built; Task 22
   (publication) is what would make the cost reachable, and it is blocked on this.
-- `EngineError::ProjectionBuilding`'s 500 is a user-visible symptom of what this rule forbids, and
-  its 429 + `Retry-After` mapping stops being an ergonomic nicety.
+- `EngineError::ProjectionBuilding`'s 429 is a user-visible symptom of what this rule forbids. It
+  is the *right* answer to a build in flight; the rule's objection is that a viewer should not meet
+  one at all.
 - Compaction inherits the rule before it is designed, which is the cheapest moment to be told.
 - Whether the rule binds **flush** as strictly as merge is the first thing the mechanism's design
   must answer, because it sets that design's size.

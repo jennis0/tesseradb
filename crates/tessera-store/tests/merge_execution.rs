@@ -73,6 +73,10 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::flush::FlushOutpu
             shard_id: 0,
             scalar_schema: &schema,
             row_base: 0,
+            // The live values a publication would carry — deliberately *above* the inputs' own
+            // range, so a merge that derived them from `entity_hi` would show up as a regression.
+            watermark: 10_000,
+            entity_id_high_water: 10_000,
         },
     )
     .expect("the merge executes")
@@ -258,7 +262,35 @@ fn out_of_order_inputs_are_refused() {
             shard_id: 0,
             scalar_schema: &schema,
             row_base: 0,
+            watermark: 10_000,
+            entity_id_high_water: 10_000,
         },
     );
     assert!(err.is_err());
+}
+
+/// **A merge must not move the watermark**, and deriving one from its inputs would.
+///
+/// The output shape is a flush's, where `entity_hi + 1` is right because a flush's entities are the
+/// newest in the partition. A merge's are not: merging an *interior* run and publishing
+/// `entity_hi + 1` moves the watermark **backwards** past entities that already have rows, and
+/// composition treats everything at or above it as buffer-resident — so those entities would be
+/// looked for in a buffer that no longer holds them.
+///
+/// **Mutation:** set `watermark: entity_hi + 1` in `execute_merge` and this fails, because the
+/// inputs here sit well below the live value.
+#[test]
+fn a_merge_carries_the_live_watermark_rather_than_deriving_one() {
+    let dir = tempfile::TempDir::new().unwrap();
+    build_bundle(dir.path(), 10);
+    let a = segment(dir.path(), "in-a", 100, 5, 7);
+    let b = segment(dir.path(), "in-b", 200, 5, 31);
+
+    let out = merge(dir.path(), &[a, b]);
+    assert_eq!(out.watermark, 10_000);
+    assert_eq!(out.entity_id_high_water, 10_000);
+    assert!(
+        out.watermark > out.segment.entity_hi + 1,
+        "the fixture must place the live watermark above the merged range, or this proves nothing"
+    );
 }

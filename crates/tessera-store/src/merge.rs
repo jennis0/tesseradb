@@ -151,6 +151,19 @@ pub struct MergeSpec<'a> {
     /// `row_base`. A merge emits exactly as many rows as it consumed, so no later extent's
     /// `row_base` moves and `RowSpace::collapsing` puts this where the consumed run was.
     pub row_base: u32,
+    /// The live partition watermark, passed through untouched.
+    ///
+    /// **A merge must not move it, and deriving one from the inputs regresses it.** The output
+    /// shape is a flush's, where `entity_hi + 1` is the right answer because a flush's entities are
+    /// the newest in the partition. A merge's are not: merging an *interior* run and then
+    /// publishing `entity_hi + 1` would move the watermark **backwards** past entities that
+    /// already have rows, and composition treats everything at or above it as buffer-resident —
+    /// so those entities would be looked for in a buffer that no longer holds them. Carried rather
+    /// than computed, so the publication path can treat a merge exactly as it treats a flush
+    /// without either of them knowing which it has.
+    pub watermark: u64,
+    /// The live allocator high-water, passed through untouched, for the reason above.
+    pub entity_id_high_water: u64,
 }
 
 /// Merge `spec.inputs` into one segment under `prefix_dir`.
@@ -337,11 +350,11 @@ pub fn execute_merge(
             external_id_run: rel("external-ids.arrow"),
         },
         files,
-        // **A merge moves neither watermark.** It publishes no entity that did not already have a
-        // row, and allocates none: both are the caller's current values, carried so the
-        // publication path can treat a merge exactly as it treats a flush.
-        watermark: entity_hi + 1,
-        entity_id_high_water: entity_hi + 1,
+        // **A merge moves neither watermark**, and both are therefore the caller's live values
+        // rather than anything derived from the inputs — see `MergeSpec::watermark` for why
+        // deriving `entity_hi + 1` here regresses it on any interior merge.
+        watermark: spec.watermark,
+        entity_id_high_water: spec.entity_id_high_water,
     })
 }
 
