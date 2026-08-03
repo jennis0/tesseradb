@@ -141,6 +141,10 @@ pub struct Session {
     pub token_id: u64,
     /// The credential's granted terms, resolved to bundle-relative `TermId`s. An unknown
     /// descriptor (no dictionary entry) is simply absent here — never an error.
+    ///
+    /// **Resolved once, at authorise, and never re-resolved in place** — see [`Session::is_stale`],
+    /// whose third rule this is. A flush that promotes one of the descriptors that dropped out
+    /// leaves this set as it was; the remedy is a new session, not a mutation of this one.
     pub satisfied: FxHashSet<TermId>,
     /// The materialised mask fragment (I2): the union of every satisfied term's postings, over
     /// the base and every delta tier live at the moment this session authorised.
@@ -161,6 +165,73 @@ pub struct Session {
     pub(crate) auth_data_hash: [u8; 32],
     /// Unix timestamp (seconds) after which this session is no longer valid.
     pub expires_at: u64,
+    /// How many of the credential's granted descriptors had **no dictionary entry** at authorise,
+    /// and the dictionary length they were resolved against — together, §3.3's staleness
+    /// condition. See [`Session::is_stale`].
+    ///
+    /// Deliberately not `pub`. The boolean is the whole of what §3.3 specifies; the count is a
+    /// fact about how many of this viewer's descriptors the corpus does not carry, which is
+    /// strictly more than the boolean and would need its own leak-register argument before
+    /// anything could put it on the wire.
+    pub(crate) unresolved_count: usize,
+    /// See [`Self::unresolved_count`].
+    pub(crate) dict_len_at_authorise: u32,
+}
+
+impl Session {
+    /// **§3.3 — is this session's mask behind the corpus?** True iff this credential named a
+    /// descriptor the dictionary did not carry at authorise *and* the dictionary has grown since.
+    ///
+    /// Two loads and a branch, evaluated lazily by whoever asks — never swept. Nothing walks the
+    /// session registry when a flush promotes a term, which keeps the executor free of an
+    /// O(sessions) publication step (decision 0035). `Dict` is generation-scoped (§3.2), so the
+    /// current length comes off the generation the caller has already loaded once at request start
+    /// (lifecycle §1.1's ordering invariant). Decision 0020 is untouched: a count and an integer
+    /// are not authorisation data.
+    ///
+    /// **Over-reports in one direction, and that is the safe one.** A session with one unresolved
+    /// descriptor is hinted whenever *any* term is promoted, not only its own; the false direction
+    /// costs one voluntary re-authorisation. A session with nothing unresolved is never hinted.
+    /// (The refinement — comparing digests of the unresolved descriptors against the promoted ones
+    /// — is deliberately not built: it retains more and leaks more, confirming that *their*
+    /// descriptor now exists where this says only that some term appeared.)
+    ///
+    /// **⊘ Specified, not implemented: the wire representation.** §3.3 states the internal
+    /// condition only. No response carries this, and a client's policy for acting on it is
+    /// client-facing work; what exists today is this predicate and its leak-register row (C21).
+    ///
+    /// **⊘ And nothing an ingest does can make it true yet.** The promotion this advertises is a
+    /// flush's, and `crate::flush::promote` carries its own ⊘ — the buffer holds resolved `TermId`s
+    /// and not the descriptor bytes, so a novel term is left out of the tier rather than promoted.
+    /// A publication that extends the dictionary flips this correctly (`tests/staleness_hint.rs`
+    /// drives exactly the call a flush's own publication makes); an ingest does not, today.
+    ///
+    /// Three rules keep it from becoming something it must not be:
+    ///
+    /// - **It moves in one direction only.** A stale session sees *fewer* items than its principal
+    ///   is entitled to — fail-closed, which is what makes an advisory answer legitimate at all.
+    ///   Grant changes are not covered, and **nothing may ever be wired to make a revocation take
+    ///   effect through this**: decision 0025 governs rotation, and this is not a general "the mask
+    ///   changed" channel.
+    /// - **It is a hint, not an expiry.** Treating a stale session as expired would need no new
+    ///   wire field and is already contractual under decision 0025 — and is rejected on load: it
+    ///   forces every affected session to rebuild its fragment at one tick, and the next viewport
+    ///   pays a **measured 10.7 s** row projection at 10⁹. A hint spreads the same total work over
+    ///   the interval. What bounds staleness for a client that ignores it already exists:
+    ///   `token_max_lifetime_secs` caps every session's life. This is the fast path, not the safety
+    ///   net.
+    /// - **The only remedy is a new session; [`Self::satisfied`] is never re-resolved in place.**
+    ///   Re-resolving it inside a live session would break §3.4's premise 3 and with it the
+    ///   patch-equals-a-rebuild equality [`Engine::fragment_for`] rests on. **This is a rule rather
+    ///   than a structural impossibility** — it is the property given up to avoid the load spike
+    ///   above — so it is the first thing to check in any future change to session handling.
+    ///
+    /// **Compaction inherits one obligation:** the dictionary length is the monotone counter this
+    /// rests on, so a compaction that renumbers the dictionary must not reduce it, or must
+    /// introduce a counter that never decreases.
+    pub fn is_stale(&self, generation: &Generation) -> bool {
+        self.unresolved_count > 0 && generation.dict.len() > self.dict_len_at_authorise
+    }
 }
 
 /// Engine-level failures. Every variant here is fail-closed (Global Constraint 3): none of them
@@ -698,11 +769,24 @@ impl Engine {
         // while building a fragment against the watermark that preceded it.
         let generation = self.generation.load();
 
-        let satisfied: FxHashSet<TermId> = auth_terms
-            .terms
-            .iter()
-            .filter_map(|descriptor| generation.dict.lookup(descriptor))
-            .collect();
+        // Counted rather than derived as `terms.len() - satisfied.len()`: `satisfied` is a set, so
+        // two descriptors resolving to one ordinal would make that difference report an unresolved
+        // descriptor that does not exist. Only `> 0` is ever read (`Session::is_stale`), but a
+        // count that can be wrong for a reason unrelated to the dictionary is not one to keep.
+        let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
+        let mut unresolved_count = 0usize;
+        for descriptor in &auth_terms.terms {
+            match generation.dict.lookup(descriptor) {
+                Some(term) => {
+                    satisfied.insert(term);
+                }
+                // An unknown descriptor is simply unsatisfied, never an error — and §3.3's
+                // observation is that the ones that drop out here are precisely this session's
+                // exposure to a later promotion, so the condition costs a counter to keep and a
+                // rebuild to recover.
+                None => unresolved_count += 1,
+            }
+        }
 
         let mut satisfied_sorted: Vec<TermId> = satisfied.iter().copied().collect();
         satisfied_sorted.sort_unstable();
@@ -746,6 +830,8 @@ impl Engine {
             satisfied_sorted,
             auth_data_hash,
             expires_at,
+            unresolved_count,
+            dict_len_at_authorise: generation.dict.len(),
         })
     }
 

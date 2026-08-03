@@ -24,14 +24,14 @@ the other.
 | **I8** | A label's generating set is immutable once supplied |
 | **I9** | Entity IDs are append-only and never reused |
 | **I10** | Entity IDs never cross the trust boundary |
-| **I11** | Row-space artifacts are versioned together |
+| **I11** | Row-space artifacts are versioned together, and a request resolves geometry once |
 | **I12** | Filters narrow rendering; they never touch authorisation |
 | **I13** | An answer that was not computed is a refusal, never a vacuous success |
 | **I13a** | a request that fails or is cancelled yields no partial answer |
 | **I13b** | a partition not consulted fails closed |
 | **I13c** | a partition unreachable through outage is an error, never an empty contribution |
 
-## Leak register (20 rows)
+## Leak register (21 rows)
 
 Exhaustive by construction: a disclosure not in this table is a bug, not an omission.
 
@@ -57,6 +57,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C18** | Mark count and sub-cell counts track the masked visible count | Low | Accepted — no new channel |
 | **C19** | Per-tile selection work varies with the viewer's own visible count | Low | Accepted — C4/C14 shape |
 | **C20** | Probing how identifiers moved across a key rotation | Medium | Closed |
+| **C21** | Mask-staleness hint (flush §3.3) | Low | Accepted — C15 shape |
 
 ## Documents
 
@@ -64,17 +65,19 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r30 | 12 |
+| `architecture.md` | Normative — r30 | 13 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
-| `concurrency-lifecycle.md` | Normative — r5 | 21 |
-| `conformance.md` | Normative — r6 | 10 |
+| `concurrency-lifecycle.md` | Normative — r5 | 22 |
+| `conformance.md` | Normative — r6 | 12 |
 | `contracts.md` | Normative — r14 | 14 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
-| `flush-and-merge.md` | Provisional — under review | 2 |
-| `hot-row-geometry.md` | Provisional — under review | 2 |
+| `flush-and-merge.md` | Provisional — under review | 3 |
+| `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
+| `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 3 |
+| `measurement.md` | Provisional — under review | 4 |
 | `per-point-attributes.md` | Provisional — under review | 6 |
 | `slices-and-multi-table.md` | Provisional — under review | 7 |
 | `system-architecture.md` | Normative — r10 | 27 |
