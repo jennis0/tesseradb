@@ -113,6 +113,33 @@ pub fn split32(qx: u32, qy: u32) -> (MortonCode, u32) {
     (cell, residual)
 }
 
+/// Recover `(qx, qy)` from the stored `(cell code, sub-cell residual)` — the exact inverse of
+/// [`split32`].
+///
+/// **Exact, and that is what it is for.** A merge re-emits the rows of several segments as one, and
+/// a segment stores the *code*, never the axes it was built from. Recovering the axes through
+/// coordinates — dequantise to floats, re-quantise — would move points by up to a quantisation
+/// step, silently, on every merge. Going back through the interleave moves nothing: it is a bit
+/// permutation, so `unsplit32(split32(qx, qy)) == (qx, qy)` for every input, which the round-trip
+/// test asserts rather than argues.
+pub fn unsplit32(cell: MortonCode, residual: u32) -> (u32, u32) {
+    let code = cell.raw();
+    let qx = (compact(code) << 16) | compact(residual);
+    let qy = (compact(code >> 1) << 16) | compact(residual >> 1);
+    (qx, qy)
+}
+
+/// Gather the even bit positions of a 32-bit value back into the low 16 bits — the inverse of
+/// [`spread`].
+fn compact(v: u32) -> u32 {
+    let mut x = v & 0x5555_5555;
+    x = (x | (x >> 1)) & 0x3333_3333;
+    x = (x | (x >> 2)) & 0x0F0F_0F0F;
+    x = (x | (x >> 4)) & 0x00FF_00FF;
+    x = (x | (x >> 8)) & 0x0000_FFFF;
+    x
+}
+
 /// Spread the low 16 bits of `v` into the even bit positions of a 32-bit value.
 ///
 /// Bit *i* of `v` moves to bit `2*i` of the result; odd bits are zero.
@@ -370,5 +397,57 @@ mod tests {
         assert_eq!(tiles.len(), 1);
         assert_eq!(tiles[0].prefix, code);
         assert_eq!(tiles[0].code_range(), (code, code + 1));
+    }
+}
+
+#[cfg(test)]
+mod unsplit_tests {
+    use super::*;
+
+    /// **`unsplit32 ∘ split32 == identity`, asserted rather than argued.** A merge re-emits several
+    /// segments' rows as one, and a segment stores the code, not the axes: this is the only route
+    /// back that moves nothing. Going via coordinates — dequantise, re-quantise — would shift
+    /// points by up to a quantisation step on every merge, silently.
+    #[test]
+    fn splitting_and_unsplitting_is_the_identity() {
+        // Boundaries and a deterministic spread of interior values, rather than a random sample:
+        // the failure mode is a bit-position error, which is exactly what extremes expose.
+        let mut cases: Vec<(u32, u32)> = vec![
+            (0, 0),
+            (u32::MAX, u32::MAX),
+            (u32::MAX, 0),
+            (0, u32::MAX),
+            (0xFFFF_0000, 0x0000_FFFF),
+            (1, 2),
+        ];
+        let mut v: u32 = 0x9E37_79B9;
+        for _ in 0..256 {
+            v = v.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let w = v.rotate_left(16) ^ 0x5BF0_3635;
+            cases.push((v, w));
+        }
+
+        for (qx, qy) in cases {
+            let (cell, residual) = split32(qx, qy);
+            assert_eq!(
+                unsplit32(cell, residual),
+                (qx, qy),
+                "round trip failed for ({qx:#010x}, {qy:#010x})"
+            );
+        }
+    }
+
+    /// The halves are independent: the cell is the interleave of the high halves and the residual
+    /// of the low, which is what makes `(code << 32) | residual` the 64-bit interleave (see
+    /// [`split32`]'s doc). A merge relies on that to sort by the code alone.
+    #[test]
+    fn the_cell_carries_the_high_halves_and_the_residual_the_low() {
+        let (cell, residual) = split32(0xABCD_1234, 0x5678_9ABC);
+        assert_eq!(cell, interleave(0xABCD, 0x5678));
+        let (qx, qy) = unsplit32(cell, residual);
+        assert_eq!(qx >> 16, 0xABCD);
+        assert_eq!(qy >> 16, 0x5678);
+        assert_eq!(qx & 0xFFFF, 0x1234);
+        assert_eq!(qy & 0xFFFF, 0x9ABC);
     }
 }
