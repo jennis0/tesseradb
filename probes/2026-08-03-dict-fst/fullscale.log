@@ -1,0 +1,50 @@
+== decimal  n=116902007  key bytes total 0.94 GB (avg 8.0 B/key)
+  sort: 12.5s
+  fst: build 9.5s, file 0.763 GB = 6.52 B/key
+  fst: open 0.038 ms
+    fst lookups (cold pages): hit 1047 ns, miss 971 ns  (checksum 58467058065013)
+    fst lookups (warm): hit 1007 ns, miss 981 ns  (checksum 58467058065013)
+  fst: resident growth after lookups 0.76 GB
+  fxhashmap: build (== open cost every restart) 40.0s, resident growth 7.09 GB
+    map lookups: hit 348 ns, miss 254 ns  (checksum 58467058065013)
+
+== surname  n=116902007  key bytes total 1.50 GB (avg 12.9 B/key)
+  sort: 15.8s
+  fst: build 7.4s, file 0.003 GB = 0.03 B/key
+  fst: open 0.036 ms
+    fst lookups (cold pages): hit 599 ns, miss 613 ns  (checksum 58467058065013)
+    fst lookups (warm): hit 594 ns, miss 608 ns  (checksum 58467058065013)
+  fst: resident growth after lookups 0.00 GB
+  fxhashmap: build (== open cost every restart) 48.7s, resident growth 7.10 GB
+    map lookups: hit 422 ns, miss 296 ns  (checksum 58467058065013)
+
+== hex32  n=116902007  key bytes total 3.74 GB (avg 32.0 B/key)
+  sort: 124.4s
+  fst: build 387.2s, file 4.055 GB = 34.69 B/key
+  fst: open 0.076 ms
+    fst lookups (cold pages): hit 2238 ns, miss 1861 ns  (checksum 58467058065013)
+    fst lookups (warm): hit 1821 ns, miss 1735 ns  (checksum 58467058065013)
+  fst: resident growth after lookups 4.06 GB
+  fxhashmap: build (== open cost every restart) 49.0s, resident growth 8.96 GB
+    map lookups: hit 522 ns, miss 386 ns  (checksum 58467058065013)
+
+== surname  n=10000000  key bytes total 0.12 GB (avg 11.8 B/key)
+  sort: 1.1s
+  fst: build 0.9s, file 0.003 GB = 0.32 B/key
+  fst: open 0.029 ms
+    fst lookups (cold pages): hit 543 ns, miss 519 ns  (checksum 5002002710459)
+    fst lookups (warm): hit 529 ns, miss 511 ns  (checksum 5002002710459)
+  fst: resident growth after lookups 0.00 GB
+  fxhashmap: build (== open cost every restart) 3.1s, resident growth 0.73 GB
+    map lookups: hit 239 ns, miss 173 ns  (checksum 5002002710459)
+
+== hex32  n=10000000  key bytes total 0.32 GB (avg 32.0 B/key)
+  sort: 5.9s
+  fst: build 31.0s, file 0.346 GB = 34.58 B/key
+  fst: open 0.025 ms
+    fst lookups (cold pages): hit 1074 ns, miss 1021 ns  (checksum 5002002710459)
+    fst lookups (warm): hit 1002 ns, miss 1013 ns  (checksum 5002002710459)
+  fst: resident growth after lookups 0.35 GB
+  fxhashmap: build (== open cost every restart) 2.7s, resident growth 0.89 GB
+    map lookups: hit 227 ns, miss 150 ns  (checksum 5002002710459)
+

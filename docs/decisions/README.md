@@ -59,3 +59,4 @@ prevent.
 | [0039](0039-multi-valued-categoricals-are-slow-path-only.md) | 2026-08-01 | Multi-valued categoricals are a slow-path capability only |
 | [0040](0040-quantisation-is-slice-scoped-index-config.md) | 2026-08-02 | The quantisation extent is slice-scoped index configuration, immutable at runtime |
 | [0041](0041-pins-become-a-staleness-stamp.md) | 2026-08-03 | A pin becomes a staleness stamp, not retained geometry |
+| [0042](0042-a-dictionary-extent-never-repeats-a-descriptor.md) | 2026-08-03 | A dictionary extent never repeats a descriptor, and the loader enforces it |

@@ -243,6 +243,37 @@ at authorise against `Engine.dict`, an `Arc<Dict>` loaded at `Engine::open` and 
 **generation-scoped** — `Arc<Dict>` moves into `Generation` and is republished with each flush —
 touching authorise, the write path and the resolver. §16 lists the sites.
 
+**The descriptor bytes come from the resolver, not from the buffer.** `BufferedItem` holds resolved
+`TermId`s, so the buffer alone cannot turn an extension id back into a descriptor. `DescriptorResolver`
+holds the mapping for the process's lifetime — one entry per distinct descriptor, deduped, carried
+across replay so the assignment stays continuous — and a flush takes the inverse of it for the ids
+its own plan carries. Restricted to those, because a descriptor no flushed item references has no
+posting to write. The lookup is total for anything a plan can name: rotation reclaims only WAL
+members below the oldest *buffered* row, so a buffered item's record always survives to be replayed.
+**An extension id with no descriptor fails the flush** rather than dropping the term.
+
+**The dictionary is consulted before anything is interned**, so an extent never repeats a descriptor
+the dictionary already holds. Ordinals are positions in the concatenation of `dict_extents` in listed
+order, and a repeat shifts every ordinal after it — in one reader but not the other, so the running
+process and the same bundle reopened would disagree about what a tier's postings mean. The reader
+enforces the same rule (`load(a ++ b) ≡ load(a).load_extending(b)`), which is where the *format*
+carries it rather than a caller.
+
+**The assignment a flush publishes is the one it wrote**, built in memory from the same sequence the
+extent records and the tier's postings name, never re-read from the file. Nothing compares the two,
+so a bad read would silently become the live assignment while the tier held the intended one; that
+the file agrees is a restart property and is tested as one.
+
+**Its ordinals are positions, so a promoting flush is discarded if the dictionary moved under it.**
+A flush that promoted nothing is exempt — its tier names only ordinals below the length it planned
+against, which append-only extension preserves.
+
+**`max_distinct_terms` is enforced here, and it is the one declared bound that is.** Promotion is the
+only path by which a *caller* grows the dictionary, and the extension range's safety rests on
+`EXTENSION_ID_START > max_distinct_terms`: past the declaration, a dictionary ordinal could alias a
+live extension id. A promotion that would cross it fails the flush, retaining the buffer, and ingest
+sheds at its own bound — the intended backpressure.
+
 **Two fail-closed consequences, neither obvious:**
 
 - A promoted descriptor is satisfiable only by sessions authorised **after** the flush that promoted
@@ -460,6 +491,13 @@ This is what makes the run count bounded by the merge policy exactly as the segm
 contracts §2.4's O(runs) scan therefore bounded too. **Stated because it was not**: an earlier
 revision specified merge over row-space extents and delta postings tiers and said nothing about
 runs, while §2.4 assumed something kept their number down.
+
+**Dictionary extents are the easy case, and the contrast is the point.** A promoting flush appends
+one, and its ordinals are positions in the concatenation of `dict_extents` in listed order — so a
+merge may coalesce a contiguous run of them into one file with **no renumbering at all**, provided
+the order is preserved and no descriptor is repeated (§3.2). They need no key merge, unlike an
+external-id run, and no repair, unlike the base locator. The three artefacts differ exactly as the
+extent/run/bounds split says they do.
 
 **Two things a merge must repair when it coalesces runs, both harmless today only because merge is
 not built.**
@@ -833,7 +871,12 @@ Extending the lifecycle §7.3 fault switchboard rather than building a second be
 10. Segment count **and delta-tier count** bounded under sustained ingest; merge keeps both bounded
     (soak).
 11. The ack→visibility gap is bounded by `flush_max_age_secs`, including when `flush_max_items` trips
-    between ticks (§1.3).
+    between ticks (§1.3). **Per slice, and a flush unit is one slice**: every plan in a dispatch
+    takes the same side-manifest name, so one slice publishes per tick and the bound over `s` slices
+    is `s × flush_max_age_secs`. The plan dispatched is the one holding the oldest unflushed row, so
+    that is a bound rather than starvation. One side-manifest per *dispatch*, covering every plan's
+    segment, is what would collapse it back to one tick; it is not built, and no build emits a
+    second slice today.
 12. Ingest is refused by buffer occupancy, not only by queue depth (§1.3).
 13. A flush patches a session's row projection rather than rebuilding it (§9), asserted on the absence
     of a full projection build rather than on timing, and the superseded entry survives long enough to

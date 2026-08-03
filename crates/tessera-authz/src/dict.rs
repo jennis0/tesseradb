@@ -175,8 +175,27 @@ pub struct Dict {
 
 impl Dict {
     /// Load a dictionary from the given paths (ordinal across extents in order).
+    ///
+    /// **A descriptor already seen is skipped, and the ordinal counter does not advance for it.**
+    /// This is the reader half of the no-duplicate rule, and it exists because the alternative is
+    /// a silent cross-compartment disclosure rather than untidiness. Without it this function and
+    /// [`Dict::load_extending`] disagree about a repeated descriptor — `load_extending` skips it,
+    /// this counted it — and *every* ordinal after the repeat shifts by one. The disagreement is
+    /// between a running process and the same bundle after a restart: a tier's postings written
+    /// under the in-memory ordinal `k` are read back as some other descriptor's, so a session
+    /// granted one term is served another's items, with no error anywhere.
+    ///
+    /// The law this restores, and which the test alongside asserts:
+    ///
+    /// ```text
+    /// load(a ++ b)  ≡  load(a).load_extending(b)
+    /// ```
+    ///
+    /// `len` is therefore the count of **distinct** descriptors rather than of records, which
+    /// differs only in the case a writer is forbidden to produce (`flush::promote` resolves
+    /// against the live dictionary before interning anything).
     pub fn load(paths: &[PathBuf]) -> io::Result<Dict> {
-        let mut lookup_map = FxHashMap::default();
+        let mut lookup_map: FxHashMap<Box<[u8]>, TermId> = FxHashMap::default();
         let mut term_id: u32 = 0;
 
         for path in paths {
@@ -208,9 +227,14 @@ impl Dict {
                 }
 
                 let descriptor = &data[offset..offset + len];
-                lookup_map.insert(descriptor.to_vec().into_boxed_slice(), TermId::new(term_id));
-                term_id += 1;
                 offset += len;
+
+                // Skip-if-present, not insert-and-count — see this function's doc.
+                let key: Box<[u8]> = descriptor.to_vec().into_boxed_slice();
+                if let std::collections::hash_map::Entry::Vacant(slot) = lookup_map.entry(key) {
+                    slot.insert(TermId::new(term_id));
+                    term_id += 1;
+                }
             }
         }
 
@@ -254,6 +278,31 @@ impl Dict {
             len += 1;
         }
         Ok(Dict { lookup_map, len })
+    }
+
+    /// The same extension as [`Dict::load_extending`], from descriptors already in memory — and
+    /// the same skip-if-present rule, so the two agree on every input.
+    ///
+    /// **This exists so that a flush's live dictionary is not routed through a disk round-trip.**
+    /// `flush::promote` assigns ordinals, writes the tier's postings under them, and writes the
+    /// extent file; re-reading that file to build the dictionary it just described would add a
+    /// failure mode rather than remove one. Nothing compares the two, so a bad read would silently
+    /// *become* the live assignment while the tier holds the intended one. Restart equality is
+    /// proved against the file by a test, which is where that obligation belongs.
+    ///
+    /// `descriptors` are appended in the order given, and that order is the caller's contract:
+    /// they must be the same sequence, in the same order, that the extent file records.
+    pub fn extended_with(&self, descriptors: &[Vec<u8>]) -> Dict {
+        let mut lookup_map = self.lookup_map.clone();
+        let mut len = self.len;
+        for descriptor in descriptors {
+            let key: Box<[u8]> = descriptor.clone().into_boxed_slice();
+            if let std::collections::hash_map::Entry::Vacant(slot) = lookup_map.entry(key) {
+                slot.insert(TermId::new(len));
+                len += 1;
+            }
+        }
+        Dict { lookup_map, len }
     }
 
     /// Look up a descriptor and return its term ID if present.
@@ -337,5 +386,83 @@ mod tests {
             Some(TermId::new(0)),
             "lookup(b'1207') should return TermId(0)"
         );
+    }
+
+    fn extent_of(dir: &std::path::Path, descriptors: &[&[u8]]) -> Vec<PathBuf> {
+        fs::create_dir_all(dir).unwrap();
+        let mut writer = DictStreamWriter::new(dir);
+        for d in descriptors {
+            writer.append(d);
+        }
+        writer.finish().unwrap()
+    }
+
+    /// **`load(a ++ b) ≡ load(a).load_extending(b)`, including when `b` repeats a descriptor
+    /// in `a`** — the promotion memo's obligation 3.
+    ///
+    /// This is the fail-open the reader rule closes, and it is worth stating what it was rather
+    /// than only that it is fixed. `load` used to insert every record and count it, while
+    /// `load_extending` skipped a descriptor the base already carried: with base `[a]` and extent
+    /// `[a, b]` the running process had `a → 0, b → 1` and the same bundle reopened had
+    /// `a → 1, b → 2`. Postings written under ordinal 1 are `b`'s, so after a restart a session
+    /// granted `a` was served `b`'s items — silently, and across a compartment boundary.
+    ///
+    /// A duplicate is a writer bug (`flush::promote` resolves against the live dictionary before
+    /// interning), so this asserts the *format* holds even when a writer does not.
+    #[test]
+    fn reload_equals_in_memory_extension_even_when_an_extent_repeats_a_descriptor() {
+        let tmp = TempDir::new().unwrap();
+        let base = extent_of(&tmp.path().join("base"), &[b"a"]);
+        let ext = extent_of(&tmp.path().join("ext"), &[b"a", b"b"]);
+
+        let in_memory = Dict::load(&base).unwrap().load_extending(&ext).unwrap();
+        let concatenated: Vec<PathBuf> = base.iter().chain(ext.iter()).cloned().collect();
+        let reloaded = Dict::load(&concatenated).unwrap();
+
+        assert_eq!(in_memory.lookup(b"a"), reloaded.lookup(b"a"));
+        assert_eq!(in_memory.lookup(b"b"), reloaded.lookup(b"b"));
+        assert_eq!(in_memory.len(), reloaded.len());
+        // Named exactly, so a future change cannot satisfy the equality by moving both.
+        assert_eq!(reloaded.lookup(b"a"), Some(TermId::new(0)));
+        assert_eq!(reloaded.lookup(b"b"), Some(TermId::new(1)));
+        assert_eq!(reloaded.len(), 2);
+    }
+
+    /// [`Dict::extended_with`] is [`Dict::load_extending`] without the file — the equality
+    /// `flush::promote` publishes on (memo §2 step 5).
+    #[test]
+    fn extending_from_memory_equals_extending_from_the_extent_it_wrote() {
+        let tmp = TempDir::new().unwrap();
+        let base = Dict::load(&extent_of(&tmp.path().join("base"), &[b"a", b"b"])).unwrap();
+        let ext = extent_of(&tmp.path().join("ext"), &[b"c", b"d"]);
+
+        let from_file = base.load_extending(&ext).unwrap();
+        let from_memory = base.extended_with(&[b"c".to_vec(), b"d".to_vec()]);
+
+        for d in [b"a".as_slice(), b"b", b"c", b"d"] {
+            assert_eq!(from_memory.lookup(d), from_file.lookup(d), "{d:?}");
+        }
+        assert_eq!(from_memory.len(), from_file.len());
+        assert_eq!(from_memory.lookup(b"c"), Some(TermId::new(2)));
+    }
+
+    /// Existing ordinals survive an extension — §3.4's premise 3, and the reason a session
+    /// authorised before a promotion keeps evaluating the terms it was granted.
+    #[test]
+    fn extending_from_memory_preserves_every_existing_ordinal() {
+        let tmp = TempDir::new().unwrap();
+        let base = Dict::load(&extent_of(tmp.path(), &[b"a", b"b", b"c"])).unwrap();
+
+        let extended = base.extended_with(&[b"c".to_vec(), b"d".to_vec()]);
+
+        assert_eq!(extended.lookup(b"a"), Some(TermId::new(0)));
+        assert_eq!(extended.lookup(b"b"), Some(TermId::new(1)));
+        assert_eq!(
+            extended.lookup(b"c"),
+            Some(TermId::new(2)),
+            "already present, so not re-interned"
+        );
+        assert_eq!(extended.lookup(b"d"), Some(TermId::new(3)));
+        assert_eq!(extended.len(), 4);
     }
 }

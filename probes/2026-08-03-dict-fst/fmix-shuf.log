@@ -1,0 +1,20 @@
+== surname (shuffled ordinals)  n=116902007  key bytes total 1.50 GB (avg 12.9 B/key)
+  sort: 16.8s
+  fst: build 15.8s, file 0.788 GB = 6.74 B/key
+  fst: open 0.036 ms
+    fst lookups (cold pages): hit 1306 ns, miss 1303 ns  (checksum 2146650613079499)
+    fst lookups (warm): hit 1377 ns, miss 1344 ns  (checksum 2146650613079499)
+  fst: resident growth after lookups 0.79 GB
+  fxhashmap: build (== open cost every restart) 52.9s, resident growth 7.09 GB
+    map lookups: hit 430 ns, miss 295 ns  (checksum 2146650613079499)
+
+== decimal (shuffled ordinals)  n=116902007  key bytes total 0.94 GB (avg 8.0 B/key)
+  sort: 13.3s
+  fst: build 11.9s, file 0.783 GB = 6.70 B/key
+  fst: open 0.032 ms
+    fst lookups (cold pages): hit 1328 ns, miss 1264 ns  (checksum 2146650613079499)
+    fst lookups (warm): hit 1209 ns, miss 1233 ns  (checksum 2146650613079499)
+  fst: resident growth after lookups 0.78 GB
+  fxhashmap: build (== open cost every restart) 49.7s, resident growth 7.09 GB
+    map lookups: hit 443 ns, miss 304 ns  (checksum 2146650613079499)
+

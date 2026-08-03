@@ -1,0 +1,20 @@
+== decimal  n=10000000  key bytes total 0.07 GB (avg 6.9 B/key)
+  sort: 0.9s
+  fst: build 0.8s, file 0.056 GB = 5.59 B/key
+  fst: open 0.021 ms
+    fst lookups (cold pages): hit 562 ns, miss 576 ns  (checksum 5002002710459)
+    fst lookups (warm): hit 631 ns, miss 666 ns  (checksum 5002002710459)
+  fst: resident growth after lookups 0.06 GB
+  fxhashmap: build (== open cost every restart) 3.5s, resident growth 0.74 GB
+    map lookups: hit 241 ns, miss 158 ns  (checksum 5002002710459)
+
+== decimal (shuffled ordinals)  n=10000000  key bytes total 0.07 GB (avg 6.9 B/key)
+  sort: 1.0s
+  fst: build 1.0s, file 0.067 GB = 6.70 B/key
+  fst: open 0.034 ms
+    fst lookups (cold pages): hit 661 ns, miss 636 ns  (checksum 2148039478739487)
+    fst lookups (warm): hit 636 ns, miss 657 ns  (checksum 2148039478739487)
+  fst: resident growth after lookups 0.07 GB
+  fxhashmap: build (== open cost every restart) 3.1s, resident growth 0.73 GB
+    map lookups: hit 231 ns, miss 144 ns  (checksum 2148039478739487)
+

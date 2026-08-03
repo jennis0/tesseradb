@@ -43,7 +43,8 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use tessera_authz::{write_delta_tier, DeltaTier, Dict};
+use rustc_hash::FxHashMap;
+use tessera_authz::{write_delta_tier, DeltaTier, Dict, DictStreamWriter};
 use tessera_lifecycle::wal::WalScalar;
 use tessera_lifecycle::{BufferedItem, Overlay};
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
@@ -165,6 +166,22 @@ pub(crate) struct FlushContext {
     pub(crate) manifest: SegmentsManifest,
     /// The dictionary the plan's terms were resolved against, and the one promotion extends.
     pub(crate) dict: Arc<Dict>,
+    /// The descriptor bytes behind every **extension** term id this plan's items carry (§3.2).
+    ///
+    /// **The inverse of `DescriptorResolver`'s extension map, and only the part this plan needs.**
+    /// The buffer holds resolved `TermId`s and not descriptors, which is what made promotion look
+    /// like it needed a WAL read; the resolver has held the bytes all along, deduped and carried
+    /// across replay so the assignment stays continuous for the process's lifetime. Restricted to
+    /// the plan's own ids because a descriptor no flushed item references has no posting to write,
+    /// and interning it would put a descriptor into a durable artefact for no reason.
+    ///
+    /// Empty in the steady state, and `dispatch_flushes` does not take the resolver's lock to
+    /// build it unless some planned item actually carries an extension id.
+    pub(crate) novel_descriptors: FxHashMap<TermId, Vec<u8>>,
+    /// The plugin's declared `max_distinct_terms`. Promotion is the one place a *caller* can grow
+    /// the dictionary, so it is the one bound that is enforced rather than declared — see
+    /// [`promote`].
+    pub(crate) max_distinct_terms: u64,
     pub(crate) prefix: String,
 }
 
@@ -186,6 +203,15 @@ pub(crate) struct CompletedFlush {
     pub(crate) tier: Arc<DeltaTier>,
     /// The dictionary including this flush's promotions (§3.2), republished with the geometry.
     pub(crate) dict: Arc<Dict>,
+    /// `Some(len)` if this flush wrote a dictionary extent, carrying the dictionary length its
+    /// ordinals were assigned from; `None` if it promoted nothing.
+    ///
+    /// **What the publication guard reads.** A dict extent's ordinals are positions in the
+    /// concatenation of `dict_extents` in listed order, so they are correct only if the extent
+    /// lands where the flush assumed. A flush that promoted nothing has no such dependency — its
+    /// tier names only ordinals below `len`, which append-only extension preserves — so the guard
+    /// is scoped to this being `Some`.
+    pub(crate) promoted_from_dict_len: Option<u32>,
     pub(crate) prefix: String,
 }
 
@@ -210,6 +236,7 @@ pub(crate) fn execute_flush(
     // name whatever descriptor interned into that slot next — the same hazard `buffer.rs` counts
     // downward from `u32::MAX` to avoid, arriving by a different route.
     let promotion = promote(&plan, &ctx)?;
+    let promoted_from = promotion.extent.as_ref().map(|_| ctx.dict.len());
 
     // ---- the segment, its extents and its locator -------------------------------------------
     let rows: Vec<FlushRow> = plan
@@ -272,14 +299,7 @@ pub(crate) fn execute_flush(
     }
     write_segments_manifest(&ctx.prefix_dir, &ctx.partition, ctx.next_n, &manifest)?;
 
-    let seg_dir = ctx
-        .prefix_dir
-        .join("partitions")
-        .join(&ctx.partition)
-        .join("slices")
-        .join(&ctx.slice)
-        .join("segments")
-        .join(&ctx.seg_id);
+    let seg_dir = segment_dir(&ctx);
     let segment = SegmentData {
         seg_id: ctx.seg_id.clone(),
         row_count: out.segment.row_count,
@@ -298,6 +318,7 @@ pub(crate) fn execute_flush(
         manifest,
         tier,
         dict: promotion.dict,
+        promoted_from_dict_len: promoted_from,
         prefix: ctx.prefix,
     })
 }
@@ -332,16 +353,25 @@ struct Promotion {
 /// an item still buffered under an old extension id for an already-promoted descriptor stays
 /// invisible until *its own* flush, even to a viewer holding the term.
 ///
-/// ⊘ **Nothing is promoted yet, because the buffer does not retain the descriptor bytes.**
-/// `BufferedItem` carries resolved `TermId`s and the raw descriptors live only in the WAL record.
-/// An extension id therefore cannot be turned into an ordinal here without a WAL read, so a term
-/// this dictionary does not know is **left out of the tier entirely** — which is exactly the
-/// fail-closed state it was already in: an extension id is unsatisfiable by any session's
-/// `satisfied`, so a posting under one could never have made the item visible. Retaining the
-/// descriptors on `BufferedItem` is what unblocks this, and it is a WAL-format-adjacent change.
+/// **The dictionary is consulted before anything is interned, and that is the writer half of the
+/// no-duplicate rule.** An extent that repeated a descriptor the dictionary already holds would
+/// make [`Dict::load`] and [`Dict::load_extending`] assign different ordinals — a running process
+/// and the same bundle reopened disagreeing about what every ordinal after the repeat means. The
+/// reader closes that too ([`Dict::load`]'s doc); this closes it at the source, and either alone
+/// would leave a viewer being served another compartment's items with no error anywhere.
+///
+/// **An extension id with no descriptor fails the flush.** It cannot happen — the resolver's map
+/// only grows, and rotation retains the WAL records of anything still buffered, so replay
+/// re-interns every id a plan can name — but silently dropping a term is precisely the bug this
+/// function existed to have, and it must not survive as the error path.
 fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFailed> {
     let dict_len = ctx.dict.len();
     let mut by_term: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    // Descriptors this flush interns, in assignment order — the extent file's contents, and the
+    // sequence `Dict::extended_with` is handed. Order is the two artefacts' shared contract.
+    let mut interned: Vec<Vec<u8>> = Vec::new();
+    let mut assigned: FxHashMap<u32, u32> = FxHashMap::default();
+
     for (entity, item) in &plan.items {
         let Ok(entity) = u32::try_from(entity.raw()) else {
             return Err(FlushFailed(format!(
@@ -350,13 +380,50 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
             )));
         };
         for term in &item.terms {
-            // A term at or above the dictionary's length is an extension id: unsatisfiable, and
-            // unpromotable here for want of its descriptor bytes. Excluded rather than written,
-            // because writing a process-local id into a durable tier is the hazard above.
-            if term.raw() >= dict_len {
-                continue;
-            }
-            by_term.entry(term.raw()).or_default().push(entity);
+            // Below the dictionary's length: already a durable ordinal, nothing to do.
+            let ordinal = if term.raw() < dict_len {
+                term.raw()
+            } else if let Some(&ordinal) = assigned.get(&term.raw()) {
+                ordinal
+            } else {
+                let descriptor = ctx.novel_descriptors.get(term).ok_or_else(|| {
+                    FlushFailed(format!(
+                        "extension term {} has no descriptor in this flush's snapshot — see \
+                         promote()'s doc; a term must never be dropped silently",
+                        term.raw()
+                    ))
+                })?;
+                let ordinal = match ctx.dict.lookup(descriptor) {
+                    // An earlier flush already promoted it. Use that ordinal and write nothing:
+                    // this is both the no-duplicate rule and what makes an item buffered under a
+                    // stale extension id become visible at its own flush (§3.2).
+                    Some(existing) => existing.raw(),
+                    None => {
+                        let next = u64::from(dict_len) + interned.len() as u64;
+                        // **The one plugin bound that is enforced, not declared.** Promotion is
+                        // the only path by which a caller grows the dictionary, and
+                        // `EXTENSION_ID_START > max_distinct_terms` is what keeps a dictionary
+                        // ordinal from ever aliasing a live extension id. Past the declaration
+                        // that assertion stops holding, so this fails the flush — buffer
+                        // retained, ingest sheds at its own bound, which is the intended
+                        // backpressure.
+                        if next >= ctx.max_distinct_terms {
+                            return Err(FlushFailed(format!(
+                                "promoting this flush's novel descriptors would carry the \
+                                 dictionary to {next}, at or past the plugin's declared \
+                                 max_distinct_terms of {}; refusing rather than assigning an \
+                                 ordinal that could alias an extension id",
+                                ctx.max_distinct_terms
+                            )));
+                        }
+                        interned.push(descriptor.clone());
+                        next as u32
+                    }
+                };
+                assigned.insert(term.raw(), ordinal);
+                ordinal
+            };
+            by_term.entry(ordinal).or_default().push(entity);
         }
     }
 
@@ -370,11 +437,52 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
         postings.push((TermId::new(term), entities));
     }
 
+    if interned.is_empty() {
+        // The steady state: no extent, no dictionary clone, nothing published but the tier.
+        return Ok(Promotion {
+            dict: Arc::clone(&ctx.dict),
+            extent: None,
+            postings,
+        });
+    }
+
+    let seg_dir = segment_dir(ctx);
+    std::fs::create_dir_all(&seg_dir).map_err(|e| FlushFailed(format!("dict extent dir: {e}")))?;
+    let mut writer = DictStreamWriter::new(&seg_dir);
+    for descriptor in &interned {
+        writer.append(descriptor);
+    }
+    writer
+        .finish()
+        .map_err(|e| FlushFailed(format!("dict extent: {e}")))?;
+
     Ok(Promotion {
-        dict: Arc::clone(&ctx.dict),
-        extent: None,
+        // **Built from the same sequence that named the tier, never re-read from the file just
+        // written.** Nothing compares the two, so a bad read would silently *become* the live
+        // assignment while the tier holds the intended one. That the file agrees is a restart
+        // property, proved by a test against the file.
+        dict: Arc::new(ctx.dict.extended_with(&interned)),
+        extent: Some(DictExtent {
+            path: format!(
+                "partitions/{}/slices/{}/segments/{}/terms-0.dict",
+                ctx.partition, ctx.slice, ctx.seg_id
+            ),
+            records: interned.len() as u64,
+        }),
         postings,
     })
+}
+
+/// This flush's segment directory. Both the segment writer and promotion address it; naming it
+/// once keeps them from drifting apart.
+fn segment_dir(ctx: &FlushContext) -> PathBuf {
+    ctx.prefix_dir
+        .join("partitions")
+        .join(&ctx.partition)
+        .join("slices")
+        .join(&ctx.slice)
+        .join("segments")
+        .join(&ctx.seg_id)
 }
 
 fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
@@ -388,8 +496,24 @@ fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
 /// Write `SEGMENTS-<n>.json`, fsynced, and fsync its directory entry.
 ///
 /// **This is the commit point** (§7.3). Everything it names is already durable; a crash before the
-/// rename leaves orphan files nothing references, and a crash after it leaves a bundle that opens
+/// link leaves orphan files nothing references, and a crash after it leaves a bundle that opens
 /// at `n` with everything present.
+///
+/// **It refuses to replace an existing `SEGMENTS-<n>.json`, and that is a safety property.** A
+/// side-manifest is complete current state for its partition, not a diff, so a second writer at
+/// the same `n` does not merge with the first — it *replaces* it, with a manifest built from the
+/// same base and naming only its own segment. The winner's rows would then be absent from the
+/// manifest a restart opens, having been acked and published: silent loss of exactly the kind the
+/// rest of this module is built to prevent. Two plans in one dispatch share `next_n` and would do
+/// this; `dispatch_flushes` now sends one, and this is the guard at the artefact rather than at
+/// the caller — the same belt-and-braces the dictionary's no-duplicate rule takes, and for the
+/// same reason: a rule held by one caller is rediscovered from prose by the next.
+///
+/// **`hard_link` rather than `rename`, because `std` has no `RENAME_NOREPLACE`.** `rename(2)`
+/// replaces silently; `link(2)` fails with `AlreadyExists` and is equally atomic, so the reader's
+/// property — `SEGMENTS-<n>.json` existing at all means it is complete — is unchanged. A crash
+/// between the link and the unlink leaves a `.tmp` orphan, which is the same orphan story every
+/// stage before this one already accepts.
 fn write_segments_manifest(
     prefix_dir: &Path,
     partition: &str,
@@ -402,15 +526,21 @@ fn write_segments_manifest(
         .map_err(|e| FlushFailed(format!("side-manifest: {e}")))?;
     let io = |what: &str, e: std::io::Error| FlushFailed(format!("side-manifest {what}: {e}"));
 
-    // Written to a temporary sibling and renamed, so a reader walking the candidate list never
-    // sees a partial one: `SEGMENTS-<n>.json` existing at all must mean it is complete.
+    // Written to a temporary sibling and linked into place, so a reader walking the candidate list
+    // never sees a partial one: `SEGMENTS-<n>.json` existing at all must mean it is complete.
     let tmp = dir.join(format!("SEGMENTS-{n}.json.tmp"));
     {
         let mut file = File::create(&tmp).map_err(|e| io("create", e))?;
         file.write_all(&bytes).map_err(|e| io("write", e))?;
         file.sync_all().map_err(|e| io("fsync", e))?;
     }
-    std::fs::rename(&tmp, &path).map_err(|e| io("rename", e))?;
+    // Refuse-to-replace — see this function's doc for why this is not a rename.
+    let linked = std::fs::hard_link(&tmp, &path);
+    // The temporary is consumed either way: on success it has a second name, on refusal it is
+    // rubbish. Unlinked before the error surfaces so a refused write leaves nothing behind for the
+    // next attempt at this `n` to trip over.
+    let _ = std::fs::remove_file(&tmp);
+    linked.map_err(|e| io("link (a side-manifest is never replaced)", e))?;
     File::open(&dir)
         .and_then(|d| d.sync_all())
         .map_err(|e| io("dir fsync", e))?;
@@ -552,6 +682,24 @@ mod tests {
         plan_flush(generation, SLICE, false, false)
     }
 
+    /// An empty side-manifest. `watermark` is the field the refuse-to-replace test varies, so the
+    /// two writers' manifests are distinguishable in the committed bytes.
+    fn manifest_fixture() -> SegmentsManifest {
+        SegmentsManifest {
+            segments_version: 4,
+            watermark: 0,
+            entity_id_high_water: 0,
+            segments: Vec::new(),
+            deltas: Vec::new(),
+            dict_extents: Vec::new(),
+            external_id_runs: Vec::new(),
+            locator_extents: Vec::new(),
+            tombstones: Vec::new(),
+            deny: Vec::new(),
+            files: BTreeMap::new(),
+        }
+    }
+
     /// **A suppression never touches postings and retires only on unsuppress**, so a flush that
     /// skipped it would leave a later unsuppress with nothing to reveal: no row would exist, and
     /// unsuppressing the item would show nothing at all.
@@ -662,5 +810,61 @@ mod tests {
         let plan = plan(&generation).unwrap();
         let ids: Vec<u64> = plan.items.iter().map(|(e, _)| e.raw()).collect();
         assert_eq!(ids, vec![3, 7, 9]);
+    }
+    /// **Obligation 11: a side-manifest is never replaced.**
+    ///
+    /// A side-manifest is complete current state for its partition, not a diff, so a second write
+    /// at the same `n` does not merge with the first — before refuse-to-replace it *replaced* it,
+    /// with a manifest built from the same base and naming only its own segment, so the winner's
+    /// acked and published rows went missing from what a restart opens.
+    ///
+    /// Asserted at the filesystem operation rather than through two slices, because
+    /// `tessera build` emits one and `dispatch_flushes` now sends one plan: the collision is a
+    /// property of the write, and this is the guard at the artefact that stands behind the rule at
+    /// the caller.
+    ///
+    /// **Mutation:** restore `std::fs::rename` and the second write succeeds, silently.
+    #[test]
+    fn a_side_manifest_is_never_replaced() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prefix_dir = tmp.path();
+        std::fs::create_dir_all(prefix_dir.join("partitions").join("default")).unwrap();
+
+        let mut first = manifest_fixture();
+        first.watermark = 11;
+        write_segments_manifest(prefix_dir, "default", 4, &first).expect("the first write commits");
+
+        let mut second = manifest_fixture();
+        second.watermark = 22;
+        let refused = write_segments_manifest(prefix_dir, "default", 4, &second)
+            .expect_err("the second write at the same n must be refused");
+        assert!(
+            refused.0.contains("never replaced"),
+            "the refusal must say what it is: {}",
+            refused.0
+        );
+
+        let committed: SegmentsManifest = serde_json::from_slice(
+            &std::fs::read(
+                prefix_dir
+                    .join("partitions")
+                    .join("default")
+                    .join("SEGMENTS-4.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            committed.watermark, 11,
+            "the first writer's manifest is intact — the loser overwrote nothing"
+        );
+        assert!(
+            !prefix_dir
+                .join("partitions")
+                .join("default")
+                .join("SEGMENTS-4.json.tmp")
+                .exists(),
+            "and the refused write left no temporary behind"
+        );
     }
 }

@@ -65,7 +65,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use tessera_authz::{DeltaTier, Dict};
 use tessera_lifecycle::alloc::{high_water_from, AllocError, Allocator};
@@ -254,8 +254,8 @@ pub struct ExecutorHealth {
     /// measured rather than argued (`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`). A deny's
     /// wait is bounded by "the work item currently executing", and *that* item's apply includes a
     /// clone that is O(total buffered items) — modelled at 100–300 ms per clone at 1 M buffered
-    /// items and 1–3 s at 10 M — and `flush_max_items` is inert because there is no flush (⊘), so
-    /// the buffer only grows. Measured at 1 M buffered items: a deny under sustained ingest acks in
+    /// items and 1–3 s at 10 M, bounded now by what the flush leaves buffered rather than by the
+    /// whole corpus. Measured at 1 M buffered items: a deny under sustained ingest acks in
     /// 165 ms p50 / 346 ms max, against a 3.2 ms quiescent floor. That much is confirmed.
     ///
     /// **What this counter is NOT is the deny's own floor**, and reading it as one is the available
@@ -302,8 +302,8 @@ pub struct ExecutorHealth {
     ///
     /// [`Self::record_work_service`] runs *after* `execute` returns, so while one long job is in
     /// flight the EWMA still reports the previous, faster regime. That is the 10⁹ shape: an
-    /// `IngestBuffer` clone is O(total buffered items) and there is no flush (⊘), so the
-    /// first job at a new buffer depth is the slow one, and it is precisely while it runs that the
+    /// `IngestBuffer` clone is O(total buffered items), so the first job at a new buffer depth is
+    /// the slow one, and it is precisely while it runs that the
     /// queue fills and callers are shed. Every one of them was told to come back in 1 s against a
     /// drain measured in minutes, and an obedient caller then re-establishes a connection and
     /// re-uploads up to `ingest_max_batch_bytes` per second, per client. **The estimator's error was
@@ -808,8 +808,8 @@ impl ExecutorHealth {
 /// # This is an estimator, and here is exactly what makes it one
 ///
 /// 1. **Service time is not stationary.** One work-lane job costs one fsync plus an `IngestBuffer`
-///    clone that is O(total buffered items), and there is no flush (⊘), so the
-///    buffer only grows. Measured (`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`): ~3.0–3.5 ms
+///    clone that is O(total buffered items), which the flush cadence bounds rather than removes.
+///    Measured (`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`): ~3.0–3.5 ms
 ///    quiescent even at 1 M buffered, but 67–167 ms p50 and up to 666 ms under six concurrent
 ///    submitters. The EWMA tracks the recent regime; it does not predict the next one.
 /// 2. **The deny lane is in the real drain and not in this figure.** `Executor::run` drains the
@@ -994,7 +994,7 @@ use ack::{Published, Responder};
 /// fail-closed by [`ExecutorPosture::Dead`], so the node stops being routed traffic through the
 /// front door rather than through a panic storm; each map insert is individually complete, so the
 /// recovered state is a prefix of a batch rather than a torn value; and buffered items have no row
-/// geometry at all, there being no flush (⊘), so a partial prefix contributes to no
+/// geometry at all — that is what being buffered means — so a partial prefix contributes to no
 /// viewport, count or density. The WAL, not these maps, is the durable record either way.
 fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -1055,6 +1055,32 @@ impl LiveState {
 
     fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
         lock_recover(&self.accepted_batches).get(batch_id).cloned()
+    }
+
+    /// The descriptor bytes behind `terms`, read out of the resolver's extension map (§3.2).
+    ///
+    /// **This is the inverse the flush needs, and it is why promotion costs no format change.**
+    /// `BufferedItem` holds resolved `TermId`s, so a flush looking at the buffer alone cannot turn
+    /// an extension id back into a descriptor; the resolver has held the bytes all along, one
+    /// entry per distinct descriptor rather than per item, kept for the process's lifetime so the
+    /// assignment stays continuous across replay and live accepts.
+    ///
+    /// **Total for any id a flush plan can name**, which is what lets `promote` treat a miss as a
+    /// failed flush rather than a dropped term: rotation reclaims only WAL members below the
+    /// oldest *buffered* row, so a buffered item's record always survives, and replay re-interns
+    /// its descriptors before the item goes back into the buffer.
+    ///
+    /// Walks the map rather than indexing it — it is keyed by descriptor, and the caller wants the
+    /// other direction. O(distinct novel descriptors this process has seen), paid only by a
+    /// dispatch that actually carries one.
+    fn descriptors_of(&self, terms: &FxHashSet<TermId>) -> FxHashMap<TermId, Vec<u8>> {
+        let state = lock_recover(&self.resolver_state);
+        state
+            .0
+            .iter()
+            .filter(|(_, id)| terms.contains(id))
+            .map(|(descriptor, &id)| (id, descriptor.clone()))
+            .collect()
     }
 
     fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
@@ -1473,6 +1499,7 @@ impl WritePath {
                     prefix_dir: flush.prefix_dir,
                     identity_key: flush.identity_key,
                     pool: flush.pool,
+                    max_distinct_terms: flush.max_distinct_terms,
                     flush_done: flush_rx,
                     flush_submit: flush_tx,
                     last_tick: std::time::Instant::now(),
@@ -2173,6 +2200,10 @@ pub(crate) struct FlushDeps {
     /// D-D's one shared compute pool — a flush's segment write runs on it, off this thread,
     /// because this thread is the one that must reach a queued deny promptly (§1.1).
     pub(crate) pool: Arc<rayon::ThreadPool>,
+    /// The plugin's declared `max_distinct_terms`, carried here because promotion (§3.2) is the
+    /// one path by which a *caller* grows the dictionary, and so the one declared bound that is
+    /// enforced rather than trusted. See `flush::promote`.
+    pub(crate) max_distinct_terms: u64,
 }
 
 /// The bundle's declared scalar tail, as the segment writer wants it.
@@ -2201,6 +2232,35 @@ fn scalar_schema_of(
 
 /// Every slice the bundle holds, across partitions. A flush plans per slice, because a segment's
 /// entity range is contiguous only within one (§2.1).
+/// The one plan a dispatch sends, chosen by **oldest unflushed row**.
+///
+/// Free and pure so the choice can be tested without an executor — and it is the choice, not the
+/// dispatch, that carries the property. See `Executor::dispatch_flushes` for why one plan.
+fn plan_to_dispatch(
+    plans: Vec<(String, crate::flush::FlushPlan)>,
+) -> Option<(String, crate::flush::FlushPlan)> {
+    plans.into_iter().min_by_key(|(_, plan)| {
+        // `items` is ascending by entity id and I9 issues ids monotonically, so the first is this
+        // slice's oldest waiting row. An empty plan cannot occur (`plan_flush` returns
+        // `NothingToFlush`), and sorting it last rather than first keeps a hypothetical one from
+        // winning every tick.
+        plan.items
+            .first()
+            .map_or(u64::MAX, |(entity, _)| entity.raw())
+    })
+}
+
+/// Whether a completed flush's dictionary moved under it — see the call site in
+/// [`Executor::publish_flush`] for the argument, and the scoping this encodes.
+///
+/// Pure so the **scoping** is testable: a flush that promoted nothing (`None`) is never discarded
+/// however far the dictionary has moved, because its tier names only ordinals below the length it
+/// planned against and append-only extension preserves those. Broadening this to every flush would
+/// be a liveness hole bought for no safety.
+fn dictionary_moved_under(promoted_from_dict_len: Option<u32>, live_len: u32) -> bool {
+    promoted_from_dict_len.is_some_and(|planned| planned != live_len)
+}
+
 fn slices_of(generation: &Generation) -> Vec<String> {
     let mut slices: Vec<String> = generation
         .bundle
@@ -2265,6 +2325,8 @@ struct Executor {
     /// The shared compute pool a flush executes on (§1.1), and the handle it submits its completed
     /// unit back through.
     pool: Arc<rayon::ThreadPool>,
+    /// See [`FlushDeps::max_distinct_terms`].
+    max_distinct_terms: u64,
     /// Completed flushes arriving from the pool (§1.1).
     ///
     /// **Its own channel, not the bounded work queue**, for two reasons. A completed flush may not
@@ -2365,10 +2427,8 @@ impl Executor {
     /// `POST /control/flush`, accepted at any time and executed here, its 202 already meaning
     /// "accepted, not yet done".
     ///
-    /// **⊘ Specified, not implemented: the flush itself.** What this drives today is `reclaim` —
-    /// lifecycle §2.1 assigns that gap to "whichever stage introduces a periodic publisher", and
-    /// this is that publisher — and the flush-readiness bookkeeping the tick will consume. The
-    /// segment write and the publication arrive with the flush unit.
+    /// It also drives `reclaim` — lifecycle §2.1 assigns that gap to "whichever stage introduces
+    /// a periodic publisher", and this is that publisher.
     fn tick_if_due(&mut self) {
         let period = std::time::Duration::from_secs(self.flush_max_age_secs);
         if self.last_tick.elapsed() < period {
@@ -2381,13 +2441,13 @@ impl Executor {
         // held until something arrives.
         self.health.flush_requested.store(false, Ordering::SeqCst);
 
-        // **⊘ Specified, not implemented: the segment write and the publication.** What runs is
-        // the *plan* — the step that decides which buffered items acquire geometry and what the
-        // three dispositions do to them (§3.5) — because that is the invariant-bearing half, and
-        // it is planned on this thread against the live generation either way. What it produces
-        // today is the count an operator needs to see a stalled flush: items that *would* acquire
-        // geometry at this tick, which stays at zero on a gated node and grows without bound on
-        // one whose flush is failing.
+        // **Planned on this thread, executed on the pool.** The plan — which buffered items
+        // acquire geometry and what the three dispositions do to them (§3.5) — is the
+        // invariant-bearing half and is taken against the live generation here; the segment write
+        // and the publication follow through `dispatch_flushes`. The count it produces on the way
+        // is what an operator needs to see a stalled flush: items that *would* acquire geometry at
+        // this tick, which stays at zero on a gated node and grows without bound on one whose
+        // flush is failing.
         let generation = self.generation.load_full();
         let mut flushable = 0usize;
         let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
@@ -2477,10 +2537,38 @@ impl Executor {
             );
             return;
         };
-        let mut contexts = Vec::with_capacity(plans.len());
-        for (slice, plan) in plans {
+        // **One plan per dispatch.** Every context a dispatch builds takes `next_n` from the same
+        // unchanging `partition_data`, so they would all write `SEGMENTS-<next_n>.json` at one
+        // path and only one could commit. Dispatching one makes that structurally unreachable and
+        // saves the losers' segment writes; `write_segments_manifest`'s refuse-to-replace stands
+        // behind it at the format boundary. The rest re-plan at the next tick, against a
+        // `segments_version` the winner has advanced.
+        //
+        // **Chosen by oldest unflushed row, not by slice name.** `slices_of` sorts
+        // lexicographically, so taking the first would let a continuously-fed `s0` deny `s1` a
+        // flush for ever. `items` is ascending by entity id and I9 issues ids monotonically, so
+        // `items.first()` is an age key needing no cursor state — which turns starvation into a
+        // bound: with `s` slices, ack→visibility is at most `s × flush_max_age_secs`.
+        //
+        // **Unreachable today**: `tessera build` emits one slice, and a plan naming a slice this
+        // bundle does not carry is dropped just below.
+        let deferred = plans.len().saturating_sub(1);
+        let Some((slice, plan)) = plan_to_dispatch(plans) else {
+            return;
+        };
+        if deferred > 0 {
+            tracing::warn!(
+                deferred,
+                dispatched = %slice,
+                "a flush unit is per slice and every plan in a dispatch shares one side-manifest \
+                 name, so one slice publishes per tick; the rest re-plan at the next one"
+            );
+        }
+
+        let mut contexts = Vec::with_capacity(1);
+        {
             let Some(slice_data) = partition_data.slices.get(&slice) else {
-                continue;
+                return;
             };
             let Ok(row_base) = u32::try_from(slice_data.row_space.total_rows()) else {
                 // Row ids are `u32` (bundle_format 1). A slice that has crossed 2^32 rows cannot
@@ -2490,8 +2578,26 @@ impl Executor {
                     "ALARM: this slice's row space has reached the u32 ceiling; no further flush \
                      can address it. The deployment must be compacted or re-sharded"
                 );
-                continue;
+                return;
             };
+
+            // **The descriptor bytes behind this plan's extension term ids** (§3.2), and the whole
+            // of what promotion needed that the buffer does not hold. Lazy on purpose: in the
+            // steady state every descriptor is already interned, `novel` is empty, and this takes
+            // no lock and allocates nothing — one comparison per term is the entire cost.
+            let dict_len = generation.dict.len();
+            let novel: FxHashSet<TermId> = plan
+                .items
+                .iter()
+                .flat_map(|(_, item)| item.terms.iter().copied())
+                .filter(|term| term.raw() >= dict_len)
+                .collect();
+            let novel_descriptors = if novel.is_empty() {
+                FxHashMap::default()
+            } else {
+                self.live.descriptors_of(&novel)
+            };
+
             let next_n = partition_data.manifest.segments_version + 1;
             contexts.push((
                 plan,
@@ -2516,6 +2622,8 @@ impl Executor {
                     scalar_schema: scalar_schema.clone(),
                     manifest: partition_data.manifest.clone(),
                     dict: Arc::clone(&generation.dict),
+                    novel_descriptors,
+                    max_distinct_terms: self.max_distinct_terms,
                     prefix: generation.prefix.clone(),
                 },
             ));
@@ -3751,6 +3859,28 @@ impl Executor {
             return;
         }
 
+        // **A promoting flush's ordinals are positions**, assigned as `dict.len() + i` against the
+        // dictionary it planned against, and `Dict::load` will reproduce them only if its extent
+        // lands where the flush assumed. If the dictionary moved, they name other descriptors.
+        //
+        // Scoped to flushes that wrote an extent: one that promoted nothing carries only ordinals
+        // below the planned length, which append-only extension preserves, so discarding it would
+        // be a liveness hole for no safety.
+        //
+        // The window is narrow and real: `flush_in_flight` clears only after the pool's sends, and
+        // the executor drains completed flushes *before* it ticks, so a send landing between the
+        // drain and the in-flight check leaves a tick planning against a generation whose
+        // completed flush is not yet published.
+        if dictionary_moved_under(completed.promoted_from_dict_len, live.dict.len()) {
+            tracing::warn!(
+                planned = completed.promoted_from_dict_len,
+                live = live.dict.len(),
+                "discarding a completed flush whose dictionary moved under it: the ordinals in \
+                 its extent are positions, and they are no longer the positions it assigned"
+            );
+            return;
+        }
+
         let next_bundle = match live.bundle.with_segment(
             &completed.partition,
             &completed.slice,
@@ -4236,5 +4366,65 @@ mod retry_after_tests {
         health.set_overlay_soft_limit(2);
         assert!(health.note_overlay_depth(3));
         assert_eq!(health.stats().overlay_soft_limit_alarms, 3);
+    }
+}
+
+/// The two rules the promotion design added to publication (`2026-08-03-descriptor-promotion-design`
+/// §2), tested where they are decided rather than through a second slice no build produces.
+#[cfg(test)]
+mod dispatch_rules_tests {
+    use super::*;
+    use tessera_lifecycle::BufferedItem;
+
+    fn plan_from(oldest: u64) -> crate::flush::FlushPlan {
+        let item = BufferedItem {
+            terms: Vec::new(),
+            slice: "s".to_string(),
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            external_id: None,
+            wal_pos: None,
+        };
+        crate::flush::FlushPlan {
+            items: vec![(EntityId::new(oldest), item)],
+        }
+    }
+
+    /// **Obligation 9.** Every context a dispatch builds shares `next_n`, so only one can commit
+    /// its side-manifest. The one sent is the slice whose oldest waiting row is oldest — not the
+    /// first by name, which is what `slices_of`'s lexicographic sort would give and which would
+    /// let a continuously-fed `s0` deny `s1` a flush for ever.
+    ///
+    /// **Mutation:** replace this with `plans.into_iter().next()` and the assertion below fails —
+    /// which is the starvation, made into a test.
+    #[test]
+    fn a_dispatch_sends_the_plan_holding_the_oldest_unflushed_row() {
+        let plans = vec![
+            ("s0".to_string(), plan_from(900)),
+            ("s1".to_string(), plan_from(100)),
+            ("s2".to_string(), plan_from(500)),
+        ];
+        let (slice, plan) = plan_to_dispatch(plans).expect("one of three");
+        assert_eq!(slice, "s1", "oldest row wins, not lowest slice id");
+        assert_eq!(plan.items[0].0.raw(), 100);
+    }
+
+    #[test]
+    fn a_dispatch_with_no_plans_sends_nothing() {
+        assert!(plan_to_dispatch(Vec::new()).is_none());
+    }
+
+    /// **Obligation 10.** The dictionary guard is scoped to flushes that wrote an extent. A flush
+    /// that promoted nothing names only ordinals below the length it planned against, which
+    /// append-only extension preserves, so discarding it would cost liveness and buy no safety.
+    #[test]
+    fn only_a_promoting_flush_is_discarded_when_the_dictionary_moves() {
+        // Promoted: its extent's ordinals are positions, and the positions have moved.
+        assert!(dictionary_moved_under(Some(7), 9));
+        assert!(!dictionary_moved_under(Some(7), 7));
+        // Promoted nothing: never discarded, however far the dictionary has gone.
+        assert!(!dictionary_moved_under(None, 9));
+        assert!(!dictionary_moved_under(None, 0));
     }
 }

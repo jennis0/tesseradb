@@ -1,0 +1,10 @@
+== surname (shuffled ordinals)  n=116902007  key bytes total 1.50 GB (avg 12.9 B/key)
+  sort: 16.7s
+  fst: build 10.0s, file 0.032 GB = 0.27 B/key
+  fst: open 0.031 ms
+    fst lookups (cold pages): hit 1093 ns, miss 1090 ns  (checksum 67140501068773)
+    fst lookups (warm): hit 1071 ns, miss 1074 ns  (checksum 67140501068773)
+  fst: resident growth after lookups 0.03 GB
+  fxhashmap: build (== open cost every restart) 53.3s, resident growth 7.09 GB
+    map lookups: hit 461 ns, miss 315 ns  (checksum 67140501068773)
+

@@ -402,20 +402,25 @@ impl Engine {
         // an identifier the principal may not see.
         let declared_scalars = &generation.bundle.manifest.declared_scalars;
         for partition in generation.bundle.partitions.values() {
-            for slice_data in partition.slices.values() {
+            for (slice, slice_data) in &partition.slices {
                 // The permutation is the only entity→row bridge (I4, §5.1) — an O(1)
                 // bounds-checked slot read, not a scan.
                 let Some(row) = slice_data.row_space.row_of(entity) else {
                     continue;
                 };
-                // There is exactly one segment per (partition, slice) — the same
-                // invariant `Engine::viewport`'s `MultiSegmentSlice` guard rests on; the
-                // permutation addresses that single segment's row space.
-                let Some(segment) = slice_data.segments.first() else {
+                // **A slice holds more than one segment once anything has flushed**, and `row` is
+                // a *slice*-space row: it must be resolved to the segment that owns it and to that
+                // segment's local index before anything is read. Taking the first segment and
+                // indexing it with a slice row read past the build segment's end for every
+                // flushed item.
+                let segments = segments_with_row_bases(slice, slice_data)?;
+                let Some(&(segment, row_base)) =
+                    segments.iter().rev().find(|(_, base)| row.raw() >= *base)
+                else {
                     continue;
                 };
                 return Ok(Some(ItemOut {
-                    scalars: row_to_point(segment, row.raw(), declared_scalars).scalars,
+                    scalars: row_to_point(segment, row.raw() - row_base, declared_scalars).scalars,
                     // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
                     // every other store-backed call in this crate uses (see `Engine::open`).
                     external_id: self.external_id_of(entity).map_err(EngineError::Store)?,
@@ -531,38 +536,7 @@ impl Engine {
         //
         // The build segment is the one `permutation.bin` addresses and has no extent; it is
         // therefore the one with no entry here, and its rows begin at 0.
-        let row_bases: std::collections::HashMap<&str, u32> = slice_data
-            .row_space
-            .extents()
-            .iter()
-            .map(|extent| (extent.seg_id.as_str(), extent.row_base))
-            .collect();
-        let mut base_seen = false;
-        let mut segments: Vec<(&SegmentData, u32)> = Vec::with_capacity(slice_data.segments.len());
-        for segment in &slice_data.segments {
-            let row_base = match row_bases.get(segment.seg_id.as_str()) {
-                Some(&row_base) => row_base,
-                // No extent: the build segment, at 0. Legitimate exactly once — see
-                // `EngineError::SegmentWithoutRowBase` for why a second one is a 500 rather than
-                // another segment defaulted to 0.
-                None if !base_seen => {
-                    base_seen = true;
-                    0
-                }
-                None => {
-                    return Err(EngineError::SegmentWithoutRowBase {
-                        slice: slice.to_string(),
-                        seg_id: segment.seg_id.clone(),
-                    })
-                }
-            };
-            segments.push((segment.as_ref(), row_base));
-        }
-        // Ascending in `row_base`, which `SelectionParts::resolve`'s reverse scan relies on.
-        // Sorted rather than assumed: `Bundle::with_merged` pushes the merged segment to the end
-        // of `segments` while its extent takes the consumed run's place in the row space, so the
-        // segment list is not in row order after a merge.
-        segments.sort_unstable_by_key(|&(_, row_base)| row_base);
+        let segments = segments_with_row_bases(slice, slice_data)?;
         probe.lap(|t| &mut t.slice_lookup_ns);
 
         let cache_key = RowProjectionKey {
@@ -1322,6 +1296,60 @@ struct TileResult {
     points: Vec<PointOut>,
     sub_cells: Vec<SubCellCount>,
     stats: TileStats,
+}
+
+/// A slice's segments paired with their `row_base` in slice row space, ascending.
+///
+/// **Keyed on `seg_id`, never zipped positionally.** `Bundle::with_segment` appends to `segments`
+/// while `RowSpace::with_extent` appends the extent, so after a flush the two lists agree by
+/// position — but `Bundle::with_merged` pushes the merged segment at the *end* of `segments` while
+/// `RowSpace::collapsing` puts the merged extent where the consumed run was. After one merge the
+/// positions diverge, and a positional zip would silently pair a segment with another segment's
+/// `row_base`: every count right, every point drawn from the wrong entity. `seg_id`s are never
+/// reused (contracts §2.1), so the lookup is exact.
+///
+/// The build segment is the one `permutation.bin` addresses and has no extent; it is therefore the
+/// one with no entry in the row space, and its rows begin at 0.
+///
+/// **One definition, because two read paths need it.** `Engine::viewport` selects over the parts
+/// and `Engine::item` resolves a single row to its owner; when `item` had its own version — take
+/// `segments.first()` and index it with a *slice*-space row — a drill-down on any flushed item
+/// read past the build segment's end and panicked. A second copy is how the two come to disagree.
+fn segments_with_row_bases<'a>(
+    slice: &str,
+    slice_data: &'a tessera_store::read::SliceData,
+) -> Result<Vec<(&'a SegmentData, u32)>> {
+    let row_bases: std::collections::HashMap<&str, u32> = slice_data
+        .row_space
+        .extents()
+        .iter()
+        .map(|extent| (extent.seg_id.as_str(), extent.row_base))
+        .collect();
+    let mut base_seen = false;
+    let mut segments: Vec<(&SegmentData, u32)> = Vec::with_capacity(slice_data.segments.len());
+    for segment in &slice_data.segments {
+        let row_base = match row_bases.get(segment.seg_id.as_str()) {
+            Some(&row_base) => row_base,
+            // No extent: the build segment, at 0. Legitimate exactly once — see
+            // `EngineError::SegmentWithoutRowBase` for why a second one is a 500 rather than
+            // another segment defaulted to 0.
+            None if !base_seen => {
+                base_seen = true;
+                0
+            }
+            None => {
+                return Err(EngineError::SegmentWithoutRowBase {
+                    slice: slice.to_string(),
+                    seg_id: segment.seg_id.clone(),
+                })
+            }
+        };
+        segments.push((segment.as_ref(), row_base));
+    }
+    // Ascending in `row_base`, which `SelectionParts::resolve`'s reverse scan relies on. Sorted
+    // rather than assumed, for the `with_merged` reason above.
+    segments.sort_unstable_by_key(|&(_, row_base)| row_base);
+    Ok(segments)
 }
 
 /// Gather one row's `tessera_id`/position/declared scalars — zero-copy reads, no per-row

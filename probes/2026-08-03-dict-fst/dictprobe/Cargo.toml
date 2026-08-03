@@ -1,0 +1,13 @@
+[package]
+name = "dictprobe"
+version = "0.1.0"
+edition = "2024"
+
+# Standalone: not a member of the repo workspace, and must not become one — the gate's
+# `cargo test --workspace` should never build a probe harness.
+[workspace]
+
+[dependencies]
+fst = "0.4"
+memmap2 = "0.9"
+rustc-hash = "2"

@@ -200,12 +200,6 @@ impl Session {
     /// condition only. No response carries this, and a client's policy for acting on it is
     /// client-facing work; what exists today is this predicate and its leak-register row (C21).
     ///
-    /// **⊘ And nothing an ingest does can make it true yet.** The promotion this advertises is a
-    /// flush's, and `crate::flush::promote` carries its own ⊘ — the buffer holds resolved `TermId`s
-    /// and not the descriptor bytes, so a novel term is left out of the tier rather than promoted.
-    /// A publication that extends the dictionary flips this correctly (`tests/staleness_hint.rs`
-    /// drives exactly the call a flush's own publication makes); an ingest does not, today.
-    ///
     /// Three rules keep it from becoming something it must not be:
     ///
     /// - **It moves in one direction only.** A stale session sees *fewer* items than its principal
@@ -1328,6 +1322,7 @@ impl Engine {
                 prefix_dir: self.prefix_dir.clone(),
                 identity_key: self.identity_key,
                 pool: Arc::clone(&self.pool),
+                max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
             },
             #[cfg(feature = "fault-injection")]
             None,
@@ -1351,6 +1346,7 @@ impl Engine {
                 prefix_dir: self.prefix_dir.clone(),
                 identity_key: self.identity_key,
                 pool: Arc::clone(&self.pool),
+                max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
             },
             Some(faults),
         )
