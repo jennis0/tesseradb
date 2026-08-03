@@ -75,9 +75,9 @@ fn ingest(engine: &Engine, external_id: &str) -> EntityId {
         .expect("ingest is accepted")[0]
 }
 
-fn change(engine: &Engine, external_id: &str, entity: EntityId, op: ChangeOp) {
+fn change(engine: &Engine, entity: EntityId, op: ChangeOp) {
     engine
-        .accept_change(external_id.as_bytes().to_vec(), entity, op, None)
+        .accept_change(entity, op, None)
         .expect("the change is accepted");
 }
 
@@ -165,13 +165,13 @@ fn unsuppress_after_delete_keeps_the_row_masked() {
     let entity = EntityId::new(7);
     let row = row_of(&engine, entity);
 
-    change(&engine, "ext-7", entity, ChangeOp::Delete);
+    change(&engine, entity, ChangeOp::Delete);
     assert!(denied_rows(&engine).contains(row), "the delete masks it");
 
-    change(&engine, "ext-7", entity, ChangeOp::Suppress);
+    change(&engine, entity, ChangeOp::Suppress);
     assert!(denied_rows(&engine).contains(row));
 
-    change(&engine, "ext-7", entity, ChangeOp::Unsuppress);
+    change(&engine, entity, ChangeOp::Unsuppress);
     assert!(
         denied_rows(&engine).contains(row),
         "the unsuppress removed the suppression, but `deleted` still holds the entity: \
@@ -201,7 +201,7 @@ fn a_suppressed_buffered_item_is_masked_the_moment_it_gains_a_row() {
     let before = visible_count(&engine, &session);
 
     let entity = ingest(&engine, "ext-buffered");
-    change(&engine, "ext-buffered", entity, ChangeOp::Suppress);
+    change(&engine, entity, ChangeOp::Suppress);
 
     assert!(
         denied_rows(&engine).is_empty(),
@@ -245,14 +245,12 @@ fn visible_to_agrees_with_contains_row_for_every_disposition() {
     let predicated = EntityId::new(14);
     let untouched = EntityId::new(15);
 
-    change(&engine, "ext-11", deleted, ChangeOp::Delete);
-    change(&engine, "ext-12", suppressed, ChangeOp::Suppress);
-    change(&engine, "ext-13", unsuppressed, ChangeOp::Suppress);
-    change(&engine, "ext-13", unsuppressed, ChangeOp::Unsuppress);
+    change(&engine, deleted, ChangeOp::Delete);
+    change(&engine, suppressed, ChangeOp::Suppress);
+    change(&engine, unsuppressed, ChangeOp::Suppress);
+    change(&engine, unsuppressed, ChangeOp::Unsuppress);
     engine
-        .accept_change(
-            b"ext-14".to_vec(),
-            predicated,
+        .accept_change(predicated,
             ChangeOp::Predicate,
             // A term this session does not hold, so the predicate flips it invisible.
             Some(vec![b"1".to_vec()]),
@@ -300,12 +298,7 @@ fn a_deep_deny_set_changes_no_answer() {
         .iter()
         .map(|entity| {
             engine
-                .submit_change(
-                    format!("ext-{}", entity.raw()).into_bytes(),
-                    *entity,
-                    ChangeOp::Suppress,
-                    None,
-                )
+                .submit_change(*entity, ChangeOp::Suppress, None)
                 .expect("the change is submitted")
         })
         .collect();

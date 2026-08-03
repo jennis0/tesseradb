@@ -115,9 +115,7 @@ fn an_accepted_deny_moves_no_geometry() {
     let before = engine.generation();
     let entity = source_to_new_map(&root, &before.prefix)[&7];
     engine
-        .accept_change(
-            source_id_key(7),
-            EntityId::new(entity),
+        .accept_change(EntityId::new(entity),
             ChangeOp::Suppress,
             None,
         )

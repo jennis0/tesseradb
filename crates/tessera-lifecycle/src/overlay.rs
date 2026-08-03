@@ -392,6 +392,17 @@ pub fn replay<'a, E>(
                 let predicate = descriptors.as_ref().map(|ds| resolve(ds, &mut resolver));
                 overlay.apply(entity, *op, predicate);
             }
+            WalRecord::ChangeByEntity {
+                entity_id,
+                op,
+                descriptors,
+            } => {
+                // No resolution at all: the entity was fixed at admission, which is what makes
+                // this record replay to the same entity under a rotated identity key, and what
+                // lets it address an item that never had an external id.
+                let predicate = descriptors.as_ref().map(|ds| resolve(ds, &mut resolver));
+                overlay.apply(*entity_id, *op, predicate);
+            }
             WalRecord::OverlaySnapshot { entries } => {
                 overlay.apply_snapshot(entries, &mut resolver);
             }

@@ -1683,13 +1683,11 @@ impl WritePath {
     /// lane's group commit to one entry per window.
     pub(crate) fn accept_change(
         &self,
-        external_id: Vec<u8>,
         entity: EntityId,
         op: ChangeOp,
         raw_descriptors: Option<Vec<Vec<u8>>>,
     ) -> Result<(), AcceptError> {
-        self.submit_change(external_id, entity, op, raw_descriptors)?
-            .wait()
+        self.submit_change(entity, op, raw_descriptors)?.wait()
     }
 
     /// Enqueue one `/control/changes` entry **without waiting for its receipt**.
@@ -1701,13 +1699,11 @@ impl WritePath {
     /// non-enqueue boundary.
     pub(crate) fn submit_change(
         &self,
-        external_id: Vec<u8>,
         entity: EntityId,
         op: ChangeOp,
         raw_descriptors: Option<Vec<Vec<u8>>>,
     ) -> Result<PendingChange, AcceptError> {
         let pending = self.handle()?.enqueue(Command::Change {
-            external_id,
             entity,
             op,
             descriptors: raw_descriptors,
@@ -2913,7 +2909,6 @@ impl Executor {
             };
             let Job { command, respond } = job;
             let Command::Change {
-                external_id,
                 entity,
                 op,
                 descriptors,
@@ -2932,8 +2927,8 @@ impl Executor {
                 return true;
             };
             entries.push(DenyEntry {
-                record: WalRecord::Change {
-                    external_id,
+                record: WalRecord::ChangeByEntity {
+                    entity_id: entity,
                     op,
                     descriptors: descriptors.clone(),
                 },
@@ -3785,13 +3780,12 @@ impl Executor {
             // A window of one entry is exactly the per-command semantics this path used to have,
             // which is why there is no second deny implementation to keep in step with the first.
             Command::Change {
-                external_id,
                 entity,
                 op,
                 descriptors,
             } => self.commit_denies(vec![DenyEntry {
-                record: WalRecord::Change {
-                    external_id,
+                record: WalRecord::ChangeByEntity {
+                    entity_id: entity,
                     op,
                     descriptors: descriptors.clone(),
                 },

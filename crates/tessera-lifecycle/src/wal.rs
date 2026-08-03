@@ -243,6 +243,26 @@ pub enum WalRecord {
     /// device: recovery reconstructs the buffer from the published watermark, so it cannot
     /// duplicate or lose a row at any crash point whether or not this record survived.
     Flush { n: u64, wal_pos: u64 },
+    /// An accepted `/control/changes` entry addressed by **entity id** rather than by external id.
+    ///
+    /// **Appended as a new variant, never by widening `Change`**: postcard encodes an enum by
+    /// positional variant index, so the existing order is frozen and only the tail is free.
+    ///
+    /// **Why the entity and not the identifier the caller supplied.** A `tessera_id` is a keyed
+    /// permutation of entity space, so a record carrying one would resolve under whatever key the
+    /// bundle holds at replay — a rotation would silently redirect every such deny to a different
+    /// entity. Inverting once, at admission, and persisting the result is what makes replay
+    /// identical across a rotation. It is the same reason [`OverlaySnapshotEntry`] is keyed by
+    /// entity, arrived at from the other end.
+    ///
+    /// It also closes a hole the external-id form cannot: contracts §3.4 r6 makes an external id
+    /// optional at ingest, and an item that arrived without one is addressable by nothing on that
+    /// endpoint — not deletable, not suppressible, at all.
+    ChangeByEntity {
+        entity_id: EntityId,
+        op: ChangeOp,
+        descriptors: Option<Vec<Vec<u8>>>,
+    },
 }
 
 /// WAL-level failures. [`WalError::WalCorruption`], [`WalError::BadHeader`] and

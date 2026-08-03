@@ -160,7 +160,7 @@ fn a_suppression_accepted_before_a_rotation_is_still_in_force_after_a_restart() 
         let engine = engine_at(tmp.path(), &root, 1);
         let id = ingest(&engine, "ext-1");
         engine
-            .accept_change(b"ext-1".to_vec(), id, ChangeOp::Suppress, None)
+            .accept_change(id, ChangeOp::Suppress, None)
             .expect("the suppression is accepted");
 
         wait_until("the flush", || engine.write_executor_stats().flushes >= 1);

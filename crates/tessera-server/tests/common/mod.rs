@@ -15,9 +15,10 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Array, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, BinaryArray, Float32Array, Float64Array, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::StreamReader;
+use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use base64::Engine as _;
 use parking_lot::Mutex;
@@ -516,4 +517,37 @@ pub async fn control_status(server: &TestServer) -> serde_json::Value {
         .json()
         .await
         .unwrap()
+}
+
+/// An Arrow ingest batch whose `external_id` column is nullable — contracts §3.4 r6 makes the
+/// external id optional, and an item ingested without one is addressable only by its `tessera_id`.
+///
+/// Shared rather than copied: two binaries build this body, and a schema that drifted between them
+/// would fail as a server-side parse error rather than as a test disagreement.
+pub fn build_ingest_batch_optional(rows: &[(Option<&[u8]>, f32, f32, &str)]) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("access", DataType::Utf8, false),
+    ]));
+    let ext_array = BinaryArray::from_iter(rows.iter().map(|(id, _, _, _)| *id));
+    let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
+    let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
+    let access_array = StringArray::from_iter_values(rows.iter().map(|(_, _, _, a)| *a));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ext_array),
+            Arc::new(x_array),
+            Arc::new(y_array),
+            Arc::new(access_array),
+        ],
+    )
+    .unwrap();
+
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
 }

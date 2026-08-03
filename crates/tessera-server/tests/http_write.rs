@@ -91,34 +91,6 @@ fn build_ingest_batch_raw(rows: &[(&[u8], f32, f32, &str)]) -> Vec<u8> {
 /// r6: an ingested item may carry no external id at all, in which case it is addressable only by
 /// the `tessera_id` `/control/ingest`'s response returns for it. The column is declared nullable
 /// here (unlike the other two builders, which happen to always supply a value): this is the
-/// null-within-the-column shape the server must accept.
-fn build_ingest_batch_optional(rows: &[(Option<&[u8]>, f32, f32, &str)]) -> Vec<u8> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        Field::new("access", DataType::Utf8, false),
-    ]));
-    let ext_array = BinaryArray::from_iter(rows.iter().map(|(id, _, _, _)| *id));
-    let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
-    let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
-    let access_array = StringArray::from_iter_values(rows.iter().map(|(_, _, _, a)| *a));
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(ext_array),
-            Arc::new(x_array),
-            Arc::new(y_array),
-            Arc::new(access_array),
-        ],
-    )
-    .unwrap();
-
-    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    writer.write(&batch).unwrap();
-    writer.into_inner().unwrap()
-}
 
 #[tokio::test]
 async fn e_suppress_via_changes_drops_the_count_without_reauthorising() {
@@ -715,9 +687,7 @@ fn concurrent_ingest_and_change_both_survive() {
     let change_thread = std::thread::spawn(move || {
         barrier_a.wait();
         engine_a
-            .accept_change(
-                external_id_of(SUPPRESS_SOURCE_ID),
-                suppress_entity,
+            .accept_change(suppress_entity,
                 tessera_lifecycle::ChangeOp::Suppress,
                 None,
             )

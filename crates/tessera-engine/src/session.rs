@@ -1251,6 +1251,45 @@ impl Engine {
     /// at most once regardless of batch size, never once per row.
     ///
     /// Returns one `Option<EntityId>` per input, in the caller's given order.
+    /// Invert `tessera_id`s to entity ids for the admin plane, all-or-nothing.
+    ///
+    /// **The idset is checked first, against the same generation the inversions use** — one
+    /// `load_full`, exactly as [`crate::viewport::Engine::item`] does it, so a swap landing
+    /// mid-call cannot validate the idset against one snapshot and invert under another. A
+    /// mismatch is [`EngineError::StaleIdSet`] and **decides before any inversion happens**: a
+    /// caller holding a list gathered before a key rotation is refused wholesale rather than
+    /// having its identifiers reinterpreted under the new key, which would name different live
+    /// items (decision 0025).
+    ///
+    /// **`None` for an identifier that names nothing**, per position, so a caller learns which.
+    /// The permutation is total — every `u64` inverts to *something* — so the range check is the
+    /// whole of the misdirection guard: a shard that is not this one, or an entity at or above the
+    /// allocator's high-water, cannot name an item this deployment ever issued. Both are facts
+    /// about the identifier space rather than about any item's visibility, and this is the admin
+    /// plane (R5), so refusing precisely discloses nothing a caller could not compute.
+    ///
+    /// Ordered as the caller supplied, like [`Self::resolve_external_ids`], so a refusal can name
+    /// the offending position.
+    pub fn resolve_tessera_ids(
+        &self,
+        ids: &[TesseraId],
+        idset: u32,
+    ) -> Result<Vec<Option<EntityId>>> {
+        let generation = self.generation.load_full();
+        if idset != generation.bundle.manifest.identity.idset {
+            return Err(EngineError::StaleIdSet);
+        }
+        let shard = generation.bundle.manifest.identity.shard_id;
+        let high_water = self.allocator_high_water();
+        Ok(ids
+            .iter()
+            .map(|id| {
+                let (id_shard, entity) = self.identity_key.invert(*id);
+                (id_shard == shard && entity.raw() < high_water).then_some(entity)
+            })
+            .collect())
+    }
+
     pub fn resolve_external_ids(
         &self,
         external_ids: &[Vec<u8>],
@@ -1487,13 +1526,12 @@ impl Engine {
     /// waiting between items is what reduces the deny lane's group commit to one entry per window.
     pub fn accept_change(
         &self,
-        external_id: Vec<u8>,
         entity: EntityId,
         op: ChangeOp,
         raw_descriptors: Option<Vec<Vec<u8>>>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
         self.write
-            .accept_change(external_id, entity, op, raw_descriptors)
+            .accept_change(entity, op, raw_descriptors)
     }
 
     /// Enqueue one `/control/changes` entry **without waiting for its receipt**, so that a caller
@@ -1505,13 +1543,12 @@ impl Engine {
     /// happened".
     pub fn submit_change(
         &self,
-        external_id: Vec<u8>,
         entity: EntityId,
         op: ChangeOp,
         raw_descriptors: Option<Vec<Vec<u8>>>,
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
         self.write
-            .submit_change(external_id, entity, op, raw_descriptors)
+            .submit_change(entity, op, raw_descriptors)
     }
 }
 

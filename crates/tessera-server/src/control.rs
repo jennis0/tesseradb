@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 use tessera_engine::{AcceptError, DeclaredScalar, DENY_WINDOW_MAX_ENTRIES};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow, WalScalar};
 
-use tessera_types::{EntityId, TermId};
+use tessera_types::{EntityId, TermId, TesseraId};
 
 use crate::error::{
     map_accept_error, map_change_batch_error, map_join_error, map_store_error, ApiError,
@@ -1077,10 +1077,26 @@ fn tessera_ids_of(state: &AppState, entity_ids: &[EntityId]) -> Result<Vec<u64>,
 /// lossless encoding available here, matching `/control/ingest`'s Arrow `binary` column).
 #[derive(serde::Deserialize)]
 struct ChangeItem {
-    external_id: String,
+    /// Exactly one of `external_id` / `tessera_id`, never both and never neither.
+    #[serde(default)]
+    external_id: Option<String>,
+    /// **String-encoded**, deliberately: a bare JSON number loses `u64`s past 2⁵³ in every
+    /// JavaScript client, silently, and a mis-parsed identifier denies the wrong entity.
+    #[serde(default)]
+    tessera_id: Option<String>,
+    /// Required with `tessera_id`, refused without it. The deployment's current identifier set,
+    /// from `/v1/meta` — see [`DecodedChange`] for what it guards.
+    #[serde(default)]
+    idset: Option<u32>,
     op: String,
     #[serde(default)]
     access: Option<String>,
+}
+
+/// How one item names its entity: the two address forms, already shape-validated.
+enum Address {
+    External(Vec<u8>),
+    Tessera { id: TesseraId, idset: u32 },
 }
 
 /// One `/control/changes` item whose shape is validated but whose external id is not yet resolved.
@@ -1090,14 +1106,13 @@ struct ChangeItem {
 /// form opens one per item and was the largest remaining per-item cost of a change request once the
 /// WAL fsyncs were amortised.
 struct DecodedChange {
-    external_id: Vec<u8>,
+    address: Address,
     op: ChangeOp,
     raw_descriptors: Option<Vec<Vec<u8>>>,
 }
 
 /// One `/control/changes` item, fully validated but not yet applied — see [`changes`]'s doc.
 struct ValidatedChange {
-    external_id: Vec<u8>,
     entity: EntityId,
     op: ChangeOp,
     /// Raw descriptor bytes (never `TermId`s — see `Engine::accept_change`'s doc for why
@@ -1148,9 +1163,61 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
             }
         };
 
-        let external_id_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&item.external_id)
-            .map_err(|e| ApiError::Contract(format!("external_id is not valid base64: {e}")))?;
+        // **Exactly one address form.** Both is ambiguous and neither is unaddressable; either
+        // way the request is refused wholesale before anything is enqueued.
+        let address = match (&item.external_id, &item.tessera_id) {
+            (Some(external_id), None) => {
+                if item.idset.is_some() {
+                    return Err(ApiError::Contract(
+                        "idset accompanies tessera_id, never external_id: an external id means \
+                         the same entity under every identity key, so there is nothing for it to \
+                         guard"
+                            .to_string(),
+                    ));
+                }
+                Address::External(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(external_id)
+                        .map_err(|e| {
+                            ApiError::Contract(format!("external_id is not valid base64: {e}"))
+                        })?,
+                )
+            }
+            (None, Some(tessera_id)) => {
+                let id: u64 = tessera_id.parse().map_err(|_| {
+                    ApiError::Contract(
+                        "tessera_id must be a base-10 string: it is a u64, and a bare JSON number \
+                         loses precision past 2^53 in most clients"
+                            .to_string(),
+                    )
+                })?;
+                let idset = item.idset.ok_or_else(|| {
+                    ApiError::Contract(
+                        "a tessera_id-addressed change must carry the idset it was minted under \
+                         (GET /v1/meta): identifiers are keyed, so one gathered before a rotation \
+                         names a different item after it"
+                            .to_string(),
+                    )
+                })?;
+                Address::Tessera {
+                    id: TesseraId::new(id),
+                    idset,
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err(ApiError::Contract(
+                    "a change names exactly one of external_id / tessera_id, never both"
+                        .to_string(),
+                ))
+            }
+            (None, None) => {
+                return Err(ApiError::Contract(
+                    "a change names exactly one of external_id / tessera_id, and this names \
+                     neither"
+                        .to_string(),
+                ))
+            }
+        };
 
         // `terms_of_label` only maps `access` bytes to descriptor *bytes* (deterministic, no
         // persistent state touched) — validating this here is safe and does not pre-empt the
@@ -1168,13 +1235,94 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
         };
 
         decoded.push(DecodedChange {
-            external_id: external_id_bytes,
+            address,
             op,
             raw_descriptors,
         });
     }
 
-    let keys: Vec<Vec<u8>> = decoded.iter().map(|d| d.external_id.clone()).collect();
+    // **Each address form resolved in one batched call, both before anything is enqueued.** The
+    // external half opens each bundle extent at most once regardless of N; the tessera half takes
+    // one generation snapshot for the idset check and every inversion, so a swap cannot land
+    // between them.
+    //
+    // **The idset decides first, and for the whole request.** A caller whose list was gathered
+    // before a key rotation is refused as a 409 before a single identifier is inverted — its ids
+    // would otherwise be reinterpreted under the new key and name different live items (decision
+    // 0025). Every tessera-addressed item must agree on the idset, because there is one per
+    // deployment and a request mixing two was assembled from a state that never existed.
+    let mut idsets = decoded.iter().filter_map(|d| match &d.address {
+        Address::Tessera { idset, .. } => Some(*idset),
+        Address::External(_) => None,
+    });
+    if let Some(idset) = idsets.next() {
+        if idsets.any(|other| other != idset) {
+            return Err(ApiError::Contract(
+                "one request carries two different idsets; there is one per deployment, so this \
+                 list was assembled from a state that never existed"
+                    .to_string(),
+            ));
+        }
+        let ids: Vec<TesseraId> = decoded
+            .iter()
+            .filter_map(|d| match &d.address {
+                Address::Tessera { id, .. } => Some(*id),
+                Address::External(_) => None,
+            })
+            .collect();
+        // Refuses with `StaleIdSet` before inverting anything — see `resolve_tessera_ids`.
+        let resolved = state
+            .engine
+            .resolve_tessera_ids(&ids, idset)
+            .map_err(crate::error::map_engine_error)?;
+        if let Some(position) = resolved.iter().position(|e| e.is_none()) {
+            return Err(ApiError::Unknown(format!(
+                "tessera_id at tessera-addressed position {position} names nothing this \
+                 deployment issued"
+            )));
+        }
+        let mut resolved = resolved.into_iter();
+        let external_keys: Vec<Vec<u8>> = decoded
+            .iter()
+            .filter_map(|d| match &d.address {
+                Address::External(key) => Some(key.clone()),
+                Address::Tessera { .. } => None,
+            })
+            .collect();
+        let mut external = state
+            .engine
+            .resolve_external_ids(&external_keys)
+            .map_err(map_store_error)?
+            .into_iter();
+
+        let mut validated = Vec::with_capacity(decoded.len());
+        for d in decoded {
+            let entity = match &d.address {
+                Address::Tessera { .. } => resolved
+                    .next()
+                    .flatten()
+                    .expect("checked complete just above"),
+                Address::External(_) => external
+                    .next()
+                    .flatten()
+                    .ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?,
+            };
+            validated.push(ValidatedChange {
+                entity,
+                op: d.op,
+                raw_descriptors: d.raw_descriptors,
+            });
+        }
+        return apply_validated(state, validated);
+    }
+
+    let keys: Vec<Vec<u8>> = decoded
+        .iter()
+        .map(|d| match &d.address {
+            Address::External(key) => key.clone(),
+            Address::Tessera { .. } => unreachable!("no tessera address reaches here"),
+        })
+        .collect();
     let resolved = state
         .engine
         .resolve_external_ids(&keys)
@@ -1183,13 +1331,22 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     for (d, entity) in decoded.into_iter().zip(resolved) {
         let entity = entity.ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
         validated.push(ValidatedChange {
-            external_id: d.external_id,
             entity,
             op: d.op,
             raw_descriptors: d.raw_descriptors,
         });
     }
 
+    apply_validated(state, validated)
+}
+
+/// Enqueue and collect a validated batch — the apply half of [`run_changes`], reached by both
+/// address forms.
+///
+/// Extracted rather than duplicated: the enqueue/collect discipline below is the whole of this
+/// endpoint's fsync amortisation *and* its fail-closed batch semantics, and two copies of it is
+/// how one of them comes to abort early.
+fn apply_validated(state: &AppState, mut validated: Vec<ValidatedChange>) -> Result<(), ApiError> {
     // **Enqueue the whole chunk, then collect it — never one item at a time.**
     //
     // This is the difference between one fsync per request and one fsync per item. The executor
@@ -1248,9 +1405,7 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
         let mut pending = Vec::with_capacity(chunk.len());
         for change in chunk.iter_mut() {
             let op = change.op;
-            match state.engine.submit_change(
-                std::mem::take(&mut change.external_id),
-                change.entity,
+            match state.engine.submit_change(change.entity,
                 op,
                 change.raw_descriptors.take(),
             ) {

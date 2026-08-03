@@ -136,13 +136,17 @@ pub enum Command {
     },
     /// One accepted `/control/changes` entry.
     ///
-    /// `entity` is resolved by the handler (from `external_id`, via the live map and the bundle
-    /// sidecar) and carried, so the executor does not re-resolve inside its critical section.
+    /// **Addressed by entity, whatever the caller supplied.** The handler resolves an
+    /// `external_id` through the live map and the bundle sidecar, or inverts a `tessera_id`, and
+    /// carries the result — so the executor re-resolves nothing inside its critical section, and
+    /// the record it appends names the entity rather than an identifier whose meaning depends on
+    /// a key (`WalRecord::ChangeByEntity`). An item ingested without an external id is addressable
+    /// only this way, which is the hole the second address form closes.
+    ///
     /// `descriptors` carries the new predicate's raw term descriptors for
     /// [`ChangeOp::Predicate`] and is `None` for the three disposition ops, which change
     /// disposition without touching terms.
     Change {
-        external_id: Vec<u8>,
         entity: EntityId,
         op: ChangeOp,
         descriptors: Option<Vec<Vec<u8>>>,
@@ -497,7 +501,6 @@ mod tests {
             ChangeOp::Predicate,
         ] {
             let cmd = Command::Change {
-                external_id: b"ext-1".to_vec(),
                 entity: EntityId::new(1),
                 op,
                 descriptors: None,

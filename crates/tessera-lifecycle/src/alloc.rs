@@ -139,7 +139,9 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
             }
             // A `Flush` record's `wal_pos` is a byte position, never an entity id, and the rows
             // it accounts for were seeded from `IngestBatch` records anyway.
-            WalRecord::Change { .. } | WalRecord::Flush { .. } => {}
+            WalRecord::Change { .. }
+            | WalRecord::ChangeByEntity { .. }
+            | WalRecord::Flush { .. } => {}
         }
     }
     hw

@@ -244,7 +244,6 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                 let mut acks = Vec::new();
                 while applied < limit {
                     let entity = targets[applied as usize];
-                    let external_id = format!("bench-change-{}", entity.raw()).into_bytes();
                     let descriptors = if op == Op::Predicate {
                         // Re-evaluate against an empty descriptor set: the item satisfies nothing,
                         // so a predicate change is observable rather than a no-op.
@@ -253,7 +252,7 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                         None
                     };
                     let start = std::time::Instant::now();
-                    engine.accept_change(external_id, entity, op.change_op(), descriptors)?;
+                    engine.accept_change(entity, op.change_op(), descriptors)?;
                     acks.push(start.elapsed().as_nanos() as u64);
                     applied += 1;
                 }
@@ -495,12 +494,7 @@ pub fn run_deny_ack(
                     let Some(entity) = targets.next() else { break };
                     let before = engine.write_executor_stats();
                     let start = std::time::Instant::now();
-                    engine.accept_change(
-                        format!("bench-deny-{}", entity.raw()).into_bytes(),
-                        entity,
-                        op.change_op(),
-                        None,
-                    )?;
+                    engine.accept_change(entity, op.change_op(), None)?;
                     let ack = start.elapsed().as_nanos() as u64;
                     let after = engine.write_executor_stats();
                     quiet_ack.push(ack);
@@ -556,12 +550,7 @@ pub fn run_deny_ack(
                     for _ in 0..denies {
                         let Some(entity) = targets.next() else { break };
                         let start = std::time::Instant::now();
-                        let r = engine.accept_change(
-                            format!("bench-deny-{}", entity.raw()).into_bytes(),
-                            entity,
-                            op.change_op(),
-                            None,
-                        );
+                        let r = engine.accept_change(entity, op.change_op(), None);
                         busy_ack.push(start.elapsed().as_nanos() as u64);
                         if matches!(r, Err(tessera_engine::AcceptError::Submit(_))) {
                             // The failure this whole arm exists to detect: a security operation
