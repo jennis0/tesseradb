@@ -19,10 +19,20 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, FrozenFragment, PostingsReader};
 use tessera_engine::compose::{compose, visible_to, EffectiveMask, RowProjection};
-use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
+use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay, PredicateChange};
 use tessera_store::write::write_permutation;
 use tessera_store::{Permutation, RowSpace};
 use tessera_types::{EntityId, TermId};
+
+/// A predicate change over already-resolved term ids. Its descriptors are stand-ins — nothing here
+/// resolves them — but they are stated anyway, because `PredicateChange` exists precisely so the
+/// two halves cannot be set independently.
+fn evaluate(terms: &[u32]) -> PredicateChange {
+    PredicateChange {
+        descriptors: terms.iter().map(|t| t.to_string().into_bytes()).collect(),
+        terms: terms.iter().map(|t| TermId::new(*t)).collect(),
+    }
+}
 
 const UNIVERSE: u32 = 10_000;
 const BUFFER_EXT: u32 = 5;
@@ -213,7 +223,7 @@ fn d_evaluate_excludes_when_terms_no_longer_intersect() {
     overlay.apply(
         e(EVAL_NARROW),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(UNSATISFIED_TERM)]),
+        Some(evaluate(&[UNSATISFIED_TERM])),
     );
     let buffer = IngestBuffer::new();
 
@@ -231,7 +241,7 @@ fn d_evaluate_keeps_when_terms_still_intersect() {
     overlay.apply(
         e(EVAL_KEEP),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+        Some(evaluate(&[SATISFIED_TERM_MARKER])),
     );
     let buffer = IngestBuffer::new();
 
@@ -250,7 +260,7 @@ fn d2_evaluate_widening_includes_entity_outside_fragment() {
     overlay.apply(
         e(EVAL_WIDEN),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+        Some(evaluate(&[SATISFIED_TERM_MARKER])),
     );
     let buffer = IngestBuffer::new();
 
@@ -297,7 +307,7 @@ fn f_deny_beats_evaluate() {
     overlay.apply(
         e(DELETE_BEATS_EVAL),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+        Some(evaluate(&[SATISFIED_TERM_MARKER])),
     );
     let buffer = IngestBuffer::new();
 
@@ -372,12 +382,12 @@ fn g_count_range_matches_brute_force_rows_in_range() {
     overlay.apply(
         e(EVAL_NARROW),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(UNSATISFIED_TERM)]),
+        Some(evaluate(&[UNSATISFIED_TERM])),
     );
     overlay.apply(
         e(EVAL_WIDEN),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+        Some(evaluate(&[SATISFIED_TERM_MARKER])),
     );
     overlay.apply(e(CROSS1_DSU), ChangeOp::Delete, None);
     overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress, None);
@@ -429,7 +439,7 @@ fn g2_visible_runs_flatten_to_rows_in_range_on_both_routes() {
     overlay.apply(
         e(EVAL_WIDEN),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+        Some(evaluate(&[SATISFIED_TERM_MARKER])),
     );
     let diff_mask = compose_with(&fx, &overlay, &IngestBuffer::new());
     assert!(!diff_mask.diffs_are_empty(), "route predicate: fallback");
@@ -480,7 +490,7 @@ fn h_structural_invariants_hold_pervasively() {
     overlay.apply(
         e(EVAL_WIDEN),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+        Some(evaluate(&[SATISFIED_TERM_MARKER])),
     );
     overlay.apply(e(CROSS2_SDU), ChangeOp::Suppress, None);
     overlay.apply(e(CROSS2_SDU), ChangeOp::Delete, None);
@@ -627,8 +637,8 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     let y_entry = overlay.get(e(ENTITY_Y)).expect("Y has an overlay entry");
     assert!(y_entry.deleted, "delete must survive replay");
     assert_eq!(
-        y_entry.evaluate_terms,
-        Some(vec![TermId::new(0)]),
+        y_entry.evaluate_terms(),
+        Some(&[TermId::new(0)][..]),
         "predicate's granted term must also survive replay"
     );
     assert!(buffer.contains(e(ENTITY_X)));
@@ -656,7 +666,7 @@ fn predicate_with_no_terms_does_not_reopen_a_prior_evaluate_exclusion() {
     overlay.apply(
         e(EVAL_NARROW),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(UNSATISFIED_TERM)]),
+        Some(evaluate(&[UNSATISFIED_TERM])),
     );
     let buffer = IngestBuffer::new();
 
@@ -701,7 +711,10 @@ fn extension_only_term_never_passes_compose() {
     overlay.apply(
         e(EVAL_WIDEN),
         ChangeOp::Predicate,
-        Some(vec![extension_term]),
+        Some(tessera_lifecycle::overlay::resolve(
+            &[b"never-built-yet".to_vec()],
+            &mut resolver,
+        )),
     );
     let buffer = IngestBuffer::new();
 
@@ -735,23 +748,23 @@ fn visible_to_agrees_with_compose_over_every_precedence_case() {
     overlay.apply(
         e(EVAL_NARROW),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(UNSATISFIED_TERM)]),
+        Some(evaluate(&[UNSATISFIED_TERM])),
     );
     overlay.apply(
         e(EVAL_KEEP),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+        Some(evaluate(&[SATISFIED_TERM_MARKER])),
     );
     overlay.apply(
         e(EVAL_WIDEN),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+        Some(evaluate(&[SATISFIED_TERM_MARKER])),
     );
     overlay.apply(e(DELETE_BEATS_EVAL), ChangeOp::Delete, None);
     overlay.apply(
         e(DELETE_BEATS_EVAL),
         ChangeOp::Predicate,
-        Some(vec![TermId::new(SATISFIED_TERM_MARKER)]),
+        Some(evaluate(&[SATISFIED_TERM_MARKER])),
     );
     overlay.apply(e(CROSS1_DSU), ChangeOp::Delete, None);
     overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress, None);

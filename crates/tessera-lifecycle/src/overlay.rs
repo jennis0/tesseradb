@@ -21,7 +21,24 @@ use tessera_authz::Dict;
 use tessera_types::{EntityId, TermId};
 
 use crate::buffer::{DescriptorResolver, IngestBuffer};
-use crate::wal::{ChangeOp, WalRecord};
+use crate::wal::{ChangeOp, OverlaySnapshotEntry, WalRecord};
+
+/// A predicate change's term set, carried in **both** the form composition needs and the form
+/// durability needs.
+///
+/// The two are one value rather than two fields because they must never drift: `terms` is
+/// process-local (a novel descriptor resolves to an extension id that exists only in this
+/// process's [`DescriptorResolver`]), so it is unwritable, while `descriptors` is what
+/// [`Overlay::snapshot`] must emit and is meaningless to composition. An overlay that stored only
+/// the resolved ids could not be snapshotted at all; one that stored them separately could be set
+/// with a mismatched pair. See [`OverlaySnapshotEntry`] for why a persisted `TermId` dangles.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PredicateChange {
+    /// Raw term descriptors, exactly as `/control/changes` supplied them.
+    pub descriptors: Vec<Vec<u8>>,
+    /// Those descriptors resolved against this process's dictionary plus extension.
+    pub terms: Vec<TermId>,
+}
 
 /// One entity's accumulated disposition. Default (all `false`/`None`) is "untouched" — never
 /// constructed as a stand-in for "not deleted", only ever the actual absence of any change.
@@ -35,7 +52,21 @@ pub struct OverlayEntry {
     pub suppressed: bool,
     /// Set by `Predicate`. Replaces the fragment's verdict for this entity in both directions
     /// once present; never cleared by `Delete`/`Suppress`/`Unsuppress`.
-    pub evaluate_terms: Option<Vec<TermId>>,
+    pub evaluate: Option<PredicateChange>,
+}
+
+impl OverlayEntry {
+    /// The resolved terms of this entity's predicate change, if it has one.
+    pub fn evaluate_terms(&self) -> Option<&[TermId]> {
+        self.evaluate.as_ref().map(|p| p.terms.as_slice())
+    }
+
+    /// Whether any of the three facts is currently in force. A **neutral** entry (all three
+    /// inactive, e.g. after `suppress → unsuppress`) is not the same as no entry at all — see
+    /// [`Overlay::snapshot`].
+    fn is_neutral(&self) -> bool {
+        !self.deleted && !self.suppressed && self.evaluate.is_none()
+    }
 }
 
 /// Accumulated overlay state, keyed by (internal) `EntityId`. Never keyed by external id —
@@ -78,8 +109,8 @@ impl Overlay {
     }
 
     /// Apply one disposition change to `entity`. The three facts are updated independently —
-    /// see this module's doc. `terms` (already resolved to `TermId`s) is used only for
-    /// `ChangeOp::Predicate`; ignored (should be `None`) for the other three ops.
+    /// see this module's doc. `predicate` is used only for `ChangeOp::Predicate`; ignored (should
+    /// be `None`) for the other three ops.
     ///
     /// **`Predicate` always *sets* `evaluate_terms` to `Some(_)`, never `None`** — `access` is
     /// optional on `/control/changes` (contracts §3.4), so a `predicate` change with no
@@ -91,14 +122,95 @@ impl Overlay {
     /// never intersect any `satisfied` set, i.e. the entity stays excluded, matching "sets
     /// `evaluate_terms`", never "unsets" it — a case the contract does not define, and for which
     /// this method therefore refuses to invent a permissive answer.
-    pub fn apply(&mut self, entity: EntityId, op: ChangeOp, terms: Option<Vec<TermId>>) {
+    pub fn apply(&mut self, entity: EntityId, op: ChangeOp, predicate: Option<PredicateChange>) {
         let entry = self.entries.entry(entity).or_default();
         match op {
             ChangeOp::Delete => entry.deleted = true,
             ChangeOp::Suppress => entry.suppressed = true,
             ChangeOp::Unsuppress => entry.suppressed = false,
-            ChangeOp::Predicate => entry.evaluate_terms = Some(terms.unwrap_or_default()),
+            ChangeOp::Predicate => entry.evaluate = Some(predicate.unwrap_or_default()),
         }
+    }
+
+    /// Re-state this overlay as WAL records, so that the `Change` records it was accumulated from
+    /// can be deleted (lifecycle §4's rotation; [`WalRecord::OverlaySnapshot`]).
+    ///
+    /// **The snapshot reproduces the overlay exactly, not merely its active denies.** An entity
+    /// with an entry that is currently *neutral* — `suppress → unsuppress`, nothing else — still
+    /// gets one entry, an `Unsuppress`, because a present-but-neutral entry is not the same as no
+    /// entry: `tessera_engine::compose`'s verdict rule gives any overlay entry precedence over the
+    /// ingest buffer, so dropping a neutral one would change the answer for an entity that is still
+    /// buffered. That is a fail-*open* difference in the case it arises — the buffered row's own
+    /// terms would start deciding — and it would arise only after a rotation, which is the worst
+    /// possible place to discover it.
+    ///
+    /// **Entries are ordered by entity id**, so the same overlay always encodes to the same bytes.
+    /// A `FxHashMap`'s iteration order is not stable across processes, and a record whose bytes
+    /// depend on allocation history is one that cannot be compared, re-derived, or re-encoded by
+    /// [`crate::Wal::retry_durability`] with any confidence.
+    ///
+    /// Within one entity the three facts are emitted `Delete`, `Suppress`, `Predicate`. The order
+    /// is immaterial — that is the point of three independent facts — but a fixed one is what makes
+    /// the bytes a function of the state alone.
+    pub fn snapshot(&self) -> Vec<OverlaySnapshotEntry> {
+        let mut entities: Vec<&EntityId> = self.entries.keys().collect();
+        entities.sort_unstable();
+
+        let mut out = Vec::with_capacity(entities.len());
+        for entity_id in entities {
+            let entry = &self.entries[entity_id];
+            let mut push = |op, descriptors| {
+                out.push(OverlaySnapshotEntry {
+                    entity_id: *entity_id,
+                    op,
+                    descriptors,
+                })
+            };
+            if entry.is_neutral() {
+                // The one op whose effect on a default entry is to establish it and leave every
+                // fact inactive — see this method's doc for why the entry must survive at all.
+                push(ChangeOp::Unsuppress, None);
+                continue;
+            }
+            if entry.deleted {
+                push(ChangeOp::Delete, None);
+            }
+            if entry.suppressed {
+                push(ChangeOp::Suppress, None);
+            }
+            if let Some(predicate) = &entry.evaluate {
+                push(ChangeOp::Predicate, Some(predicate.descriptors.clone()));
+            }
+        }
+        out
+    }
+
+    /// Fold a snapshot back in, resolving each predicate's descriptors through `resolver` exactly
+    /// as a live `Change` would.
+    ///
+    /// Applied, never assigned: the snapshot is a record in a position, and a `Change` earlier in
+    /// the same file has already been applied when this runs. Replacing the map instead would
+    /// discard those.
+    pub fn apply_snapshot(
+        &mut self,
+        entries: &[OverlaySnapshotEntry],
+        resolver: &mut DescriptorResolver<'_>,
+    ) {
+        for entry in entries {
+            self.apply(
+                entry.entity_id,
+                entry.op,
+                entry.descriptors.as_ref().map(|ds| resolve(ds, resolver)),
+            );
+        }
+    }
+}
+
+/// Resolve a change's raw descriptors, keeping both forms together — see [`PredicateChange`].
+pub fn resolve(descriptors: &[Vec<u8>], resolver: &mut DescriptorResolver<'_>) -> PredicateChange {
+    PredicateChange {
+        terms: descriptors.iter().map(|d| resolver.resolve(d)).collect(),
+        descriptors: descriptors.to_vec(),
     }
 }
 
@@ -151,6 +263,11 @@ impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for OverlayError<
 ///   bundle's `entities/external-ids-0.arrow` extent, contracts §2.1); an id found in neither is
 ///   `OverlayError::UnknownExternalId` (`404 unknown`) — fail-closed, never silently ignored.
 ///   `Predicate`'s descriptors are resolved through the same `DescriptorResolver` as ingest rows.
+/// - `OverlaySnapshot` records are applied **at the position they occupy**, never used as a
+///   starting state the walk then resumes from. Those are different algorithms: recovery walks
+///   every surviving file in sequence order, and a file older than the one holding the snapshot may
+///   still carry `Change` records above the point the snapshot was taken at. Starting *at* the
+///   snapshot would skip them — which looks like an optimisation and is a silent un-deny.
 /// - `Lease` records carry no overlay/buffer information (I9 allocator bookkeeping only) and are
 ///   skipped here.
 ///
@@ -208,10 +325,11 @@ pub fn replay<'a, E>(
                     },
                 };
 
-                let terms = descriptors
-                    .as_ref()
-                    .map(|ds| ds.iter().map(|d| resolver.resolve(d)).collect());
-                overlay.apply(entity, *op, terms);
+                let predicate = descriptors.as_ref().map(|ds| resolve(ds, &mut resolver));
+                overlay.apply(entity, *op, predicate);
+            }
+            WalRecord::OverlaySnapshot { entries } => {
+                overlay.apply_snapshot(entries, &mut resolver);
             }
             WalRecord::Lease { .. } => {}
         }
@@ -224,6 +342,16 @@ pub fn replay<'a, E>(
 mod tests {
     use super::*;
     use crate::wal::ChangeOp;
+
+    /// A predicate change stated the way [`Overlay::apply`] requires: descriptors and the terms
+    /// they resolve to, together. These tests never resolve, so the correspondence is nominal —
+    /// what matters is that a `PredicateChange` cannot be built with one half missing.
+    fn predicate(pairs: &[(&[u8], u32)]) -> PredicateChange {
+        PredicateChange {
+            descriptors: pairs.iter().map(|(d, _)| d.to_vec()).collect(),
+            terms: pairs.iter().map(|(_, t)| TermId::new(*t)).collect(),
+        }
+    }
 
     #[test]
     fn three_facts_are_independent() {
@@ -262,11 +390,11 @@ mod tests {
         let e = EntityId::new(3);
 
         overlay.apply(e, ChangeOp::Delete, None);
-        overlay.apply(e, ChangeOp::Predicate, Some(vec![TermId::new(9)]));
+        overlay.apply(e, ChangeOp::Predicate, Some(predicate(&[(b"nine", 9)])));
 
         let entry = overlay.get(e).unwrap();
         assert!(entry.deleted);
-        assert_eq!(entry.evaluate_terms, Some(vec![TermId::new(9)]));
+        assert_eq!(entry.evaluate_terms(), Some(&[TermId::new(9)][..]));
     }
 
     /// A `predicate` change with no descriptors (`access` is optional)
@@ -278,10 +406,14 @@ mod tests {
         let e = EntityId::new(4);
 
         // First predicate: an unsatisfied term set (excludes the entity).
-        overlay.apply(e, ChangeOp::Predicate, Some(vec![TermId::new(77)]));
+        overlay.apply(
+            e,
+            ChangeOp::Predicate,
+            Some(predicate(&[(b"seventy-seven", 77)])),
+        );
         assert_eq!(
-            overlay.get(e).unwrap().evaluate_terms,
-            Some(vec![TermId::new(77)])
+            overlay.get(e).unwrap().evaluate_terms(),
+            Some(&[TermId::new(77)][..])
         );
 
         // A later predicate change with no descriptors at all (`terms: None`) must not unset
@@ -290,8 +422,8 @@ mod tests {
         overlay.apply(e, ChangeOp::Predicate, None);
         let entry = overlay.get(e).unwrap();
         assert_eq!(
-            entry.evaluate_terms,
-            Some(Vec::new()),
+            entry.evaluate_terms(),
+            Some(&[][..]),
             "a descriptor-less predicate must still set evaluate_terms, to an empty (always \
              fail-closed) set — never leave it unset"
         );

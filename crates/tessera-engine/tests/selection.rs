@@ -22,12 +22,22 @@ use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
 use tessera_engine::select::{
     decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
 };
-use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
+use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay, PredicateChange};
 use tessera_spatial::{fixed32, morton_of, tiler::sort_batch, Extent, Tile, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{tile_ranges, Permutation, RowSpace};
 use tessera_types::{EntityId, TermId, TesseraId};
+
+/// A predicate change over already-resolved term ids. Its descriptors are stand-ins — nothing here
+/// resolves them — but they are stated anyway, because `PredicateChange` exists precisely so the
+/// two halves cannot be set independently.
+fn evaluate(terms: &[u32]) -> PredicateChange {
+    PredicateChange {
+        descriptors: terms.iter().map(|t| t.to_string().into_bytes()).collect(),
+        terms: terms.iter().map(|t| TermId::new(*t)).collect(),
+    }
+}
 
 const EXTENT: Extent = Extent {
     x_min: 0.0,
@@ -932,7 +942,7 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
                     overlay.apply(
                         EntityId::new(row as u64),
                         ChangeOp::Predicate,
-                        Some(vec![TermId::new(0)]),
+                        Some(evaluate(&[0])),
                     );
                 }
             }

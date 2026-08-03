@@ -475,7 +475,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use tessera_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
-    use tessera_lifecycle::IngestBuffer;
+    use tessera_lifecycle::{IngestBuffer, PredicateChange};
     use tessera_store::manifest::{IdentityDescriptor, Manifest, Quantisation};
     use tessera_store::Bundle;
     use tessera_types::{TermId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
@@ -613,7 +613,10 @@ mod tests {
         overlay.apply(
             EntityId::new(7),
             ChangeOp::Predicate,
-            Some(vec![TermId::new(99)]),
+            Some(PredicateChange {
+                descriptors: vec![b"ninety-nine".to_vec()],
+                terms: vec![TermId::new(99)],
+            }),
         );
         let generation = generation_of(overlay, buffer_with(&[(7, item(&[1]))]));
 

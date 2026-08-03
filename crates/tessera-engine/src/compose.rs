@@ -386,8 +386,7 @@ fn verdict(
             Some(false)
         } else {
             entry
-                .evaluate_terms
-                .as_ref()
+                .evaluate_terms()
                 .map(|terms| terms.iter().any(|t| satisfied.contains(t)))
         };
     }

@@ -136,6 +136,32 @@ pub enum ChangeOp {
     Unsuppress,
 }
 
+/// One entity's disposition inside a [`WalRecord::OverlaySnapshot`].
+///
+/// Two shape decisions here are not free choices, and both are load-bearing for rotation.
+///
+/// **Keyed by [`EntityId`], never by external id.** A `Change`-shaped snapshot would re-resolve
+/// each external id at replay, and an entity deleted before it was ever flushed has no row and may
+/// have no extent entry — so `replay` would answer `UnknownExternalId` and the node would refuse to
+/// open. A snapshot is state that was already resolved once; resolving it again can only lose.
+///
+/// **`descriptors` are raw bytes, never `TermId`s.** Extension ids are assigned in replay order by
+/// [`crate::buffer::DescriptorResolver`], and rotation *changes* replay order — the records that
+/// interned an extension id may be the ones being deleted. A persisted extension `TermId` would
+/// therefore dangle, pointing at whatever descriptor happens to intern next. This is the same
+/// hazard `buffer.rs` counts extension ids downward from `u32::MAX` to avoid, arriving by a
+/// different route.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverlaySnapshotEntry {
+    pub entity_id: EntityId,
+    pub op: ChangeOp,
+    /// The predicate's raw term descriptors for [`ChangeOp::Predicate`]; `None` for the three
+    /// dispositions that do not touch terms.
+    pub descriptors: Option<Vec<Vec<u8>>>,
+}
+
 /// One framed WAL record.
 ///
 /// On-disk format: variant order is frozen and append-only — see [`WalScalar`]'s note.
@@ -160,6 +186,23 @@ pub enum WalRecord {
     /// A durable reservation of an entity-ID range, written before the range's rows are known to
     /// exist so a crash mid-batch cannot let a later batch reuse the reserved IDs (I9).
     Lease { lo: u64, hi: u64 },
+    /// The whole live overlay, written so that the `Change` records it was accumulated from can be
+    /// deleted.
+    ///
+    /// **The overlay's only durable home is the WAL.** Nothing else on disk carries a suppression:
+    /// segments carry rows and postings, and the side-manifest carries geometry. So rotation cannot
+    /// reclaim a WAL file until the dispositions inside it have been re-stated somewhere that
+    /// survives — which is this record, and why ordering constraint 2 has the snapshot land before
+    /// anything is deleted.
+    ///
+    /// It is a full snapshot, not a diff: the overlay is O(entities ever denied) — the quantity the
+    /// `overlay_soft_limit` gauge already watches — which makes that gauge the right alarm for
+    /// rotation cost too, and makes a snapshot self-sufficient rather than a link in a chain that
+    /// fails closed only if every earlier link survives.
+    ///
+    /// Under replay it is an ordinary record in position: it is applied where it occurs, and a
+    /// `Change` earlier in the same file still applies before it. See [`crate::replay`].
+    OverlaySnapshot { entries: Vec<OverlaySnapshotEntry> },
 }
 
 /// WAL-level failures. [`WalError::WalCorruption`], [`WalError::BadHeader`] and

@@ -72,7 +72,7 @@ use tessera_lifecycle::alloc::{high_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::WalMeter;
-use tessera_lifecycle::overlay::replay;
+use tessera_lifecycle::overlay::{replay, PredicateChange};
 use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord};
 use tessera_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
 use tessera_lifecycle::{IngestBuffer, Overlay};
@@ -2379,7 +2379,6 @@ impl Executor {
             }
         }
         drop(generation);
-
     }
 
     /// Apply every completed flush waiting from the pool, and report whether any did.
@@ -2785,7 +2784,7 @@ impl Executor {
         if let Some((index, error)) = failed_at {
             // Lifecycle §4's exception, per entry — see this function's doc for why the fold is not
             // uniform and why position is not a term in it.
-            let applied: Vec<(EntityId, ChangeOp, Option<Vec<TermId>>)> = entries
+            let applied: Vec<(EntityId, ChangeOp, Option<PredicateChange>)> = entries
                 .iter()
                 .filter(|e| matches!(e.op, ChangeOp::Delete | ChangeOp::Suppress))
                 .map(|e| (e.entity, e.op, None))
@@ -2817,15 +2816,16 @@ impl Executor {
         // promoted must resolve to its durable ordinal, or every later change would go on minting
         // a fresh extension id for a term that already has one.
         let dict = Arc::clone(&self.generation.load().dict);
-        let applied: Vec<(EntityId, ChangeOp, Option<Vec<TermId>>)> = entries
+        let applied: Vec<(EntityId, ChangeOp, Option<PredicateChange>)> = entries
             .iter()
             .map(|e| {
                 (
                     e.entity,
                     e.op,
-                    e.raw_descriptors
-                        .as_ref()
-                        .map(|ds| self.live.resolve_terms(&dict, ds)),
+                    e.raw_descriptors.as_ref().map(|ds| PredicateChange {
+                        terms: self.live.resolve_terms(&dict, ds),
+                        descriptors: ds.clone(),
+                    }),
                 )
             })
             .collect();
@@ -3607,15 +3607,18 @@ impl Executor {
     /// Pins are never invalidated by this (I11): a pin fixes `(prefix, segments_version)`, and this
     /// bumps `overlay_version`. That is lifecycle §2.3's rule that a suppression applies to a
     /// pinned request the moment it is accepted, without expiring the pin.
-    fn apply_changes(&self, changes: Vec<(EntityId, ChangeOp, Option<Vec<TermId>>)>) -> Published {
+    fn apply_changes(
+        &self,
+        changes: Vec<(EntityId, ChangeOp, Option<PredicateChange>)>,
+    ) -> Published {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let mut overlay: Overlay = (*generation.overlay).clone();
-        // `terms` is **moved** into the overlay rather than borrowed: a predicate change's resolved
-        // term set is per entry and cloning it here would be a per-entry cost on the one thread
-        // every write is serialised through.
-        for (entity, op, terms) in changes {
-            overlay.apply(entity, op, terms);
+        // The change is **moved** into the overlay rather than borrowed: it is per entry, and
+        // cloning it here would be a per-entry cost on the one thread every write is serialised
+        // through.
+        for (entity, op, predicate) in changes {
+            overlay.apply(entity, op, predicate);
         }
 
         // **It alarms; it does not act** — there is no compaction fold, so an operator who sets

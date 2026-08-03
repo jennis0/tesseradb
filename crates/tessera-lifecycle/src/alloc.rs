@@ -123,6 +123,20 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
                     }
                 }
             }
+            // An overlay snapshot names entities that were certainly allocated, so it raises the
+            // floor — but only for entities something has *denied*, which is a weak bound and not
+            // the mechanism. Rotation deletes the `Lease` and `IngestBatch` records this function
+            // really derives from; what replaces them is the side-manifest's own high-water mark
+            // (⊘ not built — Task 15), never the build `MANIFEST.json`, which would reallocate
+            // every flushed entity id and violate I9.
+            WalRecord::OverlaySnapshot { entries } => {
+                for entry in entries {
+                    let candidate = entry.entity_id.raw() + 1;
+                    if candidate > hw {
+                        hw = candidate;
+                    }
+                }
+            }
             WalRecord::Change { .. } => {}
         }
     }
