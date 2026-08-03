@@ -1258,6 +1258,10 @@ impl WritePath {
     /// replay produces all four in one pass and the caller needs the first two to build the
     /// `Generation` the executor will then publish through.
     ///
+    /// `manifest_high_water` is `max(build MANIFEST, side-manifest)` — see the caller. The WAL's
+    /// own high-water is unioned with it here, and stops being available once rotation reclaims the
+    /// records it derives from.
+    ///
     /// `initial_deny` is the side-manifest's own deny state — its `deny` (suppressions) and
     /// `tombstones` (deleted entities), which contracts §2.3 makes complete current state for the
     /// partition rather than a diff. It seeds the overlay **before** replay, and WAL replay

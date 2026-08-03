@@ -215,6 +215,54 @@ fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
     assert!(partition.slices["s0"].row_space.row_of(id).is_some());
 }
 
+/// **The allocator floor survives on the side-manifest alone** (I9).
+///
+/// `MANIFEST.json`'s `entity_id_high_water` is frozen at build; every flush raises the
+/// *side*-manifest's past the ids it consumed. Seeding from the build value works today only
+/// because the WAL still carries the `Lease` and `IngestBatch` records `high_water_from` derives
+/// the rest from — and rotation deletes exactly those. An id reissued after that grants the new
+/// item every access the old one had.
+///
+/// Asserted by reopening against a WAL that carries nothing: the side-manifest is then the only
+/// surviving statement of how far allocation has gone.
+#[test]
+fn the_allocator_floor_comes_from_the_side_manifest() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture(tmp.path());
+
+    let flushed = {
+        let engine = engine_at(tmp.path(), &root, 1);
+        let id = ingest(&engine, "ext-1");
+        wait_until("the flush to publish", || {
+            engine.write_executor_stats().flushes >= 1
+        });
+        id
+    };
+
+    let bundle = tessera_store::open_bundle(&root).expect("the published bundle opens");
+    let partition = bundle.partitions.values().next().unwrap();
+    assert!(
+        partition.manifest.entity_id_high_water > flushed.raw(),
+        "the flush must raise the side-manifest's floor past the ids it consumed"
+    );
+    assert!(
+        bundle.manifest.entity_id_high_water <= flushed.raw(),
+        "and the build manifest's must be the stale one, or this test proves nothing"
+    );
+
+    // A *fresh* WAL: nothing survives to re-derive the floor from, so only the side-manifest can
+    // supply it. This is the state rotation produces.
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    let reopened = engine_at(elsewhere.path(), &root, 3600);
+    let next = ingest(&reopened, "ext-after-rotation");
+    assert!(
+        next.raw() > flushed.raw(),
+        "an id was reissued over a flushed entity: {} is not past {}",
+        next.raw(),
+        flushed.raw()
+    );
+}
+
 /// **An acknowledged ingest becomes a mark on the map.** The property the flush exists for, and
 /// the one the read path could not serve until a tile could union its segments.
 ///

@@ -537,9 +537,25 @@ impl Engine {
         // `deny` and `tombstones` (`HONOURED_STATE`), which means acting on them here. A manifest
         // that opened and whose deny state went nowhere would serve every entity it names.
         let initial_deny = initial_deny_of(&bundle);
+        // **The allocator floor comes from the side-manifest, never from the build manifest
+        // alone.** Every flush raises `SegmentsManifest::entity_id_high_water` past the ids it
+        // consumed, while `MANIFEST.json`'s value is frozen at build. Seeding from the build value
+        // is safe only for as long as the WAL still carries the `Lease` and `IngestBatch` records
+        // `high_water_from` derives the rest from — and rotation deletes exactly those. Taking the
+        // max of the two makes the floor survive reclamation, which is what I9 requires: an id
+        // handed out twice grants the new item every access the old one had.
+        let side_manifest_high_water = bundle
+            .partitions
+            .values()
+            .map(|partition| partition.manifest.entity_id_high_water)
+            .max()
+            .unwrap_or(0);
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
-            bundle.manifest.entity_id_high_water,
+            bundle
+                .manifest
+                .entity_id_high_water
+                .max(side_manifest_high_water),
             &dict,
             &initial_deny,
             |external_id| external_index.resolve(external_id),
