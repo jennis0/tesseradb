@@ -2354,3 +2354,53 @@ fn the_fragmentation_counters_are_fed_by_window_closes_and_move_with_the_window(
         many.fragmentation.runs
     );
 }
+
+/// **A poisoned node publishes no deny state.** The dispositions it is still applying were
+/// answered 500 under the apply-anyway rule, and contracts §3.1's residual is that a restart
+/// drops them — so a side-manifest carrying them would make a never-acked deny permanent on every
+/// restore, which is the residual inverted.
+///
+/// Asserted on the filesystem, because the gate's whole job is that nothing is written.
+#[test]
+fn a_poisoned_node_writes_no_side_manifest_for_its_denies() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+    let root = tmp.path().join("bundle");
+    let manifests = || {
+        let dir = root.join("v00000/partitions/default");
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("SEGMENTS-") && n.ends_with(".json"))
+            .collect();
+        names.sort();
+        names
+    };
+
+    let before = manifests();
+    faults.fail_next_appends(1);
+    let doomed = entity_of(&engine, 3);
+    let _ = engine.accept_change(source_id_key(3), doomed, ChangeOp::Suppress, None);
+    assert_eq!(
+        engine.write_executor_posture(),
+        ExecutorPosture::WalPoisoned
+    );
+
+    // A second deny, applied in memory under the same rule, with every chance to publish.
+    let second = entity_of(&engine, 6);
+    let _ = engine.accept_change(source_id_key(6), second, ChangeOp::Suppress, None);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    assert_eq!(
+        manifests(),
+        before,
+        "a poisoned node writes no side-manifest: its overlay holds dispositions no durable \
+         record backs, and publishing them would survive a restart that is supposed to drop them"
+    );
+    assert_eq!(
+        engine.write_executor_stats().overlay_publications,
+        0,
+        "and the gauge agrees it published nothing"
+    );
+}

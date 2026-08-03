@@ -234,6 +234,9 @@ pub struct ExecutorHealth {
     /// Flushes published since the executor started — what "an acked ingest became visible" is
     /// observed on, rather than on a sleep.
     pub(crate) flushes: AtomicU64,
+    /// Side-manifests written for deny state alone — the gauge that makes the restore path's
+    /// freshness observable, and what a test asserts a publication happened at all against.
+    pub(crate) overlay_publications: AtomicU64,
     /// Ticks that found a flush already in flight and skipped rather than queued (§1.1).
     ///
     /// **Alarmed, because `flush_max_age_secs` would otherwise miss it**: a flush persistently
@@ -410,6 +413,9 @@ pub struct ExecutorStats {
     pub flushable_items: usize,
     /// Flushes published since the executor started.
     pub flushes: u64,
+    /// Side-manifests written for deny state alone (contracts §2.3's immediate-publication rule).
+    /// Advances without `flushes`, and without moving any geometry.
+    pub overlay_publications: u64,
     /// Ticks skipped because a flush was already in flight (§1.1) — a rising count is a flush
     /// persistently slower than the tick, i.e. a visibility-latency breach.
     pub flush_skips: u64,
@@ -536,6 +542,7 @@ impl ExecutorHealth {
             ticks: AtomicU64::new(0),
             flush_requested: AtomicBool::new(false),
             overlay_diverged: AtomicBool::new(false),
+            overlay_publications: AtomicU64::new(0),
             buffered_items: AtomicUsize::new(0),
             flushable_items: AtomicUsize::new(0),
             flushes: AtomicU64::new(0),
@@ -632,6 +639,7 @@ impl ExecutorHealth {
             overlay_diverged: self.overlay_diverged.load(Ordering::SeqCst),
             flushable_items: self.flushable_items.load(Ordering::SeqCst),
             flushes: self.flushes.load(Ordering::Relaxed),
+            overlay_publications: self.overlay_publications.load(Ordering::Relaxed),
             flush_skips: self.flush_skips.load(Ordering::Relaxed),
             flush_failures: self.flush_failures.load(Ordering::Relaxed),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
@@ -1500,6 +1508,8 @@ impl WritePath {
                     flush_attempt: 0,
                     // Above every candidate present at open, per partition — see the field's doc.
                     next_manifest_n: flush.next_manifest_n,
+                    deny_dirty: false,
+                    windows_since_publication: 0,
                     prefix_dir: flush.prefix_dir,
                     identity_key: flush.identity_key,
                     pool: flush.pool,
@@ -2143,6 +2153,23 @@ enum Admission {
 /// tens of thousands of fsyncs the per-item path charged for the same request.
 pub const DENY_WINDOW_MAX_ENTRIES: usize = 1_000;
 
+/// How many deny windows may pass before the overlay publishes regardless of whether the drain has
+/// closed.
+///
+/// **A liveness floor, not a latency bound.** The drain loops while the deny lane is non-empty, so
+/// under arrival faster than application it need never close, and without a floor the newest
+/// manifest would trail live state indefinitely. Latency is not what this bounds — architecture §3
+/// (r23) budgets the whole write path at seconds to minutes, denies included, and grants latitude
+/// in *when* work is batched under one condition this design keeps: a deny's ack stays coupled to
+/// its application, which happens at the window's own fsync and swap, upstream of any publication.
+///
+/// What the batching *does* buy is bytes. A side-manifest is complete state (contracts §2.3), so
+/// publishing per window through a bulk revocation of `N` rewrites a growing set once per window —
+/// Θ(N²/window) on disc. Collapsing a burst into one write removes that; this floor bounds the
+/// exposure the collapsing admits, at ≤ 64,000 dispositions, all durable in the WAL, all enforced
+/// live, and recovered by any WAL-bearing restart. Only a no-WAL restore sees the gap.
+const OVERLAY_PUBLICATION_MAX_WINDOWS: u64 = 64;
+
 /// How long the executor waits before each re-attempt at making a deny window durable, and
 /// therefore how many attempts there are: the first sync, plus one per entry here.
 ///
@@ -2361,6 +2388,18 @@ struct Executor {
     /// failing verification is never overwritten. `write_segments_manifest` refuses to replace in
     /// any case; seeding above means the refusal cannot arise.
     next_manifest_n: u64,
+    /// Whether the overlay holds deny state no side-manifest carries yet.
+    ///
+    /// Set by any window containing a `Delete`, `Suppress` or `Unsuppress`; cleared only by a
+    /// successful publication. A window of pure `Predicate` changes does not set it — a predicate
+    /// change's durable home is the WAL alone, by design (lifecycle §3.1), and no manifest field
+    /// carries one. It persists across a refused publication, which is what makes a node that was
+    /// poisoned or diverged publish once on its own after recovery rather than waiting for its
+    /// next deny.
+    deny_dirty: bool,
+    /// Deny windows applied since the last publication — the counter
+    /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
+    windows_since_publication: u64,
     /// The bundle prefix directory a flush writes into. A flush publishes **inside the current
     /// prefix** — never `MANIFEST.json`, never `CURRENT` — which is what separates it from a
     /// compaction.
@@ -2449,6 +2488,12 @@ impl Executor {
             let published = self.publish_completed_flushes();
             self.tick_if_due();
             while self.run_deny_pass() {}
+            // **At drain close**: one write covers a burst of consecutive windows rather than one
+            // per window, which is what keeps a bulk revocation from rewriting a growing complete
+            // state once per 1,000 entries. Runs on every iteration, so a node whose publication
+            // was refused while poisoned publishes as soon as it recovers — the wait below is
+            // tick-bounded, so that is within one tick even on an idle node.
+            self.publish_overlay_state();
             if self.run_work_pass() || published {
                 continue;
             }
@@ -3001,6 +3046,13 @@ impl Executor {
                 .map(|e| (e.entity, e.op, None))
                 .collect();
             if !applied.is_empty() {
+                // **Deliberately does not mark the overlay dirty.** These entries were applied
+                // under the apply-anyway rule and then answered 500 — they are in force in memory
+                // with no durable record behind them, and contracts §3.1's residual is that a
+                // restart drops them. Publishing them would make a never-acked deny permanent on
+                // every restore, which is the fail-open `overlay_diverged`'s gate also guards. The
+                // gate would refuse this window anyway; not setting the flag is the primary
+                // reason it never arises.
                 let _published = self.apply_changes(applied);
             }
             let mut real = Some(error);
@@ -3040,8 +3092,27 @@ impl Executor {
                 )
             })
             .collect();
+        // **Whether this window owes the disc a publication**, decided before the entries are
+        // consumed by the ack loop. Predicate changes are excluded deliberately: their durable
+        // home is the WAL alone, and no manifest field carries one (lifecycle §3.1).
+        let touches_deny_state = entries.iter().any(|e| {
+            matches!(
+                e.op,
+                ChangeOp::Delete | ChangeOp::Suppress | ChangeOp::Unsuppress
+            )
+        });
+
         // One overlay clone, one generation, **one swap** for every entry in the window.
         let published = self.apply_changes(applied);
+        if touches_deny_state {
+            self.deny_dirty = true;
+            self.windows_since_publication += 1;
+            // The liveness floor: a drain that never closes still publishes. See
+            // `OVERLAY_PUBLICATION_MAX_WINDOWS`.
+            if self.windows_since_publication >= OVERLAY_PUBLICATION_MAX_WINDOWS {
+                self.publish_overlay_state();
+            }
+        }
 
         // **k waiters, one proof.** A death partway through this loop leaves some waiters acked and
         // some not; every un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead`
@@ -3923,6 +3994,60 @@ impl Executor {
             denied,
         };
         self.publish(next, started)
+    }
+
+    /// Write a side-manifest carrying the live deny state, if any window has moved it.
+    ///
+    /// **A disc event only.** No geometry moves, nothing is superseded, no cache is pruned and the
+    /// generation is untouched — this exists so that a restore from bundle and object store, with
+    /// no WAL, recovers the deny state as of the last publication (deny lifecycle memo §4). The
+    /// live node never reads it back: its own WAL is authoritative, and `reconstruct` replays over
+    /// this as a seed.
+    ///
+    /// **Off the ack path.** Every 200 in the burst was already sent, at its own window's swap, so
+    /// nothing here is between a caller and its acknowledgement. Architecture §3 (r23) budgets the
+    /// write path at seconds to minutes with the one condition that a deny's ack stay coupled to
+    /// its *application* — which is upstream of this, at the window's fsync and swap.
+    ///
+    /// **Gated on durability.** A poisoned WAL or a diverged overlay publishes nothing: the
+    /// overlay then holds dispositions no durable record backs, and writing them would make a
+    /// 500'd, never-acked deny permanent on every restore. The dirty flag survives the refusal, so
+    /// a repaired node publishes on its own within a tick rather than waiting for its next deny.
+    ///
+    /// **Failure alarms and retains.** Nothing is un-acked and nothing is unwound — the state is
+    /// WAL-durable either way. Only the disaster-path bound degrades while the alarm stands, and
+    /// any later write carries complete state, so a single success repairs it.
+    fn publish_overlay_state(&mut self) {
+        if !self.deny_dirty {
+            return;
+        }
+        if self.wal.is_poisoned() || self.health.overlay_diverged.load(Ordering::SeqCst) {
+            tracing::warn!(
+                "ALARM: deny state is unpublished and this node is poisoned or diverged, so it                  will not write a side-manifest. The dispositions are in force and WAL-durable;                  what is degraded is the restore path, until the node recovers or restarts"
+            );
+            return;
+        }
+
+        let live = self.generation.load_full();
+        for (partition, partition_data) in &live.bundle.partitions {
+            let mut manifest = partition_data.manifest.clone();
+            write_deny_state(&mut manifest, &live.overlay);
+            let n = self.allocate_manifest_n();
+            if let Err(e) =
+                crate::flush::write_segments_manifest(&self.prefix_dir, partition, n, &manifest)
+            {
+                tracing::error!(
+                    error = %e,
+                    partition = %partition,
+                    "ALARM: could not publish the overlay's deny state; it stays in force and                      WAL-durable, and the write is retried at the next drain close or tick. A                      restore taken meanwhile recovers the previously published state"
+                );
+                return;
+            }
+        }
+
+        self.deny_dirty = false;
+        self.windows_since_publication = 0;
+        self.health.overlay_publications.fetch_add(1, Ordering::Relaxed);
     }
 
     /// **Publication by rebase** (§1.2): apply a completed flush to the **then-current**

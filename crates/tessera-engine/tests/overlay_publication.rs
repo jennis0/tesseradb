@@ -252,3 +252,46 @@ fn visible_count(engine: &Engine, session: &tessera_engine::Session) -> u64 {
         .map(|t| t.visible)
         .sum()
 }
+
+/// **Obligation 2.** An accepted deny publishes a side-manifest of its own, at a new `n` and at an
+/// **unchanged geometry version** — contracts §2.3's immediate-publication rule, without the cost
+/// that bumping the geometry version would carry.
+///
+/// The geometry half is the load-bearing assertion. `segments_version` is the row-projection cache
+/// key and its patch path derives only from `version - 1`, so a deny that moved it would drop any
+/// session quiet through a burst off that chain and cost it a full rebuild — measured at 10.7 s at
+/// 10⁹. No flush happens here at all.
+#[test]
+fn an_accepted_deny_publishes_without_moving_the_geometry_version() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture(tmp.path());
+    let engine = engine_at(tmp.path(), &root, 3600);
+
+    let (n_before, _) = newest_manifest(&root);
+    let geometry_before = engine.generation().segments_version;
+    let entity = entity_of_source(&root, 7);
+
+    engine
+        .accept_change(source_id_key(7), entity, ChangeOp::Suppress, None)
+        .expect("accepted");
+    wait_until("the overlay publication", || {
+        engine.write_executor_stats().overlay_publications >= 1
+    });
+
+    let (n_after, manifest) = newest_manifest(&root);
+    assert!(
+        n_after > n_before,
+        "the deny published a new side-manifest ({n_before} -> {n_after})"
+    );
+    assert_eq!(suppressed_in(&manifest), vec![entity.raw()]);
+    assert_eq!(
+        engine.generation().segments_version,
+        geometry_before,
+        "and no geometry moved: an overlay publication is a disc event only"
+    );
+    assert_eq!(
+        engine.write_executor_stats().flushes,
+        0,
+        "no flush was involved"
+    );
+}
