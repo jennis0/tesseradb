@@ -67,8 +67,8 @@ order are the same thing.
 this design.**
 
 The importer already refuses to fake precision it was not given: the Morton-input branch requires
-the identity extent `[0, 65536)`, under which `cell(v) = v` and the reproduction is *exact*, and
-errors under any other extent rather than re-quantising cell indices as though they were
+the identity bounds `[0, 65536)`, under which `cell(v) = v` and the reproduction is *exact*, and
+errors under any other bounds rather than re-quantising cell indices as though they were
 coordinates. That guard is tested.
 
 The loss was upstream, and is now closed. `build_scaled_corpus.py` used to read
@@ -78,7 +78,7 @@ of it is recoverable from one. It now reads `x`/`y`, quantises with the engine's
 and emits a `residual` column; **the shipped 10⁹ corpus carries the full 32 bits per axis**, and
 every corpus built from it inherits them.
 
-So on a 360-unit extent the step is **8.4×10⁻⁸** units where a Morton-sourced corpus gave
+So on a 360-unit bounds the step is **8.4×10⁻⁸** units where a Morton-sourced corpus gave
 **5.5×10⁻³** (arithmetic, not measured).
 
 Two things the regeneration cost, both inherent rather than chosen. **Codes are not comparable
@@ -130,14 +130,14 @@ In-repo consumers to update in lockstep: `clients/ts/core` and the viewer's laye
 
 The points batch carries `code: uint64` in place of `x`/`y` — same 16 B/point, so a precision and
 capability change rather than a size one. Contracts §3.2's note that
-`morton_of(x, y, extent) >> (32 − 2·zoom)` yields the containing tile becomes a shift rather than a
+`morton_of(x, y, bounds) >> (32 − 2·zoom)` yields the containing tile becomes a shift rather than a
 recomputation, which is directly useful for hover bucketing and client-side clustering.
 
 Precision can reach the GPU through deck.gl's `fp64` emulation, but **the split does not carry
 across**: `position64Low` takes the floating-point residual `x − fround(x)` in layer units, so the
 client deinterleaves and scales to `f64` first and the hi/lo split is recomputed, not carried.
 
-`/v1/meta` continues to publish the quantisation extents, which is what makes the code
+`/v1/meta` continues to publish the quantisation bounds, which is what makes the code
 interpretable.
 
 ---
@@ -196,7 +196,7 @@ and `test_overlay_journal.py`.
 **`test_byte_scan.py` (I10).** It sweeps 8-byte-aligned windows and checks `tessera_id`'s against the
 full target set, `x`/`y`'s against the floor-filtered set (`SAFE_ID_FLOOR`), because a genuine `0.0`
 coordinate yields a colliding window. `code` takes the floor-filtered treatment for the same reason:
-a point at the extent origin yields `code == 0`. Its negative controls become one `u64` rather than
+a point at the bounds origin yields `code == 0`. Its negative controls become one `u64` rather than
 two `f32` halves. One thing genuinely changes — a build writing a `tessera_id` into the `code` column
 is now a plausible bug shape, which the float columns made implausible; floor-filtering catches it
 for every ID at or above the floor, the same guarantee `tessera_id`'s own column carries.

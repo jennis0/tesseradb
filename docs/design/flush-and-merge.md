@@ -214,7 +214,7 @@ nothing to make conditional on a document count.
 ### 3.1 What a flush publishes
 
 Per segment: `morton.u32`, `columns.arrow`, a **sparse delta postings file** (term → entities, only
-for terms present in the flushed set), a `dict_extents` entry (§3.2), an `external_id_extents` entry
+for terms present in the flushed set), a `dict_extents` entry (§3.2), an `external_id_runs` entry
 and a **locator extent** giving the entity→external_id direction (§3.6).
 
 Every one is listed in the new `SEGMENTS-<n+1>.json`'s `files` map — where contracts §2.2/§2.3 put
@@ -372,16 +372,16 @@ visibility during WAL degradation, when nothing new is being made durable anyway
 
 ### 3.6 The external-id directions
 
-`external_id_extents` gives external_id → entity. The **reverse** direction is served
+`external_id_runs` gives external_id → entity. The **reverse** direction is served
 live-map-first, locator-second (contracts §2.4), where the live map is rebuilt by WAL replay and
 `ext-locator.u32` is one file of build-time length. Without a durable reverse path for flushed
 entities, an item visible on the map would answer `/v1/items` with a typed error forever once its WAL
 region is reclaimed. So a flush publishes a **locator extent** for its entity range alongside the
 forward extent, and the loader consults base locator then extents.
 
-**The ingest duplicate check must consult flush extents too.** `LiveState::established_collisions`
+**The ingest duplicate check must consult flush runs too.** `LiveState::established_collisions`
 justifies its bundle-side check as unable to go stale, because the sidecar it reads is immutable —
-which ceases to hold once flush publishes new external-id extents and rotation empties the live map
+which ceases to hold once flush publishes new external-id runs and rotation empties the live map
 at restart. The failure it guards is the worst one the write path documents: a byte-identical copy of
 a suppressed document that no external id names, so no deny can ever reach it.
 
@@ -414,14 +414,14 @@ by one asserting both bounds are honoured — epic #3's "honoured rather than pa
 
 ## 5. Merge policy
 
-### 5.1 Tiered, over flush segments, adjacent runs only
+### 5.1 Tiered, over flush segments, adjacent extents only
 
 `tier_width` segments in a tier selects a merge; `segment_floor_bytes` makes a tail of tiny segments
 compare equal so it does not dominate selection; `max_merged_segment_bytes` bounds any single merge.
 Selection on the executor against the current generation; execution on the pool over immutable
 inputs; publication rebases (§1.2).
 
-**Merge selects only entity-adjacent runs**, so k extents collapse to one and the extent list stays
+**Merge selects only entity-adjacent extents**, so k extents collapse to one and the extent list stays
 minimal and ordered. A size-only policy would produce segments covering discontiguous entity sets and
 the list would fragment monotonically with nothing but compaction to repair it. The cost is stated
 rather than hidden: a large segment can block a merge of its neighbours.
@@ -441,6 +441,28 @@ The dedup is neither optional nor a fold: `WalRow.descriptors` are not deduplica
 path and `encode_posting` hard-fails on any non-strictly-ascending entity list, so
 concatenate-and-sort alone specifies an artefact the encoder refuses. Dedup is set semantics, so
 invariant-neutrality is untouched.
+
+### 5.2b Merge coalesces external-id runs, for the same reason and by a different rule
+
+Flush publishes one **run** per segment (contracts §2.4) — a file sorted by caller-supplied keys.
+Unlike an extent, a run cannot be ordered against its neighbours, because nothing coordinates what
+keys a caller supplies. So a lookup cannot select *the* run a key falls in; it must search every run
+whose own first/last key could contain it, and that scan is O(runs) on `/control/ingest`'s duplicate
+check and `/v1/items`' drill-down.
+
+**A merge coalesces its inputs' runs into one**, by merge-sorting their keys — the same
+content-preserving re-encode §5.2 applies to postings, and the same reason: bounding segments while
+leaving runs unbounded moves the cost rather than removing it. Nothing is dropped and nothing is
+rewritten; a key present in two inputs cannot arise, because an external id names one entity and the
+duplicate check refuses a second (contracts §3.1).
+
+This is what makes the run count bounded by the merge policy exactly as the segment count is, and
+contracts §2.4's O(runs) scan therefore bounded too. **Stated because it was not**: an earlier
+revision specified merge over row-space extents and delta postings tiers and said nothing about
+runs, while §2.4 assumed something kept their number down.
+
+⊘ **Not implemented** — merge itself is not built, so nothing coalesces runs today and their number
+grows with every flush.
 
 ### 5.3 The line between merge and compaction
 
@@ -470,23 +492,23 @@ compaction under another name. Hence relation 2 in §4.
 It is not one here: reclaiming tombstoned rows is a fold. Merge's invariant-neutrality is a property
 to preserve rather than an accident.
 
-## 6. Coordinates outside the quantisation extent
+## 6. Coordinates outside the quantisation bounds
 
 Morton codes are computed against `MANIFEST.json`'s `quantisation` (contracts §2.5), fixed at build,
 and nothing today validates an ingested item's coordinates against it — which has never mattered,
 because a buffered item never acquires geometry. Flush is the moment it does.
 
-`/control/ingest` **refuses** such a row with a typed 4xx naming the extent, before anything is acked
+`/control/ingest` **refuses** such a row with a typed 4xx naming the bounds, before anything is acked
 or WAL-durable. Fail-closed: nothing is silently misplaced, and a clamped item at the boundary would
 be indistinguishable from a legitimately edge-located one.
 
 **Rows already WAL-durable when this validation lands are quarantined, not retried forever.** A
-pre-existing out-of-extent row would otherwise fail its flush on every tick, turning §10's "buffer
+pre-existing out-of-bounds row would otherwise fail its flush on every tick, turning §10's "buffer
 retained, retried next tick" into a permanent visibility outage for the whole partition. Such rows
 are moved to a quarantine list, counted, alarmed and excluded from flush; they remain invisible,
 which is the state they were already in.
 
-The stated cost: a deployment whose data drifts outside its declared extent cannot ingest those items
+The stated cost: a deployment whose data drifts outside its declared bounds cannot ingest those items
 until it re-quantises, which is compaction's shape and is recorded as a compaction obligation.
 
 ## 7. The WAL
@@ -552,7 +574,7 @@ point, never consumed, carrying entity ids at or above the new watermark — and
 them from nothing: acked ingest, silently lost at the next restart.
 
 ```
-pool:     segment files, delta postings, dict / external-id / locator extents durable
+pool:     segment files, delta postings, dict extents / external-id runs / locator extents durable
       →   SEGMENTS-<n+1>.json durable                    ← the commit point
 executor: generation swap                                 ← the publication event
       →   Flush{n, wal_pos} appended and fsynced          ← optimisation; wal_pos = snapshot point
@@ -704,7 +726,7 @@ The side-manifest being the only commit point makes every failure "nothing happe
   room and are never refused for load**.
 - **`WalPoisoned`, or an overlay diverged from the WAL** — no flush publishes and no rotation runs
   (§3.5, §7.2).
-- **Out-of-extent coordinates** — refused at ingest; pre-existing ones quarantined (§6).
+- **Out-of-bounds coordinates** — refused at ingest; pre-existing ones quarantined (§6).
 
 **One cost this design adds to the deny path, modelled not measured.** The executor's rebase removes
 the consumed range from the then-current buffer, O(buffered) on the executor thread — the shape the
@@ -813,7 +835,7 @@ Extending the lifecycle §7.3 fault switchboard rather than building a second be
 18. A stamp presented across a flush is answered normally with the staleness signal set — never a refusal — and the response reflects a post-flush deny.
 19. §4's merge-size relation refuses a violating configuration at startup.
 20. `check-layers.sh`'s one-`.store(` rule still passes — publication stayed single-owner.
-21. An out-of-extent ingest is refused before ack and leaves no WAL record; a pre-existing one is
+21. An out-of-bounds ingest is refused before ack and leaves no WAL record; a pre-existing one is
     quarantined rather than retried (§6).
 22. `tessera build` refuses a bundle root containing a `CURRENT`, with the reworded message (§11).
 23. A session holding an unresolved descriptor is hinted stale by a promoting flush and re-authorising
@@ -845,7 +867,7 @@ with the code:
 - **`buffer.rs`** — its "until the next build assigns a durable term id" now names flush (§3.2).
 
 Six decision records: the geometry/overlay publication split and the single geometry cadence (§1.3);
-dropping the Morton re-rank decorator (§2.3); refusing out-of-extent coordinates at ingest (§6); the
+dropping the Morton re-rank decorator (§2.3); refusing out-of-bounds coordinates at ingest (§6); the
 overlay snapshot as the WAL's rotation rule (§7.2); `tessera build` as initial-load only (§11);
 the row-projection retention depth replacing the drain list as what bounds superseded-generation entries (§1.4, §9).
 

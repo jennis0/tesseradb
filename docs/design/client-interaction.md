@@ -653,7 +653,7 @@ stated** *(third review, 2026-08-01)*. The visible-set size that selects the cla
 runtime property of each *principal*, so an application built resident works for every
 analyst and then meets the export refusal the day a broad-clearance principal signs in.
 A resident-class application must therefore either branch on the visible count — cheap
-to obtain, one `zoom = 0` full-extent call, at the cost of a dual implementation — or
+to obtain, one `zoom = 0` full-bounds call, at the cost of a dual implementation — or
 declare a supported-clearance ceiling. The export refusal should carry the visible count
 and the pointer to the streaming class in its detail, so the failure teaches the fix
 rather than reading as a limit.
@@ -679,7 +679,7 @@ remains unverified is our arithmetic against *that* layer, not the composition i
 no Tessera at all**: ~50 lines of orthographic view plus tile layer with a synthetic
 `getTileData` drawing each tile's index and bbox, asserting index arithmetic at z 0–16,
 y direction, abort-on-fast-pan, and cache behaviour. Half a day. **Add one item**
-*(third review, 2026-08-01)*: **non-square extents.** §2.5 quantises each axis
+*(third review, 2026-08-01)*: **non-square bounds.** §2.5 quantises each axis
 independently onto 2¹⁶, so a tile is square in cell space and rectangular in data space,
 while `TileLayer` takes a scalar `tileSize`. If it cannot express anisotropic tiles the
 fix — pre-scaling y into an aspect-corrected world space — is easy, and it belongs in
@@ -890,7 +890,7 @@ server choosing the depth, alongside the existing `zoom` form.
 *Why it is the highest-leverage change available.* Depth choice is the single hardest thing the
 client does and the least obvious: §7.2 fixes marks **per tile**, so marks **on screen** is
 `m_target × tiles-in-view`, and at depth 0 a viewport holds one tile — which is why the
-tile-addressed MVP drew 17 marks at full extent. Getting it right took a measurement campaign
+tile-addressed MVP drew 17 marks at full bounds. Getting it right took a measurement campaign
 (`probes/2026-08-02-viewport-and-underlay/`), produced a formula that needs a `min(·, V_total)`
 saturation term to avoid being wrong by three orders of magnitude for sparse principals, and needs
 a one-directional calibration loop to avoid serving a subset of what is already drawn. **No
@@ -1307,7 +1307,7 @@ geometry-independent. Keep this distinct from Appendix F, which is the *filter* 
 time; a timeline view is the *ordering* form. The overview strip is not a new verb at
 all — it is §7.1's tile counts over the second ordering.
 
-*Geographic.* A Web Mercator projection into the quantised extent makes an XYZ slippy
+*Geographic.* A Web Mercator projection into the quantised bounds makes an XYZ slippy
 tile *identically* a Morton prefix, so the engine already speaks it; CRS handling is an
 ingest contract and §8.3 covers serving. One honest caveat rather than a fix:
 mark-count-as-density becomes screen-space density, which under Mercator is
@@ -1435,8 +1435,8 @@ archive is forbidden.*
   the maximum-entropy low half stays fixed-width for mmap-and-slice. The low bits must
   **not** join the sort key under any variant, or the wire ordering contract and the
   served-prefix machinery are disturbed. And precision is a non-issue: 32-bit fixed point
-  over the extent is uniformly *more* faithful than `float32`; what is genuinely lost is
-  bit-exact round-trip of supplied floats and extent-independence of stored values, both
+  over the bounds is uniformly *more* faithful than `float32`; what is genuinely lost is
+  bit-exact round-trip of supplied floats and bounds-independence of stored values, both
   contract changes the oracle inherits. *(Two of those predictions did not survive
   building it. The wire **did** change — the server does not dequantise during the gather;
   it ships the code and the client deinterleaves — and the oracle's contract change was

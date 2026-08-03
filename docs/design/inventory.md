@@ -38,7 +38,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | | Concern | Severity | Status |
 |---|---|---|---|
 | **C1** | Node membership derives from global density | Low | Accepted |
-| **C2** | Node extent and hull shape | None | Closed |
+| **C2** | Node bounding box and hull shape | None | Closed |
 | **C3** | Label existence | None | Closed |
 | **C4** | Response timing | Low | Open |
 | **C5** | Extractive-tier background frequencies | Low | Closed |

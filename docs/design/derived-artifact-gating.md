@@ -16,7 +16,7 @@ them by **different rules**, in two sections, with nothing connecting them:
 - **Labels** (§7.6) gate on **exact containment**: served iff `and_cardinality(G, M_auth) == |G|`.
 - **Cluster nodes** (§7.5) gate on a **threshold**: descend while masked membership exceeds
   `min_visible_members`, with C1 as the accepted residual.
-- **Node extent and hull** (C2) are gated by nothing at all — recomputed per viewer from
+- **Node bounding box and hull** (C2) are gated by nothing at all — recomputed per viewer from
   masked membership.
 
 Three rules, no framework. A fourth artifact type will go looking for precedent and find
@@ -71,7 +71,7 @@ as, never as a display preference.
 **Per-viewer-recomputed artifacts are safe by construction**, and the failure to avoid is
 **serving a generated artifact instead of recomputing it**. A build-time centroid over full
 membership, shown to a viewer who sees 5% of it, points straight at where the invisible
-members are. C2 records that node extent and hull are recomputed and says it is "listed to
+members are. C2 records that node bounding box and hull are recomputed and says it is "listed to
 record that it was checked"; this tier is that check, generalised.
 
 **Not-corpus-derived attachments need no gate on the attachment.** A city boundary exists
@@ -116,7 +116,7 @@ only rule it carries is that it never contributes to a displayed number.
 and its own terms. **This is not a derived artifact at all** — it is an item that happens to
 have an extent, governed by the points framework. At these cardinalities it is cheap: give
 it an entity ID and a code from its containing cell and mask it exactly as a point is
-masked. The extent matters only for tile assignment, which the smallest-containing-tile
+masked. The footprint matters only for tile assignment, which the smallest-containing-tile
 convention handles, and at 10⁴–10⁶ objects a full scan per viewport is defensible anyway.
 
 **Consequently, rare polygons need no new spatial index for the query that matters.** "How

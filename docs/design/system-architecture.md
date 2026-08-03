@@ -211,7 +211,7 @@ bundle/
   CURRENT                          JSON: {"prefix": "v00042", "manifest_digest": …}
   v00042/
     MANIFEST.json                  bundle-format version; data-plugin hash; declared bounds
-                                   and scalars; small-term threshold; quantisation extent
+                                   and scalars; small-term threshold; quantisation bounds
                                    (so every artifact producer shares one grid); entity-ID
                                    high-water; the identity block (construction, rounds,
                                    key, shard, idset — §4.5); slice and partition lists;
@@ -231,7 +231,7 @@ bundle/
                                    serve and REQUIRED to run the conformance differential —
                                    the reference oracle, which derives masks from it by
                                    direct scan rather than from postings
-      entities/external-ids-<k>.arrow   caller external ID → entity, byte-sorted extents
+      entities/external-ids-<k>.arrow   caller external ID → entity, byte-sorted **within each run**; runs are not ordered against one another
       entities/ext-locator.u32          entity → ordinal in the above, for drill-down
       slices/<slice_id>/
         permutation.bin            entity→row, one direction only
@@ -265,7 +265,7 @@ HTTP on every surface, Arrow IPC bodies for anything columnar, JSON for control 
 
 | Verb | Request | Response |
 |---|---|---|
-| `GET /v1/meta` | — | slices, coordinate extent, max tile depth, declared-scalar schema, contract versions, idset, filter-operand *names*, and the **C11** containment-filtered label vocabulary — the one data-derived field, gated on `M_auth` (the viewer's authorised set) |
+| `GET /v1/meta` | — | slices, coordinate bounds, max tile depth, declared-scalar schema, contract versions, idset, filter-operand *names*, and the **C11** containment-filtered label vocabulary — the one data-derived field, gated on `M_auth` (the viewer's authorised set) |
 | `POST /v1/viewport` | slice, zoom, tile range or bbox, filter set, k (server-capped), optional geometry stamp | Arrow: per-tile exact masked counts, matched-and-visible alongside total-visible; sampled points (`tessera_id`, x, y, declared scalars); optional density-underlay stream; the geometry stamp answered from, and whether the presented one is stale |
 | `POST /v1/items/{tessera_id}` | drill-down; the identifier is assumed current (§6.8) — there is no rotation parameter | item detail |
 | `POST /v1/labels` | slice, viewport, filter set, optional geometry stamp | frontier nodes with at most one gated label each, plus tier |
@@ -382,7 +382,7 @@ Three disciplines make that safe rather than merely fast. **Spill files are fail
 
 **Batch size is identity-bearing under I9.** Entity IDs are assigned in signature order **within each batch and only within one** — the design's own scope for the sort. A batch is a contiguous ordinal range; IDs are batch-major, so per-term posting lists stay globally ascending as the concatenation of per-batch runs, and one batch covering the corpus reproduces the historical global sort byte for byte. The size is derived deterministically from the memory budget on a coarse grid (`BATCH_GRID = 1 << 24`), **recorded in MANIFEST provenance whenever the build batched, and replayed rather than re-derived by an identity-preserving rebuild**. A rebuild at a different batch size is not a slower or faster build — it is a different corpus, and every posting, permutation and identifier derived from it is invalidated. This is the one build parameter an operator can change that forks identities.
 
-**Streaming ingest belongs to the serving engine.** The buffer, watermark and overlay are serving state — the watermark participates in every I1 composition — so their owner owns ingest. Both paths call the same tiler, interner and allocator; there is nothing left to diverge. The manifest records the quantisation extent so every artifact producer, present or future, shares one grid.
+**Streaming ingest belongs to the serving engine.** The buffer, watermark and overlay are serving state — the watermark participates in every I1 composition — so their owner owns ingest. Both paths call the same tiler, interner and allocator; there is nothing left to diverge. The manifest records the quantisation bounds so every artifact producer, present or future, shares one grid.
 
 ### 6.2 Durability: the WAL, the executor and the ack contract
 
@@ -414,7 +414,7 @@ Every 429 the gate produces is counted, and the count is deliberately not the wh
 
 ### 6.4 Ingest, flush and posting deltas
 
-`/control/ingest`: terms resolved via the plugin and interned; coordinates quantised against the manifest extent; priorities derived; entity IDs allocated by the commit window, never in Morton order (C6 — Morton-ordered assignment would add location to the ID-gap leak); the batch buffered. Flush — on size or age, whichever comes first — writes an immutable segment directory, writes a **posting delta** (term → Roaring over the batch's ID range) rather than touching the frozen base postings, and publishes a new complete `SEGMENTS-<n>.json`. Items exceeding the declared per-item term bound are **indexed anyway and warned**: a monotone predicate with more terms intends broader visibility, and a resource guard must not produce an authorisation-shaped outcome.
+`/control/ingest`: terms resolved via the plugin and interned; coordinates quantised against the manifest bounds; priorities derived; entity IDs allocated by the commit window, never in Morton order (C6 — Morton-ordered assignment would add location to the ID-gap leak); the batch buffered. Flush — on size or age, whichever comes first — writes an immutable segment directory, writes a **posting delta** (term → Roaring over the batch's ID range) rather than touching the frozen base postings, and publishes a new complete `SEGMENTS-<n>.json`. Items exceeding the declared per-item term bound are **indexed anyway and warned**: a monotone predicate with more terms intends broader visibility, and a resource guard must not produce an authorisation-shaped outcome.
 
 > **⊘ Specified, not implemented.** Flush does not exist. `flush_max_items` and `flush_max_age_secs` parse and are asserted inert by a test. Ingested items live in the buffer, durable and authorisation-resolved, and — per §6.5 — contribute to no answer until a segment exists. There are no posting deltas and no second side-manifest.
 
