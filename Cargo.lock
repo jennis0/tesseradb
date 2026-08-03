@@ -2377,6 +2377,7 @@ name = "tessera-lifecycle"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "croaring",
  "postcard",
  "proptest",
  "rustc-hash 1.1.0",
