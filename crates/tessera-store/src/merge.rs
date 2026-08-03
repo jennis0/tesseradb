@@ -28,7 +28,23 @@
 //! a fold is invariant-bearing work that belongs to compaction. A merge that dropped rows would
 //! have left this module.
 
-use crate::manifest::SegmentDescriptor;
+use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::path::Path;
+
+use arrow::array::{Array, BinaryArray, UInt32Array};
+use arrow::ipc::reader::FileReader;
+
+use tessera_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
+use tessera_spatial::{sort_batch, unsplit32};
+use tessera_types::{EntityId, IdentityKey, MortonCode, TesseraId, ROW_ABSENT};
+
+use crate::error::{Result, StoreError};
+use crate::flush::{digest_of, write_external_id_run, write_u32_array, FlushOutput};
+use crate::manifest::{LocatorExtent, SegmentDescriptor};
+use crate::permutation::SegmentExtent;
+use crate::read::{ColumnsRef, MortonSlice, ScalarSlice};
+use crate::write::write_segment;
 
 /// What a merge is allowed to take.
 ///
@@ -112,4 +128,270 @@ impl MergePolicy {
     fn tier_of(&self, size: u64) -> u32 {
         size.max(self.segment_floor_bytes).max(1).ilog2()
     }
+}
+
+/// One segment a merge consumes, in listed (entity) order.
+pub struct MergeInput {
+    pub seg_id: String,
+    pub entity_lo: u64,
+    pub entity_hi: u64,
+}
+
+/// Everything [`execute_merge`] needs beyond its inputs — the same shape [`crate::flush::FlushInput`]
+/// has, because publication does not care which produced the segment.
+pub struct MergeSpec<'a> {
+    /// The **new** segment's id. Never one of the inputs': `seg_id`s are never reused (contracts
+    /// §2.1), which is what makes the publication rebase ABA-safe.
+    pub seg_id: &'a str,
+    pub inputs: &'a [MergeInput],
+    pub identity_key: &'a IdentityKey,
+    pub shard_id: u32,
+    pub scalar_schema: &'a [(String, ScalarType)],
+    /// Where the merged extent begins in slice row space — the **first consumed extent's**
+    /// `row_base`. A merge emits exactly as many rows as it consumed, so no later extent's
+    /// `row_base` moves and `RowSpace::collapsing` puts this where the consumed run was.
+    pub row_base: u32,
+}
+
+/// Merge `spec.inputs` into one segment under `prefix_dir`.
+///
+/// **Row-count preserving, and that is the invariant this function exists to keep.** Dropping a row
+/// — because its entity is tombstoned, because a predicate changed — is the compaction *fold*, and
+/// a fold is invariant-bearing work this layer must not do. Every input row is re-emitted.
+///
+/// **Byte-exact through the code, never through coordinates.** A segment stores the Morton code and
+/// its residual, not the axes; [`tessera_spatial::unsplit32`] recovers the axes as a bit
+/// permutation, so the merged segment's codes are identical to its inputs'. Dequantising to floats
+/// and re-quantising would move every point by up to a quantisation step on every merge, silently.
+///
+/// **It re-sorts rather than k-way merging, deliberately.** The plan specified a linear merge-sort
+/// over the inputs' code arrays; this concatenates and re-sorts through [`sort_batch`] instead, so
+/// that the *one* writer that knows a segment's layout — [`crate::write::write_segment`] — is the
+/// one that writes this too. A second writer is how the two come to disagree about a format, and
+/// the merge policy's `max_merged_segment_bytes` is what keeps the sort's inputs in hand. The
+/// result is identical either way: `sort_batch` orders by code then `tessera_id`, which is total.
+///
+/// **Arch §11.3's re-rank decorator does not transfer.** Lucene reorders a merged segment for
+/// doc-id locality, an optimisation it may skip under pressure. Here the Morton sort *is* the tile
+/// index — a segment that is not internally sorted breaks `tile_ranges`' binary search outright —
+/// so sorting is not optional and there is nothing to make conditional on a document count.
+pub fn execute_merge(
+    prefix_dir: &Path,
+    partition: &str,
+    slice: &str,
+    spec: MergeSpec<'_>,
+) -> Result<FlushOutput> {
+    if spec.inputs.is_empty() {
+        return Err(StoreError::MalformedBundle {
+            detail: "execute_merge: no inputs".to_string(),
+        });
+    }
+    if !spec
+        .inputs
+        .windows(2)
+        .all(|w| w[0].entity_hi < w[1].entity_lo)
+    {
+        return Err(StoreError::MalformedBundle {
+            detail: "execute_merge: inputs must be in ascending, non-overlapping entity order — \
+                     the merged extent is one contiguous span (see MergePolicy::select)"
+                .to_string(),
+        });
+    }
+
+    let seg_path = |seg_id: &str| {
+        prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("slices")
+            .join(slice)
+            .join("segments")
+            .join(seg_id)
+    };
+
+    let mut items: Vec<TilerItem> = Vec::new();
+    let mut entity_ids: Vec<EntityId> = Vec::new();
+    let mut forward: Vec<(Vec<u8>, u32)> = Vec::new();
+
+    for input in spec.inputs {
+        let dir = seg_path(&input.seg_id);
+        let morton = MortonSlice::load(&dir.join("morton.u32"))?;
+        let columns = ColumnsRef::load(&dir.join("columns.arrow"))?;
+        let codes = morton.u32();
+        let tessera_ids = columns.tessera_id();
+        let residuals = columns.residual();
+        if codes.len() != tessera_ids.len() || codes.len() != residuals.len() {
+            return Err(StoreError::MalformedBundle {
+                detail: format!(
+                    "execute_merge: segment '{}' has {} codes against {} identities",
+                    input.seg_id,
+                    codes.len(),
+                    tessera_ids.len()
+                ),
+            });
+        }
+
+        for row in 0..codes.len() {
+            let tessera_id = TesseraId::new(tessera_ids[row]);
+            let (shard, entity) = spec.identity_key.invert(tessera_id);
+            if shard != spec.shard_id {
+                return Err(StoreError::MalformedBundle {
+                    detail: format!(
+                        "execute_merge: segment '{}' row {row} inverts to shard {shard}, not this \
+                         bundle's {} — merging it would place another shard's entity in this \
+                         slice's row space",
+                        input.seg_id, spec.shard_id
+                    ),
+                });
+            }
+            let (qx, qy) = unsplit32(MortonCode::new(codes[row]), residuals[row]);
+            items.push(TilerItem {
+                tessera_id,
+                qx,
+                qy,
+                scalars: gather_scalars(&columns, spec.scalar_schema, row),
+            });
+            entity_ids.push(entity);
+        }
+
+        forward.extend(read_external_id_run(&dir.join("external-ids.arrow"))?);
+    }
+
+    let entity_lo = spec.inputs[0].entity_lo;
+    let entity_hi = spec.inputs[spec.inputs.len() - 1].entity_hi;
+    let span =
+        usize::try_from(entity_hi - entity_lo + 1).map_err(|_| StoreError::MalformedBundle {
+            detail: format!("execute_merge: entity span {entity_lo}..={entity_hi} is too wide"),
+        })?;
+
+    let out_dir = seg_path(spec.seg_id);
+    fs::create_dir_all(&out_dir).map_err(|source| StoreError::Io {
+        path: out_dir.clone(),
+        source,
+    })?;
+
+    let row_count = items.len();
+    let codes = sort_batch(&mut items, &mut entity_ids);
+    write_segment(&out_dir, &items, &codes, spec.scalar_schema).map_err(|source| {
+        StoreError::Io {
+            path: out_dir.join("columns.arrow"),
+            source,
+        }
+    })?;
+
+    let mut extent_rows = vec![ROW_ABSENT; span];
+    for (row, entity) in entity_ids.iter().enumerate() {
+        extent_rows[(entity.raw() - entity_lo) as usize] = row as u32;
+    }
+
+    // **The runs merge by caller key, because that is the only order a run has** (flush §5.2b).
+    // Unlike an extent, a run cannot be ordered against its neighbours — nothing coordinates what
+    // keys a caller supplies — so coalescing is a merge-sort over the bytes. A key present in two
+    // inputs cannot arise: an external id names one entity, and the ingest duplicate check refuses
+    // a second (contracts §3.1).
+    forward.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let run_rows: Vec<(&[u8], u32)> = forward.iter().map(|(id, e)| (id.as_slice(), *e)).collect();
+    write_external_id_run(&out_dir.join("external-ids.arrow"), &run_rows)?;
+
+    let mut locator = vec![ROW_ABSENT; span];
+    for (ordinal, (_, entity)) in forward.iter().enumerate() {
+        locator[(*entity as u64 - entity_lo) as usize] = ordinal as u32;
+    }
+    write_u32_array(&out_dir.join("ext-locator.u32"), &locator)?;
+
+    let rel = |name: &str| {
+        format!(
+            "partitions/{partition}/slices/{slice}/segments/{}/{name}",
+            spec.seg_id
+        )
+    };
+    let mut files = BTreeMap::new();
+    for name in [
+        "morton.u32",
+        "columns.arrow",
+        "external-ids.arrow",
+        "ext-locator.u32",
+    ] {
+        files.insert(rel(name), digest_of(&out_dir.join(name))?);
+    }
+
+    Ok(FlushOutput {
+        segment: SegmentDescriptor {
+            slice: slice.to_string(),
+            seg_id: spec.seg_id.to_string(),
+            row_count: row_count as u32,
+            entity_lo,
+            entity_hi,
+        },
+        extent: SegmentExtent {
+            entity_lo,
+            entity_hi,
+            seg_id: spec.seg_id.to_string(),
+            row_base: spec.row_base,
+            rows: extent_rows,
+        },
+        external_id_run: rel("external-ids.arrow"),
+        locator_extent: LocatorExtent {
+            path: rel("ext-locator.u32"),
+            entity_lo,
+            entity_hi,
+            external_id_run: rel("external-ids.arrow"),
+        },
+        files,
+        // **A merge moves neither watermark.** It publishes no entity that did not already have a
+        // row, and allocates none: both are the caller's current values, carried so the
+        // publication path can treat a merge exactly as it treats a flush.
+        watermark: entity_hi + 1,
+        entity_id_high_water: entity_hi + 1,
+    })
+}
+
+/// This row's declared scalars, in schema order — the shape [`TilerItem`] wants.
+fn gather_scalars(
+    columns: &ColumnsRef,
+    schema: &[(String, ScalarType)],
+    row: usize,
+) -> Vec<ScalarValue> {
+    schema
+        .iter()
+        .filter_map(|(name, _)| match columns.scalar(name)? {
+            ScalarSlice::U64(v) => Some(ScalarValue::U64(v[row])),
+            ScalarSlice::F32(v) => Some(ScalarValue::F32(v[row])),
+            ScalarSlice::Utf8(v) => Some(ScalarValue::Utf8(v.value(row).to_string())),
+        })
+        .collect()
+}
+
+/// Read one external-id run back as `(external_id, entity)` pairs.
+fn read_external_id_run(path: &Path) -> Result<Vec<(Vec<u8>, u32)>> {
+    let file = File::open(path).map_err(|source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let reader = FileReader::try_new(file, None).map_err(|e| StoreError::MalformedBundle {
+        detail: format!("external-ids.arrow at {}: {e}", path.display()),
+    })?;
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| StoreError::MalformedBundle {
+            detail: format!("external-ids.arrow at {}: {e}", path.display()),
+        })?;
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .ok_or_else(|| StoreError::MalformedBundle {
+                detail: "external-ids.arrow: column 0 is not binary".to_string(),
+            })?;
+        let entities = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .ok_or_else(|| StoreError::MalformedBundle {
+                detail: "external-ids.arrow: column 1 is not uint32".to_string(),
+            })?;
+        for i in 0..batch.num_rows() {
+            out.push((ids.value(i).to_vec(), entities.value(i)));
+        }
+    }
+    Ok(out)
 }

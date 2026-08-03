@@ -262,7 +262,7 @@ fn tessera_id_of(key: &IdentityKey, shard_id: u32, entity: EntityId) -> Result<T
 /// One external-id extent: `external_id: Binary` and `entity_id: UInt32`, ascending by the id
 /// bytes. The shape `crate::sidecar` binary-searches, and it verifies that sortedness at open —
 /// so an unsorted extent is a refusal there rather than a wrong answer here.
-fn write_external_id_run(path: &Path, rows: &[(&[u8], u32)]) -> Result<()> {
+pub(crate) fn write_external_id_run(path: &Path, rows: &[(&[u8], u32)]) -> Result<()> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("entity_id", DataType::UInt32, false),
@@ -300,7 +300,7 @@ fn write_external_id_run(path: &Path, rows: &[(&[u8], u32)]) -> Result<()> {
 
 /// A raw little-endian `u32` array, no header — the `ext-locator.u32` shape (contracts §2.4 r6),
 /// here over one segment's entity range rather than the whole entity space.
-fn write_u32_array(path: &Path, values: &[u32]) -> Result<()> {
+pub(crate) fn write_u32_array(path: &Path, values: &[u32]) -> Result<()> {
     let io = |source| StoreError::Io {
         path: path.to_path_buf(),
         source,
@@ -314,7 +314,7 @@ fn write_u32_array(path: &Path, values: &[u32]) -> Result<()> {
     Ok(())
 }
 
-fn digest_of(path: &Path) -> Result<FileDigest> {
+pub(crate) fn digest_of(path: &Path) -> Result<FileDigest> {
     let bytes = fs::read(path).map_err(|source| StoreError::Io {
         path: path.to_path_buf(),
         source,
