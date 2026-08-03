@@ -60,3 +60,4 @@ prevent.
 | [0040](0040-quantisation-is-slice-scoped-index-config.md) | 2026-08-02 | The quantisation extent is slice-scoped index configuration, immutable at runtime |
 | [0041](0041-pins-become-a-staleness-stamp.md) | 2026-08-03 | A pin becomes a staleness stamp, not retained geometry |
 | [0042](0042-a-dictionary-extent-never-repeats-a-descriptor.md) | 2026-08-03 | A dictionary extent never repeats a descriptor, and the loader enforces it |
+| [0043](0043-geometry-maintenance-never-blocks-a-request.md) | 2026-08-03 | Flush, merge and compaction never block a request; their effects are invisible to the viewer |
