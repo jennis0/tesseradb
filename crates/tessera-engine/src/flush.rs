@@ -462,6 +462,7 @@ mod tests {
             x: 0.5,
             y: 0.5,
             scalars: vec![WalScalar::U64(1)],
+            wal_pos: None,
         }
     }
 

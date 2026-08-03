@@ -475,6 +475,8 @@ pub struct Wal {
     /// immediately (I3) rather than risk `len` disagreeing with the file, or building on bytes
     /// that may not exist.
     state: WalState,
+    /// Where each record `open` replayed sits in the sequence — see [`Wal::replayed_positions`].
+    replayed_positions: Vec<u64>,
 }
 
 /// The on-disk size of a framed record whose postcard body is `body_len` bytes.
@@ -611,7 +613,7 @@ fn check_header(file: &mut File, expected_number: u64) -> Result<(u64, u64)> {
 /// Every failure inside the prefix is corruption of acknowledged state and returns
 /// [`WalError::WalCorruption`]; see the module doc for why the answer is uniform here and uniform
 /// the other way past the boundary.
-fn replay(file: &mut File, sync_point: u64) -> Result<(Vec<WalRecord>, u64)> {
+fn replay(file: &mut File, sync_point: u64) -> Result<(Vec<(u64, WalRecord)>, u64)> {
     let total_len = file.metadata()?.len();
     file.seek(SeekFrom::Start(HEADER_LEN))?;
     let mut records = Vec::new();
@@ -659,7 +661,7 @@ fn replay(file: &mut File, sync_point: u64) -> Result<(Vec<WalRecord>, u64)> {
         // like any other damaged one.
         let record: WalRecord = postcard::from_bytes(&body).map_err(|_| WalError::WalCorruption)?;
 
-        records.push(record);
+        records.push((pos, record));
         pos += framed;
     }
 
@@ -741,6 +743,7 @@ impl Wal {
                     sealed: Vec::new(),
                     active,
                     state: WalState::Healthy,
+                    replayed_positions: Vec::new(),
                 },
                 Vec::new(),
             ));
@@ -789,8 +792,14 @@ impl Wal {
             }
 
             let sync_point = resolve_sync_point(&sync_path, file_len)?;
-            let (mut member_records, len) = replay(&mut file, sync_point)?;
-            records.append(&mut member_records);
+            let (member_records, len) = replay(&mut file, sync_point)?;
+            // File offsets become sequence-global positions here, at the one place both terms are
+            // in hand: a member's records are `base_pos + (offset - HEADER_LEN)` into the sequence.
+            records.extend(
+                member_records
+                    .into_iter()
+                    .map(|(offset, record)| (base_pos + (offset - HEADER_LEN), record)),
+            );
             expected_base = Some(base_pos + (len - HEADER_LEN));
 
             if is_last {
@@ -814,15 +823,30 @@ impl Wal {
             }
         }
 
+        let (replayed_positions, records): (Vec<u64>, Vec<WalRecord>) = records.into_iter().unzip();
+
         Ok((
             Wal {
                 base,
                 sealed,
                 active: active.expect("the last member is always the active one"),
                 state: WalState::Healthy,
+                replayed_positions,
             },
             records,
         ))
+    }
+
+    /// The sequence-global position of each record `open` replayed, in the same order as the
+    /// records it returned.
+    ///
+    /// Parallel to the records rather than zipped into them because every other consumer of a
+    /// replayed record — `overlay::replay`, `high_water_from` — wants the record alone, and a tuple
+    /// would put a position into six signatures to serve one caller. That caller is
+    /// `WritePath::reconstruct`, which stamps each buffered row with the position it arrived at so a
+    /// later rotation knows what it may reclaim below.
+    pub fn replayed_positions(&self) -> &[u64] {
+        &self.replayed_positions
     }
 
     /// The sequence-global position the next record will be written at.
@@ -1279,6 +1303,32 @@ impl ExecutorWal {
             }
         }
         self.wal.is_recoverable()
+    }
+
+    /// The sequence-global position the next record will be written at — see [`Wal::position`].
+    /// Read *before* an append to learn where that record will land.
+    pub fn position(&self) -> u64 {
+        self.wal.position()
+    }
+
+    /// Seal the active member, carry `snapshot` forward and reclaim below `reclaim_below` — see
+    /// [`Wal::rotate`]. Not metered: a rotation makes nothing newly durable that an `fsync` did not
+    /// already count.
+    pub fn rotate(
+        &mut self,
+        snapshot: &[OverlaySnapshotEntry],
+        reclaim_below: u64,
+    ) -> Result<Vec<u64>> {
+        #[cfg(feature = "fault-injection")]
+        if self.injected.is_some() {
+            return Err(WalError::Poisoned);
+        }
+        self.wal.rotate(snapshot, reclaim_below)
+    }
+
+    /// Every surviving member's number — see [`Wal::members`].
+    pub fn members(&self) -> Vec<u64> {
+        self.wal.members()
     }
 
     pub fn append(&mut self, rec: &WalRecord) -> Result<()> {

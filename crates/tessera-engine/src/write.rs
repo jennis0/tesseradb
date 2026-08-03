@@ -1324,6 +1324,23 @@ impl WritePath {
             buffer.remove(entity);
         }
 
+        // **Where each surviving row sits in the log**, so a rotation knows what it may reclaim
+        // below (flush §7.3). Stamped after the filter rather than before it, because a row that
+        // already has geometry is gone from the buffer and stamping it would be a lookup for
+        // nothing.
+        //
+        // The positions are parallel to the records — same order, same length — which is what
+        // `Wal::replayed_positions` guarantees. An `IngestBatch` holds a whole window's rows, so
+        // every row in one record shares its position; that is exactly right, since reclaiming
+        // below the record is what would lose them.
+        for (record, position) in records.iter().zip(wal.replayed_positions()) {
+            if let WalRecord::IngestBatch { rows, .. } = record {
+                for row in rows {
+                    buffer.set_wal_pos(row.entity_id, *position);
+                }
+            }
+        }
+
         // Seeded after `replay` rather than before it only because `replay` constructs the
         // overlay; the *semantics* are seed-then-union, and they are order-independent here
         // because a disposition is idempotent and neither source can un-set what the other set.
@@ -3388,11 +3405,18 @@ impl Executor {
         // One record per entry — batch identity is preserved through the window, which is what a
         // joined retry is answered off — appended in entries order, which is also apply order.
         let mut failed_at: Option<(usize, WalError)> = None;
+        // The position **before** each append is where that record lands, and it is the only moment
+        // it can be read: afterwards the log has moved on, and after the window it is one number for
+        // several records. A row's position is what a rotation reclaims below, so an entry whose
+        // append failed contributes none — the loop breaks before pushing.
+        let mut positions: Vec<u64> = Vec::with_capacity(closed.len());
         for (i, entry) in closed.iter().enumerate() {
+            let at = self.wal.position();
             if let Err(e) = self.wal.append(&entry.record) {
                 failed_at = Some((i, e));
                 break;
             }
+            positions.push(at);
         }
         // **One fsync for the whole window.** This is the amortisation half of group commit; the
         // allocation scope above is the point of it.
@@ -3415,7 +3439,7 @@ impl Executor {
         self.pause_point(PauseSiteArg::AfterFsync);
         // One buffer clone, one generation, **one swap** for every entry in the window.
         let mut closed = closed;
-        let published = self.apply_window(&mut closed);
+        let published = self.apply_window(&mut closed, &positions);
 
         // Recorded after the swap, so a concurrent replay of a batch id can never observe a window
         // where the generation has swapped but the idempotency index has not caught up.
@@ -3577,7 +3601,7 @@ impl Executor {
     /// one thread every write is serialised through — measured at +14% on the
     /// 10 000-row arm. `&mut` is what buys it; an entry's `terms` is empty after this and nothing
     /// downstream reads it — the ack needs `entity_ids`, not terms.
-    fn apply_window(&self, closed: &mut [ClosedEntry<Responder>]) -> Published {
+    fn apply_window(&self, closed: &mut [ClosedEntry<Responder>], positions: &[u64]) -> Published {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let mut buffer = (*generation.buffer).clone();
@@ -3592,7 +3616,7 @@ impl Executor {
         // id establishes nothing (the `if let Some` below), so no two entries in one window can
         // write the same key. That is a stronger statement than "one vector, iterated once": it
         // survives a refactor that reorders the vector, where the shape argument does not.
-        for entry in closed.iter_mut() {
+        for (entry, wal_pos) in closed.iter_mut().zip(positions) {
             let terms = std::mem::take(&mut entry.terms);
             for (row, row_terms) in entry.rows().iter().zip(terms) {
                 // Contracts §3.4: no external id means nothing to establish. `None` must never
@@ -3602,6 +3626,7 @@ impl Executor {
                     established_inverse.insert(row.entity_id, external_id.clone());
                 }
                 buffer.insert_row_with_terms(row, row_terms);
+                buffer.set_wal_pos(row.entity_id, *wal_pos);
             }
         }
         drop(established);
@@ -3781,6 +3806,96 @@ impl Executor {
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
         self.health.flushes.fetch_add(1, Ordering::Relaxed);
+
+        self.record_and_rotate(segments_version);
+    }
+
+    /// Note the publication in the log and reclaim what it made redundant — flush §7.3's last two
+    /// steps, **after** the generation swap and never before it.
+    ///
+    /// ```text
+    /// generation swap                             ← the publication event, already done above
+    /// Flush{n, wal_pos} appended and fsynced      ← a replay-start optimisation
+    /// rotation: snapshot written, then reclaim    ← §7.2, snapshot before any deletion
+    /// ```
+    ///
+    /// **`wal_pos` is the buffer's oldest surviving row, not this record's own offset.** Rows acked
+    /// *during* the flush were appended after its snapshot point, were never consumed, and carry
+    /// entity ids at or above the new watermark; reclaiming below this record would delete them and
+    /// §7.1 would then reconstruct them from nothing. `IngestBuffer::oldest_wal_pos` answers it from
+    /// the post-publication buffer — the rows that still have no geometry — and refuses (`None`) if
+    /// any of them does not know its own position, which reclaims nothing rather than guessing.
+    ///
+    /// **Two gates, and neither is the one `plan_flush` applies.** A poisoned WAL cannot be appended
+    /// to at all. A node whose overlay has diverged from its durable WAL must rotate nothing (§7.2):
+    /// `Wal::discard_undurable` deliberately does not un-apply, so such a node holds dispositions no
+    /// record backs, and writing a snapshot from that overlay would make a 500'd, never-acked deny
+    /// permanent. `plan_flush` refuses for the same reason, but it is a different site and a flush
+    /// already in flight when the divergence happened reaches here regardless.
+    ///
+    /// Nothing here is fatal. A failure leaves the log longer than it needs to be, which the next
+    /// tick retries; the publication itself is already durable and already swapped.
+    fn record_and_rotate(&mut self, n: u64) {
+        if self.wal.is_poisoned() {
+            return;
+        }
+        if self.health.overlay_diverged.load(Ordering::SeqCst) {
+            tracing::warn!(
+                "this node's overlay has diverged from its durable WAL, so it rotates nothing;                  the log grows until an operator restarts it"
+            );
+            return;
+        }
+
+        let generation = self.generation.load();
+        let oldest = match generation.buffer.oldest_wal_pos() {
+            // Nothing buffered: every ingest row has geometry, so the whole durable prefix is
+            // reclaimable, and the position is read *after* the `Flush` append below.
+            None => None,
+            Some(Some(oldest)) => Some(oldest),
+            // A buffered row of unknown position pins the log. Fail-safe and loud by construction:
+            // the sequence grows, which is visible, rather than a record vanishing, which is not.
+            Some(None) => Some(0),
+        };
+
+        // The record's own `wal_pos` is read *before* the append and the reclamation's *after*, so
+        // with an empty buffer they differ by exactly this record's width. Both are true statements
+        // of "below this, every ingest row has been consumed into a segment" — the reclaim value is
+        // simply the tighter one, and the record is a replay-start optimisation that nothing reads
+        // back (§7.1), so the looser one costs nothing.
+        let before_append = self.wal.position();
+        if let Err(e) = self
+            .wal
+            .append(&WalRecord::Flush {
+                n,
+                wal_pos: oldest.unwrap_or(before_append),
+            })
+            .and_then(|()| self.wal.fsync().map(|_| ()))
+        {
+            tracing::warn!(error = %e, "the flush record could not be appended; no rotation this tick");
+            return;
+        }
+
+        // **Read after the append, not before it.** With an empty buffer the reclaim point is "all
+        // of it", and taking the position first would leave the `Flush` record above the line —
+        // pinning the very member it was written to announce, so the log would grow by one member
+        // per flush and reclaim nothing. The `Flush` record is an optimisation that nothing reads
+        // back (§7.1), so there is no reason for it to hold its own member open.
+        let reclaim_below = oldest.unwrap_or_else(|| self.wal.position());
+
+        let snapshot = generation.overlay.snapshot();
+        match self.wal.rotate(&snapshot, reclaim_below) {
+            Ok(deleted) if !deleted.is_empty() => {
+                tracing::info!(
+                    members = ?self.wal.members(),
+                    reclaimed = ?deleted,
+                    "WAL members reclaimed below the flush's oldest unconsumed row"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "the WAL did not rotate; the log grows until it does");
+            }
+        }
     }
 
     /// Publish new geometry: check, swap, prune. **The executor's own arm of lifecycle §1.3's

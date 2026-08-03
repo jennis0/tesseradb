@@ -150,6 +150,16 @@ pub struct BufferedItem {
     pub x: f32,
     pub y: f32,
     pub scalars: Vec<WalScalar>,
+    /// The sequence-global WAL position of the record this row arrived in — what a rotation
+    /// reclaims below (flush §7.3).
+    ///
+    /// **`None` means "not known", and it is not the same as zero.** Both are fail-safe, because a
+    /// rotation may only reclaim below the oldest position it is *sure* of — but a caller that
+    /// treated `None` as a position would reclaim everything, so the distinction is carried in the
+    /// type rather than in a sentinel. It is `None` on the way out of [`IngestBuffer::insert_row`]
+    /// because neither replay nor the live apply knows the position at that point; both stamp it
+    /// immediately afterwards with [`IngestBuffer::set_wal_pos`].
+    pub wal_pos: Option<u64>,
 }
 
 /// Replayed `WalRow`s not yet folded into a bundle, keyed by (internal) `EntityId` — the id the
@@ -195,8 +205,38 @@ impl IngestBuffer {
                 x: row.x,
                 y: row.y,
                 scalars: row.scalars.clone(),
+                wal_pos: None,
             },
         );
+    }
+
+    /// Record which WAL position `entity`'s row arrived at. No-op if the entity is not buffered,
+    /// which is the ordinary case for a stamp arriving after a flush has consumed the row.
+    pub fn set_wal_pos(&mut self, entity: EntityId, wal_pos: u64) {
+        if let Some(item) = self.items.get_mut(&entity) {
+            item.wal_pos = Some(wal_pos);
+        }
+    }
+
+    /// The lowest WAL position any buffered row arrived at, or `None` if any of them does not know
+    /// its own — **the position a rotation may reclaim below** (flush §7.3).
+    ///
+    /// Every other record class below that point is already redundant: `Change` records are
+    /// restated by the rotation's own overlay snapshot, `Lease` records by the side-manifest's
+    /// entity-id high-water, and `Flush` records by nothing needing them. Only an ingest row that
+    /// has not yet acquired geometry pins the log.
+    ///
+    /// `Some(None)` is impossible by construction; the outer `Option` is emptiness and the inner
+    /// answer is "one of them is unknown, so reclaim nothing".
+    pub fn oldest_wal_pos(&self) -> Option<Option<u64>> {
+        if self.items.is_empty() {
+            return None;
+        }
+        Some(
+            self.items
+                .values()
+                .try_fold(u64::MAX, |acc, item| item.wal_pos.map(|p| acc.min(p))),
+        )
     }
 
     /// Remove one item — **what a flush's publication does with exactly the entities it
