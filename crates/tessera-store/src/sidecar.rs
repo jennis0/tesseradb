@@ -78,15 +78,60 @@ struct RunDesc {
     path: PathBuf,
     /// Lowercase hex SHA-256, matching [`crate::manifest::FileDigest::sha256`].
     digest: String,
+    /// The prefix-relative path this run is named by in the manifest. Kept because a flush's
+    /// [`LocatorExtent`] names the run its ordinals index by that path, and matching on the
+    /// absolute one would depend on how the caller happened to spell `prefix_dir`.
+    rel: String,
 }
 
 impl RunDesc {
+    /// Test-only: derives the manifest-relative path from the filename, which is what a
+    /// single-directory fixture wants. Production goes through [`RunDesc::with_rel`], because a
+    /// flush's runs live under their segment directory and the relative path is not the filename.
+    #[cfg(test)]
     fn new(path: impl Into<PathBuf>, digest: impl Into<String>) -> Self {
+        let path = path.into();
+        let rel = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        RunDesc {
+            path,
+            digest: digest.into(),
+            rel,
+        }
+    }
+
+    fn with_rel(
+        path: impl Into<PathBuf>,
+        digest: impl Into<String>,
+        rel: impl Into<String>,
+    ) -> Self {
         RunDesc {
             path: path.into(),
             digest: digest.into(),
+            rel: rel.into(),
         }
     }
+}
+
+/// One flush-published locator extent: a dense `u32` array over `[entity_lo, entity_hi]`, giving
+/// each entity's ordinal **into the single run it names** — not into the concatenation of every
+/// run, which is what the *base* locator's ordinals mean.
+///
+/// **The two conventions differ deliberately, and the newer one is the robust one.** A base-locator
+/// ordinal is a position in the listed-order concatenation, so it survives a flush (runs are
+/// appended, prior positions unchanged) but not a merge, which coalesces runs and renumbers
+/// everything after them. A flush extent's ordinal is run-local and survives both.
+#[derive(Debug, Clone)]
+struct LocatorRunDesc {
+    path: PathBuf,
+    digest: String,
+    entity_lo: u64,
+    /// Inclusive.
+    entity_hi: u64,
+    /// The prefix-relative path of the run these ordinals index.
+    run_rel: String,
 }
 
 /// The `entities/ext-locator.u32` file's identity plus its declared length (contracts §2.4 r6:
@@ -383,6 +428,56 @@ struct LocatorSlot {
     cell: OnceLock<std::result::Result<Mmap, String>>,
 }
 
+/// One flush locator extent, lazily opened on the same protocol as every other sidecar file.
+struct LocatorRunSlot {
+    desc: LocatorRunDesc,
+    cell: OnceLock<std::result::Result<Mmap, String>>,
+}
+
+impl LocatorRunSlot {
+    fn new(desc: LocatorRunDesc) -> Self {
+        LocatorRunSlot {
+            desc,
+            cell: OnceLock::new(),
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.cell.get().is_some()
+    }
+
+    /// This entity's ordinal into the run this extent names, or `None` when the entity is covered
+    /// by the extent but has no external id at all (contracts §2.4 r6's ordinary case, carried by
+    /// [`LOCATOR_NONE`] — never an error).
+    fn ordinal_of(&self, entity: EntityId) -> Result<Option<u32>> {
+        let raw = entity.raw();
+        debug_assert!(raw >= self.desc.entity_lo && raw <= self.desc.entity_hi);
+        let idx = (raw - self.desc.entity_lo) as usize;
+        let bytes = self
+            .cell
+            .get_or_init(|| {
+                load_locator(&LocatorDesc {
+                    path: self.desc.path.clone(),
+                    digest: self.desc.digest.clone(),
+                    len: self.desc.entity_hi - self.desc.entity_lo + 1,
+                })
+            })
+            .as_ref()
+            .map_err(|detail| StoreError::InvalidSidecar {
+                path: self.desc.path.clone(),
+                detail: detail.clone(),
+            })?;
+        // SAFETY: identical to `LocatorSlot::get_or_load` — `load_locator` validated the length
+        // is a checked multiple of 4 and matches `len * 4` exactly, and the mmap base is
+        // page-aligned.
+        let len = (self.desc.entity_hi - self.desc.entity_lo + 1) as usize;
+        let slots: &[u32] =
+            unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u32, len) };
+        let ord = slots[idx];
+        Ok(if ord == LOCATOR_NONE { None } else { Some(ord) })
+    }
+}
+
 impl LocatorSlot {
     fn new(desc: LocatorDesc) -> Self {
         LocatorSlot {
@@ -462,6 +557,9 @@ fn load_locator(desc: &LocatorDesc) -> std::result::Result<Mmap, String> {
 pub struct ExternalIdSidecar {
     runs: Vec<RunSlot>,
     locator: Option<LocatorSlot>,
+    /// Flush-published locator extents, in manifest order — the reverse direction for entities
+    /// past the build locator's end. Empty on a bundle that has never flushed.
+    locator_runs: Vec<LocatorRunSlot>,
 }
 
 impl ExternalIdSidecar {
@@ -474,6 +572,7 @@ impl ExternalIdSidecar {
         ExternalIdSidecar {
             runs: runs.into_iter().map(RunSlot::new).collect(),
             locator: None,
+            locator_runs: Vec::new(),
         }
     }
 
@@ -481,6 +580,7 @@ impl ExternalIdSidecar {
         ExternalIdSidecar {
             runs: runs.into_iter().map(RunSlot::new).collect(),
             locator: Some(LocatorSlot::new(locator)),
+            locator_runs: Vec::new(),
         }
     }
 
@@ -507,7 +607,11 @@ impl ExternalIdSidecar {
                 .ok_or_else(|| StoreError::UnverifiedFile {
                     path: prefix_dir.join(rel),
                 })?;
-            runs.push(RunDesc::new(prefix_dir.join(rel), digest.sha256.clone()));
+            runs.push(RunDesc::with_rel(
+                prefix_dir.join(rel),
+                digest.sha256.clone(),
+                rel.clone(),
+            ));
         }
 
         if runs.is_empty() {
@@ -536,7 +640,27 @@ impl ExternalIdSidecar {
             len: bundle_manifest.entity_id_high_water,
         };
 
-        Ok(Self::with_locator(runs, locator))
+        let mut locator_runs = Vec::with_capacity(partition_manifest.locator_extents.len());
+        for extent in &partition_manifest.locator_extents {
+            let digest = partition_manifest
+                .files
+                .get(&extent.path)
+                .or_else(|| bundle_manifest.files.get(&extent.path))
+                .ok_or_else(|| StoreError::UnverifiedFile {
+                    path: prefix_dir.join(&extent.path),
+                })?;
+            locator_runs.push(LocatorRunSlot::new(LocatorRunDesc {
+                path: prefix_dir.join(&extent.path),
+                digest: digest.sha256.clone(),
+                entity_lo: extent.entity_lo,
+                entity_hi: extent.entity_hi,
+                run_rel: extent.external_id_run.clone(),
+            }));
+        }
+
+        let mut sidecar = Self::with_locator(runs, locator);
+        sidecar.locator_runs = locator_runs;
+        Ok(sidecar)
     }
 
     /// `true` if at least one run (or the locator) has been opened.
@@ -548,7 +672,11 @@ impl ExternalIdSidecar {
     /// — the observable behind the residency claim, which is that steady state is *base + one
     /// run* rather than the whole family.
     pub fn open_extents(&self) -> usize {
+        // Locator extents count too: the laziness this reports is a property of the whole sidecar,
+        // and a flush-published extent opened at `Engine::open` would breach it exactly as a run
+        // would.
         self.runs.iter().filter(|e| e.is_open()).count()
+            + self.locator_runs.iter().filter(|e| e.is_open()).count()
     }
 
     /// Resolve `external_id` to its entity id, or `Ok(None)` if it names nothing in this
@@ -679,6 +807,48 @@ impl ExternalIdSidecar {
         }
         if entity.raw() < self.locator_len() {
             return self.external_id_of(entity);
+        }
+        // **Past the build locator's end is where a flushed entity lives**, and a flush publishes a
+        // locator extent for exactly its own entity range. Without this the drill-down answered a
+        // typed error for ever once rotation reclaimed the WAL record the live map was rebuilt
+        // from — an item visible on the map that `/v1/items` refuses to name.
+        //
+        // A hit here is authoritative either way: `LOCATOR_NONE` means the item was ingested with
+        // no external id (contracts §2.4 r6's ordinary case) and `Ok(None)` is the right answer,
+        // never the inconsistency below.
+        if let Some(slot) = self
+            .locator_runs
+            .iter()
+            .find(|s| entity.raw() >= s.desc.entity_lo && entity.raw() <= s.desc.entity_hi)
+        {
+            let Some(ordinal) = slot.ordinal_of(entity)? else {
+                return Ok(None);
+            };
+            let run = self
+                .runs
+                .iter()
+                .find(|r| r.desc.rel == slot.desc.run_rel)
+                .ok_or_else(|| StoreError::InvalidSidecar {
+                    path: slot.desc.path.clone(),
+                    detail: format!(
+                        "this locator extent indexes run '{}', which the manifest does not list — \
+                         the ordinal cannot be resolved and an absent external id would be the \
+                         wrong answer",
+                        slot.desc.run_rel
+                    ),
+                })?;
+            let validated = run.get_or_load()?;
+            if (ordinal as usize) >= validated.len() {
+                return Err(StoreError::InvalidSidecar {
+                    path: slot.desc.path.clone(),
+                    detail: format!(
+                        "locator ordinal {ordinal} is past the end of run '{}' ({} rows)",
+                        slot.desc.run_rel,
+                        validated.len()
+                    ),
+                });
+            }
+            return Ok(Some(validated.key(ordinal as usize).to_vec()));
         }
         if entity.raw() < high_water {
             let path = self

@@ -5,10 +5,9 @@
 //! a **restart**, because that is the only state in which the live external-id map — rebuilt from
 //! whatever WAL records survived — no longer covers what a flush published.
 //!
-//! **One of the three is still `#[ignore]`d**, with the reason recorded at it: nothing consults the
-//! locator extent a flush publishes, so the reverse direction still answers `InvalidSidecar` past
-//! the build locator's end. It asserts nothing weaker than it should — it is the test that will pass
-//! when the reader catches up, kept visible rather than deferred to a backlog.
+//! All three pass. Getting there needed the flush to carry external ids into its segment at all,
+//! contracts §2.4's cross-run ordering requirement to go (it was unsatisfiable by construction),
+//! and the reverse direction to consult the locator extent a flush publishes.
 
 mod common;
 
@@ -101,13 +100,7 @@ fn flushed_then_rotated(tmp: &std::path::Path, root: &std::path::Path, key: &str
 /// is length `entity_id_high_water` at build, and this entity sits past its end: reading there and
 /// returning "no external id" would be a wrong answer wearing a legitimate state's clothes
 /// (contracts §2.4 r6).
-/// **⊘ Blocked, not failing by accident.** The flush publishes a locator extent, and nothing reads
-/// it: `external_id_of_checked` consults the build locator alone (length `entity_id_high_water` at
-/// build) and answers `InvalidSidecar` for an entity past its end. Un-ignore this with the reader
-/// change, not by weakening the assertion — the inconsistency error is correct for what the reader
-/// currently knows.
 #[test]
-#[ignore = "the flush's locator extent is published but no read path consults it"]
 fn a_flushed_item_answers_items_after_rotation_and_a_restart() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = fixture(tmp.path());
@@ -118,6 +111,47 @@ fn a_flushed_item_answers_items_after_rotation_and_a_restart() {
         reopened.external_id_of(id).expect("the lookup succeeds"),
         Some(b"ext-1".to_vec()),
         "the flush's locator extent is the only thing left that can answer this"
+    );
+}
+
+/// An item ingested with **no external id** is not an error after rotation — it is the ordinary
+/// case (contracts §2.4 r6), and the locator extent carries `LOCATOR_NONE` for it.
+///
+/// This is the branch most easily got wrong: the reverse direction now consults flush locator
+/// extents, and reading a present-but-absent slot as a failure would turn every id-less item into a
+/// typed error the moment its WAL record was reclaimed.
+#[test]
+fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture(tmp.path());
+
+    let anonymous = {
+        let engine = engine_at(tmp.path(), &root, 1);
+        let row = UnallocatedRow {
+            external_id: None,
+            slice: "s0".to_string(),
+            descriptors: vec![b"0".to_vec()],
+            x: 5.0,
+            y: 5.0,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+        };
+        let id = engine
+            .accept_ingest(vec![row], "anon".to_string(), [0u8; 32])
+            .expect("an item with no external id is accepted")[0];
+        wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
+        wait_until("member 1 to be reclaimed", || {
+            !wal_members(tmp.path()).contains(&"wal-000001.log".to_string())
+        });
+        id
+    };
+
+    let reopened = engine_at(tmp.path(), &root, 3600);
+    assert_eq!(
+        reopened.external_id_of(anonymous).expect("not an error"),
+        None,
+        "an item addressable only by its tessera_id has no external id, and saying so is the \
+         answer — not a typed failure"
     );
 }
 

@@ -461,6 +461,19 @@ contracts §2.4's O(runs) scan therefore bounded too. **Stated because it was no
 revision specified merge over row-space extents and delta postings tiers and said nothing about
 runs, while §2.4 assumed something kept their number down.
 
+**Two things a merge must repair when it coalesces runs, both harmless today only because merge is
+not built.**
+
+- **The base locator's ordinals are positions in the listed-order concatenation of runs.** Appending
+  a flush run leaves every prior position intact, which is why flush is safe; coalescing runs 0 and
+  1 renumbers everything after them, and the base locator then points at the wrong keys. A flush's
+  own locator extent does not have this problem — its ordinals are **run-local**, resolved against
+  the single run the extent names (contracts §2.4). The newer convention is the robust one, so a
+  merge either rewrites the base locator or converts it to the same form.
+- **The sidecar derives the base locator's path from `external_id_runs[0]`.** That entry is the
+  build's today. A merge that coalesced run 0 into a segment directory would leave the derivation
+  pointing at a path that does not exist.
+
 ⊘ **Not implemented** — merge itself is not built, so nothing coalesces runs today and their number
 grows with every flush.
 
