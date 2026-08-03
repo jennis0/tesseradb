@@ -171,13 +171,8 @@ fn a_suppression_accepted_before_a_rotation_is_still_in_force_after_a_restart() 
     };
 
     let reopened = engine_at(tmp.path(), &root, 3600);
-    let generation = reopened.generation();
-    let entry = generation
-        .overlay
-        .get(suppressed)
-        .expect("the suppression must survive on the snapshot alone");
     assert!(
-        entry.suppressed,
+        reopened.generation().overlay.is_suppressed(suppressed),
         "the record that carried this suppression was reclaimed; only the rotation's snapshot \
          stands between that and a re-exposed item"
     );

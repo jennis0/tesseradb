@@ -370,24 +370,22 @@ impl DecodeSource<'_> {
 /// of a precedence rule is how a suppression stops suppressing (lifecycle §3, caught twice in
 /// review) — do not re-derive this logic anywhere else.
 ///
-/// An overlay entry — even a *neutral* one (present, but currently no active verdict, e.g. after
-/// `suppress → unsuppress` with no `Predicate` ever applied) — takes precedence over the buffer:
-/// its `None` here is correct, not a fall-through, because rule 4 below only ever applies when
-/// the overlay has no entry at all.
+/// **There is no neutral entry any more.** Under a single map, `suppress → unsuppress` left an entry
+/// whose every fact was inactive, and its bare presence outranked the ingest buffer here. An
+/// unsuppress now removes the id from the suppression bitmap, so a still-buffered entity falls
+/// through to rule 4 and its own terms decide — which is what lifecycle §3.1 always said
+/// ("unsuppress removes the entry") and what the previous representation did not do.
 fn verdict(
     overlay: &Overlay,
     buffer: &IngestBuffer,
     satisfied: &FxHashSet<TermId>,
     entity: EntityId,
 ) -> Option<bool> {
-    if let Some(entry) = overlay.get(entity) {
-        return if entry.deleted || entry.suppressed {
-            Some(false)
-        } else {
-            entry
-                .evaluate_terms()
-                .map(|terms| terms.iter().any(|t| satisfied.contains(t)))
-        };
+    if overlay.is_deleted(entity) || overlay.is_suppressed(entity) {
+        return Some(false);
+    }
+    if let Some(predicate) = overlay.evaluate_of(entity) {
+        return Some(predicate.terms.iter().any(|t| satisfied.contains(t)));
     }
 
     // Rule 4: buffered entities with no overlay entry (handled above — an overlay entry, even a
@@ -433,7 +431,7 @@ pub fn compose(
     // so it contributes nothing to the diff. This is deliberate, not an oversight: recomputing
     // "no verdict" from scratch every time is what makes unsuppress a pure subtraction from
     // `minus` rather than a special case.
-    for (&entity, _) in overlay.iter() {
+    for entity in overlay.touched() {
         if let Some(pass) = verdict(overlay, buffer, satisfied, entity) {
             if let Some(row) = row_space.row_of(entity) {
                 if pass {
@@ -451,7 +449,7 @@ pub fn compose(
     // takes precedence per the rule ordering above, and was already resolved, or deliberately given
     // no verdict, in the loop above).
     for (&entity, _) in buffer.iter() {
-        if overlay.get(entity).is_some() {
+        if overlay.touches(entity) {
             continue;
         }
         if let Some(pass) = verdict(overlay, buffer, satisfied, entity) {

@@ -55,7 +55,7 @@ fn a_deleted_entity_with_no_row_round_trips_the_snapshot() {
 
     let restored = round_trip(&overlay, &dict);
     assert!(
-        restored.get(EntityId::new(99)).unwrap().deleted,
+        restored.is_deleted(EntityId::new(99)),
         "a deletion must survive a rotation with nothing but the snapshot to carry it"
     );
 }
@@ -103,7 +103,9 @@ fn a_re_resolved_extension_id_follows_the_descriptor_not_the_ordinal() {
         )),
     );
     assert_eq!(
-        overlay.get(EntityId::new(1)).unwrap().evaluate_terms(),
+        overlay
+            .evaluate_of(EntityId::new(1))
+            .map(|p| p.terms.as_slice()),
         Some(&[TermId::new(u32::MAX)][..]),
     );
 
@@ -113,7 +115,9 @@ fn a_re_resolved_extension_id_follows_the_descriptor_not_the_ordinal() {
     restored.apply_snapshot(&overlay.snapshot(), &mut later);
 
     assert_eq!(
-        restored.get(EntityId::new(1)).unwrap().evaluate_terms(),
+        restored
+            .evaluate_of(EntityId::new(1))
+            .map(|p| p.terms.as_slice()),
         Some(&[TermId::new(u32::MAX - 1)][..]),
         "the restored entry must name whatever id \"novel\" holds now, not the one it held then"
     );
@@ -136,27 +140,36 @@ fn a_dictionary_term_keeps_its_durable_ordinal_across_the_snapshot() {
 
     let restored = round_trip(&overlay, &dict);
     assert_eq!(
-        restored.get(EntityId::new(5)).unwrap().evaluate_terms(),
+        restored
+            .evaluate_of(EntityId::new(5))
+            .map(|p| p.terms.as_slice()),
         Some(&[TermId::new(1)][..]),
     );
 }
 
-/// **A present-but-neutral entry is not the same as no entry.** `compose`'s verdict rule gives any
-/// overlay entry precedence over the ingest buffer, so an entry lost to a snapshot would let a
-/// still-buffered entity's own terms start deciding its visibility — fail-open, and discoverable
-/// only after a rotation.
+/// **An unsuppressed entity is untouched, and the snapshot says nothing about it.**
+///
+/// Under a single map, `suppress → unsuppress` left a husk whose every fact was inactive, and the
+/// snapshot had to preserve it because `compose`'s verdict rule gave any entry precedence over the
+/// ingest buffer. Three stores make the husk unrepresentable: an unsuppress removes the id from the
+/// suppression bitmap and nothing else ever held it. This is what lifecycle §3.1 always said —
+/// "unsuppress removes the entry" — and what the previous representation did not do.
 #[test]
-fn a_neutral_entry_survives_the_snapshot() {
+fn an_unsuppressed_entity_is_untouched_and_absent_from_the_snapshot() {
     let (dict, _temp) = empty_dict();
     let mut overlay = Overlay::new();
     overlay.apply(EntityId::new(3), ChangeOp::Suppress, None);
     overlay.apply(EntityId::new(3), ChangeOp::Unsuppress, None);
 
+    assert!(!overlay.touches(EntityId::new(3)));
+    assert!(
+        overlay.snapshot().is_empty(),
+        "nothing is in force, so there is nothing to carry forward"
+    );
+
     let restored = round_trip(&overlay, &dict);
-    let entry = restored
-        .get(EntityId::new(3))
-        .expect("the entry itself must survive, even with no fact in force");
-    assert!(!entry.deleted && !entry.suppressed && entry.evaluate.is_none());
+    assert!(!restored.touches(EntityId::new(3)));
+    assert!(!restored.is_suppressed(EntityId::new(3)));
 }
 
 /// The three facts are independent, so a snapshot has to carry all of them — a `delete` folded into
@@ -180,10 +193,9 @@ fn all_three_facts_survive_together() {
     );
 
     let restored = round_trip(&overlay, &dict);
-    let entry = restored.get(e).unwrap();
-    assert!(entry.deleted);
-    assert!(entry.suppressed);
-    assert_eq!(entry.evaluate.as_ref().unwrap().descriptors.len(), 2);
+    assert!(restored.is_deleted(e));
+    assert!(restored.is_suppressed(e));
+    assert_eq!(restored.evaluate_of(e).unwrap().descriptors.len(), 2);
 }
 
 /// The same overlay must encode to the same bytes, whatever order its hash map happens to iterate
@@ -245,11 +257,11 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     .unwrap();
 
     assert!(
-        overlay.get(EntityId::new(7)).unwrap().suppressed,
+        overlay.is_suppressed(EntityId::new(7)),
         "the snapshot's own entries must apply"
     );
     assert!(
-        overlay.get(EntityId::new(8)).unwrap().deleted,
+        overlay.is_deleted(EntityId::new(8)),
         "a Change below the snapshot must not be displaced by it"
     );
 }
@@ -266,9 +278,9 @@ fn a_snapshot_unions_with_state_already_applied() {
     live.apply(EntityId::new(2), ChangeOp::Suppress, None);
     live.apply_snapshot(&snapshotted.snapshot(), &mut DescriptorResolver::new(&dict));
 
-    assert!(live.get(EntityId::new(1)).unwrap().deleted);
+    assert!(live.is_deleted(EntityId::new(1)));
     assert!(
-        live.get(EntityId::new(2)).unwrap().suppressed,
+        live.is_suppressed(EntityId::new(2)),
         "applying a snapshot must not discard what was already there"
     );
 }
@@ -282,13 +294,15 @@ fn a_descriptor_less_predicate_stays_fail_closed_across_the_snapshot() {
     let mut overlay = Overlay::new();
     overlay.apply(EntityId::new(4), ChangeOp::Predicate, None);
     assert_eq!(
-        overlay.get(EntityId::new(4)).unwrap().evaluate,
+        overlay.evaluate_of(EntityId::new(4)).cloned(),
         Some(PredicateChange::default()),
     );
 
     let restored = round_trip(&overlay, &dict);
     assert_eq!(
-        restored.get(EntityId::new(4)).unwrap().evaluate_terms(),
+        restored
+            .evaluate_of(EntityId::new(4))
+            .map(|p| p.terms.as_slice()),
         Some(&[][..]),
         "an empty term set intersects nothing; an absent one falls back to the fragment"
     );

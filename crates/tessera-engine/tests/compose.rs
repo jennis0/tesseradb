@@ -195,6 +195,49 @@ fn b_suppress_visible_entity_drops_count_and_visibility() {
     assert!(mask.check_structural_invariants());
 }
 
+/// **An unsuppress on a still-buffered item makes it visible immediately** — a behaviour change,
+/// accepted deliberately, and named here because it is the one direction that cannot be walked back
+/// quietly.
+///
+/// Under the old single-map overlay, `suppress → unsuppress` left an entry whose every fact was
+/// inactive, and `verdict` gave any entry precedence over the ingest buffer — so the item stayed
+/// hidden until a flush gave it geometry. Three independent stores make that husk unrepresentable:
+/// the unsuppress removes the id from the suppression bitmap, nothing else ever held it, and the
+/// entity falls through to the buffer where its own terms decide.
+///
+/// Lifecycle §3.1 always said "unsuppress removes the entry". The old code did not, and the
+/// difference was invisible because nothing tested an unsuppress *before* a flush.
+#[test]
+fn an_unsuppress_before_the_first_flush_reveals_the_item_rather_than_waiting_for_geometry() {
+    let fx = build_fixture();
+    let entity = e(EVAL_WIDEN);
+    assert!(!fx.fragment_entities.contains(&(EVAL_WIDEN as u32)));
+
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        EVAL_WIDEN,
+        vec![TermId::new(SATISFIED_TERM_MARKER)],
+    );
+
+    let mut overlay = Overlay::new();
+    overlay.apply(entity, ChangeOp::Suppress, None);
+    assert!(
+        !visible_to(&fragment_for(&fx), &fx.satisfied, &overlay, &buffer, entity),
+        "suppressed, so hidden whatever the buffer says"
+    );
+
+    overlay.apply(entity, ChangeOp::Unsuppress, None);
+    assert!(
+        !overlay.touches(entity),
+        "the unsuppress leaves no trace at all — there is no husk to outrank the buffer"
+    );
+    assert!(
+        visible_to(&fragment_for(&fx), &fx.satisfied, &overlay, &buffer, entity),
+        "the buffered item's own terms decide once nothing denies it"
+    );
+}
+
 #[test]
 fn c_unsuppress_restores_it() {
     let fx = build_fixture();
@@ -627,17 +670,21 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     })
     .unwrap();
 
-    let x_entry = overlay.get(e(ENTITY_X)).expect("X has an overlay entry");
-    assert!(x_entry.deleted, "delete must survive replay");
     assert!(
-        !x_entry.suppressed,
-        "unsuppress clears suppressed only, and does so across replay too"
+        overlay.is_deleted(e(ENTITY_X)),
+        "delete must survive replay"
+    );
+    assert!(
+        !overlay.is_suppressed(e(ENTITY_X)),
+        "unsuppress clears the suppression only, and does so across replay too"
     );
 
-    let y_entry = overlay.get(e(ENTITY_Y)).expect("Y has an overlay entry");
-    assert!(y_entry.deleted, "delete must survive replay");
+    assert!(
+        overlay.is_deleted(e(ENTITY_Y)),
+        "delete must survive replay"
+    );
     assert_eq!(
-        y_entry.evaluate_terms(),
+        overlay.evaluate_of(e(ENTITY_Y)).map(|p| p.terms.as_slice()),
         Some(&[TermId::new(0)][..]),
         "predicate's granted term must also survive replay"
     );

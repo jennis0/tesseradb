@@ -17,6 +17,7 @@ default = []
 fault-injection = []
 
 [dependencies]
+croaring = { workspace = true }
 tessera-types = { path = "../tessera-types", features = ["serde"] }
 tessera-authz = { path = "../tessera-authz" }
 postcard = { workspace = true }

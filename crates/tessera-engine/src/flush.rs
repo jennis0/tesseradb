@@ -437,7 +437,7 @@ fn digest_of(path: &Path) -> Result<FileDigest, String> {
 /// buffered row's and the entry stands. Reading any other field here is the fold arriving as a
 /// simplification; see this module's doc.
 fn is_deleted(overlay: &Overlay, entity: EntityId) -> bool {
-    overlay.get(entity).is_some_and(|entry| entry.deleted)
+    overlay.is_deleted(entity)
 }
 
 #[cfg(test)]
