@@ -39,12 +39,20 @@ fn a_wal_row_round_trips_its_slice() {
     }
 }
 
-/// A version-1 WAL is refused, not silently misread: postcard decodes a missing field as
+/// An older-version WAL is refused, not silently misread: postcard decodes a missing field as
 /// whatever follows it in the buffer.
+///
+/// Written under a member's real name, because the base path is a name for the *sequence* and a
+/// file sitting there is not part of it — `Wal::open` would ignore it and start a fresh log, which
+/// is the one answer a version check must never give.
 #[test]
-fn a_version_1_wal_is_refused() {
+fn an_older_version_wal_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal.log");
-    std::fs::write(&path, [b'T', b'W', b'A', b'L', 1, 0]).unwrap();
+    std::fs::write(
+        dir.path().join("wal-000001.log"),
+        [b'T', b'W', b'A', b'L', 1, 0],
+    )
+    .unwrap();
     assert!(matches!(Wal::open(&path), Err(WalError::BadHeader)));
 }

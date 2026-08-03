@@ -10,6 +10,17 @@ use tempfile::tempdir;
 
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalError, WalRecord, HEADER_LEN};
 
+/// The log is a **sequence** of member files, so `wal.log` is a base name and never a file: the
+/// first member is `wal-000001.log`, with its own `wal-000001.sync` sidecar. These tests reach past
+/// the API to damage bytes, so they need the real names.
+fn member(base: &Path, n: u64) -> std::path::PathBuf {
+    base.with_file_name(format!("wal-{n:06}.log"))
+}
+
+fn sidecar(base: &Path, n: u64) -> std::path::PathBuf {
+    base.with_file_name(format!("wal-{n:06}.sync"))
+}
+
 fn sample_record(tag: u8) -> WalRecord {
     WalRecord::Change {
         external_id: vec![tag, tag, tag],
@@ -88,8 +99,8 @@ fn tail_corruption_past_sync_point_truncates_silently() {
     }
 
     // Corrupt the last byte of the file — the unsynced third record's trailing CRC byte.
-    let len = fs::metadata(&path).unwrap().len();
-    corrupt_byte(&path, len - 1);
+    let len = fs::metadata(member(&path, 1)).unwrap().len();
+    corrupt_byte(&member(&path, 1), len - 1);
 
     let (_wal, records) = Wal::open(&path).unwrap();
     assert_eq!(records.len(), 2);
@@ -114,7 +125,7 @@ fn corruption_before_sync_point_fails_closed() {
 
     // Corrupt a byte inside record 1's body: HEADER_LEN (file header) + 4 (record 1's own
     // length prefix) is its first body byte — well below the sync point.
-    corrupt_byte(&path, HEADER_LEN + 4);
+    corrupt_byte(&member(&path, 1), HEADER_LEN + 4);
 
     expect_corruption(Wal::open(&path));
 }
@@ -130,14 +141,17 @@ fn wal_shorter_than_sync_point_fails_closed() {
     {
         let (mut wal, _) = Wal::open(&path).unwrap();
         wal.append(&sample_record(0)).unwrap();
-        let after_record1 = fs::metadata(&path).unwrap().len();
+        let after_record1 = fs::metadata(member(&path, 1)).unwrap().len();
         wal.append(&sample_record(1)).unwrap();
         wal.append(&sample_record(2)).unwrap();
         // The sidecar now claims all three records are durable...
         wal.fsync().unwrap();
         // ...but the file on disk loses its tail without the sidecar being told, e.g. a
         // filesystem-level truncation or a stale restored copy.
-        let f = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(member(&path, 1))
+            .unwrap();
         f.set_len(after_record1).unwrap();
     }
 
@@ -159,11 +173,11 @@ fn setup_two_synced_records(path: &Path) {
 fn missing_sidecar_still_fails_closed_on_corruption() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("wal.log");
-    let sync_path = dir.path().join("wal.sync");
+    let sync_path = sidecar(&path, 1);
 
     setup_two_synced_records(&path);
     fs::remove_file(&sync_path).unwrap();
-    corrupt_byte(&path, HEADER_LEN + 4);
+    corrupt_byte(&member(&path, 1), HEADER_LEN + 4);
 
     expect_corruption(Wal::open(&path));
 }
@@ -172,7 +186,7 @@ fn missing_sidecar_still_fails_closed_on_corruption() {
 fn zero_byte_sidecar_still_fails_closed_on_corruption() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("wal.log");
-    let sync_path = dir.path().join("wal.sync");
+    let sync_path = sidecar(&path, 1);
 
     setup_two_synced_records(&path);
     fs::OpenOptions::new()
@@ -181,7 +195,7 @@ fn zero_byte_sidecar_still_fails_closed_on_corruption() {
         .unwrap()
         .set_len(0)
         .unwrap();
-    corrupt_byte(&path, HEADER_LEN + 4);
+    corrupt_byte(&member(&path, 1), HEADER_LEN + 4);
 
     expect_corruption(Wal::open(&path));
 }
@@ -190,7 +204,7 @@ fn zero_byte_sidecar_still_fails_closed_on_corruption() {
 fn four_byte_sidecar_still_fails_closed_on_corruption() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("wal.log");
-    let sync_path = dir.path().join("wal.sync");
+    let sync_path = sidecar(&path, 1);
 
     setup_two_synced_records(&path);
     fs::OpenOptions::new()
@@ -199,7 +213,7 @@ fn four_byte_sidecar_still_fails_closed_on_corruption() {
         .unwrap()
         .set_len(4)
         .unwrap();
-    corrupt_byte(&path, HEADER_LEN + 4);
+    corrupt_byte(&member(&path, 1), HEADER_LEN + 4);
 
     expect_corruption(Wal::open(&path));
 }
@@ -219,12 +233,12 @@ fn huge_length_prefix_past_sync_point_truncates_silently() {
         wal.append(&sample_record(0)).unwrap();
         wal.append(&sample_record(1)).unwrap();
         wal.fsync().unwrap();
-        record3_start = fs::metadata(&path).unwrap().len();
+        record3_start = fs::metadata(member(&path, 1)).unwrap().len();
         // Never fsynced: record 3 is discardable.
         wal.append(&sample_record(2)).unwrap();
     }
 
-    corrupt_length_prefix(&path, record3_start, 0xFFFF_FFFF);
+    corrupt_length_prefix(&member(&path, 1), record3_start, 0xFFFF_FFFF);
 
     let (_wal, records) = Wal::open(&path).unwrap();
     assert_eq!(records.len(), 2);
@@ -244,7 +258,7 @@ fn huge_length_prefix_before_sync_point_fails_closed() {
     }
 
     // Record 1's own length prefix, right after the header.
-    corrupt_length_prefix(&path, HEADER_LEN, 0xFFFF_FFFF);
+    corrupt_length_prefix(&member(&path, 1), HEADER_LEN, 0xFFFF_FFFF);
 
     expect_corruption(Wal::open(&path));
 }
@@ -287,12 +301,12 @@ fn the_discarded_tail_is_truncated_rather_than_left_to_be_rediscovered() {
         wal.append(&sample_record(0)).unwrap();
         sync_point = wal.fsync().unwrap();
         wal.append(&sample_record(1)).unwrap();
-        assert!(fs::metadata(&path).unwrap().len() > sync_point);
+        assert!(fs::metadata(member(&path, 1)).unwrap().len() > sync_point);
     }
 
     let (_wal, _records) = Wal::open(&path).unwrap();
     assert_eq!(
-        fs::metadata(&path).unwrap().len(),
+        fs::metadata(member(&path, 1)).unwrap().len(),
         sync_point,
         "the tail is discarded on disk, not merely skipped in memory — otherwise the next append \
          lands in front of bytes a later replay would have to reason about again"
@@ -346,13 +360,13 @@ fn a_record_stranded_by_a_real_fsync_failure_is_not_replayed() {
 fn a_record_straddling_the_sync_point_fails_closed() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("wal.log");
-    let sync_path = dir.path().join("wal.sync");
+    let sync_path = sidecar(&path, 1);
 
     setup_two_synced_records(&path);
 
     // One byte short of record 1's end: the record starts inside the durable prefix and finishes
     // outside it.
-    let mid_record = fs::metadata(&path).unwrap().len() - 1;
+    let mid_record = fs::metadata(member(&path, 1)).unwrap().len() - 1;
     fs::write(&sync_path, mid_record.to_le_bytes()).unwrap();
 
     expect_corruption(Wal::open(&path));
@@ -382,7 +396,7 @@ fn bad_header_is_rejected() {
         wal.append(&sample_record(0)).unwrap();
         wal.fsync().unwrap();
     }
-    corrupt_byte(&path, 0);
+    corrupt_byte(&member(&path, 1), 0);
 
     match Wal::open(&path) {
         Err(WalError::BadHeader) => {}

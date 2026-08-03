@@ -268,8 +268,8 @@ impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for OverlayError<
 ///   every surviving file in sequence order, and a file older than the one holding the snapshot may
 ///   still carry `Change` records above the point the snapshot was taken at. Starting *at* the
 ///   snapshot would skip them — which looks like an optimisation and is a silent un-deny.
-/// - `Lease` records carry no overlay/buffer information (I9 allocator bookkeeping only) and are
-///   skipped here.
+/// - `Lease` and `Flush` records carry no overlay/buffer information — I9 allocator bookkeeping
+///   and a reclamation authority respectively — and are skipped here.
 ///
 /// Returns, alongside the overlay and buffer, the `external_id -> entity_id` map this replay
 /// established from `IngestBatch` rows, and the `DescriptorResolver` in its final state — both
@@ -331,7 +331,9 @@ pub fn replay<'a, E>(
             WalRecord::OverlaySnapshot { entries } => {
                 overlay.apply_snapshot(entries, &mut resolver);
             }
-            WalRecord::Lease { .. } => {}
+            // Neither carries overlay or buffer information: `Lease` is I9 allocator bookkeeping
+            // and `Flush` is a reclamation authority read by the WAL sequence, not by this walk.
+            WalRecord::Lease { .. } | WalRecord::Flush { .. } => {}
         }
     }
 

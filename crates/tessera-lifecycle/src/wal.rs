@@ -4,8 +4,33 @@
 //! ack before fsync — everything below exists to make that fsync boundary the one place acked
 //! state can be trusted from, and everything past it disposable.
 //!
-//! On-disk layout: a fixed 6-byte header (`b"TWAL"` ‖ `u16 LE` format version), then a sequence
-//! of framed records: `u32 LE len ‖ postcard bytes ‖ u32 LE crc32(postcard bytes)`.
+//! On-disk layout: a fixed 22-byte header (`b"TWAL"` ‖ `u16 LE` format version ‖ `u64 LE` member
+//! number ‖ `u64 LE` base position), then framed records:
+//! `u32 LE len ‖ postcard bytes ‖ u32 LE crc32(postcard bytes)`.
+//!
+//! ## The log is a sequence, not a file
+//!
+//! A caller names one path — `<dir>/wal.log` — and that names a **family**:
+//! `<dir>/wal-000001.log`, `<dir>/wal-000002.log`, … each with its own fsync-offset sidecar
+//! (decision 0038). The base path is never itself a file.
+//!
+//! It has to be a sequence because a flush makes a prefix of the log redundant and there is no way
+//! to reclaim the front of a single file. [`Wal::rotate`] seals the active member, opens the next
+//! one with an overlay snapshot at its head, and deletes whatever now lies wholly behind a flush's
+//! `wal_pos`. Everything the single-file design guaranteed applies **per member, unchanged**: the
+//! positional CRC rule, the three sidecar guards, truncate-and-fsync before a handle is issued.
+//!
+//! **Offsets are per file; positions are sequence-global.** A position counts record bytes across
+//! every member the sequence has ever held, so it stays meaningful after the file it named has been
+//! deleted — which is what lets a flush record a `wal_pos` and a later rotation act on it. Each
+//! member's header carries the position it begins at, and `open` checks that every member continues
+//! its predecessor's: a file that does not is stale or foreign, and every position derived from it
+//! afterwards would name the wrong bytes.
+//!
+//! Two sequence-level failures fail closed, both for the same reason as the positional rule. A
+//! **gap** in the numbering means a member was lost or deleted out of order, taking acked records
+//! with it and leaving nothing to mark their absence — which is why reclamation deletes oldest
+//! first. A **broken position chain** means a member has taken another's place in the walk.
 //!
 //! ## The durable prefix, and the positional rule over it
 //!
@@ -203,6 +228,21 @@ pub enum WalRecord {
     /// Under replay it is an ordinary record in position: it is applied where it occurs, and a
     /// `Change` earlier in the same file still applies before it. See [`crate::replay`].
     OverlaySnapshot { entries: Vec<OverlaySnapshotEntry> },
+    /// A published flush: side-manifest `n`, and the sequence position of the flush's
+    /// **buffer-snapshot point**.
+    ///
+    /// **`wal_pos` is the position below which every ingest row has been consumed into a segment.**
+    /// It is *not* the offset of this record, and the distinction is the whole of its safety: rows
+    /// acked *during* the flush are appended after the snapshot point, were never consumed, and
+    /// carry entity ids at or above the new watermark. Reclaiming below this record's own offset
+    /// would delete them, and §7.1 would then reconstruct them from nothing — acked ingest,
+    /// silently lost at the next restart. Group-commit allocation makes entity order equal WAL
+    /// append order, so such a position always exists and is exact.
+    ///
+    /// It is a replay-start optimisation and the authority for reclamation, never a correctness
+    /// device: recovery reconstructs the buffer from the published watermark, so it cannot
+    /// duplicate or lose a row at any crash point whether or not this record survived.
+    Flush { n: u64, wal_pos: u64 },
 }
 
 /// WAL-level failures. [`WalError::WalCorruption`], [`WalError::BadHeader`] and
@@ -268,12 +308,18 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// File format version, checked at open. Bump on any incompatible change to record framing or
 /// the header itself — and on any change to a record's *field* layout, since postcard encodes
 /// struct fields positionally and would otherwise decode a missing field as whatever bytes follow
-/// it. Version 2 added [`WalRow::slice`].
-const WAL_VERSION: u16 = 2;
-/// Header size in bytes (`WAL_MAGIC` ‖ `WAL_VERSION` LE). Every record offset in this module —
-/// including the ones compared against the sidecar's last-fsync offset — is a byte offset from
-/// the start of the file, so it already accounts for the header living at the front.
-pub const HEADER_LEN: u64 = WAL_MAGIC.len() as u64 + 2;
+/// it. Version 2 added [`WalRow::slice`]; version 3 made the log a sequence and put each member's
+/// number and base position in its header.
+const WAL_VERSION: u16 = 3;
+/// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
+/// Every *offset* in this module is a byte offset from the start of its own file, so it already
+/// accounts for the header living at the front; every *position* is sequence-global and counts
+/// record bytes only — see [`Wal::position`].
+pub const HEADER_LEN: u64 = WAL_MAGIC.len() as u64 + 2 + 8 + 8;
+
+/// Digits in a member's zero-padded number. Fixed width so lexical order is numerical order, which
+/// makes a directory listing already sorted oldest-first — the order reclamation must delete in.
+const MEMBER_DIGITS: usize = 6;
 
 /// What a handle is able to do next. See the module doc's account of why an append failure and a
 /// sync failure are not the same event.
@@ -294,19 +340,137 @@ enum WalState {
     Torn,
 }
 
-/// An open write-ahead log. `open` replays existing records; `append` buffers a new one;
-/// `fsync` is the durability boundary the ack contract waits on.
-pub struct Wal {
-    file: File,
+/// The **sequence base**: the directory, stem and extension every member's name is derived from.
+///
+/// The caller still names a single path — `<dir>/wal.log` — and this turns it into the family
+/// `<dir>/wal-000001.log`, `<dir>/wal-000002.log`, … The base path itself is never a file.
+#[derive(Debug, Clone)]
+struct SequenceBase {
+    dir: PathBuf,
+    stem: std::ffi::OsString,
+    ext: Option<std::ffi::OsString>,
+}
+
+impl SequenceBase {
+    fn of(path: &Path) -> Self {
+        SequenceBase {
+            dir: path
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+            stem: path.file_stem().unwrap_or(path.as_os_str()).to_os_string(),
+            ext: path.extension().map(|e| e.to_os_string()),
+        }
+    }
+
+    /// `<dir>/<stem>-<n:06>.<ext>`.
+    fn member(&self, n: u64) -> PathBuf {
+        let mut name = self.stem.clone();
+        name.push(format!(
+            "-{n:0MEMBER_DIGITS$}",
+            MEMBER_DIGITS = MEMBER_DIGITS
+        ));
+        if let Some(ext) = &self.ext {
+            name.push(".");
+            name.push(ext);
+        }
+        self.dir.join(name)
+    }
+
+    /// The sidecar lives beside its member and is named after it: `wal-000001.log` →
+    /// `wal-000001.sync`. Per member, never one for the sequence — decision 0038, and the reason
+    /// rotation can seal a file without any shared state having to be rewritten.
+    fn sidecar(&self, n: u64) -> PathBuf {
+        let mut name = self.stem.clone();
+        name.push(format!(
+            "-{n:0MEMBER_DIGITS$}.sync",
+            MEMBER_DIGITS = MEMBER_DIGITS
+        ));
+        self.dir.join(name)
+    }
+
+    /// The member number `name` denotes, if it is one of this sequence's files.
+    fn number_of(&self, name: &std::ffi::OsStr) -> Option<u64> {
+        let name = name.to_str()?;
+        let stem = self.stem.to_str()?;
+        let rest = name.strip_prefix(stem)?.strip_prefix('-')?;
+        let digits = match &self.ext {
+            Some(ext) => rest.strip_suffix(&format!(".{}", ext.to_str()?))?,
+            None => rest,
+        };
+        if digits.len() < MEMBER_DIGITS || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
+    }
+
+    /// Every member present on disk, ascending. Contiguity is checked by the caller, not here —
+    /// a gap is a fail-closed condition, not an absence.
+    fn members(&self) -> Result<Vec<u64>> {
+        let mut found = Vec::new();
+        match std::fs::read_dir(&self.dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    if let Some(n) = self.number_of(&entry.file_name()) {
+                        found.push(n);
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        found.sort_unstable();
+        Ok(found)
+    }
+}
+
+/// One member file of the sequence, open for append.
+struct WalFile {
+    number: u64,
     sync_path: PathBuf,
-    /// Current end-of-file offset — bytes appended so far (including the header), whether or
-    /// not yet fsynced.
+    file: File,
+    /// The sequence-global position of this file's **first record byte** — the total record bytes
+    /// in every earlier member. Held in the header so the chain can be checked at open: a member
+    /// whose base position does not continue its predecessor's is a stale or foreign file, not a
+    /// continuation, and saying so is cheaper than discovering it through a `wal_pos` comparison
+    /// that quietly means the wrong thing.
+    base_pos: u64,
+    /// Current end-of-file offset — bytes written so far, header included, fsynced or not.
     len: u64,
     /// The offset the sidecar names: everything below it is durable and acknowledged. Advanced
     /// only by a *complete* `sync_data` + publish, so `[durable_len, len)` is always exactly the
     /// region no caller has been told about — which is what makes it the region
     /// [`Wal::retry_durability`] may re-write.
     durable_len: u64,
+}
+
+impl WalFile {
+    /// The sequence-global position just past this file's durable bytes.
+    fn end_pos(&self) -> u64 {
+        self.base_pos + (self.durable_len - HEADER_LEN)
+    }
+}
+
+/// A member that is no longer appended to: its span, kept so reclamation can decide whether it
+/// lies wholly below a `wal_pos` without reopening it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SealedSpan {
+    number: u64,
+    end_pos: u64,
+}
+
+/// An open write-ahead log — a **sequence** of member files. `open` replays every surviving member
+/// in order; `append` buffers a new record in the last of them; `fsync` is the durability boundary
+/// the ack contract waits on; `rotate` seals the active member and reclaims what a flush has made
+/// redundant.
+pub struct Wal {
+    base: SequenceBase,
+    /// Members no longer appended to, ascending — the reclamation candidates.
+    sealed: Vec<SealedSpan>,
+    /// The member being appended to. Never a reclamation candidate.
+    active: WalFile,
     /// Set on any I/O error during a write or a sync. Every further `append`/`fsync` refuses
     /// immediately (I3) rather than risk `len` disagreeing with the file, or building on bytes
     /// that may not exist.
@@ -316,20 +480,6 @@ pub struct Wal {
 /// The on-disk size of a framed record whose postcard body is `body_len` bytes.
 fn framed_len(body_len: usize) -> u64 {
     4 + body_len as u64 + 4
-}
-
-/// The sidecar lives beside the WAL file, named after its stem: `wal.log` → `wal.sync`. Not a
-/// fixed `wal.sync` in the directory — a directory could plausibly host more than one WAL in
-/// future, and naming it after the file it belongs to avoids collision.
-fn sync_sidecar_path(wal_path: &Path) -> PathBuf {
-    let dir = wal_path
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let stem = wal_path.file_stem().unwrap_or(wal_path.as_os_str());
-    let mut name = stem.to_os_string();
-    name.push(".sync");
-    dir.join(name)
 }
 
 /// A `.tmp` sibling of `path`, used for the write-tmp-then-rename sidecar update (C3): a rename
@@ -418,16 +568,25 @@ fn read_up_to(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(total)
 }
 
-fn write_header(file: &mut File) -> std::io::Result<()> {
+fn write_header(file: &mut File, number: u64, base_pos: u64) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&WAL_MAGIC)?;
     file.write_all(&WAL_VERSION.to_le_bytes())?;
+    file.write_all(&number.to_le_bytes())?;
+    file.write_all(&base_pos.to_le_bytes())?;
     file.sync_all()?;
     file.seek(SeekFrom::Start(HEADER_LEN))?;
     Ok(())
 }
 
-fn check_header(file: &mut File) -> Result<()> {
+/// The `(number, base_pos)` a member's header claims, refusing anything this format cannot
+/// positively identify.
+///
+/// The number is checked against the *filename* here rather than merely read: a member renamed or
+/// copied into the sequence would otherwise take its predecessor's place in the walk, and every
+/// position derived afterwards would be silently wrong. A file we cannot identify is not trusted
+/// and not written to.
+fn check_header(file: &mut File, expected_number: u64) -> Result<(u64, u64)> {
     file.seek(SeekFrom::Start(0))?;
     let mut buf = [0u8; HEADER_LEN as usize];
     let n = read_up_to(file, &mut buf)?;
@@ -437,7 +596,12 @@ fn check_header(file: &mut File) -> Result<()> {
     {
         return Err(WalError::BadHeader);
     }
-    Ok(())
+    let number = u64::from_le_bytes(buf[6..14].try_into().expect("8 bytes"));
+    let base_pos = u64::from_le_bytes(buf[14..22].try_into().expect("8 bytes"));
+    if number != expected_number {
+        return Err(WalError::BadHeader);
+    }
+    Ok((number, base_pos))
 }
 
 /// Replays the log's **durable prefix** — the records lying wholly below `sync_point` — and
@@ -511,66 +675,261 @@ fn replay(file: &mut File, sync_point: u64) -> Result<(Vec<WalRecord>, u64)> {
     Ok((records, pos))
 }
 
+/// Creates member `number` of `base`, headered, sidecarred and durable — including its directory
+/// entry, without which a crash immediately after creation can lose the file entirely while its
+/// sidecar still claims a sync point (C3).
+///
+/// **A member begins with a recorded durable boundary of "header only".** Without this, a file that
+/// is created, appended to, and then denied its first fsync has no sidecar at all, and the
+/// missing-sidecar default (everything present is acked — see the module doc) would read back as
+/// acked exactly the records that failure told the caller it did not have. That default is right
+/// for a sidecar that was *lost* and must not be reached by a file that never had one.
+///
+/// `create_new` rather than `create`: [`SequenceBase::members`] has already established that this
+/// number is free, so a file appearing under it is a same-named predecessor or a concurrent writer
+/// — neither of which may be silently written over.
+fn create_member(base: &SequenceBase, number: u64, base_pos: u64) -> Result<WalFile> {
+    let path = base.member(number);
+    let sync_path = base.sidecar(number);
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    write_header(&mut file, number, base_pos)?;
+    write_sync_offset(&sync_path, HEADER_LEN)?;
+    fsync_dir(&base.dir)?;
+    Ok(WalFile {
+        number,
+        sync_path,
+        file,
+        base_pos,
+        len: HEADER_LEN,
+        durable_len: HEADER_LEN,
+    })
+}
+
 impl Wal {
-    /// Opens (creating if absent) the WAL at `path`, replays it under the positional CRC rule,
-    /// and returns the live handle plus every record recovered.
+    /// Opens (creating if absent) the WAL sequence based at `path`, replays every surviving member
+    /// under the positional CRC rule, and returns the live handle plus every record recovered.
+    ///
+    /// **Recovery walks every surviving file in sequence order.** It does not start *at* the
+    /// newest overlay snapshot and resume: an older member can still carry `Change` records above
+    /// the point that snapshot was taken at, and skipping them looks like an optimisation and is a
+    /// silent un-deny. `Flush{n, wal_pos}` is likewise a replay-start optimisation and the
+    /// authority for reclamation — never a correctness device (§7.1).
+    ///
+    /// Every lifecycle §4 rule applies **per member, unchanged**: its own fsync-offset sidecar
+    /// (decision 0038), the positional CRC rule, the three sidecar guards, and truncate-and-fsync
+    /// before the handle is issued.
+    ///
+    /// Two sequence-level failures are added, and both fail closed. A **gap** in the numbering
+    /// means a member was deleted out of order or lost, so records a caller was told were durable
+    /// are missing with nothing to mark their absence — this is why reclamation deletes oldest
+    /// first. A **broken position chain** — a member whose header base position does not continue
+    /// its predecessor's durable end — means a stale or foreign file has taken a member's place,
+    /// and every position derived from it afterwards would name the wrong bytes.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<(Wal, Vec<WalRecord>)> {
-        let path = path.as_ref();
-        let sync_path = sync_sidecar_path(path);
+        let base = SequenceBase::of(path.as_ref());
+        let members = base.members()?;
 
-        let is_new = !path.exists();
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)?;
-
-        let initial_len = file.metadata()?.len();
-        if initial_len == 0 {
-            write_header(&mut file)?;
-            // **A log begins with a recorded durable boundary of "header only".** Without this, a
-            // log that is created, appended to, and then denied its first fsync has no sidecar at
-            // all, and the missing-sidecar default (everything present is acked — see the module
-            // doc) would read back as acked exactly the records that failure told the caller it did
-            // not have. That default is right for a sidecar that was *lost* and must not be reached
-            // by a log that never had one. Any stale sidecar left by a same-named predecessor is
-            // replaced here for the same reason.
-            write_sync_offset(&sync_path, HEADER_LEN)?;
-        } else {
-            check_header(&mut file)?;
+        if members.is_empty() {
+            let active = create_member(&base, 1, 0)?;
+            return Ok((
+                Wal {
+                    base,
+                    sealed: Vec::new(),
+                    active,
+                    state: WalState::Healthy,
+                },
+                Vec::new(),
+            ));
         }
-        if is_new {
-            // The directory entry for a brand-new WAL file must itself be durable (C3) —
-            // otherwise a crash immediately after creation can lose the file entirely while its
-            // sidecar (if any survives from a same-named predecessor) still claims a sync point.
-            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-                fsync_dir(dir)?;
+
+        let first = members[0];
+        let last = *members.last().expect("non-empty");
+        if last - first + 1 != members.len() as u64 {
+            return Err(WalError::WalCorruption);
+        }
+
+        let mut records = Vec::new();
+        let mut sealed = Vec::new();
+        let mut active = None;
+        // `None` for the oldest surviving member: reclamation has removed whatever preceded it, so
+        // its base position is taken as given and only its successors have anything to continue.
+        let mut expected_base: Option<u64> = None;
+
+        for (i, number) in members.iter().copied().enumerate() {
+            let is_last = i + 1 == members.len();
+            let path = base.member(number);
+            let sync_path = base.sidecar(number);
+            let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
+
+            let mut file_len = file.metadata()?.len();
+            if file_len == 0 {
+                // A crash between `create_new` and the header write. The member's number comes from
+                // its name and its base position from the chain, so this is exactly recoverable —
+                // and refusing it would turn a benign crash into a permanently unopenable node,
+                // which is the outcome §7.3's oldest-first rule exists to avoid.
+                let base_pos = match (expected_base, members.len()) {
+                    (Some(expected), _) => expected,
+                    (None, 1) => 0,
+                    // An empty *oldest* member with successors: its span is unknowable, and every
+                    // later member's position would be a guess.
+                    (None, _) => return Err(WalError::WalCorruption),
+                };
+                write_header(&mut file, number, base_pos)?;
+                write_sync_offset(&sync_path, HEADER_LEN)?;
+                file_len = HEADER_LEN;
+            }
+
+            let (_, base_pos) = check_header(&mut file, number)?;
+            if expected_base.is_some_and(|expected| expected != base_pos) {
+                return Err(WalError::WalCorruption);
+            }
+
+            let sync_point = resolve_sync_point(&sync_path, file_len)?;
+            let (mut member_records, len) = replay(&mut file, sync_point)?;
+            records.append(&mut member_records);
+            expected_base = Some(base_pos + (len - HEADER_LEN));
+
+            if is_last {
+                file.seek(SeekFrom::Start(len))?;
+                active = Some(WalFile {
+                    number,
+                    sync_path,
+                    file,
+                    base_pos,
+                    len,
+                    // Replay ends exactly at the sync point (every record is bounded against it),
+                    // and the tail past it has just been truncated away, so the file's length *is*
+                    // the durable boundary at the moment a handle is issued.
+                    durable_len: len,
+                });
             } else {
-                fsync_dir(Path::new("."))?;
+                sealed.push(SealedSpan {
+                    number,
+                    end_pos: base_pos + (len - HEADER_LEN),
+                });
             }
         }
 
-        let wal_len = file.metadata()?.len();
-        let sync_point = resolve_sync_point(&sync_path, wal_len)?;
-
-        let (records, len) = replay(&mut file, sync_point)?;
-        file.seek(SeekFrom::Start(len))?;
-
         Ok((
             Wal {
-                file,
-                sync_path,
-                len,
-                // Replay ends exactly at the sync point (every record is bounded against it), and
-                // the tail past it has just been truncated away, so the file's length *is* the
-                // durable boundary at the moment a handle is issued.
-                durable_len: len,
+                base,
+                sealed,
+                active: active.expect("the last member is always the active one"),
                 state: WalState::Healthy,
             },
             records,
         ))
+    }
+
+    /// The sequence-global position the next record will be written at.
+    ///
+    /// Positions count **record bytes only**, across every member the sequence has ever held, so
+    /// they are comparable after reclamation has deleted the files the earlier ones lived in. This
+    /// is the quantity a flush records as its `wal_pos` — the buffer-snapshot point, below which
+    /// every ingest row has been consumed into a segment.
+    pub fn position(&self) -> u64 {
+        self.active.base_pos + (self.active.len - HEADER_LEN)
+    }
+
+    /// The sequence-global position below which everything is durable and acknowledged.
+    pub fn durable_position(&self) -> u64 {
+        self.active.end_pos()
+    }
+
+    /// Every surviving member's number, ascending — the active one last. Telemetry and tests: the
+    /// steady state is two, and a sequence that keeps growing is a rotation that is not reclaiming.
+    pub fn members(&self) -> Vec<u64> {
+        self.sealed
+            .iter()
+            .map(|s| s.number)
+            .chain(std::iter::once(self.active.number))
+            .collect()
+    }
+
+    /// Seal the active member, open the next one with `snapshot` at its head, and reclaim every
+    /// member lying wholly below `reclaim_below`. Returns the numbers deleted, oldest first.
+    ///
+    /// ## The order, and why each step is where it is
+    ///
+    /// ```text
+    /// fsync the active member                     ← its durable length is the next base position
+    /// create member n+1, headered and fsynced
+    /// append the overlay snapshot, fsynced        ← §7.2, and before any deletion
+    /// delete members wholly below reclaim_below,  ← oldest first
+    ///   oldest first
+    /// ```
+    ///
+    /// **The snapshot is durable before anything is deleted**, because the overlay's only durable
+    /// home is the WAL: the `Change` records inside the members about to go are the sole record
+    /// that an item was suppressed, and a suppression retires only on unsuppress. Deleting first
+    /// and snapshotting after would re-expose every denied item on the next restart.
+    ///
+    /// **Deletion is oldest-first**, because a crash midway through an unordered deletion leaves a
+    /// *gap* in the sequence, and [`Wal::open`] fails closed on a gap — turning a benign crash into
+    /// a permanently unopenable node. Deleting a prefix leaves a shorter sequence, which is exactly
+    /// what a completed rotation leaves.
+    ///
+    /// **A member is reclaimable only if it lies wholly below `reclaim_below`.** Steady-state
+    /// retention is therefore two members: the one holding the snapshot point is generally still
+    /// live above it, so it survives its own rotation.
+    ///
+    /// An **empty** overlay still writes the record. The alternative is a conditional whose only
+    /// benefit is a few bytes, and whose cost is that the snapshot's absence stops meaning
+    /// "nothing was denied" and starts meaning either that or "no rotation happened here".
+    ///
+    /// A poisoned handle rotates nothing — nothing above the last durable offset may be built on,
+    /// and the caller has a repair to attempt first.
+    pub fn rotate(
+        &mut self,
+        snapshot: &[OverlaySnapshotEntry],
+        reclaim_below: u64,
+    ) -> Result<Vec<u64>> {
+        if self.state != WalState::Healthy {
+            return Err(WalError::Poisoned);
+        }
+        if self.active.len != self.active.durable_len {
+            self.sync_and_publish()?;
+        }
+
+        let sealed_end = self.active.end_pos();
+        let next = create_member(&self.base, self.active.number + 1, sealed_end)?;
+        let previous = std::mem::replace(&mut self.active, next);
+        self.sealed.push(SealedSpan {
+            number: previous.number,
+            end_pos: sealed_end,
+        });
+        drop(previous);
+
+        self.append(&WalRecord::OverlaySnapshot {
+            entries: snapshot.to_vec(),
+        })?;
+        self.fsync()?;
+
+        let mut deleted = Vec::new();
+        while let Some(span) = self.sealed.first().copied() {
+            if span.end_pos > reclaim_below {
+                break;
+            }
+            // The file before its sidecar, and the directory fsynced after each: a crash between
+            // the two leaves a sidecar naming a member that is gone, which `members()` does not
+            // list and nothing reads. The reverse leaves a member with no sidecar, which the
+            // missing-sidecar default would then read as "everything present is acked" — sound, but
+            // it is state this rotation has already decided is redundant.
+            std::fs::remove_file(self.base.member(span.number))?;
+            match std::fs::remove_file(self.base.sidecar(span.number)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            fsync_dir(&self.base.dir)?;
+            self.sealed.remove(0);
+            deleted.push(span.number);
+        }
+        Ok(deleted)
     }
 
     /// Buffers `rec` for append. Not durable until [`Wal::fsync`] returns.
@@ -581,13 +940,13 @@ impl Wal {
         let body = postcard::to_allocvec(rec)?;
         match self.write_framed(&body) {
             Ok(()) => {
-                self.len += framed_len(body.len());
+                self.active.len += framed_len(body.len());
                 Ok(())
             }
             Err(e) => {
                 // A partially-completed write_all may have left the file at an offset between
-                // the old and new `self.len` — we cannot know how many bytes actually landed, so
-                // `self.len` can no longer be trusted to name a record boundary. Poison rather
+                // the old and new `self.active.len` — we cannot know how many bytes actually landed, so
+                // `self.active.len` can no longer be trusted to name a record boundary. Poison rather
                 // than guess (I3), and terminally: no repair can recover a boundary nothing
                 // records.
                 self.state = WalState::Torn;
@@ -601,9 +960,11 @@ impl Wal {
     /// about what a record looks like.
     fn write_framed(&mut self, body: &[u8]) -> std::io::Result<()> {
         let crc = crc32fast::hash(body);
-        self.file.write_all(&(body.len() as u32).to_le_bytes())?;
-        self.file.write_all(body)?;
-        self.file.write_all(&crc.to_le_bytes())?;
+        self.active
+            .file
+            .write_all(&(body.len() as u32).to_le_bytes())?;
+        self.active.file.write_all(body)?;
+        self.active.file.write_all(&crc.to_le_bytes())?;
         Ok(())
     }
 
@@ -671,8 +1032,8 @@ impl Wal {
         if self.state == WalState::Torn {
             return Err(WalError::Poisoned);
         }
-        if self.state == WalState::Healthy && self.len == self.durable_len {
-            return Ok(self.durable_len);
+        if self.state == WalState::Healthy && self.active.len == self.active.durable_len {
+            return Ok(self.active.durable_len);
         }
         // Every other case does the same work, including a *healthy* handle carrying appends that
         // have not been synced. Keying the discard on the region rather than on the state is what
@@ -693,16 +1054,20 @@ impl Wal {
         // more, and discarding is what this call is for. A crash between the two steps leaves the
         // sidecar naming `durable_len` and the file longer, which is the ordinary tail `open`
         // truncates away.
-        write_sync_offset(&self.sync_path, self.durable_len).map_err(WalError::Io)?;
-        self.file.set_len(self.durable_len).map_err(WalError::Io)?;
-        self.file.sync_data().map_err(WalError::Io)?;
-        self.file
-            .seek(SeekFrom::Start(self.durable_len))
+        write_sync_offset(&self.active.sync_path, self.active.durable_len).map_err(WalError::Io)?;
+        self.active
+            .file
+            .set_len(self.active.durable_len)
+            .map_err(WalError::Io)?;
+        self.active.file.sync_data().map_err(WalError::Io)?;
+        self.active
+            .file
+            .seek(SeekFrom::Start(self.active.durable_len))
             .map_err(WalError::Io)?;
 
-        self.len = self.durable_len;
+        self.active.len = self.active.durable_len;
         self.state = WalState::Healthy;
-        Ok(self.durable_len)
+        Ok(self.active.durable_len)
     }
 
     /// Flushes buffered appends to durable storage and advances the sidecar's last-fsync offset
@@ -761,7 +1126,7 @@ impl Wal {
             total += framed_len(body.len());
             bodies.push(body);
         }
-        if self.durable_len + total != self.len {
+        if self.active.durable_len + total != self.active.len {
             // Refuse rather than write a region whose extent we cannot predict — and leave the
             // state alone, so the handle goes on refusing everything.
             return Err(WalError::Poisoned);
@@ -769,7 +1134,9 @@ impl Wal {
 
         if self.state == WalState::Unsynced {
             let rewrite: std::io::Result<()> = (|| {
-                self.file.seek(SeekFrom::Start(self.durable_len))?;
+                self.active
+                    .file
+                    .seek(SeekFrom::Start(self.active.durable_len))?;
                 for body in &bodies {
                     self.write_framed(body)?;
                 }
@@ -791,16 +1158,16 @@ impl Wal {
     /// The two arms are separate states rather than one poison because they are separately
     /// repairable — see [`Wal::retry_durability`].
     fn sync_and_publish(&mut self) -> Result<u64> {
-        if let Err(e) = self.file.sync_data() {
+        if let Err(e) = self.active.file.sync_data() {
             self.state = WalState::Unsynced;
             return Err(WalError::Io(e));
         }
 
-        match write_sync_offset(&self.sync_path, self.len) {
+        match write_sync_offset(&self.active.sync_path, self.active.len) {
             Ok(()) => {
-                self.durable_len = self.len;
+                self.active.durable_len = self.active.len;
                 self.state = WalState::Healthy;
-                Ok(self.len)
+                Ok(self.active.len)
             }
             Err(e) => {
                 self.state = WalState::Unpublished;
@@ -1071,15 +1438,15 @@ mod tests {
             let (mut wal, _) = Wal::open(&path).unwrap();
             wal.append(&record(0)).unwrap();
             wal.fsync().unwrap();
-            let durable = wal.durable_len;
+            let durable = wal.active.durable_len;
 
             wal.append(&record(1)).unwrap();
             wal.append(&record(2)).unwrap();
-            let end = wal.len;
+            let end = wal.active.len;
 
             // The sync failed, and the pages it was meant to write are gone.
             wal.state = WalState::Unsynced;
-            blank_region(&path, durable, end);
+            blank_region(&wal.base.member(wal.active.number), durable, end);
 
             wal.retry_durability(&[record(1), record(2)])
                 .expect("the repair must succeed");
@@ -1142,14 +1509,14 @@ mod tests {
             let (mut wal, _) = Wal::open(&path).unwrap();
             wal.append(&record(0)).unwrap();
             wal.fsync().unwrap();
-            let durable = wal.durable_len;
+            let durable = wal.active.durable_len;
 
             wal.append(&record(1)).unwrap();
-            let end = wal.len;
+            let end = wal.active.len;
 
             // `Unpublished` is the state that skips the rewrite, so this is the bare re-sync.
             wal.state = WalState::Unpublished;
-            blank_region(&path, durable, end);
+            blank_region(&wal.base.member(wal.active.number), durable, end);
 
             wal.retry_durability(&[record(1)])
                 .expect("a bare re-sync reports success — that is the whole trap");
