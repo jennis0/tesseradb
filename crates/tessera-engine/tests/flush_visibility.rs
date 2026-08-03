@@ -164,6 +164,57 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
     );
 }
 
+/// **A reopened engine does not re-buffer what it already flushed** — and that is what makes
+/// `compose::verdict`'s missing watermark gate safe.
+///
+/// Replay walks every retained WAL record, the `IngestBatch` rows of already-published flushes
+/// included, so without a filter the buffer comes back holding entities that already have segments.
+/// Two things then go wrong: the next flush writes each of them a second time, and `verdict` gets a
+/// buffer hit for an entity the frozen fragment already accounts for. The second was what the
+/// `entity < watermark` gate existed to stop.
+///
+/// **The filter is `row_of`, not a watermark.** A watermark is exact only while entity-allocation
+/// order and flush order coincide — one slice per partition, which flush §2.1 records as
+/// load-bearing and unenforced. `row_of` is the predicate the watermark approximates, so it holds
+/// at any number of slices.
+///
+/// The same WAL is reused deliberately: a separate one would exercise nothing, since the point is
+/// precisely that the flushed rows' records are still there.
+#[test]
+fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture(tmp.path());
+
+    let id = {
+        let engine = engine_at(tmp.path(), &root, 1);
+        let id = ingest(&engine, "ext-1");
+        wait_until("the flush to publish", || {
+            engine.write_executor_stats().flushes >= 1
+        });
+        assert!(!engine.generation().buffer.contains(id));
+        id
+    };
+
+    // The record is still in the WAL — nothing has rotated — so replay will meet it again.
+    let reopened = engine_at(tmp.path(), &root, 3600);
+    assert!(
+        !reopened.generation().buffer.contains(id),
+        "the row has geometry, so it must not come back into the buffer: the next flush would \
+         write it a second time, and `verdict` would answer from the buffer for an entity the \
+         fragment already covers"
+    );
+    assert!(
+        reopened.generation().buffer.is_empty(),
+        "and nothing else came back either"
+    );
+
+    // The geometry is still there, which is what makes the absence above a filter rather than a
+    // loss.
+    let bundle = tessera_store::open_bundle(&root).expect("the published bundle opens");
+    let partition = bundle.partitions.values().next().unwrap();
+    assert!(partition.slices["s0"].row_space.row_of(id).is_some());
+}
+
 /// **An acknowledged ingest becomes a mark on the map.** The property the flush exists for, and
 /// the one the read path could not serve until a tile could union its segments.
 ///

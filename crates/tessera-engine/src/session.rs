@@ -543,6 +543,17 @@ impl Engine {
             &dict,
             &initial_deny,
             |external_id| external_index.resolve(external_id),
+            // An entity belongs to exactly one slice, so "any slice's row space holds it" is the
+            // same question as "its slice's does" — and asking it this way needs no slice lookup,
+            // which the buffer would otherwise have to supply before it has been filtered.
+            |entity| {
+                bundle.partitions.values().any(|partition| {
+                    partition
+                        .slices
+                        .values()
+                        .any(|slice| slice.row_space.row_of(entity).is_some())
+                })
+            },
         )?;
 
         let plugin: Arc<dyn Plugin> = Arc::new(plugin);

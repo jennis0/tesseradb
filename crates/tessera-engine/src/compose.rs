@@ -5,7 +5,7 @@
 //! computed once — seconds at 10⁹ rows — and reused across every
 //! viewport and every `compose` call in that session, never recomputed on a per-viewport path.
 //!
-//! [`compose`] walks `L = keys(overlay) ∪ {buffered entities ≥ fragment.watermark}` exactly once
+//! [`compose`] walks `L = keys(overlay) ∪ keys(buffer)` exactly once
 //! per entity, resolving each with the fixed precedence `deleted > suppressed > evaluate_terms >
 //! buffered`, and turns the result into two row-space bitmaps against `base`:
 //! `minus = {row(e) : e fails} ∩ base` and `plus = {row(e) : e passes} ∖ base`. The `∩ base` /
@@ -378,7 +378,6 @@ fn verdict(
     overlay: &Overlay,
     buffer: &IngestBuffer,
     satisfied: &FxHashSet<TermId>,
-    watermark: u64,
     entity: EntityId,
 ) -> Option<bool> {
     if let Some(entry) = overlay.get(entity) {
@@ -391,11 +390,16 @@ fn verdict(
         };
     }
 
-    // Rule 4: buffered entities at or past the fragment's own watermark, with no overlay entry
-    // (handled above — an overlay entry, even a neutral one, takes precedence).
-    if entity.raw() < watermark {
-        return None;
-    }
+    // Rule 4: buffered entities with no overlay entry (handled above — an overlay entry, even a
+    // neutral one, takes precedence).
+    //
+    // **No watermark gate.** There used to be one, `entity < watermark → None`, guarding against a
+    // buffer that still held entities the fragment already accounts for. What made that reachable
+    // was replay re-buffering every retained WAL row; `WritePath::reconstruct` now drops any row
+    // whose entity already has geometry, so the buffer holds exactly the rows without it and a
+    // hit here cannot be an entity the fragment covers. The gate was also only ever *exact* while
+    // entity-allocation order and flush order coincided — one slice per partition — so removing it
+    // takes a silent multi-slice hazard out with it.
     buffer
         .get(entity)
         .map(|item| item.terms.iter().any(|t| satisfied.contains(t)))
@@ -404,22 +408,22 @@ fn verdict(
 /// Compose the effective mask for one request. See this module's doc for the precedence rule and
 /// the clamp rationale.
 ///
-/// `fragment` is consulted only for its `watermark` (the SEGMENTS watermark the frozen fragment
-/// was built against — a buffered entity below it would mean a bundle/WAL inconsistency and is
-/// excluded from `L` defensively, even though nothing actually produces one). `satisfied`
-/// is the viewer's granted term set (already resolved to `TermId`s by the auth plugin path).
+/// **The frozen fragment is not a parameter**: `base` is already its row-space projection, and an
+/// entity with no verdict falls through to `base` by construction. It used to be taken for its
+/// `watermark` alone, to gate rule 4; that gate is gone (see [`verdict`]), and with it the last
+/// reason for this function to see the fragment at all.
+///
+/// `satisfied` is the viewer's granted term set (already resolved to `TermId`s by the auth plugin
+/// path).
 /// `base` is the cached row-space projection (see [`RowProjection`]'s doc); `row_space` is used
 /// only for per-entity `row_of` lookups (O(log k), not the O(bound) `project` cost).
 pub fn compose(
-    fragment: &FrozenFragment,
     satisfied: &FxHashSet<TermId>,
     overlay: &Overlay,
     buffer: &IngestBuffer,
     base: Arc<RowProjection>,
     row_space: &RowSpace,
 ) -> EffectiveMask {
-    let watermark = fragment.watermark;
-
     let mut fail_rows: Vec<u32> = Vec::new();
     let mut pass_rows: Vec<u32> = Vec::new();
 
@@ -430,7 +434,7 @@ pub fn compose(
     // "no verdict" from scratch every time is what makes unsuppress a pure subtraction from
     // `minus` rather than a special case.
     for (&entity, _) in overlay.iter() {
-        if let Some(pass) = verdict(overlay, buffer, satisfied, watermark, entity) {
+        if let Some(pass) = verdict(overlay, buffer, satisfied, entity) {
             if let Some(row) = row_space.row_of(entity) {
                 if pass {
                     pass_rows.push(row.raw());
@@ -443,17 +447,14 @@ pub fn compose(
         }
     }
 
-    // Rule 4: buffered entities at or past the fragment's own watermark, with no overlay entry
-    // (an overlay entry — even a neutral one — takes precedence per the rule ordering above, and
-    // was already resolved, or deliberately given no verdict, in the loop above).
+    // Rule 4: buffered entities with no overlay entry (an overlay entry — even a neutral one —
+    // takes precedence per the rule ordering above, and was already resolved, or deliberately given
+    // no verdict, in the loop above).
     for (&entity, _) in buffer.iter() {
-        if entity.raw() < watermark {
-            continue;
-        }
         if overlay.get(entity).is_some() {
             continue;
         }
-        if let Some(pass) = verdict(overlay, buffer, satisfied, watermark, entity) {
+        if let Some(pass) = verdict(overlay, buffer, satisfied, entity) {
             if let Some(row) = row_space.row_of(entity) {
                 if pass {
                     pass_rows.push(row.raw());
@@ -518,7 +519,7 @@ pub fn visible_to(
     buffer: &IngestBuffer,
     entity: EntityId,
 ) -> bool {
-    verdict(overlay, buffer, satisfied, fragment.watermark, entity)
+    verdict(overlay, buffer, satisfied, entity)
         .unwrap_or_else(|| fragment.view().contains(entity_as_u32(entity)))
 }
 

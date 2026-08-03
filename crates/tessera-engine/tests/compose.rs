@@ -135,13 +135,13 @@ fn fragment_for(fx: &Fixture) -> Arc<FrozenFragment> {
         .unwrap()
 }
 
-/// Build a `FrozenFragment` handle and compose against `overlay`/`buffer`. Kept as a free
-/// function so every test composes through the exact same call.
+/// Compose against `overlay`/`buffer`. Kept as a free function so every test composes through the
+/// exact same call.
+///
+/// No `FrozenFragment` is built: `fx.base` is already its row-space projection, which is all
+/// `compose` reads. `visible_to` still takes one, and `fragment_for` still exists for it.
 fn compose_with(fx: &Fixture, overlay: &Overlay, buffer: &IngestBuffer) -> EffectiveMask {
-    let fragment = fragment_for(fx);
-
     compose(
-        &fragment,
         &fx.satisfied,
         overlay,
         buffer,
@@ -785,7 +785,6 @@ fn visible_to_agrees_with_compose_over_every_precedence_case() {
 
     let fragment = fragment_for(&fx);
     let mask = compose(
-        &fragment,
         &fx.satisfied,
         &overlay,
         &buffer,

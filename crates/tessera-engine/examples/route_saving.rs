@@ -102,9 +102,18 @@ fn main() {
             // Under saturation, serving everything means served == visible; needing selection means
             // served == cap < visible. Asserting this is what proves the two arms of the sweep are
             // actually hitting different branches.
-            let served = Selection::of(&mask, &SelectionParts::new(&[SelectionPart::base(&seg, ranges[0].0.clone(), ranges[0].1)]), &params, ranges[0].1)
-                .rows
-                .len();
+            let served = Selection::of(
+                &mask,
+                &SelectionParts::new(&[SelectionPart::base(
+                    &seg,
+                    ranges[0].0.clone(),
+                    ranges[0].1,
+                )]),
+                &params,
+                ranges[0].1,
+            )
+            .rows
+            .len();
             if v_per_tile == cap {
                 assert_eq!(
                     served, v_per_tile,
@@ -162,12 +171,22 @@ fn time(
 ) -> u128 {
     // Warm.
     for (r, vis) in ranges {
-        black_box(Selection::of(mask, &SelectionParts::new(&[SelectionPart::base(seg, r.clone(), *vis)]), params, *vis));
+        black_box(Selection::of(
+            mask,
+            &SelectionParts::new(&[SelectionPart::base(seg, r.clone(), *vis)]),
+            params,
+            *vis,
+        ));
     }
     let t0 = Instant::now();
     for _ in 0..reps {
         for (r, vis) in ranges {
-            black_box(Selection::of(mask, &SelectionParts::new(&[SelectionPart::base(seg, r.clone(), *vis)]), params, *vis));
+            black_box(Selection::of(
+                mask,
+                &SelectionParts::new(&[SelectionPart::base(seg, r.clone(), *vis)]),
+                params,
+                *vis,
+            ));
         }
     }
     t0.elapsed().as_nanos() / reps as u128
@@ -223,7 +242,6 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
     let base = Arc::new(RowProjection::new(&fragment, &perm));
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
     let mask = compose(
-        &fragment,
         &satisfied,
         &Overlay::default(),
         &IngestBuffer::default(),

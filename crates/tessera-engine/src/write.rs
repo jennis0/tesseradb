@@ -1270,6 +1270,7 @@ impl WritePath {
         dict: &Dict,
         initial_deny: &[(EntityId, ChangeOp)],
         resolve_from_bundle: impl Fn(&[u8]) -> std::result::Result<Option<EntityId>, StoreError>,
+        has_row: impl Fn(EntityId) -> bool,
     ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
 
@@ -1286,8 +1287,38 @@ impl WritePath {
             ))
         })?;
 
-        let (mut overlay, buffer, established, resolver) =
+        let (mut overlay, mut buffer, established, resolver) =
             replay(&records, dict, resolve_from_bundle).map_err(EngineError::Overlay)?;
+
+        // **The buffer holds exactly the rows that have no geometry, and this is where that becomes
+        // true.** Replay walks every retained WAL record, including the `IngestBatch` rows of every
+        // flush whose member has not yet been reclaimed — so without this the buffer comes back
+        // holding rows that already have segments, and the next flush writes each of them a second
+        // time under a second entity's worth of geometry.
+        //
+        // **The test is `row_of`, not a watermark.** A watermark is a cheap scalar proxy for "has a
+        // row", exact only while entity-allocation order and flush order coincide — that is, while
+        // there is one slice per partition, which flush §2.1 records as load-bearing and unenforced.
+        // The predicate below is what the watermark approximates, so it stays exact at any number of
+        // slices and needs no per-slice bookkeeping anywhere.
+        //
+        // It is also what `compose::verdict` now relies on. That function used to gate rule 4 on
+        // `entity < watermark` to stop a stale buffer answering for an entity the fragment already
+        // covers; the gate is gone, and this invariant is what replaces it.
+        let already_flushed: Vec<EntityId> = buffer
+            .iter()
+            .map(|(entity, _)| *entity)
+            .filter(|entity| has_row(*entity))
+            .collect();
+        if !already_flushed.is_empty() {
+            tracing::debug!(
+                count = already_flushed.len(),
+                "WAL rows that already have geometry were not re-buffered"
+            );
+        }
+        for entity in already_flushed {
+            buffer.remove(entity);
+        }
 
         // Seeded after `replay` rather than before it only because `replay` constructs the
         // overlay; the *semantics* are seed-then-union, and they are order-independent here

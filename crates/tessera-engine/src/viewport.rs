@@ -641,7 +641,6 @@ impl Engine {
         check_cancelled(&cancel)?;
 
         let mask = compose(
-            &fragment,
             &session.satisfied,
             &generation.overlay,
             &generation.buffer,

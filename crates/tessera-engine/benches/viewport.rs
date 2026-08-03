@@ -139,7 +139,6 @@ fn bench_compose(c: &mut Criterion) {
     c.bench_function("compose", |b| {
         b.iter(|| {
             compose(
-                &fragment,
                 &satisfied,
                 &overlay,
                 &buffer,

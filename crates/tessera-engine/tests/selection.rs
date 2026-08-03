@@ -134,14 +134,7 @@ fn mask_over_with(
 
     let base = Arc::new(RowProjection::new(&fragment, &perm));
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
-    let mask = compose(
-        &fragment,
-        &satisfied,
-        overlay,
-        &IngestBuffer::default(),
-        base,
-        &perm,
-    );
+    let mask = compose(&satisfied, overlay, &IngestBuffer::default(), base, &perm);
     (temp, mask)
 }
 
