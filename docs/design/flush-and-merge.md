@@ -96,10 +96,26 @@ conflate because both write a side-manifest:
 Immediacy is not a concession but the only workable answer: the deny lane is unbounded and can never
 be load-shed, so a sized deny cadence would be unvalidatable under an adversarial deny rate. Two
 consequences follow. `segments_version` must **not** move on an overlay publication, or every deny
-would rotate the row-projection cache key and cost a full projection rebuild. And the side-manifest
-`n` therefore advances faster than `segments_version` — which `read.rs` already tolerates and
-documents ("the two agree in every bundle a conforming writer produces, and where they do not it is
-the filename that decided").
+would rotate the row-projection cache key — and the patch path derives only from `segments_version −
+1`, so a burst larger than one deny window drops any session quiet through it to a full rebuild,
+measured at 10.7 s at 10⁹. And the side-manifest `n` therefore advances faster than
+`segments_version`.
+
+**The two counters are now different in kind, not merely in value.** `n` is the manifest sequence
+number, per partition, monotone, and lives in the filename alone — the manifest field that once
+duplicated it is deleted, because one name for two quantities is how they came to be conflated.
+`segments_version` is the *geometry* version: process-local, carried on the generation, and bumped
+only by a geometry publication. A reader takes `n` from the filename; nothing on disc carries the
+geometry version at all.
+
+**Immediate means at the close of the deny drain, not per window.** Architecture §3 (r23) budgets
+the write path at seconds to minutes with denies included, and grants latitude in *when* work is
+batched provided a deny's acknowledgement stays coupled to its application — which it does, at the
+window's own fsync and swap, upstream of publication. What forces the batching is not latency but
+bytes: a side-manifest is complete state, so publishing per window through a bulk revocation of *N*
+entities rewrites a growing set once per window, Θ(*N*²/window) on disc. One write per burst removes
+that. A floor publishes every 64 windows regardless, for the case where arrival outpaces application
+and the drain never closes.
 
 **Every geometry publication is on one cadence, and a completed merge rides along with the next flush
 publication.** One swap, one `segments_version` bump, one drain entry. Sizing flush and merge as

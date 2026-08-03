@@ -138,7 +138,6 @@ Each is **complete** for its partition — full current state, not a diff — so
 
 | Field | Type | Meaning |
 |---|---|---|
-| `segments_version` | int | = n |
 | `watermark` | u64 | entity high-water this partition's postings cover (§11.2) |
 | `entity_id_high_water` | u64 | allocator high-water as of this version |
 | `segments` | array | `[{slice, seg_id, row_count, entity_lo, entity_hi}]` in serving order |
@@ -151,7 +150,9 @@ Each is **complete** for its partition — full current state, not a diff — so
 
 Entity IDs appear here only inside their own partition's directory; `entity_lo`/`entity_hi` and high-waters are counter values, not item data (SA §6.6's argument). The stamp is the vector of per-partition *(prefix, n, watermark)*; single-partition deployments have a vector of one. The `watermark` component is **advisory** (status and debugging): I1 composition always uses the watermark of the mask fragment actually loaded. The stamp as a whole is advisory too — see §3.1 — and it never fixes authorisation state (lifecycle design §2.4).
 
-**⊘ `deltas`, `tombstones` and `deny` are parsed and honoured by nothing.** No read path acts on any of the three; the set of state fields the reader claims to act on is empty, and a tripwire test fails if that claim is edited without the machinery arriving. This is safe only while nothing *writes* them, which nothing does. It is what makes the disposition split below necessary rather than defensive: the reader cannot serve such a manifest, so it must decide, per field, between missing items and re-exposed ones.
+**`tombstones` and `deny` are written and honoured; `deltas` is parsed and honoured by nothing (⊘).** The two deny fields are serialised from the live overlay at **every** manifest write — a flush's and an accepted deny's alike — and never carried forward from the manifest being extended, which is what makes an unsuppress reach disc rather than a stale list republishing itself for ever. The reader seeds its overlay from them at open, and replays the WAL *over* that seed: every record postdates any state an honourable manifest carries, so a durable, acked unsuppress wins over the older manifest's suppression. `deltas` remains parsed-only, and a tripwire test fails if that claim is edited without the machinery arriving.
+
+**`n` is the manifest sequence number and lives in the filename alone.** This table carried a `segments_version` field defined as `= n`; it is deleted. It was redundant, the reader takes `n` from the filename, and its name collided with the *geometry* version — the counter identifying a segment set, which a row-projection cache key rotates on and which must **not** advance when a manifest is written for deny state alone. `n` therefore advances faster than the geometry version. A reader that carries the field forward from an older bundle is not wrong to; the type ignores unknown fields, so both shapes open.
 
 **Reader protocol.** Read `CURRENT` → fetch and digest-check `MANIFEST.json` → check `bundle_format` → per partition, walk `SEGMENTS-<n>.json` candidates highest-`n` first and take the first that is both **honourable** and **verifying**; a candidate whose listed `files` (or the MANIFEST `files` set) fail by size or digest is stepped past.
 
@@ -181,13 +182,18 @@ flowchart TD
 > freshness gate, which is itself unbuilt, so a replica in this state serves the older manifest
 > indefinitely with no operator signal.
 >
-> This is acceptable *only* because nothing writes `deny` yet. The deny writer and the freshness
-> gate must ship as one unit; separating them reintroduces exactly the fail-open the disposition
-> split exists to prevent.
+> **The deny writer has shipped and the freshness gate has not**, which an earlier revision of this
+> paragraph said must not happen. The condition it was protecting is narrower than the rule it
+> stated: all three residuals require a **replica** — a reader seeded from someone else's manifests
+> — and this deployment has one node, which replays its own WAL and treats the manifest as a seed
+> that replay overrides. What the gate bounds is how long a *badly synced replica* may serve a
+> stale manifest, and there is no replication. It ships with replication (owner ruling, 2026-08-03,
+> `docs/evidence/memos/2026-08-03-deny-lifecycle-design.md` §4), and until then the residual is
+> recorded rather than closed.
 
 Readiness requires a verifying manifest per partition **and** a freshness gate: `readyz` fails if the newest verifying `n` is older than the deployment's configured lag bound — unbounded step-down would let a badly synced replica serve long-deleted items as live.
 
-> **⊘ Specified, not implemented — the freshness gate.** Step-down itself is built, with the disposition split above. Its *time bound* is not: no lag bound is configured, nothing compares `n` against one, and the signal that a partition stepped down is carried to the readiness predicate and then read by nothing. A replica in a stepped-down state therefore serves the older manifest **indefinitely**. That is tolerable today only because nothing writes `deny` or `tombstones`, so the only reachable step-down is the `deltas` one, whose failure mode is missing items rather than re-exposed ones. Two consequences the reader must not assume away: readiness is not a freshness statement, and this is the gate that would have bounded the filename disagreement in §2.1 — a writer whose manifests this reader cannot find is indistinguishable, today, from a writer that has published nothing.
+> **⊘ Specified, not implemented — the freshness gate.** Step-down itself is built, with the disposition split above. Its *time bound* is not: no lag bound is configured, nothing compares `n` against one, and the signal that a partition stepped down is carried to the readiness predicate and then read by nothing. A replica in a stepped-down state therefore serves the older manifest **indefinitely**. What makes that tolerable is no longer that nothing writes `deny` — something does — but that nothing *replicates*: the one reader of these manifests is the node that wrote them, and it replays its own WAL over them. The gate becomes load-bearing the moment a second node reads a first node's manifests, and ships with it. Two consequences the reader must not assume away: readiness is not a freshness statement, and this is the gate that would have bounded the filename disagreement in §2.1 — a writer whose manifests this reader cannot find is indistinguishable, today, from a writer that has published nothing.
 
 
 

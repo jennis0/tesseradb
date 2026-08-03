@@ -584,10 +584,15 @@ fn ensure_verified(
 /// None is closable here, and none should be closed by guessing: an ordinary torn write must
 /// not become a hard partition failure, and a manifest whose bytes are unavailable tells the
 /// reader nothing about what it carried. **The bound on all three is time, and that bound does
-/// not exist yet** — the `readyz` freshness gate (contracts §2.3, roadmap O4) is a stage-2.2
-/// obligation, so today a replica in this state serves the older manifest indefinitely. That is
-/// acceptable *only* because nothing writes `deny` yet; the roadmap ships the deny writer and
-/// the freshness gate as one unit, and they must stay one unit.
+/// not exist yet** — the `readyz` freshness gate (contracts §2.3) is unbuilt, so a replica in this
+/// state serves the older manifest indefinitely.
+///
+/// **The deny writer has shipped and the gate has not**, which an earlier note here said must
+/// never happen. The rule was stated wider than the condition it protected: all three residuals
+/// require a *replica* — a reader seeded from a manifest it did not write — and this deployment
+/// has one node, which replays its own WAL over the seed. The gate bounds how stale a synced
+/// replica's view may be, and there is nothing to sync. It ships with replication (owner ruling,
+/// 2026-08-03).
 // `SEGMENTS-<n>.json`'s own `files` map, like `MANIFEST.json`'s, is keyed by paths relative to
 // the bundle *prefix* directory (R1: "manifest paths prefix-relative"), not to the partition
 // directory the side-manifest itself lives in — so verification is against `prefix_dir`, even
