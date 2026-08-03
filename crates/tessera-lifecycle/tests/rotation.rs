@@ -178,7 +178,7 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
 
     let (_wal, records) = Wal::open(&base).unwrap();
     let (overlay, _buffer, _established, _resolver) =
-        replay(&records, &dict, |_| Ok::<_, std::convert::Infallible>(None)).unwrap();
+        replay(&records, &dict, Overlay::new(), |_| Ok::<_, std::convert::Infallible>(None)).unwrap();
     assert!(
         overlay.is_suppressed(entity),
         "a suppression retires only on unsuppress — reclaiming its record must not retire it"

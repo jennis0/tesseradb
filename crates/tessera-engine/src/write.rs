@@ -1317,8 +1317,18 @@ impl WritePath {
             ))
         })?;
 
-        let (mut overlay, mut buffer, established, resolver) =
-            replay(&records, dict, resolve_from_bundle).map_err(EngineError::Overlay)?;
+        // **The manifests' deny state is the starting point, and replay runs over it.** Ordering,
+        // not aesthetics — see `replay`'s own doc: every WAL record postdates any state an
+        // honourable manifest carries, and the one op that needs the later record to win is
+        // `Unsuppress`. Seeding afterwards silently reverts an acked unsuppress on any restart in
+        // the publication gap.
+        let mut seed = Overlay::new();
+        for (entity, op) in initial_deny {
+            seed.apply(*entity, *op, None);
+        }
+
+        let (overlay, mut buffer, established, resolver) =
+            replay(&records, dict, seed, resolve_from_bundle).map_err(EngineError::Overlay)?;
 
         // **The buffer holds exactly the rows that have no geometry, and this is where that becomes
         // true.** Replay walks every retained WAL record, including the `IngestBatch` rows of every
@@ -1365,15 +1375,6 @@ impl WritePath {
                     buffer.set_wal_pos(row.entity_id, *position);
                 }
             }
-        }
-
-        // Seeded after `replay` rather than before it only because `replay` constructs the
-        // overlay; the *semantics* are seed-then-union, and they are order-independent here
-        // because a disposition is idempotent and neither source can un-set what the other set.
-        // (`Unsuppress` is the one op that clears, and no manifest carries one: `deny` is the
-        // current suppression set, so an unsuppressed entity is simply absent from it.)
-        for (entity, op) in initial_deny {
-            overlay.apply(*entity, *op, None);
         }
 
         let established_inverse: FxHashMap<EntityId, Vec<u8>> = established

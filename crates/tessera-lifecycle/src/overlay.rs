@@ -314,6 +314,7 @@ impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for OverlayError<
 pub fn replay<'a, E>(
     records: &[WalRecord],
     dict: &'a Dict,
+    seed: Overlay,
     resolve_from_bundle: impl Fn(&[u8]) -> std::result::Result<Option<EntityId>, E>,
 ) -> Result<
     (
@@ -324,7 +325,21 @@ pub fn replay<'a, E>(
     ),
     OverlayError<E>,
 > {
-    let mut overlay = Overlay::new();
+    // **The seed is the starting state, and replay runs over it — that order is load-bearing.**
+    // `seed` is what the partition manifests carry (`initial_deny_of`); every WAL record postdates
+    // it, because a manifest is only ever written above WAL durability and a member is only
+    // reclaimed after a manifest reflecting it is durable at a higher `n`. So a later record must
+    // win, and the one op that needs it to is `Unsuppress`: publication is deliberately off the ack
+    // path, so there is always a gap in which the newest manifest predates a durable, acked
+    // unsuppress. Seeding *after* replay would re-apply the retired suppression on every restart in
+    // that gap, and the next manifest write would make the reversion permanent — an acked
+    // disposition silently reverted. Fail-closed in direction (an item hidden, never leaked), but a
+    // violation of what the 200 asserts.
+    //
+    // Deletes are indifferent: nothing un-sets them, so either order gives the same answer. The
+    // idempotency the previous ordering rested on is untouched — applying a disposition twice still
+    // folds to the same state.
+    let mut overlay = seed;
     let mut buffer = IngestBuffer::new();
     let mut resolver = DescriptorResolver::new(dict);
     let mut established: FxHashMap<Vec<u8>, EntityId> = FxHashMap::default();
@@ -480,7 +495,7 @@ mod tests {
             descriptors: None,
         }];
 
-        let result = replay(&records, &dict, |_external_id| {
+        let result = replay(&records, &dict, Overlay::new(), |_external_id| {
             Ok::<_, std::convert::Infallible>(None)
         });
         assert_eq!(
@@ -526,10 +541,20 @@ mod tests {
             })
         };
 
-        let (once, _, established_once, _) =
-            replay(std::slice::from_ref(&suppress), &dict, resolve).unwrap();
-        let (twice, _, established_twice, _) =
-            replay(&[suppress.clone(), suppress], &dict, resolve).unwrap();
+        let (once, _, established_once, _) = replay(
+            std::slice::from_ref(&suppress),
+            &dict,
+            Overlay::new(),
+            resolve,
+        )
+        .unwrap();
+        let (twice, _, established_twice, _) = replay(
+            &[suppress.clone(), suppress],
+            &dict,
+            Overlay::new(),
+            resolve,
+        )
+        .unwrap();
 
         assert_eq!(
             once.is_suppressed(entity),
@@ -564,14 +589,15 @@ mod tests {
             descriptors: None,
         }];
 
-        let (overlay, _buffer, _established, _resolver) = replay(&records, &dict, |external_id| {
-            Ok::<_, std::convert::Infallible>(if external_id == b"from-a-previous-build" {
-                Some(bundle_entity)
-            } else {
-                None
+        let (overlay, _buffer, _established, _resolver) =
+            replay(&records, &dict, Overlay::new(), |external_id| {
+                Ok::<_, std::convert::Infallible>(if external_id == b"from-a-previous-build" {
+                    Some(bundle_entity)
+                } else {
+                    None
+                })
             })
-        })
-        .unwrap();
+            .unwrap();
 
         assert!(overlay.is_deleted(bundle_entity));
     }
@@ -614,10 +640,11 @@ mod tests {
             ],
         }];
 
-        let (_overlay, buffer, established, _resolver) = replay(&records, &dict, |_external_id| {
-            Ok::<_, std::convert::Infallible>(None)
-        })
-        .unwrap();
+        let (_overlay, buffer, established, _resolver) =
+            replay(&records, &dict, Overlay::new(), |_external_id| {
+                Ok::<_, std::convert::Infallible>(None)
+            })
+            .unwrap();
 
         assert!(
             established.is_empty(),

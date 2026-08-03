@@ -247,7 +247,7 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     }
 
     let (_wal, records) = Wal::open(&path).unwrap();
-    let (overlay, _buffer, _established, _resolver) = replay(&records, &dict, |ext| {
+    let (overlay, _buffer, _established, _resolver) = replay(&records, &dict, Overlay::new(), |ext| {
         Ok::<_, std::convert::Infallible>(if ext == b"ext-8" {
             Some(EntityId::new(8))
         } else {
