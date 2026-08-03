@@ -150,6 +150,15 @@ pub struct BufferedItem {
     pub x: f32,
     pub y: f32,
     pub scalars: Vec<WalScalar>,
+    /// The caller-supplied external id, or `None` for an item ingested without one (contracts
+    /// §3.4 r6) — carried because the **flush** is what writes it into the bundle's external-id
+    /// extent and locator, and the flush reads the buffer rather than the WAL.
+    ///
+    /// Without it a flushed item is addressable by its `tessera_id` alone the moment its WAL record
+    /// is reclaimed: the drill-down has nothing to answer with, and the ingest duplicate check has
+    /// nothing to collide against — which admits a byte-identical second copy that no external id
+    /// names, so no deny can ever reach it.
+    pub external_id: Option<Vec<u8>>,
     /// The sequence-global WAL position of the record this row arrived in — what a rotation
     /// reclaims below (flush §7.3).
     ///
@@ -201,6 +210,7 @@ impl IngestBuffer {
             row.entity_id,
             BufferedItem {
                 terms,
+                external_id: row.external_id.clone(),
                 slice: row.slice.clone(),
                 x: row.x,
                 y: row.y,

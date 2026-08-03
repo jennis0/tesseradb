@@ -217,7 +217,7 @@ pub(crate) fn execute_flush(
         .iter()
         .map(|(entity, item)| FlushRow {
             entity_id: *entity,
-            external_id: None,
+            external_id: item.external_id.clone(),
             x: item.x,
             y: item.y,
             scalars: item.scalars.iter().map(to_scalar_value).collect(),
@@ -462,6 +462,7 @@ mod tests {
             x: 0.5,
             y: 0.5,
             scalars: vec![WalScalar::U64(1)],
+            external_id: None,
             wal_pos: None,
         }
     }
