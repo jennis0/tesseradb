@@ -71,10 +71,11 @@ pub struct SegmentData {
 #[derive(Debug, Clone)]
 pub struct PartitionData {
     pub manifest: SegmentsManifest,
-    /// The `n` of the `SEGMENTS-<n>.json` actually served — taken from the **filename**, not
-    /// from the manifest's self-declared `segments_version`. The two agree in every bundle a
-    /// conforming writer produces, and where they do not it is the filename that decided which
-    /// candidate this reader walked to.
+    /// The `n` of the `SEGMENTS-<n>.json` actually served — taken from the **filename**, which is
+    /// the only place it is written. The manifest carried a `segments_version` field defined as
+    /// `= n`; it is gone, because the name collided with the *geometry* version, a different
+    /// counter that must not move when a manifest is written for deny state alone (see
+    /// `SegmentsManifest`'s doc).
     pub segments_n: u64,
     /// The highest `SEGMENTS-<n>.json` present for this partition at open, whether or not it
     /// was the one served.
@@ -114,6 +115,17 @@ pub struct Bundle {
     pub partitions: HashMap<String, PartitionData>,
 }
 
+/// A side-manifest together with the `n` it is published at.
+///
+/// **One value because they must never be supplied separately.** `n` lives in the filename and
+/// nothing inside the manifest carries it (see [`SegmentsManifest`]'s doc), so a caller holding
+/// the two apart can install a manifest under a number that does not describe it — and the number
+/// is what every later reader uses to decide which candidate it walked to.
+pub struct PublishedManifest {
+    pub manifest: SegmentsManifest,
+    pub n: u64,
+}
+
 impl Bundle {
     /// This bundle plus one segment in `(partition, slice)`: a **new** `Bundle` sharing every
     /// mapped file with this one.
@@ -139,9 +151,9 @@ impl Bundle {
         slice: &str,
         segment: SegmentData,
         extent: SegmentExtent,
-        manifest: SegmentsManifest,
+        published: PublishedManifest,
     ) -> Result<Arc<Bundle>> {
-        self.substituting(partition, slice, manifest, |slice_data| {
+        self.substituting(partition, slice, published, |slice_data| {
             let row_space = slice_data.row_space.with_extent(extent).ok_or_else(|| {
                 StoreError::MalformedBundle {
                     detail: format!(
@@ -173,9 +185,9 @@ impl Bundle {
         consumed: &[String],
         segment: SegmentData,
         extent: SegmentExtent,
-        manifest: SegmentsManifest,
+        published: PublishedManifest,
     ) -> Result<Arc<Bundle>> {
-        self.substituting(partition, slice, manifest, |slice_data| {
+        self.substituting(partition, slice, published, |slice_data| {
             let row_space = slice_data
                 .row_space
                 .collapsing(consumed, extent)
@@ -205,7 +217,7 @@ impl Bundle {
         &self,
         partition: &str,
         slice: &str,
-        manifest: SegmentsManifest,
+        published: PublishedManifest,
         replace: impl FnOnce(&SliceData) -> Result<SliceData>,
     ) -> Result<Arc<Bundle>> {
         let existing =
@@ -229,9 +241,13 @@ impl Bundle {
         entry.slices.insert(slice.to_string(), next_slice);
         // The served `n` and the highest candidate move together: this generation *is* the newest
         // manifest, so it is not stepped down, whatever the one it was built from was.
-        entry.segments_n = manifest.segments_version;
-        entry.highest_candidate_n = manifest.segments_version;
-        entry.manifest = manifest;
+        //
+        // **Passed in, not read off the manifest.** `n` lives in the filename (see
+        // `SegmentsManifest`'s doc for why the field that duplicated it is gone), so the only
+        // honest source for it here is the writer that allocated it.
+        entry.segments_n = published.n;
+        entry.highest_candidate_n = published.n;
+        entry.manifest = published.manifest;
 
         Ok(Arc::new(Bundle {
             manifest: self.manifest.clone(),

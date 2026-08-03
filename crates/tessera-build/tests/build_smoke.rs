@@ -216,7 +216,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     );
 
     let part = &bundle.partitions["default"];
-    assert_eq!(part.manifest.segments_version, 0);
+    assert_eq!(part.segments_n, 0);
     assert_eq!(part.manifest.watermark, N_ITEMS);
     assert_eq!(part.manifest.entity_id_high_water, N_ITEMS);
     assert_eq!(part.manifest.segments.len(), 1);

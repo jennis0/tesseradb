@@ -260,9 +260,21 @@ pub struct LocatorExtent {
 
 /// `SEGMENTS-<n>.json` (contracts §2.3): complete current state for one partition, written by
 /// that partition's worker only after every file it names is durable.
+///
+/// **`n` lives in the filename and nowhere else.** This struct carried a `segments_version` field
+/// defined as `= n`, which was redundant on its face and actively misleading in its name: the
+/// *geometry* version — the counter a row-projection cache key rotates on — is a different
+/// quantity, and it must **not** advance when an overlay publication writes a manifest carrying
+/// only new deny state (`flush-and-merge.md` §1.3; bumping it would cost every live session a
+/// measured 10.7 s row-projection rebuild per deny burst). Two counters with one name is how the
+/// two came to be conflated, so the redundant one is gone: the reader takes `n` from the filename,
+/// the writer allocates it, and the geometry version is process-local, carried by
+/// `Generation::segments_version` and no format field.
+///
+/// Old bundles still open: this type parses without `deny_unknown_fields`, so a `segments_version`
+/// key in an existing manifest is ignored rather than refused.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentsManifest {
-    pub segments_version: u64,
     pub watermark: u64,
     pub entity_id_high_water: u64,
     pub segments: Vec<SegmentDescriptor>,
@@ -461,7 +473,6 @@ mod tests {
 
     fn empty_segments_manifest() -> SegmentsManifest {
         SegmentsManifest {
-            segments_version: 0,
             watermark: 0,
             entity_id_high_water: 0,
             segments: Vec::new(),

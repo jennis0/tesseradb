@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use tessera_store::read::PublishedManifest;
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::{open_bundle, Bundle};
 use tessera_types::{EntityId, RowId};
@@ -26,7 +27,7 @@ fn an_incremental_bundle_shares_its_base_mappings() {
 
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let next = base
-        .with_segment(PARTITION, SLICE, seg, extent, next_manifest(&base, 3))
+        .with_segment(PARTITION, SLICE, seg, extent, PublishedManifest { manifest: next_manifest(&base, 3), n: &base.partitions[PARTITION].segments_n + 1 })
         .unwrap();
 
     let a = &base.partitions[PARTITION].slices[SLICE];
@@ -52,7 +53,7 @@ fn a_flushed_entity_resolves_and_the_base_is_untouched() {
 
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let next = base
-        .with_segment(PARTITION, SLICE, seg, extent, next_manifest(&base, 3))
+        .with_segment(PARTITION, SLICE, seg, extent, PublishedManifest { manifest: next_manifest(&base, 3), n: &base.partitions[PARTITION].segments_n + 1 })
         .unwrap();
 
     let before = &base.partitions[PARTITION].slices[SLICE].row_space;
@@ -100,11 +101,11 @@ fn a_merge_substitutes_the_consumed_segments() {
 
     let (s1, e1) = flush_segment(dir.path(), &base, 50, 2);
     let one = base
-        .with_segment(PARTITION, SLICE, s1, e1, next_manifest(&base, 2))
+        .with_segment(PARTITION, SLICE, s1, e1, PublishedManifest { manifest: next_manifest(&base, 2), n: &base.partitions[PARTITION].segments_n + 1 })
         .unwrap();
     let (s2, e2) = flush_segment(dir.path(), &one, 52, 2);
     let two = one
-        .with_segment(PARTITION, SLICE, s2, e2, next_manifest(&one, 2))
+        .with_segment(PARTITION, SLICE, s2, e2, PublishedManifest { manifest: next_manifest(&one, 2), n: &one.partitions[PARTITION].segments_n + 1 })
         .unwrap();
     assert_eq!(two.partitions[PARTITION].slices[SLICE].segments.len(), 3);
 
@@ -126,7 +127,7 @@ fn a_merge_substitutes_the_consumed_segments() {
                 row_base: 50,
                 rows: vec![0, 1, 2, 3],
             },
-            next_manifest(&two, 4),
+            PublishedManifest { manifest: next_manifest(&two, 4), n: &two.partitions[PARTITION].segments_n + 1 },
         )
         .unwrap();
 
@@ -166,7 +167,7 @@ fn a_merge_whose_inputs_are_absent_is_refused() {
         &["seg-that-never-existed".to_string()],
         seg,
         extent,
-        next_manifest(&base, 3),
+        PublishedManifest { manifest: next_manifest(&base, 3), n: &base.partitions[PARTITION].segments_n + 1 },
     );
     assert!(
         err.is_err(),
@@ -189,7 +190,7 @@ fn an_unknown_slice_is_refused() {
             "no-such-slice",
             seg,
             extent,
-            next_manifest(&base, 3)
+            PublishedManifest { manifest: next_manifest(&base, 3), n: 1 },
         )
         .is_err());
 }
@@ -204,7 +205,7 @@ fn the_original_generation_is_unchanged_by_a_publication() {
 
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let _next = base
-        .with_segment(PARTITION, SLICE, seg, extent, next_manifest(&base, 3))
+        .with_segment(PARTITION, SLICE, seg, extent, PublishedManifest { manifest: next_manifest(&base, 3), n: &base.partitions[PARTITION].segments_n + 1 })
         .unwrap();
 
     let slice = &base.partitions[PARTITION].slices[SLICE];

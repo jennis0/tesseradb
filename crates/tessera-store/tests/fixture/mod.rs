@@ -98,7 +98,6 @@ pub fn build_bundle(root: &Path, n: u64) {
     }
 
     let segments_manifest = SegmentsManifest {
-        segments_version: 0,
         watermark: n,
         entity_id_high_water: n,
         segments: vec![SegmentDescriptor {
@@ -236,7 +235,6 @@ pub fn flush_segment(
 /// tests exercise generation construction, not verification, which happened at `open_bundle`.
 pub fn next_manifest(bundle: &Bundle, added: u64) -> SegmentsManifest {
     let mut manifest = bundle.partitions[PARTITION].manifest.clone();
-    manifest.segments_version += 1;
     manifest.watermark += added;
     manifest.entity_id_high_water += added;
     manifest

@@ -126,7 +126,7 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
     let bundle = tessera_store::open_bundle(&root).expect("the published bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
     assert_eq!(
-        partition.manifest.segments_version, 1,
+        partition.segments_n, 1,
         "the reader settled on the flush-published side-manifest"
     );
     assert_eq!(

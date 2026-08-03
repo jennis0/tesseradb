@@ -114,6 +114,24 @@ impl Overlay {
         self.deleted.or(&self.suppressed)
     }
 
+    /// The suppression set, ascending — `SEGMENTS-<n>.json`'s `deny` field.
+    ///
+    /// Separate from [`Self::deleted_entities`] because the two manifest fields mean different
+    /// things and retire under different rules (lifecycle §3): a suppression leaves only by its
+    /// unsuppress, a tombstone only at the fold that executes it. [`Self::denied`] deliberately
+    /// hands out only the union, which is right for the row mask and wrong here — a writer that
+    /// published the union under one field would make every deletion look retirable by an
+    /// unsuppress.
+    pub fn suppressed_entities(&self) -> Vec<u64> {
+        self.suppressed.iter().map(u64::from).collect()
+    }
+
+    /// The deleted set, ascending — `SEGMENTS-<n>.json`'s `tombstones` field. See
+    /// [`Self::suppressed_entities`].
+    pub fn deleted_entities(&self) -> Vec<u64> {
+        self.deleted.iter().map(u64::from).collect()
+    }
+
     /// The entities carrying a predicate change — with the buffer, the whole of what `compose`
     /// still walks per request once the deny mask covers the rest.
     pub fn evaluate_keys(&self) -> impl Iterator<Item = EntityId> + '_ {

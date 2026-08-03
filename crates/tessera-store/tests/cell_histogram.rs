@@ -105,7 +105,6 @@ fn build_bundle(root: &Path) {
     }
 
     let segments_manifest = SegmentsManifest {
-        segments_version: 0,
         watermark: n,
         entity_id_high_water: n,
         segments: vec![SegmentDescriptor {

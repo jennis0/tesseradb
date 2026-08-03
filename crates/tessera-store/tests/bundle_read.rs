@@ -110,7 +110,6 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     );
 
     let segments_manifest = SegmentsManifest {
-        segments_version: 0,
         watermark: n,
         entity_id_high_water: n,
         segments: vec![SegmentDescriptor {
@@ -188,7 +187,7 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     assert_eq!(bundle.manifest.bundle_format, 1);
 
     let partition = bundle.partitions.get("default").expect("default partition");
-    assert_eq!(partition.manifest.segments_version, 0);
+    assert_eq!(partition.segments_n, 0);
 
     let slice = partition.slices.get("main").expect("main slice");
     assert_eq!(slice.segments.len(), 1);
@@ -582,7 +581,7 @@ fn a_candidate_with_no_deny_state_steps_down_and_serves() {
         open_bundle(dir.path()).expect("a candidate with no deny state may be stepped past");
     let partition = bundle.partitions.get("default").expect("default partition");
     assert_eq!(
-        partition.manifest.segments_version, 0,
+        partition.segments_n, 0,
         "must have stepped down to SEGMENTS-0, not opened SEGMENTS-1"
     );
     assert_eq!(
@@ -645,7 +644,7 @@ fn a_manifest_with_no_unhonourable_state_opens_at_the_highest_n() {
 
     let bundle = open_bundle(dir.path()).expect("a clean manifest must open");
     let partition = &bundle.partitions["default"];
-    assert_eq!(partition.manifest.segments_version, 1);
+    assert_eq!(partition.segments_n, 1);
     assert_eq!(partition.segments_n, 1);
     assert_eq!(partition.highest_candidate_n, 1);
     assert!(

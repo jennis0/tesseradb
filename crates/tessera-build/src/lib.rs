@@ -547,7 +547,6 @@ fn write_manifests(
     let bundle_bytes: u64 = manifest_files.values().map(|f| f.size).sum();
 
     let segments = SegmentsManifest {
-        segments_version: 0,
         watermark: n,
         entity_id_high_water: n,
         segments: vec![SegmentDescriptor {

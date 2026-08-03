@@ -82,6 +82,7 @@ use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
 use crate::geometry::{check_publishable, GeometryRefused};
 use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
+use tessera_store::manifest::{DenyEntry as ManifestDenyEntry, SegmentsManifest};
 use tessera_store::{Bundle, StoreError};
 use tessera_types::{EntityId, IdentityKey, TermId};
 
@@ -1497,6 +1498,8 @@ impl WritePath {
                     flush_max_age_secs: flush.max_age_secs,
                     flush_in_flight: Arc::new(AtomicBool::new(false)),
                     flush_attempt: 0,
+                    // Above every candidate present at open, per partition — see the field's doc.
+                    next_manifest_n: flush.next_manifest_n,
                     prefix_dir: flush.prefix_dir,
                     identity_key: flush.identity_key,
                     pool: flush.pool,
@@ -2205,6 +2208,9 @@ pub(crate) struct FlushDeps {
     /// one path by which a *caller* grows the dictionary, and so the one declared bound that is
     /// enforced rather than trusted. See `flush::promote`.
     pub(crate) max_distinct_terms: u64,
+    /// One past the highest `SEGMENTS-<n>.json` this bundle carries — the executor's manifest
+    /// counter seed. See [`Executor::next_manifest_n`].
+    pub(crate) next_manifest_n: u64,
 }
 
 /// The bundle's declared scalar tail, as the segment writer wants it.
@@ -2233,6 +2239,30 @@ fn scalar_schema_of(
 
 /// Every slice the bundle holds, across partitions. A flush plans per slice, because a segment's
 /// entity range is contiguous only within one (§2.1).
+/// Replace a manifest's deny fields with the overlay's live state.
+///
+/// **Serialised fresh at every write, never carried forward from another manifest.** A
+/// side-manifest is complete current state (contracts §2.3), and the two fields are the only ones
+/// whose truth lives outside the files the manifest names — so copying them from the manifest
+/// being extended would publish whatever was true when *that* one was written, indefinitely, and
+/// an unsuppress would never reach disc. The rule is one line here and it is the whole of what
+/// keeps a manifest a projection of live state rather than an input to the next one.
+///
+/// The two fields are taken from the two bitmaps separately, never from `Overlay::denied`'s union:
+/// they retire under different rules (lifecycle §3), and publishing the union under one field
+/// would make every deletion look retirable by an unsuppress.
+fn write_deny_state(manifest: &mut SegmentsManifest, overlay: &Overlay) {
+    manifest.deny = overlay
+        .suppressed_entities()
+        .into_iter()
+        .map(|entity_id| ManifestDenyEntry {
+            entity_id,
+            cause: "suppress".to_string(),
+        })
+        .collect();
+    manifest.tombstones = overlay.deleted_entities();
+}
+
 /// The one plan a dispatch sends, chosen by **oldest unflushed row**.
 ///
 /// Free and pure so the choice can be tested without an executor — and it is the choice, not the
@@ -2318,6 +2348,19 @@ struct Executor {
     /// Distinguishes two flush attempts at the same `segments_version` — see the `seg_id` this
     /// feeds.
     flush_attempt: u64,
+    /// The next `SEGMENTS-<n>.json` number to write, for the single partition this executor
+    /// publishes. Seeded at open from `highest_candidate_n + 1`.
+    ///
+    /// **One allocator, on the one thread that writes manifests.** `n` is per-partition, monotone
+    /// and never reused (contracts §2.3), and it must be allocated by whoever writes at it: a
+    /// number taken when a flush is *planned* is stale by the time that flush lands, because a
+    /// deny publication may have taken one during its flight — and a flush committed beneath the
+    /// newest manifest is a segment a restore never reads.
+    ///
+    /// Seeded from the highest *candidate*, not the served `n`, so a manifest stepped past for
+    /// failing verification is never overwritten. `write_segments_manifest` refuses to replace in
+    /// any case; seeding above means the refusal cannot arise.
+    next_manifest_n: u64,
     /// The bundle prefix directory a flush writes into. A flush publishes **inside the current
     /// prefix** — never `MANIFEST.json`, never `CURRENT` — which is what separates it from a
     /// compaction.
@@ -2599,14 +2642,18 @@ impl Executor {
                 self.live.descriptors_of(&novel)
             };
 
-            let next_n = partition_data.manifest.segments_version + 1;
+            // **A label, not an allocation.** `n` is allocated by the executor at publication
+            // (`next_manifest_n`), because a deny publication may take one while this flush is in
+            // flight. What the plan needs is a component that makes `seg_id` unique, and the
+            // sequence it was planned against is exactly that: contracts §2.1's never-reused
+            // property rests on this plus the attempt counter, as before.
+            let planned_at_n = partition_data.segments_n;
             contexts.push((
                 plan,
                 crate::flush::FlushContext {
                     prefix_dir: self.prefix_dir.clone(),
                     partition: partition.clone(),
                     slice: slice.clone(),
-                    next_n,
                     // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
                     // merge rebase ABA-safe — and the attempt counter is not decoration. `next_n`
                     // alone repeats whenever a flush is planned twice before it publishes, and the
@@ -2615,13 +2662,12 @@ impl Executor {
                     // makes every attempt's path distinct, so a re-plan writes beside the earlier
                     // one rather than through it, and the loser's files are orphans nothing
                     // references.
-                    seg_id: format!("flush-{next_n}-{}", self.next_flush_attempt()),
+                    seg_id: format!("flush-{planned_at_n}-{}", self.next_flush_attempt()),
                     row_base,
                     identity_key: self.identity_key,
                     shard_id: manifest.identity.shard_id,
                     quantisation: manifest.quantisation,
                     scalar_schema: scalar_schema.clone(),
-                    manifest: partition_data.manifest.clone(),
                     dict: Arc::clone(&generation.dict),
                     novel_descriptors,
                     max_distinct_terms: self.max_distinct_terms,
@@ -3293,6 +3339,13 @@ impl Executor {
         self.flush_attempt
     }
 
+    /// Take the next side-manifest number. See [`Executor::next_manifest_n`].
+    fn allocate_manifest_n(&mut self) -> u64 {
+        let n = self.next_manifest_n;
+        self.next_manifest_n += 1;
+        n
+    }
+
     fn next_window_seq(&mut self) -> u64 {
         self.window_seq += 1;
         self.window_seq
@@ -3919,12 +3972,61 @@ impl Executor {
             return;
         }
 
+        // **Assembled here, from the live partition manifest, and written before the swap.**
+        // Contracts §2.3 makes a side-manifest complete current state, and *current* is decided
+        // now rather than when the flush was planned: the deny fields come from the overlay this
+        // publication carries, so a suppression accepted during the flush's flight is in the
+        // manifest the flush publishes.
+        let Some(partition_data) = live.bundle.partitions.get(&completed.partition) else {
+            tracing::warn!(
+                partition = %completed.partition,
+                "discarding a completed flush for a partition this bundle no longer carries"
+            );
+            return;
+        };
+        let mut manifest = partition_data.manifest.clone();
+        let manifest_n = self.allocate_manifest_n();
+        manifest.watermark = completed.watermark;
+        manifest.entity_id_high_water = manifest
+            .entity_id_high_water
+            .max(completed.entity_id_high_water);
+        manifest.segments.push(completed.descriptor);
+        manifest.deltas.push(manifest_n);
+        manifest.external_id_runs.push(completed.external_id_run);
+        manifest.locator_extents.push(completed.locator_extent);
+        manifest.files.extend(completed.files);
+        if let Some(extent) = completed.dict_extent {
+            manifest.dict_extents.push(extent);
+        }
+        write_deny_state(&mut manifest, &live.overlay);
+
+        // **The commit point, and it is still the manifest** — only the thread moved. A failure
+        // here discards the flush: its files become orphans nothing references, the buffer is
+        // retained, the next tick re-plans. The same posture as every other flush failure, and
+        // the reason the write precedes the swap.
+        if let Err(e) = crate::flush::write_segments_manifest(
+            &self.prefix_dir,
+            &completed.partition,
+            manifest_n,
+            &manifest,
+        ) {
+            self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                error = %e,
+                "ALARM: a completed flush's side-manifest could not be committed; its files are                  orphans, the buffer is retained, and the next tick will re-plan"
+            );
+            return;
+        }
+
         let next_bundle = match live.bundle.with_segment(
             &completed.partition,
             &completed.slice,
             completed.segment,
             completed.extent,
-            completed.manifest,
+            tessera_store::read::PublishedManifest {
+                manifest,
+                n: manifest_n,
+            },
         ) {
             Ok(bundle) => bundle,
             Err(e) => {

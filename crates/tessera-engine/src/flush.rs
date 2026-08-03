@@ -153,17 +153,12 @@ pub(crate) struct FlushContext {
     pub(crate) prefix_dir: PathBuf,
     pub(crate) partition: String,
     pub(crate) slice: String,
-    /// The `n` this flush's side-manifest will be written at: one past the served one.
-    pub(crate) next_n: u64,
     pub(crate) seg_id: String,
     pub(crate) row_base: u32,
     pub(crate) identity_key: IdentityKey,
     pub(crate) shard_id: u32,
     pub(crate) quantisation: Quantisation,
     pub(crate) scalar_schema: Vec<(String, ScalarType)>,
-    /// The manifest this flush extends. Contracts §2.3 makes a side-manifest complete current
-    /// state for its partition, so the new one is this plus what the flush adds — never a diff.
-    pub(crate) manifest: SegmentsManifest,
     /// The dictionary the plan's terms were resolved against, and the one promotion extends.
     pub(crate) dict: Arc<Dict>,
     /// The descriptor bytes behind every **extension** term id this plan's items carry (§3.2).
@@ -199,7 +194,20 @@ pub(crate) struct CompletedFlush {
     pub(crate) consumed: Vec<EntityId>,
     pub(crate) segment: SegmentData,
     pub(crate) extent: SegmentExtent,
-    pub(crate) manifest: SegmentsManifest,
+    /// **The manifest's ingredients, not a manifest.** Contracts §2.3 makes a side-manifest
+    /// complete current state for its partition, and *current* is decided at publication: the
+    /// executor assembles this into the live partition manifest, with deny fields serialised
+    /// fresh from the overlay of the generation being published. A manifest cloned at plan time
+    /// would carry the deny state of a snapshot the flush's own flight has outlived.
+    pub(crate) descriptor: tessera_store::manifest::SegmentDescriptor,
+    pub(crate) watermark: u64,
+    pub(crate) entity_id_high_water: u64,
+    pub(crate) external_id_run: String,
+    pub(crate) locator_extent: tessera_store::manifest::LocatorExtent,
+    /// `Some` iff this flush promoted (§3.2); its digest is already in `files`.
+    pub(crate) dict_extent: Option<DictExtent>,
+    /// Every file this flush wrote, prefix-relative, with its digest — computed on the pool.
+    pub(crate) files: std::collections::BTreeMap<String, FileDigest>,
     pub(crate) tier: Arc<DeltaTier>,
     /// The dictionary including this flush's promotions (§3.2), republished with the geometry.
     pub(crate) dict: Arc<Dict>,
@@ -277,27 +285,27 @@ pub(crate) fn execute_flush(
     let tier =
         Arc::new(DeltaTier::open(&tier_path).map_err(|e| FlushFailed(format!("tier: {e}")))?);
 
-    // ---- the side-manifest: the commit point ------------------------------------------------
-    let mut manifest = ctx.manifest.clone();
-    manifest.segments_version = ctx.next_n;
-    manifest.watermark = out.watermark;
-    manifest.entity_id_high_water = manifest.entity_id_high_water.max(out.entity_id_high_water);
-    manifest.segments.push(out.segment.clone());
-    manifest.deltas.push(ctx.next_n);
-    manifest.external_id_runs.push(out.external_id_run);
-    manifest.locator_extents.push(out.locator_extent);
-    manifest.files.extend(out.files);
-    manifest
-        .files
-        .insert(tier_rel, digest_of(&tier_path).map_err(FlushFailed)?);
-    if let Some(extent) = promotion.extent {
-        manifest.files.insert(
-            extent.path.clone(),
-            digest_of(&ctx.prefix_dir.join(&extent.path)).map_err(FlushFailed)?,
-        );
-        manifest.dict_extents.push(extent);
-    }
-    write_segments_manifest(&ctx.prefix_dir, &ctx.partition, ctx.next_n, &manifest)?;
+    // ---- the manifest's ingredients, not the manifest ---------------------------------------
+    //
+    // **This function no longer writes the side-manifest.** It computes everything the manifest
+    // will name — the files and their digests, all on the pool where the IO belongs — and the
+    // executor assembles and writes it at publication (`Executor::publish_flush`). Two reasons,
+    // both structural. `n` cannot be allocated here: a deny publication may take one while this
+    // flush is in flight, and a manifest committed at a lower `n` than the newest is a manifest a
+    // restore never reads — the segment silently lost. And the deny fields must reflect the
+    // overlay at *publication*, not at plan time, which is a thing only the executor holds.
+    let mut files = out.files;
+    files.insert(tier_rel, digest_of(&tier_path).map_err(FlushFailed)?);
+    let dict_extent = match promotion.extent {
+        Some(extent) => {
+            files.insert(
+                extent.path.clone(),
+                digest_of(&ctx.prefix_dir.join(&extent.path)).map_err(FlushFailed)?,
+            );
+            Some(extent)
+        }
+        None => None,
+    };
 
     let seg_dir = segment_dir(&ctx);
     let segment = SegmentData {
@@ -315,7 +323,13 @@ pub(crate) fn execute_flush(
         consumed,
         segment,
         extent: out.extent,
-        manifest,
+        descriptor: out.segment,
+        watermark: out.watermark,
+        entity_id_high_water: out.entity_id_high_water,
+        external_id_run: out.external_id_run,
+        locator_extent: out.locator_extent,
+        dict_extent,
+        files,
         tier,
         dict: promotion.dict,
         promoted_from_dict_len: promoted_from,
@@ -514,7 +528,7 @@ fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
 /// property — `SEGMENTS-<n>.json` existing at all means it is complete — is unchanged. A crash
 /// between the link and the unlink leaves a `.tmp` orphan, which is the same orphan story every
 /// stage before this one already accepts.
-fn write_segments_manifest(
+pub(crate) fn write_segments_manifest(
     prefix_dir: &Path,
     partition: &str,
     n: u64,
@@ -688,7 +702,6 @@ mod tests {
     /// two writers' manifests are distinguishable in the committed bytes.
     fn manifest_fixture() -> SegmentsManifest {
         SegmentsManifest {
-            segments_version: 4,
             watermark: 0,
             entity_id_high_water: 0,
             segments: Vec::new(),
