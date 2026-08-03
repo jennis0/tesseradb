@@ -195,20 +195,23 @@ fn b_suppress_visible_entity_drops_count_and_visibility() {
     assert!(mask.check_structural_invariants());
 }
 
-/// **An unsuppress on a still-buffered item makes it visible immediately** — a behaviour change,
-/// accepted deliberately, and named here because it is the one direction that cannot be walked back
-/// quietly.
+/// **An unsuppress restores the ordinary path, and does not publish anything.**
 ///
-/// Under the old single-map overlay, `suppress → unsuppress` left an entry whose every fact was
-/// inactive, and `verdict` gave any entry precedence over the ingest buffer — so the item stayed
-/// hidden until a flush gave it geometry. Three independent stores make that husk unrepresentable:
-/// the unsuppress removes the id from the suppression bitmap, nothing else ever held it, and the
-/// entity falls through to the buffer where its own terms decide.
+/// Suppression is a set, and composition subtracts it. Removing an entity from that set stops it
+/// being subtracted — nothing more. What made this worth a test is that the old representation did
+/// something *else* at the same time: `suppress → unsuppress` left an entry with no active fact,
+/// and `verdict` treated the mere presence of an entry as "the fragment decides". A buffered item
+/// is in no fragment, so it read as invisible — hidden by a leftover data structure, after the
+/// suppression that justified hiding it had been lifted.
 ///
-/// Lifecycle §3.1 always said "unsuppress removes the entry". The old code did not, and the
-/// difference was invisible because nothing tested an unsuppress *before* a flush.
+/// So the item is not revealed by the unsuppress; it stops being hidden by the husk. Lifecycle
+/// §3.1 always said "unsuppress removes the entry", and the old code kept one.
+///
+/// **Observable only through `visible_to`** — `/v1/items`' one-bit test. A buffered item has no row
+/// in any segment, so it contributes to no tile and no count either way, and a viewport cannot tell
+/// the difference.
 #[test]
-fn an_unsuppress_before_the_first_flush_reveals_the_item_rather_than_waiting_for_geometry() {
+fn an_unsuppress_restores_the_buffered_items_own_verdict_rather_than_leaving_a_husk() {
     let fx = build_fixture();
     let entity = e(EVAL_WIDEN);
     assert!(!fx.fragment_entities.contains(&(EVAL_WIDEN as u32)));

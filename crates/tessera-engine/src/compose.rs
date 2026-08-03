@@ -388,8 +388,8 @@ fn verdict(
         return Some(predicate.terms.iter().any(|t| satisfied.contains(t)));
     }
 
-    // Rule 4: buffered entities with no overlay entry (handled above — an overlay entry, even a
-    // neutral one, takes precedence).
+    // Rule 4: buffered entities the overlay has no opinion on (anything it does have an opinion on
+    // was resolved above).
     //
     // **No watermark gate.** There used to be one, `entity < watermark → None`, guarding against a
     // buffer that still held entities the fragment already accounts for. What made that reachable
