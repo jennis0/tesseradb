@@ -5,11 +5,10 @@
 //! a **restart**, because that is the only state in which the live external-id map — rebuilt from
 //! whatever WAL records survived — no longer covers what a flush published.
 //!
-//! **Two of the three are `#[ignore]`d, and the reasons are recorded at each rather than here.**
-//! The flush now carries external ids into its segment, so the extent and the locator it publishes
-//! are populated; what is missing is on the **read** side, and one half of it is a contract question
-//! rather than a gap to fill in. Neither test asserts anything weaker than it should — they are the
-//! tests that will pass when the reader catches up, kept visible rather than deferred to a backlog.
+//! **One of the three is still `#[ignore]`d**, with the reason recorded at it: nothing consults the
+//! locator extent a flush publishes, so the reverse direction still answers `InvalidSidecar` past
+//! the build locator's end. It asserts nothing weaker than it should — it is the test that will pass
+//! when the reader catches up, kept visible rather than deferred to a backlog.
 
 mod common;
 
@@ -129,14 +128,12 @@ fn a_flushed_item_answers_items_after_rotation_and_a_restart() {
 /// the live map's copy — so after a restart the flushed extent is the only place the id exists. The
 /// failure this guards is the worst one the write path documents: a byte-identical copy of a
 /// document that no external id names, so no deny can ever reach it.
-/// **⊘ Blocked on a contract question, not on an implementation gap.** Contracts §2.4 requires
-/// external-id extents to partition **one** ascending order — `scan_run_keys` refuses a set that does
-/// not, and the reader's "open the one extent a key falls in" protocol depends on it. A flush
-/// appends keys in whatever order callers supplied them, so its extent cannot honour that against
-/// the build's. See this file's module doc and the handover; the resolution is an owner's.
+/// This is the case that could not pass while contracts §2.4 required external-id files to
+/// partition one ascending order: a flush's keys interleave with the build's, so the run it
+/// publishes was refused outright. §2.4 now says runs are ordered only within themselves, and the
+/// reader searches every run whose own bounds admit the key.
 #[test]
-#[ignore = "flush extents cannot satisfy contracts §2.4's cross-extent ordering"]
-fn a_duplicate_external_id_is_caught_against_a_flushed_extent() {
+fn a_duplicate_external_id_is_caught_against_a_flushed_run() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = fixture(tmp.path());
     flushed_then_rotated(tmp.path(), &root, "ext-1");

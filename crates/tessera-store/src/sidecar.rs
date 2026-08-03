@@ -334,29 +334,42 @@ struct RunKeyScan {
     bounds: Vec<Option<ExtentBounds>>,
 }
 
-/// Peek every run's bounds, in order, validating that non-empty runs partition one
-/// ascending order across the whole family (Critical: cross-run ordering must be validated,
-/// not assumed — point 4). Fresh on every call: no cache (Ruling B).
+/// Peek every run's bounds, in order. Fresh on every call: no cache (Ruling B).
+///
+/// **Runs are not ordered against one another, and this deliberately does not check that they
+/// are** (contracts §2.4). A run is sorted by *caller-supplied* keys, and a flush appends whatever
+/// keys it was given — so a flush's range interleaves with the build's, and demanding a partition
+/// would refuse the arrangement §2.4 prescribes. An earlier revision required exactly that, and
+/// with it no flush-published run could ever be read.
+///
+/// What survives is each run's **own internal** sortedness, which is a real property and is
+/// verified where it matters: at [`ResidentRun`] load, before any answer leaves the run. The bounds
+/// peeked here are therefore a *filter* — which runs could contain this key — not a selector.
 fn scan_run_keys(descs: &[RunDesc]) -> Result<RunKeyScan> {
     let mut bounds = Vec::with_capacity(descs.len());
-    let mut prev_non_empty: Option<(usize, Vec<u8>)> = None;
-    for (idx, desc) in descs.iter().enumerate() {
-        let this = peek_bounds(&desc.path)?;
-        if let Some((first, last, _)) = &this {
-            if let Some((prev_idx, prev_last)) = &prev_non_empty {
-                if prev_last.as_slice() >= first.as_slice() {
-                    return Err(StoreError::InvalidSidecar {
-                        path: desc.path.clone(),
-                        detail: format!(
-                            "run {prev_idx}'s last key is not strictly less than run \
-                             {idx}'s first key — runs must partition one ascending order"
-                        ),
-                    });
-                }
+    for desc in descs {
+        let peeked = peek_bounds(&desc.path)?;
+        // **A run whose first key exceeds its last is not sorted, and must fail closed here rather
+        // than be filtered out.** The filter below trusts `first <= key <= last` to mean "this run
+        // cannot hold the key"; on a run where the bounds are inverted that reasoning is backwards,
+        // and every lookup would skip it and answer `None` — a mis-resolved id denies the wrong
+        // entity while leaving the intended target visible (Critical C-1).
+        //
+        // This is a cheap necessary condition, not the sortedness proof: the full check runs at
+        // `ResidentRun` load, before any answer leaves the run. What it buys is that an unsorted
+        // run can never be silently *excluded* on the strength of bounds that do not mean what the
+        // filter assumes.
+        if let Some((first, last, _)) = &peeked {
+            if first > last {
+                return Err(StoreError::InvalidSidecar {
+                    path: desc.path.clone(),
+                    detail: "this run's first key exceeds its last, so it is not sorted; a lookup \
+                             must not skip it on bounds that cannot be trusted"
+                        .to_string(),
+                });
             }
-            prev_non_empty = Some((idx, last.clone()));
         }
-        bounds.push(this);
+        bounds.push(peeked);
     }
     Ok(RunKeyScan { bounds })
 }
@@ -549,15 +562,28 @@ impl ExternalIdSidecar {
         let plain: Vec<RunDesc> = self.runs.iter().map(|e| e.desc.clone()).collect();
         let scan = scan_run_keys(&plain)?;
 
-        let Some(idx) = scan.bounds.iter().position(|b| {
-            b.as_ref()
-                .is_some_and(|(_, last, _)| last.as_slice() >= external_id)
-        }) else {
-            return Ok(None);
-        };
-
-        let run = self.runs[idx].get_or_load()?;
-        Ok(run.resolve(external_id))
+        // **Every run whose own bounds could contain the key, not the first one past it.** Runs are
+        // not ordered against one another (contracts §2.4), so `first_key <= id <= last_key` is a
+        // filter and never a selector: taking the first run whose last key clears the target would
+        // answer from whichever run happened to be listed earliest, and miss the one that holds it.
+        //
+        // The filter still does the work it was built for — a run whose range excludes the key is
+        // never opened, verified or mapped — so the common case is unchanged. What changes is the
+        // worst case, which is why §2.4 makes merge's coalescing of runs the bound on how many
+        // there can be.
+        for (idx, bound) in scan.bounds.iter().enumerate() {
+            let Some((first, last, _)) = bound else {
+                continue;
+            };
+            if external_id < first.as_slice() || external_id > last.as_slice() {
+                continue;
+            }
+            let run = self.runs[idx].get_or_load()?;
+            if let Some(entity) = run.resolve(external_id) {
+                return Ok(Some(entity));
+            }
+        }
+        Ok(None)
     }
 
     /// Resolve many external ids in one batched pass over the bundle — `/control/ingest`'s
@@ -579,32 +605,37 @@ impl ExternalIdSidecar {
         let plain: Vec<RunDesc> = self.runs.iter().map(|e| e.desc.clone()).collect();
         let scan = scan_run_keys(&plain)?;
 
-        // Sort input indices by key (not the keys themselves) so results can still be returned
-        // in the caller's original order.
-        let mut order: Vec<usize> = (0..external_ids.len()).collect();
-        order.sort_by(|&a, &b| external_ids[a].cmp(&external_ids[b]));
-
-        // Runs partition one ascending order (scan_run_keys already checked this), and `order`
-        // visits keys ascending too, so the run cursor only ever moves forward — one pass,
-        // each run opened at most once.
-        let mut extent_idx = 0usize;
-        for i in order {
-            let key = &external_ids[i];
-            while extent_idx < scan.bounds.len()
-                && !scan.bounds[extent_idx]
-                    .as_ref()
-                    .is_some_and(|(_, last, _)| last.as_slice() >= key.as_slice())
-            {
-                extent_idx += 1;
-            }
-            if extent_idx >= scan.bounds.len() {
-                // Past every run's last key: absent from the bundle, and so is every key
-                // still to come (they only get larger) — but other, smaller-sorted keys already
-                // resolved above may still be valid, so keep going rather than returning early.
+        // **Runs in the outer loop, keys in the inner one.** Runs are not ordered against one
+        // another (contracts §2.4), so the old single-forward-cursor walk — which assumed each key
+        // could be answered by advancing past runs whose last key was too small — is not merely
+        // slower here, it is wrong: it would step past the run that holds the key.
+        //
+        // This ordering keeps the property the batched path exists for, which is that a run is
+        // opened, verified and mapped **at most once** however many keys fall inside it. The added
+        // cost is O(runs x keys) byte comparisons against no I/O at all, and a run whose range
+        // admits no key in the batch is still never opened.
+        //
+        // `results[i].is_none()` is the early-out: an external id names one entity and the ingest
+        // duplicate check refuses a second (contracts §3.1), so a key found in one run cannot be in
+        // another, and later runs need not reconsider it.
+        for (idx, bound) in scan.bounds.iter().enumerate() {
+            let Some((first, last, _)) = bound else {
+                continue;
+            };
+            let candidates: Vec<usize> = (0..external_ids.len())
+                .filter(|&i| {
+                    results[i].is_none()
+                        && external_ids[i].as_slice() >= first.as_slice()
+                        && external_ids[i].as_slice() <= last.as_slice()
+                })
+                .collect();
+            if candidates.is_empty() {
                 continue;
             }
-            let run = self.runs[extent_idx].get_or_load()?;
-            results[i] = run.resolve(key);
+            let run = self.runs[idx].get_or_load()?;
+            for i in candidates {
+                results[i] = run.resolve(&external_ids[i]);
+            }
         }
         Ok(results)
     }
@@ -963,19 +994,23 @@ mod tests {
     }
 
     #[test]
-    fn rejects_extents_out_of_order_relative_to_each_other() {
-        // Each run is individually sorted ascending, but run 1's keys all precede run
-        // 0's — a shuffled run *list*, not a shuffled run. Point 4: this must be validated,
-        // not assumed, or a shuffled list silently resolves every lookup to `None`.
+    fn resolves_across_runs_that_are_not_ordered_against_each_other() {
+        // Each run is individually sorted, and run 1's keys all precede run 0's. That is a
+        // **legitimate** arrangement, not a shuffled list: runs are keyed by data the caller
+        // supplied, so a flush's keys interleave with the build's (contracts §2.4). An earlier
+        // revision required the runs to partition one ascending order and refused this outright,
+        // which meant no flush-published run could ever be read.
         let dir = tempfile::TempDir::new().unwrap();
         let d0 = sorted_extent(dir.path(), "external-ids-0.arrow", &[(vec![5, 0, 0, 0], 0)]);
         let d1 = sorted_extent(dir.path(), "external-ids-1.arrow", &[(vec![1, 0, 0, 0], 1)]);
         let s = ExternalIdSidecar::deferred(vec![d0, d1]);
-        let err = s.resolve(&[1, 0, 0, 0]).unwrap_err();
-        assert!(
-            matches!(err, StoreError::InvalidSidecar { .. }),
-            "got {err:?}"
+        assert_eq!(
+            s.resolve(&[1, 0, 0, 0]).unwrap(),
+            Some(EntityId::new(1)),
+            "the key lives in the run listed second, and nothing about the listing order says so"
         );
+        assert_eq!(s.resolve(&[5, 0, 0, 0]).unwrap(), Some(EntityId::new(0)));
+        assert_eq!(s.resolve(&[9, 0, 0, 0]).unwrap(), None);
     }
 
     #[test]
