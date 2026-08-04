@@ -5,7 +5,7 @@
 //! every external id still resolves to the same entity; and geometry does not move — no
 //! `segments_version` bump, so no projection is invalidated and no session pays anything.
 //!
-//! The selection rules themselves are unit-tested beside the code (`src/coalesce.rs`); what needs a
+//! The selection rules themselves are unit-tested beside the code (`crates/tessera-engine/src/coalesce.rs`); what needs a
 //! whole engine is that a published coalesce is *live* — the generation's tier list and the
 //! process's external-id sidecar both swapped, rather than a manifest edit the running process
 //! keeps ignoring until its next restart.

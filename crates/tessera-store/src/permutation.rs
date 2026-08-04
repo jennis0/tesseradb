@@ -442,16 +442,24 @@ impl SegmentExtent {
 
     /// This extent's contribution to a projection: the rows of every entity of `mask` that falls
     /// inside it. Nothing else in `mask` can be answered here, so nothing else is looked at.
+    ///
+    /// **It seeks to `entity_lo` rather than skipping up to it, and the difference is the whole
+    /// cost of a flush's patch.** An extent's entities are the newest in the partition, so they
+    /// sit at the top of the mask; a walk from the mask's start pays O(mask cardinality) to reach
+    /// them — *measured* 79 ms per extent against a 25 M-entity grant at 10⁸
+    /// (`probes/2026-08-04-refresh-ladder/`), which is the patch's cost being a function of the
+    /// grant's width rather than of the flush's size. `reset_at_or_after` costs O(containers
+    /// skipped), which is the cost model this index is designed against
+    /// (`CLAUDE.md`: bitmap operations cost O(containers touched), not O(cardinality)).
     fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         let mut rows: Vec<u32> = Vec::new();
         // `entity_hi` is inclusive and the range end is exclusive; both ends are already inside
         // `u32` because a `mask` is entity-space and entity ids are capped at `u32::MAX` (I9).
         let lo = u32::try_from(self.entity_lo).unwrap_or(u32::MAX);
         let hi = u32::try_from(self.entity_hi).unwrap_or(u32::MAX);
-        for entity in mask.iter() {
-            if entity < lo {
-                continue;
-            }
+        let mut iter = mask.iter();
+        iter.reset_at_or_after(lo);
+        for entity in iter {
             if entity > hi {
                 break;
             }

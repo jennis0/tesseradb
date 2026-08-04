@@ -1,0 +1,18 @@
+# refresh_probe — P1/P2 for decision 0044
+entities=100000000 grant=0.25 flush_rows=100000 merge_width=4
+threads=12
+
+## P1 — projection ladder
+grant: 25000000 entities, 12.51 MB serialised
+rebuild:          270.7 ms   (25100000 rows, 12.56 MB)
+clone (patch's fixed cost)     median     1.166 ms   max     6.491 ms
+union over one new extent      median     0.198 ms   max     0.268 ms
+span rebase over a merge       median     1.911 ms   max     7.477 ms
+ratio: rebuild / span_rebase = 142x
+
+## P2 — fragment build vs tier count
+fragment build,   0 tiers      median    18.301 ms   max    19.175 ms
+fragment build,   1 tiers      median    18.421 ms   max    18.648 ms
+fragment build,   8 tiers      median    18.150 ms   max    18.378 ms
+fragment build,  64 tiers      median    19.919 ms   max    20.266 ms
+fragment build, 512 tiers      median    21.054 ms   max    22.054 ms
