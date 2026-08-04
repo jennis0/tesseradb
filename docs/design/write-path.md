@@ -361,7 +361,8 @@ then-current generation** rather than the one the work was planned against:
 - a **flush** removes exactly the entity ids it consumed from the live buffer — never a range,
   which would take late arrivals with it — and appends its segment;
 - a **merge** publishes only if every input `seg_id` is still present — ABA-safe because
-  `seg_id`s are never reused (contracts §2.1). ⊘ Merge publication is not built (spec §7).
+  `seg_id`s are never reused (contracts §2.1) — and an entity-space **coalesce** only if every
+  path it consumed is still listed, by the same argument (spec §7).
 
 **At most one flush is in flight.** A tick arriving while one runs is skipped, not queued — two
 concurrent flushes would double-consume the buffer — and skips are counted and alarmed, because
@@ -623,7 +624,8 @@ the records that carried allocations can never let a restart reissue an entity i
   post-flush answer differs from the pre-flush one only by rows that did not exist (a flush
   invalidates nothing a client holds — a tile is a Morton prefix, an item is a `tessera_id`,
   both resolve against any generation).
-- **Sessions holding unresolved descriptors** become *stale* in §3.3's sense when a flush
+- **Sessions holding unresolved descriptors** become *stale* — a different mechanism from the
+  geometry staleness stamp two bullets up, and the two must not be conflated — when a flush
   promotes any term: `unresolved_count > 0 && dict.len() > dict_len_at_authorise` — two loads
   and a branch, evaluated lazily, never swept (decision 0035). It over-reports in the safe
   direction (any promotion hints every such session), moves in one direction only (a stale
@@ -1010,11 +1012,10 @@ a function of the bytes rather than of the segments. Tier coalescence, ≈2–3�
 is still modelled — its inputs are postings rather than rows and the probe's shape does not
 transfer. Nothing bounds the **sum** when a flush, a merge and a coalesce overlap on the pool.
 
-**The base segment and the build run are excluded by consequence, not rule**: a merge's inputs
-are flush segments; swallowing the base pays compaction's entire cost (a full permutation
+**The base segment and the build run are excluded, and by two independent things**: a merge's
+inputs are flush segments; swallowing the base pays compaction's entire cost (a full permutation
 rewrite, up to 10⁹ rows of columns) and banks none of its benefit, and base files live in
-`MANIFEST.files`, so consuming them means a new prefix — compaction under another name. The
-enforced relation: `max_merged_segment_bytes` strictly below the base segment's size. The base
+`MANIFEST.files`, so consuming them means a new prefix — compaction under another name. The base
 locator needs no repair: its ordinals all resolve inside run 0, which no merge ever consumes,
 provided run 0 stays listed first — an invariant with an assertion, not a rewrite.
 
@@ -1074,10 +1075,15 @@ in place**, contiguity required, because recency is list position and 0047 resol
 And the **deny mask is re-derived** over the new row space, never carried forward: a denied row id
 inside the span names a different entity afterwards.
 
-**The base segment is excluded structurally rather than by the size relation.** Selection runs over
-the *extent list*, and the base is the one segment with no extent — `permutation.bin` addresses it
-— so `max_merged_segment_bytes` is a cost bound and nothing more. The relation this section
-previously called enforced is no longer load-bearing.
+**The base segment is excluded twice over, and the second guard is not redundant.** Selection runs
+over the **extent list**, and the base is the one segment with no extent — `permutation.bin`
+addresses it — so it cannot be selected whatever the sizes are. The **enforced relation** stands
+beside that and is still refused at startup (§10, §14.19): `max_merged_segment_bytes` strictly
+below the base segment's bytes. Keeping both is deliberate — the structural exclusion is a
+property of one function that a refactor could lose, and the startup refusal is what would still
+be standing if it did. What changed is which one carries the weight: the relation is no longer
+the *mechanism*, so a deployment whose base segment is small enough to make the relation awkward
+is not thereby unsafe, only refused.
 
 ## 8. Where compaction sits — the seam, stated so it is not rediscovered
 
@@ -1343,7 +1349,8 @@ on the same day:
 - **§7 rewritten.** Both halves of merge publish. The entity-space coalesce bounds three axes
   without moving a row; the row-space merge bounds segments as its own swap. The "enforced
   relation" that kept the base segment out of selection is **retired**: selection runs over the
-  extent list, so the exclusion is structural and `max_merged_segment_bytes` is a cost bound.
+  extent list, so the exclusion is structural — the startup relation stands beside it as the
+  guard that survives a refactor, rather than as the mechanism.
 - **§12 corrected by measurement, in two places that had been wrong.** P2 **refuted** this
   document's "modelled seconds" for the fragment build — it is ~200 ms and flat in tier count — and
   a merge's peak RSS, carried as a modelled ≈5–7×, measured at **4.4–4.9×**. Both were figures a

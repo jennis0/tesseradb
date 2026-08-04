@@ -10,9 +10,10 @@ argument, an engineer evaluating the approach, a contributor arriving cold. Writ
 
 Write what the system **is** and **why it is that way**. Not how it came to be that way.
 
-A reader wants to know that deletion denies retire against a stamp ledger and suppressions never
-retire at all, and why those differ. They do not want to know that this was revision 3's
-correction to revision 1, that it was found in review, or which phase built it.
+A reader wants to know that a suppression retires only by its unsuppress while a deletion retires
+only at the compaction fold that executes it, and why those differ. They do not want to know that
+this was revision 3's correction to revision 1, that it was found in review, or which phase built
+it.
 
 On the rare occasions that history is worth keeping, it belongs in `docs/decisions/` and in git — not
 interleaved with the explanation. A document whose paragraphs are half archaeology forces every

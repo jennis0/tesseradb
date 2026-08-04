@@ -1,6 +1,8 @@
 # 0044 — "Invisible" means stale-serve plus background refresh; merge splits, and publishes as its own swap
 
-**Date:** 2026-08-04 · **Status:** Settled (owner ruling) · **Mechanism: ⊘ not built**
+**Date:** 2026-08-04 · **Status:** Settled (owner ruling) · **Mechanism: built the same day** —
+write-path §4.6 and §7; `crates/tessera-engine/src/{refresh,coalesce,merge}.rs`. D4's "measure
+first" ran and **P2 refuted the model it rested on**; see the consequences below
 
 ## The rulings
 
@@ -53,15 +55,24 @@ harmful: it makes the flush's zero-cost path carry the merge's refresh. The empt
 rider rule is deleted with it. Cost if wrong: one extra `segments_version` bump per merge — one
 more background refresh round, nothing a viewer observes.
 
-## Before the mechanism is coded
+## The probes this was gated on — **run 2026-08-04**, `probes/2026-08-04-refresh-ladder/`
 
-Two probes, already specified in the merge review memo, run first:
+- **P1 — the projection ladder at 10⁹, 25% grant.** Rebuild 4 550 ms; the patch's bitmap **clone**
+  40.9 ms; the union over one new extent 0.24 ms; a span rebase 44.6 ms. So D1's "two orders over
+  the budget" holds as measured rather than inferred, and the reason is structural: the cached
+  value is immutable (lifecycle §7), so a patch must **copy** before it unions, and no inline
+  arrangement escapes the copy.
+- **P2 — the fragment build against tier count: ~200 ms, and flat** (199 ms at 1 tier, 198 ms at
+  512). **This refuted the model.** The corpus carried the build as "unmeasured, modelled seconds
+  — the largest unpriced request-thread term"; it is a bounded term, three orders over the budget
+  rather than four, and it does **not** grow with the tier count the entity-space coalesce bounds.
+  By this ruling's own D4 the incremental fragment form therefore does **not** land: it would
+  trade a 200 ms build for a ~41 ms clone, on work that had to move off the request thread anyway,
+  by the same background refresh the projection needed.
 
-- **P1** — projection patch/rebase cost at 10⁹ (clone-versus-union split, per entry): sizes the
-  refresh window and the racer exposure.
-- **P2** — `build_fragment_with_deltas` per credential at 10⁹ against tier counts: decides how
-  urgent Task 12's incremental fragment form is. Until it lands, the per-tick full fragment
-  rebuild on the request thread is the largest term out of conformance with this ruling.
+One defect the probe found rather than review: `SegmentExtent::project` walked the mask from its
+start, so projecting one flush extent cost O(grant cardinality) rather than O(extent span) — the
+patch's cost was a function of the *grant's width* rather than of the flush's size.
 
 ## Consequences
 

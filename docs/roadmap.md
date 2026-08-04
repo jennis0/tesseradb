@@ -86,11 +86,13 @@ of which is deployment guidance this project cannot produce.
 question of when.** Three reasons to take it early:
 
 - **`segment` becomes `table`.** The design rewrites the concept to `(slice, group, flush)` and
-  amends architecture §11.2 and §13, contracts §2.1, §2.3 and §2.6, and lifecycle §3 and §5 to
-  match — including giving the move deny its own named retirement rule. [#3], [#4], [#8] and [#9]
-  are all written against `segment`. Folding this in after they are built is rework of machinery
-  that carries invariants, in the one part of the system where a conflation has already been
-  caught fail-open twice.
+  amends architecture §11.2 and §13, contracts §2.1, §2.3 and §2.6, and
+  [`design/write-path.md`](design/write-path.md) §4–§7 and lifecycle §5.3 to match — including
+  giving the move deny its own named retirement rule. [#3], [#4], [#8] and [#9]
+  are all written against `segment`, and **flush and merge are already built against it**, so part
+  of this rework is now owed rather than avoidable. It is rework of machinery that carries
+  invariants, in the one part of the system where a conflation has already been caught fail-open
+  twice — which raises the cost of taking the fold-in later still, not lowers it.
 - **A window closes when the clients ship.** `slices-and-multi-table.md` §12 lists six things
   cheap now and expensive later — container-aligned table base offsets, the manifest `group` key,
   prefix-qualified table references, the `{slice → (x, y)}` ingest map, resolving contracts §2.6's
@@ -109,19 +111,24 @@ The design is provisional pending exactly that fold-in.
 > [#4 Retire denies correctly: the epoch ledger, the suppression rule and the compaction fold][#4] ·
 > [#8 Add a batch of items to a running deployment][#8]
 
-Today an acknowledgement is a durability receipt, not a visibility promise, and the gap between
-them is unbounded — visibility waits on an offline rebuild. [#3] closes that with flush. [#4]
-builds the deny machinery that a mutable deployment needs: three retirement rules that retire
-three different ways, of which **two are specified and unbuilt**, safe today only because nothing
-retires at all. Compaction belongs to [#4], because the fold is what compaction is for in
-invariant terms. [#8] then lets a batch enter a bundle that is already serving, which presupposes
-[#3] — landing into a *running* deployment means nothing until publication makes items visible.
+An acknowledgement is a durability receipt, not a visibility promise, and **flush bounds the gap
+between them** at `flush_max_age_secs` per slice. That releases the theme's one hard sequencing
+constraint: [#8] no longer presupposes [#3], because landing into a *running* deployment now means
+something — publication makes the items visible.
 
-The theme's difficulty is identity rather than throughput. Entity identifiers are append-only,
-assigned in signature order, and that ordering is scoped to a batch — so batch boundaries are
-permanent features of the index. [#8] opens with a design decision recorded in the specification
-as an open question: whether a batch enters an existing bundle appended, merged or staged. It
-determines everything downstream of it, and it is a ruling before it is work.
+What is left is [#4], the deny machinery a mutable deployment needs. Two retirement rules retire
+two different ways ([`design/write-path.md`](design/write-path.md) §5.4), and the stamp ledger the
+issue title names is **deleted from the spec rather than deferred** — so [#4] is the compaction
+fold, which is the rule with nothing to run at. Nothing but an unsuppress retires today, which is
+fail-closed and is why the theme is safe to sequence late. Compaction belongs to [#4], because the
+fold is what compaction is for in invariant terms.
+
+The theme's remaining difficulty is identity rather than throughput. Entity identifiers are
+append-only and assigned in signature order, and that ordering is scoped to whatever one commit
+window allocates together — so window boundaries are permanent features of the index and nothing
+repairs them afterwards. The question [#8] used to open with, whether a batch enters an existing
+bundle appended, merged or staged, is settled by what is built: appended by the flush that gives it
+geometry, merged afterwards on its own cadence.
 
 This whole theme is written against `segment`, which the slices epic renames — see above.
 
@@ -336,8 +343,9 @@ it is taken up. Distinct from [#54], which changes what an item *is*.
 determines the design: restoring a state that predates a deletion re-exposes the deleted item. An
 older consistent state is not a safe state when the thing that changed was a revocation. It
 cannot be a directory copy — a restored bundle reconciles against the deny record before serving,
-or refuses. It should not start before [#4], because the record it must reconcile against does
-not exist.
+or refuses. That record now exists: every side-manifest carries complete `deny` and `tombstones`
+state and a restore takes the newest honourable one
+([`design/write-path.md`](design/write-path.md) §5.6), so this no longer waits on [#4].
 
 **[#54 Store and serve items that are areas rather than points][#54].** This reaches the central
 assumption of the storage model. Geometry is stored in Morton order so a tile is a contiguous

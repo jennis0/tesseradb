@@ -250,10 +250,12 @@ an argument.
 - **No change to row order or to the tile path.** `morton.u32`, `tile_ranges` and every existing
   search are untouched.
 - **No fix for `morton.u32`'s absence from Appendix A** (§2.3).
-- ⊘ **Nothing streaming-side is exercisable end to end.** Residual geometry can be carried through
-  the WAL and buffer, but there is no flush: buffered rows have no row in `columns.arrow` and
-  `Engine::item` returns `Ok(None)` for them. `/control/ingest` accordingly still takes `x`/`y`
-  `f32` — §2.2's noted asymmetry between built and streamed points, unchanged here.
+- **No 32-bit precision on the streaming path.** A flush gives a buffered row a row in
+  `columns.arrow` through the same segment writer and the same `residual` column
+  ([write-path](write-path.md) §4.3), so the representation is exercisable end to end from
+  `/control/ingest` outwards. What is not fixed is the ingest body's `x`/`y` `f32`, which caps a
+  streamed point at a 24-bit mantissa below what storage holds — §2.2's asymmetry between built
+  and streamed points.
 - **No new precision in any existing corpus.** The generators quantise the way the engine does and
   emit a residual, but every corpus predating that must be rebuilt to carry one, and the scaled
   corpora hold 16 bits per axis whatever they are rebuilt from (§2.2). Rebuilding also moves ~25%
@@ -263,6 +265,10 @@ an argument.
 ---
 
 ## Appendix R — review trail
+
+**2026-08-04 — the streaming marker retired.** Flush is built ([write-path](write-path.md) §4), so a
+buffered row acquires a row in `columns.arrow` carrying its residual, and §8's marker now names
+only what is left: the ingest body's `f32` cap on a streamed point. No rule changed.
 
 **Reviewed 2026-08-02**, three lenses (conformance/oracle, performance, implementability) across
 successive drafts.

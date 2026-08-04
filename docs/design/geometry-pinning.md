@@ -245,9 +245,11 @@ to is not closing the door: dropping the request field now would mean re-adding 
 - **`flush_max_age_secs` loses one of its two constraints.** The startup relation goes, so the 90 s
   default stops being forced by the TTL. **It does not become a free choice**: the binding floor is
   the row-projection rebuild, a *measured* 10.7 s at 10⁹ synchronised across the session population
-  at every tick, and only patching the projection removes that. Claiming the tick as this
+  at every tick, and only taking that off the request path removes it. Claiming the tick as this
   document's win was an error in an earlier draft and is corrected here rather than quietly
-  dropped.
+  dropped. *(Decision 0044 is what took it off: a background refresh at each publication, with
+  stale-serve in front of it — write-path §4.6. The floor is now one refresh round, which is a
+  different and much smaller number.)*
 - **Cache pruning simplifies.** The licence to prune a superseded generation's projections was a
   `Reclaimed` value produced by a drain-list reclaim, and `prune_generation` ran synchronously
   inside the publication. With no drain list, retention became an explicit N-generations-back

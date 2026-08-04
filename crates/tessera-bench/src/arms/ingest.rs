@@ -67,15 +67,18 @@
 //!
 //! * **Durability — covered.** WAL append → fsync → buffer insert → generation swap, which is the
 //!   whole of what `/control/ingest` promises before it acks.
-//! * **Visibility — NOT reached.** `sigma_visible` is *identical* at every buffer depth measured
-//!   (16,108 across 501 → 25,001 buffered). A buffered entity has no row in the segment's
-//!   permutation, so `compose` skips it: its rule-4 loop has no cross-segment geometry to
-//!   resolve the entity against. Ingested rows are durable and invisible.
-//! * **Absorption — does not exist.** No flush, no posting-delta fold, no merge, no compaction.
-//!   `EngineError::MultiSegmentSlice` fails closed above one segment per slice. So the steady-state
-//!   cost of a database that has been *running* and absorbing writes for a while is unmeasurable
-//!   here, and design §16's "how many live segments before per-tile fan-out is noticeable" stays
-//!   open — see this module's note rather than assuming the continuous arm answered it.
+//! * **Visibility — not reached *by these arms*.** `sigma_visible` is identical at every buffer
+//!   depth measured (16,108 across 501 → 25,001 buffered), because a buffered entity has no row
+//!   and `compose` has nowhere to put its verdict. That is a property of the arms, which never
+//!   drive a tick: **flush now gives a buffered row geometry within `flush_max_age_secs`**
+//!   (write-path §4), so "durable and invisible" is the arm's window, not the system's.
+//! * **Absorption — partly measured, and not here.** Flush, both halves of merge and the
+//!   background refresh exist; the compaction fold does not. What these arms still cannot show is
+//!   the steady state of a database that has been *running* and absorbing writes for a while —
+//!   `crates/tessera-engine/tests/soak.rs` is what covers that today (40 flushes → 2 segments,
+//!   5 delta tiers, one full projection build), and design §16's "how many live segments before
+//!   per-tile fan-out is noticeable" stays open because merge keeps the count too low here to
+//!   provoke it.
 //! * **`accept_change` — benchmarked since 2026-07-30 in `arms::changes`; this note is kept for
 //!   the half of it that stayed true until 2026-08-01.** `changes` measures ack, tail and the
 //!   visibility arithmetic against *overlay* depth. It never ingests, so its buffer is empty in

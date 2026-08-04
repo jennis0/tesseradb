@@ -1,6 +1,8 @@
 # 0043 — Flush, merge and compaction never block a request
 
-**Date:** 2026-08-03 · **Status:** Settled (owner ruling) · **Mechanism: ⊘ not built**
+**Date:** 2026-08-03 · **Status:** Settled (owner ruling) · **Mechanism: built 2026-08-04** —
+decision [0044](0044-invisible-means-stale-serve-plus-background-refresh.md) resolved what
+"never blocks" means and the mechanism landed with it (write-path §4.6)
 
 ## The rule
 

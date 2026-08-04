@@ -206,7 +206,7 @@ already been disclosed.
 
 So exactly **two** mechanisms carry the security here, and neither is a timer:
 
-1. **The server never serves it again** once the change is accepted (lifecycle §2.3).
+1. **The server never serves it again** once the change is accepted (write-path §5.8).
    That is the whole of the authorisation boundary, and it is the server's behaviour.
 2. **The cache dies with the principal** — the session owns cache lifetime and drops it
    on token change (§10), which closes cross-principal persistence, the one client-side
@@ -325,7 +325,7 @@ economics at the large drawn-mark budget, where naming 10⁷ identities costs ~8
 with every attribute elided, and the completeness guarantee it needs is one the
 contracts already give replicas via the deny set's immediate-publication rule. It also
 trades away the fail-closed-by-naming property that makes §5 reviewable, which is
-precisely the class of thing the three retirement rules warn gets conflated. Adopt only
+precisely the class of thing the two retirement rules warn gets conflated. Adopt only
 with the argument written first, and only if P2's numbers demand it.
 
 ### 5.1 Where the replica state lives — the axis this document initially fixed
@@ -353,7 +353,7 @@ compression; §5 merely gives the record to the other party.**
 *Prior art, including one nobody has brought.* Replicache's server-held Client View
 Record diffs a recomputed authoritative view against what a client was last sent, so
 revocation propagates as deletions for free; PowerSync's protocol distinguishes REMOVE
-(left your visible set) from DELETE, which is the wire-level echo of the three
+(left your visible set) from DELETE, which is the wire-level echo of the two
 retirement rules. **The unclaimed body of evidence is game-server interest
 management** — server-authoritative per-client visibility with delta replication,
 fog-of-war computed server-side *because clients cheat*. It is the one field whose
@@ -574,7 +574,7 @@ discipline, since handing an integrator a broad root rebuilds the proxy with ext
 steps; a revocation denylist, which is the same class of machinery as a server-side retirement ledger;
 and Datalog debugging opacity.
 
-**Two anti-patterns, named as loudly as the three retirement rules.**
+**Two anti-patterns, named as loudly as the two retirement rules.**
 
 *The pooled service token.* An integrator authorises once with a broad credential and
 filters per user in their proxy. That is post-filtering rebuilt: every count, density
@@ -1456,8 +1456,9 @@ archive is forbidden.*
   2026-08-01)*. Every sync engine surveyed answers "readable, with a retention window".
   It matters at §6.1's flip: a pan mid-flip may need one more tile under the *old* view key
   to keep the outgoing snapshot complete. If the server will serve a still-retained view key
-  — the same retention shape as pins and `410` — flips never tear; if not, the client
-  force-flips early or shows holes. Serving a stale view key briefly keeps an accepted
+  — retention plus a refusal once it lapses, which is a shape nothing here has any longer,
+  pins and their `410` having been deleted (decision 0041) — flips never tear; if not, the
+  client force-flips early or shows holes. Serving a stale view key briefly keeps an accepted
   suppression visible within that view key's responses, but bounded by the same deny-visibility budget
   as the flip deadline, so it spends §4's existing concession rather than a new one.
   **The reconcile table cannot be written until this is chosen.**

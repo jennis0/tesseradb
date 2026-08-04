@@ -55,15 +55,16 @@ pub fn write_segment(
     Ok(())
 }
 
-/// The three fixed, non-nullable fields of `columns.arrow` (contracts §2.6 r6), in column
-/// order. One definition, so the three writers below cannot drift apart in name, type or
-/// nullability — the reader (`read::validate_schema`) checks all three per column.
+/// The fixed, non-nullable fields of `columns.arrow` (contracts §2.6), in column order. One
+/// definition, so the writers below cannot drift apart in name, type or nullability — the reader
+/// (`read::validate_schema`) checks each per column.
 ///
 /// `residual` is the *low* half of the point's 64-bit interleaved position; the high half is
 /// the cell code in `morton.u32`, and concatenating them recovers the whole. It replaces the
-/// `x`/`y` `f32` pair, which is why this table is three columns and 14 bytes per row rather
-/// than four and 18. Nothing reads a coordinate off a segment: what is stored is the position
-/// in the grid's own units, at 32 bits per axis rather than an `f32`'s 24-bit mantissa.
+/// `x`/`y` `f32` pair. With `priority` cut too (decision 0046), the fixed table is **two columns
+/// and 12 bytes per row**, where the original four were 18. Nothing reads a coordinate off a
+/// segment: what is stored is the position in the grid's own units, at 32 bits per axis rather
+/// than an `f32`'s 24-bit mantissa.
 fn fixed_fields() -> Vec<Field> {
     // No `priority` column (decision 0046). It was 2 B/row written and read by nothing at query
     // time — the selection comparator reads the full `tessera_id`, of which priority is the high

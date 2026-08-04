@@ -5,9 +5,10 @@
 folded into `architecture.md` and `contracts.md`, and an owner ruling on whether Appendix A gains a
 residency *ceiling* (§2.3 — the plan step reports against it either way).
 **Reads against:** architecture §4 (I2, I3, I9, I12), §5.3, §8.2, §8.3, §10.3, §10.5, Appendix A,
-Appendix C (C8, C11); contracts §2.1–§2.4, §3.2, §3.4; `slices-and-multi-table.md` §51, §53, §61,
-§80, §87 (itself provisional); `system-architecture.md` §7; design memo 2026-07-29 (secondary
-attribute indexing); decision [0013](../decisions/0013-mark-specified-vs-implemented.md).
+Appendix C (C8, C11); contracts §2.1–§2.4, §3.2, §3.4; [`write-path.md`](write-path.md) §1.2, §4.3,
+§5.4; `slices-and-multi-table.md` §51, §53, §61, §80, §87 (itself provisional);
+`system-architecture.md` §7; design memo 2026-07-29 (secondary attribute indexing);
+decision [0013](../decisions/0013-mark-specified-vs-implemented.md).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **spec §n**.
 
@@ -23,11 +24,12 @@ space for filtering and vocabulary visibility, and a vocabulary table carrying p
 are **scattered, not dense** (§3.4), so a visible code is not a lower bound on how many values a
 principal cannot see.
 
-> **⊘ Specified, not implemented.** *The streaming half:* there is no flush, so buffered rows have
-> no row in `columns.arrow` and cannot be exercised on the read path; and
-> `dictionary/terms-<k>.dict` has only ever had one extent, so a category value minted at ingest
-> lives in the WAL overlay and its in-memory dictionary extension and folds at a flush that does not
-> exist. *`inspect`:* §8.3's vector sidecar and §10.3's per-interaction row are one slot whose first
+> **⊘ Specified, not implemented.** *The streaming half:* the substrate now exists — a flush gives
+> buffered rows a row in `columns.arrow`, and promotes a descriptor novel at ingest to a durable
+> dictionary ordinal in its own extent ([write-path](write-path.md) §4.3) — but that is the *auth*
+> dictionary. §3.5's separate attribute dictionary and postings file, which is where a category
+> value minted at ingest would land, does not exist, so nothing here is exercisable on the read
+> path. *`inspect`:* §8.3's vector sidecar and §10.3's per-interaction row are one slot whose first
 > occupant, the external-ID store, is explicitly transitional — `inspect` is declarable and
 > **refused at parse** until that slot is filled. *Multi-valued attributes* (§3.7), likewise refused.
 
@@ -132,15 +134,15 @@ rather than conservative, and computed entirely from inside `M_auth` (I2).
 **The alternative — a maintained union of members' term signatures — is rejected.** Such a union is
 monotone under ingest and *non-monotone under deletion*: when the last point granting a term is
 deleted or suppressed, the union must shrink or the value stays visible to a principal who can no
-longer see any member. That needs a fourth retirement rule beside lifecycle §3's three, two of which
-are themselves unbuilt. Derivation self-retires.
+longer see any member. That needs a third retirement rule beside write-path §5.4's two, one of
+which is itself unbuilt. Derivation self-retires.
 
 This is C11, already ruled closed — *"vocabulary containment-filtered against `M_auth`"* (§8.3).
 
 **It is evaluated in entity space, against the composed verdict — not against the cached fragment,
 and not by projecting into row space.** Three facts make that precise:
 
-- A suppression never touches postings (lifecycle §3's second rule), so a fragment built from
+- A suppression never touches postings (write-path §5.4's Rule S), so a fragment built from
   postings alone still contains a suppressed item. Filtering a vocabulary against it would keep
   listing a value whose only visible member has been suppressed.
 - The *composed mask* is a row-space object: it exists to answer range cardinalities over row
@@ -164,7 +166,8 @@ the opposite of the asymmetry I7 warns about elsewhere. That is a prediction, no
 §8's authorise arm exists to check it.
 
 Any cache of the resulting visible-vocabulary set is keyed by
-`(auth fingerprint, generation, overlay version)`. The overlay has no version counter today; an
+`(auth fingerprint, generation, overlay version)`. The generation carries `overlay_version`, which
+moves on every accepted change (write-path §1.2), so the third component is available; an
 overlay-blind cache row is the same fail-open by another route, and under continuous ingest such a
 cache is cold on most requests anyway.
 
@@ -233,8 +236,12 @@ Declared, required, no default: `u8` (255 usable values), `u16`, `u32`. Code 0 i
 **absent**, which preserves `columns.arrow`'s contractual non-nullability (R4) without a validity
 buffer — the reader rejects any nullable column outright.
 
-**`u8` buys residency, not speed**, against an 18 B row: a `u16` category is +11% and a `u8` +5.6%,
-so with three categories at 10⁹ the difference is 2.79 GiB. *Whether the two are truly identical on
+**`u8` buys residency, not speed.** Against the **12 B** fixed row the segment writer now emits —
+`tessera_id` plus `residual`, the `x`/`y` pair having become the residual and `priority` having
+been cut (decision 0046) — a `u16` category is +17% and a `u8` +8.3%, so with three categories at
+10⁹ the difference is 2.79 GiB. *(The percentages were computed against an 18 B row and are
+restated here; the 2.79 GiB is the difference between the two widths and does not depend on the
+base row at all.)* *Whether the two are truly identical on
 the gather path is **assumed**, not measured* — the argument is that a scattered gather costs one
 cache line per point whatever the element width, but the gather is columnar, several category
 columns are several independent streams, and the repo's own gather arm models cost per column *by
@@ -518,8 +525,7 @@ typo must not create one.
 
 - **No aggregation.** Category counts are C8's existing shape; a breakdown surface is a separate
   design against §8.2.
-- **No multi-valued attributes** (⊘, §3.7), no cold `inspect` sidecar (⊘, §1), no resolution of
-  flush.
+- **No multi-valued attributes** (⊘, §3.7) and no cold `inspect` sidecar (⊘, §1).
 - **No server-side multi-slice composition** (§3.9).
 - **No vocabulary cardinality limit.** §3.6's guidance is judgement, not measurement, and §8's
   authorise arm must run before any number becomes a documented limit.
@@ -545,6 +551,12 @@ The fixtures carry no attribute tail today, so no arm can see any of this.
 ---
 
 ## Appendix R — review trail
+
+**2026-08-04 — corrected against the built write path.** Flush and descriptor promotion exist, so
+§1's streaming marker names what is actually missing (§3.5's attribute dictionary) rather than flush;
+the retirement citations move to write-path §5.4's Rule S and Rule F, which replaced lifecycle §3's
+stamp ledger; and `overlay_version` exists, which §3.3's cache key assumed it did not. No rule
+changed.
 
 **Reviewed 2026-08-02**, three lenses across successive drafts.
 

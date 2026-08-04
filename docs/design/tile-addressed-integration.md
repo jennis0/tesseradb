@@ -152,11 +152,11 @@ measurement will reasonably conclude the product is slow.
   property with **per-session ordinals minted inside the boundary** — legitimate precisely because
   the adapter is inside it. Anything carrying per-session handles (Phase 3 labels' `node_handle`)
   must never enter a *shared* cache entry.
-- **The three retirement rules.** The adapter holds responses, not overlay state, and re-evaluates
-  on any view-key change. It never interprets deny semantics.
-- **Pins fix geometry, never authorisation.** The cache key carries overlay version independently of
-  the geometry stamp, so a suppression voids cached tiles whatever stamp the request carried — and
-  the stamp selects no geometry in any case (`geometry-pinning.md` §7).
+- **The two retirement rules** (Rule S and Rule F, write-path §5.4). The adapter holds responses,
+  not overlay state, and re-evaluates on any view-key change. It never interprets deny semantics.
+- **A geometry stamp is advisory, never authorisation.** The cache key carries overlay version
+  independently of the geometry stamp, so a suppression voids cached tiles whatever stamp the
+  request carried — and the stamp selects no geometry in any case (`geometry-pinning.md` §7).
 - **CDN posture, unchanged from §8.3.** Per-viewer masked tiles are intrinsically CDN-hostile;
   `Cache-Control: private`, view-key-scoped URL segments using a **session nonce and never the bearer
   token** (URLs reach history and proxies), max-age inside the deny-visibility budget.

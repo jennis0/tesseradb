@@ -96,7 +96,7 @@ point cache and the server density raster — could not sensibly share a design.
 | # | Cache | Home | Key | Bound | Eviction | Invalidated by |
 |---|---|---|---|---|---|---|
 | S1 | Mask fragment *(exists)* | server | canonical grant set | `fragment_cache_bytes` | LRU | content-addressed; never |
-| S2 | Row projection *(exists)* | server | (token, slice, segments_version) | `row_projection_cache_bytes` | LRU + `prune_generation` | compaction |
+| S2 | Row projection *(exists)* | server | (token, slice, segments_version) | `row_projection_cache_bytes` | LRU + `prune_generation` | every geometry publication rotates the key; the superseded entry stays servable across a flush, never across a merge (write-path §4.6) |
 | S3 | Density raster | server | (grant set, slice, content version, depth) | new knob, ~512 MB | LRU | content version; rebuild async, serve stale-marked |
 | S4 | Overview / bootstrap answers | server | (grant set, slice, content version, view, k) | new knob | LRU | content version |
 | S5 | Adapter tiles *(class b only)* | server, in boundary | (grant set, overlay version, segments_version, slice, view-key nonce, z/x/y, k, encoding) | new knob, 1–2 GB | LRU + single-flight | content version; view-key-scoped URL self-busts browser copies |
@@ -238,9 +238,9 @@ version and not mask identity alone.
 - **I10.** Shared caches hold `tessera_id` only. Anything carrying per-session handles (Phase 3
   labels' `node_handle`) is excluded from shared entries. S1/S2 are entity/row space and never leave
   the server.
-- **The three retirement rules.** No cache interprets deny semantics. All invalidation binds to
-  §6.2's tiers: identity generation voids everything; content version voids the delta; segment
-  version voids nothing client-visible.
+- **The two retirement rules** (Rule S and Rule F, write-path §5.4). No cache interprets deny
+  semantics. All invalidation binds to §6.2's tiers: identity generation voids everything; content
+  version voids the delta; segment version voids nothing client-visible.
 - **Geometry identity never fixes authorisation.** S5 keys on overlay version independently of the
   geometry stamp, so a suppression voids cached tiles whatever stamp the request carried. Since
   2026-08-03 the stamp is advisory in any case — it selects no geometry, so there is no "pinned

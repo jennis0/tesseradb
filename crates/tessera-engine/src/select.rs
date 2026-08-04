@@ -190,7 +190,8 @@ impl Threshold {
 ///
 /// **θ's anchor must be a whole-slice total, never per-segment or per-partition** — a local anchor
 /// makes "below the cut" mean different things in different segments, and the merge stops computing
-/// the definition. Both cases fail closed today (`MultiSegmentSlice`, `MultiPartitionSlice`);
+/// the definition. A slice spanning partitions fails closed today (`MultiPartitionSlice`); a
+/// slice spanning *segments* is now the ordinary case, flush appending one per tick;
 /// §7.2 and §12.3 carry the merge rule for when they no longer do.
 #[derive(Debug, Clone, Copy)]
 pub struct SelectParams {

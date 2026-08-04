@@ -120,12 +120,13 @@ pub struct EngineConfig {
 /// flushes differ by a few bytes producing a size class per flush and merging nothing at all.
 /// The cap bounds one merge's pool time and its write amplification.
 ///
-/// **The base segment is excluded structurally, not by the cap.** Write-path §7 records an
-/// "enforced relation" — `max_merged_segment_bytes` strictly below the base segment's size — as
-/// what keeps the base out of selection. `crate::merge::plan_merge` selects from the **extent
-/// list**, and the base is the one segment with no extent (`permutation.bin` addresses it), so
-/// the exclusion no longer depends on a size relation anyone has to maintain. The cap is a cost
-/// bound and nothing more.
+/// **The base segment is excluded twice over.** `crate::merge::plan_merge` selects from the
+/// **extent list**, and the base is the one segment with no extent (`permutation.bin` addresses
+/// it), so no size makes it selectable. Write-path §7's **enforced relation** —
+/// `max_merged_segment_bytes` strictly below the base segment's bytes — stands beside that and is
+/// still refused at startup by `tessera-server`'s config loader. Both are kept deliberately: the
+/// structural exclusion lives in one function and a refactor could lose it, and the startup
+/// refusal is what would still be standing if it did.
 fn default_merge_policy() -> tessera_store::merge::MergePolicy {
     tessera_store::merge::MergePolicy {
         tier_width: 4,

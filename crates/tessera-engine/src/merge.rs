@@ -165,11 +165,18 @@ impl std::fmt::Display for MergeFailed {
 
 /// Turn a plan into durable files. **Runs on the background pool, over immutable inputs.**
 ///
-/// **Memory peaks at ≈5–7× the inputs' on-disk bytes** (memory review, 2026-08-04, modelled):
-/// every input is decoded to items at once and doubled at the sort, and
-/// `max_merged_segment_bytes` bounds the *selection-time file bytes*, not the decoded resident
-/// set. A 256 MiB cap models to a ~1.3–1.8 GB pool transient. No maintenance event's peak RSS has
-/// been measured; the probe is named at write-path §12.
+/// **Memory peaks at a measured 4.4–4.9× the inputs' on-disk bytes**
+/// (`probes/2026-08-04-maintenance-memory/`; the modelled ≈5–7× was conservative, which is the
+/// right direction for a figure a limit is set from). Every input is decoded to items at once and
+/// doubled at the sort, and the inputs' mapped pages stay resident — so
+/// `max_merged_segment_bytes`, which bounds the *selection-time file bytes* rather than the
+/// decoded set, is a memory budget only through this multiplier: **the 256 MiB default models to
+/// a ~1.1–1.3 GB pool transient**, and this function enforces nothing itself. The figure holds
+/// its shape across input count, so it is a function of the bytes rather than of the segments.
+///
+/// **What is still unmeasured**, and must not be inferred from the above: tier coalescence
+/// (postings rather than rows — the probe's shape does not transfer) and the **sum** when a
+/// flush, a merge and a coalesce overlap on this pool, which nothing bounds.
 pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMerge, MergeFailed> {
     let output = execute_merge(
         &ctx.prefix_dir,

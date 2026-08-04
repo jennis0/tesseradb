@@ -40,14 +40,19 @@ Two conventions follow from it, and they are the part most easily got wrong:
 ## 2. The two missing axes
 
 Every arm today holds the bundle constant and varies the request. Nothing varies the bundle under a
-constant request, because until flush there was nothing to vary: `tessera build` produced one
-segment and it stayed.
+constant request: the arms were written when `tessera build` produced one segment and it stayed.
 
-After flush, a reader's cost depends on quantities no existing record carries. A tile resolves to
-one contiguous range **per live segment** (§11.3) and a fragment build unions across **every live
-delta postings tier**, so a viewport's latency is a function of the merge policy's recent history.
-A regression and "the merge policy left more segments live" are the same number without those
-counts beside it, and they are the most likely false alarm of the next campaign.
+With flush and merge built, a reader's cost depends on quantities no existing record carries. A tile
+resolves to one contiguous range **per live segment** (§11.3), so a viewport's latency is a function
+of the merge policy's recent history. A regression and "the merge policy left more segments live"
+are the same number without that count beside it, and it is the most likely false alarm of the next
+campaign.
+
+The other half of that expectation is **refuted, and must not be reinstated**. A fragment build does
+union across every live delta postings tier, but it is **measured flat in tier count** — 199 ms at
+one tier, 198 ms at 512, at 10⁹ with a 25% grant (`probes/2026-08-04-refresh-ladder/`, P2), against
+the seconds the write-path design had modelled. A tier count therefore explains an operand count and
+not a latency, and an arm that reports one as the other will attribute a stall to the wrong pass.
 
 This is the identical argument [`report.rs`](../../crates/tessera-bench/src/report.rs) already makes
 for `containers`, applied to the write path. It is why `work` is not an `Option` there, and the new
@@ -61,7 +66,7 @@ absent rather than zero would misread every pre-flush record.
 | field | what it explains |
 |---|---|
 | `segments` | ranges resolved per tile; the merge policy's whole justification |
-| `delta_tiers` | operands in a fragment build |
+| `delta_tiers` | operands in a fragment build — an operand count, not a latency term (spec §2) |
 | `buffered_items` | `compose_ns` — F2's measured denominator |
 | `overlay_entries` | `compose_ns`'s other half, and the deny path's depth |
 | `hot_row_bytes` | bytes per served mark, once the tail is variable (spec §5) |
@@ -76,15 +81,19 @@ One new arm shape carries the axis: continuous ingest at a configured rate for h
 drawing a fixed density battery throughout, reporting **time-bucketed** read latency alongside the
 §2.1 counts, ack→visible, and RSS.
 
-It is the only place several of write-path §14's obligations are observable at all — §14.10
-(segment **and** delta-tier count bounded under sustained ingest) and §14.11 (the ack→visibility gap
-bounded by `flush_max_age_secs`) are soak properties by construction, and a unit test cannot see
-them. §14.13 and §14.18 fit here for the same reason.
+It is the only place some of write-path §14's obligations are observable at all — §14.11 (the
+ack→visibility gap bounded by `flush_max_age_secs`) is a soak property by construction, and §14.13
+and §14.18 fit here for the same reason. §14.10 — segment, tier, run and dictionary-extent counts
+bounded under sustained ingest — is not one of them: it is already asserted at engine scale by
+`crates/tessera-engine/tests/soak.rs`, where forty flushes leave two segments, five delta tiers, two
+external-id runs and six dictionary extents, with a control showing each grows one per flush when
+the maintenance passes are stopped. What the arm adds there is the same axis under hours of load
+rather than forty ticks, with read latency beside it.
 
-> ⊘ **The arm is buildable before flush is; the properties are not.** Against today's engine it
-> correctly reports a flat read latency and an unbounded ack→visible gap, because there is no flush.
-> That is a useful negative baseline and it is not a partial pass — the gates in spec §8 stay
-> unarmed until there is a flush to bound.
+> ⊘ **The arm does not exist.** Flush and both halves of merge do (write-path §4, §7), so the gates
+> in spec §8 have something to bound: the ack→visible gap is `flush_max_age_secs` per slice rather
+> than unbounded, and G5's counts are the ones `soak.rs` already holds. What is missing is only the
+> arm — until it runs, nothing measures read latency under sustained ingest at all.
 
 ### 2.3 Residency, and why it cannot be measured naively
 
@@ -128,16 +137,19 @@ Three consequences:
   selects the warmest sample by construction, which is exactly what it was chosen to do. Cells are
   first-touch, or a distribution over independent trials at steady-state pressure.
 
-What this unblocks is the comparison hot-row-geometry §7 records as open. 18 → 14 B/row is
-arithmetic against Appendix A and **must not be quoted as a measurement**; a `variant` field
-(spec §7) plus a residency sweep is the first construction in which it could become one.
+What this unblocks is the comparison hot-row-geometry §7 records as open. The fixed-row saving —
+**18 → 12 B/row**, the `x`/`y` pair having become `residual` and `priority` having been cut
+(decision 0046) — is arithmetic against Appendix A and **must not be quoted as a measurement**; a
+`variant` field (spec §7) plus a residency sweep is the first construction in which it could
+become one.
 
 ---
 
 ## 3. What the existing ingest arms stop measuring
 
 [`bench/README.md`](../../bench/README.md) §9 records the caveat that governs them: *"Ingested rows
-never become visible."* Flush ends that condition, and two arms are re-derived rather than extended.
+never become visible."* Flush has ended that condition, and two arms are re-derived rather than
+extended.
 
 `ingest-continuous` currently measures `compose` over **rejected** entries — a buffered entity has
 no row in the segment permutation, so `compose` skips it at `perm.row_of`. F2's measured ~10 ns per
@@ -264,8 +276,10 @@ Three consequences worth stating, because each is a convention this document oth
   it is the one arm where min-of-N is not merely uninformative but actively wrong.
 - **The cold/warm ratio is a reported axis**, not a constant. It is what decides how much of the
   population meets the F4 projection lock.
-- ⊘ **Pins and mid-session filter toggles are trajectory verbs the arm should carry and cannot yet.**
-  A pin across a flush is write-path §14.18; a filter toggle needs the attribute tail.
+- ⊘ **A superseded geometry stamp across a flush, and mid-session filter toggles, are trajectory
+  verbs the arm should carry and cannot yet.** The stamp case is write-path §14.18 — pins are
+  deleted (decision [0041](../decisions/0041-pins-become-a-staleness-stamp.md)), so what a session
+  presents is advisory and never selects geometry; a filter toggle needs the attribute tail.
 
 The zoom distribution and think-time model are **assumed, not measured** — this project has no
 telemetry and cannot produce them. State the assumed parameters beside every figure the arm
@@ -327,7 +341,7 @@ they belong to conformance §6's nightly tier, which does not exist (⊘).
 | gate | checks | on failure |
 |---|---|---|
 | **G4** | soak p99 shows no monotonic drift across the window beyond +15% | steady-state regression — the class a frozen-bundle suite structurally cannot catch |
-| **G5** | segment count, delta-tier count and ack→visible within configured bounds | write-path §14.10/§14.11 violated |
+| **G5** | segment, delta-tier, external-id-run and dictionary-extent counts, and ack→visible, within configured bounds | write-path §14.10/§14.11 violated |
 
 G5 is an assertion about the system, not about its speed, and it fails the run rather than reporting
 a regression.
@@ -338,7 +352,8 @@ a regression.
 
 The `variant` field, the load arm's `work` block and the `p99` suppression are unblocked now, and
 the first two block comparisons the other work will want. The fixture knob blocks every attributes
-arm. The soak **harness** is independent of flush; its **gates** are not (spec §2.2).
+arm. The soak harness was always independent of flush, and its gates no longer wait on anything but
+the arm itself (spec §2.2).
 
 The state axis is expensive in wall clock, not in cell count — one soak cell is hours. It is
 declared outside `matrix.toml`, as `load` and `ingest-build` already are, for the reason that file
@@ -349,8 +364,8 @@ gives: putting an hours-long cell beside a two-microsecond one makes the default
 ## 10. Amendments
 
 - **`bench/README.md` §8** — the two reporting modes beside the existing `min_ns` rationale, and the
-  `p99` suppression rule; the §9 caveat *"Ingested rows never become visible"* retires when flush
-  lands, and the arms it governs are re-derived rather than edited.
+  `p99` suppression rule; the §9 caveat *"Ingested rows never become visible"* is false as of flush
+  and retires, and the arms it governs are re-derived rather than edited.
 - **`bench/README.md` §7** — G4 and G5 in the gate table, marked nightly-tier.
 - **`bench/matrix.toml`** — the attribute-tail axis on `gather` and `viewport`; `filter` declared;
   `soak` and `ingest-wire` noted as deliberately absent, with the reason.
@@ -364,19 +379,27 @@ gives: putting an hours-long cell beside a two-microsecond one makes the default
 - **No new corpus.** Every axis here is constructible within the existing fixtures plus an attribute
   tail. Signature-sorted contiguity still cannot be synthesised and still costs a rebuild.
 - **No residency figure yet.** Spec §2.3 specifies the mechanism; until it runs, hot-row-geometry
-  §7 stands unchanged and the 18 → 14 B/row saving stays arithmetic against Appendix A.
+  §7 stands unchanged and the 18 → 12 B/row saving stays arithmetic against Appendix A.
 - **No claim that the residency sweep is representative.** A cgroup limit reclaims by the kernel's
   LRU, not by a deployment's access pattern, and the ratio *r* is chosen rather than observed. It
   establishes a curve's **shape**; it does not predict a given deployment's point on it.
 - **No published figure for anything unbuilt.** ⊘ Four of the six spec §6 figures cannot be produced
-  today: ack→visible and the soak curve need flush; the attribute split needs the tail; the wire
-  ingest number needs the arm.
+  today: ack→visible and the soak curve need the soak arm — flush itself is built, so what is
+  missing is the measurement rather than the mechanism; the attribute split needs the tail; the wire
+  ingest number needs `ingest-wire`.
 - **No replacement for the correctness gate.** A soak that stays fast while leaking passes every
   gate here. `conformance.md` owns that, and this document does not weaken the split.
 
 ---
 
 ## Appendix R — review record
+
+**Updated 2026-08-04 — restated against a built write path.** Flush and both halves of merge exist,
+so spec §2.2's marker is the arm's absence rather than flush's, spec §3's and spec §10's caveat is
+retired rather than pending, and spec §11's unpublishable list names the missing *measurement*. Two
+figures changed class: P2 measured the fragment build at ~200 ms and **flat in tier count**, which
+refutes the tier-count-drives-latency expectation spec §2 carried, and §14.10's bound is now
+asserted by an engine test rather than only by a soak. No convention changed.
 
 Not yet reviewed. Drafted 2026-08-02 from the benchmark obligations recorded in
 `write-path.md` §14, `per-point-attributes.md` §8 and `hot-row-geometry.md` §7, plus two

@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 31
+**Status:** Draft for review — revision 32
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 **Specified versus implemented.** This document specifies a target, and parts of that target are not built. Every such claim carries a **⊘ Specified, not implemented** marker at the point it is made, saying what exists instead and what a reader must not assume meanwhile; the full set is tabulated in the generated `docs/design/inventory.md`. A marker's absence is a claim that the machinery exists.
@@ -142,7 +142,7 @@ The access control requirement is hard: data the presented credentials do not sa
 
 Some terms mark data that must be held separately at rest and in memory, not merely masked — the requirement §12 exists to serve.
 
-Term sizes are heavily skewed, approximately exponential, with the largest plausibly covering 25–50% of all points. New points arrive continuously, with a target visibility latency of seconds to minutes. Item predicate changes are rare. *(r23, owner decision 2026-07-30)* **That seconds-to-minutes budget covers the write path in full, deny dispositions included** — suppressions and deletions may take effect on the same scale as ingest, because a human decides them and human reaction time dominates any window the system adds. This is a **bounded, configured** delay and is not the fail-open the deny rules exist to prevent: those (an overlay lost on restart, SA §6.2; a deny retired ahead of the stamp ledger, §11.3) all concern a deny that is *lost or reversed*, which is unbounded exposure of a different kind. One rule keeps the distinction sharp and costs nothing: **a deny's acknowledgement stays coupled to its application** — hold the 200 until the entry is fsync'd and swapped, never acknowledge a deny that is not yet in force. The caller then still observes its own accepted change on its next request, and no window is ever open between "accepted" and "applied". The write path's latitude is therefore in *when work is batched*, never in whether an acknowledged security operation has taken effect. Data is held in an object store. Several temporal slices exist and must be independently browsable.
+Term sizes are heavily skewed, approximately exponential, with the largest plausibly covering 25–50% of all points. New points arrive continuously, with a target visibility latency of seconds to minutes. Item predicate changes are rare. *(r23, owner decision 2026-07-30)* **That seconds-to-minutes budget covers the write path in full, deny dispositions included** — suppressions and deletions may take effect on the same scale as ingest, because a human decides them and human reaction time dominates any window the system adds. This is a **bounded, configured** delay and is not the fail-open the deny rules exist to prevent: those (an overlay lost on restart, SA §6.2; a deny retired other than by its own unsuppress or by the compaction fold that executes it — write-path §5.4's Rule S and Rule F) all concern a deny that is *lost or reversed*, which is unbounded exposure of a different kind. One rule keeps the distinction sharp and costs nothing: **a deny's acknowledgement stays coupled to its application** — hold the 200 until the entry is fsync'd and swapped, never acknowledge a deny that is not yet in force. The caller then still observes its own accepted change on its next request, and no window is ever open between "accepted" and "applied". The write path's latitude is therefore in *when work is batched*, never in whether an acknowledged security operation has taken effect. Data is held in an object store. Several temporal slices exist and must be independently browsable.
 
 ## 4. Invariants
 
@@ -567,7 +567,9 @@ By the time the store is touched, every selection decision has been made in bitm
 
 Artifacts live in the bucket under **immutable versioned prefixes**; serving nodes sync the slices they need to instance-local NVMe at boot and mmap from there, so cold start is seconds. Compress at rest; decompress once at load.
 
-Immutable prefixes make rebuilds atomic: write a new version, flip a pointer, roll back by flipping it back. The prefix name *is* the segment-set version in **I11**. This is also what makes a repartitioning (§12.5) expensive but not risky.
+Immutable prefixes make rebuilds atomic: write a new version, flip a pointer, roll back by flipping it back. This is also what makes a repartitioning (§12.5) expensive but not risky.
+
+**The prefix name is not the segment-set version, and I11 says so.** An earlier form of this paragraph equated them. Flush and merge both publish *within* a prefix — a merge permuting row space inside the merged span — so the prefix cannot discriminate the geometry a row-space artefact was built against. I11's own third paragraph is the rule: **no row-space artefact may key on the prefix**; `segments_version` is the only safe discriminator. A prefix flip is compaction's boundary, and it is a *stronger* signal than a version bump, not a substitute for one.
 
 ### 10.3 On-disk layout
 
@@ -707,11 +709,15 @@ Beyond what batching can reach — the win is still bounded by window size, and 
 
 ### 11.2 The buffer, the watermark and the overlay
 
-Arrivals land in an **in-memory buffer**. A flush policy — size or age, whichever trips first — turns the buffer into an immutable on-disk segment, so segment count is governed by the flush interval rather than the arrival rate.
+Arrivals land in an **in-memory buffer**. A flush policy turns the buffer into an immutable on-disk segment, so segment count is governed by the flush interval rather than the arrival rate. *(As built: **age alone** — `flush_max_age_secs`. The size trigger is deleted, decision 0045: "flush-ready" had no consumer, the tick never skipping a non-empty buffer. Buffer occupancy is a backpressure bound that sheds ingest with 429, not a flush trigger.)*
 
 **The mask carries an entity high-water mark.** A mask fragment built at watermark *W* is authoritative below *W*. Entities at or above *W* are new and not yet folded in. Flushing advances *W* by OR-ing in the flushed segment's contribution for the token's already-known satisfied terms — a small, monotone patch rather than a rebuild.
 
+> **⊘ The incremental patch is not built, and is not being built** (decision 0044's D4, resolved by measurement). It was gated on the full rebuild being seconds-scale at 10⁹; probe P2 measured it at **~200 ms and flat in tier count** (`probes/2026-08-04-refresh-ladder/`), refuting the model. The patch would trade that for a ~41 ms bitmap clone, on work that has to leave the request thread either way — and the mechanism that moved it, a background refresh at each publication producing the fragment and its row projection as one value (write-path §4.6), is the same one the projection needed. **The correctness claim above is untouched**: what runs is the rebuild the patch was to be equal to.
+
 **The overlay holds items in flux below *W*:** those whose predicate changed, those deleted, and those administratively suppressed. Each entry carries a **disposition** — *evaluate*, meaning test its current term set against the token's, or *deny*, meaning invisible regardless. The disposition is what lets one mechanism cover both a predicate change and an administrative suppression. Entries carry their own term sets inline.
+
+> **As built, the disposition is not a field: it is three independent stores** — `deleted`, `suppressed`, `evaluate` — one written by each op and cleared by nothing but its own opposite (write-path §5.3). **This is a safety property, not a representation preference, and the paragraph above must not be read as licensing the collapse.** A single last-write-wins disposition makes `delete → suppress → unsuppress` re-expose a deleted item; it was caught fail-open in review twice, which is why three containers of three different types replaced three fields in one struct. What the paragraph above still states correctly is the *conceptual* unification — one overlay covers both kinds of fact — and the precedence `deleted > suppressed > evaluate` is single-sourced in one function. *(Decision 0047 also withdrew the `predicate` op: "those whose predicate changed" is now only what pre-0047 WALs replay.)*
 
 Together these define the **live set** `L` = overlay ∪ {entities ≥ *W*}, and **I1**'s composition follows.
 
@@ -733,9 +739,37 @@ Structure the merge policy on established lines rather than as a scheduled job. 
 
 Better still, make **re-ranking a decorator on the merge policy**: reorder only merges above a minimum document count, skip rather than fail when memory is short, and always reorder on forced merges. The Morton re-rank becomes a continuous property of large merges rather than a scheduled cliff. Reference points from a widely-deployed policy: ten segments per tier, a 5 GB maximum merged segment, a 2 MB floor, a 20% deletes threshold, reordering above 2<sup>18</sup> documents.
 
+> **Merge is built (write-path §7), and it departs from this sketch in two ways that are not
+> tuning.** The floor, the maximum merged size and the tiering all transfer, at different numbers
+> (`tier_width` 4, a 16 MiB floor, a 256 MiB cap). The two departures:
+>
+> - **There is no re-rank decorator, and there cannot be one.** The Morton sort *is* the tile
+>   index — `tile_ranges` binary-searches a segment's codes — so a segment that is not internally
+>   sorted is unreadable, not merely unoptimised. "Skip rather than fail when memory is short"
+>   would publish exactly that. Sorting is unconditional and has no document-count threshold to be
+>   a decorator above.
+> - **There is no deletes-percentage trigger.** Reclaiming a tombstoned row is the compaction
+>   *fold*, which is invariant-bearing; a merge that dropped rows would be folding authorisation
+>   state from a layer that must not. Merge is row-count preserving and byte-exact through the
+>   Morton code.
+>
+> **Owner ruling wanted** on whether this section should shrink to a pointer at write-path §7, as
+> that document's §13.2 proposes while recording the call as this document's rather than its own.
+
 A compaction rewrites the permutation and the columns, publishes them under a new segment-set version, and lets in-flight requests drain (**I11**). At single-node scale it does **not** invalidate the term index, masks or generating sets.
 
 Deletions are tombstones: remove the entity from the term index, add it to the overlay with *deny* disposition, notify the caller of affected labels (§2.5), and drop the row at the next compaction. Never recycle the ID (**I9**).
+
+> **⊘ The first clause is not what is built, and two normative documents state the opposite as
+> load-bearing.** The term index is the postings (§6.2), and **deny state is not a postings
+> subtraction**: a deleted entity's postings stand until the compaction fold, and its invisibility
+> is the overlay's alone (contracts §2.4; write-path §5.3). The reason is structural — base
+> postings are frozen and delta tiers append-only, so subtracting one *is* the fold, which is
+> compaction's and is invariant-bearing. It is also why a merge and a coalesce are forbidden to
+> touch postings for a deleted entity. What is built is fail-closed: the entity is invisible from
+> the moment the deny is acked, and stays so. **Owner ruling wanted** on whether this clause is
+> retired or restated as a compaction obligation; the ID rule (**I9**) and the rest of the
+> sentence are untouched and hold.
 
 ## 12. Compartmented partitions
 
@@ -1130,6 +1164,26 @@ Both were checked exhaustively against explicit quantification over all well-for
 **One consequence of the default to watch.** Under *possible*, an item with very wide uncertainty matches almost every query and becomes noise. Consider styling marks by uncertainty width, or offering the definite form as a secondary control.
 
 ## Appendix G — Revision history
+
+- **r32** — **the write path's promotion, read back against this document** (2026-08-04, after
+  `write-path.md` became normative for the write path and both halves of merge published). Three
+  corrections, all factual: §3's fail-open example named the **stamp ledger**, deleted from the
+  spec on 2026-08-03 and replaced by Rule S / Rule F; §10.2 asserted *"the prefix name is the
+  segment-set version in I11"*, which **I11's own third paragraph contradicts** — a merge permutes
+  row space inside one prefix, so no row-space artefact may key on it, and equating the two
+  sanctioned exactly the stale-projection hazard the invariant forbids; §11.2's flush policy said
+  "size or age", and the size trigger is deleted (decision 0045).
+  **Four claims marked rather than rewritten, because each is the specification's intent and
+  changing it is not this pass's to do**: §11.2's incremental fragment patch (⊘ — probe P2
+  measured the rebuild at ~200 ms and flat in tier count, refuting the model decision 0044's D4
+  rested on); §11.2's overlay *disposition field* (built as three independent stores, and the
+  collapse this sentence would license was caught fail-open in review twice); §11.3's re-rank
+  decorator and deletes-percentage trigger (neither is buildable as stated — the Morton sort *is*
+  the tile index, and reclaiming a tombstoned row is the fold); and §11.3's *"remove the entity
+  from the term index"* on deletion, which contracts §2.4 and write-path §5.3 both contradict as
+  load-bearing. **Two of those carry an explicit request for an owner ruling** and are listed in
+  the promotion's report. No invariant statement changed; I11 gained no text, it was cited against
+  a paragraph that disagreed with it.
 
 - **r31** — **Decision [0046](../decisions/0046-the-priority-column-is-cut.md): the `priority` column is cut from `columns.arrow`** (owner ruling, 2026-08-04, from the write-path consolidation's audit). §5.3, §7.2's recorded-price paragraph, §14's build sequence and Appendix A's hot-column sizing (14 → 12 B/row) are updated. Nothing about the *quantity* changes — priority remains the high 16 bits of `tessera_id`, §7.2's definition and the composition argument of §12.3 are untouched, and the wire rule (a keyed prefix is publishable; an unkeyed derivative of the entity ID is not) stands verbatim. The column had been written and unread at query time since the r22-era comparator ruling; the new fact that decided it is the asymmetry — removal is free while format 1 is unpublished, re-adding is additive, and keeping it was 2 GB at 10⁹ against an optimisation whose revisit trigger (recorded at §7.2, unchanged) has never fired.
 
