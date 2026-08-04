@@ -70,7 +70,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `client-interaction.md` | Provisional — under review |  |
 | `concurrency-lifecycle.md` | Normative — r6 | 16 |
 | `conformance.md` | Normative — r6 | 12 |
-| `contracts.md` | Normative — r17 | 15 |
+| `contracts.md` | Normative — r18 | 15 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |

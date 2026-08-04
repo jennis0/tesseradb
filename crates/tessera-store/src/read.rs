@@ -211,8 +211,32 @@ impl Bundle {
         })
     }
 
-    /// The shared half of [`Self::with_segment`] and [`Self::with_merged`]: clone the partition
-    /// and slice maps — `Arc`s and a manifest, no file IO — and replace the one slice.
+    /// This bundle with one partition's side-manifest replaced and **nothing else touched** — no
+    /// segment added, no extent collapsed, no row space rebuilt.
+    ///
+    /// The entity-space coalesce publication's whole bundle edit (`tessera_engine::coalesce`): it
+    /// rewrites `deltas`, `external_id_runs`, `locator_extents`, `dict_extents` and `files`, every
+    /// one of which addresses entity space. A caller that needed row space to move would be using
+    /// one of the two above, and the type is what keeps the two apart.
+    pub fn with_manifest(&self, partition: &str, published: PublishedManifest) -> Result<Arc<Bundle>> {
+        let slice = self
+            .partitions
+            .get(partition)
+            .and_then(|p| p.slices.keys().next().cloned())
+            .ok_or_else(|| StoreError::MalformedBundle {
+                detail: format!("no partition '{partition}' with a slice in this bundle"),
+            })?;
+        self.substituting(partition, &slice, published, |slice_data| {
+            Ok(SliceData {
+                row_space: slice_data.row_space.clone(),
+                segments: slice_data.segments.clone(),
+            })
+        })
+    }
+
+    /// The shared half of [`Self::with_segment`], [`Self::with_merged`] and
+    /// [`Self::with_manifest`]: clone the partition and slice maps — `Arc`s and a manifest, no
+    /// file IO — and replace the one slice.
     fn substituting(
         &self,
         partition: &str,

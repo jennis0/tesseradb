@@ -2,6 +2,7 @@
 //! the bundle read protocol and zero-copy loader, and `Permutation` — the
 //! only legal EntityId→RowId path in the codebase (invariant I4).
 
+pub mod coalesce;
 pub mod error;
 pub mod flush;
 pub mod manifest;
@@ -11,6 +12,7 @@ pub mod read;
 mod sidecar;
 pub mod write;
 
+pub use coalesce::coalesce_external_id_runs;
 pub use error::{Result, StoreError};
 pub use flush::{write_flush_segment, FlushInput, FlushOutput, FlushRow};
 pub use permutation::{Permutation, RowSpace, SegmentExtent};

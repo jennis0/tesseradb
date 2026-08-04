@@ -430,9 +430,15 @@ pub struct Engine {
     /// and its two siblings) compose over its read accessors, so this crate has one owner for each
     /// mutable field rather than two.
     pub(crate) write: WritePath,
-    /// External ids established by the bundle's own extent, at open — immutable for the process
-    /// lifetime.
-    external_index: ExternalIdIndex,
+    /// External ids established by the bundle's runs — the reader half of contracts §2.4.
+    ///
+    /// **Swappable, because the entity-space coalesce rewrites the run list** (`crate::coalesce`).
+    /// It is not per-generation: a coalesce is content-preserving, so an old sidecar and a new
+    /// generation answer identically for every key, and a request that loaded one before the swap
+    /// and the other after it cannot observe a difference. What the swap buys is the bound the
+    /// coalesce exists for — `resolve` scans every run whose bounds admit the key, and without it
+    /// a live process kept the pre-coalesce list until its next restart.
+    external_index: Arc<arc_swap::ArcSwap<ExternalIdIndex>>,
     /// The `tessera_id` blinding permutation's per-deployment key (contracts §2.6 r6, design
     /// memo `docs/evidence/memos/2026-07-30-tessera-id-construction.md`) — parsed once at open from
     /// MANIFEST's `identity.key` and held for the process lifetime. Never leaves the server (I10).
@@ -560,40 +566,24 @@ impl Engine {
         // since the last compaction would silently vanish from every principal's map — visible
         // before the restart, gone after it, with no error anywhere.
         //
-        // **The paths are derived, and the manifest's `deltas` is what makes that safe.** A tier
-        // lives beside the segment that produced it, so its path is a function of `(phash, slice,
-        // seg_id)` — `deltas` carries only the `n` each tier arrived at, which is not a path. The
-        // count is the check: `deltas.len()` is the manifest's own declaration of how many tiers
-        // it has, and finding a different number means the derivation and the manifest disagree,
-        // which is corruption rather than a state to serve past. The bytes are already
-        // digest-verified — `open_bundle` refuses a `SEGMENTS-<n>.json` unless every file it names
-        // verifies, and the tier is one of them.
+        // **The manifest names them** (contracts §2.3 r18). The paths used to be derived from
+        // `segments` with `deltas` carrying only a count, which a coalesced tier — one file
+        // covering several segments' entities, sitting beside none of them — cannot be described
+        // by. Every path must be digest-named in one of the two `files` maps, because
+        // `open_bundle` verifies what those maps carry and nothing else: a tier reached by a path
+        // the manifest names but no map covers would be served unverified.
         let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
-        let mut slices_seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for seg_desc in &partition.manifest.segments {
-            // The first segment named for a slice is its build segment, which has no tier: base
-            // postings already carry its items.
-            if slices_seen.insert(seg_desc.slice.as_str()) {
-                continue;
-            }
-            let rel = format!(
-                "partitions/{phash}/slices/{}/segments/{}/delta.arrow",
-                seg_desc.slice, seg_desc.seg_id
-            );
-            if !partition.manifest.files.contains_key(&rel) {
-                continue;
+        for rel in &partition.manifest.deltas {
+            if !partition.manifest.files.contains_key(rel) && !bundle.manifest.files.contains_key(rel)
+            {
+                return Err(EngineError::Malformed(format!(
+                    "the side-manifest lists delta tier '{rel}' which no files map digests, so \
+                     opening it would serve unverified postings"
+                )));
             }
             delta_postings.push(Arc::new(
-                DeltaTier::open(&prefix_dir.join(&rel)).map_err(EngineError::Io)?,
+                DeltaTier::open(&prefix_dir.join(rel)).map_err(EngineError::Io)?,
             ));
-        }
-        if delta_postings.len() != partition.manifest.deltas.len() {
-            return Err(EngineError::Malformed(format!(
-                "manifest declares {} delta tiers but {} were found beside its segments — a \
-                 fragment built from the ones present would omit whatever the missing tiers carry",
-                partition.manifest.deltas.len(),
-                delta_postings.len()
-            )));
         }
 
         // The sidecar is lazy for real: nothing here is opened, mapped or verified —
@@ -601,9 +591,10 @@ impl Engine {
         // data (paths and digests), never the filesystem. No extent descriptor, digest, ordinal
         // or file path is handed to this crate — the constructor takes the manifests and the
         // prefix directory and keeps everything else behind its own API.
-        let external_index =
+        let external_index = Arc::new(arc_swap::ArcSwap::from(Arc::new(
             ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
-                .map_err(EngineError::Store)?;
+                .map_err(EngineError::Store)?,
+        )));
 
         // Contracts §2.6 r6: the deployment's `tessera_id` key, parsed once here and held for
         // the process lifetime. `IdentityKey::from_hex` also rejects a degenerate key — a bundle
@@ -644,7 +635,7 @@ impl Engine {
                 .max(side_manifest_high_water),
             &dict,
             &initial_deny,
-            |external_id| external_index.resolve(external_id),
+            |external_id| external_index.load().resolve(external_id),
             // An entity belongs to exactly one slice, so "any slice's row space holds it" is the
             // same question as "its slice's does" — and asking it this way needs no slice lookup,
             // which the buffer would otherwise have to supply before it has been filtered.
@@ -721,7 +712,7 @@ impl Engine {
             config,
             next_token_id: AtomicU64::new(0),
             write: WritePath::new(write_state),
-            external_index,
+            external_index: Arc::clone(&external_index),
             identity_key,
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
             full_projection_builds: AtomicU64::new(0),
@@ -1186,7 +1177,7 @@ impl Engine {
     /// Whether the external-id sidecar has opened any extent (or its locator) yet — exposed for
     /// tests confirming `Engine::open` never touches it — the per-extent laziness guarantee.
     pub fn external_id_sidecar_is_open(&self) -> bool {
-        self.external_index.0.is_open()
+        self.external_index.load().0.is_open()
     }
 
     /// The plugin this engine was opened with — the `/control/ingest` handler calls
@@ -1238,7 +1229,7 @@ impl Engine {
         if let Some(entity) = self.write.established_entity(external_id) {
             return Ok(Some(entity));
         }
-        self.external_index.resolve(external_id)
+        self.external_index.load().resolve(external_id)
     }
 
     /// Batch form of [`Self::resolve_external_id`] for `/control/ingest`'s duplicate check
@@ -1306,7 +1297,7 @@ impl Engine {
             .iter()
             .map(|&i| external_ids[i].clone())
             .collect();
-        let residual_results = self.external_index.resolve_many(&residual_keys)?;
+        let residual_results = self.external_index.load().resolve_many(&residual_keys)?;
         for (pos, resolved) in residual_positions.into_iter().zip(residual_results) {
             results[pos] = resolved;
         }
@@ -1330,6 +1321,7 @@ impl Engine {
             return Ok(Some(external_id));
         }
         self.external_index
+            .load()
             .external_id_of_checked(entity, self.allocator_high_water())
     }
 
@@ -1385,8 +1377,10 @@ impl Engine {
             generation,
             Arc::clone(&self.row_projection_cache),
             queue_bound,
-            crate::write::FlushDeps {
+            crate::write::MaintenanceDeps {
                 max_age_secs: self.config.flush_max_age_secs,
+                coalesce: crate::coalesce::CoalescePolicy::default(),
+                external_index: Arc::clone(&self.external_index),
                 prefix_dir: self.prefix_dir.clone(),
                 identity_key: self.identity_key,
                 pool: Arc::clone(&self.pool),
@@ -1420,8 +1414,10 @@ impl Engine {
             generation,
             Arc::clone(&self.row_projection_cache),
             queue_bound,
-            crate::write::FlushDeps {
+            crate::write::MaintenanceDeps {
                 max_age_secs: self.config.flush_max_age_secs,
+                coalesce: crate::coalesce::CoalescePolicy::default(),
+                external_index: Arc::clone(&self.external_index),
                 prefix_dir: self.prefix_dir.clone(),
                 identity_key: self.identity_key,
                 pool: Arc::clone(&self.pool),
@@ -1599,10 +1595,10 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// This is the `resolve_from_bundle` seam `tessera_lifecycle::overlay::replay` uses,
 /// authorisation-bearing because `/control/changes` denies whichever entity it resolves to — a
 /// wrong resolution denies the wrong entity and leaves the intended target visible.
-struct ExternalIdIndex(tessera_store::ExternalIdSidecar);
+pub(crate) struct ExternalIdIndex(tessera_store::ExternalIdSidecar);
 
 impl ExternalIdIndex {
-    fn open(
+    pub(crate) fn open(
         bundle_manifest: &tessera_store::manifest::Manifest,
         partition_manifest: &tessera_store::manifest::SegmentsManifest,
         prefix_dir: &Path,

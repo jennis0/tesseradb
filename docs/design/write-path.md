@@ -974,12 +974,14 @@ the residual is recorded at contracts §2.3, not closed.
 - **Flush completing against a moved prefix / moved row space / moved dictionary**: discarded;
   orphans; re-planned. Publication is rebase-or-discard, never force.
 
-## 7. Merge — built, unpublished
+## 7. Merge — the entity-space half published, the row-space half gated
 
 Merge bounds what flush grows: segments (the tile path pays one range per live segment per
-tile), delta tiers (a fragment build unions across every live tier), and external-id runs (the
-ingest duplicate check and drill-down scan every run whose bounds admit the key). A 90 s tick
-produces roughly a thousand of each per day.
+tile), delta tiers (a fragment build unions across every live tier), external-id runs (the
+ingest duplicate check and drill-down scan every run whose bounds admit the key), and dictionary
+extents (`Engine::open` reads every one). A 90 s tick produces roughly a thousand of each per
+day. **Three of the four are bounded; segments are not**, which is exactly the split decision
+0044's D2 rules — everything but segments is entity space, and entity space moves no row.
 
 **What is built** (verified, with tests): the selection policy — `tier_width` (4) list-adjacent
 segments of equal power-of-two size class over `max(size, segment_floor_bytes)` (16 MiB), total
@@ -993,8 +995,9 @@ merge); concatenate-and-re-sort through the one segment writer rather than a k-w
 second writer that knows the layout is how two come to disagree; the policy cap bounds the
 sort). Delta tiers coalesce as a content-preserving re-encode — same `(term, entity)` pairs,
 deduplicated, re-sorted, nothing dropped, no tombstone applied, no evaluate entry consulted.
-External-id runs coalesce by merge-sorting caller keys (a key in two runs cannot arise — the
-duplicate check refused it). Watermark and high-water pass through as the caller's live values —
+External-id runs coalesce by merge-sorting caller keys, keeping the **newest** binding on a
+collision — decision 0047's re-ingest re-binds a key, so an older holder is a forgotten, deleted
+entity, and the reader resolving newest-run-first is what a coalesced run must answer as. Watermark and high-water pass through as the caller's live values —
 a merge moves neither (deriving them from the inputs would move the watermark *backwards* for
 any merge not containing the newest segment, silently hiding every flushed entity above it; the
 defect existed and is fixed).
@@ -1015,27 +1018,49 @@ enforced relation: `max_merged_segment_bytes` strictly below the base segment's 
 locator needs no repair: its ordinals all resolve inside run 0, which no merge ever consumes,
 provided run 0 stays listed first — an invariant with an assertion, not a rewrite.
 
-⊘ **Publication is not built, deliberately — gated on decision 0044's mechanism.** A merge shortens the
-extent list and permutes row space inside the merged span, so a row id there names a different
-entity afterwards: the cached projection's patch path refuses (correctly — its bits in the span
-are wrong, and **no row-space artefact may key on the prefix**; `segments_version` is the only
-safe discriminator), and every live session would fall to the full **measured 10.7 s** rebuild
-on its next request — the maintenance schedule leaking into the product, which 0043 forbids.
-Decision 0044 rules the shape (2026-08-04): the span-local rebase (clear the merged span's row
-range, re-project the span only — sound because everything outside the span is exact) runs in an
-eager background refresh over resident cache keys at publication, racers shed 429 within that
-bounded window; merge **splits** — the entity-space coalesce publishes first, without a
-`segments_version` bump (Task 22a) — and the row-space merge publishes as **its own swap**,
-the one-cadence rule having lost its justification with pin retention (decision 0041). The
-mechanism is unbuilt; P1/P2 size it first.
+**Merge splits, and only one half publishes** (decision 0044's D2).
 
-**What grows meanwhile, and what that costs** — all modelled, no axis measured: the ingest
-duplicate check and drill-down pay O(runs) binary searches per key; a fragment build pays a
-per-tier probe per satisfied term; a viewport pays one binary search and one
-`range_cardinality` per live segment per tile (~tens of ms at 1,000 segments). At the 90 s tick
-that is ~960 of each per day of sustained ingest. The entity-space halves (tier and run
-coalescence) touch no row space and could publish without a `segments_version` bump —
-0043-conforming by construction — which is decision 0044's D2, now ruled.
+**The entity-space half is built and published** (`tessera_engine::coalesce`). It coalesces delta
+tiers, external-id runs with their locator extents, and dictionary extents — each on its own
+axis, selected the same way `MergePolicy::select` selects segments: the first window of
+`width` (8) consecutive entries in one power-of-two size class, within an input cap. Size tiering
+is not decoration on any of them: without it the pass re-reads what it produced last round for
+ever, where one size class makes a byte move only as its artefact doubles. It publishes as a
+manifest edit over `deltas`, `external_id_runs`, `locator_extents`, `dict_extents` and `files`,
+with `n` from the executor's counter and refuse-to-replace standing, **and it bumps no
+`segments_version`** — no row moves, so no projection is stale, no fragment is stale and no cache
+key rotates. Two pieces of live state swap with it, or the bound is only realised at the next
+restart: the generation's tier list and the process's external-id sidecar. Both are
+content-preserving, so a request holding the old and one holding the new agree on every answer.
+
+Three rules make the axes safe, and they are different rules. Tiers are unioned, so their order
+and their division into files are immaterial; what may not change is the set of `(term, entity)`
+pairs. Runs are searched newest-first and a key may sit in several of them (0047's re-binding),
+so the window must be contiguous — a coalesced run at a recency position it did not earn answers
+a stale binding — and the keep-newest rule decides collisions. Dictionary extents are
+**positional**: an ordinal is an index into the concatenation in listed order and a session's
+granted terms are resolved once at authorise, so the window must be contiguous and land in place,
+or a session evaluates a term it was not granted. Across all three, **the build's own artefacts
+are never taken** — they are the entries `MANIFEST.json` digests, rewriting one means a new
+prefix, and the base locator's ordinals are positions in the build's runs.
+
+⊘ **The row-space half's publication is not built, deliberately — gated on decision 0044's D1
+mechanism.** A merge shortens the extent list and permutes row space inside the merged span, so a
+row id there names a different entity afterwards: the cached projection's patch path refuses
+(correctly — its bits in the span are wrong, and **no row-space artefact may key on the prefix**;
+`segments_version` is the only safe discriminator), and every live session would fall to the full
+**measured 10.7 s** rebuild on its next request — the maintenance schedule leaking into the
+product, which 0043 forbids. Decision 0044 rules the shape (2026-08-04): the span-local rebase
+(clear the merged span's row range, re-project the span only — sound because everything outside
+the span is exact) runs in an eager background refresh over resident cache keys at publication,
+racers shed 429 within that bounded window, and the merge publishes as **its own swap**, the
+one-cadence rule having lost its justification with pin retention (decision 0041). P1/P2 size it
+first.
+
+**What grows meanwhile, and what that costs** — the segment axis only, now that the other three
+are bounded: a viewport pays one binary search and one `range_cardinality` per live segment per
+tile (~tens of ms at 1,000 segments, modelled), and at the 90 s tick that is ~960 segments per
+day of sustained ingest.
 
 ## 8. Where compaction sits — the seam, stated so it is not rediscovered
 
@@ -1158,7 +1183,7 @@ Cited, never restated; the table is the audit trail from mechanism to obligation
 | posting compression 8.9–36.7× under full-corpus sort; window-scope runs of order 10¹ | measured ceiling; **modelled** window figure — no per-window probe exists | probes results §2/§4; `window.rs`'s own calibration note |
 | per-tick rebase stall = one O(buffered) clone ahead of the deny lane | modelled — re-run the 2026-08-01 method now that flush exists | superseded flush design §10 |
 | deny-manifest write at 10⁶ entries (30–60 MB, hundreds of ms) | modelled — probe named before bulk-revocation scale is claimed | deny-publication memo §5 |
-| the three merge growth axes (runs / tiers / segments) | modelled — no axis measured; probe P3 named | merge review memo §3, §7 |
+| the three merge growth axes (runs / tiers / segments) | modelled — no axis measured; probe P3 named. Three of the four axes are now *bounded* by the entity-space coalesce, which changes what the number would be, not that it is unmeasured | merge review memo §3, §7 |
 | fragment rebuild per credential at 10⁹ | **unmeasured** — the largest unpriced request-thread term; probe P2 named | merge review memo §5.2 |
 | flush-segment size uniformity at steady ingest | assumed | merge review memo §2 |
 | flush transients ≈1×/2–2.5×/1× buffer bytes (plan/execute/rebase; worst overlap ~3.5–5×); merge ≈5–7× input file bytes; dict clone 7.1 GB at 1.17×10⁸ terms per promoting flush | modelled (dict clone measured) — **no maintenance event's peak RSS has been measured**; the named probe: one instrumented ingest→`/control/flush`→publication cycle sampling `VmHWM`, one promoting cell | memory review, 2026-08-04; `probes/2026-08-03-dict-fst/` |
@@ -1262,7 +1287,11 @@ ingest with the typed error, publishes no geometry across ticks, and still accep
 rotation and restart, the newest binding wins, and the forgotten holder accumulates nothing
 (exists — `rebind.rs`); 34 a suppressed holder still collides at both duplicate checks (exists —
 `rebind.rs`, `http_write.rs`); 35 the predicate op is refused with the typed 422 (exists —
-`http_write.rs`).
+`http_write.rs`); 36 a coalesce bounds the tier, run and dictionary-extent counts while every
+item stays visible, every binding still resolves and `segments_version` does not move (exists —
+`coalesce.rs`); 37 a coalesced manifest reopens with the tiers it names and every binding intact
+(exists — `coalesce.rs`); 38 a row deleted before its first flush stops pinning the WAL, and the
+entity stays denied, burned and rowless across the reclaim (exists — `rotation_e2e.rs`).
 
 ## Appendix R — Review record
 

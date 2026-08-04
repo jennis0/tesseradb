@@ -255,6 +255,15 @@ pub struct ExecutorHealth {
     pub(crate) flush_skips: AtomicU64,
     /// Flushes that failed and left the buffer intact for the next tick (§10).
     pub(crate) flush_failures: AtomicU64,
+    /// Entity-space coalesce publications since the executor started (decision 0044's D2). A
+    /// separate counter from `flushes` because the two publish different things: a flush moves
+    /// geometry, a coalesce bounds the tier, run and dictionary-extent counts and moves none.
+    pub(crate) coalesces: AtomicU64,
+    /// Coalesces that failed or no longer rebased, leaving every consumed entry standing.
+    pub(crate) coalesce_failures: AtomicU64,
+    /// Whether a completed coalesce is waiting to be published — see
+    /// [`Self::flush_completed_pending`], whose handshake and ordering this shares exactly.
+    pub(crate) coalesce_completed_pending: AtomicBool,
     /// Total nanoseconds spent in **the whole apply step** — the `IngestBuffer`/`Overlay` clone,
     /// the per-row inserts, the `Generation` construction and the swap.
     ///
@@ -438,6 +447,10 @@ pub struct ExecutorStats {
     pub flush_skips: u64,
     /// Flushes that failed and left the buffer intact for the next tick (§10).
     pub flush_failures: u64,
+    /// Entity-space coalesce publications, and the ones that produced nothing — the observable
+    /// behind "the tier, run and dictionary-extent counts are bounded".
+    pub coalesces: u64,
+    pub coalesce_failures: u64,
     /// Whether a `POST /control/flush` is awaiting the next tick.
     pub flush_requested: bool,
     /// Whether this node's overlay has diverged from its durable WAL (§7.2). **Latching**: it
@@ -586,6 +599,9 @@ impl ExecutorHealth {
             flushes: AtomicU64::new(0),
             flush_skips: AtomicU64::new(0),
             flush_failures: AtomicU64::new(0),
+            coalesces: AtomicU64::new(0),
+            coalesce_failures: AtomicU64::new(0),
+            coalesce_completed_pending: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
             apply_nanos_max: AtomicU64::new(0),
             work_completed: AtomicU64::new(0),
@@ -684,6 +700,8 @@ impl ExecutorHealth {
             overlay_publications: self.overlay_publications.load(Ordering::Relaxed),
             flush_skips: self.flush_skips.load(Ordering::Relaxed),
             flush_failures: self.flush_failures.load(Ordering::Relaxed),
+            coalesces: self.coalesces.load(Ordering::Relaxed),
+            coalesce_failures: self.coalesce_failures.load(Ordering::Relaxed),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
         }
@@ -1525,7 +1543,7 @@ impl WritePath {
         generation: Arc<GenerationHandle>,
         row_projection_cache: Arc<RowProjectionCache>,
         queue_bound: usize,
-        flush: FlushDeps,
+        flush: MaintenanceDeps,
         #[cfg(feature = "fault-injection")] faults: Option<
             Arc<tessera_lifecycle::faults::FaultSwitchboard>,
         >,
@@ -1540,8 +1558,11 @@ impl WritePath {
         // ever blocks on this having **observed both queues empty**, which is what makes discarding
         // safe — see [`Executor::run`].
         let (bell_tx, bell_rx) = std::sync::mpsc::sync_channel(1);
-        // Completed flushes have their own, unbounded channel — see `Executor::flush_done`.
+        // Completed flushes have their own, unbounded channel — see `Executor::flush_done`. A
+        // coalesce gets its own for the same reasons: it may not be shed, and it must not queue
+        // behind the deny lane or a commit window.
         let (flush_tx, flush_rx) = std::sync::mpsc::channel();
+        let (coalesce_tx, coalesce_rx) = std::sync::mpsc::channel();
 
         // A clone, not a move: `ExecutorHealth` keeps the other end, which is what gives the
         // counters a reader outside the executor thread (`ExecutorStats::wal_fsyncs`).
@@ -1590,6 +1611,12 @@ impl WritePath {
                     max_distinct_terms: flush.max_distinct_terms,
                     flush_done: flush_rx,
                     flush_submit: flush_tx,
+                    coalesce_policy: flush.coalesce,
+                    coalesce_in_flight: Arc::new(AtomicBool::new(false)),
+                    coalesce_attempt: 0,
+                    coalesce_done: coalesce_rx,
+                    coalesce_submit: coalesce_tx,
+                    external_index: flush.external_index,
                     last_tick: std::time::Instant::now(),
                     // Seeded from the opened WAL's position so a freshly started node does not
                     // rotate until something is appended in this run.
@@ -2328,8 +2355,14 @@ pub const DENY_DURABILITY_ATTEMPTS: usize = DENY_DURABILITY_BACKOFF.len() + 1;
 ///
 /// A struct because the alternative is a ten-argument `start_executor`, where the compiler stops
 /// distinguishing two `u64`s and a caller can transpose them silently.
-pub(crate) struct FlushDeps {
+pub(crate) struct MaintenanceDeps {
     pub(crate) max_age_secs: u64,
+    /// The entity-space coalesce's policy — see [`crate::coalesce::CoalescePolicy`].
+    pub(crate) coalesce: crate::coalesce::CoalescePolicy,
+    /// The external-id sidecar, so a coalesce publication can install the one it just wrote. The
+    /// executor is the only writer of this cell, exactly as it is the only publisher of
+    /// generations.
+    pub(crate) external_index: Arc<arc_swap::ArcSwap<crate::session::ExternalIdIndex>>,
     /// The bundle's current prefix directory. A flush writes inside it, and never touches
     /// `MANIFEST.json` or `CURRENT`.
     pub(crate) prefix_dir: PathBuf,
@@ -2514,7 +2547,7 @@ struct Executor {
     /// The shared compute pool a flush executes on (§1.1), and the handle it submits its completed
     /// unit back through.
     pool: Arc<rayon::ThreadPool>,
-    /// See [`FlushDeps::max_distinct_terms`].
+    /// See [`MaintenanceDeps::max_distinct_terms`].
     max_distinct_terms: u64,
     /// Completed flushes arriving from the pool (§1.1).
     ///
@@ -2527,6 +2560,17 @@ struct Executor {
     /// Drained **after** the deny lane, exactly as work is: that ordering is what keeps a
     /// suppression from queueing behind a flush's publication.
     flush_done: Receiver<crate::flush::CompletedFlush>,
+    /// The entity-space coalesce's policy, its in-flight flag, its attempt counter and its own
+    /// completion channel — the same three-part shape a flush has, and separate from a flush's for
+    /// the reason decision 0044's D2 gives: the two halves of merge are independent work, and
+    /// coupling them would make the cheap one wait on the expensive one.
+    coalesce_policy: crate::coalesce::CoalescePolicy,
+    coalesce_in_flight: Arc<AtomicBool>,
+    coalesce_attempt: u64,
+    coalesce_done: Receiver<crate::coalesce::CompletedCoalesce>,
+    coalesce_submit: Sender<crate::coalesce::CompletedCoalesce>,
+    /// The external-id sidecar cell — see [`MaintenanceDeps::external_index`].
+    external_index: Arc<arc_swap::ArcSwap<crate::session::ExternalIdIndex>>,
     /// The sender pool tasks are given a clone of.
     ///
     /// **Nothing rings the doorbell when a flush completes**, and that is deliberate twice over.
@@ -2595,7 +2639,7 @@ impl Executor {
             // **Completed flushes are applied before the tick plans another**, and the order is
             // load-bearing: until a flush is published its items are still in the buffer, so a tick
             // that planned first would re-plan the very rows the completed unit already wrote.
-            let published = self.publish_completed_flushes();
+            let published = self.publish_completed_flushes() | self.publish_completed_coalesces();
             self.tick_if_due();
             while self.run_deny_pass() {}
             // **At drain close**: one write covers a burst of consecutive windows rather than one
@@ -2724,12 +2768,258 @@ impl Executor {
         if plans.is_empty() {
             // Nothing to flush, so no publication is coming to rotate the log — the deny-only
             // regime. See `rotate_if_grown`.
-            drop(generation);
             self.rotate_if_grown();
         } else {
             self.dispatch_flushes(&generation, plans);
-            drop(generation);
         }
+        // **The entity-space coalesce shares the tick and nothing else** (decision 0044 D2). It
+        // is independent of the flush: it consumes what earlier ticks published, so a tick that
+        // dispatched a flush may dispatch one too, and a gated node — which publishes no
+        // geometry — still bounds the axes a coalesce owns.
+        self.dispatch_coalesce(&generation);
+        drop(generation);
+    }
+
+    /// Select and dispatch an entity-space coalesce, if one qualifies and none is running.
+    ///
+    /// **At most one in flight, checked before the plan is built**, for the same reason a flush
+    /// is: two passes would select overlapping windows and the loser's manifest edit would no
+    /// longer rebase, having done all of its IO first.
+    fn dispatch_coalesce(&mut self, generation: &Arc<Generation>) {
+        if self.coalesce_policy.width < 2 || self.coalesce_in_flight.load(Ordering::SeqCst) {
+            return;
+        }
+        // A poisoned or diverged node publishes no manifest at all (`publish_overlay_state`'s
+        // gate, for the same reason): a coalesce's manifest carries the live deny state, and
+        // writing that from an overlay no durable record backs would make a 500'd, never-acked
+        // deny permanent on every restore.
+        if self.wal.is_poisoned() || self.health.overlay_diverged.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some((partition, partition_data)) = generation.bundle.partitions.iter().next() else {
+            return;
+        };
+        if partition_data.stepped_down() {
+            return;
+        }
+        let Some(plan) = crate::coalesce::plan_coalesce(
+            partition,
+            &partition_data.manifest,
+            &generation.bundle.manifest.files,
+            self.coalesce_policy,
+        ) else {
+            return;
+        };
+
+        self.coalesce_attempt += 1;
+        let ctx = crate::coalesce::CoalesceContext {
+            prefix_dir: self.prefix_dir.clone(),
+            prefix: generation.prefix.clone(),
+            // The same never-reused shape a `seg_id` has, and for the same reason: two passes at
+            // one `n` would otherwise write one path, and the second `File::create` truncates
+            // files the first has memory-mapped.
+            out_rel: format!(
+                "partitions/{partition}/coalesced/coalesce-{}-{}",
+                partition_data.segments_n, self.coalesce_attempt
+            ),
+        };
+
+        self.coalesce_in_flight.store(true, Ordering::SeqCst);
+        let in_flight = Arc::clone(&self.coalesce_in_flight);
+        let health = Arc::clone(&self.health);
+        let submit = self.coalesce_submit.clone();
+        self.pool.spawn(move || {
+            match crate::coalesce::execute_coalesce(plan, ctx) {
+                Ok(completed) => {
+                    // Set before the send, exactly as a flush's is — see
+                    // `ExecutorHealth::flush_completed_pending` for the handshake's ordering.
+                    health
+                        .coalesce_completed_pending
+                        .store(true, Ordering::SeqCst);
+                    let _ = submit.send(completed);
+                }
+                Err(e) => {
+                    // Nothing happened, retry next tick: the manifest is the only commit point,
+                    // so a failure before it leaves orphan files nothing references and every
+                    // consumed entry still stands.
+                    health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        error = %e,
+                        "an entity-space coalesce failed; the axes it would have bounded keep \
+                         growing and it is retried at the next tick"
+                    );
+                }
+            }
+            in_flight.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// Apply every completed coalesce waiting from the pool, and report whether any did.
+    fn publish_completed_coalesces(&mut self) -> bool {
+        let mut any = false;
+        while let Ok(completed) = self.coalesce_done.try_recv() {
+            self.publish_coalesce(completed);
+            any = true;
+        }
+        if any {
+            // Cleared only after something was drained, never on an empty pass — the other half of
+            // the handshake; see `ExecutorHealth::flush_completed_pending`.
+            self.health
+                .coalesce_completed_pending
+                .store(false, Ordering::SeqCst);
+        }
+        any
+    }
+
+    /// **Publish an entity-space coalesce: a manifest edit, a sidecar swap and a tier-list swap —
+    /// and no `segments_version` bump** (decision 0044 D2).
+    ///
+    /// This is the half of merge that touches no row space. Nothing it rewrites addresses a row:
+    /// a delta tier is `(term, entity)` pairs, a run and its locator are `external_id ↔ entity`,
+    /// a dictionary extent is descriptors. So no projection is invalidated, no fragment is stale,
+    /// no cache key rotates and no session pays anything — which is what makes it 0043-conforming
+    /// by construction rather than by 0044's refresh mechanism, and why it lands ahead of the
+    /// row-space merge that is gated on it.
+    ///
+    /// **What it does swap is the two pieces of live state the manifest names**: the generation's
+    /// tier list, so a fragment built after this reads one file where it read `width`; and the
+    /// external-id sidecar, so the duplicate check scans one run where it scanned `width`. Both
+    /// are content-preserving, so a request holding the old and a request holding the new agree
+    /// on every answer — the swap buys the bound, never a correctness property.
+    ///
+    /// **The consumed files are not deleted.** Every side-manifest below this `n` still names
+    /// them, and a step-down serves one of those (contracts §2.3); reclaiming them is
+    /// compaction's, along with every other orphan.
+    fn publish_coalesce(&mut self, completed: crate::coalesce::CompletedCoalesce) {
+        let started = std::time::Instant::now();
+        let live = self.generation.load_full();
+        if live.prefix != completed.prefix {
+            tracing::warn!(
+                planned = %completed.prefix,
+                live = %live.prefix,
+                "discarding a completed coalesce planned against a superseded prefix"
+            );
+            return;
+        }
+        let Some(partition_data) = live.bundle.partitions.get(&completed.plan.partition) else {
+            return;
+        };
+
+        let mut manifest = partition_data.manifest.clone();
+        if !crate::coalesce::rebase_into(&mut manifest, &completed) {
+            // The window it planned against is gone. Expected rather than exceptional — see
+            // `rebase_into` — and the files are orphans nothing references.
+            tracing::warn!("discarding a completed coalesce that no longer rebases");
+            return;
+        }
+        // Complete current state, serialised fresh from the overlay this publication carries —
+        // the same rule every other manifest write follows (contracts §2.3).
+        write_deny_state(&mut manifest, &live.overlay);
+
+        let manifest_n = self.allocate_manifest_n();
+        if let Err(e) = crate::flush::write_segments_manifest(
+            &self.prefix_dir,
+            &completed.plan.partition,
+            manifest_n,
+            &manifest,
+        ) {
+            self.health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                error = %e,
+                "ALARM: a completed coalesce's side-manifest could not be committed; its files \
+                 are orphans, every consumed entry still stands, and the next tick re-plans"
+            );
+            return;
+        }
+
+        // The sidecar reads the *new* manifest, so it must be built after the edit and before the
+        // swap — and it is built here, on the executor, because a failure must abandon the
+        // publication rather than leave the generation naming runs no sidecar can resolve.
+        let next_index = match crate::session::ExternalIdIndex::open(
+            &live.bundle.manifest,
+            &manifest,
+            &self.prefix_dir,
+        ) {
+            Ok(index) => index,
+            Err(e) => {
+                self.health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    error = %e,
+                    "ALARM: a coalesce's manifest committed but its external-id sidecar would not \
+                     open; the process keeps serving the pre-coalesce sidecar, which answers \
+                     identically, and a restart opens the committed manifest"
+                );
+                return;
+            }
+        };
+
+        let next_bundle = match live.bundle.with_manifest(
+            &completed.plan.partition,
+            tessera_store::read::PublishedManifest {
+                manifest,
+                n: manifest_n,
+            },
+        ) {
+            Ok(bundle) => bundle,
+            Err(e) => {
+                tracing::warn!(error = %e, "discarding a completed coalesce that no longer rebases");
+                return;
+            }
+        };
+
+        // **The tier list, with the consumed tiers replaced by the one that carries their pairs.**
+        // Rebuilt from the new manifest rather than patched positionally: `deltas` is now the
+        // authority on which tiers are live (contracts §2.3 r18), and re-deriving from it is the
+        // one form that cannot drift from what a restart would open.
+        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
+        let coalesced = completed.tier.as_ref();
+        for rel in &next_bundle
+            .partitions
+            .get(&completed.plan.partition)
+            .expect("the partition this publication just rebased")
+            .manifest
+            .deltas
+        {
+            match coalesced.filter(|(path, _)| path == rel) {
+                Some((_, tier)) => delta_postings.push(Arc::clone(tier)),
+                None => match live
+                    .delta_postings
+                    .iter()
+                    .zip(&partition_data.manifest.deltas)
+                    .find(|(_, live_rel)| *live_rel == rel)
+                {
+                    Some((tier, _)) => delta_postings.push(Arc::clone(tier)),
+                    None => {
+                        tracing::error!(
+                            tier = %rel,
+                            "ALARM: a coalesce's manifest names a delta tier this process does \
+                             not hold open; abandoning the swap rather than serving a fragment \
+                             built from fewer tiers than the manifest declares"
+                        );
+                        return;
+                    }
+                },
+            }
+        }
+
+        let next = Generation {
+            prefix: live.prefix.clone(),
+            // **Unchanged, and this is the whole of D2.** Row space did not move, so no
+            // projection is stale and no cache key may rotate.
+            segments_version: live.segments_version,
+            watermark: live.watermark,
+            bundle: next_bundle,
+            dict: Arc::clone(&live.dict),
+            postings: Arc::clone(&live.postings),
+            delta_postings,
+            overlay_version: live.overlay_version,
+            overlay: Arc::clone(&live.overlay),
+            buffer: Arc::clone(&live.buffer),
+            denied: Arc::clone(&live.denied),
+        };
+        let _published = self.publish(next, started);
+        self.external_index.store(Arc::new(next_index));
+        self.health.coalesces.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Apply every completed flush waiting from the pool, and report whether any did.
@@ -3004,10 +3294,15 @@ impl Executor {
             until_tick.min(WAL_RECOVERY_POLL_INTERVAL)
         } else if self.flush_in_flight.load(Ordering::SeqCst)
             || self.health.flush_completed_pending.load(Ordering::SeqCst)
+            || self.coalesce_in_flight.load(Ordering::SeqCst)
+            || self.health.coalesce_completed_pending.load(Ordering::SeqCst)
         {
-            // A flush is executing on the pool, or its completed unit is waiting in `flush_done`.
-            // The pool cannot ring the doorbell (see `flush_submit`), so this poll is what bounds
-            // publication latency on an idle node — see `FLUSH_COMPLETION_POLL`.
+            // A flush or a coalesce is executing on the pool, or its completed unit is waiting in
+            // the corresponding channel. The pool cannot ring the doorbell (see `flush_submit`),
+            // so this poll is what bounds publication latency on an idle node — see
+            // `FLUSH_COMPLETION_POLL`. Without the coalesce arm an idle node's completed coalesce
+            // waits for the next *tick*, which at a 90 s period is 90 s of a pass that has already
+            // done all of its IO sitting unpublished.
             until_tick.min(FLUSH_COMPLETION_POLL)
         } else {
             until_tick
@@ -4321,7 +4616,7 @@ impl Executor {
             .entity_id_high_water
             .max(completed.entity_id_high_water);
         manifest.segments.push(completed.descriptor);
-        manifest.deltas.push(manifest_n);
+        manifest.deltas.push(completed.tier_path);
         manifest.external_id_runs.push(completed.external_id_run);
         manifest.locator_extents.push(completed.locator_extent);
         manifest.files.extend(completed.files);

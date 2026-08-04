@@ -16,10 +16,13 @@
 //! deletion or an evaluate entry — safe today precisely because nothing retires at all, and
 //! fail-open the moment a fold is built without Rule F's identity match (`write-path.md` §5.4).
 //!
-//! **`evaluate` takes no new entries.** Decision 0047 withdrew the `predicate` op — an edit is a
-//! delete plus a re-ingest, and `/control/changes` refuses `op: "predicate"` with a 422 naming the
-//! flow. The store and [`Overlay::apply`]'s `Predicate` arm remain for exactly one reason:
-//! replaying legacy entries from pre-0047 WALs, which compose as they always did until their fold.
+//! **`evaluate` is being removed, and holds nothing anywhere.** Decision 0047 withdrew the
+//! `predicate` op — an edit is a delete plus a re-ingest, and `/control/changes` refuses
+//! `op: "predicate"` with a 422 naming the flow. 0047 kept the machinery dormant rather than
+//! deleting it, for pre-0047 WALs to replay; **that set is empty, because the system has never been
+//! deployed**, so the follow-on ruling 0047 anticipated is made: the store, the WAL variant,
+//! `ChangeOp::Predicate`, [`PredicateChange`] and `verdict`'s branch are all to be cut. Until that
+//! lands, nothing may be built against this store and nothing new can enter it.
 //!
 //! Collapsing them into a single enum ("last write wins") is fail-open, and has been caught twice:
 //! the sequence `delete → suppress → unsuppress` must not re-expose a deleted item. Three separate
@@ -80,10 +83,10 @@ pub struct Overlay {
     /// Set by `Suppress`, cleared **only** by `Unsuppress`. Never touched by `Delete` or
     /// `Predicate`, which is now true by construction rather than by discipline.
     suppressed: Bitmap,
-    /// Set by `Predicate`, which `/control/changes` no longer accepts (decision 0047) — so this is
-    /// reachable only by replaying a pre-0047 WAL, and holds nothing in a corpus written since.
-    /// Replaces the fragment's verdict for this entity in both directions once present; never
-    /// cleared by the other ops (⊘ — Rule F's compaction fold does not exist).
+    /// Set by `Predicate`, which `/control/changes` no longer accepts (decision 0047), and which no
+    /// WAL anywhere carries — **this store is empty in every deployment that exists, and is being
+    /// cut**. Replaces the fragment's verdict for this entity in both directions once present;
+    /// never cleared by the other ops (⊘ — Rule F's compaction fold does not exist).
     evaluate: FxHashMap<EntityId, PredicateChange>,
 }
 
@@ -182,9 +185,9 @@ impl Overlay {
     /// Apply one disposition change to `entity`. Each op touches exactly one store — see this
     /// type's doc for why that is the whole safety argument.
     ///
-    /// **The `Predicate` arm is replay-only** (decision 0047): `/control/changes` refuses the op, so
-    /// the only caller that still reaches it is WAL replay over a pre-0047 log. Its semantics are
-    /// frozen for that reason — they must reproduce what a legacy entry meant when it was written.
+    /// **The `Predicate` arm is unreachable and is being cut** (decision 0047, plus the follow-on
+    /// ruling in this module's doc): `/control/changes` refuses the op, and no WAL that could replay
+    /// one exists. Do not extend it.
     ///
     /// **`Predicate` always *sets* a term set, never unsets one.** `access` is optional on
     /// `/control/changes` (contracts §3.4), so a predicate change with no descriptors is a

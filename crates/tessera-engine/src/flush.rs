@@ -231,6 +231,10 @@ pub(crate) struct CompletedFlush {
     /// Every file this flush wrote, prefix-relative, with its digest — computed on the pool.
     pub(crate) files: std::collections::BTreeMap<String, FileDigest>,
     pub(crate) tier: Arc<DeltaTier>,
+    /// The tier's prefix-relative path — `deltas`' entry for it (contracts §2.3 r18). Carried
+    /// rather than re-derived at publication, because after a coalesce a tier's path is no longer
+    /// a function of any segment's `seg_id`.
+    pub(crate) tier_path: String,
     /// The tier measured as encoded (`FragmentationTally::of_tier`) — contracts §3.4's
     /// `fragmentation`, at the scope where between-window scatter is visible. Computed on the
     /// pool beside the write it measures; recorded by the executor only if the flush publishes.
@@ -325,7 +329,7 @@ pub(crate) fn execute_flush(
     // restore never reads — the segment silently lost. And the deny fields must reflect the
     // overlay at *publication*, not at plan time, which is a thing only the executor holds.
     let mut files = out.files;
-    files.insert(tier_rel, digest_of(&tier_path).map_err(FlushFailed)?);
+    files.insert(tier_rel.clone(), digest_of(&tier_path).map_err(FlushFailed)?);
     let dict_extent = match promotion.extent {
         Some(extent) => {
             files.insert(
@@ -361,6 +365,7 @@ pub(crate) fn execute_flush(
         dict_extent,
         files,
         tier,
+        tier_path: tier_rel,
         tier_tally,
         dict: promotion.dict,
         promoted_from_dict_len: promoted_from,

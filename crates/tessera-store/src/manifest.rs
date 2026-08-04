@@ -278,8 +278,18 @@ pub struct SegmentsManifest {
     pub watermark: u64,
     pub entity_id_high_water: u64,
     pub segments: Vec<SegmentDescriptor>,
+    /// Every live delta postings tier, **by prefix-relative path**, in serving order.
+    ///
+    /// **A path list rather than the count declaration it was.** Until r18 this carried the
+    /// manifest sequence number each tier arrived at and the reader *derived* the paths from
+    /// `segments` (`…/segments/<seg_id>/delta.arrow`), checking only that the two counts agreed.
+    /// That derivation makes tier coalescence unexpressible: a coalesced tier covers several
+    /// segments' entities, so it sits beside none of them, and a manifest naming it would open
+    /// with the tiers it could derive and refuse the count. Naming the files is also what lets a
+    /// coalesce publication drop the consumed tiers from `files` and add one, which is the whole
+    /// of its manifest edit on this axis.
     #[serde(default)]
-    pub deltas: Vec<u64>,
+    pub deltas: Vec<String>,
     #[serde(default)]
     pub dict_extents: Vec<DictExtent>,
     #[serde(default)]
@@ -523,7 +533,7 @@ mod tests {
         // staleness in the fail-safe direction, so a deltas-only candidate whose files do not
         // verify may still be stepped past.
         let mut with_delta = empty_segments_manifest();
-        with_delta.deltas.push(1);
+        with_delta.deltas.push("d.arrow".to_string());
         assert_eq!(with_delta.honourability(), Honourability::Honourable);
         assert!(with_delta.deny_disposition_state().is_empty());
     }
@@ -535,7 +545,7 @@ mod tests {
     fn no_known_state_field_is_unhonourable_any_more() {
         let mut all_three = empty_segments_manifest();
         all_three.tombstones.push(17);
-        all_three.deltas.push(1);
+        all_three.deltas.push("d.arrow".to_string());
         all_three.deny.push(DenyEntry {
             entity_id: 18,
             cause: "suppress".to_string(),
@@ -555,7 +565,7 @@ mod tests {
     #[test]
     fn a_deny_beside_deltas_is_still_deny_disposition_state() {
         let mut manifest = empty_segments_manifest();
-        manifest.deltas.push(1);
+        manifest.deltas.push("d.arrow".to_string());
         manifest.deny.push(DenyEntry {
             entity_id: 17,
             cause: "suppress".to_string(),
@@ -564,7 +574,7 @@ mod tests {
 
         // And the same for a tombstone beside deltas — the other deny-disposition field.
         let mut manifest = empty_segments_manifest();
-        manifest.deltas.push(1);
+        manifest.deltas.push("d.arrow".to_string());
         manifest.tombstones.push(17);
         assert_eq!(manifest.deny_disposition_state(), vec!["tombstones"]);
     }

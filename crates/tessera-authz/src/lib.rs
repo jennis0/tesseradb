@@ -4,7 +4,7 @@ pub mod postings;
 mod single_flight;
 pub mod tier;
 
-pub use dict::{Dict, DictStreamWriter, DictWriter};
+pub use dict::{coalesce_dict_extents, Dict, DictStreamWriter, DictWriter};
 pub use fragment::{
     build_fragment, build_fragment_with_deltas, FragmentCache, FragmentCacheError, FrozenFragment,
 };

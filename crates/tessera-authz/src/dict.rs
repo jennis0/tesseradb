@@ -167,6 +167,59 @@ impl DictStreamWriter {
     }
 }
 
+/// Concatenate `inputs` into one extent at `out`, and return how many records it carries.
+///
+/// **Ordinal-preserving by construction, which is the whole of its correctness argument.** A
+/// dictionary ordinal is a position in the concatenation of `dict_extents` in listed order
+/// ([`Dict::load`]), so writing the same records in the same order under one name changes no
+/// ordinal — provided the caller replaces a *contiguous* range of the list, in place. A caller
+/// that reordered the list, or coalesced a non-contiguous selection, would renumber every ordinal
+/// after the gap, and a session's granted terms are resolved once at authorise and never
+/// re-resolved: it would evaluate against a different term than the one it was granted.
+///
+/// **The records are walked, not the bytes copied**, so a truncated or corrupt extent fails here
+/// rather than at the next `Engine::open` — the same walk `Dict::load` performs, at the one point
+/// where a bad extent can still be left unpublished.
+///
+/// Duplicates are *not* removed. [`Dict::load`] skips a repeat without advancing the ordinal
+/// counter, so a repeat that somehow existed already costs an ordinal in neither form; removing it
+/// here would make this function's output disagree with its input for a reader that predates that
+/// rule. Decision 0042 keeps the writer from producing one at all.
+pub fn coalesce_dict_extents(inputs: &[PathBuf], out: &Path) -> io::Result<u64> {
+    let mut writer = BufWriter::new(File::create(out)?);
+    let mut records: u64 = 0;
+    for path in inputs {
+        let data = std::fs::read(path)?;
+        let mut offset = 0;
+        while offset < data.len() {
+            if offset + 4 > data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("dictionary extent {}: incomplete length field", path.display()),
+                ));
+            }
+            let len = u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+            if offset + len > data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("dictionary extent {}: incomplete descriptor", path.display()),
+                ));
+            }
+            writer.write_all(&data[offset - 4..offset + len])?;
+            offset += len;
+            records += 1;
+        }
+    }
+    writer.flush()?;
+    Ok(records)
+}
+
 /// Loads and queries a dictionary.
 pub struct Dict {
     lookup_map: FxHashMap<Box<[u8]>, TermId>,

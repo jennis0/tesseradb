@@ -29,18 +29,16 @@
 //! have left this module.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs;
 use std::path::Path;
-
-use arrow::array::{Array, BinaryArray, UInt32Array};
-use arrow::ipc::reader::FileReader;
 
 use tessera_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
 use tessera_spatial::{sort_batch, unsplit32};
 use tessera_types::{EntityId, IdentityKey, MortonCode, TesseraId, ROW_ABSENT};
 
+use crate::coalesce::{read_runs, write_coalesced_run};
 use crate::error::{Result, StoreError};
-use crate::flush::{digest_of, write_external_id_run, write_u32_array, FlushOutput};
+use crate::flush::{digest_of, FlushOutput};
 use crate::manifest::{LocatorExtent, SegmentDescriptor};
 use crate::permutation::SegmentExtent;
 use crate::read::{ColumnsRef, MortonSlice, ScalarSlice};
@@ -120,14 +118,25 @@ impl MergePolicy {
         None
     }
 
-    /// `size`'s tier: the power-of-two class of `max(size, floor)`.
-    ///
-    /// Clamping to the floor **before** taking the class is what makes the floor mean "these
-    /// compare equal" rather than "these are skipped": two segments of 1 and 999 bytes against a
-    /// 1,000-byte floor are one tier, which is the tail-of-tiny-segments case the floor exists for.
+    /// `size`'s tier — see [`size_tier`].
     fn tier_of(&self, size: u64) -> u32 {
-        size.max(self.segment_floor_bytes).max(1).ilog2()
+        size_tier(size, self.segment_floor_bytes)
     }
+}
+
+/// `size`'s tier: the power-of-two class of `max(size, floor)`.
+///
+/// Clamping to the floor **before** taking the class is what makes the floor mean "these compare
+/// equal" rather than "these are skipped": two segments of 1 and 999 bytes against a 1,000-byte
+/// floor are one tier, which is the tail-of-tiny-artefacts case the floor exists for.
+///
+/// **Size tiering is what bounds write amplification, on every axis it is applied to.** A policy
+/// that simply took the oldest *w* entries would re-read the artefact it produced last time at
+/// every round, so a byte would be rewritten once per round for ever; requiring one size class
+/// makes a byte move only when its artefact has doubled, which is O(log n) rewrites over the
+/// deployment's life. The entity-space coalesce shares this function for exactly that reason.
+pub fn size_tier(size: u64, floor: u64) -> u32 {
+    size.max(floor).max(1).ilog2()
 }
 
 /// One segment a merge consumes, in listed (entity) order.
@@ -266,7 +275,7 @@ pub fn execute_merge(
             entity_ids.push(entity);
         }
 
-        forward.extend(read_external_id_run(&dir.join("external-ids.arrow"))?);
+        forward.extend(read_runs(&[dir.join("external-ids.arrow")])?);
     }
 
     let entity_lo = spec.inputs[0].entity_lo;
@@ -296,36 +305,10 @@ pub fn execute_merge(
         extent_rows[(entity.raw() - entity_lo) as usize] = row as u32;
     }
 
-    // **The runs merge by caller key, because that is the only order a run has** (flush §5.2b).
-    // Unlike an extent, a run cannot be ordered against its neighbours — nothing coordinates what
-    // keys a caller supplies — so coalescing is a merge-sort over the bytes.
-    //
-    // **A key present in two inputs keeps the newest binding** (decision 0047): delete +
-    // re-ingest re-binds an external id, so the older holder is a forgotten, deleted entity and
-    // must not survive the coalesce — the reader resolves newest-run-first, and a coalesced run
-    // must answer exactly as the runs it replaced did. `forward` is collected input-by-input in
-    // manifest order (oldest first), so a stable sort keeps that order within equal keys and the
-    // keep-last dedup below selects the newest.
-    forward.sort_by(|a, b| a.0.cmp(&b.0));
-    {
-        let mut write = 0usize;
-        for read in 0..forward.len() {
-            if read + 1 < forward.len() && forward[read + 1].0 == forward[read].0 {
-                continue; // a newer binding for the same key follows; drop this one
-            }
-            forward.swap(write, read);
-            write += 1;
-        }
-        forward.truncate(write);
-    }
-    let run_rows: Vec<(&[u8], u32)> = forward.iter().map(|(id, e)| (id.as_slice(), *e)).collect();
-    write_external_id_run(&out_dir.join("external-ids.arrow"), &run_rows)?;
-
-    let mut locator = vec![ROW_ABSENT; span];
-    for (ordinal, (_, entity)) in forward.iter().enumerate() {
-        locator[(*entity as u64 - entity_lo) as usize] = ordinal as u32;
-    }
-    write_u32_array(&out_dir.join("ext-locator.u32"), &locator)?;
+    // The runs and their reverse locator are entity-space work, shared verbatim with the
+    // entity-space coalesce publication that does it *without* a segment — see
+    // [`crate::coalesce`] for the key order and the keep-newest rule.
+    write_coalesced_run(forward, entity_lo, entity_hi, &out_dir)?;
 
     let rel = |name: &str| {
         format!(
@@ -419,39 +402,4 @@ fn gather_scalars(
             }
         })
         .collect()
-}
-
-/// Read one external-id run back as `(external_id, entity)` pairs.
-fn read_external_id_run(path: &Path) -> Result<Vec<(Vec<u8>, u32)>> {
-    let file = File::open(path).map_err(|source| StoreError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let reader = FileReader::try_new(file, None).map_err(|e| StoreError::MalformedBundle {
-        detail: format!("external-ids.arrow at {}: {e}", path.display()),
-    })?;
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch.map_err(|e| StoreError::MalformedBundle {
-            detail: format!("external-ids.arrow at {}: {e}", path.display()),
-        })?;
-        let ids = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .ok_or_else(|| StoreError::MalformedBundle {
-                detail: "external-ids.arrow: column 0 is not binary".to_string(),
-            })?;
-        let entities = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .ok_or_else(|| StoreError::MalformedBundle {
-                detail: "external-ids.arrow: column 1 is not uint32".to_string(),
-            })?;
-        for i in 0..batch.num_rows() {
-            out.push((ids.value(i).to_vec(), entities.value(i)));
-        }
-    }
-    Ok(out)
 }

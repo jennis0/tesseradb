@@ -8,6 +8,7 @@
 
 mod cache;
 pub mod cancel;
+mod coalesce;
 pub mod compose;
 mod flush;
 mod geometry;
