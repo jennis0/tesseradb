@@ -177,3 +177,61 @@ fn a_suppression_accepted_before_a_rotation_is_still_in_force_after_a_restart() 
          stands between that and a re-exposed item"
     );
 }
+
+/// **A row deleted before its first flush does not pin the log** (write-path §4.2).
+///
+/// A deleted row acquires no geometry — `plan_flush` skips it — so no flush ever consumes it, and
+/// before the delete removed it from the buffer it sat there for the process's lifetime holding
+/// `oldest_wal_pos` down: its member, and every member after it, unreclaimable. A deployment that
+/// deletes before flushing therefore stopped reclaiming the log at all, which is the one lane that
+/// structurally cannot be shed.
+///
+/// The end state asserted here is decision 0047's *forgotten*: no row, no buffer entry, the id
+/// still burned, and the deny still in force across a restart from the rotation's snapshot alone.
+#[test]
+fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture(tmp.path());
+
+    let deleted = {
+        let engine = engine_at(tmp.path(), &root, 1);
+        let id = ingest(&engine, "ext-1");
+        assert!(engine.generation().buffer.contains(id));
+        engine
+            .accept_change(id, ChangeOp::Delete, None)
+            .expect("the delete is accepted");
+        assert!(
+            !engine.generation().buffer.contains(id),
+            "the delete must drop the row from the buffer; nothing else ever will"
+        );
+
+        // No flush publishes — the one buffered row was deleted — so what rotates is the tick's
+        // own growth-gated rotation, and it may only reclaim because the buffer is now empty.
+        wait_until("member 1 to be reclaimed", || {
+            !members(tmp.path()).contains(&"wal-000001.log".to_string())
+        });
+        id
+    };
+
+    let reopened = engine_at(tmp.path(), &root, 3600);
+    let generation = reopened.generation();
+    assert!(
+        generation.overlay.is_deleted(deleted),
+        "the record that carried this deletion was reclaimed; the rotation's snapshot is what \
+         keeps it in force"
+    );
+    assert!(
+        !generation.buffer.contains(deleted),
+        "a reclaimed row must reconstruct nothing — the entity is forgotten (decision 0047)"
+    );
+    let bundle = tessera_store::open_bundle(&root).expect("the bundle opens");
+    let partition = bundle.partitions.values().next().unwrap();
+    assert!(
+        partition.slices["s0"].row_space.row_of(deleted).is_none(),
+        "and it acquired no geometry on the way out"
+    );
+    assert!(
+        reopened.allocator_high_water() >= deleted.raw(),
+        "the id stays burned (I9) — a deletion never returns one to the allocator"
+    );
+}

@@ -1,12 +1,18 @@
-//! The ingest buffer: replayed `WalRow`s not yet in any segment.
+//! The ingest buffer: `WalRow`s not yet in any segment.
 //!
-//! **⊘ Specified, not implemented: there is no flush.** An ingested item is durable (WAL-fsynced)
-//! and participates in authorisation state (I1's composition rule 4) the moment it is accepted, but
-//! has no row geometry until the next `tessera build` folds it into a bundle. That is a durability
-//! guarantee, not a visibility-latency one, and it is not a bug: a buffered item has no
-//! `Permutation::row_of` entry anywhere, so it can never contribute to a tile's geometry — only,
-//! if its terms are satisfied, to the *count*, and even that only once the composition path can
-//! synthesise a row for it, which it cannot.
+//! **It holds exactly the rows without geometry, and nothing else may reach it.** An ingested item
+//! is durable (WAL-fsynced) and participates in authorisation state (I1's composition rule 4) the
+//! moment it is accepted, but it has no `Permutation::row_of` entry anywhere until the flush tick
+//! gives it one — so an ack is a durability receipt, never a visibility promise, and the gap is
+//! bounded by `flush_max_age_secs` (write-path §4.1).
+//!
+//! Two rules keep membership exact, and both are enforced away from here because both are
+//! statements about the *other* state a row can be in. A row that acquired geometry leaves at its
+//! flush's publication (`Executor::publish_flush`, by consumed id) or at replay
+//! (`WritePath::reconstruct`, by the `row_of` predicate). A row that was **deleted** leaves as the
+//! deletion applies (`crate::overlay::drop_deleted`): it will never acquire geometry, so nothing
+//! else would ever remove it, and [`IngestBuffer::oldest_wal_pos`] is the WAL's reclaim bound —
+//! one such row pins its member and every member after it, for ever.
 //!
 //! Term descriptors are resolved through [`DescriptorResolver`]: the bundle dictionary first,
 //! then a deterministic in-memory extension interned in replay order for descriptors the

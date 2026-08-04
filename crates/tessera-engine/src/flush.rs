@@ -611,6 +611,11 @@ fn digest_of(path: &Path) -> Result<FileDigest, String> {
 /// a later unsuppress to reveal — and `evaluate_terms` does not, because the terms written are the
 /// buffered row's and the entry stands. Reading any other field here is the fold arriving as a
 /// simplification; see this module's doc.
+///
+/// Unreachable in the steady state and kept deliberately: a delete now drops its row from the
+/// buffer as it applies (`tessera_lifecycle::overlay::drop_deleted`), so no live buffer holds a
+/// deleted row for this to find. This is the statement of *which disposition* excludes an item,
+/// which is the invariant-bearing half, and it must not follow the buffer's shape.
 fn is_deleted(overlay: &Overlay, entity: EntityId) -> bool {
     overlay.is_deleted(entity)
 }

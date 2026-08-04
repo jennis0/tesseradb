@@ -1,13 +1,25 @@
-//! The overlay: per-entity deny/evaluate state accumulated from `/control/changes` (lifecycle
-//! §3.1's three retirement rules).
+//! The overlay: per-entity deny/evaluate state accumulated from `/control/changes`
+//! (`write-path.md` §5.4's two removal rules).
 //!
 //! The overlay is **three independent stores**, never one overwritable disposition: deletions,
-//! suppressions and predicate changes retire on entirely different triggers. Deletion denies retire
-//! via the stamp ledger; suppressions retire only on `Unsuppress`; predicate changes retire at
-//! their compaction fold (lifecycle §3).
-//! **⊘ Partially implemented:** only the `Unsuppress` rule exists. There is no stamp ledger and no
-//! compaction fold, so nothing retires a deletion or a predicate change — safe today precisely
-//! because nothing retires at all, and fail-open the moment either is built without its own rule.
+//! suppressions and predicate changes are separate facts that leave on different triggers.
+//! **Rule S** — an entry leaves `suppressed` only by its unsuppress. **Rule F** — entries leave
+//! `deleted` and `evaluate` only at the compaction fold that *executes* them. Three stores against
+//! two rules: the store boundary is what makes the fail-open collapse below unexpressible, and it
+//! is not a claim that each store owns a rule.
+//!
+//! *(Owner-ruled 2026-08-03, replacing lifecycle §3.2's stamp ledger. That document is not yet
+//! rewritten — a reader who finds it describing per-deny retirement stamps has found the stale
+//! text, not a second mechanism.)*
+//!
+//! **⊘ Only the unsuppress rule exists.** There is no compaction fold, so nothing retires a
+//! deletion or an evaluate entry — safe today precisely because nothing retires at all, and
+//! fail-open the moment a fold is built without Rule F's identity match (`write-path.md` §5.4).
+//!
+//! **`evaluate` takes no new entries.** Decision 0047 withdrew the `predicate` op — an edit is a
+//! delete plus a re-ingest, and `/control/changes` refuses `op: "predicate"` with a 422 naming the
+//! flow. The store and [`Overlay::apply`]'s `Predicate` arm remain for exactly one reason:
+//! replaying legacy entries from pre-0047 WALs, which compose as they always did until their fold.
 //!
 //! Collapsing them into a single enum ("last write wins") is fail-open, and has been caught twice:
 //! the sequence `delete → suppress → unsuppress` must not re-expose a deleted item. Three separate
@@ -40,12 +52,13 @@ pub struct PredicateChange {
     pub terms: Vec<TermId>,
 }
 
-/// Per-entity deny/evaluate state, held as **three independent stores, one per retirement rule**.
+/// Per-entity deny/evaluate state, held as **three independent stores**.
 ///
-/// The three facts retire on entirely different triggers — deletion denies by the stamp ledger,
-/// suppressions *only* on unsuppress, predicate changes at their compaction fold (lifecycle §3.1) —
-/// and the rejected single rule (r1: one retirement stamp for every deny) is fail-open precisely
-/// for suppression, because any stamp eventually retires the entry and re-exposes the item.
+/// The three facts leave on different triggers — a suppression *only* by its unsuppress (Rule S), a
+/// deletion or an evaluate entry only at the compaction fold that executes it (Rule F,
+/// `write-path.md` §5.4) — and the rejected single rule (r1: one retirement stamp for every deny)
+/// is fail-open precisely for suppression, because any stamp eventually retires the entry and
+/// re-exposes the item.
 ///
 /// **Three stores rather than three fields in one struct, and the difference is not cosmetic.**
 /// Collapsing the facts into one last-write-wins disposition was caught fail-open twice in review;
@@ -61,15 +74,16 @@ pub struct PredicateChange {
 /// set per entity and stay a map.
 #[derive(Debug, Default, Clone)]
 pub struct Overlay {
-    /// Set by `Delete`. **Terminal: nothing removes from it**, because the stamp ledger that would
-    /// retire a deletion deny does not exist (⊘).
+    /// Set by `Delete`. **Terminal: nothing removes from it**, because Rule F's compaction fold —
+    /// the only thing that may execute a deletion — does not exist (⊘).
     deleted: Bitmap,
     /// Set by `Suppress`, cleared **only** by `Unsuppress`. Never touched by `Delete` or
     /// `Predicate`, which is now true by construction rather than by discipline.
     suppressed: Bitmap,
-    /// Set by `Predicate`. Replaces the fragment's verdict for this entity in both directions once
-    /// present; never cleared by the other three ops (⊘ — the compaction fold that would retire it
-    /// does not exist).
+    /// Set by `Predicate`, which `/control/changes` no longer accepts (decision 0047) — so this is
+    /// reachable only by replaying a pre-0047 WAL, and holds nothing in a corpus written since.
+    /// Replaces the fragment's verdict for this entity in both directions once present; never
+    /// cleared by the other ops (⊘ — Rule F's compaction fold does not exist).
     evaluate: FxHashMap<EntityId, PredicateChange>,
 }
 
@@ -108,8 +122,8 @@ impl Overlay {
     /// unsuppress may not subtract a row while `deleted` still holds the entity. Handing callers
     /// the union makes the rule the only expressible thing.
     ///
-    /// The two predicate-change stores are deliberately absent: an `evaluate` entry is not a deny,
-    /// it replaces a verdict in both directions, and it stays in `compose`'s per-entity walk.
+    /// The `evaluate` store is deliberately absent: an entry there is not a deny, it replaces a
+    /// verdict in both directions, and it stays in `compose`'s per-entity walk.
     pub fn denied(&self) -> Bitmap {
         self.deleted.or(&self.suppressed)
     }
@@ -117,8 +131,9 @@ impl Overlay {
     /// The suppression set, ascending — `SEGMENTS-<n>.json`'s `deny` field.
     ///
     /// Separate from [`Self::deleted_entities`] because the two manifest fields mean different
-    /// things and retire under different rules (lifecycle §3): a suppression leaves only by its
-    /// unsuppress, a tombstone only at the fold that executes it. [`Self::denied`] deliberately
+    /// things and leave under different rules (`write-path.md` §5.4): a suppression only by its
+    /// unsuppress (Rule S), a tombstone only at the fold that executes it (Rule F).
+    /// [`Self::denied`] deliberately
     /// hands out only the union, which is right for the row mask and wrong here — a writer that
     /// published the union under one field would make every deletion look retirable by an
     /// unsuppress.
@@ -166,6 +181,10 @@ impl Overlay {
 
     /// Apply one disposition change to `entity`. Each op touches exactly one store — see this
     /// type's doc for why that is the whole safety argument.
+    ///
+    /// **The `Predicate` arm is replay-only** (decision 0047): `/control/changes` refuses the op, so
+    /// the only caller that still reaches it is WAL replay over a pre-0047 log. Its semantics are
+    /// frozen for that reason — they must reproduce what a legacy entry meant when it was written.
     ///
     /// **`Predicate` always *sets* a term set, never unsets one.** `access` is optional on
     /// `/control/changes` (contracts §3.4), so a predicate change with no descriptors is a
@@ -412,7 +431,38 @@ pub fn replay<'a, E>(
         }
     }
 
+    drop_deleted(&overlay, &mut buffer);
     Ok((overlay, buffer, established, resolver))
+}
+
+/// Drop every buffered row whose entity the overlay has deleted — **the buffer never holds a
+/// deleted row** (write-path §4.2, decision 0047).
+///
+/// A deleted row acquires no geometry: `plan_flush` skips it, so a flush never consumes it and
+/// its entry would sit in the buffer for the process's lifetime. That is not merely untidy —
+/// `IngestBuffer::oldest_wal_pos` is the rotation's reclaim bound, so one such row **pins its WAL
+/// member and every member after it**, and a deployment that deletes before its first flush stops
+/// reclaiming the log entirely.
+///
+/// **Composition-neutral, which is what makes the removal safe rather than merely cheap.**
+/// `compose::verdict` answers `Some(false)` from `overlay.is_deleted` before it ever consults the
+/// buffer, and a deletion never retires (Rule F; the fold does not exist), so nothing downstream
+/// can observe the difference. Under decision 0047 the entity is *forgotten* — its id stays burned
+/// (I9), a re-ingest of its external id binds a new one — so the end state after reclamation, no
+/// row and no buffer entry, is the ruled one and not a loss.
+///
+/// Applied as an end-of-pass rule rather than at each `Delete`, because the manifests' deny seed
+/// is applied *before* the walk: a tombstone the seed carries would otherwise miss the
+/// `IngestBatch` record replayed after it.
+fn drop_deleted(overlay: &Overlay, buffer: &mut IngestBuffer) {
+    let deleted: Vec<EntityId> = buffer
+        .iter()
+        .map(|(entity, _)| *entity)
+        .filter(|entity| overlay.is_deleted(*entity))
+        .collect();
+    for entity in deleted {
+        buffer.remove(entity);
+    }
 }
 
 #[cfg(test)]

@@ -694,8 +694,12 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
         Some(&[TermId::new(0)][..]),
         "predicate's granted term must also survive replay"
     );
-    assert!(buffer.contains(e(ENTITY_X)));
-    assert!(buffer.contains(e(ENTITY_Y)));
+    // **Neither is buffered any more, and the exclusions above are what makes that safe.** A
+    // deleted row acquires no geometry, so no flush would ever consume it and it would pin the
+    // WAL's reclaim bound for ever (`overlay::drop_deleted`). What answers for it is the overlay,
+    // which `verdict` consults before the buffer and which nothing retires.
+    assert!(!buffer.contains(e(ENTITY_X)));
+    assert!(!buffer.contains(e(ENTITY_Y)));
 
     // Compose against the Step 1 fixture (its `satisfied` set already contains `TermId(0)`) and
     // confirm both entities are excluded from the effective mask despite Y's satisfied predicate.

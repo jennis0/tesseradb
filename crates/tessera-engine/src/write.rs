@@ -4091,10 +4091,15 @@ impl Executor {
         // What the window did, for the mask below: which entities it denied, and whether any
         // removal happened at all.
         let mut newly_denied: Vec<EntityId> = Vec::new();
+        let mut deleted: Vec<EntityId> = Vec::new();
         let mut unsuppressed = false;
         for (entity, op, predicate) in changes {
             match op {
-                ChangeOp::Delete | ChangeOp::Suppress => newly_denied.push(entity),
+                ChangeOp::Delete => {
+                    newly_denied.push(entity);
+                    deleted.push(entity);
+                }
+                ChangeOp::Suppress => newly_denied.push(entity),
                 ChangeOp::Unsuppress => unsuppressed = true,
                 ChangeOp::Predicate => {}
             }
@@ -4151,6 +4156,35 @@ impl Executor {
             Arc::new(denied)
         };
 
+        // **A deleted row leaves the buffer here** — the runtime half of `replay`'s end-of-pass
+        // rule, and the reason a `delete` issued before the item's first flush does not pin the
+        // WAL for ever (`IngestBuffer::oldest_wal_pos` is the rotation's reclaim bound, and
+        // `plan_flush` never consumes a deleted row, so nothing else would ever remove it).
+        // Composition-neutral: `compose::verdict` answers from `is_deleted` before it consults the
+        // buffer. The argument in full is at `tessera_lifecycle::overlay::drop_deleted`.
+        //
+        // **The clone is paid only when a buffered row is actually dropped.** It is O(buffered) —
+        // the term the deny-ack memo measured at 165 ms p50 with 1 M buffered — and this is the
+        // deny lane, so paying it per window would put a flush-sized stall in front of every
+        // revocation. Deleting an entity that already has geometry, which is the ordinary case,
+        // costs one hash lookup per entry and no clone at all.
+        let buffered_deletions: Vec<EntityId> = deleted
+            .into_iter()
+            .filter(|entity| generation.buffer.contains(*entity))
+            .collect();
+        let buffer = if buffered_deletions.is_empty() {
+            Arc::clone(&generation.buffer)
+        } else {
+            let mut buffer = (*generation.buffer).clone();
+            for entity in buffered_deletions {
+                buffer.remove(entity);
+            }
+            self.health
+                .buffered_items
+                .store(buffer.len(), Ordering::SeqCst);
+            Arc::new(buffer)
+        };
+
         let next = Generation {
             overlay_version: generation.overlay_version + 1,
             overlay: Arc::new(overlay),
@@ -4161,7 +4195,7 @@ impl Executor {
             dict: Arc::clone(&generation.dict),
             postings: Arc::clone(&generation.postings),
             delta_postings: generation.delta_postings.clone(),
-            buffer: Arc::clone(&generation.buffer),
+            buffer,
             denied,
         };
         self.publish(next, started)

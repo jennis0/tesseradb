@@ -269,6 +269,44 @@ fn out_of_order_inputs_are_refused() {
     assert!(err.is_err());
 }
 
+/// **A declared scalar column an input lacks fails the merge**, rather than being dropped.
+///
+/// Dropping it shifts every later scalar up a position, so the merged segment carries every value
+/// under the wrong column's name — right count, right types, wrong data, and no error anywhere.
+/// The inputs here are written with no scalars while the merge declares one, which is precisely
+/// the shape a stepped-down or hand-repaired bundle presents.
+///
+/// **Mutation:** restore the `filter_map` in `gather_scalars` and this merge succeeds, silently.
+#[test]
+fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
+    let dir = tempfile::TempDir::new().unwrap();
+    build_bundle(dir.path(), 10);
+    let a = segment(dir.path(), "in-a", 100, 5, 7);
+    let b = segment(dir.path(), "in-b", 200, 5, 31);
+
+    let schema = vec![("citations".to_string(), ScalarType::U64)];
+    let err = execute_merge(
+        &dir.path().join("v00000"),
+        PARTITION,
+        SLICE,
+        MergeSpec {
+            seg_id: "merged-1",
+            inputs: &[a, b],
+            identity_key: &key(),
+            shard_id: 0,
+            scalar_schema: &schema,
+            row_base: 0,
+            watermark: 10_000,
+            entity_id_high_water: 10_000,
+        },
+    )
+    .expect_err("a segment missing a declared column must not merge");
+    assert!(
+        err.to_string().contains("citations"),
+        "the refusal must name the column: {err}"
+    );
+}
+
 /// **A merge must not move the watermark**, and deriving one from its inputs would.
 ///
 /// The output shape is a flush's, where `entity_hi + 1` is right because a flush's entities are the

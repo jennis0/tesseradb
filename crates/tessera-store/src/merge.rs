@@ -261,7 +261,7 @@ pub fn execute_merge(
                 tessera_id,
                 qx,
                 qy,
-                scalars: gather_scalars(&columns, spec.scalar_schema, row),
+                scalars: gather_scalars(&columns, spec.scalar_schema, row, &input.seg_id)?,
             });
             entity_ids.push(entity);
         }
@@ -375,17 +375,48 @@ pub fn execute_merge(
 }
 
 /// This row's declared scalars, in schema order — the shape [`TilerItem`] wants.
+///
+/// **A column the input lacks, or holds under another type, fails the merge**, and the alternative
+/// is why: a `filter_map` here drops the missing one and shifts every later scalar up a position,
+/// so the merged segment's columns are silently transposed — every value present, every value
+/// against the wrong name, no error anywhere. Unreachable through [`crate::write::write_segment`],
+/// which emits the declared schema in full; reachable the moment a merge takes an input this
+/// process did not write, which is what a stepped-down or hand-repaired bundle is.
 fn gather_scalars(
     columns: &ColumnsRef,
     schema: &[(String, ScalarType)],
     row: usize,
-) -> Vec<ScalarValue> {
+    seg_id: &str,
+) -> Result<Vec<ScalarValue>> {
+    let mismatch = |declared: ScalarType, found: &str| StoreError::MalformedBundle {
+        detail: format!(
+            "execute_merge: segment '{seg_id}' holds scalar column of type {found} where the \
+             bundle declares {declared:?}; merging it would write the value under another \
+             column's name"
+        ),
+    };
     schema
         .iter()
-        .filter_map(|(name, _)| match columns.scalar(name)? {
-            ScalarSlice::U64(v) => Some(ScalarValue::U64(v[row])),
-            ScalarSlice::F32(v) => Some(ScalarValue::F32(v[row])),
-            ScalarSlice::Utf8(v) => Some(ScalarValue::Utf8(v.value(row).to_string())),
+        .map(|(name, declared)| {
+            let slice = columns
+                .scalar(name)
+                .ok_or_else(|| StoreError::MalformedBundle {
+                    detail: format!(
+                        "execute_merge: segment '{seg_id}' has no scalar column '{name}', which \
+                         this bundle declares; dropping it would shift every later scalar into \
+                         the wrong column"
+                    ),
+                })?;
+            match (slice, declared) {
+                (ScalarSlice::U64(v), ScalarType::U64) => Ok(ScalarValue::U64(v[row])),
+                (ScalarSlice::F32(v), ScalarType::F32) => Ok(ScalarValue::F32(v[row])),
+                (ScalarSlice::Utf8(v), ScalarType::Utf8) => {
+                    Ok(ScalarValue::Utf8(v.value(row).to_string()))
+                }
+                (ScalarSlice::U64(_), declared) => Err(mismatch(*declared, "u64")),
+                (ScalarSlice::F32(_), declared) => Err(mismatch(*declared, "f32")),
+                (ScalarSlice::Utf8(_), declared) => Err(mismatch(*declared, "utf8")),
+            }
         })
         .collect()
 }
