@@ -108,7 +108,7 @@ fn a_merge_emits_exactly_as_many_rows_as_it_consumed() {
 
 /// The Morton sort **is** the tile index — a segment that is not internally sorted breaks
 /// `tile_ranges`' binary search outright — so sorting is not optional and cannot be skipped under
-/// pressure, unlike Lucene's re-rank decorator (arch §11.3).
+/// pressure, unlike the Lucene re-ranking this policy was drawn from (arch §11.3).
 #[test]
 fn a_merged_segment_is_morton_sorted() {
     let dir = tempfile::TempDir::new().unwrap();

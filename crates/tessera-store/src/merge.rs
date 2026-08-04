@@ -23,10 +23,11 @@
 //! consuming the base must either leave them digested there with nothing referencing them, or write
 //! a new prefix, at which point it *is* compaction under another name.
 //!
-//! **No deletes-percentage trigger.** `architecture.md` §11.3 lists tombstone reclamation as one of
-//! three reasons to merge; it is not one here, because reclaiming a tombstoned row is a *fold*, and
-//! a fold is invariant-bearing work that belongs to compaction. A merge that dropped rows would
-//! have left this module.
+//! **No deletes-percentage trigger.** Reclaiming a tombstoned row is a *fold*, and a fold is
+//! invariant-bearing work that belongs to compaction: dropping the row changes what a viewer may
+//! see, which is authorisation state this layer must not touch (`architecture.md` §11.3, which
+//! states the rule after the borrowed policy that offered the trigger was retired at r33). A merge
+//! that dropped rows would have left this module.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -193,10 +194,11 @@ pub struct MergeSpec<'a> {
 /// the merge policy's `max_merged_segment_bytes` is what keeps the sort's inputs in hand. The
 /// result is identical either way: `sort_batch` orders by code then `tessera_id`, which is total.
 ///
-/// **Arch §11.3's re-rank decorator does not transfer.** Lucene reorders a merged segment for
-/// doc-id locality, an optimisation it may skip under pressure. Here the Morton sort *is* the tile
-/// index — a segment that is not internally sorted breaks `tile_ranges`' binary search outright —
-/// so sorting is not optional and there is nothing to make conditional on a document count.
+/// **Sorting is unconditional** (arch §11.3). Lucene reorders a merged segment for doc-id
+/// locality, an optimisation it may skip under pressure, and the policy this one was drawn from
+/// offered that as a decorator. Here the Morton sort *is* the tile index — a segment that is not
+/// internally sorted breaks `tile_ranges`' binary search outright — so sorting cannot be skipped
+/// and there is nothing to make conditional on a document count.
 pub fn execute_merge(
     prefix_dir: &Path,
     partition: &str,

@@ -1091,7 +1091,9 @@ is not thereby unsafe, only refused.
 re-ranking, no batch-grid change. Everything in this section is obligation, not description.
 
 Compaction is the **invariant-bearing** half flush and merge are defined by contrast with: it
-folds — snapshot-covered delta tiers into base postings, tombstoned rows out of row space,
+folds — snapshot-covered delta tiers into base postings, tombstoned rows out of row space **and
+their entities' postings out of the term index** (architecture §11.3, ruled r33: both halves, because
+a post-fold fragment that still contained the entity would make Rule F's retirement re-expose it),
 evaluate entries' term sets into postings — and **the fold is the retirement event** (Rule F):
 executed entries leave `deleted` and `evaluate` in the fold's own publication, `suppressed` is
 copied forward verbatim, and everything accepted after the snapshot — segments, deltas,
@@ -1238,9 +1240,13 @@ text needs to find where it went.
 
 - **`architecture.md`** — the specification; wins every conflict. §4 and Appendix C are cited
   here, never owned. §11.1 keeps the *why* of the entity-ID ordering (this document owns only
-  the mechanism that spends it); §11.2 keeps I1's composition and the live set; §11.3's merge
-  sketch should eventually shrink to a pointer, but that is architecture's call, listed in the
-  superseded flush design's §16 already.
+  the mechanism that spends it); §11.2 keeps I1's composition and the live set. **§11.3 was
+  ruled 2026-08-05 and does not become a pointer** (architecture r33): the requirement that
+  segment count be bounded, the merge/compaction line and the tombstone rule are the
+  specification's, and a document that defers to architecture cannot be the sole home of a bound
+  architecture's own §11.1 and §6.2 cite. What shrank instead is the borrowed policy sketch —
+  the re-rank decorator and the deletes-percentage trigger are gone rather than quarantined,
+  restated as the two structural rules they violate, and the numbers now live here alone.
 - **`contracts.md`** — the interchange contract: what a client or replica must do, and the
   bytes. Stays whole. This document proposes four corrections there (spec §13.3) and otherwise
   defers to it.

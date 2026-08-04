@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 32
+**Status:** Draft for review — revision 33
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 **Specified versus implemented.** This document specifies a target, and parts of that target are not built. Every such claim carries a **⊘ Specified, not implemented** marker at the point it is made, saying what exists instead and what a reader must not assume meanwhile; the full set is tabulated in the generated `docs/design/inventory.md`. A marker's absence is a claim that the machinery exists.
@@ -735,41 +735,23 @@ The consequence is worth stating plainly, because it is easy to read this sectio
 
 A tile resolves to one contiguous range per live segment, so cost is linear in segment count and it must be bounded.
 
-Structure the merge policy on established lines rather than as a scheduled job. Three ideas transfer directly: a **floor size**, below which segments are treated as equally small so a tail of tiny segments does not dominate decisions; a **maximum merged-segment size**, preventing any merge from becoming an unbounded rewrite; and **separating the reasons to merge** — natural tiering, forced compaction, and tombstone reclamation on a deletes-percentage trigger.
+The operation that bounds it is a **merge**, and the line between a merge and a compaction is what makes this section invariant-bearing rather than a tuning note: a merge rewrites row space within one segment set and folds nothing; a compaction folds, and what it folds is authorisation state. Two ideas from the LSM literature carry the bound. A **floor size**, below which segments count as equally small, so a tail of tiny segments does not dominate decisions. And a **maximum merged size**, so no merge becomes an unbounded rewrite — which is also the only handle on a merge's memory, through a measured multiplier on its inputs' bytes (write-path §7). Tiering is the trigger; reclamation is not a merge reason at all.
 
-Better still, make **re-ranking a decorator on the merge policy**: reorder only merges above a minimum document count, skip rather than fail when memory is short, and always reorder on forced merges. The Morton re-rank becomes a continuous property of large merges rather than a scheduled cliff. Reference points from a widely-deployed policy: ten segments per tier, a 5 GB maximum merged segment, a 2 MB floor, a 20% deletes threshold, reordering above 2<sup>18</sup> documents.
+Two properties of the row-space layout, stated because that literature offers each as an option and here neither is.
 
-> **Merge is built (write-path §7), and it departs from this sketch in two ways that are not
-> tuning.** The floor, the maximum merged size and the tiering all transfer, at different numbers
-> (`tier_width` 4, a 16 MiB floor, a 256 MiB cap). The two departures:
->
-> - **There is no re-rank decorator, and there cannot be one.** The Morton sort *is* the tile
->   index — `tile_ranges` binary-searches a segment's codes — so a segment that is not internally
->   sorted is unreadable, not merely unoptimised. "Skip rather than fail when memory is short"
->   would publish exactly that. Sorting is unconditional and has no document-count threshold to be
->   a decorator above.
-> - **There is no deletes-percentage trigger.** Reclaiming a tombstoned row is the compaction
->   *fold*, which is invariant-bearing; a merge that dropped rows would be folding authorisation
->   state from a layer that must not. Merge is row-count preserving and byte-exact through the
->   Morton code.
->
-> **Owner ruling wanted** on whether this section should shrink to a pointer at write-path §7, as
-> that document's §13.2 proposes while recording the call as this document's rather than its own.
+**Sorting is unconditional.** The Morton order *is* the tile index — a tile range is a binary search over a segment's codes — so a segment that is not internally sorted is unreadable, not merely unoptimised. Re-ranking is therefore not a decorator that may be skipped when memory is short, and there is no document count below which it is omitted.
+
+**A merge never drops a row.** Dropping a tombstoned row changes what a viewer may see, which makes it authorisation state and so the fold's; a deletes-percentage trigger would be the instrument for doing that work in the wrong layer. Merge is row-count preserving and byte-exact through the Morton code.
+
+*(As built, at write-path §7: `tier_width` 4, a 16 MiB floor, a 256 MiB cap. The reference points this policy was drawn from — ten segments per tier, a 5 GB maximum merged segment, a 2 MB floor — size a different deployment and are not this one's.)*
 
 A compaction rewrites the permutation and the columns, publishes them under a new segment-set version, and lets in-flight requests drain (**I11**). At single-node scale it does **not** invalidate the term index, masks or generating sets.
 
-Deletions are tombstones: remove the entity from the term index, add it to the overlay with *deny* disposition, notify the caller of affected labels (§2.5), and drop the row at the next compaction. Never recycle the ID (**I9**).
+Deletions are tombstones: add the entity to the overlay with *deny* disposition, notify the caller of affected labels (§2.5), and at the next compaction drop its row and fold its postings out of the term index. Never recycle the ID (**I9**).
 
-> **⊘ The first clause is not what is built, and two normative documents state the opposite as
-> load-bearing.** The term index is the postings (§6.2), and **deny state is not a postings
-> subtraction**: a deleted entity's postings stand until the compaction fold, and its invisibility
-> is the overlay's alone (contracts §2.4; write-path §5.3). The reason is structural — base
-> postings are frozen and delta tiers append-only, so subtracting one *is* the fold, which is
-> compaction's and is invariant-bearing. It is also why a merge and a coalesce are forbidden to
-> touch postings for a deleted entity. What is built is fail-closed: the entity is invisible from
-> the moment the deny is acked, and stays so. **Owner ruling wanted** on whether this clause is
-> retired or restated as a compaction obligation; the ID rule (**I9**) and the rest of the
-> sentence are untouched and hold.
+**That order is load-bearing in both directions** *(r33; this sentence used to remove the postings first, which is fail-open in one direction and unbuildable in the other)*. The overlay entry is what makes the item invisible, from the moment the deny is acknowledged, and deny state is never a postings subtraction: base postings are frozen and delta tiers append-only, so subtracting one *is* the fold (contracts §2.4 and write-path §5.3 both carry this as load-bearing; it is equally why neither a merge nor a tier coalescence may touch a deleted entity's postings). And the fold's removal is not bookkeeping — it is what lets the overlay entry retire at all, since only a post-fold fragment stops containing the entity.
+
+> **⊘ There is no fold** (write-path §8), so nothing retires: under deletion the overlay grows monotonically and the rows stay. Fail-closed — the deny holds for as long as the entry does, which is for ever — but the retirement half of the rule above is unbuilt.
 
 ## 12. Compartmented partitions
 
@@ -1164,6 +1146,28 @@ Both were checked exhaustively against explicit quantification over all well-for
 **One consequence of the default to watch.** Under *possible*, an item with very wide uncertainty matches almost every query and becomes noise. Consider styling marks by uncertainty width, or offering the definite form as a secondary control.
 
 ## Appendix G — Revision history
+
+- **r33** — **§11.3's two owner rulings, taken** (2026-08-05; r32 raised both and settled
+  neither). **The section does not shrink to a pointer.** Three things in it are the
+  specification's and cannot live only in a document that defers to it: the requirement that
+  segment count be bounded (cited by measurement §2 and the slices design), the merge/compaction
+  line, and the tombstone rule. What shrank is the borrowed policy sketch. The **re-rank
+  decorator** and the **deletes-percentage trigger** are deleted rather than quarantined behind a
+  marker — both were reference points from a widely-deployed LSM policy that do not survive
+  contact with this row space, and keeping refuted text beside a note refuting it is the
+  archaeology the house style forbids. Each is now stated positively as the rule it violates:
+  *sorting is unconditional*, because the Morton order **is** the tile index and an unsorted
+  segment is unreadable rather than unoptimised; and *a merge never drops a row*, because
+  dropping a tombstoned one changes what a viewer may see and is therefore the fold's. The
+  numbers move to write-path §7, which owns the mechanism, and the Lucene figures are kept in one
+  parenthesis marked as another deployment's. **And the deletion clause is restated as a
+  compaction obligation, not retired** — retiring it would have lost a real obligation, since the
+  fold's removal of a deleted entity's postings is precisely what lets the overlay entry retire
+  under Rule F. *"Remove the entity from the term index"* was never wrong about the end state,
+  only about when: it read as an immediate postings subtraction at deny time, which contracts
+  §2.4 and write-path §5.3 both contradict as load-bearing. The order is now stated as
+  load-bearing in both directions, and write-path §8's fold list gains the obligation it was
+  carrying only by implication. **No invariant statement changes and Appendix C is unchanged.**
 
 - **r32** — **the write path's promotion, read back against this document** (2026-08-04, after
   `write-path.md` became normative for the write path and both halves of merge published). Three
