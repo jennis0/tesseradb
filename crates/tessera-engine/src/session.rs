@@ -500,6 +500,8 @@ pub struct Engine {
     pub(crate) refresh_enabled: Arc<AtomicBool>,
     /// Whether the background refresh **holds** — see [`crate::refresh::RefreshDeps::paused`].
     pub(crate) refresh_paused: Arc<AtomicBool>,
+    /// Whether the entity-space coalesce runs. Always `true` in a shipped build.
+    pub(crate) coalesce_enabled: Arc<AtomicBool>,
     /// Whether the row-space merge runs. Always `true` in a shipped build; a test turns it off to
     /// hold the entity-space axes still, since a merge coalesces runs and locator extents of its
     /// own and the two passes would otherwise race for the same entries.
@@ -748,6 +750,7 @@ impl Engine {
         let refresh_in_flight = Arc::new(AtomicBool::new(false));
         let refresh_enabled = Arc::new(AtomicBool::new(true));
         let refresh_paused = Arc::new(AtomicBool::new(false));
+        let coalesce_enabled = Arc::new(AtomicBool::new(true));
         let merge_enabled = Arc::new(AtomicBool::new(true));
 
         Ok(Engine {
@@ -771,6 +774,7 @@ impl Engine {
             refresh_in_flight: Arc::clone(&refresh_in_flight),
             refresh_enabled: Arc::clone(&refresh_enabled),
             refresh_paused: Arc::clone(&refresh_paused),
+            coalesce_enabled: Arc::clone(&coalesce_enabled),
             merge_enabled: Arc::clone(&merge_enabled),
             full_projection_builds: AtomicU64::new(0),
         })
@@ -841,6 +845,15 @@ impl Engine {
     #[doc(hidden)]
     pub fn set_merge_for_test(&self, enabled: bool) {
         self.merge_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Turn the entity-space coalesce off. The soak's control needs both passes stopped, to show
+    /// the axes it bounds do grow — a bound assertion against a policy that never triggers is
+    /// indistinguishable from one against a policy that works.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_coalesce_for_test(&self, enabled: bool) {
+        self.coalesce_enabled.store(enabled, Ordering::SeqCst);
     }
 
     /// How many requests were served from a one-generation-stale entry (decision 0044's rung 2),
@@ -1487,6 +1500,7 @@ impl Engine {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: crate::coalesce::CoalescePolicy::default(),
                 merge: default_merge_policy(),
+                coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 external_index: Arc::clone(&self.external_index),
                 refresh: crate::refresh::RefreshDeps {
@@ -1535,6 +1549,7 @@ impl Engine {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: crate::coalesce::CoalescePolicy::default(),
                 merge: default_merge_policy(),
+                coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 external_index: Arc::clone(&self.external_index),
                 refresh: crate::refresh::RefreshDeps {

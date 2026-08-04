@@ -1278,8 +1278,10 @@ restart (pins the reclaim bound's definition); 5 the three dispositions at the f
 a mid-flight delete leaving a row hidden by its entry; 6 a poisoned node publishes no flush, and
 an under-durable delete's item returns after restart; 7 a diverged node publishes and rotates
 nothing; 8 a deny-carrying manifest failing verification is unready, never stepped past;
-9 `readyz` fails while stepped down; 10 segment, tier **and run** counts bounded under sustained
-ingest once merge publishes (soak); 11 ack→visibility ≤ `slices × flush_max_age_secs`;
+9 `readyz` fails while stepped down; 10 segment, tier, run **and dictionary-extent** counts
+bounded under sustained ingest, with a control showing each grows one per flush without its
+maintenance pass (exists — `soak.rs`; measured 40 flushes → 2 segments, 5 tiers, 2 runs,
+6 dict extents, **1 full projection build**); 11 ack→visibility ≤ `slices × flush_max_age_secs`;
 12 ingest refused by buffer occupancy, not only queue depth; 13 a flush patches rather than
 rebuilds the projection, and the superseded entry survives to be patched; 14 the allocator floor
 survives rotation and restart; 15 an evaluate entry round-trips rotation with descriptors

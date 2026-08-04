@@ -1637,6 +1637,7 @@ impl WritePath {
                     external_index: flush.external_index,
                     refresh: flush.refresh,
                     merge_policy: flush.merge,
+                    coalesce_enabled: flush.coalesce_enabled,
                     merge_enabled: flush.merge_enabled,
                     merge_in_flight: Arc::new(AtomicBool::new(false)),
                     merge_attempt: 0,
@@ -2393,7 +2394,8 @@ pub(crate) struct MaintenanceDeps {
     pub(crate) refresh: crate::refresh::RefreshDeps,
     /// The row-space merge's policy — see [`crate::merge`].
     pub(crate) merge: MergePolicy,
-    /// Whether the merge runs at all — see `Engine::merge_enabled`.
+    /// Whether the coalesce and the merge run at all — see `Engine::merge_enabled`.
+    pub(crate) coalesce_enabled: Arc<AtomicBool>,
     pub(crate) merge_enabled: Arc<AtomicBool>,
     /// The bundle's current prefix directory. A flush writes inside it, and never touches
     /// `MANIFEST.json` or `CURRENT`.
@@ -2610,6 +2612,7 @@ struct Executor {
     /// **its own swap** (decision 0044's D3 — the one-cadence rule lost its justification when pin
     /// retention was deleted, and under 0043 the coupling is harmful, since it makes a flush's
     /// zero-cost path carry the merge's refresh).
+    coalesce_enabled: Arc<AtomicBool>,
     merge_policy: MergePolicy,
     merge_enabled: Arc<AtomicBool>,
     merge_in_flight: Arc<AtomicBool>,
@@ -2834,7 +2837,10 @@ impl Executor {
     /// is: two passes would select overlapping windows and the loser's manifest edit would no
     /// longer rebase, having done all of its IO first.
     fn dispatch_coalesce(&mut self, generation: &Arc<Generation>) {
-        if self.coalesce_policy.width < 2 || self.coalesce_in_flight.load(Ordering::SeqCst) {
+        if self.coalesce_policy.width < 2
+            || !self.coalesce_enabled.load(Ordering::SeqCst)
+            || self.coalesce_in_flight.load(Ordering::SeqCst)
+        {
             return;
         }
         // A poisoned or diverged node publishes no manifest at all (`publish_overlay_state`'s
