@@ -48,6 +48,11 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
     engine
         .start_write_executor(64)
         .expect("the executor starts once");
+    // **The row-space merge is held off**, so these assertions are about the entity-space pass
+    // alone. A merge coalesces its consumed segments' runs and locator extents too, on the same
+    // tick, and the two would race for the same entries — safely, each discarding a plan that no
+    // longer rebases, but not deterministically enough to assert list lengths against.
+    engine.set_merge_for_test(false);
     engine
 }
 

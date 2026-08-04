@@ -113,6 +113,27 @@ pub struct EngineConfig {
     pub flush_max_age_secs: u64,
 }
 
+/// The row-space merge's policy (write-path §7).
+///
+/// **`tier_width` 4, floor 16 MiB, cap 256 MiB.** The floor is where per-segment overheads stop
+/// dominating, and clamping to it before taking the size class is what stops a deployment whose
+/// flushes differ by a few bytes producing a size class per flush and merging nothing at all.
+/// The cap bounds one merge's pool time and its write amplification.
+///
+/// **The base segment is excluded structurally, not by the cap.** Write-path §7 records an
+/// "enforced relation" — `max_merged_segment_bytes` strictly below the base segment's size — as
+/// what keeps the base out of selection. `crate::merge::plan_merge` selects from the **extent
+/// list**, and the base is the one segment with no extent (`permutation.bin` addresses it), so
+/// the exclusion no longer depends on a size relation anyone has to maintain. The cap is a cost
+/// bound and nothing more.
+fn default_merge_policy() -> tessera_store::merge::MergePolicy {
+    tessera_store::merge::MergePolicy {
+        tier_width: 4,
+        segment_floor_bytes: 16 << 20,
+        max_merged_segment_bytes: 256 << 20,
+    }
+}
+
 /// D-D's default: fill the machine. Identical reasoning and identical fallback (`1`, never
 /// propagated — see `tessera-server::config::default_compute_threads`'s doc) to the server's own
 /// default, kept as a free function here so every non-server construction site (tests, benches,
@@ -477,6 +498,12 @@ pub struct Engine {
     pub(crate) refresh_in_flight: Arc<AtomicBool>,
     /// Whether the background refresh runs — see [`crate::refresh::RefreshDeps::enabled`].
     pub(crate) refresh_enabled: Arc<AtomicBool>,
+    /// Whether the background refresh **holds** — see [`crate::refresh::RefreshDeps::paused`].
+    pub(crate) refresh_paused: Arc<AtomicBool>,
+    /// Whether the row-space merge runs. Always `true` in a shipped build; a test turns it off to
+    /// hold the entity-space axes still, since a merge coalesces runs and locator extents of its
+    /// own and the two passes would otherwise race for the same entries.
+    pub(crate) merge_enabled: Arc<AtomicBool>,
     /// How many row projections were built from the whole fragment rather than derived from the
     /// preceding generation's — the observable behind [`Engine::full_projection_builds`].
     ///
@@ -720,6 +747,8 @@ impl Engine {
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
         let refresh_in_flight = Arc::new(AtomicBool::new(false));
         let refresh_enabled = Arc::new(AtomicBool::new(true));
+        let refresh_paused = Arc::new(AtomicBool::new(false));
+        let merge_enabled = Arc::new(AtomicBool::new(true));
 
         Ok(Engine {
             generation: Arc::clone(&generation),
@@ -741,6 +770,8 @@ impl Engine {
             refreshes: Arc::new(AtomicU64::new(0)),
             refresh_in_flight: Arc::clone(&refresh_in_flight),
             refresh_enabled: Arc::clone(&refresh_enabled),
+            refresh_paused: Arc::clone(&refresh_paused),
+            merge_enabled: Arc::clone(&merge_enabled),
             full_projection_builds: AtomicU64::new(0),
         })
     }
@@ -792,6 +823,24 @@ impl Engine {
     #[doc(hidden)]
     pub fn set_background_refresh_for_test(&self, enabled: bool) {
         self.refresh_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Hold the background refresh, leaving it **in flight** — the window rung 3 of
+    /// `Engine::session_geometry`'s ladder sheds a racer in. Distinct from
+    /// [`Self::set_background_refresh_for_test`], which models a refresh that produces nothing and
+    /// *finishes*: the flag clears there, and rung 3 builds instead of refusing.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_refresh_paused_for_test(&self, paused: bool) {
+        self.refresh_paused.store(paused, Ordering::SeqCst);
+    }
+
+    /// Turn the row-space merge off — see [`Self::merge_enabled`]. Same gate, same reasoning as
+    /// [`Self::set_background_refresh_for_test`].
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_merge_for_test(&self, enabled: bool) {
+        self.merge_enabled.store(enabled, Ordering::SeqCst);
     }
 
     /// How many requests were served from a one-generation-stale entry (decision 0044's rung 2),
@@ -1437,6 +1486,8 @@ impl Engine {
             crate::write::MaintenanceDeps {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: crate::coalesce::CoalescePolicy::default(),
+                merge: default_merge_policy(),
+                merge_enabled: Arc::clone(&self.merge_enabled),
                 external_index: Arc::clone(&self.external_index),
                 refresh: crate::refresh::RefreshDeps {
                     cache: Arc::clone(&self.row_projection_cache),
@@ -1445,6 +1496,7 @@ impl Engine {
                     in_flight: Arc::clone(&self.refresh_in_flight),
                     refreshes: Arc::clone(&self.refreshes),
                     enabled: Arc::clone(&self.refresh_enabled),
+                    paused: Arc::clone(&self.refresh_paused),
                 },
                 prefix_dir: self.prefix_dir.clone(),
                 identity_key: self.identity_key,
@@ -1482,6 +1534,8 @@ impl Engine {
             crate::write::MaintenanceDeps {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: crate::coalesce::CoalescePolicy::default(),
+                merge: default_merge_policy(),
+                merge_enabled: Arc::clone(&self.merge_enabled),
                 external_index: Arc::clone(&self.external_index),
                 refresh: crate::refresh::RefreshDeps {
                     cache: Arc::clone(&self.row_projection_cache),
@@ -1490,6 +1544,7 @@ impl Engine {
                     in_flight: Arc::clone(&self.refresh_in_flight),
                     refreshes: Arc::clone(&self.refreshes),
                     enabled: Arc::clone(&self.refresh_enabled),
+                    paused: Arc::clone(&self.refresh_paused),
                 },
                 prefix_dir: self.prefix_dir.clone(),
                 identity_key: self.identity_key,

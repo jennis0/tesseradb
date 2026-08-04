@@ -64,6 +64,14 @@ pub struct RowProjection {
     /// a different segment or out of range. Comparing that one id is therefore exact rather than
     /// heuristic, and costs one string comparison against a *measured* 10.7 s rebuild.
     boundary_seg_id: Option<String>,
+    /// The base permutation's row count at construction — the boundary between the part of this
+    /// projection a merge can never move and the part it can.
+    ///
+    /// Every row below it comes from `permutation.bin`, which no flush and no merge rewrites (a
+    /// merge's inputs are flush segments; consuming the base is compaction under another name, and
+    /// compaction publishes a new *prefix*, which the cache key discriminates on). That is what
+    /// makes [`Self::rebase_extents`] exact.
+    base_rows: u32,
     /// `rows.cardinality()`, computed once at construction.
     ///
     /// Memoised because §7.2's θ anchor needs the projection's total cardinality on **every**
@@ -116,11 +124,52 @@ impl RowProjection {
         }
     }
 
+    /// This projection rebased onto `rows`: **the base's contribution kept, every extent
+    /// re-projected.**
+    ///
+    /// The rung a *merge* needs. A merge permutes row space inside the merged span, so
+    /// [`Self::extend`] refuses (correctly — [`Self::extends_to`] is exact), and the alternative
+    /// was a full rebuild: a *measured* 4 550 ms at 10⁹, essentially all of it the base
+    /// permutation's `project` over a 25% grant. This keeps that part and re-does only the
+    /// extents, at a *measured* 0.24 ms each (`probes/2026-08-04-refresh-ladder/`).
+    ///
+    /// **Exact for any publication that leaves the base alone**, which is every flush and every
+    /// merge: rows below `base_rows` are the base's and no publication within one prefix rewrites
+    /// it, and everything at or above it is re-projected from scratch. Callers must check
+    /// [`Self::can_rebase_extents`] first — this does not, for the same reason [`Self::extend`]
+    /// does not.
+    ///
+    /// **Why not the narrower span-local rebase** the plan's ladder also names (clear only the
+    /// merged span's row range, re-project only that span): it needs the publication to hand the
+    /// refresh the merged extent's row range and the old projection's coverage to be reconciled
+    /// against a shortened extent list — bookkeeping that has to be right at every construction
+    /// site of a `Generation` — and it buys the difference between re-projecting one extent and
+    /// re-projecting all of them, which the merge policy itself bounds. At 0.24 ms per extent the
+    /// difference is not worth a second correctness argument.
+    pub fn rebase_extents(&self, fragment: &FrozenFragment, rows: &RowSpace) -> Self {
+        let mut rebased = self.rows.clone();
+        rebased.remove_range(self.base_rows..u32::MAX);
+        rebased.remove(u32::MAX);
+        rebased.or_inplace(&rows.project_extents_from(&fragment.view(), 0));
+        Self::over(rebased, rows)
+    }
+
+    /// Whether [`Self::rebase_extents`] is exact over `rows` — i.e. whether the base this
+    /// projection was built over is the one `rows` addresses.
+    ///
+    /// A differing base row count means a different `permutation.bin`, which within one prefix
+    /// cannot happen and across prefixes is a compaction. Refusing is the fail-safe direction: a
+    /// needless rebuild, never a projection over the wrong row space.
+    pub fn can_rebase_extents(&self, rows: &RowSpace) -> bool {
+        rows.base_rows() == self.base_rows
+    }
+
     fn over(rows: Bitmap, space: &RowSpace) -> Self {
         let extents = space.extents();
         let mut projection = Self::from_rows(rows);
         projection.extents_covered = extents.len();
         projection.boundary_seg_id = extents.last().map(|e| e.seg_id.clone());
+        projection.base_rows = space.base_rows();
         projection
     }
 
@@ -137,6 +186,9 @@ impl RowProjection {
             // that wants a derivable projection goes through `RowProjection::new`.
             extents_covered: 0,
             boundary_seg_id: None,
+            // Likewise: an unattached bitmap addresses no base, so `can_rebase_extents` holds only
+            // over a row space with none.
+            base_rows: 0,
             cardinality,
         }
     }

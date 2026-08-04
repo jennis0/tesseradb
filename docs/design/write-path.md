@@ -972,7 +972,7 @@ the residual is recorded at contracts §2.3, not closed.
 - **Flush completing against a moved prefix / moved row space / moved dictionary**: discarded;
   orphans; re-planned. Publication is rebase-or-discard, never force.
 
-## 7. Merge — the entity-space half published, the row-space half gated
+## 7. Merge — both halves published, on separate cadences
 
 Merge bounds what flush grows: segments (the tile path pays one range per live segment per
 tile), delta tiers (a fragment build unions across every live tier), external-id runs (the
@@ -981,7 +981,7 @@ extents (`Engine::open` reads every one). A 90 s tick produces roughly a thousan
 day. **Three of the four are bounded; segments are not**, which is exactly the split decision
 0044's D2 rules — everything but segments is entity space, and entity space moves no row.
 
-**What is built** (verified, with tests): the selection policy — `tier_width` (4) list-adjacent
+**Selection and execution** (verified, with tests): the selection policy — `tier_width` (4) list-adjacent
 segments of equal power-of-two size class over `max(size, segment_floor_bytes)` (16 MiB), total
 within `max_merged_segment_bytes`, first window wins (predictable from the manifest beats
 marginally better); adjacency is `hi < lo`, deliberately not `hi + 1 == lo`, because
@@ -1042,23 +1042,40 @@ or a session evaluates a term it was not granted. Across all three, **the build'
 are never taken** — they are the entries `MANIFEST.json` digests, rewriting one means a new
 prefix, and the base locator's ordinals are positions in the build's runs.
 
-⊘ **The row-space half's publication is not built, deliberately — gated on decision 0044's D1
-mechanism.** A merge shortens the extent list and permutes row space inside the merged span, so a
-row id there names a different entity afterwards: the cached projection's patch path refuses
-(correctly — its bits in the span are wrong, and **no row-space artefact may key on the prefix**;
-`segments_version` is the only safe discriminator), and every live session would fall to the full
-**measured 10.7 s** rebuild on its next request — the maintenance schedule leaking into the
-product, which 0043 forbids. Decision 0044 rules the shape (2026-08-04): the span-local rebase
-(clear the merged span's row range, re-project the span only — sound because everything outside
-the span is exact) runs in an eager background refresh over resident cache keys at publication,
-racers shed 429 within that bounded window, and the merge publishes as **its own swap**, the
-one-cadence rule having lost its justification with pin retention (decision 0041). P1/P2 size it
-first.
+**The row-space half publishes too, as its own swap** (`tessera_engine::merge`). A merge shortens
+the extent list and permutes row space inside the merged span, so a row id there names a different
+entity afterwards: the cached projection may be neither served nor extended (**no row-space
+artefact may key on the prefix**; `segments_version` is the only safe discriminator), which is
+what `RowProjection::extends_to` refuses on. Three things make that affordable rather than the
+maintenance schedule leaking into the product 0043 forbids:
 
-**What grows meanwhile, and what that costs** — the segment axis only, now that the other three
-are bounded: a viewport pays one binary search and one `range_cardinality` per live segment per
-tile (~tens of ms at 1,000 segments, modelled), and at the 90 s tick that is ~960 segments per
-day of sustained ingest.
+- **The refresh is armed before the swap**, so a same-key racer inside the window is shed **429
+  `backpressure`, `Retry-After: 1`** — decision 0044's bounded residual, and the one place this
+  design accepts a refusal.
+- **The replacement is an extents-only re-projection**, not a rebuild: the base permutation is the
+  file no flush and no merge rewrites within a prefix, so keeping its contribution and
+  re-projecting every extent is exact and costs a *measured* 0.24 ms per extent against 4 550 ms.
+  (The narrower span-local rebase 0044 names is declined: it needs the merged extent's row range
+  threaded to the refresh and the old coverage reconciled against a shortened extent list, and it
+  buys the difference between re-projecting one extent and all of them, which the merge policy
+  itself bounds.)
+- **Its own swap, not a rider on the next flush** (D3). The one-cadence rule lost its
+  justification with pin retention (decision 0041), and under 0043 the coupling is harmful: it
+  makes the flush's zero-cost path carry the merge's refresh. Cost: one extra `segments_version`
+  bump per merge.
+
+**Three things the publication must get right, each fail-open the other way.** The consumed
+segments' **delta tiers stay listed** — their entities still have rows, in the merged segment, and
+dropping a tier makes every item it carries invisible to every session; only the four row-space
+files the merged segment replaces leave `files`. The consumed runs' **locator extents are replaced
+in place**, contiguity required, because recency is list position and 0047 resolves newest-first.
+And the **deny mask is re-derived** over the new row space, never carried forward: a denied row id
+inside the span names a different entity afterwards.
+
+**The base segment is excluded structurally rather than by the size relation.** Selection runs over
+the *extent list*, and the base is the one segment with no extent — `permutation.bin` addresses it
+— so `max_merged_segment_bytes` is a cost bound and nothing more. The relation this section
+previously called enforced is no longer load-bearing.
 
 ## 8. Where compaction sits — the seam, stated so it is not rediscovered
 
@@ -1295,7 +1312,9 @@ entity stays denied, burned and rowless across the reclaim (exists — `rotation
 `projection_patch.rs`); 40 the window before a refresh serves stale geometry rather than
 rebuilding, the flushed item is not yet drawn, and the staleness ages out within two publications
 (exists — `projection_patch.rs`); 41 a racer inside a **merge's** refresh window is shed 429
-rather than paying the rebuild (⊘ — needs the row-space merge publication, Task 22b).
+rather than paying the rebuild (exists — `merge.rs`); 42 a merge collapses segments, loses no
+item, moves no point and keeps every binding (exists — `merge.rs`); 43 a merged manifest reopens
+with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`).
 
 ## Appendix R — Review record
 

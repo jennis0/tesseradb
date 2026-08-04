@@ -354,7 +354,7 @@ generation's shape under flush), §1.2 (`segments_version` process-local, moved 
 (the second publisher is gone — #59), §2.4 (the fragment rebuild is built; its incremental form
 is not, and decision 0044 obliges it off the request thread), §4 (the `Flush` record and
 rotation exist; the write-only record was then deleted at `WAL_VERSION` 4, with `Lease`), §5.1 (flush built; `flush_max_items` deleted —
-decision 0045), §5.2 (merge selection/execution built; the entity-space coalesce publishes, the row-space half is gated on 0044), §8 (the
+decision 0045), §5.2 (merge publishes in both halves — the entity-space coalesce without a `segments_version` bump, the row-space merge as its own swap behind 0044's background refresh), §8 (the
 mid-flush row is tested behaviour). §3.2 and §3.4's stamp-ledger/retirement-floor machinery is
 annotated **superseded by ruling** (2026-08-03: Rule S / Rule F, retirement at the fold under an
 identity match); decisions 5 and 6 amended to match. No surviving rule changed.

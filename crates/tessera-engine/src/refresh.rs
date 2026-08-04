@@ -112,13 +112,22 @@ pub(crate) fn refresh_resident(
         let space = &slice_data.row_space;
         let previous_projection = Arc::clone(&previous.projection);
         let built = cache.get_or_derive(next_key, None, |_| {
-            // **Append-patch, or full build.** `extends_to` is exact: it holds when every extent
-            // the previous projection covers is still the same segment, which is what an append
-            // leaves and what a merge over the covered prefix does not. Task 22b's span rebase
-            // is the third rung and lands with the row-space merge publication (⊘ — not built).
+            // **Three rungs, cheapest first, each exact rather than approximate.**
+            //
+            // 1. `extends_to` — every extent the previous projection covers is still the same
+            //    segment, which is what an append leaves. Union the new extents' rows only: a
+            //    *measured* 0.24 ms per extent.
+            // 2. `can_rebase_extents` — the base permutation is the same file, which no flush and
+            //    no merge rewrites within one prefix. Keep the base's contribution, re-project
+            //    every extent. This is the rung a **merge** falls to, and it is what keeps a merge
+            //    publication off the 4 550 ms rebuild.
+            // 3. Otherwise the whole thing: a different base means a different prefix, which is
+            //    compaction, and nothing carries across it.
             let projection = pool.install(|| {
                 if previous_projection.extends_to(space) {
                     previous_projection.extend(&fragment, space)
+                } else if previous_projection.can_rebase_extents(space) {
+                    previous_projection.rebase_extents(&fragment, space)
                 } else {
                     RowProjection::new(&fragment, space)
                 }
@@ -145,9 +154,15 @@ pub(crate) struct RefreshDeps {
     pub(crate) pool: Arc<rayon::ThreadPool>,
     pub(crate) in_flight: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) refreshes: Arc<std::sync::atomic::AtomicU64>,
-    /// Whether the pass runs at all. Always `true` in a shipped build; a test disables it to hold
-    /// a session in the stale-serve window, which is otherwise a race to observe.
+    /// Whether the pass runs at all. Always `true` in a shipped build; a test disables it to model
+    /// a refresh that **produces nothing and finishes** — the degraded case, where the in-flight
+    /// flag clears and the ladder's rung 3 becomes a build rather than a 429.
     pub(crate) enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the pass **holds**. Always `false` in a shipped build; a test sets it to model a
+    /// refresh that is merely *slow* — the in-flight flag stays set for as long as it is held,
+    /// which is the window rung 3 sheds a racer in. The two hooks are different states and a test
+    /// that used one for the other would assert the wrong thing.
+    pub(crate) paused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RefreshDeps {
@@ -169,7 +184,11 @@ impl RefreshDeps {
             return;
         }
         let spawn_on = Arc::clone(&self.pool);
+        let paused = Arc::clone(&self.paused);
         spawn_on.spawn(move || {
+            while paused.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
             let produced = refresh_resident(&cache, &fragments, &pool, &generation);
             refreshes.fetch_add(produced as u64, Ordering::Relaxed);
             in_flight.store(false, Ordering::SeqCst);

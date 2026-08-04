@@ -83,6 +83,7 @@ use crate::geometry::{check_publishable, GeometryRefused};
 use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{DenyEntry as ManifestDenyEntry, SegmentsManifest};
+use tessera_store::merge::MergePolicy;
 use tessera_store::{Bundle, StoreError};
 use tessera_types::{EntityId, IdentityKey, TermId};
 
@@ -261,6 +262,13 @@ pub struct ExecutorHealth {
     pub(crate) coalesces: AtomicU64,
     /// Coalesces that failed or no longer rebased, leaving every consumed entry standing.
     pub(crate) coalesce_failures: AtomicU64,
+    /// Row-space merge publications, and the ones that produced nothing. Separate from
+    /// `coalesces` because the two publish different things: a merge bumps `segments_version` and
+    /// costs a refresh round, a coalesce does neither.
+    pub(crate) merges: AtomicU64,
+    pub(crate) merge_failures: AtomicU64,
+    /// See [`Self::flush_completed_pending`], whose handshake this shares.
+    pub(crate) merge_completed_pending: AtomicBool,
     /// Whether a completed coalesce is waiting to be published — see
     /// [`Self::flush_completed_pending`], whose handshake and ordering this shares exactly.
     pub(crate) coalesce_completed_pending: AtomicBool,
@@ -451,6 +459,10 @@ pub struct ExecutorStats {
     /// behind "the tier, run and dictionary-extent counts are bounded".
     pub coalesces: u64,
     pub coalesce_failures: u64,
+    /// Row-space merge publications, and the ones that produced nothing — the observable behind
+    /// "the segment count is bounded".
+    pub merges: u64,
+    pub merge_failures: u64,
     /// Whether a `POST /control/flush` is awaiting the next tick.
     pub flush_requested: bool,
     /// Whether this node's overlay has diverged from its durable WAL (§7.2). **Latching**: it
@@ -602,6 +614,9 @@ impl ExecutorHealth {
             coalesces: AtomicU64::new(0),
             coalesce_failures: AtomicU64::new(0),
             coalesce_completed_pending: AtomicBool::new(false),
+            merges: AtomicU64::new(0),
+            merge_failures: AtomicU64::new(0),
+            merge_completed_pending: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
             apply_nanos_max: AtomicU64::new(0),
             work_completed: AtomicU64::new(0),
@@ -702,6 +717,8 @@ impl ExecutorHealth {
             flush_failures: self.flush_failures.load(Ordering::Relaxed),
             coalesces: self.coalesces.load(Ordering::Relaxed),
             coalesce_failures: self.coalesce_failures.load(Ordering::Relaxed),
+            merges: self.merges.load(Ordering::Relaxed),
+            merge_failures: self.merge_failures.load(Ordering::Relaxed),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
         }
@@ -1563,6 +1580,7 @@ impl WritePath {
         // behind the deny lane or a commit window.
         let (flush_tx, flush_rx) = std::sync::mpsc::channel();
         let (coalesce_tx, coalesce_rx) = std::sync::mpsc::channel();
+        let (merge_tx, merge_rx) = std::sync::mpsc::channel();
 
         // A clone, not a move: `ExecutorHealth` keeps the other end, which is what gives the
         // counters a reader outside the executor thread (`ExecutorStats::wal_fsyncs`).
@@ -1618,6 +1636,12 @@ impl WritePath {
                     coalesce_submit: coalesce_tx,
                     external_index: flush.external_index,
                     refresh: flush.refresh,
+                    merge_policy: flush.merge,
+                    merge_enabled: flush.merge_enabled,
+                    merge_in_flight: Arc::new(AtomicBool::new(false)),
+                    merge_attempt: 0,
+                    merge_done: merge_rx,
+                    merge_submit: merge_tx,
                     last_tick: std::time::Instant::now(),
                     // Seeded from the opened WAL's position so a freshly started node does not
                     // rotate until something is appended in this run.
@@ -2367,6 +2391,10 @@ pub(crate) struct MaintenanceDeps {
     /// What a geometry publication needs to start the background refresh decision 0044's D1
     /// rules — see [`crate::refresh`].
     pub(crate) refresh: crate::refresh::RefreshDeps,
+    /// The row-space merge's policy — see [`crate::merge`].
+    pub(crate) merge: MergePolicy,
+    /// Whether the merge runs at all — see `Engine::merge_enabled`.
+    pub(crate) merge_enabled: Arc<AtomicBool>,
     /// The bundle's current prefix directory. A flush writes inside it, and never touches
     /// `MANIFEST.json` or `CURRENT`.
     pub(crate) prefix_dir: PathBuf,
@@ -2577,6 +2605,17 @@ struct Executor {
     external_index: Arc<arc_swap::ArcSwap<crate::session::ExternalIdIndex>>,
     /// The background refresh's dependencies — see [`crate::refresh`].
     refresh: crate::refresh::RefreshDeps,
+    /// The row-space merge's policy, its in-flight flag, its attempt counter and its own
+    /// completion channel. Separate from both the flush's and the coalesce's: a merge publishes as
+    /// **its own swap** (decision 0044's D3 — the one-cadence rule lost its justification when pin
+    /// retention was deleted, and under 0043 the coupling is harmful, since it makes a flush's
+    /// zero-cost path carry the merge's refresh).
+    merge_policy: MergePolicy,
+    merge_enabled: Arc<AtomicBool>,
+    merge_in_flight: Arc<AtomicBool>,
+    merge_attempt: u64,
+    merge_done: Receiver<crate::merge::CompletedMerge>,
+    merge_submit: Sender<crate::merge::CompletedMerge>,
     /// The sender pool tasks are given a clone of.
     ///
     /// **Nothing rings the doorbell when a flush completes**, and that is deliberate twice over.
@@ -2645,7 +2684,9 @@ impl Executor {
             // **Completed flushes are applied before the tick plans another**, and the order is
             // load-bearing: until a flush is published its items are still in the buffer, so a tick
             // that planned first would re-plan the very rows the completed unit already wrote.
-            let published = self.publish_completed_flushes() | self.publish_completed_coalesces();
+            let published = self.publish_completed_flushes()
+                | self.publish_completed_coalesces()
+                | self.publish_completed_merges();
             self.tick_if_due();
             while self.run_deny_pass() {}
             // **At drain close**: one write covers a burst of consecutive windows rather than one
@@ -2783,6 +2824,7 @@ impl Executor {
         // dispatched a flush may dispatch one too, and a gated node — which publishes no
         // geometry — still bounds the axes a coalesce owns.
         self.dispatch_coalesce(&generation);
+        self.dispatch_merge(&generation);
         drop(generation);
     }
 
@@ -2858,6 +2900,196 @@ impl Executor {
             }
             in_flight.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// Select and dispatch a row-space merge, if one qualifies and none is running.
+    ///
+    /// **Gated exactly as a coalesce is, and for the extra reason that this one moves geometry**:
+    /// a poisoned or diverged node writes no manifest, and a stepped-down partition publishes
+    /// nothing (`plan_merge` checks the last itself, it being bundle state rather than executor
+    /// health).
+    fn dispatch_merge(&mut self, generation: &Arc<Generation>) {
+        if !self.merge_enabled.load(Ordering::SeqCst)
+            || self.merge_in_flight.load(Ordering::SeqCst)
+            || self.wal.is_poisoned()
+            || self.health.overlay_diverged.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        let Some(plan) = crate::merge::plan_merge(generation, self.merge_policy) else {
+            return;
+        };
+        let manifest = &generation.bundle.manifest;
+        let Some(scalar_schema) = scalar_schema_of(manifest) else {
+            return;
+        };
+        let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
+            return;
+        };
+
+        self.merge_attempt += 1;
+        let ctx = crate::merge::MergeContext {
+            prefix_dir: self.prefix_dir.clone(),
+            prefix: generation.prefix.clone(),
+            // The same never-reused shape a flush's `seg_id` has, and for the same reason: two
+            // attempts at one `n` would otherwise write one path, and the second `File::create`
+            // truncates files the first has memory-mapped.
+            seg_id: format!(
+                "merge-{}-{}",
+                partition_data.segments_n, self.merge_attempt
+            ),
+            identity_key: self.identity_key,
+            shard_id: manifest.identity.shard_id,
+            scalar_schema,
+            watermark: generation.watermark,
+            entity_id_high_water: partition_data.manifest.entity_id_high_water,
+        };
+
+        self.merge_in_flight.store(true, Ordering::SeqCst);
+        let in_flight = Arc::clone(&self.merge_in_flight);
+        let health = Arc::clone(&self.health);
+        let submit = self.merge_submit.clone();
+        self.pool.spawn(move || {
+            match crate::merge::execute(plan, ctx) {
+                Ok(completed) => {
+                    health.merge_completed_pending.store(true, Ordering::SeqCst);
+                    let _ = submit.send(completed);
+                }
+                Err(e) => {
+                    health.merge_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        error = %e,
+                        "a merge failed; the segment count keeps growing and it is retried at the \
+                         next tick"
+                    );
+                }
+            }
+            in_flight.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// Apply every completed merge waiting from the pool, and report whether any did.
+    fn publish_completed_merges(&mut self) -> bool {
+        let mut any = false;
+        while let Ok(completed) = self.merge_done.try_recv() {
+            self.publish_merge(completed);
+            any = true;
+        }
+        if any {
+            self.health
+                .merge_completed_pending
+                .store(false, Ordering::SeqCst);
+        }
+        any
+    }
+
+    /// **Publish a row-space merge: its own swap, a `segments_version` bump, and a refresh
+    /// armed before it** (decision 0044's D2/D3).
+    ///
+    /// The one publication in the write path that **permutes** row space rather than extending it.
+    /// A row id inside the merged span names a different entity afterwards, so every cached
+    /// projection covering that span is wrong and `RowProjection::extends_to` refuses to serve or
+    /// extend it — which is why the refresh is armed before the swap and why a same-key racer in
+    /// that window is shed 429 instead of paying the *measured* 4 550 ms rebuild.
+    ///
+    /// **Its own swap, not a rider on the next flush.** The one-cadence rule lost its stated
+    /// justification when pin retention was deleted (decision 0041), and under 0043 the coupling
+    /// is actively harmful: it would make the flush's zero-cost path carry the merge's refresh.
+    /// The cost of the split is one extra `segments_version` bump per merge — one more refresh
+    /// round, nothing a viewer observes.
+    fn publish_merge(&mut self, completed: crate::merge::CompletedMerge) {
+        let started = std::time::Instant::now();
+        let live = self.generation.load_full();
+        if live.prefix != completed.prefix {
+            tracing::warn!("discarding a completed merge planned against a superseded prefix");
+            return;
+        }
+        let Some(partition_data) = live.bundle.partitions.get(&completed.plan.partition) else {
+            return;
+        };
+
+        let mut manifest = partition_data.manifest.clone();
+        if !crate::merge::rebase_into(&mut manifest, &completed) {
+            // Its inputs are gone, or their runs are no longer contiguous. Expected rather than
+            // exceptional, and the files are orphans nothing references.
+            tracing::warn!("discarding a completed merge that no longer rebases");
+            return;
+        }
+        write_deny_state(&mut manifest, &live.overlay);
+
+        let manifest_n = self.allocate_manifest_n();
+        if let Err(e) = crate::flush::write_segments_manifest(
+            &self.prefix_dir,
+            &completed.plan.partition,
+            manifest_n,
+            &manifest,
+        ) {
+            self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                error = %e,
+                "ALARM: a completed merge's side-manifest could not be committed; its files are \
+                 orphans, every consumed segment still stands, and the next tick re-plans"
+            );
+            return;
+        }
+
+        let consumed: Vec<String> = completed
+            .plan
+            .inputs
+            .iter()
+            .map(|i| i.seg_id.clone())
+            .collect();
+        let next_bundle = match live.bundle.with_merged(
+            &completed.plan.partition,
+            &completed.plan.slice,
+            &consumed,
+            completed.segment,
+            completed.output.extent,
+            tessera_store::read::PublishedManifest {
+                manifest,
+                n: manifest_n,
+            },
+        ) {
+            Ok(bundle) => bundle,
+            Err(e) => {
+                // ABA-safe by `seg_id`: an absent input is proof the inputs are gone, never a
+                // pointer comparison. Discarded rather than forced — forcing would collapse a run
+                // that is no longer the one the merged extent's rows were computed against.
+                tracing::warn!(error = %e, "discarding a completed merge that no longer rebases");
+                return;
+            }
+        };
+
+        let segments_version = live.segments_version + 1;
+        // **Re-derived over the new row space, because row ids changed meaning inside the span.**
+        // Carrying the mask forward would leave denied rows pointing at whichever entities now
+        // occupy those ids — the one way this mask can silently re-expose a deleted item.
+        let denied = Arc::new(crate::compose::derive_denied(&live.overlay, &next_bundle));
+
+        let next = Arc::new(Generation {
+            prefix: live.prefix.clone(),
+            segments_version,
+            // A merge moves neither, and both are the live values — see `MergeSpec::watermark`.
+            watermark: live.watermark,
+            bundle: next_bundle,
+            dict: Arc::clone(&live.dict),
+            postings: Arc::clone(&live.postings),
+            // **The consumed segments' delta tiers stay listed**, and the entities they carry
+            // still have rows — in the merged segment. Dropping one would make every item it
+            // carries invisible to every session. See `crate::merge::rebase_into`.
+            delta_postings: live.delta_postings.clone(),
+            overlay_version: live.overlay_version,
+            overlay: Arc::clone(&live.overlay),
+            buffer: Arc::clone(&live.buffer),
+            denied,
+        });
+        self.refresh.in_flight.store(true, Ordering::SeqCst);
+        let _published = self.publish_arc(Arc::clone(&next), started);
+        self.refresh.spawn(next);
+
+        self.row_projection_cache
+            .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
+        self.health.merges.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Apply every completed coalesce waiting from the pool, and report whether any did.
@@ -3302,6 +3534,8 @@ impl Executor {
             || self.health.flush_completed_pending.load(Ordering::SeqCst)
             || self.coalesce_in_flight.load(Ordering::SeqCst)
             || self.health.coalesce_completed_pending.load(Ordering::SeqCst)
+            || self.merge_in_flight.load(Ordering::SeqCst)
+            || self.health.merge_completed_pending.load(Ordering::SeqCst)
         {
             // A flush or a coalesce is executing on the pool, or its completed unit is waiting in
             // the corresponding channel. The pool cannot ring the doorbell (see `flush_submit`),
