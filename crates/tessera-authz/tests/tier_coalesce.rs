@@ -1,4 +1,4 @@
-//! Coalescing delta tiers is a content-preserving re-encode (flush §5.2).
+//! Coalescing delta tiers is a content-preserving re-encode (write-path §7).
 //!
 //! A fragment build unions the base with **every live delta tier**, so a flush per tick is a
 //! serving cliff on the authorisation path just as it is on the tile path. Coalescing is what

@@ -585,7 +585,7 @@ impl Engine {
 
         // **The geometry version is seeded from the served filename and is process-local
         // thereafter** — bumped only by a geometry publication, never by a manifest written for
-        // deny state alone (`flush-and-merge.md` §1.3). Seeding from `n` only ever moves it
+        // deny state alone (write-path §5.6). Seeding from `n` only ever moves it
         // forward, which is all `check_publishable`'s strictly-increases rule asks of it.
         let segments_version = partition.segments_n;
         let watermark = partition.manifest.watermark;
@@ -1230,7 +1230,7 @@ impl Engine {
     ///
     /// Design §11.2 specifies advancing the fragment by OR-ing in the flushed segment's
     /// contribution for the session's already-satisfied terms — *"a small, monotone patch rather
-    /// than a rebuild"* — and flush §3.4 sets out the four premises under which that patch is
+    /// than a rebuild"* — and write-path §4.6 sets out the four premises under which that patch is
     /// **equal** to what a rebuild produces. **This is the rebuild.** It is correct for the same
     /// reason the patch would be: `satisfied` is fixed at authorise and never re-resolved (premise
     /// 3), so the terms unioned are exactly the terms a rebuild consults.
@@ -1294,7 +1294,7 @@ impl Engine {
     ///
     /// The number to watch after a flush: a deployment where this rises once per session per tick
     /// is paying `Permutation::project` — a *measured* 10.7 s at 10⁹ — on the steady-state path,
-    /// which is the failure flush §9 names. See `RowProjectionCache::get_or_derive`.
+    /// which is the failure write-path §4.6 names. See `RowProjectionCache::get_or_derive`.
     pub fn full_projection_builds(&self) -> u64 {
         self.full_projection_builds.load(Ordering::Relaxed)
     }

@@ -618,7 +618,7 @@ impl FragmentCache {
 
     /// Entries live flat in `dir`, named by their canonical key.
     ///
-    /// **No format version and no orphan sweep** (owner ruling, 2026-08-02, flush §9). Both existed
+    /// **No format version and no orphan sweep** (owner ruling, 2026-08-02; write-path §4.6). Both existed
     /// because the key changed shape when the watermark joined it, leaving every pre-upgrade entry
     /// unreachable — a leak rather than a fail-open, since new code can never read one — with
     /// nothing on this path deleting anything. Pre-alpha there are no pre-upgrade entries anywhere,

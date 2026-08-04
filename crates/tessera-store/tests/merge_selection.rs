@@ -1,4 +1,4 @@
-//! What a merge is allowed to take (flush §5.1).
+//! What a merge is allowed to take (write-path §7).
 
 use tessera_store::manifest::SegmentDescriptor;
 use tessera_store::merge::MergePolicy;

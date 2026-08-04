@@ -1,6 +1,6 @@
 # Tessera — System Architecture: Storage, Serving and Lifecycle
 
-**Status:** Draft r11 — r10 plus the §6 marker refresh after the flush epic: flush is built, merge is built-and-unpublished (decision 0044), pins are gone from §6.5/§6.7 (decision 0041), `flush_max_items` is deleted (decision 0045). Applied with the write-path consolidation; see `write-path.md` §13 for what its promotion will absorb from §6
+**Status:** Draft r12 — r11 plus [`write-path.md`](write-path.md)'s §13.1 supersession, performed at its promotion (2026-08-04): §6.2, §6.4 and §6.5 are reduced to their security and architectural statements plus pointers, and §6.7's merge-scheduler paragraph is deleted in favour of write-path §7. Both halves of merge now publish. §6.6's retirement rule is restated as Rule S / Rule F, the stamp ledger and its floor being deleted from the spec rather than deferred
 
 **Companion to** `architecture.md` (the specification, which owns the invariants and the *why*) and the capability epics in this repository's issues (which own sequencing — the phase model they replaced is archived). This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the architecture design; `contracts §n` to `contracts.md`; `lifecycle §n` to `concurrency-lifecycle.md`. Where this document and the design disagree, the design is right; where this document and `contracts.md` disagree, contracts §0.3's recorded deviations govern.
 
@@ -384,21 +384,22 @@ Three disciplines make that safe rather than merely fast. **Spill files are fail
 
 **Streaming ingest belongs to the serving engine.** The buffer, watermark and overlay are serving state — the watermark participates in every I1 composition — so their owner owns ingest. Both paths call the same tiler, interner and allocator; there is nothing left to diverge. The manifest records the quantisation bounds so every artifact producer, present or future, shares one grid.
 
-### 6.2 Durability: the WAL, the executor and the ack contract
+### 6.2 Durability: the WAL, the executor and the ack contract — see write-path §1
 
-One line of this section is security-relevant rather than operational: **an unpersisted overlay fails open** — a *deny* entry that evaporates on restart makes suppressed items visible again. Everything else follows from that.
+One line of this section is security-relevant rather than operational: **an unpersisted overlay
+fails open** — a *deny* entry that evaporates on restart makes suppressed items visible again.
+Everything else follows from that, and everything else is now
+[`write-path.md`](write-path.md)'s: one thread owning the WAL by value so
+`append → fsync → apply → swap → ack` is structural rather than a discipline (§1.1); the commit
+window that makes the signature-sort scope a server decision, with its honest calibration —
+**the window collects the posting-storage win and none of the container-count win** (§2.2); and
+the ack contract enforced by type (§2.3).
 
-**One thread owns the WAL, by value.** `/control/ingest` and `/control/changes` do not execute on the thread the request landed on. They submit a command to a single write-executor thread (the *lifecycle thread* of lifecycle §1.3 — the same object under two names) which owns the `Wal` outright and performs `append → fsync → apply → publish` in that order because there is nowhere else for those steps to happen. The earlier construction held one mutex across all four steps and defended it with a comment; moving the WAL onto one thread makes the ordering structural rather than a discipline, and removes the lost-update race in which two acceptances both clone the generation and whichever publishes last silently discards the other's already-acked change.
-
-Acknowledgement follows fsync of the batch rows (with the caller batch id), the change entries, and the allocator's advanced high-water. **WAL rows record their allocated entity IDs**, and replay reuses them rather than re-allocating — otherwise entity-ID stability across rebuilds, and every entity-space structure referencing those IDs, would silently break. Restart replays the log: the buffer is rebuilt, the overlay reconstructed in full, and the allocator resumes past its durable high-water (I9 under crash replay). Acked-batch-id replay is idempotent, and the external-ID sidecar — also WAL-covered — is what makes duplicate detection possible at all.
-
-**The commit window makes the signature-sort scope a server decision.** Arriving ingest submissions are held open in a window bounded by size — an age bound is specified and configurable but inert, because a window that never waits has no age to bound (§7). At close, the whole window is signature-sorted, allocated from the high-water in one call, appended and fsynced once, published once, and every held request is acknowledged with its rows' IDs. I9 is untouched — IDs are still monotone from the high-water, still never reused, still assigned in `(signature, external_id)` order. The window changes only *how many* are assigned in one sorted run. Amortising the fsync and the publication is a welcome side effect; the allocation scope is the point.
-
-**Calibrate that win honestly, because the corpus's headline figures do not apply to it.** The probes' 8.9–36.7× posting compression was measured under a *full-corpus* sort. `run ≈ B × p` is a ceiling, not a forecast: the sort key is an item's whole signature, so a term's IDs are contiguous only across items whose *entire* signature matches, and `B × p` is attained only where the term effectively is the signature. Against the measured signature distribution — 54,791 distinct signatures over 2.42 M items — a 10,000-row window holds about 17 rows of the rank-100 group and 0.65 of the rank-1,000 one: runs of order 10¹ and 1. And the container arithmetic bounds it further. The benefit available to a term of density *p* at sort scope *B* is `max(1, 2¹⁶/(p·B))`, and `p·B < 2¹⁶` holds for every `p ≤ 1` once `B ≲ 6·10⁴` — below every window size a deployment's heap budget permits. **So the window collects the posting-storage win and none of the container-count win** — and container count is what a union costs, since bitmap operations cost O(containers touched), not O(cardinality). Raising the bound buys run length sub-linearly and costs sort work, window latency and residency; it is not a free dial.
-
-**Two retirement rules, deliberately different.** A *WAL entry* retires once its data is segment-durable, subject to the rollback-replay retention window — which does not exist, and §4.1 marks why. An *overlay entry* is governed by §6.5's rule, which is strictly later for deny dispositions. Conflating the two is fail-open, and it is stated here at the point of temptation.
-
-**Two recovery rules live in lifecycle §4 and are not restated here**: how recovery treats a bad CRC by position rather than by policy (truncate-at-first-bad-CRC applied mid-log would silently drop acked denies), and what a full disk must do — the triple whose third member, *never a refusal that leaves the item visible*, is the one a naive fail-closed implementation breaks. Both are rules an implementer must read there in full; a justification without its rule is worse than either a copy or a pointer.
+**Two retirement rules, deliberately different, stated here at the point of temptation.** A *WAL
+entry* retires once its data is segment-durable, subject to a rollback-replay retention window
+which does not exist (§4.1 marks why). An *overlay entry* retires under Rule S or Rule F
+(write-path §5.4), which is strictly later for every deny disposition. Conflating the two is
+fail-open.
 
 ### 6.3 Admission, backpressure and cancellation
 
@@ -412,44 +413,68 @@ Every 429 the gate produces is counted, and the count is deliberately not the wh
 
 **Cancellation** is the third lever and the only one that gives back work already started: a disconnected client flips a cooperative token, and the viewport path aborts wholly rather than returning a partial answer.
 
-### 6.4 Ingest, flush and posting deltas
+### 6.4 Ingest, flush and posting deltas — see write-path §2, §4
 
-`/control/ingest`: terms resolved via the plugin and interned; coordinates quantised against the manifest bounds; priorities derived; entity IDs allocated by the commit window, never in Morton order (C6 — Morton-ordered assignment would add location to the ID-gap leak); the batch buffered. Flush — on size or age, whichever comes first — writes an immutable segment directory, writes a **posting delta** (term → Roaring over the batch's ID range) rather than touching the frozen base postings, and publishes a new complete `SEGMENTS-<n>.json`. Items exceeding the declared per-item term bound are **indexed anyway and warned**: a monotone predicate with more terms intends broader visibility, and a resource guard must not produce an authorisation-shaped outcome.
+`/control/ingest`: terms resolved via the plugin and interned; coordinates quantised against the
+manifest bounds — and an out-of-bounds coordinate is **refused at ingest**, never quantised onto
+the grid's edge (decision 0040); entity IDs allocated by the commit window, **never in Morton
+order** (C6 — Morton-ordered assignment would add location to the ID-gap leak); the batch
+buffered. Flush writes an immutable segment directory and a **posting delta** (term → Roaring over
+the batch's ID range) rather than touching the frozen base postings, and publishes a new complete
+`SEGMENTS-<n>.json`.
 
-> **Built (epic #3; the mechanism document is `write-path.md` §4).** Flush publishes a segment, a per-segment delta tier and a new side-manifest each tick, bounded by `flush_max_age_secs`; `flush_max_items` is deleted — readiness had no consumer, since the tick never skips a non-empty buffer (decision 0045). One correction to the paragraph above: an out-of-bounds coordinate is **refused at ingest**, never quantised onto the grid's edge (decision 0040).
+Items exceeding the declared per-item term bound are **indexed anyway and warned**: a monotone
+predicate with more terms intends broader visibility, and a resource guard must not produce an
+authorisation-shaped outcome.
 
-### 6.5 The watermark, and what flush actually is
+**[write-path §2](write-path.md#2-an-item-arrives-controlingest) and
+[§4](write-path.md#4-flush--the-moment-of-visibility) own the mechanism**, including the tick, the
+three dispositions at the flush snapshot, descriptor promotion and publication by rebase.
 
-Fragments are content-addressed, shared across tokens, and served as immutable frozen views, so "OR the flushed contribution into live masks" is impossible as stated. The mechanism is stamp advance:
+### 6.5 The watermark, and what flush actually is — see write-path §4.6
 
-- Fragment identity includes a **postings stamp** — the segments-version its postings reflect. A flush creates a new stamp; it does not touch any existing fragment.
-- Until a token's fragment is refreshed, flushed entities are simply *live*: they sit at or above the fragment's watermark, so I1's composition `M_auth = (fragment \ L) ∪ direct_eval(L)` already covers them exactly. Correctness never depends on patching.
-- Refresh is **lazy and per fragment**: on next use past a staleness threshold, or when `L`'s cost bound trips, the engine builds stamp *n+1* as `fragment@n ∪ delta-postings(satisfied terms, stamps n+1…)`. One OR per delta per live fragment, amortised by laziness so a flush never stampedes the cache. The old stamp stays frozen only for requests still holding it — pin retention is deleted (decision 0041). *(As built: the rebuild triggers whenever the fragment's watermark is behind the live one, in full-build form shared per credential through the disk cache; the incremental form above is ⊘ unbuilt, and decision 0044 obliges the refresh off the request thread.)*
-- **The effective watermark is always the fragment's own.** A request composes against the watermark of the stamp it actually loaded, so an entity between that watermark and the store's latest is in `L` and directly evaluated — never in neither set. This holds for pinned requests too: the watermark recorded in a pin is advisory, and composition never reads it.
+Fragments are content-addressed, shared across credentials, and served as immutable frozen views,
+so "OR the flushed contribution into live masks" is impossible as stated. What actually happens:
 
-**"Correctness never depends on patching" is a claim about *flushed* entities.** Every bullet above concerns an entity that already has a row. An entity still in the **buffer** has none, and every viewer verb asks a row-space question — count the rows in this tile range, in this density cell, picked by this selection. The composition resolves such an entity's verdict and then has nowhere to put it, so it contributes to nothing regardless of what `L` says. **Flush is therefore the ingest-visibility mechanism, not merely the thing that bounds segment count**, and a system that ships the buffer without it has built durability and authorisation state rather than queryable ingest. That is exactly the current position, and it is why **§6.2's acknowledgement is a durability receipt, not a visibility promise.**
+- **The effective watermark is always the fragment's own.** A request composes against the
+  watermark of the fragment it actually loaded, so an entity between that watermark and the
+  store's latest is in `L` and directly evaluated — never in neither set. A stamp presented by a
+  client is advisory and composition never reads it (decision 0041).
+- **A flush therefore never has to patch anything to stay correct**; what it changes is *when* an
+  item becomes visible. Refresh is a background pass over resident sessions at each publication,
+  and a request is served the freshest entry it has produced (decision 0044, write-path §4.6).
+
+**"Correctness never depends on patching" is a claim about *flushed* entities.** Every bullet
+above concerns an entity that already has a row. An entity still in the **buffer** has none, and
+every viewer verb asks a row-space question — count the rows in this tile range, in this density
+cell, picked by this selection. The composition resolves such an entity's verdict and then has
+nowhere to put it. **Flush is therefore the ingest-visibility mechanism, not merely the thing that
+bounds segment count**, and that is why **§6.2's acknowledgement is a durability receipt, not a
+visibility promise.**
 
 ### 6.6 The overlay and the deny-retirement rule
 
 Predicate changes, deletions and suppressions become overlay entries with *evaluate* or *deny* dispositions, term sets inline, owned per partition because they carry entity IDs. Overlay size is a first-class metric: I1's composition cost is linear in it, and its configured bound triggers fragment-refresh scheduling rather than refusal — the same asymmetry as §4.2's backpressure. Deletion additionally removes the entity from postings, enqueues affected labels for invalidation, and leaves a row tombstone for compaction. IDs are never reused (I9), and the allocator is fuzzed for exactly that.
 
-Overlay precedence between the dispositions is stated once, in lifecycle §3.1, and is not restated here. The sequence `delete → suppress → unsuppress` must not re-expose a deleted item, and three independent fields make that structurally impossible rather than merely tested.
+Overlay precedence between the dispositions is stated once, in write-path §5.3, and is not restated here. The sequence `delete → suppress → unsuppress` must not re-expose a deleted item, and three independent **stores** make that structurally impossible rather than merely tested.
 
-**The deny-retirement rule.** Because §6.5's stamp advance is a pure union, it can never *remove* an entity from a fragment: a deleted or suppressed item's invisibility rests entirely on its deny entry until every fragment predating the deletion is gone. So a deny entry may leave the overlay only when **no servable fragment stamp predates the deletion** — that is, when every cached fragment across every live token has been rebuilt from post-deletion postings. Compaction may force full rebuilds rather than monotone advance precisely to bound how long that takes.
+**The deny-retirement rule, and why it is a prohibition.** Because §6.5's refresh is a pure union, it can never *remove* an entity from a fragment: a deleted or suppressed item's invisibility rests entirely on its deny entry. So retiring a deny entry on segment durability, on compaction of the row tombstone, or on WAL retirement each reopens visibility, and each is individually plausible — which is why the rule is stated as a prohibition on all three rather than as a positive condition alone.
 
-Retiring a deny entry on **any** earlier trigger — segment durability, compaction of the row tombstone, WAL retirement — reopens visibility for tokens still on old stamps. That is the fail-open this section exists to forbid, and each of those triggers is individually plausible, which is why the rule is stated as a prohibition on all three rather than as a positive condition alone.
+**Two rules, owner-ruled 2026-08-03 and stated at write-path §5.4.** A suppression retires **only by its unsuppress** (Rule S) — non-retirable while active by construction, since no fragment rebuild ever excludes a suppressed entity, and giving it any retirement stamp would eventually expire the entry and make the item visible again. A deletion or an evaluate entry retires **only at the compaction fold that executes it** (Rule F), whose safety is an identity match rather than a stamp ordering: the fold publishes a new prefix, whose manifest digest rotates the fragment identity, so no pre-fold fragment is reachable by key afterwards. The stamp ledger and the retirement floor earlier revisions specified are **deleted from the spec, not deferred**.
 
-> **⊘ Specified, not implemented.** No deny entry retires. Deletion is a terminal flag; there is no stamp ledger, no retirement floor and no compaction fold. That is fail-*closed* — an entry that never retires never re-exposes anything — but it is not the mechanism described, and the argument above is the only thing carrying the rule until the ledger exists. A suppression, separately, is **non-retirable while active by construction**: no fragment rebuild ever excludes a suppressed entity, so its invisibility rests on the overlay entry for as long as the suppression stands, and assigning it a retirement stamp — as deletion denies have — would eventually expire the entry and make the item visible again.
+> **⊘ Only Rule S exists.** There is no compaction fold, so no deletion and no evaluate entry retires. Fail-*closed* — an entry that never retires never re-exposes anything — but it is not the mechanism, and the prohibition above is what carries the rule until the fold exists.
 
 ### 6.7 Merging, compaction, and the two-writer problem
 
-The merge scheduler follows the Lucene-derived shape: tiered natural merges (2 MB floor, ~10 per tier, 5 GB max merged), deletes-triggered merges at 20% tombstones, forced compaction; Morton re-ranking as a decorator above 2¹⁸ rows and always on forced merges. A compaction rewrites permutation and columns, **folds posting deltas into the base tier**, drops compaction-tombstoned entries, and publishes a new prefix. Masks, node memberships, generating sets and the entity-space term index are untouched.
+**Merge is [write-path §7](write-path.md#7-merge--both-halves-published-on-separate-cadences)'s**, and both its halves publish: an entity-space coalesce that bounds delta tiers, external-id runs and dictionary extents without moving a row, and a row-space merge that bounds segments as its own swap. The Lucene-derived sketch this paragraph carried is superseded there, with two departures from it recorded and reasoned: **no deletes-percentage trigger** (reclaiming a tombstoned row is a fold, and folds are compaction's) and **no re-rank decorator** (the Morton sort *is* the tile index, so it is never optional).
 
-> **⊘ Compaction does not exist; merge selection and execution are built and unpublished** — publication is gated on decision 0044's mechanism, splits per its D2 and swaps on its own per D3. The built merge departs from the sketch above with recorded reasons (write-path §7): **no deletes-percentage trigger** (reclaiming tombstoned rows is a fold, which is compaction's) and **no re-rank decorator** (the Morton sort *is* the tile index, so it is never optional). Flush creates the segments; nothing yet consumes them. **A forward obligation on whoever builds compaction:** compaction reads and rewrites columns unmasked, which is sanctioned only because its outputs are bundle artifacts. Its rewrite must never be able to reach response data, and that must be proved by a test rather than held by convention — an unmasked reader whose output can reach a viewer is an I2 breach (every aggregate computable from inside `M_auth` alone) by any route it takes.
+A compaction rewrites permutation and columns, **folds posting deltas into the base tier**, drops compaction-tombstoned entries, and publishes a new prefix. Masks, node memberships, generating sets and the entity-space term index are untouched.
+
+> **⊘ Compaction does not exist.** **A forward obligation on whoever builds it:** compaction reads and rewrites columns unmasked, which is sanctioned only because its outputs are bundle artifacts. Its rewrite must never be able to reach response data, and that must be proved by a test rather than held by convention — an unmasked reader whose output can reach a viewer is an I2 breach (every aggregate computable from inside `M_auth` alone) by any route it takes.
 
 **The carry-forward rule is compaction's entire specification.** Compaction snapshots a segments-version, rewrites that set, and at publication *carries forward verbatim* everything accepted after its snapshot: segments, deltas, **post-snapshot tombstones, the active suppression set, and unfolded overlay entries** — folding away only snapshot-covered state. A post-snapshot tombstone folded away while its entity survives in the rebuilt base is fail-open. The fold obligation extends to *evaluate* entries too: compaction rewrites affected entities' postings from the term sets those entries carry, which is what makes predicate changes eventually retirable at all. Flushes never block.
 
-That fold is also why deletion and evaluate share a retirement floor while suppression touches neither: **a floor raised only on deletion retirements passes the deletion test and still fails open through a pre-fold fragment.** And a pre-fold fragment misreads in *both* directions — a revoked term still present is fail-open, a granted term absent is wrong counts — so the fold is not a hygiene step that can be deferred indefinitely.
+That fold is also the **only** thing that may retire a deletion or an evaluate entry (Rule F, write-path §5.4; the retirement floor this paragraph used to describe is deleted from the spec, not deferred). A pre-fold fragment misreads in *both* directions — a revoked term still present is fail-open, a granted term absent is wrong counts — so the fold is not a hygiene step that can be deferred indefinitely.
 
 Two writers touch the bundle — the serving engine (streamed segments, deltas) and batch mode (full prefixes) — so the races are named and owned:
 

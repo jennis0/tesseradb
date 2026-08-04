@@ -166,7 +166,7 @@ pub struct BufferedItem {
     /// names, so no deny can ever reach it.
     pub external_id: Option<Vec<u8>>,
     /// The sequence-global WAL position of the record this row arrived in — what a rotation
-    /// reclaims below (flush §7.3).
+    /// reclaims below (write-path §4.5).
     ///
     /// **`None` means "not known", and it is not the same as zero.** Both are fail-safe, because a
     /// rotation may only reclaim below the oldest position it is *sure* of — but a caller that
@@ -235,7 +235,7 @@ impl IngestBuffer {
     }
 
     /// The lowest WAL position any buffered row arrived at, or `None` if any of them does not know
-    /// its own — **the position a rotation may reclaim below** (flush §7.3).
+    /// its own — **the position a rotation may reclaim below** (write-path §4.5).
     ///
     /// Every other record class below that point is already redundant: `Change` records are
     /// restated by the rotation's own overlay snapshot, `Lease` records by the side-manifest's

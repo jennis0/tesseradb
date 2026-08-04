@@ -12,7 +12,7 @@ Read the other way, a tile prefix names a fraction-of-extent rectangle rather th
 Two questions made that consequential at once.
 
 **Flush gave a buffered item geometry**, so `/control/ingest` now refuses a coordinate outside the
-declared extent (flush §6) — an out-of-extent point has no cell to occupy, and clamping one at the
+declared extent (write-path §2.1) — an out-of-extent point has no cell to occupy, and clamping one at the
 boundary would be indistinguishable from a point that belongs there. The refusal's stated remedy was
 a re-quantising compaction.
 
@@ -61,7 +61,7 @@ is the reason the choice belongs at creation time where it is deliberate.
 
 **The narrower remedy is expressible but not built.** Because the extent is slice-scoped, the
 principled fix is to rebuild the one slice whose extent was wrong. No such path exists: `tessera build`
-is initial-load only and whole-bundle (flush §11), so the practical remedy today is a new deployment.
+is initial-load only and whole-bundle (write-path §8), so the practical remedy today is a new deployment.
 What the slice scoping buys is that a per-slice reindex needs no model change when someone writes it.
 
 ## ⊘ Not implemented: the extent still lives on the bundle
@@ -76,7 +76,7 @@ means and when it may change, and that is true at either location.
 
 ## What changes in the corpus
 
-`flush-and-merge.md` §0 and §11 drop re-quantisation from compaction's list of reorganisations; §6's
+`flush-and-merge.md` §0 and §11 dropped re-quantisation from compaction's list of reorganisations; §6's
 "until it re-quantises, which is compaction's shape and is recorded as a compaction obligation"
 inverts into the obligation above. `geometry-pinning.md` §5 loses its caveat and §12's
 superseded-prefix obligation with it. The ingest refusal in `control.rs` and the quarantine alarm in

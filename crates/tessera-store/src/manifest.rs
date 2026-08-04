@@ -265,7 +265,7 @@ pub struct LocatorExtent {
 /// defined as `= n`, which was redundant on its face and actively misleading in its name: the
 /// *geometry* version — the counter a row-projection cache key rotates on — is a different
 /// quantity, and it must **not** advance when an overlay publication writes a manifest carrying
-/// only new deny state (`flush-and-merge.md` §1.3; bumping it would cost every live session a
+/// only new deny state (write-path §5.6; bumping it would cost every live session a
 /// measured 10.7 s row-projection rebuild per deny burst). Two counters with one name is how the
 /// two came to be conflated, so the redundant one is gone: the reader takes `n` from the filename,
 /// the writer allocates it, and the geometry version is process-local, carried by

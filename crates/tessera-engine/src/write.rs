@@ -1455,7 +1455,7 @@ impl WritePath {
         //
         // **The test is `row_of`, not a watermark.** A watermark is a cheap scalar proxy for "has a
         // row", exact only while entity-allocation order and flush order coincide — that is, while
-        // there is one slice per partition, which flush §2.1 records as load-bearing and unenforced.
+        // there is one slice per partition, which write-path §4.3 records as load-bearing and unenforced.
         // The predicate below is what the watermark approximates, so it stays exact at any number of
         // slices and needs no per-slice bookkeeping anywhere.
         //
@@ -1478,7 +1478,7 @@ impl WritePath {
         }
 
         // **Where each surviving row sits in the log**, so a rotation knows what it may reclaim
-        // below (flush §7.3). Stamped after the filter rather than before it, because a row that
+        // below (write-path §4.5). Stamped after the filter rather than before it, because a row that
         // already has geometry is gone from the buffer and stamping it would be a lookup for
         // nothing.
         //

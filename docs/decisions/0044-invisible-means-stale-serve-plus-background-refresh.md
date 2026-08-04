@@ -65,7 +65,7 @@ Two probes, already specified in the merge review memo, run first:
 
 ## Consequences
 
-- Task 22 splits (22a now, 22b gated); `flush-and-merge.md` §1.3's one-cadence rule and §1.2's
+- Task 22 splits (22a now, 22b gated); the superseded flush design's §1.3 one-cadence rule and its §1.2
   empty-buffer-tick rule are superseded (carried by `write-path.md`'s supersession map).
 - The write path's caches acquire a design obligation: a refresh mechanism whose request-side
   face is stale-serve, with the 429 residual stated in a testable conformance obligation.

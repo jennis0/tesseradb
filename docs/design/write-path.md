@@ -1,35 +1,35 @@
 # The write path — design
 
-**Date:** 2026-08-03
-**Status:** Provisional — under review, and **not approved**. The rest of the corpus governs where
-they disagree. **To become normative:** (1) one independent adversarial review
-([design process](../agents/design-process.md)); (2) owner sign-off; (3) the section-level
-supersession edits in §13.1 applied — until they are, the superseded texts stand and a reader who
-finds a disagreement should assume this document is the one in error and check the code. §13.4's
-rulings landed 2026-08-04 as decisions 0044 and 0045, and §13.3's corrections are applied.
+**Date:** 2026-08-03 · **Promoted:** 2026-08-04
+**Status:** **Normative** for the write path. Owner sign-off 2026-08-04; the adversarial review
+ran the same day across three lenses with every finding dispositioned (Appendix R); §13.4's
+rulings landed as decisions 0044 and 0045; §13.3's corrections and §13.1's supersession edits are
+**performed**. `flush-and-merge.md` is deleted, and the lifecycle and system-architecture sections
+§13.1 names now point here. `architecture.md` remains the specification and wins every conflict.
 **Reads against:** architecture §3, §4, §11, Appendix C; contracts §2.1–§2.6, §3.1, §3.4;
 concurrency-lifecycle §1–§5, §7, §8; [geometry-pinning](geometry-pinning.md); decisions 0013,
-0020, 0024, 0025, 0033, 0034, 0035, 0040, 0041, 0042, 0043.
+0020, 0024, 0025, 0033, 0034, 0035, 0040, 0041, 0042, 0043, 0044, 0045, 0046, 0047.
 **Citation convention:** unprefixed §n is the architecture design; `lifecycle §n` is
 concurrency-lifecycle, `contracts §n` contracts, `SA §n` system-architecture. This document's own
-sections are cited as **spec §n**.
+sections are cited as **spec §n**, and are cited from elsewhere as `write-path §n`.
 
 **Owns:** the write path end to end — what happens between a byte arriving at `/control/ingest`
 or `/control/changes` and a viewer's map changing: admission, the commit window, allocation, the
 WAL, the ingest buffer, flush, the deny lane, the overlay and its row-space mask, side-manifest
-publication, merge, and the seam where compaction will sit. It absorbs
-[`flush-and-merge.md`](flush-and-merge.md) and the write-path halves of
-[`concurrency-lifecycle.md`](concurrency-lifecycle.md); §13 is the map of what it replaces and
-what it must not.
+publication, merge, and the seam where compaction will sit. It absorbed the deleted
+`flush-and-merge.md` and the write-path halves of
+[`concurrency-lifecycle.md`](concurrency-lifecycle.md); §13 records what it replaced and what it
+must not.
 
 **Does not own:** the invariants and the leak register (architecture §4, Appendix C — cited here,
 never restated as this document's); the byte-level formats and API (contracts); compaction and
 the fold, which do not exist and get a boundary statement here (spec §9) rather than a design;
 the read path's own machinery (lifecycle §1.1, §2, §7).
 
-**Every claim below was verified against the tree on 2026-08-03** (branch
-`geometry/cell-plus-residual`, at `5060acd`). Machinery that is specified but not built is marked
-**⊘ at the claim**, with what happens instead (decision 0013).
+**Every claim below was verified against the tree on 2026-08-04** (branch
+`geometry/cell-plus-residual`, at `15e8bbc` — both halves of merge published, the background
+refresh built, the ladder and the merge peak measured). Machinery that is specified but not built
+is marked **⊘ at the claim**, with what happens instead (decision 0013).
 
 ---
 
@@ -406,7 +406,7 @@ Planning runs on the executor against the live generation — the invariant-bear
 pure: buffered rows for the slice, ascending by entity id (I9 issues monotonically, so each
 flush segment covers a contiguous ascending entity range — ascending-with-holes where deletes
 struck or where a commit window interleaved slices; merge's adjacency test is `hi < lo`, not
-`hi + 1 == lo`, for exactly this reason). Per disposition, relative to the plan's snapshot (lifecycle §3.1 is why each differs):
+`hi + 1 == lo`, for exactly this reason). Per disposition, relative to the plan's snapshot (spec §5.3 is why each differs):
 
 - **Deleted → never written.** No row is created; the entity ID stays burned (I9); the deny
   entry stands.
@@ -456,7 +456,7 @@ above the watermark as buffer-resident, so `entity_hi` exactly would leave the h
 entity excluded from every fragment *and* absent from the buffer — invisible, with a row,
 forever. Pinned by test under that name.
 
-**Descriptor promotion** (decision 0042; the mechanism this corpus's `flush-and-merge.md` §3.2
+**Descriptor promotion** (decision 0042; the mechanism the superseded flush design's §3.2
 stated at the "what" level, now built). A novel descriptor buffered under an unsatisfiable
 extension id is promoted to a durable dictionary ordinal by the flush that carries it:
 
@@ -767,8 +767,7 @@ suite rather than silently re-exposing a deleted item.
 ### 5.4 What removes each fact — the retirement position
 
 *(Owner-ruled 2026-08-03, deny-lifecycle design pass; recorded in the implementation plan's
-constraints. The ruling replaces lifecycle §3.2's stamp ledger and is not yet folded into that
-document — spec §13.3. Until compaction exists the difference is unobservable: nothing retires
+constraints. The ruling replaced lifecycle §3.2's stamp ledger, which now points here — spec §13.3. Until compaction exists the difference is unobservable: nothing retires
 either way.)*
 
 - **Rule S** — an entry leaves `suppressed` only by its unsuppress. Non-retirable while active
@@ -1208,25 +1207,26 @@ Cited, never restated; the table is the audit trail from mechanism to obligation
 | **merge execute peaks at 4.4–4.9× its inputs' on-disk bytes** (stable across 78–315 MB and across 4 vs 8 input segments) | measured — `VmHWM`, one stage per process; the model said ≈5–7×, so it was conservative in the safe direction | `probes/2026-08-04-maintenance-memory/` |
 | flush transients ≈1×/2–2.5×/1× buffer bytes (plan/execute/rebase; worst overlap ~3.5–5×); tier coalescence ≈2–3× the pairs' bytes; dict clone 7.1 GB at 1.17×10⁸ terms per promoting flush | modelled (dict clone measured). **Still unmeasured: the flush cycle, tier coalescence, and the sum when a flush, a merge and a coalesce overlap on the pool** | memory review, 2026-08-04; `probes/2026-08-03-dict-fst/` |
 
-## 13. Supersession map
+## 13. Supersession map — **performed 2026-08-04**
 
-This document becomes the write path's source of truth **when promoted, not before**. The edits
-below are proposed, not performed.
+This document is the write path's source of truth. The edits below were applied at its promotion;
+the table is kept as the record of what moved and where, because a reader who remembers the old
+text needs to find where it went.
 
-### 13.1 Replaced wholly
+### 13.1 Replaced wholly — **done**
 
-| Superseded | Disposition |
+| Superseded | What was done |
 |---|---|
-| [`flush-and-merge.md`](flush-and-merge.md), entire | **Delete**, with its README table row re-pointed here. Its review trail survives in the two review memos it already cites and in this document's Appendix R; its §14 obligations are carried at spec §14; its §16 corpus-edit list is subsumed by this section. Nothing in it remains normative that this document does not restate |
-| [`concurrency-lifecycle.md`](concurrency-lifecycle.md) §1.3 (single writer, lanes) | **Reduce to a pointer** at spec §1.1. Its "two publishers" marker is corrected (r6); the deny-lane cost figures live here now |
-| lifecycle §3.1's dispositions table and the overlay representation | **Reduce to a pointer** at spec §5.3–§5.4 (it still describes the pre-`6491d19` three-*field* entry; the code is three *stores*) |
-| lifecycle §3.2 (deletion stamp ledger) and §3.4 (fold stamp under the same floor) | **Replace with Rule S / Rule F** per spec §5.4 — owner-ruled 2026-08-03. Both markers now say so in place (r6); the full rewrite lands with this document's promotion |
-| lifecycle §4 (the WAL) — the write-side halves: record set, ack ordering, group commit, rotation, the `Flush` record (marker corrected at r6) | **Reduce to spec §1.3 / §4.5 pointers**, keeping lifecycle §4's recovery rules (positional CRC, sidecar guards, repair, posture) if the owner prefers them there — they are restated at spec §1.3 either way, and two full copies must not both claim ownership |
-| lifecycle §5.1 (flush, group-commit allocation), §5.2 (merge) — markers corrected at r6 | **Reduce to pointers** at spec §2.2/§4 and §7 |
-| lifecycle §8 crash matrix — the flush/merge rows | **Re-point** to spec §9 (the router/worker rows stay ⊘ where they are) |
-| SA §6.4 and §6.5 (ingest, flush, watermark) — markers and the pins clause corrected at r11 | **Reduce to pointers** at spec §2/§4, keeping §6.5's stamp-advance framing only if re-verified |
-| SA §6.2's executor/ack/commit-window narrative | **Reduce to its security sentence plus a pointer** (spec §1) |
-| SA §6.7's merge-scheduler paragraph (departures now recorded at its marker, r11) and its pin-manager bullet (corrected at r11) | **Delete the merge paragraph in favour of spec §7**; keep §6.7's compaction carry-forward rule and the two-writer races — they are compaction's, not this document's |
+| `flush-and-merge.md`, entire | **Deleted.** Its review trail survives in the two review memos it cited and in this document's Appendix R; its §14 obligations are carried at spec §14 **under the same numbers for 1–24**, so a citation of `flush-and-merge §14.n` reads as `write-path §14.n`; its §16 corpus-edit list is subsumed by this section |
+| [`concurrency-lifecycle.md`](concurrency-lifecycle.md) §1.3 (single writer, lanes) | **Reduced to a pointer** at spec §1.1 |
+| lifecycle §3.1's dispositions table and the overlay representation | **Reduced to a pointer** at spec §5.3–§5.4 |
+| lifecycle §3.2 (deletion stamp ledger) and §3.4 (fold stamp under the same floor) | **Replaced by Rule S / Rule F** at spec §5.4 — owner-ruled 2026-08-03. The stamp ledger is deleted from the spec, not deferred |
+| lifecycle §4 (the WAL) — the write-side halves: record set, ack ordering, group commit, rotation | **Reduced to pointers** at spec §1.3 / §4.5. Lifecycle §4 keeps its **recovery** rules (positional CRC, sidecar guards, repair, posture), which are the read-back half and are cited rather than restated here |
+| lifecycle §5.1 (flush, group-commit allocation), §5.2 (merge) | **Reduced to pointers** at spec §2.2/§4 and §7 |
+| lifecycle §8 crash matrix — the flush/merge rows | **Re-pointed** to spec §9 (the router/worker rows stay ⊘ where they are) |
+| SA §6.4 and §6.5 (ingest, flush, watermark) | **Reduced to pointers** at spec §2/§4 |
+| SA §6.2's executor/ack/commit-window narrative | **Reduced to its security sentence plus a pointer** (spec §1) |
+| SA §6.7's merge-scheduler paragraph | **Deleted** in favour of spec §7; §6.7 keeps compaction's carry-forward rule and the two-writer races, which are compaction's rather than this document's |
 
 ### 13.2 Overlaps, and must not replace
 
@@ -1260,14 +1260,18 @@ refreshed; lifecycle §3.2/§3.4 annotated superseded-by-ruling); and the stale 
 (`config.rs`, `CompletedFlush`, the tick and `/control/flush` docs). The knob deletions are
 decision 0045.
 
-### 13.4 Decisions needing an owner ruling — **ruled 2026-08-04**
+### 13.4 Decisions that needed an owner ruling — **ruled 2026-08-04**
 
 1. **Decision [0044](../decisions/0044-invisible-means-stale-serve-plus-background-refresh.md)**
    resolves 0043's D1 (zero steady-state via stale-serve plus eager background refresh; a
    bounded 429 residual only for merge-window racers; full builds only at session
    establishment — the owner's streaming-ingest bound is recorded there verbatim), D2 (the
-   merge split) and D3 (merge as its own swap). Flush's inline patch and per-tick fragment
-   rebuild are thereby out of conformance until the mechanism lands; P1/P2 run first.
+   merge split) and D3 (merge as its own swap). P1/P2 ran first
+   (`probes/2026-08-04-refresh-ladder/`), and the mechanism landed the same day: flush's inline
+   patch and per-tick fragment rebuild are gone, replaced by stale-serve plus the background
+   refresh (spec §4.6). **P2 refuted the model D4 rested on** — the fragment build is ~200 ms and
+   flat in tier count, not the seconds this document assumed — which is why §11.2's incremental
+   fragment form is *not built and not being built*.
 2. **Decision [0045](../decisions/0045-inert-config-keys-are-deleted.md)** — `flush_max_items`
    and `commit_window_max_age_ms` are deleted; no key exists without a consumer.
 
@@ -1323,6 +1327,28 @@ item, moves no point and keeps every binding (exists — `merge.rs`); 43 a merge
 with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`).
 
 ## Appendix R — Review record
+
+**r6 (2026-08-04) — promoted to normative, and the mechanism it was gated on is built.** Owner
+sign-off; §13.1's supersession edits **performed** (`flush-and-merge.md` deleted; the lifecycle
+and system-architecture sections reduced to pointers, lifecycle r7 and SA r12); §13.4's rulings
+carried by decisions 0044–0047.
+
+What changed in the document beyond the supersession, all of it because the code moved under it
+on the same day:
+
+- **§4.6 replaced.** The inline projection patch and the per-request fragment rebuild are gone;
+  what runs is stale-serve plus a background refresh over resident keys, with the three-rung
+  ladder and the 429 residual stated. The fragment and the projection are one cache entry, which
+  is how review finding F5's coupling obligation is discharged — structurally, not by discipline.
+- **§7 rewritten.** Both halves of merge publish. The entity-space coalesce bounds three axes
+  without moving a row; the row-space merge bounds segments as its own swap. The "enforced
+  relation" that kept the base segment out of selection is **retired**: selection runs over the
+  extent list, so the exclusion is structural and `max_merged_segment_bytes` is a cost bound.
+- **§12 corrected by measurement, in two places that had been wrong.** P2 **refuted** this
+  document's "modelled seconds" for the fragment build — it is ~200 ms and flat in tier count — and
+  a merge's peak RSS, carried as a modelled ≈5–7×, measured at **4.4–4.9×**. Both were figures a
+  reader would have sized a deployment from.
+- **§14 extended** to obligations 36–43, all but one of which exist as tests.
 
 **r5 (2026-08-04) — decision 0047: edit is delete + re-ingest, deleted entities forgotten at
 the boundary.** The predicate op is withdrawn (§5's op list, §5.2, §5.8), which dissolves the

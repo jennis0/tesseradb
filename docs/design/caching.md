@@ -152,7 +152,7 @@ The server-held cursor of client-interaction §5.1 and the client-sent prefix de
   view, the cut it currently holds; the server serves the band between the declared cut and the new
   one.
 - **Removals come from the server's own ledger** — the deny set's immediate-publication rule and
-  the flush/stamp ledger. No client claim is load-bearing here, which is the security-relevant
+  the flush and the retirement rules (write-path §4, §5.4). No client claim is load-bearing here, which is the security-relevant
   guarantee.
 
 **Why additions cannot use the cursor.** The cursor records what the server *named*; the cache holds

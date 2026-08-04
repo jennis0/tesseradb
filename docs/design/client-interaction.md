@@ -304,7 +304,7 @@ The rejection is **re-grounded, not withdrawn.** What actually survives it:
    no next request. Don't re-download is free; don't re-request needs an explicit staleness bound,
    and the bound is the view key."* Client-derived membership is the unbounded form; §6.1's
    rule 3 — compare the view key, render stale-marked — is the bound that makes it acceptable.
-3. **Removals stay server-authoritative** regardless, from the deny set and the stamp ledger. That
+3. **Removals stay server-authoritative** regardless, from the deny set and the retirement rules (write-path §5.4). That
    is the half no client derivation may touch, and it is what the "fail-closed by naming" property
    in this section is really protecting.
 
@@ -571,7 +571,7 @@ rather than the candidate**: HMAC chaining means every verifier holds the mintin
 secret, which is why the one large modern deployment ended up building a centralised
 verification service. The costs are honest and mostly organisational — root-issuance
 discipline, since handing an integrator a broad root rebuilds the proxy with extra
-steps; a revocation denylist, which is the same class of machinery as the stamp ledger;
+steps; a revocation denylist, which is the same class of machinery as a server-side retirement ledger;
 and Datalog debugging opacity.
 
 **Two anti-patterns, named as loudly as the three retirement rules.**

@@ -7,9 +7,11 @@ Preserved verbatim because Appendix R records the substance of only twelve of th
 which would leave the closure of the other six unauditable by anyone, now or later. The second
 reviewer raised exactly that.
 
-Section references are to r1 of [`../../design/flush-and-merge.md`](../../design/flush-and-merge.md);
-numbering shifted in r2
-and r3.
+Section references are to r1 of `flush-and-merge.md`; numbering shifted in r2 and r3, and the
+document itself was **deleted on 2026-08-04** when
+[`write-path.md`](../../design/write-path.md) was promoted and absorbed it. This memo is kept as
+provenance for the review it records, not as a live citation: read the section numbers as naming
+a document in git history.
 
 ---
 

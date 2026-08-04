@@ -227,7 +227,7 @@ impl RowProjectionCache {
     /// the old bitmap unioned with the new extents' own contribution
     /// (`RowSpace::project_extents_from`), and that is *equal to*, not merely close to, what
     /// `RowSpace::project` would return over the whole space. Four premises hold it up, each a
-    /// thing this design must maintain rather than happen to have (flush §3.4):
+    /// thing this design must maintain rather than happen to have (write-path §4.6):
     ///
     /// 1. The flushed entity range is contiguous, disjoint from everything below, and entirely at
     ///    or above the pre-flush watermark — I9's append-only allocation.

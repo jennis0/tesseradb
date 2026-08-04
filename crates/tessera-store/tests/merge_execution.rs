@@ -1,4 +1,4 @@
-//! What a merge emits (flush §5.1, §5.2).
+//! What a merge emits (write-path §7).
 
 mod fixture;
 
@@ -208,7 +208,7 @@ fn the_extent_maps_every_entity_to_its_merged_row() {
     );
 }
 
-/// **Runs merge by caller key, because that is the only order a run has** (flush §5.2b). Unlike an
+/// **Runs merge by caller key, because that is the only order a run has** (write-path §7). Unlike an
 /// extent, a run cannot be ordered against its neighbours, so coalescing is a merge-sort over the
 /// bytes — and the reader binary-searches the result.
 #[test]

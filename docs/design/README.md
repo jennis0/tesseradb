@@ -85,8 +85,7 @@ architecture design.
 | [`derived-artifact-gating.md`](derived-artifact-gating.md) | Provisional | Non-point artifacts: clusters, labels, hulls, cells — one class, three gates |
 | [`slices-and-multi-table.md`](slices-and-multi-table.md) | Provisional | Named orthogonal coordinate systems, and physical table shards |
 | [`tile-addressed-integration.md`](tile-addressed-integration.md) | Provisional | Serving MapLibre, OpenLayers and QGIS by tile addressing |
-| [`flush-and-merge.md`](flush-and-merge.md) | Provisional | The row-space segment lifecycle — being absorbed by `write-path.md`, which governs where they disagree once promoted; until then this stands |
-| [`write-path.md`](write-path.md) | Provisional | The write path end to end: ingest, the commit window, the WAL, flush, the deny lifecycle, merge, and where compaction will sit. Intended to absorb `flush-and-merge.md` and the write-path halves of the lifecycle design on promotion |
+| [`write-path.md`](write-path.md) | Normative | The write path end to end: ingest, the commit window, the WAL, flush, the deny lifecycle, merge, and where compaction will sit. Absorbed `flush-and-merge.md` (deleted 2026-08-04) and the write-path halves of the lifecycle and system-architecture designs; its §13 is the map of what moved |
 | [`measurement.md`](measurement.md) | Provisional | What the suite measures and why: the axes, the denominators, the reporting conventions, and which figures may be published |
 | [`deferred-index-ordinal-split.md`](deferred-index-ordinal-split.md) | Deferred sketch | Splitting permanent identity from a renumberable index ordinal — **not approved**; its overlay question is open |
 | [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) | Deferred sketch | Sorting rows by (signature, morton) — **not approved**; three inputs it needs do not exist |
@@ -116,9 +115,12 @@ machinery that does not exist are marked ⊘ at the point they are made** — ne
 Three of those gaps matter more than the rest, because a reader could otherwise take a security
 property as delivered:
 
-- **Two of the three deny-retirement rules are unbuilt.** A suppression retires only when lifted,
-  as specified. Deletion's stamp ledger and the predicate-change fold have no code — they are safe
-  today only because nothing retires at all, which is fail-closed but is not the mechanism.
+- **One of the two deny-retirement rules is unbuilt.** A suppression retires only when lifted, as
+  specified (Rule S). Deletions and predicate changes retire only at the **compaction fold that
+  executes them** (Rule F, write-path §5.4) — and there is no compaction, so they never retire.
+  Safe today only because nothing retires at all, which is fail-closed but is not the mechanism.
+  *(The deletion **stamp ledger** and its retirement floor earlier revisions specified are deleted
+  from the spec, not deferred — owner-ruled 2026-08-03.)*
 - **The conformance suite covers five of thirteen invariants as designed.** Two more are covered
   in substance but in Rust rather than the suite; six have no coverage, four of them for want of an
   implementation to test. None of the eight scripted interleavings exist. CI runs the suite and the

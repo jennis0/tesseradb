@@ -1,6 +1,6 @@
 # Tessera — Conformance Suite Design
 
-**Status:** Draft r6 — r5 plus the falsifiability epic: the canary comparator canonicalises and can fail, the byte-scanner's control is planted, crash realism is built, I4 has compile-fail rows, and the per-PR gate exists (Appendix R)
+**Status:** Draft r7 — r6 plus the write-path promotion's consequence for §5: the interleaving scripts that test a deletion **stamp ledger** and a **retirement floor** are void, both being deleted from the spec rather than unbuilt (Rule S / Rule F, write-path §5.4), and `ledger_state()`'s stamp components with them (Appendix R)
 
 **Owns:** the design of `conformance/` and `reference/` — harness architecture, oracle interfaces, fixtures, the invariant matrix's concrete test forms, the interleaving machinery, and what "pass" means. The implementation plan (§10.1) is blunt that the suite is the deliverable; this document exists so it is designed, not accreted.
 
@@ -35,7 +35,7 @@ The invariant-by-invariant position is §4.6, and it is this document's most imp
 
 Two things a reader should carry from this table. First, **every differential and every sweep here now has something that makes it fail**: the canary comparator was the last one without, and its third fixture state closed that. That claim is deliberately narrower than "every test" — several structural checks remain pass-only, and the restart-replay module's controls needed a deliberately damaged WAL and so live outside the suite (§5). Second, **a pause mechanism already exists** — in the write path's fault-injection module, with different vocabulary and a different home (lifecycle §7.3). §5's interleavings must be built by extending it, not beside it; that has not happened, and it is the largest thing this document still describes and the system does not have.
 
-**What did not move, and why it did not.** Six invariants remain uncovered. Four of them — I3, I6, I8, I12 — have no implementation to test: no label service, no plugin host, no generating sets, no filter surface. I5 needs an authorisation plugin whose two functions can genuinely diverge before any oracle could disagree with it (decision [0027](../decisions/0027-i5-is-unverified.md)). I13b needs a required-set gate. Of the eight interleaving scripts, five (2 through 6) test a stamp ledger, a retirement floor and a compaction fold that do not exist, and a sixth needs a pause point. **None of that is a testing gap**, and a reader deciding what this system's evidence is worth should not read it as one.
+**What did not move, and why it did not.** Six invariants remain uncovered. Four of them — I3, I6, I8, I12 — have no implementation to test: no label service, no plugin host, no generating sets, no filter surface. I5 needs an authorisation plugin whose two functions can genuinely diverge before any oracle could disagree with it (decision [0027](../decisions/0027-i5-is-unverified.md)). I13b needs a required-set gate. Of the eight interleaving scripts, five (2 through 6) test a compaction fold that does not exist — and, in two cases, a stamp ledger and a retirement floor that are now deleted from the spec rather than merely unbuilt (owner-ruled 2026-08-03; Rule S / Rule F at write-path §5.4), so those two will never be written in the form specified — and a sixth needs a pause point. **None of that is a testing gap**, and a reader deciding what this system's evidence is worth should not read it as one.
 
 ## 1. Components
 
@@ -167,7 +167,7 @@ Durability ordering is not an invariant row, and it is recorded here because it 
 
 **Pause points** (park a named thread on a channel): `after_wal_fsync` · `before_generation_swap` · `before_deny_retire` · `compaction_snapshot_taken` · `before_manifest_publish` · `before_current_flip` · **`before_fragment_insert`** (request thread — where the retirement-floor refusal is exercisable) · **`before_fragment_acquire`** (request thread; drives §1.1's request-ordering interleaving in the lifecycle design).
 
-**Commands** (feature-gated RPCs, distinct from pauses, because a pause can only wait): `evict_fragment(key)` · `ledger_state()` (stamp counts, retirement floor, overlay entry states — so retirement is *observed*, not assumed; a deny-retirement test that cannot see retirement passes vacuously).
+**Commands** (feature-gated RPCs, distinct from pauses, because a pause can only wait): `evict_fragment(key)` · `ledger_state()` (overlay entry states — so retirement is *observed*, not assumed; a deny-retirement test that cannot see retirement passes vacuously. Its stamp-count and retirement-floor components are **void**: the ledger they would report is deleted from the spec, and what a fold-era test must observe instead is that the entry left the overlay in the fold's own publication).
 
 A third, `fsync_offset()`, was specified here and **retired rather than built** (decision [0038](../decisions/0038-fsync-offset-is-a-sidecar-not-a-command.md)): the WAL's `.sync` sidecar already publishes the number durably, so the crash tests read it from disk. Retiring it does not buy the crash tests any evidential strength — see the crash-realism marker below, which is blunt that neither route establishes ack ordering.
 
@@ -189,7 +189,7 @@ A third, `fsync_offset()`, was specified here and **retired rather than built** 
 7. **Positional CRC** — corrupt one byte **within [last Flush record, `fsync_offset()`]** ("below the fsync point" alone could land before the replay start and assert nothing); assert recovery fails closed. Corrupt past `fsync_offset()`; assert clean truncation.
 8. **Request ordering** — pause a request at `before_fragment_acquire`; evict, retire, swap; release; assert the request's own generation still governs and the response is correct — the eviction-while-held window driven explicitly, as the lifecycle design promises.
 
-> **⊘ Specified, not implemented — none of the eight exists as a script here.** Restart-replay exists in two forms, script 1(a) and the crash-realism variant below, but neither drives a pause point. Scripts 2 through 6 test the deny-retirement ledger, the retirement floor and the compaction fold, none of which are built (lifecycle §3.2, §3.4, §5.3): they cannot be written before the machinery they check. Scripts 7 and 8 test machinery that *does* exist and are the two that could be written today — with the qualification that **script 7's property is already covered in substance, in Rust**: `crates/tessera-lifecycle/tests/wal.rs` corrupts a byte below the sync point and requires a fail-closed refusal, corrupts past it and requires clean truncation, and covers the missing, short and zero-length sidecar variants besides. Rebuilding it in Python would buy the layout, not the coverage. Script 8 is genuinely absent and needs `before_fragment_acquire`.
+> **⊘ Specified, not implemented — none of the eight exists as a script here.** Restart-replay exists in two forms, script 1(a) and the crash-realism variant below, but neither drives a pause point. Scripts 2 through 6 test the deny-retirement ledger, the retirement floor and the compaction fold. **The first two are deleted from the spec** (Rule S / Rule F, write-path §5.4) and must be rewritten against the fold's identity match rather than resurrected; the fold itself is unbuilt (write-path §8), so none of the five can be written before the machinery they check. Scripts 7 and 8 test machinery that *does* exist and are the two that could be written today — with the qualification that **script 7's property is already covered in substance, in Rust**: `crates/tessera-lifecycle/tests/wal.rs` corrupts a byte below the sync point and requires a fail-closed refusal, corrupts past it and requires clean truncation, and covers the missing, short and zero-length sidecar variants besides. Rebuilding it in Python would buy the layout, not the coverage. Script 8 is genuinely absent and needs `before_fragment_acquire`.
 
 **Crash realism (the sharpest finding against this design's first draft):** SIGKILL loses nothing — the page cache survives process death — so kill-based tests alone verify replay logic, not durability *ordering*; **an engine that acked before fsync would pass them all.** The falsifying variant: after the kill, **truncate the WAL to `fsync_offset()`** before restart — simulating lost unsynced writes — and assert no *acked* operation is missing. Environment: because power loss is simulated by truncation rather than depended on, the suite may run on any filesystem including tmpfs; that reasoning is recorded here so the first flake does not relitigate it.
 
@@ -224,6 +224,19 @@ A differential failure is a defect until proven a fixture bug. The oracle change
 9. **Coverage is reported, not claimed.** §4.6 is the matrix of record, and a row moves only when a test moves with it.
 
 ## Appendix R — Review record
+
+**r7** (2026-08-04) carries [`write-path.md`](write-path.md)'s promotion into §5, and it
+**removes** obligations rather than adding any. Two of the five unwritten interleaving scripts
+tested a deletion stamp ledger and a fragment-insertion retirement floor; both are **deleted from
+the spec**, not deferred (owner-ruled 2026-08-03 — Rule S / Rule F at write-path §5.4), so they
+must be rewritten against the fold's identity match rather than resurrected, and `ledger_state()`'s
+stamp-count and floor components are void with them. The compaction fold the other three need is
+still unbuilt, so the five remain unwritable — but for one reason now instead of three, and the
+one that remains is honest.
+
+**No coverage claim changes.** §4.4's inventory is untouched: I11 in particular is still recorded
+as a **negative result** — the pin that carried it is deleted (decision 0041) and neither
+replacement test exists — and the write-path promotion does not alter that.
 
 **r6** records the falsifiability epic (#11's first, third and fourth gates). Four rows of §4.6 move and each moved with a test. **No test form was weakened, and one was retired as redundant:** script 7's positional-CRC property is already covered in Rust, in both directions and with the sidecar variants besides, so it is recorded as covered in substance rather than transcribed into Python for the sake of the layout.
 

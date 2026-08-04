@@ -174,7 +174,7 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
 /// `entity < watermark` gate existed to stop.
 ///
 /// **The filter is `row_of`, not a watermark.** A watermark is exact only while entity-allocation
-/// order and flush order coincide — one slice per partition, which flush §2.1 records as
+/// order and flush order coincide — one slice per partition, which write-path §4.3 records as
 /// load-bearing and unenforced. `row_of` is the predicate the watermark approximates, so it holds
 /// at any number of slices.
 ///

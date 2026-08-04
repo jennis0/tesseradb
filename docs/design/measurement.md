@@ -6,7 +6,7 @@ sign-off, the §10 amendments landed in `bench/README.md` and `bench/matrix.toml
 `Work` fields carried by at least one arm — the two reporting modes (§4) are the part a reader could
 otherwise take as already in force.
 **Reads against:** architecture §4 (I2, I7), §7.2, Appendix A, Appendix C (C4); conformance §6;
-`flush-and-merge.md` §14; `per-point-attributes.md` §8; `hot-row-geometry.md` §7;
+[`write-path.md`](write-path.md) §14; `per-point-attributes.md` §8; `hot-row-geometry.md` §7;
 `probes/optimisations.md` §0; `probes/results.md` §1, §5, §6.
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **spec §n**.
@@ -76,7 +76,7 @@ One new arm shape carries the axis: continuous ingest at a configured rate for h
 drawing a fixed density battery throughout, reporting **time-bucketed** read latency alongside the
 §2.1 counts, ack→visible, and RSS.
 
-It is the only place several of flush-and-merge §14's obligations are observable at all — §14.10
+It is the only place several of write-path §14's obligations are observable at all — §14.10
 (segment **and** delta-tier count bounded under sustained ingest) and §14.11 (the ack→visibility gap
 bounded by `flush_max_age_secs`) are soak properties by construction, and a unit test cannot see
 them. §14.13 and §14.18 fit here for the same reason.
@@ -265,7 +265,7 @@ Three consequences worth stating, because each is a convention this document oth
 - **The cold/warm ratio is a reported axis**, not a constant. It is what decides how much of the
   population meets the F4 projection lock.
 - ⊘ **Pins and mid-session filter toggles are trajectory verbs the arm should carry and cannot yet.**
-  A pin across a flush is flush-and-merge §14.18; a filter toggle needs the attribute tail.
+  A pin across a flush is write-path §14.18; a filter toggle needs the attribute tail.
 
 The zoom distribution and think-time model are **assumed, not measured** — this project has no
 telemetry and cannot produce them. State the assumed parameters beside every figure the arm
@@ -327,7 +327,7 @@ they belong to conformance §6's nightly tier, which does not exist (⊘).
 | gate | checks | on failure |
 |---|---|---|
 | **G4** | soak p99 shows no monotonic drift across the window beyond +15% | steady-state regression — the class a frozen-bundle suite structurally cannot catch |
-| **G5** | segment count, delta-tier count and ack→visible within configured bounds | flush-and-merge §14.10/§14.11 violated |
+| **G5** | segment count, delta-tier count and ack→visible within configured bounds | write-path §14.10/§14.11 violated |
 
 G5 is an assertion about the system, not about its speed, and it fails the run rather than reporting
 a regression.
@@ -379,7 +379,7 @@ gives: putting an hours-long cell beside a two-microsecond one makes the default
 ## Appendix R — review record
 
 Not yet reviewed. Drafted 2026-08-02 from the benchmark obligations recorded in
-`flush-and-merge.md` §14, `per-point-attributes.md` §8 and `hot-row-geometry.md` §7, plus two
+`write-path.md` §14, `per-point-attributes.md` §8 and `hot-row-geometry.md` §7, plus two
 findings from reading the harness: `p99_ns` is identically `max_ns` at the matrix's own repetition
 counts (spec §4), and the load arm emits a stubbed `work` block despite already decoding the
 columns that would fill it (spec §5.1).

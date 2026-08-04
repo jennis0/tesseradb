@@ -5,10 +5,11 @@
 dispositioned and signed off 2026-08-03; the deletion has landed. §14's amendments are folded into
 the ten documents it names.
 **Reads against:** architecture §2.6, §10.4, §11.2, I11, Appendix C; contracts §3.1, §3.2;
-concurrency-lifecycle §2.1–§2.3, §3.2, §6, §7.2; flush-and-merge §1.3, §2.1, §2.2.
+concurrency-lifecycle §2.1–§2.3, §3.2, §6, §7.2; [write-path](write-path.md) §4.1, §4.6, §7.
 **Citation convention:** unprefixed §n is the architecture design; `lifecycle §n` is
-concurrency-lifecycle, `contracts §n` contracts, `flush §n` flush-and-merge. This document's own
-sections are cited as **spec §n**.
+concurrency-lifecycle, `contracts §n` contracts, `write-path §n` the write path — which absorbed
+`flush-and-merge.md` when it was promoted on 2026-08-04, so the `flush §n` citations this document
+carried are now write-path's. This document's own sections are cited as **spec §n**.
 
 **Owns:** what a pin is for, and what the server retains on its behalf.
 
@@ -46,9 +47,10 @@ what a client actually needs is a *staleness signal* rather than a frozen view.
 **What the case is not.** An earlier draft led on the startup relation as a *floor of 75 s on
 visibility latency*, and that is wrong in both directions. It is not the binding floor: the
 row-projection cache keys on `segments_version`, so every flush rotates every session's key, and a
-miss is a **measured 10.7 s** at 10⁹ (flush §9 — *"the fallback is not an edge case but the steady
-state"*). That floor is removed by patching the projection, which is needed whatever happens to
-pins and is not this document's to claim. Nor is the relation itself a reason to delete anything:
+miss is a **measured 10.7 s** at 10⁹ end to end (a synthetic 4 550 ms for the projection alone —
+`probes/2026-08-04-refresh-ladder/`). That floor is removed by the background refresh
+(write-path §4.6, decision 0044), which is needed whatever happens to pins and is not this
+document's to claim. Nor is the relation itself a reason to delete anything:
 it is a sizing constraint, and sizing constraints are satisfied by choosing numbers. The honest
 case is the two bullets above — mapped bytes and lines of mechanism, both buying something no
 client uses.
@@ -122,11 +124,10 @@ What a pinned answer *does* differ in is that it omits rows that did not exist a
 is the frozen view, and spec §6 is about whether it is worth anything.
 
 **Merge does not preserve row identity, only row count — so "a row id is immutable within a
-prefix" is false.** A merge is row-count preserving in the sense flush §2.2 states: it emits
+prefix" is false.** A merge is row-count preserving in the sense write-path §7 states: it emits
 exactly as many rows as it consumed, so no *later* extent's `row_base` moves. Inside the merged
-span it is a linear merge-sort of Morton-sorted arrays producing globally sorted output (flush
-§2.3), so entities interleave and a row id inside that span names a **different entity** after the
-merge than before it.
+span the rows are re-sorted into globally sorted output, so entities interleave and a row id
+inside that span names a **different entity** after the merge than before it.
 
 Nothing live fails open on this — the row-projection cache keys on `segments_version`, which a
 merge advances, so no cached row-space structure survives one. The reason it is stated here, in
@@ -142,7 +143,7 @@ Compaction rewrites row space: it applies tombstones, reclaims deleted rows' spa
 entries into postings, and may re-quantise. Row ids move. §I11's *"selects arbitrary rows"* is
 about exactly this boundary.
 
-**Compaction publishes a new prefix and flips `CURRENT`** (§12.5, flush §5.3). So the hazard is
+**Compaction publishes a new prefix and flips `CURRENT`** (§12.5, write-path §8). So the hazard is
 identified by the `prefix` component alone; `segments_version` moves for flushes and merges, which
 cannot invalidate anything (spec §4).
 
@@ -228,10 +229,14 @@ to is not closing the door: dropping the request field now would mean re-adding 
   geometry"* — the same mixing hazard, reached from the cache instead of from a pin.
 - **The row-projection cache's key**, which already includes `segments_version` and must, because
   a flush genuinely extends row space.
-- **Lifecycle §3.2's retirement floor.** It refuses insertion of a fragment whose stamp is below
-  the highest retired entry's, and its stated trigger is *"a pinned or slow request"*. The **slow**
-  half survives pins entirely: a request that began before a retirement can still rebuild an
-  old-stamp fragment. The floor is not pin-dependent and is untouched.
+- **The fragment-insertion floor lifecycle §3.2 then specified.** It refused a fragment whose
+  stamp was below the highest retired entry's, and its stated trigger was *"a pinned or slow
+  request"* — the **slow** half surviving pins entirely, so the floor was never pin-dependent and
+  this document left it untouched. *(It has since been **deleted from the spec** with the stamp
+  ledger it belonged to — owner-ruled 2026-08-03. Rule F replaces both: a deletion retires only at
+  the compaction fold that executes it, and the safety property is an identity match rather than a
+  stamp ordering, the fold's new prefix rotating the fragment identity so no pre-fold fragment is
+  reachable by key. Nothing in this section's pin argument depended on the floor.)*
 
 ## 10. What this buys
 
@@ -243,12 +248,12 @@ to is not closing the door: dropping the request field now would mean re-adding 
   at every tick, and only patching the projection removes that. Claiming the tick as this
   document's win was an error in an earlier draft and is corrected here rather than quietly
   dropped.
-- **Cache pruning simplifies.** Today the licence to prune a superseded generation's projections is
-  a `Reclaimed` value produced by a drain-list reclaim, and `prune_generation` runs synchronously
-  inside the publication — which is why flush §9 needs *"retention of superseded-generation entries
-  until patched or drain-expired"* and finds it unsequenceable against today's callers. With no
-  drain list, retention becomes an explicit N-generations-back policy on the cache, stated where the
-  cache is bounded rather than inherited from a pin lifetime.
+- **Cache pruning simplifies.** The licence to prune a superseded generation's projections was a
+  `Reclaimed` value produced by a drain-list reclaim, and `prune_generation` ran synchronously
+  inside the publication. With no drain list, retention became an explicit N-generations-back
+  policy on the cache, stated where the cache is bounded rather than inherited from a pin lifetime
+  — and that depth is now what both feeds the background refresh and bounds how long a
+  stale-served session can lag (write-path §4.6).
 - **~1,900 lines of deletion**, and two design sections shrink to the rule that carries their
   weight.
 
@@ -292,7 +297,11 @@ each is a place to attack.
 4. A viewport presenting a stamp from a superseded **prefix** is likewise answered normally with
    the signal set. (What a client should *do* about it is spec §5's open question.)
 5. No superseded `Bundle` is retained after the last request holding it completes.
-6. Lifecycle §3.2's retirement floor still refuses a below-floor fragment from a slow request.
+6. ~~Lifecycle §3.2's retirement floor still refuses a below-floor fragment from a slow
+   request.~~ *(Superseded 2026-08-03: the floor is deleted from the spec with the stamp ledger,
+   and Rule F's identity match replaces it — write-path §5.4. The obligation this list was
+   checking, that deleting pins costs no retirement safety, is unaffected: neither mechanism was
+   pin-dependent.)*
 
 ## 13. Out of scope
 
@@ -325,11 +334,15 @@ because a missed document is how a corpus goes stale silently.
   describes the exposure.
 - **concurrency-lifecycle** — §2.1 (the drain list), §2.2 (session pins, the two bounds and the
   sizing obligation, the prefix-retention marker), §2.3 (pinned geometry against current overlay).
-  §3.2's retirement floor is unchanged and should say so.
+  §3.2's retirement floor is unchanged by *this* document and should say so. *(It was
+  subsequently deleted with the stamp ledger — see spec §11's note above.)*
 - **contracts** — §3.1's closed code list loses 410 `pin-expired`; **§3.1 and §3.2** carry the
   `x-tessera-pin` header, which changes meaning from a selector to an advisory stamp. (The draft
   and the Status line both cited §3.4 for this; §3.4 is the external-id contract.)
-- **flush-and-merge** — §1.3 and §4's relation 1 and its default; §13's I11 line.
+- **flush-and-merge** — §1.3 and §4's relation 1 and its default; §13's I11 line. *(That document
+  was deleted on 2026-08-04; `write-path.md` carries all three, and §4's merge-size relation is no
+  longer load-bearing — merge selection runs over the extent list, so the base segment is excluded
+  structurally.)*
 - One decision record: pins become a staleness stamp rather than retained geometry.
 
 ### The owner's leak ruling, recorded

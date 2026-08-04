@@ -17,7 +17,7 @@ The corpus currently states the opposite, deliberately and in two places, and bo
 - `Engine::viewport`, at the row-projection cache: *"The patch, and why it is on the ordinary request
   path rather than in the publication … Derived here instead: the session that asks pays, once."*
   The reasoning it gives is sound about *cost*; the ruling says the cost may not be charged there.
-- `flush-and-merge.md` §3.3 rejected forcing rebuilds at publication because doing so
+- The superseded flush design's §3.3 rejected forcing rebuilds at publication because doing so
   *"synchronises the most expensive operation in the request path across the session population"*.
   The ruling agrees that is bad and forbids the alternative it settled on.
 

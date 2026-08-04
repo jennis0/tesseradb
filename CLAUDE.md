@@ -30,6 +30,12 @@ normative and provisional documents; the provisional ones say so and name what r
 mechanism documents defer to it. Where `contracts.md` and `system-architecture.md` differ, the
 eleven deviations in contracts §0.3 govern. `§n` unprefixed means the architecture design.
 
+**`write-path.md` is normative for the write path** (promoted 2026-08-04) — ingest, the commit
+window, the WAL's write half, flush, the deny lane and the overlay, merge, and compaction's seam.
+It absorbed `flush-and-merge.md`, which is deleted, and the write-side sections of
+`concurrency-lifecycle.md` and `system-architecture.md`, which point at it; its §13 is the map of
+what moved. Lifecycle keeps the read path, retention, WAL *recovery* and caching.
+
 Every corpus document carries a review trail in its Appendix R.
 
 ## Non-negotiables

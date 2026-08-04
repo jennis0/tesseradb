@@ -57,7 +57,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C18** | Mark count and sub-cell counts track the masked visible count | Low | Accepted — no new channel |
 | **C19** | Per-tile selection work varies with the viewer's own visible count | Low | Accepted — C4/C14 shape |
 | **C20** | Probing how identifiers moved across a key rotation | Medium | Closed |
-| **C21** | Mask-staleness hint (flush §3.3) | Low | Accepted — C15 shape |
+| **C21** | Mask-staleness hint (write-path §4.6) | Low | Accepted — C15 shape |
 
 ## Documents
 
@@ -68,18 +68,17 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `architecture.md` | Normative — r31 | 13 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
-| `concurrency-lifecycle.md` | Normative — r6 | 16 |
-| `conformance.md` | Normative — r6 | 12 |
+| `concurrency-lifecycle.md` | Normative — r7 | 14 |
+| `conformance.md` | Normative — r7 | 12 |
 | `contracts.md` | Normative — r18 | 15 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
-| `flush-and-merge.md` | Provisional — under review | 3 |
 | `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
 | `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 3 |
 | `measurement.md` | Provisional — under review | 4 |
 | `per-point-attributes.md` | Provisional — under review | 6 |
 | `slices-and-multi-table.md` | Provisional — under review | 7 |
-| `system-architecture.md` | Normative — r11 | 27 |
+| `system-architecture.md` | Normative — r12 | 26 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `write-path.md` | Provisional — under review | 25 |
+| `write-path.md` | Normative for the write path. Owner sign | 25 |
