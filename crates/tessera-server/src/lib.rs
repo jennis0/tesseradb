@@ -190,10 +190,9 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         // their serialise phase, deliberately, because small requests are latency-bound on
         // scheduling rather than CPU.
         compute_threads: config.compute_threads,
-        // Lifecycle §2.2's two pin bounds. `Engine::open` hands both to `PinManager::new`, which
-        // holds them for the drain list they bound.
+        // The flush tick: the one write-path cadence, and the bound on how stale an acknowledged
+        // item's absence may be (write-path §4.1).
         flush_max_age_secs: config.flush_max_age_secs,
-        flush_max_items: config.flush_max_items,
     };
     let mut engine = Engine::open(
         &config.bundle_path,

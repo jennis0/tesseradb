@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use arrow::array::{Array, Float32Array, StringArray, UInt16Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, Float32Array, StringArray, UInt32Array, UInt64Array};
 use arrow::buffer::Buffer;
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::ipc::convert::fb_to_schema;
@@ -974,8 +974,9 @@ pub enum ScalarSlice<'a> {
 
 /// A zero-copy, mmap-backed view of `columns.arrow`. Validated once at [`ColumnsRef::load`]:
 /// exactly one record batch, uncompressed, 8-byte-aligned buffers (via
-/// [`FileDecoder::with_require_alignment`]), and the three fixed columns present with the
-/// expected names and types (contracts §2.6 r6). Every accessor below borrows directly from the
+/// [`FileDecoder::with_require_alignment`]), and the two fixed columns present with the
+/// expected names and types (contracts §2.6; the `priority` column is cut — decision 0046 —
+/// and a pre-cut bundle carrying it is a typed error here, never a silently ignored column). Every accessor below borrows directly from the
 /// underlying `RecordBatch`'s buffers — no per-call copy.
 #[derive(Debug)]
 pub struct ColumnsRef {
@@ -983,10 +984,9 @@ pub struct ColumnsRef {
     scalar_index: HashMap<String, usize>,
 }
 
-const FIXED_COLUMNS: [(&str, DataType); 3] = [
+const FIXED_COLUMNS: [(&str, DataType); 2] = [
     ("tessera_id", DataType::UInt64),
     ("residual", DataType::UInt32),
-    ("priority", DataType::UInt16),
 ];
 
 impl ColumnsRef {
@@ -1051,10 +1051,6 @@ impl ColumnsRef {
     /// extent `MANIFEST.json` declares.
     pub fn residual(&self) -> &[u32] {
         downcast::<UInt32Array>(&self.batch, 1).values()
-    }
-
-    pub fn priority(&self) -> &[u16] {
-        downcast::<UInt16Array>(&self.batch, 2).values()
     }
 
     /// A declared-scalar column by name, or `None` if `columns.arrow` has no such column.

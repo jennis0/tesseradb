@@ -106,6 +106,14 @@ pub(crate) enum NoFlush {
     /// converge the WAL was the alternative, and it is rejected because it produces a state **no
     /// restart could have produced** — which is lifecycle §4's central argument.
     OverlayDiverged,
+    /// **A partition is serving a stepped-down side-manifest** (owner-ruled gate, 2026-08-04;
+    /// write-path §5.6). A flush from this state assembles its manifest from the *older served*
+    /// partition state and commits it at a higher `n`, permanently shadowing the stepped-past
+    /// segment; and §7.1's buffer reconstruction against the served row space means the shadowed
+    /// rows' WAL members are the only recovery material left. Publishing nothing while stepped
+    /// down costs ingest visibility on a node whose newest manifest's files are damaged — the
+    /// same trade the poisoned and diverged gates make, for the same reason.
+    SteppedDown,
 }
 
 /// Plan a flush of `slice` against `generation`.
@@ -119,13 +127,23 @@ pub(crate) fn plan_flush(
     wal_poisoned: bool,
     overlay_diverged: bool,
 ) -> Result<FlushPlan, NoFlush> {
-    // The gates first, and before any work: a poisoned or diverged node publishes nothing, and
-    // deciding that after building a plan would only mean building one to throw away.
+    // The gates first, and before any work: a poisoned, diverged or stepped-down node publishes
+    // nothing, and deciding that after building a plan would only mean building one to throw
+    // away. Step-down is read off the generation's own bundle — it is bundle state, not executor
+    // health — so it is checked here rather than passed in.
     if wal_poisoned {
         return Err(NoFlush::WalPoisoned);
     }
     if overlay_diverged {
         return Err(NoFlush::OverlayDiverged);
+    }
+    if generation
+        .bundle
+        .partitions
+        .values()
+        .any(|p| p.stepped_down())
+    {
+        return Err(NoFlush::SteppedDown);
     }
 
     let mut items: Vec<(EntityId, BufferedItem)> = generation
@@ -180,11 +198,15 @@ pub(crate) struct FlushContext {
     pub(crate) prefix: String,
 }
 
-/// A flush whose files and side-manifest are durable, awaiting the swap-only publication step.
+/// A flush whose files are durable, awaiting manifest assembly and the swap on the executor.
 ///
-/// **The side-manifest is the commit point** (§7.3): by the time one of these exists, a crash
-/// leaves a bundle that opens at the new `n` with everything it names present. What remains is
-/// in-memory.
+/// **The side-manifest is still the commit point (§7.3), and it is written at publication, not
+/// here.** A crash while one of these is in flight leaves orphan files nothing references, and
+/// the next tick re-plans; only once `publish_flush` has written the manifest does a crash leave
+/// a bundle that opens at the new `n` with everything it names present. The manifest moved to
+/// the executor because `n` cannot be allocated at plan time (a deny publication may take one
+/// mid-flight) and the deny fields must reflect the overlay at publication — see the field docs
+/// below.
 pub(crate) struct CompletedFlush {
     pub(crate) partition: String,
     pub(crate) slice: String,
@@ -209,6 +231,10 @@ pub(crate) struct CompletedFlush {
     /// Every file this flush wrote, prefix-relative, with its digest — computed on the pool.
     pub(crate) files: std::collections::BTreeMap<String, FileDigest>,
     pub(crate) tier: Arc<DeltaTier>,
+    /// The tier measured as encoded (`FragmentationTally::of_tier`) — contracts §3.4's
+    /// `fragmentation`, at the scope where between-window scatter is visible. Computed on the
+    /// pool beside the write it measures; recorded by the executor only if the flush publishes.
+    pub(crate) tier_tally: tessera_lifecycle::window::FragmentationTally,
     /// The dictionary including this flush's promotions (§3.2), republished with the geometry.
     pub(crate) dict: Arc<Dict>,
     /// `Some(len)` if this flush wrote a dictionary extent, carrying the dictionary length its
@@ -275,6 +301,10 @@ pub(crate) fn execute_flush(
     .map_err(|e| FlushFailed(format!("segment: {e}")))?;
 
     // ---- the delta postings tier ------------------------------------------------------------
+    let tier_tally = tessera_lifecycle::window::FragmentationTally::of_tier(
+        &promotion.postings,
+        plan.items.len() as u64,
+    );
     let tier_rel = format!(
         "partitions/{}/slices/{}/segments/{}/delta.arrow",
         ctx.partition, ctx.slice, ctx.seg_id
@@ -331,6 +361,7 @@ pub(crate) fn execute_flush(
         dict_extent,
         files,
         tier,
+        tier_tally,
         dict: promotion.dict,
         promoted_from_dict_len: promoted_from,
         prefix: ctx.prefix,

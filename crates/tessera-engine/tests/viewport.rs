@@ -361,7 +361,6 @@ fn theta_does_not_move_when_the_viewport_pans() {
             max_tiles_per_request: 262_144,
             compute_threads: default_compute_threads(),
             flush_max_age_secs: 90,
-            flush_max_items: 100_000,
         },
     )
     .unwrap();
@@ -436,7 +435,6 @@ fn no_visible_tile_is_ever_served_empty() {
             max_tiles_per_request: 262_144,
             compute_threads: default_compute_threads(),
             flush_max_age_secs: 90,
-            flush_max_items: 100_000,
         },
     )
     .unwrap();
@@ -986,14 +984,25 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
         &tmp.path().join("pairs.parquet"),
     );
 
-    // A lease claiming the whole u32 space — `high_water_from` folds `Lease.hi` into the seed, so
-    // this is the WAL-side half of the seeding rule, reached without touching MANIFEST's digest.
+    // A replayed row at the top of the u32 space — `high_water_from` folds
+    // `entity_id + 1` into the seed, so this is the WAL-side half of the seeding rule, reached
+    // without touching MANIFEST's digest. The refusal fires before replay resolves anything, so
+    // the row's other fields never matter.
     let wal_path = tmp.path().join("wal.log");
     {
         let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
-        wal.append(&WalRecord::Lease {
-            lo: u32::MAX as u64 - 1,
-            hi: u32::MAX as u64,
+        wal.append(&WalRecord::IngestBatch {
+            batch_id: "over-the-top".to_string(),
+            body_hash: [0u8; 32],
+            rows: vec![tessera_lifecycle::WalRow {
+                external_id: None,
+                entity_id: tessera_types::EntityId::new(u32::MAX as u64 - 1),
+                slice: "s0".to_string(),
+                descriptors: Vec::new(),
+                x: 0.5,
+                y: 0.5,
+                scalars: Vec::new(),
+            }],
         })
         .unwrap();
         wal.fsync().unwrap();
@@ -1155,7 +1164,6 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             max_tiles_per_request: 262_144,
             compute_threads: default_compute_threads(),
             flush_max_age_secs: 90,
-            flush_max_items: 100_000,
         },
     )
     .expect("engine should open the 2.4M bundle");

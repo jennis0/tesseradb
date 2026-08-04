@@ -129,7 +129,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_tiles_per_request: MAX_TILES_PER_REQUEST,
             compute_threads: tessera_engine::default_compute_threads(),
             flush_max_age_secs: 90,
-            flush_max_items: 100_000,
         },
     )?;
 

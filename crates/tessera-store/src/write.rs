@@ -6,7 +6,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float32Array, StringArray, UInt16Array, UInt32Array, UInt64Array};
+use arrow::array::{ArrayRef, Float32Array, StringArray, UInt32Array, UInt64Array};
 use arrow::buffer::{Buffer, ScalarBuffer};
 use arrow::datatypes::{ArrowNativeType, DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
@@ -14,7 +14,7 @@ use arrow::record_batch::RecordBatch;
 
 use tessera_spatial::split32;
 use tessera_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
-use tessera_types::{EntityId, TesseraId};
+use tessera_types::EntityId;
 
 const PERMUTATION_MAGIC: &[u8; 4] = b"TSPM";
 const PERMUTATION_VERSION: u16 = 1;
@@ -65,10 +65,14 @@ pub fn write_segment(
 /// than four and 18. Nothing reads a coordinate off a segment: what is stored is the position
 /// in the grid's own units, at 32 bits per axis rather than an `f32`'s 24-bit mantissa.
 fn fixed_fields() -> Vec<Field> {
+    // No `priority` column (decision 0046). It was 2 B/row written and read by nothing at query
+    // time — the selection comparator reads the full `tessera_id`, of which priority is the high
+    // 16 bits — and format 1 is unpublished, so cutting it now is free where cutting it later is
+    // a break. Re-adding it is additive (the reader matches columns by name) and is licensed the
+    // day a measured prefix-scan optimisation asks for it.
     vec![
         Field::new("tessera_id", DataType::UInt64, false),
         Field::new("residual", DataType::UInt32, false),
-        Field::new("priority", DataType::UInt16, false),
     ]
 }
 
@@ -110,14 +114,7 @@ fn write_columns_arrow(
     let residual: ArrayRef = Arc::new(UInt32Array::from_iter_values(
         items.iter().map(|i| split32(i.qx, i.qy).1),
     ));
-    // `priority` is derived here, from the `tessera_id` the item already carries — the one
-    // place this column is computed (contracts §2.6 r6, `TesseraId::priority()`); neither the
-    // tiler nor `write_columns` below recomputes the shift inline.
-    let priority: ArrayRef = Arc::new(UInt16Array::from_iter_values(
-        items.iter().map(|i| i.tessera_id.priority()),
-    ));
-
-    let mut columns: Vec<ArrayRef> = vec![tessera_id, residual, priority];
+    let mut columns: Vec<ArrayRef> = vec![tessera_id, residual];
     for (idx, (name, ty)) in scalar_schema.iter().enumerate() {
         columns.push(build_scalar_column(items, idx, *ty, name)?);
     }
@@ -229,19 +226,15 @@ pub fn write_morton_codes<I: IntoIterator<Item = u32>>(path: &Path, codes: I) ->
     writer.flush()
 }
 
-/// Write `columns.arrow` from columns that are already in row order — the fixed three columns of
+/// Write `columns.arrow` from columns that are already in row order — the fixed two columns of
 /// contracts §2.6, no declared scalars.
 ///
 /// Takes each column **by value** so the `Vec`s become the Arrow buffers with no copy. This
 /// record batch is the largest single structure the batch build materialises (at 10^9 rows,
-/// 8+4+2 bytes per row), so a copy here would be another fourteen gigabytes. Produces
-/// byte-for-byte what [`write_segment`] writes for the same rows and no scalars.
-///
-/// `priority` is derived from `tessera_id` via `TesseraId::priority` — the same one place
-/// `write_columns_arrow` derives it — so the two build paths are byte-identical by
-/// construction rather than by agreement (contracts §2.6 r6, 2026-07-30 fold). Since the
-/// 2026-07-31 rework this function is a thin wrapper over [`write_columns_from_parts`], which
-/// does that derivation and the writing; there is one code path.
+/// 8+4 bytes per row), so a copy here would be another twelve gigabytes. Produces
+/// byte-for-byte what [`write_segment`] writes for the same rows and no scalars. Since the
+/// 2026-07-31 rework this function is a thin wrapper over [`write_columns_from_parts`]; there
+/// is one code path.
 pub fn write_columns(
     path: &Path,
     tessera_id: Vec<u64>,
@@ -260,9 +253,9 @@ pub fn write_columns(
 
     // Delegation, not duplication: `Buffer::from_vec` takes ownership of each `Vec`'s
     // allocation with no copy, and `write_columns_from_parts` builds the identical record
-    // batch (same schema, same zero-null primitive arrays over the same bytes, same priority
-    // derivation) through the same `write_single_batch` path — so the delegated output is
-    // byte-for-byte what this function wrote before it delegated.
+    // batch (same schema, same zero-null primitive arrays over the same bytes) through the
+    // same `write_single_batch` path — so the delegated output is byte-for-byte what this
+    // function wrote before it delegated.
     write_columns_from_parts(
         path,
         Buffer::from_vec(tessera_id),
@@ -277,11 +270,6 @@ pub fn write_columns(
 /// build's handover point for file-backed columns: at 3×10⁹ rows the two `Vec`s of
 /// [`write_columns`] are 36 GB of anonymous memory, whereas mmap-backed `Buffer`s
 /// (`Buffer::from_custom_allocation` over a scratch file) cost address space only.
-///
-/// `priority` is still derived here, row by row, from the `tessera_id` buffer via
-/// [`TesseraId::priority`] — the same single definition site every `columns.arrow` writer uses
-/// (contracts §2.6 r6, 2026-07-30 fold). Its transient `Vec<u16>` (2 bytes × `rows`) is the
-/// only allocation proportional to the input and is bounded, accepted cost.
 ///
 /// **Alignment**: Arrow requires each values buffer to be aligned to its element type —
 /// 8 bytes for `tessera_id`, 4 for `residual` (`ScalarBuffer` refuses less). An mmap is
@@ -303,17 +291,11 @@ pub fn write_columns_from_parts(
     let residual: ScalarBuffer<u32> = typed_column("residual", residual, rows)?;
 
     let tessera_id = UInt64Array::new(tessera_id, None);
-    let priority: Vec<u16> = tessera_id
-        .values()
-        .iter()
-        .map(|&id| TesseraId::new(id).priority())
-        .collect();
 
     let schema = Arc::new(Schema::new(fixed_fields()));
     let columns: Vec<ArrayRef> = vec![
         Arc::new(tessera_id),
         Arc::new(UInt32Array::new(residual, None)),
-        Arc::new(UInt16Array::from(priority)),
     ];
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;

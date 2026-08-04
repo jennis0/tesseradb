@@ -36,7 +36,6 @@ fn main() {
             max_tiles_per_request: 262_144,
             compute_threads: tessera_engine::default_compute_threads(),
             flush_max_age_secs: 90,
-            flush_max_items: 100_000,
         },
     )
     .expect("engine should open the 2.4M bundle");

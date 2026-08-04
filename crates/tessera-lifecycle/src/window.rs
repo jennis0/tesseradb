@@ -252,6 +252,59 @@ pub struct FragmentationTally {
 }
 
 impl FragmentationTally {
+    /// Measure a delta postings tier as encoded: `postings` is `(term, sorted ascending entity
+    /// list)` pairs — the shape a flush writes — and `rows` is the flushed item count.
+    ///
+    /// **This is the scope at which between-window scatter becomes visible.** The per-window tally
+    /// below measures one allocation run against a random baseline of that same window, so
+    /// fragmentation *between* windows is invisible to it by construction. A tier spans every
+    /// commit window the buffer accumulated between two ticks, so its run and container counts
+    /// carry exactly the erosion design §11.1 records as permanent — which is what the deferred
+    /// index-ordinal split is supposed to trigger on, and what contracts §3.4's figures exist to
+    /// make observable.
+    ///
+    /// The baseline is the same normalisation as [`tally`]'s (`Σ_t k_t·(W − k_t + 1)/W`, W = rows),
+    /// so tier-scope and window-scope `run_ratio` values are comparable in construction even
+    /// though they answer at different scopes. Entities are deduplicated per term before a tier is
+    /// encoded, so `k_t ≤ W` holds by the same argument as the window's rows-not-occurrences rule.
+    pub fn of_tier(postings: &[(TermId, Vec<u32>)], rows: u64) -> Self {
+        let mut t = FragmentationTally {
+            rows,
+            ..Default::default()
+        };
+        if rows == 0 {
+            return t;
+        }
+        let w = rows as f64;
+        let mut baseline = 0.0f64;
+        for (_, entities) in postings {
+            if entities.is_empty() {
+                continue;
+            }
+            t.postings += entities.len() as u64;
+            t.runs += 1;
+            t.containers += 1;
+            for pair in entities.windows(2) {
+                // Two INDEPENDENT predicates, exactly as [`tally`]: `65_535 → 65_536` continues a
+                // run *and* opens a container.
+                if pair[0] + 1 != pair[1] {
+                    t.runs += 1;
+                }
+                if pair[0] >> 16 != pair[1] >> 16 {
+                    t.containers += 1;
+                }
+            }
+            let k = entities.len() as f64;
+            debug_assert!(
+                entities.len() as u64 <= rows,
+                "a tier's postings are deduplicated per term, so k_t cannot exceed the row count"
+            );
+            baseline += k * (w - k + 1.0) / w;
+        }
+        t.baseline_runs_milli = (baseline * 1000.0).round() as u64;
+        t
+    }
+
     /// Fold another window's tally in. Saturating: a counter that has run out of `u64` stopped being
     /// a useful figure long before, and an operator gauge must not be the thing that panics the
     /// write executor.

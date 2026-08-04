@@ -50,13 +50,16 @@ broken by a plausible-looking change:
   never evaluate a visibility rule. That identifier is a **blinding permutation, not encryption**
   ([decision 0014](docs/decisions/0014-i10-weakened-to-construction.md)) — do not describe it as a
   cryptographic guarantee, and do not treat it as a defence against a bundle-holder.
-- **Deny handling is fail-closed with three distinct retirement rules** (lifecycle §3): deletion
-  denies retire by the stamp ledger; suppressions retire *only* on unsuppress (they never touch
-  postings); predicate-change entries retire at their compaction fold. Conflating them is
-  fail-open — caught in review twice; do not rediscover it. **Two of the three are specified but
-  not built**, and are safe today only because nothing retires at all.
-- **Pins fix geometry, never authorisation** (lifecycle §2.3). A suppression applies to a pinned
-  request the moment it is accepted.
+- **Deny handling is fail-closed, with two removal rules that must never be conflated**
+  (write-path §5.4; ruled 2026-08-03, superseding the stamp ledger): suppressions retire *only*
+  on unsuppress (they never touch postings — Rule S); deletions — and any legacy
+  predicate-change entries, the op being withdrawn (decision 0047: edit is delete + re-ingest,
+  and a deleted holder never blocks the re-ingest) — retire *only* at the compaction fold that
+  executes them (Rule F). Giving a suppression any other retirement route is fail-open — caught
+  in review twice; do not rediscover it. **The fold does not exist**, so today nothing retires
+  at all — fail-closed, and not the mechanism.
+- **Geometry stamps are advisory, never authorisation** (decision 0041 — pins are deleted). A
+  suppression applies to every request the moment it is accepted, whatever stamp was presented.
 
 The conformance suite is the deliverable: an implementation that keeps the Morton and Roaring
 machinery while quietly dropping I2, I7 or I13b passes every functional test while leaking. Five

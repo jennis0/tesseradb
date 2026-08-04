@@ -440,6 +440,16 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
                     .to_string(),
             )
         }
+        AcceptError::SteppedDown => {
+            // Owner-ruled gate (2026-08-04; write-path §5.6): a stepped-down node must not accept
+            // rows a flush would bury under a manifest assembled from the older served state.
+            // 503, the same class as an unready worker — the node, not the request, is wrong,
+            // and retrying later (after the damaged newest manifest is repaired) is correct.
+            tracing::error!(
+                "ALARM: ingest refused — a partition is serving a stepped-down side-manifest;                  repair or restore the damaged newest manifest's files"
+            );
+            ApiError::NotReady
+        }
         AcceptError::Exec(ExecError::BatchConflict { batch_id }) => ApiError::Conflict(format!(
             "batch id '{batch_id}' was already accepted with a different body"
         )),
@@ -541,7 +551,7 @@ pub fn map_change_batch_error(
             AcceptError::Submit(e) => e.may_have_taken_effect(),
             // Refused before the submit, so it never reached the executor. Ingest-only in
             // practice; named rather than folded, per this function's own rule.
-            AcceptError::OutsideExtent { .. } => false,
+            AcceptError::OutsideExtent { .. } | AcceptError::SteppedDown => false,
         });
     if !reached_executor {
         tracing::error!(
@@ -555,7 +565,7 @@ pub fn map_change_batch_error(
         || failures.iter().any(|(op, f)| match f {
             AcceptError::Exec(e) => exec_failure_may_be_in_force(*op, e),
             AcceptError::Submit(e) => e.may_have_taken_effect(),
-            AcceptError::OutsideExtent { .. } => false,
+            AcceptError::OutsideExtent { .. } | AcceptError::SteppedDown => false,
         });
     // The exact negation, item by item, so no item can be counted in both halves or in neither. A
     // `ReceiptLost` is in neither category's *certain* sense — it lands in `may_be_in_force` and out
@@ -565,7 +575,7 @@ pub fn map_change_batch_error(
         AcceptError::Exec(e) => !exec_failure_may_be_in_force(*op, e),
         AcceptError::Submit(e) => !e.may_have_taken_effect(),
         // Refused before the submit: certainly not applied, which is this half's sense exactly.
-        AcceptError::OutsideExtent { .. } => true,
+        AcceptError::OutsideExtent { .. } | AcceptError::SteppedDown => true,
     });
 
     tracing::error!(

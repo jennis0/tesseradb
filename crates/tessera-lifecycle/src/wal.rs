@@ -147,10 +147,12 @@ pub struct WalRow {
     pub scalars: Vec<WalScalar>,
 }
 
-/// The disposition change carried by a `Change` record. The three retirement rules (lifecycle
-/// §3) are distinct and must not be conflated: deletion denies retire by the stamp ledger,
-/// suppressions retire only on `Unsuppress` (never touching postings), and predicate changes
-/// retire at their compaction fold.
+/// The disposition change carried by a `Change` record. The two removal rules (write-path §5.4;
+/// ruled 2026-08-03) are distinct and must not be conflated: suppressions retire only on
+/// `Unsuppress` (never touching postings — Rule S); deletions and predicate changes retire at the
+/// compaction fold that executes them (Rule F). `Predicate` is **withdrawn at the boundary**
+/// (decision 0047 — edit is delete + re-ingest): no new record carries it, and the variant stays
+/// for pre-0047 logs, which replay unchanged.
 ///
 /// On-disk format: variant order is frozen and append-only — see [`WalScalar`]'s note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,9 +210,6 @@ pub enum WalRecord {
         op: ChangeOp,
         descriptors: Option<Vec<Vec<u8>>>,
     },
-    /// A durable reservation of an entity-ID range, written before the range's rows are known to
-    /// exist so a crash mid-batch cannot let a later batch reuse the reserved IDs (I9).
-    Lease { lo: u64, hi: u64 },
     /// The whole live overlay, written so that the `Change` records it was accumulated from can be
     /// deleted.
     ///
@@ -228,21 +227,6 @@ pub enum WalRecord {
     /// Under replay it is an ordinary record in position: it is applied where it occurs, and a
     /// `Change` earlier in the same file still applies before it. See [`crate::replay`].
     OverlaySnapshot { entries: Vec<OverlaySnapshotEntry> },
-    /// A published flush: side-manifest `n`, and the sequence position of the flush's
-    /// **buffer-snapshot point**.
-    ///
-    /// **`wal_pos` is the position below which every ingest row has been consumed into a segment.**
-    /// It is *not* the offset of this record, and the distinction is the whole of its safety: rows
-    /// acked *during* the flush are appended after the snapshot point, were never consumed, and
-    /// carry entity ids at or above the new watermark. Reclaiming below this record's own offset
-    /// would delete them, and §7.1 would then reconstruct them from nothing — acked ingest,
-    /// silently lost at the next restart. Group-commit allocation makes entity order equal WAL
-    /// append order, so such a position always exists and is exact.
-    ///
-    /// It is a replay-start optimisation and the authority for reclamation, never a correctness
-    /// device: recovery reconstructs the buffer from the published watermark, so it cannot
-    /// duplicate or lose a row at any crash point whether or not this record survived.
-    Flush { n: u64, wal_pos: u64 },
     /// An accepted `/control/changes` entry addressed by **entity id** rather than by external id.
     ///
     /// **Appended as a new variant, never by widening `Change`**: postcard encodes an enum by
@@ -326,11 +310,16 @@ pub type Result<T> = std::result::Result<T, WalError>;
 /// File format magic, checked at open.
 const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// File format version, checked at open. Bump on any incompatible change to record framing or
-/// the header itself — and on any change to a record's *field* layout, since postcard encodes
-/// struct fields positionally and would otherwise decode a missing field as whatever bytes follow
-/// it. Version 2 added [`WalRow::slice`]; version 3 made the log a sequence and put each member's
-/// number and base position in its header.
-const WAL_VERSION: u16 = 3;
+/// the header itself — and on any change to a record's *field* layout or the variant table, since
+/// postcard encodes struct fields and enum discriminants positionally and would otherwise decode
+/// a missing field or shifted variant as whatever bytes follow it. Version 2 added
+/// [`WalRow::slice`]; version 3 made the log a sequence and put each member's number and base
+/// position in its header; version 4 deleted the `Lease` and `Flush` variants — the first was
+/// written by nothing (allocation rides `IngestBatch` rows), the second was written and read by
+/// nothing (recovery reconstructs the buffer by the has-a-row predicate and rotation computes its
+/// own reclaim bound), and deleting them shifts every later discriminant, which is exactly what
+/// this version check exists to refuse.
+const WAL_VERSION: u16 = 4;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -738,8 +727,7 @@ impl Wal {
     /// **Recovery walks every surviving file in sequence order.** It does not start *at* the
     /// newest overlay snapshot and resume: an older member can still carry `Change` records above
     /// the point that snapshot was taken at, and skipping them looks like an optimisation and is a
-    /// silent un-deny. `Flush{n, wal_pos}` is likewise a replay-start optimisation and the
-    /// authority for reclamation — never a correctness device (§7.1).
+    /// silent un-deny.
     ///
     /// Every lifecycle §4 rule applies **per member, unchanged**: its own fsync-offset sidecar
     /// (decision 0038), the positional CRC rule, the three sidecar guards, and truncate-and-fsync

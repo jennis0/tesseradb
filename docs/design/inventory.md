@@ -65,12 +65,12 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r30 | 13 |
+| `architecture.md` | Normative — r31 | 13 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
-| `concurrency-lifecycle.md` | Normative — r5 | 22 |
+| `concurrency-lifecycle.md` | Normative — r6 | 16 |
 | `conformance.md` | Normative — r6 | 12 |
-| `contracts.md` | Normative — r14 | 14 |
+| `contracts.md` | Normative — r17 | 15 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
@@ -80,5 +80,6 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `measurement.md` | Provisional — under review | 4 |
 | `per-point-attributes.md` | Provisional — under review | 6 |
 | `slices-and-multi-table.md` | Provisional — under review | 7 |
-| `system-architecture.md` | Normative — r10 | 27 |
+| `system-architecture.md` | Normative — r11 | 27 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
+| `write-path.md` | Provisional — under review | 28 |

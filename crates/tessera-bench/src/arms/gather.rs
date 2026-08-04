@@ -96,18 +96,17 @@ impl Pattern {
 pub enum Columns {
     /// `morton`, `residual` — 8 B/row: the whole position, both halves.
     Pos,
-    /// `morton`, `residual`, `tessera_id` — 16 B/row. What the real viewport path reads.
+    /// `morton`, `residual`, `tessera_id` — 16 B/row. What the real viewport path reads, and the
+    /// widest set a segment carries: the `priority` column is cut (decision 0046), so the r21
+    /// 18 B/row figure is historical and `full` is an alias of this set.
     PosId,
-    /// Adds `priority` — 18 B/row, the r21 residency figure.
-    PosIdPriority,
 }
 
 impl Columns {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pos" => Some(Columns::Pos),
-            "pos+id" => Some(Columns::PosId),
-            "pos+id+priority" | "full" => Some(Columns::PosIdPriority),
+            "pos+id" | "full" => Some(Columns::PosId),
             _ => None,
         }
     }
@@ -115,7 +114,6 @@ impl Columns {
         match self {
             Columns::Pos => "pos",
             Columns::PosId => "pos+id",
-            Columns::PosIdPriority => "pos+id+priority",
         }
     }
     /// Total bytes per row across the columns read — the denominator for bandwidth, and the
@@ -124,7 +122,6 @@ impl Columns {
         match self {
             Columns::Pos => &[4, 4],
             Columns::PosId => &[4, 4, 8],
-            Columns::PosIdPriority => &[4, 4, 8, 2],
         }
     }
 }
@@ -195,16 +192,6 @@ fn gather(segment: &SegmentData, rows: &[u32], which: Columns) -> u64 {
                 acc = acc
                     .wrapping_add(((cells[i] as u64) << 32) | residuals[i] as u64)
                     .wrapping_add(ids[i]);
-            }
-        }
-        Columns::PosIdPriority => {
-            let ps = columns.priority();
-            for &r in rows {
-                let i = r as usize;
-                acc = acc
-                    .wrapping_add(((cells[i] as u64) << 32) | residuals[i] as u64)
-                    .wrapping_add(ids[i])
-                    .wrapping_add(ps[i] as u64);
             }
         }
     }

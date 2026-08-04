@@ -408,7 +408,7 @@ pub fn replay<'a, E>(
             }
             // Neither carries overlay or buffer information: `Lease` is I9 allocator bookkeeping
             // and `Flush` is a reclamation authority read by the WAL sequence, not by this walk.
-            WalRecord::Lease { .. } | WalRecord::Flush { .. } => {}
+
         }
     }
 

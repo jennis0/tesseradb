@@ -179,7 +179,6 @@ pub fn run(
                         max_tiles_per_request: 262_144,
                         compute_threads: tessera_engine::default_compute_threads(),
                         flush_max_age_secs: 90,
-                        flush_max_items: 100_000,
                     },
                 )?;
                 let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;

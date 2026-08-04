@@ -665,7 +665,6 @@ fn concurrent_ingest_and_change_both_survive() {
             max_tiles_per_request: 262_144,
             compute_threads: tessera_engine::default_compute_threads(),
             flush_max_age_secs: 90,
-            flush_max_items: 100_000,
         },
     )
     .expect("engine should open");
@@ -1665,7 +1664,7 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
             { "external_id": b64(5),  "op": "suppress" },
-            { "external_id": b64(9),  "op": "predicate", "access": "0" },
+            { "external_id": b64(9),  "op": "unsuppress" },
             { "external_id": b64(11), "op": "suppress" },
         ]))
         .send()
@@ -1685,16 +1684,18 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
         "'refused' is false of the apply-anyway case and invites a retry of a suppression that has \
          already taken hold; got: {detail}"
     );
-    // **Fix round 1: the middle item is a `predicate`, and it was NOT applied.** Lifecycle §4's
+    // **The middle item is an `unsuppress`, and it was NOT applied.** Lifecycle §4's
     // apply-anyway rule covers `Delete`/`Suppress` only, and `Executor::commit_denies`'s failure
-    // fold honours that — a
-    // `Predicate` whose append fails is refused without touching the overlay. The op-blind fold
-    // counted it as possibly-in-force along with the two suppressions, so `some_not_applied` was
-    // false and this body never told the operator that a third of their batch had not taken hold.
-    // Constructible with the shape this test already had, which is why the assertion lands here.
+    // fold honours that — an `Unsuppress` whose append fails is refused without touching the
+    // overlay (applying it without durability would re-expose a suppressed item behind a body
+    // that says nothing was applied). The op-blind fold counted it as possibly-in-force along
+    // with the two suppressions, so `some_not_applied` was false and this body never told the
+    // operator that a third of their batch had not taken hold. (This slot exercised `predicate`
+    // until decision 0047 withdrew the op; `unsuppress` is the other member of the same
+    // applies-nothing fold half, so the discrimination is unchanged.)
     assert!(
         detail.contains("NOT applied"),
-        "item 2 is a `predicate`: refused without applying, so the operator must be told to \
+        "item 2 is an `unsuppress`: refused without applying, so the operator must be told to \
          re-submit rather than assume the whole batch took hold; got: {detail}"
     );
 
@@ -1940,8 +1941,8 @@ fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
 ///
 /// `ingest_queue_bound` bounds the *command queue* — 32 jobs by default — and the executor drains
 /// a job into the buffer in milliseconds, so no ingest rate produces a 429 by buffer size through
-/// it. Between ticks the buffer is what grows, and deferring `flush_max_items` to the tick needs a
-/// bound on the thing that grows. This is that bound, and the two are distinct knobs because they
+/// it. Between ticks the buffer is what grows, and a tick-only publication cadence needs a bound
+/// on the thing that grows. This is that bound, and the two are distinct knobs because they
 /// bound distinct resources.
 ///
 /// The refusal costs no entity id, no queue slot and no WAL append: it fires before submission,
@@ -3465,16 +3466,18 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
 // The fragmentation figure on /control/status, and admin-plane hygiene
 // =================================================================================================
 
-/// Contracts §3.4's `fragmentation` block: absent-not-zero before the first window closes, present
-/// after it.
+/// Contracts §3.4's `fragmentation` block: tier-scope headline ratios, absent-not-zero before the
+/// first flush publishes, with the window-scope raw counters under `allocation`.
 ///
-/// The arithmetic lives where it is computed (`tessera-lifecycle`'s `window_props.rs`) and the
-/// executor wiring in `tessera-engine`'s `tests/write.rs`. What this asserts is the **endpoint**:
-/// that the two contract fields exist under the specified names, that they are `null` rather than
-/// `0` when nothing has been measured, and that the body says what scope it is reporting — because
-/// a JSON consumer reads the body and never the specification's ⊘ marker.
+/// The arithmetic lives where it is computed (`FragmentationTally`) and the executor wiring in
+/// `tessera-engine`'s `tests/write.rs`. What this asserts is the **endpoint**: that the two
+/// contract fields exist under the specified names at the scope the body declares, that they are
+/// `null` rather than `0` when nothing has been measured — a flushless process has encoded no
+/// tier, however many windows have closed — and that the allocation counters move with ingest
+/// while the headline moves only with a published flush. A JSON consumer reads the body and never
+/// the specification's markers, so the scope declarations are contract-adjacent, not decoration.
 #[tokio::test]
-async fn control_status_publishes_the_fragmentation_figure_once_a_window_has_closed() {
+async fn control_status_publishes_tier_scope_fragmentation_once_a_flush_publishes() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -3492,16 +3495,18 @@ async fn control_status_publishes_the_fragmentation_figure_once_a_window_has_clo
     let before = control_status(&server).await;
     let frag = &before["fragmentation"];
     assert_eq!(
-        frag["scope"], "commit-window-allocation",
-        "the body must say which scope it reports — §3.4 defines these over base plus deltas, and \
-         this is the ingest stream's allocation"
+        frag["scope"], "delta-tiers",
+        "the body must say which scope it reports — the headline is tiers as encoded, where \
+         between-window scatter is visible"
     );
+    assert_eq!(frag["allocation"]["scope"], "commit-window-allocation");
     assert!(
         frag["run_ratio"].is_null() && frag["postings_per_container"].is_null(),
-        "both must be null, not 0, before any window has closed: 0 is not a reachable value of \
+        "both must be null, not 0, before any flush has published: 0 is not a reachable value of \
          either quantity, so publishing one would read as a measurement. Got {frag}"
     );
-    assert_eq!(frag["windows"], 0);
+    assert_eq!(frag["tiers"], 0);
+    assert_eq!(frag["allocation"]["windows"], 0);
 
     let body = build_ingest_batch(&[
         (N_ITEMS + 1, 10.0, 10.0, "0"),
@@ -3520,13 +3525,46 @@ async fn control_status_publishes_the_fragmentation_figure_once_a_window_has_clo
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    let after = control_status(&server).await;
-    let frag = &after["fragmentation"];
-    assert_eq!(frag["windows"], 1, "one submission closed one window");
-    assert_eq!(frag["rows"], 3);
+    let after_ingest = control_status(&server).await;
+    let frag = &after_ingest["fragmentation"];
+    assert_eq!(
+        frag["allocation"]["windows"], 1,
+        "one submission closed one window"
+    );
+    assert_eq!(frag["allocation"]["rows"], 3);
+    assert!(
+        frag["run_ratio"].is_null() && frag["tiers"] == 0,
+        "an ingest alone publishes no tier, so the headline must still be an absence. Got {frag}"
+    );
+
+    // `POST /control/flush` pulls the tick forward, so the tier figure is testable without
+    // waiting out a flush period.
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let frag = loop {
+        let now = control_status(&server).await;
+        if now["fragmentation"]["tiers"].as_u64().unwrap() > 0 {
+            break now["fragmentation"].clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the requested flush to publish a tier; last: {}",
+            now["fragmentation"]
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(frag["rows"], 3, "the tier covers the flushed rows");
     assert!(
         frag["run_ratio"].as_f64().is_some() && frag["postings_per_container"].as_f64().is_some(),
-        "both contract fields must carry a number once a window has closed. Got {frag}"
+        "both contract fields must carry a number once a tier is encoded. Got {frag}"
     );
     assert!(
         frag["postings"].as_u64().unwrap() > 0 && frag["runs"].as_u64().unwrap() > 0,
@@ -3769,4 +3807,123 @@ async fn over_bound_ids_are_base64_not_lossy_utf8() {
         external_id,
         "and it must decode to exactly those bytes — 0xFF has no lossy encoding that survives"
     );
+}
+
+/// **The predicate op is withdrawn** (decision 0047): edit is delete + re-ingest. A request
+/// naming it is a 422 whose detail says what to do instead — wholesale, nothing enqueued.
+#[tokio::test]
+async fn the_predicate_op_is_withdrawn_with_a_422_naming_the_flow() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([
+            { "external_id": b64(3), "op": "predicate", "access": "0" },
+        ]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract");
+    let detail = body["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("delete + re-ingest") && detail.contains("0047"),
+        "the refusal must say what replaced the op; got: {detail}"
+    );
+}
+
+/// **A deleted holder does not block re-ingest; a suppressed one does** (decision 0047, at the
+/// handler's own duplicate check). Deletion forgets the binding — our retention of it must never
+/// refuse a user's write — while suppression is temporary hiding, and re-ingesting a
+/// byte-identical copy past one is the copy-no-deny-can-reach hole the check exists to close.
+#[tokio::test]
+async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
+    let ingest = |batch: &'static str, ids: Vec<u64>| {
+        let client = server.client.clone();
+        let url = server.control_url("/control/ingest");
+        let body = build_ingest_batch(
+            &ids
+                .into_iter()
+                .map(|id| (id, 10.0, 10.0, "0"))
+                .collect::<Vec<_>>(),
+        );
+        async move {
+            client
+                .post(url)
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .header("x-tessera-batch-id", batch)
+                .header("content-type", "application/octet-stream")
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let change = |op: &'static str, id: u64| {
+        let client = server.client.clone();
+        let url = server.control_url("/control/changes");
+        let ext = b64(id);
+        async move {
+            client
+                .post(url)
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .json(&serde_json::json!([{ "external_id": ext, "op": op }]))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    let fresh = N_ITEMS + 100;
+    assert_eq!(ingest("rebind-1", vec![fresh]).await.status(), 200);
+
+    // Suppressed: still a duplicate — 409, batch has no effect.
+    assert_eq!(change("suppress", fresh).await.status(), 200);
+    let resp = ingest("rebind-2", vec![fresh]).await;
+    assert_eq!(
+        resp.status(),
+        409,
+        "a suppressed holder still collides: suppression is temporary hiding, not deletion"
+    );
+
+    // Deleted: forgotten — the same bytes under the same external id are accepted.
+    assert_eq!(change("delete", fresh).await.status(), 200);
+    assert_eq!(
+        ingest("rebind-3", vec![fresh]).await.status(),
+        200,
+        "a deleted holder must not block a user's write (decision 0047)"
+    );
+
+    // And the re-bound id is operable: a suppress addresses the new life, answered 200.
+    assert_eq!(change("suppress", fresh).await.status(), 200);
 }

@@ -24,15 +24,13 @@
 //! `"60s"` sketch, taken deliberately so a value's unit survives being read out of a log line or
 //! a status payload without its key.
 //!
-//! **One key is inert.** ⊘ Specified, not implemented: `commit_window_max_age_ms`, because an age
-//! bound has no subject in an executor whose commit window never waits (see
-//! [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`]). [`tests::the_commit_window_age_bound_is_inert`] asserts
-//! that mechanically, so an operator cannot set it and believe it works without this file's doc
-//! having been changed first.
-//!
-//! `flush_max_items` and `flush_max_age_secs` were inert too, and are not: the flush tick reads
-//! both, and the assertion that used to pin their inertness was deleted in the commit that gave
-//! them a consumer — which is what it asked for.
+//! **No key is inert, by rule** (decision 0045): a key exists only while something reads it.
+//! Two were deleted under that rule — `ingest.flush_max_items` (its "flush-ready" mark had no
+//! consumer: the tick never skips a non-empty buffer, and the buffer's real bound is
+//! `ingest_buffer_max_items`) and `ingest.commit_window_max_age_ms` (an age bound has no subject
+//! in an executor whose window never lingers — decision 0034, whose keep-parsed clause 0045
+//! supersedes). A `tessera.toml` naming either is refused with an error naming it, which is
+//! louder than the silent no-op the key used to buy.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -475,8 +473,6 @@ struct RawIngest {
     #[serde(default)]
     commit_window_max_items: Option<usize>,
     #[serde(default)]
-    commit_window_max_age_ms: Option<u64>,
-    #[serde(default)]
     ingest_queue_bound: Option<usize>,
     #[serde(default)]
     ingest_admission: Option<usize>,
@@ -488,8 +484,6 @@ struct RawIngest {
     wal_hard_limit_bytes: Option<u64>,
     #[serde(default)]
     overlay_soft_limit: Option<usize>,
-    #[serde(default)]
-    flush_max_items: Option<usize>,
     #[serde(default)]
     flush_max_age_secs: Option<u64>,
     #[serde(default)]
@@ -642,10 +636,6 @@ pub struct Config {
     /// whole, so a window closes at or just past this).
     /// See [`DEFAULT_COMMIT_WINDOW_MAX_ITEMS`]. `1` is the honest way to disable group commit.
     pub commit_window_max_items: usize,
-    /// **INERT** — parsed, validated, stored, and read by nothing, because a commit window never
-    /// waits and so has no age to bound; see [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`] for the argument
-    /// and [`tests::the_commit_window_age_bound_is_inert`] for the mechanical assertion.
-    pub commit_window_max_age_ms: u64,
     /// The bounded work queue's depth; full is a 429 with `retry_after_s`.
     /// See [`DEFAULT_INGEST_QUEUE_BOUND`]. The deny queue is unbounded and this never bounds it.
     pub ingest_queue_bound: usize,
@@ -669,9 +659,6 @@ pub struct Config {
     /// **Alarms only** — ⊘ no compaction fold exists, so crossing it gets an operator a signal,
     /// never relief.
     pub overlay_soft_limit: usize,
-    /// Buffer occupancy at which a flush becomes **ready** — not at which it publishes. See
-    /// [`DEFAULT_FLUSH_MAX_ITEMS`] and [`Config::flush_max_age_secs`].
-    pub flush_max_items: usize,
     /// The flush tick: the period at which geometry is published, and therefore the bound on how
     /// stale an acknowledged item's absence may be. See [`DEFAULT_FLUSH_MAX_AGE_SECS`].
     pub flush_max_age_secs: u64,
@@ -905,36 +892,11 @@ const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;
 /// still runs.
 const DEFAULT_COMMIT_WINDOW_MAX_ITEMS: usize = 10_000;
 
-/// **INERT.** The age at which a commit window would close, if a commit window ever waited. It does
-/// not, so **nothing reads this value and an operator who sets it changes nothing at all**
-/// (`tests::the_commit_window_age_bound_is_inert` fails the moment anything outside this module
-/// uses the key).
-///
-/// **Three plausible claims about it are all false of the code**, and are worth naming because each
-/// would be a reason to wire the key up: denies do *not* share the window (it is ingest-only, and
-/// denies ride the never-shed lane); the worst-case deny starvation is *not* `2 ×` this value (that
-/// arithmetic needs both an age bound and a deny in the window, and has neither); and "both queues
-/// empty" is *not* the close trigger (the trigger is the **work** queue observed empty —
-/// `run_work_pass` never looks at the deny lane).
-///
-/// **What an age bound would buy: nothing.** It is the safety cap on a *linger* — "having drained
-/// the queue empty, wait for company" — and the executor has no linger. A `CommitWindow` is a local
-/// of `Executor::run_work_pass` that every exit disposes of; no window survives the executor's one
-/// blocking point. So the interval a timer would end does not exist, and the only place such a
-/// check could fire is inside the drain, where it is a less predictable spelling of
-/// [`DEFAULT_COMMIT_WINDOW_MAX_ITEMS`] — that loop does hashing, not IO, and the rows it can gather
-/// are bounded by the row bound (worst case `commit_window_max_items - 1 + ingest_max_batch_rows`,
-/// ≈ 20 000) rather than by a clock. The full argument, including why the interval where the queue
-/// momentarily empties while more work is imminent is real but is a window closing *too early* —
-/// the wrong sign for an age bound — is at `Executor::run_work_pass`.
-///
-/// **The key is kept rather than deleted** because every raw config section is
-/// `deny_unknown_fields`: removing it would turn any existing `tessera.toml` that sets
-/// `ingest.commit_window_max_age_ms` into a start-up refusal. That is the same trade the two
-/// `flush_*` knobs make — an inert key that says so beats a compatibility break. Anything that
-/// builds a linger and gives this key a consumer must delete this paragraph, the `Config` field's
-/// INERT note and `the_commit_window_age_bound_is_inert` in the same commit.
-const DEFAULT_COMMIT_WINDOW_MAX_AGE_MS: u64 = 200;
+// `commit_window_max_age_ms` is deleted, not inert (decision 0045). There is no linger for an
+// age bound to cap — a window closes on its row bound or on the work queue observed empty, and
+// none survives the executor's blocking point — so the key had no possible consumer. The full
+// no-linger argument lives at `Executor::run_work_pass` and decision 0034; anything that builds
+// a linger re-adds the key *with* its consumer, in one commit.
 
 /// The bounded work queue's depth. Full is a 429 with `retry_after_s`; the deny queue is
 /// separate and unbounded, and this never bounds it (lifecycle §1.3's deny priority lane).
@@ -1217,18 +1179,13 @@ const DEFAULT_WAL_HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// operator who sets this gets a signal that the overlay is deep, not a mechanism that makes it
 /// shallower. The
 /// depth matters beyond memory: every deny acceptance clones the overlay inside the WAL critical
-/// section, so overlay depth is a term in the deny-ack latency that
-/// [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`] budgets against.
+/// section, so overlay depth is a term in deny-ack latency.
 const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 
-/// **INERT.** The flush trigger by buffered-item count. **SA §7's own default**, carried across
-/// unchanged.
-///
-/// **It marks the buffer flush-*ready*; it does not publish** (§1.3). Publication waits for the
-/// tick, because a flush that published on trip would make the real publication period a function
-/// of ingest rate rather than of `flush_max_age_secs` — and the row-projection cache key rotates
-/// on every publication, so that is the rate at which every session pays a projection patch.
-const DEFAULT_FLUSH_MAX_ITEMS: usize = 100_000;
+// `flush_max_items` is deleted, not inert (decision 0045). "Marks the buffer flush-ready" had no
+// consumer: the tick never skips a non-empty buffer and a flush consumes everything buffered for
+// its slice, so the key could not have an effect. The buffer's real bound is
+// `ingest_buffer_max_items`; the tick's is `flush_max_age_secs`.
 
 /// **The flush tick**, and therefore the bound on how stale an acknowledged item's absence may be:
 /// a buffered item contributes to no viewport, count or density until a flush gives it a row. A
@@ -1252,13 +1209,11 @@ const DEFAULT_FLUSH_MAX_AGE_SECS: u64 = 90;
 /// **`ingest_queue_bound` does not bound this.** That one bounds the *command queue* — 32 jobs by
 /// default — and the executor drains a job into the buffer in milliseconds, so nothing in the
 /// system compared buffer occupancy to anything and no ingest rate produced a 429 by buffer size.
-/// Deferring `flush_max_items` to the tick needs such a bound to exist, because between ticks the
-/// buffer is what grows.
+/// Between ticks the buffer is what grows, and this is the bound on it.
 ///
-/// Sized an order above `flush_max_items` (100 000): a flush-ready buffer must not be a refusing
-/// one, or a deployment that trips the item bound between ticks sheds ingest it was about to
-/// publish. What this bounds is the pathological case — repeated flush failure — where the buffer
-/// grows without a flush to drain it, and 429 is the intended backpressure (§10).
+/// Sized well above anything a healthy tick leaves behind: what this bounds is the pathological
+/// case — repeated flush failure — where the buffer grows without a flush to drain it, and 429
+/// is the intended backpressure (§10).
 const DEFAULT_INGEST_BUFFER_MAX_ITEMS: usize = 1_000_000;
 
 /// Below this, segments compare equal for merge selection (§5.1), so a tail of tiny segments does
@@ -1536,7 +1491,7 @@ fn parse(text: &str) -> Result<Config> {
 
     // The write-path knobs. All of them default (SA §7: performance knobs default, disclosure
     // controls do not — none of these is a disclosure control); all of them refuse a zero, each with
-    // its own silent failure named. Two of them (`flush_*`) are read by nothing.
+    // its own silent failure named. Every one of them has a consumer (decision 0045).
     let commit_window_max_items = non_zero_usize(
         "ingest.commit_window_max_items",
         raw.ingest
@@ -1544,19 +1499,6 @@ fn parse(text: &str) -> Result<Config> {
             .unwrap_or(DEFAULT_COMMIT_WINDOW_MAX_ITEMS),
         "a window that closes at zero rows is not group commit switched off, it is group \
          commit silently doing nothing — set it to 1 to disable batching honestly",
-    )?;
-    let commit_window_max_age_ms = non_zero_u64(
-        "ingest.commit_window_max_age_ms",
-        raw.ingest
-            .commit_window_max_age_ms
-            .unwrap_or(DEFAULT_COMMIT_WINDOW_MAX_AGE_MS),
-        // The key is INERT — no window is ever aged out — so this refusal guards a future consumer
-        // rather than a live mechanism, and says so rather than describing a behaviour the build
-        // does not have.
-        "this key is inert (nothing reads it; see DEFAULT_COMMIT_WINDOW_MAX_AGE_MS), and zero is \
-         still refused so that no configuration reaches a future consumer already meaning \
-         \"close before anything can join\" — set ingest.commit_window_max_items = 1 to disable \
-         batching honestly",
     )?;
     let ingest_queue_bound = non_zero_usize(
         "ingest.ingest_queue_bound",
@@ -1614,14 +1556,6 @@ fn parse(text: &str) -> Result<Config> {
             .unwrap_or(DEFAULT_OVERLAY_SOFT_LIMIT),
         "the alarm would fire on the very first deny and never stop; a permanently-firing alarm \
          is indistinguishable from no alarm at all",
-    )?;
-    let flush_max_items = non_zero_usize(
-        "ingest.flush_max_items",
-        raw.ingest
-            .flush_max_items
-            .unwrap_or(DEFAULT_FLUSH_MAX_ITEMS),
-        "a zero item trigger asks flush to run before there is anything to flush (INERT — nothing \
-         reads this key; validated so that whatever builds flush inherits the guard)",
     )?;
     let flush_max_age_secs = non_zero_u64(
         "ingest.flush_max_age_secs",
@@ -1790,14 +1724,12 @@ fn parse(text: &str) -> Result<Config> {
         compute_queue,
         admission_timeout_ms,
         commit_window_max_items,
-        commit_window_max_age_ms,
         ingest_queue_bound,
         ingest_admission,
         ingest_max_batch_rows,
         ingest_max_batch_bytes,
         wal_hard_limit_bytes,
         overlay_soft_limit,
-        flush_max_items,
         flush_max_age_secs,
         row_projection_cache_bytes,
         fragment_cache_bytes,
@@ -1920,7 +1852,6 @@ mod tests {
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
         let config = parse(&valid_toml("")).expect("defaults must load");
         assert_eq!(config.flush_max_age_secs, DEFAULT_FLUSH_MAX_AGE_SECS);
-        assert_eq!(config.flush_max_items, DEFAULT_FLUSH_MAX_ITEMS);
         assert_eq!(
             config.ingest_buffer_max_items,
             DEFAULT_INGEST_BUFFER_MAX_ITEMS
@@ -2172,10 +2103,6 @@ mod tests {
             config.commit_window_max_items,
             DEFAULT_COMMIT_WINDOW_MAX_ITEMS
         );
-        assert_eq!(
-            config.commit_window_max_age_ms,
-            DEFAULT_COMMIT_WINDOW_MAX_AGE_MS
-        );
         assert_eq!(config.ingest_queue_bound, DEFAULT_INGEST_QUEUE_BOUND);
         assert_eq!(config.ingest_admission, DEFAULT_INGEST_ADMISSION);
         assert_eq!(config.ingest_max_batch_rows, DEFAULT_INGEST_MAX_BATCH_ROWS);
@@ -2185,7 +2112,6 @@ mod tests {
         );
         assert_eq!(config.wal_hard_limit_bytes, DEFAULT_WAL_HARD_LIMIT_BYTES);
         assert_eq!(config.overlay_soft_limit, DEFAULT_OVERLAY_SOFT_LIMIT);
-        assert_eq!(config.flush_max_items, DEFAULT_FLUSH_MAX_ITEMS);
         assert_eq!(config.flush_max_age_secs, DEFAULT_FLUSH_MAX_AGE_SECS);
         assert_eq!(
             config.row_projection_cache_bytes,
@@ -2234,14 +2160,12 @@ mod tests {
 
         let ingest_keys = [
             "commit_window_max_items",
-            "commit_window_max_age_ms",
             "ingest_queue_bound",
             "ingest_admission",
             "ingest_max_batch_rows",
             "ingest_max_batch_bytes",
             "wal_hard_limit_bytes",
             "overlay_soft_limit",
-            "flush_max_items",
             "flush_max_age_secs",
         ];
         let serve_keys = [
@@ -2251,8 +2175,8 @@ mod tests {
         ];
         assert_eq!(
             ingest_keys.len() + serve_keys.len(),
-            13,
-            "there are thirteen write-path and admission knobs; this table must cover all of them"
+            11,
+            "there are eleven write-path and admission knobs; this table must cover all of them"
         );
 
         for key in ingest_keys {
@@ -2296,132 +2220,6 @@ mod tests {
                 "an unrecognised key or section must be refused, got {err}"
             );
         }
-    }
-
-    /// Every `.rs` file under `crates/` — other than this module, the one legitimate mention —
-    /// that **uses** any of `keys` after comments are stripped.
-    ///
-    /// **Comments are stripped before the scan**, and that is not an incidental detail: a scan over
-    /// raw text matches prose too, which forces every doc comment in the tree that explains why a
-    /// key does nothing to avoid naming it — a test making documentation worse to keep itself green.
-    /// A mention is not a consumer; only a *use* is, and after comment-stripping any surviving
-    /// occurrence is one.
-    ///
-    /// Shared by the two inertness tests rather than inlined into either, so each can carry its own
-    /// failure message: they are instructions to different readers.
-    fn files_using(keys: &[&str]) -> Vec<String> {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("crates/<crate> always has two ancestors")
-            .to_path_buf();
-        let crates = workspace.join("crates");
-        assert!(
-            crates.is_dir(),
-            "cannot scan for consumers: {} is not a directory",
-            crates.display()
-        );
-        let this_file = workspace.join("crates/tessera-server/src/config.rs");
-        assert!(this_file.is_file(), "{} moved", this_file.display());
-
-        let mut offenders: Vec<String> = Vec::new();
-        let mut stack = vec![crates];
-        while let Some(dir) = stack.pop() {
-            for entry in fs::read_dir(&dir).expect("readable crates tree") {
-                let path = entry.expect("readable dir entry").path();
-                if path.is_dir() {
-                    // `target/` can appear inside a crate dir; nothing generated is a consumer.
-                    if path.file_name().is_some_and(|n| n == "target") {
-                        continue;
-                    }
-                    stack.push(path);
-                } else if path.extension().is_some_and(|e| e == "rs") && path != this_file {
-                    let text = fs::read_to_string(&path).expect("readable source file");
-                    let code = strip_comments(&text);
-                    if keys.iter().any(|k| code.contains(k)) {
-                        offenders.push(path.display().to_string());
-                    }
-                }
-            }
-        }
-        offenders
-    }
-
-    /// **The second inertness assertion.** `commit_window_max_age_ms` is parsed, validated and
-    /// stored, and *nothing reads it*: the consumer it would have — a third window-close trigger —
-    /// has no subject, because a `CommitWindow` is a local of `Executor::run_work_pass` that every
-    /// exit disposes of, so no window ever waits and there is no interval for an age bound to end.
-    /// The full argument is at [`DEFAULT_COMMIT_WINDOW_MAX_AGE_MS`] and at
-    /// `Executor::run_work_pass`.
-    ///
-    /// It is a **separate test** from [`the_flush_knobs_are_inert`] rather than a third key added to
-    /// it, because that test's failure message is a specific instruction to whoever wires flush and
-    /// this key's is a different instruction to a different reader. They share only the scan.
-    ///
-    /// **This test is what makes "there is no timer" honest**, rather than a decoration: the claim
-    /// only holds if an operator cannot set the key and believe one exists. Comments are stripped
-    /// before the scan, so the prose above — and every doc block in the tree that names this key to
-    /// explain why it does nothing — is deliberately fine.
-    #[test]
-    fn the_commit_window_age_bound_is_inert() {
-        let offenders = files_using(&["commit_window_max_age_ms"]);
-        assert!(
-            offenders.is_empty(),
-            "commit_window_max_age_ms is documented as INERT (the commit window never waits, so \
-             an age bound has no subject), but is USED (outside a comment) in: \
-             {offenders:?}. Naming the key in prose is fine — comments are stripped before this \
-             scan. If something now consumes it, that something is a *linger* and it needs the \
-             argument at DEFAULT_COMMIT_WINDOW_MAX_AGE_MS answered first; then delete this test AND \
-             the INERT paragraphs on that constant, on the Config field and in this module's own \
-             doc, in the same commit"
-        );
-    }
-
-    /// Line and block comments removed; string literals are left alone.
-    ///
-    /// Deliberately crude — it is scanning for a handful of identifiers, not parsing Rust. The one
-    /// way it can be wrong is a `//` inside a string literal on a line that also *uses* one of the
-    /// keys, which would hide a real consumer; there is no such line, and the failure direction
-    /// would be a missed offender in a test whose job is to notice a whole new consumer appearing.
-    fn strip_comments(text: &str) -> String {
-        let mut out = String::with_capacity(text.len());
-        let mut in_block = false;
-        for line in text.lines() {
-            let mut rest = line;
-            loop {
-                if in_block {
-                    match rest.find("*/") {
-                        Some(end) => {
-                            in_block = false;
-                            rest = &rest[end + 2..];
-                        }
-                        None => {
-                            rest = "";
-                            break;
-                        }
-                    }
-                } else {
-                    let line_at = rest.find("//");
-                    let block_at = rest.find("/*");
-                    match (line_at, block_at) {
-                        (Some(l), b) if b.is_none_or(|b| l < b) => {
-                            out.push_str(&rest[..l]);
-                            rest = "";
-                            break;
-                        }
-                        (_, Some(b)) => {
-                            out.push_str(&rest[..b]);
-                            in_block = true;
-                            rest = &rest[b + 2..];
-                        }
-                        _ => break,
-                    }
-                }
-            }
-            out.push_str(rest);
-            out.push('\n');
-        }
-        out
     }
 
     /// The defaults are a *consistent set*, not fifteen independent numbers. `parse` refuses to

@@ -99,10 +99,10 @@ impl Allocator {
 }
 
 /// Computes the entity-ID high-water mark implied by a set of replayed WAL records: the maximum
-/// of every `Lease.hi` and every `WalRow.entity_id.raw() + 1`.
+/// `WalRow.entity_id.raw() + 1` (with overlay-snapshot entries as a weak floor).
 ///
-/// This is the "replayed rows/leases" half of `Allocator::new`'s `max(manifest_hw, replayed
-/// rows/leases)` seeding contract — callers should rebuild with
+/// This is the "replayed rows" half of `Allocator::new`'s `max(manifest_hw, replayed rows)`
+/// seeding contract — callers should rebuild with
 /// `Allocator::new(manifest_hw.max(high_water_from(&replayed)))` rather than carrying a
 /// pre-crash `Allocator::high_water()` value across a restart, since the allocator itself does
 /// not persist: only what actually made it into the WAL (or the bundle manifest) did.
@@ -110,11 +110,6 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
     let mut hw = 0u64;
     for rec in records {
         match rec {
-            WalRecord::Lease { hi, .. } => {
-                if *hi > hw {
-                    hw = *hi;
-                }
-            }
             WalRecord::IngestBatch { rows, .. } => {
                 for row in rows {
                     let candidate = row.entity_id.raw() + 1;
@@ -125,10 +120,10 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
             }
             // An overlay snapshot names entities that were certainly allocated, so it raises the
             // floor — but only for entities something has *denied*, which is a weak bound and not
-            // the mechanism. Rotation deletes the `Lease` and `IngestBatch` records this function
-            // really derives from; what replaces them is the side-manifest's own high-water mark
-            // (⊘ not built — Task 15), never the build `MANIFEST.json`, which would reallocate
-            // every flushed entity id and violate I9.
+            // the mechanism. Rotation deletes the `IngestBatch` records this function really
+            // derives from; what replaces them is the side-manifest's own `entity_id_high_water`,
+            // refreshed at every flush publication — never the build `MANIFEST.json`, which would
+            // reallocate every flushed entity id and violate I9.
             WalRecord::OverlaySnapshot { entries } => {
                 for entry in entries {
                     let candidate = entry.entity_id.raw() + 1;
@@ -137,11 +132,7 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
                     }
                 }
             }
-            // A `Flush` record's `wal_pos` is a byte position, never an entity id, and the rows
-            // it accounts for were seeded from `IngestBatch` records anyway.
-            WalRecord::Change { .. }
-            | WalRecord::ChangeByEntity { .. }
-            | WalRecord::Flush { .. } => {}
+            WalRecord::Change { .. } | WalRecord::ChangeByEntity { .. } => {}
         }
     }
     hw
@@ -266,19 +257,12 @@ mod tests {
     }
 
     #[test]
-    fn high_water_from_takes_the_max_of_rows_and_leases() {
+    fn high_water_from_takes_the_max_over_rows() {
         assert_eq!(high_water_from(&[]), 0);
         // A row with entity_id 5 means IDs 0..=5 are taken, so the next free ID is 6.
         assert_eq!(high_water_from(&[row(5)]), 6);
-        assert_eq!(
-            high_water_from(&[row(5), WalRecord::Lease { lo: 6, hi: 20 }]),
-            20
-        );
-        // A lease lower than an already-seen row must not pull the high-water mark backwards.
-        assert_eq!(
-            high_water_from(&[WalRecord::Lease { lo: 6, hi: 20 }, row(3)]),
-            20
-        );
+        // A later, lower row must not pull the high-water mark backwards.
+        assert_eq!(high_water_from(&[row(5), row(3)]), 6);
         // Change records carry no entity-ID information.
         assert_eq!(
             high_water_from(&[WalRecord::Change {

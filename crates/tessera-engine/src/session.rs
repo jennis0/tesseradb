@@ -110,9 +110,6 @@ pub struct EngineConfig {
     /// costs every session that rebuild at every tick. That is a real floor and a different one;
     /// see `crate::cache`.
     pub flush_max_age_secs: u64,
-    /// Buffer occupancy at which a flush becomes **ready** — publication still waits for the tick
-    /// (§1.3).
-    pub flush_max_items: usize,
 }
 
 /// D-D's default: fill the machine. Identical reasoning and identical fallback (`1`, never
@@ -1466,22 +1463,27 @@ impl Engine {
     ///
     /// **Lags by at most one apply, deliberately.** An exact figure would need the caller to load
     /// the generation, and the bound this feeds is a ceiling with an order of magnitude of
-    /// headroom over `flush_max_items`, not a precise quota.
+    /// headroom, not a precise quota.
     pub fn buffered_items(&self) -> usize {
         self.write.health().buffered_items.load(Ordering::SeqCst)
     }
 
-    /// Request a flush. **Accepted at any time, executed at the next tick** (contracts §3.4) —
-    /// its 202 already means "accepted, not yet done".
+    /// Request a flush. **Accepted at any time, executed promptly** (contracts §3.4): the flag
+    /// pulls the tick's deadline forward and the doorbell wakes an idle executor, so the flush
+    /// runs at the next loop iteration — through the one tick path, with everything a tick
+    /// guarantees. The 202 still means "accepted, not yet done": the segment write is pool work
+    /// of real duration, and the response never waits on it.
     ///
-    /// Publishing on request would move the real publication period below the one §4's relation 1
-    /// validated, which is the same reason `flush_max_items` marks the buffer ready rather than
-    /// publishing.
+    /// This is an *operator* trigger and deliberately the only thing that may pull the tick: it
+    /// is rate-decoupled from ingest, so it cannot recreate the publish-on-trip hazard that got
+    /// `flush_max_items` deleted (decision 0045) — a publication period proportional to load,
+    /// rotating every session's projection key at that rate.
     pub fn request_flush(&self) {
         self.write
             .health()
             .flush_requested
             .store(true, Ordering::SeqCst);
+        self.write.wake();
     }
 
     /// Submit an ingest batch and wait for its receipt. Rows arrive **unallocated**: entity ids are
@@ -1502,6 +1504,14 @@ impl Engine {
         // Before the submit, so an out-of-extent row is refused with nothing acked, nothing
         // WAL-durable and no entity id burned (I9). `plan_flush` is entitled to assume this and
         // does; a second copy of the predicate there is how the two would come to disagree.
+        // **Step-down gates ingest** (owner-ruled 2026-08-04; write-path §5.6). Before the
+        // per-row checks: this is node state, not row state, and refusing here — the boundary
+        // with more than one caller — is what keeps a stepped-down node from accepting rows a
+        // flush would then bury under a manifest assembled from the older served state. Denies
+        // are deliberately not gated; see `AcceptError::SteppedDown`.
+        if self.any_partition_stepped_down() {
+            return Err(crate::write::AcceptError::SteppedDown);
+        }
         let quantisation = self.meta().quantisation;
         if let Some((index, row)) = rows
             .iter()

@@ -1,10 +1,10 @@
-//! The flush tick (§1.3, §1.5): the one cadence on which geometry is published.
+//! The flush tick: the one cadence on which geometry is published (write-path §4.1).
 //!
-//! **⊘ The flush itself is not built.** What is asserted here is the cadence and its three
-//! publishers — that the tick fires, that it drives reclaim, and that nothing publishes off it.
-//! The segment write and the publication arrive with the flush unit; these are the properties that
-//! must already hold when it does, because each of them is fail-open if it lands the other way
-//! round.
+//! What is asserted here is the cadence and its two triggers — the tick fires on an idle node,
+//! an operator request pulls the deadline forward without bypassing the tick path, and an
+//! accepted deny moves no geometry. The flush unit's own behaviour is covered by the flush and
+//! promotion suites; these are the properties that must hold around it, because each is
+//! fail-open if it lands the other way round.
 
 mod common;
 
@@ -65,12 +65,13 @@ fn the_tick_fires_on_an_idle_node() {
     });
 }
 
-/// **`POST /control/flush` is accepted at any time and executed at the next tick** (contracts
-/// §3.4). Publishing on request would move the real publication period below the one §4's
-/// relation 1 validated, and §2.2's depth trim would then drop pins before their TTL while the
-/// depth alarm saturates.
+/// **`POST /control/flush` is accepted at any time and executed promptly** (contracts §3.4): the
+/// flag pulls the tick's deadline forward and the doorbell wakes an idle executor, so the flush
+/// runs at the next loop iteration — through the one tick path, never around it. With nothing
+/// buffered the triggered tick plans nothing and the request is consumed; with a buffered row it
+/// publishes long before the 3600 s deadline this test sets.
 #[test]
-fn a_requested_flush_waits_for_the_tick_and_is_then_consumed() {
+fn a_requested_flush_executes_promptly_through_the_tick_path() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     build_fixture(
@@ -78,29 +79,50 @@ fn a_requested_flush_waits_for_the_tick_and_is_then_consumed() {
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    // A tick far enough out that the request is observably pending in between.
+    // A deadline far enough out that any publication observed below is the request's doing.
     let engine = engine_with_tick(&tmp, &root, 3600);
+    let ticks_at_start = engine.write_executor_stats().ticks;
 
+    // Empty buffer: the triggered tick fires, plans nothing, and consumes the request.
     engine.request_flush();
-    assert!(
-        engine.write_executor_stats().flush_requested,
-        "accepted, and pending until a tick"
-    );
+    wait_until("the requested tick fires on an empty buffer", || {
+        engine.write_executor_stats().ticks > ticks_at_start
+    });
+    wait_until("the request is consumed by the tick it triggered", || {
+        !engine.write_executor_stats().flush_requested
+    });
     assert_eq!(
         engine.generation().segments_version,
         0,
-        "202 means accepted, not done: nothing published"
+        "nothing buffered, so the triggered tick published nothing"
     );
+
+    // Buffered row: a second request publishes it without waiting out the deadline.
+    let row = tessera_lifecycle::UnallocatedRow {
+        external_id: Some(b"prompt-flush".to_vec()),
+        slice: "s0".to_string(),
+        descriptors: vec![b"0".to_vec()],
+        x: 0.5,
+        y: 0.5,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+    };
+    engine
+        .accept_ingest(vec![row], "prompt-flush-batch".to_string(), [7u8; 32])
+        .expect("the row is accepted");
+    engine.request_flush();
+    wait_until("the buffered row is published by the requested flush", || {
+        engine.generation().segments_version > 0
+    });
 }
 
 /// **An accepted deny leaves `segments_version` unmoved** (§1.3's geometry/overlay split).
 ///
-/// ⊘ Nothing writes a side-manifest on an accepted deny today, so contracts §2.3's
-/// immediate-publication rule is unmet and a deny's durable home is the WAL alone until a restart
-/// or the next flush. The guard is here regardless, because the fail-open arrives the day someone
-/// implements §2.3 by reaching for `publish_geometry`: an overlay publication supersedes no
-/// geometry, so it creates no drain entry and must not move `segments_version` — every deny would
-/// otherwise rotate the row-projection cache key and cost a full projection rebuild.
+/// The overlay publication writes a side-manifest at the deny drain's close (Task 27), and the
+/// guard here is what keeps that publication from ever being implemented through
+/// `publish_geometry`: an overlay publication supersedes no geometry, so it must not move
+/// `segments_version` — every deny would otherwise rotate the row-projection cache key and cost
+/// a full projection rebuild.
 #[test]
 fn an_accepted_deny_moves_no_geometry() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -130,5 +152,69 @@ fn an_accepted_deny_moves_no_geometry() {
         after.segments_version, before.segments_version,
         "an overlay publication supersedes no geometry, so it must not rotate the row-projection \
          cache key"
+    );
+}
+
+/// **The deny-only regime rotates** (owner-ruled 2026-08-04; write-path §4.5). A node that takes
+/// denies but never flushes — a loaded bundle with no live ingest — used to seal nothing and
+/// reclaim nothing: an unbounded log on the one lane that cannot be shed. The tick now rotates
+/// whenever the log has grown and no flush publication is coming to do it, and the rotation's
+/// snapshot is what carries the suppression across the reclaim — asserted by restarting onto the
+/// rotated log and finding it still in force.
+#[test]
+fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 1);
+
+    let wal_members = || -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("wal") && !n.ends_with(".sync"))
+            .collect();
+        names.sort();
+        names
+    };
+    let before = wal_members();
+    assert!(!before.is_empty(), "the WAL has at least its first member");
+
+    let entity = source_to_new_map(&root, &engine.generation().prefix)[&3];
+    engine
+        .accept_change(EntityId::new(entity), ChangeOp::Suppress, None)
+        .expect("a suppression is accepted");
+
+    // The tick fires within a second; growth (the ChangeByEntity record) triggers a rotation,
+    // whose reclaim deletes the original member — the buffer is empty, so the whole durable
+    // prefix below the snapshot is reclaimable.
+    wait_until("the original WAL member is reclaimed by a tick rotation", || {
+        let now = wal_members();
+        now != before && !now.is_empty()
+    });
+
+    // The suppression's only durable home is now the rotation snapshot. A restart must carry it.
+    drop(engine);
+    let reopened = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            ..config()
+        },
+    )
+    .expect("the rotated log opens");
+    assert!(
+        reopened
+            .generation()
+            .overlay
+            .is_suppressed(EntityId::new(entity)),
+        "the suppression must survive the rotation it was reclaimed under"
     );
 }

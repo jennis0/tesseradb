@@ -199,10 +199,20 @@ pub struct ExecutorHealth {
     /// Flush ticks fired since the executor started — the observable that makes "the tick runs"
     /// a condition a test can wait on rather than a sleep it has to guess at.
     pub(crate) ticks: AtomicU64,
-    /// A `POST /control/flush` awaiting the next tick (contracts §3.4). A flag, not a count: the
-    /// endpoint's 202 means "accepted, not yet done", and two requests before one tick are
-    /// satisfied by that tick together.
+    /// A `POST /control/flush` awaiting the tick it pulls forward (contracts §3.4). A flag, not a
+    /// count: the endpoint's 202 means "accepted, not yet done", and two requests before one tick
+    /// are satisfied by that tick together.
     pub(crate) flush_requested: AtomicBool,
+    /// A completed flush has been sent to `flush_done` and not yet drained.
+    ///
+    /// **The pool's half of the completion handshake** ([`FLUSH_COMPLETION_POLL`]): set
+    /// immediately *before* the send, cleared by `publish_completed_flushes` only after it drained
+    /// something. The ordering closes the race a bare `flush_in_flight` check leaves open — the
+    /// pool clearing `in_flight` after its send, between the executor's empty `try_recv` and its
+    /// wait computation, would put the executor to sleep for a full tick with a completed unit in
+    /// the channel. With set-before-send, at wait time either the send has not happened
+    /// (`in_flight` still true) or this flag is already visible; there is no gap.
+    pub(crate) flush_completed_pending: AtomicBool,
     /// **The in-memory overlay holds dispositions the durable WAL does not** (§7.2).
     ///
     /// Set when [`Executor::recover_wal`] discards an undurable region, and **cleared only by a
@@ -215,7 +225,7 @@ pub struct ExecutorHealth {
     /// this one latches, because what diverged stays diverged until the process is replaced.
     pub(crate) overlay_diverged: AtomicBool,
     /// Buffer occupancy as of the last apply — what `/control/ingest`'s occupancy bound is checked
-    /// against, and what `flush_max_items` marks ready.
+    /// against.
     ///
     /// Published by the executor and read by handlers, so it lags by at most one apply. That is
     /// the right shape for a backpressure signal: an exact figure would need the handler to hold
@@ -383,6 +393,13 @@ pub struct ExecutorHealth {
     /// Read through [`lock_recover`] on the same argument every other lock in this module makes:
     /// an operator gauge must not turn one writer fault into a panicking admin plane.
     fragmentation: Mutex<FragmentationTally>,
+    /// Delta tiers as encoded, cumulative over every published flush — the tier-scope half of
+    /// contracts §3.4's `fragmentation`, and the one at which between-window scatter is visible
+    /// ([`FragmentationTally::of_tier`]). Fed at publication, never at plan or execute: a
+    /// discarded flush's tier is an orphan and must not count.
+    tier_fragmentation: Mutex<FragmentationTally>,
+    /// Published tiers behind [`Self::tier_fragmentation`].
+    fragmentation_tiers: AtomicU64,
     /// Commit windows whose allocation has been tallied. The denominator an operator needs to read
     /// the rest: the ratios are means over windows, and a mean over three windows is not a trend.
     fragmentation_windows: AtomicU64,
@@ -481,6 +498,11 @@ pub struct ExecutorStats {
     pub fragmentation: FragmentationTally,
     /// Commit windows behind [`Self::fragmentation`].
     pub fragmentation_windows: u64,
+    /// Delta tiers as encoded, cumulative over published flushes — the scope at which
+    /// between-window scatter is visible (contracts §3.4; [`FragmentationTally::of_tier`]).
+    pub tier_fragmentation: FragmentationTally,
+    /// Published tiers behind [`Self::tier_fragmentation`].
+    pub fragmentation_tiers: u64,
 }
 
 impl ExecutorStats {
@@ -512,6 +534,21 @@ impl ExecutorStats {
         let f = self.fragmentation;
         (f.runs > 0).then(|| f.baseline_runs_milli as f64 / 1000.0 / f.runs as f64)
     }
+
+    /// Tier-scope postings over containers touched (contracts §3.4): the encoded tiers, where a
+    /// tier spans every window the buffer accumulated between ticks — so this figure, unlike the
+    /// window-scope one, moves with between-window scatter. `None` before any flush has published.
+    pub fn tier_postings_per_container(&self) -> Option<f64> {
+        let f = self.tier_fragmentation;
+        (f.containers > 0).then(|| f.postings as f64 / f.containers as f64)
+    }
+
+    /// Tier-scope run ratio, same construction as [`Self::run_ratio`] (`1.0` fully scattered,
+    /// larger is better), over tiers as encoded. `None` before any flush has published.
+    pub fn tier_run_ratio(&self) -> Option<f64> {
+        let f = self.tier_fragmentation;
+        (f.runs > 0).then(|| f.baseline_runs_milli as f64 / 1000.0 / f.runs as f64)
+    }
 }
 
 impl ExecutorStats {
@@ -541,6 +578,7 @@ impl ExecutorHealth {
             deny_submitted: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             flush_requested: AtomicBool::new(false),
+            flush_completed_pending: AtomicBool::new(false),
             overlay_diverged: AtomicBool::new(false),
             overlay_publications: AtomicU64::new(0),
             buffered_items: AtomicUsize::new(0),
@@ -559,7 +597,9 @@ impl ExecutorHealth {
             overlay_soft_limit_latched: AtomicBool::new(false),
             commit_window_max_rows: AtomicUsize::new(DEFAULT_COMMIT_WINDOW_MAX_ROWS),
             fragmentation: Mutex::new(FragmentationTally::default()),
+            tier_fragmentation: Mutex::new(FragmentationTally::default()),
             fragmentation_windows: AtomicU64::new(0),
+            fragmentation_tiers: AtomicU64::new(0),
             wal: Arc::new(WalMeter::new()),
         }
     }
@@ -634,6 +674,8 @@ impl ExecutorHealth {
             work_in_flight_nanos: self.work_in_flight_nanos(),
             overlay_soft_limit_alarms: self.overlay_soft_limit_alarms.load(Ordering::Relaxed),
             fragmentation: *lock_recover(&self.fragmentation),
+            tier_fragmentation: *lock_recover(&self.tier_fragmentation),
+            fragmentation_tiers: self.fragmentation_tiers.load(Ordering::Relaxed),
             fragmentation_windows: self.fragmentation_windows.load(Ordering::Relaxed),
             ticks: self.ticks.load(Ordering::Relaxed),
             overlay_diverged: self.overlay_diverged.load(Ordering::SeqCst),
@@ -651,6 +693,11 @@ impl ExecutorHealth {
     fn record_fragmentation(&self, tally: FragmentationTally) {
         lock_recover(&self.fragmentation).merge(tally);
         self.fragmentation_windows.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_tier_fragmentation(&self, tally: FragmentationTally) {
+        lock_recover(&self.tier_fragmentation).merge(tally);
+        self.fragmentation_tiers.fetch_add(1, Ordering::Relaxed);
     }
 
     /// How long the work item currently executing has been running; `0` when idle.
@@ -1120,11 +1167,21 @@ impl LiveState {
     /// Returns a **count**, never the ids: this value reaches a 409 body, and an external id is
     /// caller data that `error.rs`'s standing rule keeps out of response bodies. The handler's own
     /// check is the one that names them, to a caller who supplied them.
-    fn established_collisions(&self, rows: &[UnallocatedRow]) -> usize {
+    /// `is_deleted` is the overlay's verdict on the current holder: **a deleted holder does not
+    /// collide** (decision 0047 — edit is delete + re-ingest, and our retention of a dead binding
+    /// must never refuse a user's write). A *suppressed* holder still collides: suppression is
+    /// temporary hiding, and re-ingesting past one is the byte-identical-copy hole this check
+    /// exists to close.
+    fn established_collisions(
+        &self,
+        rows: &[UnallocatedRow],
+        is_deleted: impl Fn(EntityId) -> bool,
+    ) -> usize {
         let established = lock_recover(&self.established);
         rows.iter()
             .filter_map(|r| r.external_id.as_ref())
-            .filter(|id| established.contains_key(id.as_slice()))
+            .filter_map(|id| established.get(id.as_slice()))
+            .filter(|entity| !is_deleted(**entity))
             .count()
     }
 
@@ -1239,6 +1296,15 @@ pub enum AcceptError {
         y: f32,
         quantisation: tessera_store::manifest::Quantisation,
     },
+    /// A partition is serving a stepped-down side-manifest (owner-ruled gate, 2026-08-04;
+    /// write-path §5.6). Ingest is refused **at the engine's boundary**, for the same
+    /// more-than-one-caller reason as [`Self::OutsideExtent`]: a stepped-down node that accepted
+    /// and flushed would assemble its manifest from the *older served* partition state at a
+    /// higher `n`, permanently shadowing the stepped-past segment — and once rotation moves the
+    /// reclaim bound, its acked rows are unrecoverable. Denies are deliberately **not** gated:
+    /// a deny is entity-space state carried by WAL and manifest deny fields, threatens no
+    /// segment, and must never be refused.
+    SteppedDown,
 }
 
 impl std::fmt::Display for AcceptError {
@@ -1260,6 +1326,13 @@ impl std::fmt::Display for AcceptError {
                  cannot be told from one that belongs there. The remedy is to rebuild the slice \
                  under a corrected extent, which is a migration",
                 q.x_min, q.x_max, q.y_min, q.y_max
+            ),
+            AcceptError::SteppedDown => write!(
+                f,
+                "a partition is serving a stepped-down side-manifest, so ingest is refused: a \
+                 flush from this state would assemble its manifest from the older served state at \
+                 a higher n, permanently shadowing the stepped-past segment and its acked rows. \
+                 Repair or restore the damaged newest manifest's files, then retry"
             ),
         }
     }
@@ -1458,6 +1531,7 @@ impl WritePath {
         >,
     ) -> Result<(), ExecutorStartError> {
         let wal = self.wal.take().ok_or(ExecutorStartError::AlreadyStarted)?;
+        let wal_position_at_start = wal.position();
 
         let (work_tx, work_rx) = std::sync::mpsc::sync_channel(queue_bound);
         let (deny_tx, deny_rx) = std::sync::mpsc::channel();
@@ -1517,6 +1591,9 @@ impl WritePath {
                     flush_done: flush_rx,
                     flush_submit: flush_tx,
                     last_tick: std::time::Instant::now(),
+                    // Seeded from the opened WAL's position so a freshly started node does not
+                    // rotate until something is appended in this run.
+                    wal_position_at_last_rotation: wal_position_at_start,
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
                 };
@@ -1564,6 +1641,14 @@ impl WritePath {
             self.faults = faults;
         }
         Ok(())
+    }
+
+    /// Ring the executor's doorbell. No executor yet started is a no-op: the flag a caller set is
+    /// read at the executor's first loop iteration anyway.
+    pub(crate) fn wake(&self) {
+        if let Ok(handle) = self.handle() {
+            handle.wake();
+        }
     }
 
     pub(crate) fn health(&self) -> &Arc<ExecutorHealth> {
@@ -1947,6 +2032,17 @@ impl LifecycleHandle {
             .map_err(PublishGeometryError::Refused)
     }
 
+    /// Ring the executor's doorbell without submitting anything.
+    ///
+    /// A spurious token is harmless (capacity one; `Full` means a wake-up is already pending); a
+    /// missing one costs nothing but latency, because `Executor::wait_for_work` times out at the
+    /// tick regardless. The one caller is `Engine::request_flush`: the flag it sets is consumed by
+    /// `tick_if_due`, and without this ring an idle executor would not look at it until the next
+    /// timeout — turning "executes promptly" back into "executes within one tick".
+    pub(crate) fn wake(&self) {
+        let _ = self.bell.try_send(());
+    }
+
     pub(crate) fn enqueue(&self, command: Command) -> std::result::Result<Pending, SubmitError> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let job = Job {
@@ -2165,6 +2261,20 @@ pub const DENY_WINDOW_MAX_ENTRIES: usize = 1_000;
 /// exposure the collapsing admits, at ≤ 64,000 dispositions, all durable in the WAL, all enforced
 /// live, and recovered by any WAL-bearing restart. Only a no-WAL restore sees the gap.
 const OVERLAY_PUBLICATION_MAX_WINDOWS: u64 = 64;
+
+/// How often the executor re-checks for a completed flush while one is in flight or completed
+/// but not yet drained.
+///
+/// **This is what bounds publication latency on an idle node, and it exists because the pool must
+/// not ring the doorbell.** `flush_submit`'s doc records why: an executor holding a clone of its
+/// own bell sender would keep the channel alive for ever and `WritePath::drop`'s join would hang —
+/// and a pool task holding one re-creates the same hang for the duration of a flush at shutdown.
+/// So the wake-up is a poll, armed only while [`Executor::run`]'s `flush_in_flight` /
+/// `flush_completed_pending` pair says there is something to wait for: a quiescent executor still
+/// sleeps the full tick, and a flush's publication lands within this interval of its files being
+/// durable rather than at the next tick — which is what keeps `POST /control/flush` "prompt" on
+/// an idle node, and the ack→visibility bound at one tick rather than two.
+const FLUSH_COMPLETION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// How long the executor waits before each re-attempt at making a deny window durable, and
 /// therefore how many attempts there are: the first sync, plus one per entry here.
@@ -2429,6 +2539,10 @@ struct Executor {
     /// When the last tick fired. Started at construction, so the first tick is one period after
     /// the executor starts rather than immediately at startup.
     last_tick: std::time::Instant,
+    /// The WAL's sequence position after the last rotation (or at start), so a tick can tell
+    /// whether the log has grown since — the deny-only regime's rotation trigger (owner-ruled
+    /// 2026-08-04; write-path §4.5). An idle node whose position has not moved rotates nothing.
+    wal_position_at_last_rotation: u64,
     #[cfg(feature = "fault-injection")]
     faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }
@@ -2505,24 +2619,70 @@ impl Executor {
     /// that arrived after it came due — and after it, because a tick that publishes must not
     /// preempt a deny already queued (lifecycle §1.3's priority lane).
     ///
-    /// **Three publishers reach this cadence and none publishes off it.** The tick itself;
-    /// `flush_max_items`, which marks the buffer flush-*ready* and waits (publishing on trip would
-    /// move the real period below the one §4's relation 1 validated, and §2.2's depth trim would
-    /// then drop pins before their TTL while the depth alarm saturates); and
-    /// `POST /control/flush`, accepted at any time and executed here, its 202 already meaning
-    /// "accepted, not yet done".
+    /// **Two triggers reach this cadence and neither publishes off it.** The tick itself, and
+    /// `POST /control/flush` — accepted at any time and executed here, its 202 already meaning
+    /// "accepted, not yet done". (`flush_max_items` is deleted — decision 0045: "flush-ready"
+    /// had no consumer, because this tick never skips a non-empty buffer.)
     ///
     /// It also drives `reclaim` — lifecycle §2.1 assigns that gap to "whichever stage introduces
     /// a periodic publisher", and this is that publisher.
     fn tick_if_due(&mut self) {
         let period = std::time::Duration::from_secs(self.flush_max_age_secs);
-        if self.last_tick.elapsed() < period {
+        // **A requested flush pulls the deadline forward; it does not publish off the cadence.**
+        // `POST /control/flush` sets the flag and rings the doorbell, and the tick fires here, on
+        // this one path, at the next loop iteration — so everything a tick guarantees (one flush
+        // in flight, plan gates, rebase, retention) holds for an operator-triggered flush exactly
+        // as for a scheduled one. The publish-on-trip hazard that killed `flush_max_items`
+        // (a publication period proportional to ingest rate) does not apply: this trigger is an
+        // operator action, rate-decoupled from ingest by construction.
+        let period_due = self.last_tick.elapsed() >= period;
+        let requested = self.health.flush_requested.load(Ordering::SeqCst);
+        if !period_due && !requested {
             return;
         }
+
+        let generation = self.generation.load_full();
+
+        // **At most one flush in flight, checked before any plan is built.** A period tick
+        // arriving while one runs is *skipped, not queued* — two concurrent flushes would
+        // double-consume the buffer range — and a skipped tick must not pay the plan either: a
+        // plan deep-clones every buffered item, which at the buffer bound is an O(buffer-bytes)
+        // allocate-and-free for a gauge (memory review, 2026-08-04). The gauge is fed from a
+        // clone-free count instead, so a stalled flush still shows its backlog growing. Skips are
+        // counted and alarmed, because a flush persistently slower than the tick is a
+        // visibility-latency breach that `flush_max_age_secs` would otherwise silently miss.
+        //
+        // **A *requested* flush is not consumed by a skip.** The flag stays armed and a
+        // requested-only wake returns without counting a tick, so the request executes at the
+        // first iteration after the in-flight flush lands — which `FLUSH_COMPLETION_POLL` bounds
+        // to within ~20 ms of its publication. Consuming it here would silently drop an
+        // operator's "drain now" whenever it raced a scheduled flush.
+        if self.flush_in_flight.load(Ordering::SeqCst) {
+            if period_due {
+                self.last_tick = std::time::Instant::now();
+                self.health.ticks.fetch_add(1, Ordering::Relaxed);
+                let flushable = generation
+                    .buffer
+                    .iter()
+                    .filter(|(entity, _)| !generation.overlay.is_deleted(**entity))
+                    .count();
+                self.health.flushable_items.store(flushable, Ordering::SeqCst);
+                if flushable > 0 {
+                    self.health.flush_skips.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        "ALARM: a flush was still running when the next tick came due, so this \
+                         tick published nothing. The effective publication period is longer \
+                         than flush_max_age_secs, which is a visibility-latency breach"
+                    );
+                }
+            }
+            return;
+        }
+
         self.last_tick = std::time::Instant::now();
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
         // Requested flushes are consumed by the tick whether or not there is anything to flush: a
-        // `POST /control/flush` against an empty buffer is satisfied by the tick it named, not
+        // `POST /control/flush` against an empty buffer is satisfied by the tick it triggered, not
         // held until something arrives.
         self.health.flush_requested.store(false, Ordering::SeqCst);
 
@@ -2531,9 +2691,7 @@ impl Executor {
         // invariant-bearing half and is taken against the live generation here; the segment write
         // and the publication follow through `dispatch_flushes`. The count it produces on the way
         // is what an operator needs to see a stalled flush: items that *would* acquire geometry at
-        // this tick, which stays at zero on a gated node and grows without bound on one whose
-        // flush is failing.
-        let generation = self.generation.load_full();
+        // this tick, which stays at zero on a gated node and grows on one whose flush is failing.
         let mut flushable = 0usize;
         let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
         for slice in slices_of(&generation) {
@@ -2563,23 +2721,15 @@ impl Executor {
             .flushable_items
             .store(flushable, Ordering::SeqCst);
 
-        // **At most one flush in flight.** A tick arriving while one runs is *skipped, not queued*:
-        // two concurrent flushes would double-consume the buffer range. Skips are counted and
-        // alarmed, because a flush persistently slower than the tick is a visibility-latency
-        // breach that `flush_max_age_secs` would otherwise silently miss.
-        if !plans.is_empty() {
-            if self.flush_in_flight.load(Ordering::SeqCst) {
-                self.health.flush_skips.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(
-                    "ALARM: a flush was still running when the next tick came due, so this tick \
-                     published nothing. The effective publication period is longer than \
-                     flush_max_age_secs, which is a visibility-latency breach"
-                );
-            } else {
-                self.dispatch_flushes(&generation, plans);
-            }
+        if plans.is_empty() {
+            // Nothing to flush, so no publication is coming to rotate the log — the deny-only
+            // regime. See `rotate_if_grown`.
+            drop(generation);
+            self.rotate_if_grown();
+        } else {
+            self.dispatch_flushes(&generation, plans);
+            drop(generation);
         }
-        drop(generation);
     }
 
     /// Apply every completed flush waiting from the pool, and report whether any did.
@@ -2591,6 +2741,14 @@ impl Executor {
         while let Ok(completed) = self.flush_done.try_recv() {
             self.publish_flush(completed);
             any = true;
+        }
+        if any {
+            // Cleared only after something was drained (never on an empty pass), so a set-and-send
+            // landing between this loop's empty `try_recv` and a clear could not be erased — the
+            // handshake's other half; see `ExecutorHealth::flush_completed_pending`.
+            self.health
+                .flush_completed_pending
+                .store(false, Ordering::SeqCst);
         }
         any
     }
@@ -2727,6 +2885,11 @@ impl Executor {
             for (plan, ctx) in contexts {
                 match crate::flush::execute_flush(plan, ctx) {
                     Ok(completed) => {
+                        // **Pending is set before the send** — the completion handshake's whole
+                        // ordering; see `ExecutorHealth::flush_completed_pending`.
+                        health
+                            .flush_completed_pending
+                            .store(true, Ordering::SeqCst);
                         // A send failure means the executor is gone, which is a shutdown and not a
                         // fault: the files are orphans nothing references, and replay re-flushes.
                         let _ = submit.send(completed);
@@ -2839,6 +3002,13 @@ impl Executor {
             .saturating_sub(self.last_tick.elapsed());
         let wait = if self.wal.is_poisoned() {
             until_tick.min(WAL_RECOVERY_POLL_INTERVAL)
+        } else if self.flush_in_flight.load(Ordering::SeqCst)
+            || self.health.flush_completed_pending.load(Ordering::SeqCst)
+        {
+            // A flush is executing on the pool, or its completed unit is waiting in `flush_done`.
+            // The pool cannot ring the doorbell (see `flush_submit`), so this poll is what bounds
+            // publication latency on an idle node — see `FLUSH_COMPLETION_POLL`.
+            until_tick.min(FLUSH_COMPLETION_POLL)
         } else {
             until_tick
         };
@@ -3190,14 +3360,13 @@ impl Executor {
     /// That one is a correctness mechanism (it is what keeps the unreachable-duplicate hole closed
     /// across a window), not a policy; it also yields, for the reason written at the site.
     ///
-    /// ## Why there is no age bound, and why the config key is inert
+    /// ## Why there is no age bound, and why the config key is deleted
     ///
     /// The specified third trigger is `opened_at.elapsed() >= commit_window_max_age_ms`, whose
     /// stated purpose is to stop a lone ingest on an idle server waiting the full window age
     /// "for company that is not coming". **It is declined, and `ingest.commit_window_max_age_ms`
-    /// is inert** (`docs/decisions/0034-the-window-does-not-linger.md`;
-    /// `tessera_server::config::tests::the_commit_window_age_bound_is_inert` fails the
-    /// moment anything outside that module reads it).
+    /// is deleted** (`docs/decisions/0034-the-window-does-not-linger.md` carries the no-linger
+    /// argument; `docs/decisions/0045-inert-config-keys-are-deleted.md` the key's removal).
     ///
     /// An age bound is the safety cap on a **linger** — "having drained the queue empty, wait for
     /// more" — and this executor has no linger. A window is a local of this function and every exit
@@ -3256,8 +3425,8 @@ impl Executor {
     /// close succeeded (see the conflict arm). The worst case is two only when the first close
     /// *failed*. What those closes cost is one `assign_sorted` run over the window's
     /// rows, one append per entry, **one fsync** (~3.2 ms measured, ingest baseline memo) and one
-    /// `IngestBuffer` clone that is O(total buffered items) — the dominant term, the only one that
-    /// grows, and unbounded while there is no flush (⊘; see [`Executor::apply_window`]). That is why
+    /// `IngestBuffer` clone that is O(total buffered items) — the dominant term, bounded by
+    /// `ingest_buffer_max_items` now that flush drains it (see [`Executor::apply_window`]). That is why
     /// this is a **starvation** bound and deliberately not a latency target: the window in front may
     /// be arbitrarily slow, and nothing here is sized to make it fast.
     ///
@@ -3556,8 +3725,14 @@ impl Executor {
         respond: Responder,
     ) -> Option<WindowEntry<Responder>> {
         // The fail-closed backstop for the widened check-to-apply race — see
-        // `LiveState::established_collisions`.
-        let collisions = self.live.established_collisions(&rows);
+        // `LiveState::established_collisions`. The overlay read here is the same generation the
+        // apply below will clone from, on the same thread, so the deleted-holder exemption cannot
+        // race its own delete.
+        let generation = self.generation.load();
+        let collisions = self
+            .live
+            .established_collisions(&rows, |e| generation.overlay.is_deleted(e));
+        drop(generation);
         if collisions > 0 {
             self.ack_failed(
                 &respond,
@@ -3800,7 +3975,7 @@ impl Executor {
     /// Clone the buffer **once**, insert every entry in the window, publish **once**.
     ///
     /// The amortisation this buys is the one that grows: the clone is O(total buffered items) and
-    /// the buffer only grows, there being no flush (⊘), so a window of k entries pays it once
+    /// the buffer grows until the next tick drains it, so a window of k entries pays it once
     /// instead of k times — and the same clone is the deny-ack latency floor
     /// ([`ExecutorHealth::apply_nanos_total`]).
     ///
@@ -3812,13 +3987,15 @@ impl Executor {
     /// 1. **At the shipped defaults `commit_window_max_items == ingest_max_batch_rows == 10 000`,
     ///    so a maximal batch is a one-entry window and gets no amortisation at all.** Ingesting
     ///    10⁹ rows in maximal batches is 10⁵ submissions each cloning a buffer growing towards
-    ///    10⁹ — **O(N²/B)** — and only a flush bounds it. Measured today:
+    ///    10⁹ — **O(N²/B)** — bounded only by the flush draining the buffer each tick and by
+    ///    `ingest_buffer_max_items` when it cannot. Measured pre-flush:
     ///    `apply_nanos_max` 210–437 ms at ~1.34 M buffered items
     ///    (`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`, result 3). It is the *small*
     ///    batches the window collects.
-    /// 2. **A flush is specified to make the buffer chunked or persistent** (⊘). So the O(B) clone
-    ///    is a known cost with a known remedy, not an inherited posture — do not build a second
-    ///    mechanism around it in the meantime.
+    /// 2. **Flush drains the buffer each tick**, so the clone's operand is bounded by one tick's
+    ///    arrivals in the steady state and by `ingest_buffer_max_items` when flush is failing. A
+    ///    chunked or persistent buffer remains the remedy if the per-window clone itself ever
+    ///    measures as the constraint — do not build a second mechanism around it before that.
     ///
     /// No counter is added for this: `apply_nanos_total` / `apply_nanos_max` already
     /// measure it and are already on `/control/status`.
@@ -4201,25 +4378,31 @@ impl Executor {
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
         self.health.flushes.fetch_add(1, Ordering::Relaxed);
+        self.health.record_tier_fragmentation(completed.tier_tally);
 
-        self.record_and_rotate(segments_version);
+        self.rotate_wal();
     }
 
-    /// Note the publication in the log and reclaim what it made redundant — flush §7.3's last two
-    /// steps, **after** the generation swap and never before it.
+    /// Reclaim what the publication just made redundant — **after** the generation swap and never
+    /// before it.
     ///
     /// ```text
     /// generation swap                             ← the publication event, already done above
-    /// Flush{n, wal_pos} appended and fsynced      ← a replay-start optimisation
     /// rotation: snapshot written, then reclaim    ← §7.2, snapshot before any deletion
     /// ```
     ///
-    /// **`wal_pos` is the buffer's oldest surviving row, not this record's own offset.** Rows acked
-    /// *during* the flush were appended after its snapshot point, were never consumed, and carry
-    /// entity ids at or above the new watermark; reclaiming below this record would delete them and
-    /// §7.1 would then reconstruct them from nothing. `IngestBuffer::oldest_wal_pos` answers it from
-    /// the post-publication buffer — the rows that still have no geometry — and refuses (`None`) if
-    /// any of them does not know its own position, which reclaims nothing rather than guessing.
+    /// **The reclaim bound is the buffer's oldest surviving row.** Rows acked *during* the flush
+    /// were appended after its snapshot point, were never consumed, and carry entity ids at or
+    /// above the new watermark; reclaiming past them would delete them and recovery would then
+    /// reconstruct them from nothing — acked ingest, silently lost at the next restart.
+    /// `IngestBuffer::oldest_wal_pos` answers it from the post-publication buffer — the rows that
+    /// still have no geometry — and refuses (`None`) if any of them does not know its own
+    /// position, which reclaims nothing rather than guessing. With an empty buffer the whole
+    /// durable prefix is reclaimable.
+    ///
+    /// (A `Flush{n, wal_pos}` WAL record used to be appended here first. It was write-only —
+    /// recovery reconstructs the buffer by the has-a-row predicate and this function computes its
+    /// own bound — and was deleted with `WAL_VERSION` 4 rather than carried as archaeology.)
     ///
     /// **Two gates, and neither is the one `plan_flush` applies.** A poisoned WAL cannot be appended
     /// to at all. A node whose overlay has diverged from its durable WAL must rotate nothing (§7.2):
@@ -4230,7 +4413,7 @@ impl Executor {
     ///
     /// Nothing here is fatal. A failure leaves the log longer than it needs to be, which the next
     /// tick retries; the publication itself is already durable and already swapped.
-    fn record_and_rotate(&mut self, n: u64) {
+    fn rotate_wal(&mut self) {
         if self.wal.is_poisoned() {
             return;
         }
@@ -4242,55 +4425,74 @@ impl Executor {
         }
 
         let generation = self.generation.load();
-        let oldest = match generation.buffer.oldest_wal_pos() {
-            // Nothing buffered: every ingest row has geometry, so the whole durable prefix is
-            // reclaimable, and the position is read *after* the `Flush` append below.
-            None => None,
-            Some(Some(oldest)) => Some(oldest),
-            // A buffered row of unknown position pins the log. Fail-safe and loud by construction:
-            // the sequence grows, which is visible, rather than a record vanishing, which is not.
-            Some(None) => Some(0),
-        };
-
-        // The record's own `wal_pos` is read *before* the append and the reclamation's *after*, so
-        // with an empty buffer they differ by exactly this record's width. Both are true statements
-        // of "below this, every ingest row has been consumed into a segment" — the reclaim value is
-        // simply the tighter one, and the record is a replay-start optimisation that nothing reads
-        // back (§7.1), so the looser one costs nothing.
-        let before_append = self.wal.position();
-        if let Err(e) = self
-            .wal
-            .append(&WalRecord::Flush {
-                n,
-                wal_pos: oldest.unwrap_or(before_append),
-            })
-            .and_then(|()| self.wal.fsync().map(|_| ()))
+        // A stepped-down node reclaims nothing (owner-ruled 2026-08-04, with the ingest and
+        // plan gates): its WAL members are the only recovery material for whatever the
+        // step-down shadowed, and freezing reclamation is the fail-closed direction while an
+        // operator repairs the damaged newest manifest.
+        if generation
+            .bundle
+            .partitions
+            .values()
+            .any(|p| p.stepped_down())
         {
-            tracing::warn!(error = %e, "the flush record could not be appended; no rotation this tick");
+            tracing::warn!(
+                "a partition is stepped down, so this node rotates nothing; the log grows until \
+                 the damaged newest manifest is repaired"
+            );
             return;
         }
-
-        // **Read after the append, not before it.** With an empty buffer the reclaim point is "all
-        // of it", and taking the position first would leave the `Flush` record above the line —
-        // pinning the very member it was written to announce, so the log would grow by one member
-        // per flush and reclaim nothing. The `Flush` record is an optimisation that nothing reads
-        // back (§7.1), so there is no reason for it to hold its own member open.
-        let reclaim_below = oldest.unwrap_or_else(|| self.wal.position());
+        let reclaim_below = match generation.buffer.oldest_wal_pos() {
+            // Nothing buffered: every ingest row has geometry, so everything below the current
+            // position — the whole durable prefix — is reclaimable.
+            None => self.wal.position(),
+            Some(Some(oldest)) => oldest,
+            // A buffered row of unknown position pins the log. Fail-safe and loud by construction:
+            // the sequence grows, which is visible, rather than a record vanishing, which is not.
+            Some(None) => 0,
+        };
 
         let snapshot = generation.overlay.snapshot();
         match self.wal.rotate(&snapshot, reclaim_below) {
-            Ok(deleted) if !deleted.is_empty() => {
-                tracing::info!(
-                    members = ?self.wal.members(),
-                    reclaimed = ?deleted,
-                    "WAL members reclaimed below the flush's oldest unconsumed row"
-                );
+            Ok(deleted) => {
+                // Post-rotation position, so the next growth check counts only appends made
+                // after the snapshot this rotation just wrote.
+                self.wal_position_at_last_rotation = self.wal.position();
+                if !deleted.is_empty() {
+                    tracing::info!(
+                        members = ?self.wal.members(),
+                        reclaimed = ?deleted,
+                        "WAL members reclaimed below the oldest unconsumed row"
+                    );
+                }
             }
-            Ok(_) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "the WAL did not rotate; the log grows until it does");
             }
         }
+    }
+
+    /// Rotate at the tick when the log has grown and no flush publication is coming to do it —
+    /// **the deny-only regime's rotation** (owner-ruled 2026-08-04; write-path §4.5).
+    ///
+    /// Rotation used to run only inside `publish_flush`, so a node that took denies without ever
+    /// flushing — a loaded bundle with no live ingest, the natural state after a bulk load —
+    /// sealed nothing, snapshotted nothing and reclaimed nothing: an unbounded log on the one
+    /// lane that structurally cannot be shed, replayed in full at every restart. The tick
+    /// already fires every `flush_max_age_secs` regardless of buffer contents, so it is the
+    /// site.
+    ///
+    /// **Gated on growth**, so an idle node rotates nothing: a rotation writes an O(overlay)
+    /// snapshot and a new member, and doing that per tick on a quiet deployment would be churn
+    /// for no reclaim. The position check is exact — append order is sequence order — and
+    /// `rotate_wal` re-checks every safety gate (poisoned, diverged, stepped-down) itself.
+    /// Safety is the flush-publication rotation's own argument, unchanged: the snapshot
+    /// re-states the whole overlay before anything is deleted, and the reclaim bound is the
+    /// oldest surviving buffered row, so nothing acked is lost at any crash point.
+    fn rotate_if_grown(&mut self) {
+        if self.wal.position() == self.wal_position_at_last_rotation {
+            return;
+        }
+        self.rotate_wal();
     }
 
     /// Publish new geometry: check, swap, prune. **The executor's own arm of lifecycle §1.3's

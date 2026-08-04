@@ -34,9 +34,11 @@
 //!
 //! * SA §7's overlay/flush bounds are **⊘ partially implemented**, so the extrapolation has no
 //!   ceiling rather than a 500,000 one. They exist as parsed, validated config keys, and that is
-//!   all: `overlay_soft_limit` alarms and does not fold, because there is no fold, and
-//!   `flush_max_items`/`flush_max_age_secs` have no consumer, because there is no flush. The
-//!   buffer grows without bound in code, so this extrapolation stands as written.
+//!   all: `overlay_soft_limit` alarms and does not fold, because there is no fold, and — when
+//!   this arm was written — there was no flush. **Dated correction (2026-08-04):** flush and the
+//!   `ingest_buffer_max_items` admission bound have since landed (`flush_max_items` is deleted,
+//!   decision 0045), so the buffer no longer grows without bound; the extrapolation below
+//!   describes the pre-flush build it was measured on.
 //! * The measured ~10 ns/item is a **lower bound**. None of the buffered rows are visible (see
 //!   below), so `compose` iterates the buffer and *rejects* every entry at `perm.row_of`. Rows
 //!   that resolved would additionally push into `pass_rows`/`fail_rows` and build the diff
@@ -387,7 +389,6 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     max_tiles_per_request: 262_144,
                     compute_threads: tessera_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
-                    flush_max_items: 100_000,
                 },
             )?;
             // The WAL lives on a dedicated executor thread, so an engine that writes must start
@@ -499,7 +500,6 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 max_tiles_per_request: 262_144,
                 compute_threads: tessera_engine::default_compute_threads(),
                 flush_max_age_secs: 90,
-                flush_max_items: 100_000,
             },
         )?;
         // The WAL lives on a dedicated executor thread, so an engine that writes must start one.
@@ -730,7 +730,6 @@ pub fn run_concurrent(
                     max_tiles_per_request: 262_144,
                     compute_threads: tessera_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
-                    flush_max_items: 100_000,
                 },
             )?;
             // Generous, deliberately: this arm means to measure what a full window collects, never

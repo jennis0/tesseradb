@@ -55,7 +55,8 @@ Then, depending on what you are after:
 - **What the bytes are.** [`contracts.md`](contracts.md) — bundle format, service API, plugin ABI,
   wire format. A contract exists here only where a second reader exists.
 - **How concurrency and deletion work.** [`concurrency-lifecycle.md`](concurrency-lifecycle.md) —
-  generations, pins, the **three** retirement rules, the write-ahead log.
+  generations, retention, the removal rules (Rule S / Rule F), the write-ahead log — and
+  [`write-path.md`](write-path.md) for the write path end to end.
 - **How any of it is checked.** [`conformance.md`](conformance.md).
 - **How a client talks to it.** [`client-interaction.md`](client-interaction.md) and its children.
 
@@ -77,14 +78,15 @@ architecture design.
 | [`architecture.md`](architecture.md) | Normative | The specification: data model, the thirteen invariants, the leak register |
 | [`system-architecture.md`](system-architecture.md) | Normative | The built system: processes, planes, crates, lifecycle, config, packaging |
 | [`contracts.md`](contracts.md) | Normative | Byte level: bundle format, service API, plugin ABI, wire |
-| [`concurrency-lifecycle.md`](concurrency-lifecycle.md) | Normative | Generations, pins, the three retirement rules, the WAL, merge versus snapshot |
+| [`concurrency-lifecycle.md`](concurrency-lifecycle.md) | Normative | Generations, retention, the two removal rules, the WAL, merge versus snapshot |
 | [`conformance.md`](conformance.md) | Normative | The suite: the definitions-oracle, canaries, the byte-scanner, interleavings |
 | [`client-interaction.md`](client-interaction.md) | Provisional | What a client is: holdings, version coordinates, display obligations, protocol |
 | [`caching.md`](caching.md) | Provisional | Where data rests and what that costs — caching as feasibility, not optimisation |
 | [`derived-artifact-gating.md`](derived-artifact-gating.md) | Provisional | Non-point artifacts: clusters, labels, hulls, cells — one class, three gates |
 | [`slices-and-multi-table.md`](slices-and-multi-table.md) | Provisional | Named orthogonal coordinate systems, and physical table shards |
 | [`tile-addressed-integration.md`](tile-addressed-integration.md) | Provisional | Serving MapLibre, OpenLayers and QGIS by tile addressing |
-| [`flush-and-merge.md`](flush-and-merge.md) | Provisional | The row-space segment lifecycle: what makes an ingested item visible, and what bounds the segments that follow |
+| [`flush-and-merge.md`](flush-and-merge.md) | Provisional | The row-space segment lifecycle — being absorbed by `write-path.md`, which governs where they disagree once promoted; until then this stands |
+| [`write-path.md`](write-path.md) | Provisional | The write path end to end: ingest, the commit window, the WAL, flush, the deny lifecycle, merge, and where compaction will sit. Intended to absorb `flush-and-merge.md` and the write-path halves of the lifecycle design on promotion |
 | [`measurement.md`](measurement.md) | Provisional | What the suite measures and why: the axes, the denominators, the reporting conventions, and which figures may be published |
 | [`deferred-index-ordinal-split.md`](deferred-index-ordinal-split.md) | Deferred sketch | Splitting permanent identity from a renumberable index ordinal — **not approved**; its overlay question is open |
 | [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) | Deferred sketch | Sorting rows by (signature, morton) — **not approved**; three inputs it needs do not exist |

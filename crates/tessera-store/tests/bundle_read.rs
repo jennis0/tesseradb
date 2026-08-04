@@ -195,15 +195,14 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     assert_eq!(seg.seg_id, "seg0");
     assert_eq!(seg.row_count, items.len() as u32);
 
-    // columns.arrow round-trips row 0..n exactly.
+    // columns.arrow round-trips row 0..n exactly. (No `priority` column — decision 0046; the
+    // quantity is the high 16 bits of `tessera_id`, carried in the same row.)
     let tessera_id_col = seg.columns.tessera_id();
     let residual_col = seg.columns.residual();
-    let priority_col = seg.columns.priority();
     assert_eq!(tessera_id_col.len(), items.len());
     for (i, item) in items.iter().enumerate() {
         assert_eq!(tessera_id_col[i], item.tessera_id.raw());
         assert_eq!(residual_col[i], split32(item.qx, item.qy).1);
-        assert_eq!(priority_col[i], item.tessera_id.priority());
     }
 
     // morton.u32 round-trips exactly what sort_batch computed, and the two files' words

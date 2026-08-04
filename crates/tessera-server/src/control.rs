@@ -831,10 +831,18 @@ fn run_ingest(
         .engine
         .resolve_external_ids(&supplied_ids)
         .map_err(map_store_error)?;
+    // **A deleted holder is not a duplicate** (decision 0047: edit is delete + re-ingest, and our
+    // retention of a dead binding must never refuse a user's write). A **suppressed** holder
+    // still is one — suppression is temporary hiding, and re-ingesting a byte-identical copy past
+    // it is the exact hole this check exists to close. Resolution is newest-binding-first, so a
+    // re-ingested id's live holder is the one consulted here.
+    let overlay_generation = state.engine.generation();
     let existing_ids: Vec<String> = resolved
         .iter()
         .zip(&supplied)
-        .filter(|(entity, _)| entity.is_some())
+        .filter(|(entity, _)| {
+            entity.is_some_and(|e| !overlay_generation.overlay.is_deleted(e))
+        })
         .map(|(_, (_, id))| base64::engine::general_purpose::STANDARD.encode(id))
         .collect();
     if !existing_ids.is_empty() {
@@ -847,8 +855,8 @@ fn run_ingest(
     // **The buffer-occupancy bound (§1.3).** Checked here, before submission, and distinct from
     // `ingest_queue_bound`: that one bounds the *command queue* — 32 jobs by default — and the
     // executor drains a job into the buffer in milliseconds, so no ingest rate produces a 429 by
-    // buffer size through it. Between ticks the buffer is what grows, and deferring
-    // `flush_max_items` to the tick needs a bound on the thing that grows.
+    // buffer size through it. Between ticks the buffer is what grows, and a tick-only
+    // publication cadence needs a bound on the thing that grows. This is it.
     //
     // Placed after the duplicate checks and before the submission so a refusal costs no entity id,
     // no queue slot and no WAL append — the same standard the row cap above is held to.
@@ -1154,7 +1162,16 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     let mut decoded: Vec<DecodedChange> = Vec::with_capacity(items.len());
     for item in &items {
         let op = match item.op.as_str() {
-            "predicate" => ChangeOp::Predicate,
+            // **Withdrawn** (decision 0047, owner-ruled 2026-08-04): edit is delete + re-ingest.
+            // The evaluate machinery stays for records already in WALs; no new one is accepted.
+            "predicate" => {
+                return Err(ApiError::Contract(
+                    "the predicate op is withdrawn: edit is delete + re-ingest (decision 0047) — \
+                     delete the item, then re-ingest it under the same external_id with its new \
+                     access labels; a deleted holder does not block re-ingest"
+                        .to_string(),
+                ));
+            }
             "delete" => ChangeOp::Delete,
             "suppress" => ChangeOp::Suppress,
             "unsuppress" => ChangeOp::Unsuppress,
@@ -1450,7 +1467,7 @@ fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
         AcceptError::Exec(_) => matches!(op, ChangeOp::Delete | ChangeOp::Suppress),
         // Ingest-only, and refused before the submit — unreachable from a change, and in force in
         // no sense even if it were.
-        AcceptError::OutsideExtent { .. } => false,
+        AcceptError::OutsideExtent { .. } | AcceptError::SteppedDown => false,
     };
     if in_force {
         tracing::error!(
@@ -1522,14 +1539,17 @@ async fn changes(
     Ok(StatusCode::OK)
 }
 
-/// `POST /control/flush` (contracts §3.4): **accepted at any time, executed at the next tick.**
+/// `POST /control/flush` (contracts §3.4): **accepted at any time, executed promptly.**
 ///
-/// The 202 already means "accepted, not yet done", which is the whole reason this can be deferred
-/// without changing what a caller was promised. Publishing on request instead would make the real
-/// publication period a function of who calls this rather than of `flush_max_age_secs` — and every
-/// publication rotates the row-projection cache key, so that is the rate at which every live
-/// session pays to bring its projection forward. Same reason `flush_max_items` marks the buffer
-/// flush-ready rather than publishing.
+/// The request pulls the tick's deadline forward and wakes an idle executor, so the flush runs at
+/// the executor's next loop iteration — through the one tick path, with everything a tick
+/// guarantees (`Engine::request_flush`). The 202 still means "accepted, not yet done": the
+/// segment write is pool work of real duration and this response never waits on it.
+///
+/// This operator trigger is deliberately the only thing that may pull the tick — it is
+/// rate-decoupled from ingest, so it cannot recreate the publish-on-trip hazard that got
+/// `flush_max_items` deleted (decision 0045): a publication period proportional to load, rotating
+/// every session's projection key at that rate.
 ///
 /// Idempotent: two requests before one tick are satisfied by that tick together, because what is
 /// recorded is a flag and not a count.
@@ -1606,6 +1626,22 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "work_completed": executor.work_completed,
             "work_depth": executor.work_depth,
             "work_service_nanos_ewma": executor.work_service_nanos_ewma,
+            // The flush cadence's operator surface (write-path §4.7; out of contract, §0.1).
+            // `flush_skips` rising is the alarm the log line carries — a flush persistently
+            // slower than its tick is a visibility-latency breach — and `flushable_items` is the
+            // backlog gauge that distinguishes a gated node (stays at zero) from a failing one
+            // (grows). `buffered_items` is the occupancy the ingest 429 is checked against; note
+            // it counts items, not bytes (write-path §2.1).
+            "flush": {
+                "ticks": executor.ticks,
+                "flushes": executor.flushes,
+                "flush_skips": executor.flush_skips,
+                "flush_failures": executor.flush_failures,
+                "flushable_items": executor.flushable_items,
+                "flush_requested": executor.flush_requested,
+                "buffered_items": executor.buffered_items,
+                "overlay_publications": executor.overlay_publications,
+            },
             // Published beside the EWMA rather than folded into it: the EWMA is written only when a
             // job finishes, so during one long job it reports the previous regime. The 429
             // derivations take `max` of the two (`ExecutorStats::service_nanos_for_estimate`); an
@@ -1638,28 +1674,40 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // healthy while union cost climbs. These two numbers are what make it observable, and they
         // are what lets the deferred index-ordinal split trigger on evidence rather than suspicion.
         //
-        // **`scope` is in the body deliberately.** §3.4 defines these quantities over base plus
-        // delta tiers at flush or fold. Nothing in this process writes postings — flush is a later
-        // capability — so what is measured is the **commit-window allocation**: the ingest stream
-        // this process has served, with no bundle postings in it. A consumer reads JSON, never a
-        // document, so the narrowing is stated where the consumer is.
+        // **The headline ratios are tier-scope**: each delta tier is measured as encoded at its
+        // flush, and a tier spans every commit window the buffer accumulated between ticks — so
+        // between-window scatter, the erosion §11.1 records as permanent, is visible here where
+        // the old window-scope ratios were structurally blind to it (both their run count and
+        // their baseline were taken inside one window). Base postings are still outside the
+        // figure: they are one build-time global sort whose contribution is static, and folding
+        // them in arrives with compaction. `scope` stays in the body because a consumer reads
+        // JSON, never a document.
         //
-        // **`null`, not `0.0`, before the first window closes.** Zero is a value of this quantity
-        // (`run_ratio = 1.0` is fully scattered; `0` is not reachable at all), so publishing one for
-        // "nothing measured yet" would be a reading rather than an absence.
+        // **`null`, not `0.0`, before the first flush publishes.** Zero is a value of this
+        // quantity (`run_ratio = 1.0` is fully scattered; `0` is not reachable at all), so
+        // publishing one for "nothing measured yet" would be a reading rather than an absence.
         //
-        // The raw counters ride along under §0.1's out-of-contract clause: `postings / runs` is mean
-        // run length with none of `run_ratio`'s window-local normalisation, and `windows` is the
-        // denominator that says whether the ratios are a trend or an anecdote.
+        // The window-scope raw counters ride along under `allocation` (§0.1's out-of-contract
+        // clause), ratios withheld deliberately: at any reachable window size they answered
+        // "how well did one sorted run do against a random shuffle of itself", which reads as the
+        // health signal and is not it.
         "fragmentation": {
-            "scope": "commit-window-allocation",
-            "postings_per_container": executor.postings_per_container(),
-            "run_ratio": executor.run_ratio(),
-            "postings": executor.fragmentation.postings,
-            "runs": executor.fragmentation.runs,
-            "containers": executor.fragmentation.containers,
-            "rows": executor.fragmentation.rows,
-            "windows": executor.fragmentation_windows,
+            "scope": "delta-tiers",
+            "postings_per_container": executor.tier_postings_per_container(),
+            "run_ratio": executor.tier_run_ratio(),
+            "postings": executor.tier_fragmentation.postings,
+            "runs": executor.tier_fragmentation.runs,
+            "containers": executor.tier_fragmentation.containers,
+            "rows": executor.tier_fragmentation.rows,
+            "tiers": executor.fragmentation_tiers,
+            "allocation": {
+                "scope": "commit-window-allocation",
+                "postings": executor.fragmentation.postings,
+                "runs": executor.fragmentation.runs,
+                "containers": executor.fragmentation.containers,
+                "rows": executor.fragmentation.rows,
+                "windows": executor.fragmentation_windows,
+            },
         },
         // **`young_evictions` is an alarm, not an undifferentiated counter, and `thrashing` is the
         // predicate spelled out.** `> 0` is the argued threshold, not an arbitrary one: `prepare`

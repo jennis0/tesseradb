@@ -77,7 +77,6 @@ pub fn config() -> EngineConfig {
         // it is testing (`tests/pins.rs` does), so these must never be the reason a test passes.
         // A 300 s TTL means no case here reaches it by elapsing.
         flush_max_age_secs: 90,
-        flush_max_items: 100_000,
     }
 }
 

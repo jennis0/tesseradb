@@ -298,10 +298,26 @@ pub fn execute_merge(
 
     // **The runs merge by caller key, because that is the only order a run has** (flush §5.2b).
     // Unlike an extent, a run cannot be ordered against its neighbours — nothing coordinates what
-    // keys a caller supplies — so coalescing is a merge-sort over the bytes. A key present in two
-    // inputs cannot arise: an external id names one entity, and the ingest duplicate check refuses
-    // a second (contracts §3.1).
-    forward.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    // keys a caller supplies — so coalescing is a merge-sort over the bytes.
+    //
+    // **A key present in two inputs keeps the newest binding** (decision 0047): delete +
+    // re-ingest re-binds an external id, so the older holder is a forgotten, deleted entity and
+    // must not survive the coalesce — the reader resolves newest-run-first, and a coalesced run
+    // must answer exactly as the runs it replaced did. `forward` is collected input-by-input in
+    // manifest order (oldest first), so a stable sort keeps that order within equal keys and the
+    // keep-last dedup below selects the newest.
+    forward.sort_by(|a, b| a.0.cmp(&b.0));
+    {
+        let mut write = 0usize;
+        for read in 0..forward.len() {
+            if read + 1 < forward.len() && forward[read + 1].0 == forward[read].0 {
+                continue; // a newer binding for the same key follows; drop this one
+            }
+            forward.swap(write, read);
+            write += 1;
+        }
+        forward.truncate(write);
+    }
     let run_rows: Vec<(&[u8], u32)> = forward.iter().map(|(id, e)| (id.as_slice(), *e)).collect();
     write_external_id_run(&out_dir.join("external-ids.arrow"), &run_rows)?;
 

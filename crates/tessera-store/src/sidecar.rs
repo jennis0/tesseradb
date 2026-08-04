@@ -690,16 +690,19 @@ impl ExternalIdSidecar {
         let plain: Vec<RunDesc> = self.runs.iter().map(|e| e.desc.clone()).collect();
         let scan = scan_run_keys(&plain)?;
 
-        // **Every run whose own bounds could contain the key, not the first one past it.** Runs are
-        // not ordered against one another (contracts §2.4), so `first_key <= id <= last_key` is a
-        // filter and never a selector: taking the first run whose last key clears the target would
-        // answer from whichever run happened to be listed earliest, and miss the one that holds it.
+        // **Every run whose own bounds could contain the key, walked newest-first.** Runs are not
+        // ordered against one another (contracts §2.4), so `first_key <= id <= last_key` is a
+        // filter and never a selector. The walk is **reversed** — flush order is recorded, the
+        // build run is oldest — because delete + re-ingest re-binds an external id (decision
+        // 0047): the newest run holding the key carries the live binding, and an older hit is a
+        // forgotten holder. Before 0047 at most one run could hold a key and the order was
+        // immaterial; now it is the rule.
         //
         // The filter still does the work it was built for — a run whose range excludes the key is
         // never opened, verified or mapped — so the common case is unchanged. What changes is the
         // worst case, which is why §2.4 makes merge's coalescing of runs the bound on how many
         // there can be.
-        for (idx, bound) in scan.bounds.iter().enumerate() {
+        for (idx, bound) in scan.bounds.iter().enumerate().rev() {
             let Some((first, last, _)) = bound else {
                 continue;
             };
@@ -743,10 +746,11 @@ impl ExternalIdSidecar {
         // cost is O(runs x keys) byte comparisons against no I/O at all, and a run whose range
         // admits no key in the batch is still never opened.
         //
-        // `results[i].is_none()` is the early-out: an external id names one entity and the ingest
-        // duplicate check refuses a second (contracts §3.1), so a key found in one run cannot be in
-        // another, and later runs need not reconsider it.
-        for (idx, bound) in scan.bounds.iter().enumerate() {
+        // `results[i].is_none()` is the early-out, and the walk is **newest-run-first** (decision
+        // 0047): delete + re-ingest re-binds an external id, so a key may appear in several runs
+        // and the newest binding is the live one — the first hit in reverse order. Older runs need
+        // not reconsider a resolved key, which keeps the opened-at-most-once property.
+        for (idx, bound) in scan.bounds.iter().enumerate().rev() {
             let Some((first, last, _)) = bound else {
                 continue;
             };

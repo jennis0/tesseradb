@@ -81,10 +81,9 @@ fn tiler_and_segment_writers_round_trip() {
     let mut reader = FileReader::try_new(file, None).expect("FileReader::try_new");
     let schema = reader.schema();
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-    assert_eq!(names, vec!["tessera_id", "residual", "priority"]);
+    assert_eq!(names, vec!["tessera_id", "residual"]);
     assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
     assert_eq!(schema.field(1).data_type(), &DataType::UInt32);
-    assert_eq!(schema.field(2).data_type(), &DataType::UInt16);
 
     let batch = reader.next().expect("one batch").expect("batch ok");
     assert!(reader.next().is_none(), "expected exactly one record batch");
@@ -102,12 +101,6 @@ fn tiler_and_segment_writers_round_trip() {
         .downcast_ref::<UInt32Array>()
         .unwrap();
     assert_eq!(residual_col.value(0), split32(items[0].qx, items[0].qy).1);
-    let priority_col = batch
-        .column(2)
-        .as_any()
-        .downcast_ref::<UInt16Array>()
-        .unwrap();
-    assert_eq!(priority_col.value(0), items[0].tessera_id.priority());
 
     // The stored pair is one splitting of one position: the residual at row i and the code at
     // row i are the two halves of `split32` over the same item, so this also pins that
@@ -117,7 +110,6 @@ fn tiler_and_segment_writers_round_trip() {
         let (cell, residual) = split32(item.qx, item.qy);
         assert_eq!(residual_col.value(i), residual);
         assert_eq!(codes[i], cell.raw());
-        assert_eq!(priority_col.value(i), item.tessera_id.priority());
     }
 
     // (c) permutation.bin: header, then perm[entity_id[i]] == i for every row, and a
@@ -299,18 +291,15 @@ fn write_segment_scalars_round_trip() {
     let mut reader = FileReader::try_new(file, None).expect("FileReader::try_new");
     let schema = reader.schema();
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-    assert_eq!(
-        names,
-        vec!["tessera_id", "residual", "priority", "count", "label"]
-    );
+    assert_eq!(names, vec!["tessera_id", "residual", "count", "label"]);
     let batch = reader.next().unwrap().unwrap();
     let count_col = batch
-        .column(3)
+        .column(2)
         .as_any()
         .downcast_ref::<UInt64Array>()
         .unwrap();
     let label_col = batch
-        .column(4)
+        .column(3)
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
         .unwrap();
@@ -379,9 +368,10 @@ fn a_pre_residual_columns_file_is_a_typed_error_rather_than_a_misread_position()
     // The cell-plus-residual change carries **no `bundle_format` bump** — format 1 has never
     // been published — and that is only safe because `validate_schema` compares the fixed
     // columns by name *and* type. This is the test that makes it so: a bundle written before
-    // the change carries `x`/`y` `f32` where `residual`/`priority` now sit, and must fail at
-    // open rather than reading a float's bits as a sub-cell position and a second float's as a
-    // priority. Without this, an old bundle against a new reader is silent nonsense geometry.
+    // the change carries `x`/`y` `f32` where `residual` now sits, and must fail at open rather
+    // than reading a float's bits as a sub-cell position. Without this, an old bundle against a
+    // new reader is silent nonsense geometry. (The fixture's `priority` column also makes it a
+    // pre-0046 file, which the two-column schema refuses for the same reason.)
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("columns.arrow");
     let schema = Arc::new(Schema::new(vec![
@@ -502,17 +492,11 @@ fn write_columns_from_parts_matches_write_columns_byte_for_byte() {
         }
 
         // And the strict reader (one batch, uncompressed, aligned, fixed schema, no nulls)
-        // accepts it, with `priority` derived from `tessera_id` exactly as contracts §2.6 r6
-        // defines it.
+        // accepts it. (No `priority` column — decision 0046.)
         let cols = ColumnsRef::load(&via_parts).expect("ColumnsRef must load from_parts output");
         assert_eq!(cols.row_count() as usize, rows);
         assert_eq!(cols.tessera_id(), &tessera[..]);
         assert_eq!(cols.residual(), &residual[..]);
-        let expected_priority: Vec<u16> = tessera
-            .iter()
-            .map(|&id| TesseraId::new(id).priority())
-            .collect();
-        assert_eq!(cols.priority(), &expected_priority[..]);
     }
 }
 

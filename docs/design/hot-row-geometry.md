@@ -20,7 +20,8 @@ Morton cell code in `morton.u32` — sorted, searched, byte-identical to today �
 64-bit interleave, which is what goes on the wire (§4) and nowhere else.
 
 Storage capacity rises to **32 bits per axis** (§2.2 — what a given corpus realises depends on the
-corpus), `columns.arrow` falls from 18 to 14 B/row, and the client receives the Morton cell
+corpus), `columns.arrow` falls from 18 to 14 B/row *(12 since decision 0046 cut the `priority`
+column, 2026-08-04 — this document's figures predate that and are not restated)*, and the client receives the Morton cell
 alongside the position for free.
 
 ---
