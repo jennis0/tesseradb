@@ -12,6 +12,15 @@ concurrency-lifecycle §1–§5, §7, §8; system-architecture §6.2, §9.
 concurrency-lifecycle, `contracts §n` contracts, `SA §n` system-architecture. This document's own
 sections are cited as **spec §n**.
 
+> **The mechanism moved, 2026-08-04.** [`write-path.md`](write-path.md) carries the write path end
+> to end, and where the two disagree it is the current one — its promotion (which supersedes this
+> document) is owner-gated and has not happened, so this text still stands on paper. What changed
+> most since: **§3.4's inline projection patch and §9's per-request fragment rebuild are no longer
+> what runs.** Decision [0044](../decisions/0044-invisible-means-stale-serve-plus-background-refresh.md)
+> replaced both with stale-serve plus a background refresh at each publication (write-path §4.6),
+> because the patch's cost is a bitmap **clone** — a *measured* 40.9 ms at 10⁹, against a 0.2 ms
+> budget (`probes/2026-08-04-refresh-ladder/`). Merge publishes in both halves (write-path §7).
+
 **Owns:** the row-space segment lifecycle. Flush turns WAL-durable buffered items into a published
 segment, which is what makes an ingested item visible at all; merge bounds the segment and
 delta-tier counts flush would otherwise grow without limit. Both are **invariant-neutral**: neither

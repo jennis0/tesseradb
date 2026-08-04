@@ -93,9 +93,11 @@ pub use write::{
 pub use write::{estimate_retry_after_s, RETRY_AFTER_MAX_SECS, RETRY_AFTER_MIN_SECS};
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1).
-/// **⊘ Partially implemented:** §1.1's merge and compaction fields are absent, there being no
-/// merge and no compaction; what is here is the bundle, the overlay, the buffer and the counters
-/// that identify them.
+///
+/// **⊘ Partially implemented:** §1.1's compaction fields are absent, there being no compaction.
+/// Merge no longer is: both halves publish through this type — the entity-space coalesce without
+/// moving `segments_version`, the row-space merge as its own swap (`crate::coalesce`,
+/// `crate::merge`).
 pub struct Generation {
     /// The bundle's `CURRENT` prefix (e.g. `"v00000"`) this generation was loaded from.
     pub prefix: String,

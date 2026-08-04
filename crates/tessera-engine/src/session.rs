@@ -1232,10 +1232,16 @@ impl Engine {
     /// contribution for the session's already-satisfied terms — *"a small, monotone patch rather
     /// than a rebuild"* — and flush §3.4 sets out the four premises under which that patch is
     /// **equal** to what a rebuild produces. **This is the rebuild.** It is correct for the same
-    /// reason the patch would be — `satisfied` is fixed at authorise and never re-resolved (premise
-    /// 3), so the terms unioned are exactly the terms a rebuild consults — and it is what makes the
-    /// flush observable to a live session today. The incremental form is plan Task 12, with its
-    /// byte-equality property test, and is not built (⊘).
+    /// reason the patch would be: `satisfied` is fixed at authorise and never re-resolved (premise
+    /// 3), so the terms unioned are exactly the terms a rebuild consults.
+    ///
+    /// **⊘ The incremental form is not built, and is not being built** — a ruling, not a backlog
+    /// entry. Decision 0044's D4 made it conditional on this being seconds-scale at 10⁹; probe P2
+    /// measured **~200 ms and flat in tier count**, refuting the model. The incremental form would
+    /// trade that for a ~41 ms bitmap clone, on work that had to move off the request thread
+    /// anyway — and the mechanism that moved it (`crate::refresh`) is the same one the projection
+    /// needed. Re-open it if a credential's satisfied set grows by orders, the base union being
+    /// the whole of the 200 ms.
     ///
     /// **What that costs, and where it is now paid.** One `build_fragment_with_deltas` per
     /// *credential*, not per session: [`tessera_authz::FragmentCache`] keys on
