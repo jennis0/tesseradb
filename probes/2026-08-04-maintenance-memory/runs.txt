@@ -1,0 +1,9 @@
+# maintenance_memory — peak RSS across a merge
+rows_per_segment=500000 segments=4
+merge: inputs 77.9 MB on disk, VmHWM 377.8 MB (baseline before the merge 116.9 MB) → **4.9x** the inputs' file bytes
+# maintenance_memory — peak RSS across a merge
+rows_per_segment=2000000 segments=4
+merge: inputs 314.9 MB on disk, VmHWM 1378.9 MB (baseline before the merge 448.3 MB) → **4.4x** the inputs' file bytes
+# maintenance_memory — peak RSS across a merge
+rows_per_segment=1000000 segments=8
+merge: inputs 314.9 MB on disk, VmHWM 1397.8 MB (baseline before the merge 237.6 MB) → **4.4x** the inputs' file bytes

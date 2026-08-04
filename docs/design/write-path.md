@@ -1000,13 +1000,16 @@ a merge moves neither (deriving them from the inputs would move the watermark *b
 any merge not containing the newest segment, silently hiding every flushed entity above it; the
 defect existed and is fixed).
 
-**Merge's memory peak is ≈5–7× its inputs' on-disk bytes** (memory review, 2026-08-04,
-modelled): every input decoded to items at once, doubled at the sort — and
-`max_merged_segment_bytes` bounds the *selection-time file bytes*, not the decoded resident set
-and not the output; `execute_merge` itself enforces nothing. A 256 MiB cap models to a
-~1.3–1.8 GB pool transient. Tier coalescence peaks at ≈2–3× the pairs' bytes (the union map
-holds every input tier's pairs at once). No maintenance event's peak memory has ever been
-measured; the probe is named at spec §12.
+**Merge's memory peak is a measured 4.4–4.9× its inputs' on-disk bytes**
+(`probes/2026-08-04-maintenance-memory/`; the modelled ≈5–7× was conservative, which is the right
+direction for a figure a limit is set from). Every input is decoded to items at once and doubled
+at the sort, and the inputs' mapped pages stay resident — so `max_merged_segment_bytes`, which
+bounds the *selection-time file bytes* rather than the decoded set, is a memory budget only
+through this multiplier: **a 256 MiB cap models to a ~1.1–1.3 GB pool transient**, and
+`execute_merge` itself enforces nothing. The figure holds its shape across input count, so it is
+a function of the bytes rather than of the segments. Tier coalescence, ≈2–3× the pairs' bytes,
+is still modelled — its inputs are postings rather than rows and the probe's shape does not
+transfer. Nothing bounds the **sum** when a flush, a merge and a coalesce overlap on the pool.
 
 **The base segment and the build run are excluded by consequence, not rule**: a merge's inputs
 are flush segments; swallowing the base pays compaction's entire cost (a full permutation
@@ -1202,7 +1205,8 @@ Cited, never restated; the table is the audit trail from mechanism to obligation
 | the three merge growth axes (runs / tiers / segments) | modelled — no axis measured; probe P3 named. Three of the four axes are now *bounded* by the entity-space coalesce, which changes what the number would be, not that it is unmeasured | merge review memo §3, §7 |
 | fragment rebuild per credential at 10⁹: **~200 ms, flat in tier count** (199 ms at 1 tier, 198 ms at 512) | measured — P2, and it **refuted** the "modelled seconds" this document carried; the term is bounded, not conformant | `probes/2026-08-04-refresh-ladder/` |
 | flush-segment size uniformity at steady ingest | assumed | merge review memo §2 |
-| flush transients ≈1×/2–2.5×/1× buffer bytes (plan/execute/rebase; worst overlap ~3.5–5×); merge ≈5–7× input file bytes; dict clone 7.1 GB at 1.17×10⁸ terms per promoting flush | modelled (dict clone measured) — **no maintenance event's peak RSS has been measured**; the named probe: one instrumented ingest→`/control/flush`→publication cycle sampling `VmHWM`, one promoting cell | memory review, 2026-08-04; `probes/2026-08-03-dict-fst/` |
+| **merge execute peaks at 4.4–4.9× its inputs' on-disk bytes** (stable across 78–315 MB and across 4 vs 8 input segments) | measured — `VmHWM`, one stage per process; the model said ≈5–7×, so it was conservative in the safe direction | `probes/2026-08-04-maintenance-memory/` |
+| flush transients ≈1×/2–2.5×/1× buffer bytes (plan/execute/rebase; worst overlap ~3.5–5×); tier coalescence ≈2–3× the pairs' bytes; dict clone 7.1 GB at 1.17×10⁸ terms per promoting flush | modelled (dict clone measured). **Still unmeasured: the flush cycle, tier coalescence, and the sum when a flush, a merge and a coalesce overlap on the pool** | memory review, 2026-08-04; `probes/2026-08-03-dict-fst/` |
 
 ## 13. Supersession map
 
