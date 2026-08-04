@@ -1617,6 +1617,7 @@ impl WritePath {
                     coalesce_done: coalesce_rx,
                     coalesce_submit: coalesce_tx,
                     external_index: flush.external_index,
+                    refresh: flush.refresh,
                     last_tick: std::time::Instant::now(),
                     // Seeded from the opened WAL's position so a freshly started node does not
                     // rotate until something is appended in this run.
@@ -2363,6 +2364,9 @@ pub(crate) struct MaintenanceDeps {
     /// executor is the only writer of this cell, exactly as it is the only publisher of
     /// generations.
     pub(crate) external_index: Arc<arc_swap::ArcSwap<crate::session::ExternalIdIndex>>,
+    /// What a geometry publication needs to start the background refresh decision 0044's D1
+    /// rules — see [`crate::refresh`].
+    pub(crate) refresh: crate::refresh::RefreshDeps,
     /// The bundle's current prefix directory. A flush writes inside it, and never touches
     /// `MANIFEST.json` or `CURRENT`.
     pub(crate) prefix_dir: PathBuf,
@@ -2571,6 +2575,8 @@ struct Executor {
     coalesce_submit: Sender<crate::coalesce::CompletedCoalesce>,
     /// The external-id sidecar cell — see [`MaintenanceDeps::external_index`].
     external_index: Arc<arc_swap::ArcSwap<crate::session::ExternalIdIndex>>,
+    /// The background refresh's dependencies — see [`crate::refresh`].
+    refresh: crate::refresh::RefreshDeps,
     /// The sender pool tasks are given a clone of.
     ///
     /// **Nothing rings the doorbell when a flush completes**, and that is deliberate twice over.
@@ -4686,7 +4692,7 @@ impl Executor {
         // buffered, had no row, and so appeared in no mask at all.
         let denied = Arc::new(crate::compose::derive_denied(&live.overlay, &next_bundle));
 
-        let next = Generation {
+        let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
             segments_version,
             watermark,
@@ -4698,8 +4704,15 @@ impl Executor {
             overlay: Arc::clone(&live.overlay),
             buffer: Arc::new(buffer),
             denied,
-        };
-        let _published = self.publish(next, started);
+        });
+        // **Armed before the swap, and that ordering is the mechanism** (decision 0044 D1; review
+        // finding F5). A request landing between the swap and the pool task's first insert must
+        // find the flag set, or it takes rung 3 of the ladder as a *build* — the measured 4 550 ms
+        // rebuild after a merge — where the whole design is that it be shed with a 429 for the
+        // bounded duration of the refresh instead.
+        self.refresh.in_flight.store(true, Ordering::SeqCst);
+        let _published = self.publish_arc(Arc::clone(&next), started);
+        self.refresh.spawn(next);
 
         // A flush supersedes geometry, so it prunes exactly as any other geometry publication
         // does: one swap, one `segments_version` bump, one retention pass. The superseded
@@ -4888,6 +4901,12 @@ impl Executor {
     /// use. `scripts/check-layers.sh` refuses any non-atomic `.store(` in this crate's sources
     /// outside this file — and that rule is demonstrated going red, not merely written.
     fn publish(&self, next: Generation, started: std::time::Instant) -> Published {
+        self.publish_arc(Arc::new(next), started)
+    }
+
+    /// [`Self::publish`] over a generation the caller already holds by `Arc` — a geometry
+    /// publication needs the same value afterwards, to hand the background refresh.
+    fn publish_arc(&self, next: Arc<Generation>, started: std::time::Instant) -> Published {
         // **The deny mask's derivation rule, enforced at the one place a generation becomes live.**
         // `crate::compose::derive_denied` states the rule; every build site — the incremental
         // addition on a deny window, the rebuild at each geometry publication, the carry-forward
@@ -4901,7 +4920,7 @@ impl Executor {
              `derive_denied`; an unsuppress subtracting a row while `deleted` still holds the \
              entity is the classic way"
         );
-        self.generation.store(Arc::new(next));
+        self.generation.store(next);
         // The overlay/buffer clone above is O(total buffered items). This counter is what makes
         // the deny-ack floor measurable rather than asserted — see
         // `ExecutorHealth::apply_nanos_total`.

@@ -1,20 +1,25 @@
-//! The row-projection patch: a flush must not cost every session a full rebuild.
+//! The row-projection refresh: a flush must cost a live session **nothing** on its request thread.
 //!
 //! Every flush advances `segments_version`, which is a component of `RowProjectionKey`, so every
-//! flush rotates every live session's key. A miss is `Permutation::project` over the session's
-//! whole fragment — a **measured 10.7 s at 10⁹** — and flush-and-merge §9 states the consequence:
-//! *"the fallback is not an edge case but the steady state: a full 10.7 s projection per session
-//! per tick, synchronised across the session population"*.
+//! flush rotates every live session's key. Doing anything about that inline was measured at 4 550 ms
+//! for a rebuild and 40.9 ms for the patch's bitmap clone alone at 10⁹
+//! (`probes/2026-08-04-refresh-ladder/`), against decision 0044's stated budget of 0.2 ms. The
+//! mechanism is therefore a background refresh at each publication, with a three-rung ladder in
+//! front of it (`Engine::session_geometry`).
 //!
-//! Two things have to hold together, and each is worthless without the other:
+//! Three things have to hold together, and each is worthless without the others:
 //!
-//! - **The patch happens.** Asserted on `Engine::full_projection_builds`, not on timing — a
-//!   wall-clock assertion at fixture scale would measure noise.
-//! - **The patch is a rebuild.** Asserted on response equality against an engine that never had
-//!   the source entry to derive from, so the two answers come from genuinely different routes.
+//! - **The refresh happens, and the request pays nothing.** Asserted on
+//!   `Engine::full_projection_builds`, not on timing — a wall-clock assertion at fixture scale
+//!   would measure noise.
+//! - **What it produces is a rebuild.** Asserted on response equality against an engine that never
+//!   had a source entry to derive from, so the two answers come from genuinely different routes.
+//! - **The window in front of it is stale-serve, not a build.** Asserted with the refresh switched
+//!   off, which is the only way to observe a window that is otherwise a race with the pool.
 //!
-//! A test with only the first passes against a patch that quietly loses rows; a test with only the
-//! second passes against no patch at all.
+//! A suite with only the first passes against a refresh that quietly loses rows; one with only the
+//! second passes against no refresh at all; one without the third passes against a request path
+//! that silently reinstates the inline rebuild.
 
 mod common;
 
@@ -69,15 +74,15 @@ fn whole_extent() -> ViewportRequest<'static> {
     ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], N_ITEMS as usize)
 }
 
-/// **The property, both halves.** After a flush, the session's next viewport derives its projection
-/// from the superseded generation's entry — no full build — and the response it produces is
-/// identical to the one a cold engine builds from scratch over the same published bundle.
+/// **The property, all of it.** After a flush the background refresh produces the session's next
+/// entry, the session's next viewport pays no build at all, and what it is served is identical to
+/// what a cold engine builds from scratch over the same published bundle.
 ///
 /// The cold engine is opened on its **own** WAL, so its ingest buffer is empty and it has no
-/// superseded entry to derive from: its first viewport is necessarily a full build. That is what
+/// resident entry to refresh from: its first viewport is necessarily a full build. That is what
 /// makes the equality a comparison of two routes rather than of one route with itself.
 #[test]
-fn a_flush_patches_a_sessions_projection_and_the_patch_equals_a_rebuild() {
+fn a_flush_refreshes_a_sessions_geometry_and_the_refresh_equals_a_rebuild() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     build_fixture(
@@ -89,7 +94,8 @@ fn a_flush_patches_a_sessions_projection_and_the_patch_equals_a_rebuild() {
     let engine = engine_at(tmp.path(), &root, "wal", 1);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
 
-    // The first viewport is a genuine build: there is no earlier generation to derive from.
+    // The first viewport is a genuine build: this session has no resident entry, which is
+    // establishment and is outside decision 0043's scope.
     engine.viewport(&session, whole_extent()).unwrap();
     assert_eq!(
         engine.full_projection_builds(),
@@ -107,46 +113,49 @@ fn a_flush_patches_a_sessions_projection_and_the_patch_equals_a_rebuild() {
         1,
         "the flush must move geometry, or the key never rotates and this is vacuous"
     );
+    wait_until("the background refresh to produce the new entry", || {
+        engine.refreshes() >= 1
+    });
 
-    let patched = engine.viewport(&session, whole_extent()).unwrap();
+    let refreshed = engine.viewport(&session, whole_extent()).unwrap();
     assert_eq!(
         engine.full_projection_builds(),
         1,
-        "the post-flush viewport must DERIVE from the superseded generation's entry -- a rise \
-         here is a full Permutation::project per session per tick, which is flush §9's steady \
-         state"
+        "the post-flush viewport must be served from the refresh's entry — a rise here is a full \
+         Permutation::project per session per tick, on the request thread, which is exactly what \
+         decision 0044 rules out"
     );
 
-    // The reference: a cold engine over the same published bundle, on its own WAL, with nothing to
-    // derive from.
+    // The reference: a cold engine over the same published bundle, on its own WAL, with nothing
+    // resident to refresh from.
     let cold = engine_at(tmp.path(), &root, "wal-cold", 3600);
     let cold_session = cold.authorise(&full_coverage_credential()).unwrap();
     let rebuilt = cold.viewport(&cold_session, whole_extent()).unwrap();
     assert_eq!(
         cold.full_projection_builds(),
         1,
-        "the reference must be a genuine rebuild, or the comparison is between two patches"
+        "the reference must be a genuine rebuild, or the comparison is between two refreshes"
     );
 
     assert_eq!(
-        patched, rebuilt,
-        "a patched projection must produce byte-identical counts and points to a rebuilt one"
+        refreshed, rebuilt,
+        "a refreshed projection must produce byte-identical counts and points to a rebuilt one"
     );
     assert!(
-        patched.tiles.iter().map(|t| t.visible).sum::<u64>() > N_ITEMS,
+        refreshed.tiles.iter().map(|t| t.visible).sum::<u64>() > N_ITEMS,
         "and both must actually include the flushed items, or equality is satisfied by two \
          projections that both lost them"
     );
 }
 
-/// A second flush derives from the first flush's generation, not from the build's — so the depth-1
+/// A second flush refreshes from the first flush's entry, not from the build's — so the depth-1
 /// retention is sufficient for a *sequence* of flushes and not only for one.
 ///
 /// The mutation this kills is a retention floor computed from the build generation rather than
 /// from the live one: that keeps generation 0 alive for ever and drops generation 1, so the second
-/// flush's derive misses and rebuilds. Nothing else in the suite notices.
+/// refresh has nothing to extend and rebuilds. Nothing else in the suite notices.
 #[test]
-fn consecutive_flushes_each_derive_from_the_one_before() {
+fn consecutive_flushes_each_refresh_from_the_one_before() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     build_fixture(
@@ -165,6 +174,7 @@ fn consecutive_flushes_each_derive_from_the_one_before() {
             engine.write_executor_stats().flushes >= flush
         });
         assert_eq!(engine.generation().segments_version, flush);
+        wait_until("the refresh to catch up", || engine.refreshes() >= flush);
 
         let out = engine.viewport(&session, whole_extent()).unwrap();
         assert_eq!(
@@ -177,5 +187,98 @@ fn consecutive_flushes_each_derive_from_the_one_before() {
             1,
             "flush {flush}: still the one build from the very first viewport"
         );
+    }
+}
+
+/// **The window in front of the refresh is stale-serve, and stale-serve is fail-closed** (decision
+/// 0044's rung 2).
+///
+/// With the refresh switched off, the request that follows a flush finds no live entry and must
+/// serve the one-generation-stale one *as it is*: no build, no 429, and the freshly flushed items
+/// not yet drawn. That last part is the whole claim — a flush appends, so every row id the stale
+/// entry holds still names the same entity and what it lacks is only rows that did not exist when
+/// it was built. The session sees them one refresh later.
+///
+/// **Mutation:** make rung 2 rebuild instead of serving, and `full_projection_builds` rises —
+/// which is the inline 4 550 ms this design exists to remove.
+#[test]
+fn the_window_before_a_refresh_serves_stale_geometry_rather_than_rebuilding() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = engine_at(tmp.path(), &root, "wal", 1);
+    engine.set_background_refresh_for_test(false);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let before = engine.viewport(&session, whole_extent()).unwrap();
+    let visible_before: u64 = before.tiles.iter().map(|t| t.visible).sum();
+
+    ingest(&engine, "ext-1", 5.0, 5.0);
+    wait_until("the flush to publish", || {
+        engine.write_executor_stats().flushes >= 1
+    });
+    assert_eq!(engine.generation().segments_version, 1);
+
+    let during = engine.viewport(&session, whole_extent()).unwrap();
+    assert_eq!(
+        engine.stale_serves(),
+        1,
+        "the post-flush request must take rung 2"
+    );
+    assert_eq!(
+        engine.full_projection_builds(),
+        1,
+        "and must not have rebuilt — that is the inline cost decision 0044 removes"
+    );
+    assert_eq!(
+        during.tiles.iter().map(|t| t.visible).sum::<u64>(),
+        visible_before,
+        "the flushed item is not yet drawn: fail-closed staleness, never a deny miss"
+    );
+
+    // **And the staleness self-heals rather than compounding.** Stale-serve inserts nothing, so a
+    // session whose refresh never runs would sit one generation behind for ever — which would
+    // silently falsify the ack→visibility bound. What stops it is the retention depth: at the next
+    // publication the entry is two generations back, `prune_generations_below` removes it, and the
+    // session's next request finds neither rung 1 nor rung 2 and builds. Fail-closed staleness is
+    // bounded at two publications, never permanent.
+    engine.set_background_refresh_for_test(true);
+    ingest(&engine, "ext-2", 500.0, 500.0);
+    wait_until("the second flush", || {
+        engine.write_executor_stats().flushes >= 2
+    });
+    let after = wait_for_viewport(&engine, &session);
+    assert_eq!(
+        after.tiles.iter().map(|t| t.visible).sum::<u64>(),
+        visible_before + 2,
+        "both flushed items are drawn: the stale entry aged out and the session rebuilt"
+    );
+    assert_eq!(
+        engine.full_projection_builds(),
+        2,
+        "and it did so by a build — the one the retention depth forces when a refresh is missed"
+    );
+}
+
+/// A viewport, retried past the bounded `ProjectionBuilding` a refresh window can answer with.
+/// Decision 0044 permits exactly this residual, and a test that did not retry would be asserting
+/// that the residual does not exist.
+fn wait_for_viewport(engine: &Engine, session: &tessera_engine::Session) -> tessera_engine::viewport::ViewportOut {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match engine.viewport(session, whole_extent()) {
+            Ok(out) => return out,
+            Err(e) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out retrying a viewport: {e}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
     }
 }

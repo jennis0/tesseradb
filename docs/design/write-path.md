@@ -578,47 +578,45 @@ the records that carried allocations can never let a restart reissue an entity i
 
 ### 4.6 What the viewer observes at a flush
 
-- **The flushed items appear** — in counts, density, selection — for every session, at that
-  session's next request. Two session artefacts are brought forward to make that true:
-  - **The row projection** (per session, keyed on `segments_version`) is **patched, not
-    rebuilt**: the new key's value is derived from the superseded generation's entry — the old
-    bitmap unioned with a projection over the new extent only — which is *equal to* a rebuild
-    because a flush appends: the flushed range is contiguous, disjoint from everything below,
-    entirely at or above the pre-flush watermark; base postings are untouched; `satisfied` is
-    fixed per session; and single-flight publication prevents interleaving. **Asserted by a
-    byte-equality property test, not by this paragraph.** The patch input is the
-    one-generation-back entry; a session quiet through **two or more** publications falls to a
-    full rebuild — a **measured 10.7 s at 10⁹** (and a measured 125.12 MB per wide-grant entry,
-    which is what sizes the cache). A concurrent same-key request during any build gets **429
-    `backpressure`, `Retry-After: 1`** — single-flight waiters do not block (lifecycle §7.2).
-  - **The mask fragment** is rebuilt at the live watermark through the shared disk cache
-    (watermark is part of the disk key, so a pre-flush fragment is never found by a post-flush
-    lookup), keyed so every session sharing a credential shares one build. ⊘ **The incremental
-    form** — `old ∪ (delta ∩ satisfied)`, whose equality to a rebuild rests on the same four
-    premises — **is not built**; what runs is a full `build_fragment_with_deltas` per credential
-    per tick, **unmeasured at 10⁹** (modelled seconds — §13.1's posting-union scale), on the
-    request thread.
-- **Decisions 0043/0044 are not yet satisfied, and this is the honest statement of the gap.**
-  0043: flush, merge and compaction may not block the request thread. 0044 (2026-08-04) defines
-  what that means: **update-induced request-path work is zero in the steady state** — stale-serve
-  plus eager background refresh over resident keys — with a bounded 429 residual only for
-  same-key racers during a merge's refresh window, and full builds only at session
-  establishment. Stale-serve is sound for a flush because a flush appends and the deny mask is
-  composed live, so a stale entry is fail-closed staleness, never a deny miss. ⊘ The mechanism
-  is unbuilt. What happens instead, per publication: the projection patch (a bitmap clone —
-  tens of milliseconds at a measured 125.12 MB wide-grant entry, two orders over 0044's budget)
-  and the full fragment rebuild (the largest unmeasured term) run on the first request that
-  needs them, with racers shed 429. Probes P1/P2 run before the mechanism is coded. **Two
-  obligations the mechanism inherits (review, 2026-08-04):** the row-projection key carries no
-  fragment identity — today the projection is coupled to the fragment only by request ordering
-  (`fragment_for` runs first and always lands at the live watermark), and stale-serve
-  deliberately breaks that ordering, so a projection derived from a stale fragment would be
-  inserted at the *new* `segments_version` key and pin the session's freshly flushed items
-  invisible until the next publication (fail-closed, and it silently falsifies §4.1's
-  ack→visibility bound) — the fragment's watermark joins the projection key, or the two
-  artefacts refresh jointly. And **the refresh must claim resident keys before the swap makes
-  the new version observable**: a racer landing between the swap and the claim takes the inline
-  path, and after a merge that is the measured 10.7 s rebuild, not a 429.
+- **The flushed items appear** — in counts, density, selection — for every session, **one refresh
+  after the publication**, and the request thread pays nothing for it (decision 0044's D1). At
+  each geometry publication one pool task refreshes every **resident** cache entry — O(cache
+  residency), never O(sessions) — producing the session's fragment at the new watermark and the
+  projection over it as **one value**. In front of it sits a three-rung ladder
+  (`Engine::session_geometry`):
+  1. the live entry, which is the steady state and costs nothing;
+  2. failing that, the **one-generation-stale** entry, served as it is. Sound for a flush and only
+     for a flush: a flush appends, so every row id the stale entry holds still names the same
+     entity, and what it lacks is rows that did not exist when it was built — the session sees
+     them one refresh later, which is fail-closed staleness and never a deny miss. The deny mask
+     and the overlay are composed live over it. `RowProjection::extends_to` is the predicate, and
+     it is exact: after a merge the boundary segment differs and this rung refuses;
+  3. failing that, **429 `backpressure`, `Retry-After: 1` if a refresh is in flight**, otherwise a
+     build. The 429 is 0044's bounded residual; the build is session establishment or a rebuild
+     after eviction, neither of them update-induced.
+- **The fragment and the projection are one cache entry, because stale-serve breaks the ordering
+  that used to couple them** (review finding F5). Until this, `fragment_for` ran first and always
+  landed at the live watermark, so the projection built after it was necessarily over it — a
+  coupling held by request ordering and by nothing in the types. A projection derived from a stale
+  fragment but inserted under the *new* `segments_version` key would pin the session's freshly
+  flushed items invisible until the next publication, silently falsifying §4.1's ack→visibility
+  bound. Carrying the pair makes the mismatch unexpressible. The drill-down takes its fragment
+  from the same entry, so `visible_to` and the map cannot drift (§14's obligation 27).
+- **`refresh_in_flight` is armed before the swap, and that ordering is the mechanism.** A racer
+  landing between the swap and the pool task's first insert must find it set, or after a merge it
+  takes rung 3 as a *build* — the measured 4 550 ms — where the design is that it be shed for the
+  refresh's bounded duration (review finding F5).
+- **Stale-serve inserts nothing, and the retention depth is what stops that compounding.** A
+  session whose refresh never runs would otherwise sit one generation behind for ever. At the next
+  publication its entry is two back, `prune_generations_below` removes it, and its next request
+  builds: the staleness is bounded at two publications, never permanent, and a refresh that
+  cannot run degrades to the pre-0044 behaviour rather than wedging a session at 429.
+- **The measured ladder** (`probes/2026-08-04-refresh-ladder/`, 10⁹, 25% grant): rebuild 4 550 ms;
+  the patch's bitmap clone 40.9 ms; the union over one new extent 0.24 ms; the span rebase 44.6 ms;
+  the fragment build ~200 ms and **flat in tier count** (199 ms at 1 tier, 198 ms at 512 — the
+  "modelled seconds" this document carried was wrong, and P2 refuted it). The patch is the clone
+  and nothing else, because the cached value is immutable (lifecycle §7) so a patch must copy
+  before it unions — which is why no inline arrangement reaches the 0.2 ms budget.
 - **`x-tessera-stale` flips to 1** on the next response of any session that presented a
   pre-flush stamp — broadcast, advisory, never a refusal, never a `410` (decision 0041). The
   stamp never selects geometry: the request is answered from live geometry regardless, and a
@@ -1177,14 +1175,15 @@ Cited, never restated; the table is the audit trail from mechanism to obligation
 |---|---|---|
 | deny ack 3.2 ms quiescent; 165 ms p50 / 346 ms max at 1 M buffered; apply 1.33 µs | measured | `docs/evidence/memos/2026-08-01-deny-ack-baseline.md` |
 | 1,000-suppression request 3.289 s → 31.9 ms | measured | `docs/evidence/memos/2026-08-01-deny-batching-and-window-compression.md` |
-| row projection full build 10.7 s at 10⁹ | measured | `docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md` |
+| row projection full build 10.7 s at 10⁹, end to end over a built bundle | measured | `docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md` |
+| the refresh ladder at 10⁹, 25% grant: rebuild 4 550 ms · patch clone 40.9 ms · union over one new extent 0.24 ms · span rebase 44.6 ms | measured, **synthetic** (primitives over a written `permutation.bin`, not an end-to-end request) | `probes/2026-08-04-refresh-ladder/` |
 | 125.12 MB serialised per wide-grant projection entry at 10⁹ | measured | `probes/results.md` §4.2 (quoted via the merge review memo) |
 | dictionary map rebuild 40–53 s at 1.17×10⁸ terms | measured | `probes/2026-08-03-dict-fst/` |
 | posting compression 8.9–36.7× under full-corpus sort; window-scope runs of order 10¹ | measured ceiling; **modelled** window figure — no per-window probe exists | probes results §2/§4; `window.rs`'s own calibration note |
 | per-tick rebase stall = one O(buffered) clone ahead of the deny lane | modelled — re-run the 2026-08-01 method now that flush exists | superseded flush design §10 |
 | deny-manifest write at 10⁶ entries (30–60 MB, hundreds of ms) | modelled — probe named before bulk-revocation scale is claimed | deny-publication memo §5 |
 | the three merge growth axes (runs / tiers / segments) | modelled — no axis measured; probe P3 named. Three of the four axes are now *bounded* by the entity-space coalesce, which changes what the number would be, not that it is unmeasured | merge review memo §3, §7 |
-| fragment rebuild per credential at 10⁹ | **unmeasured** — the largest unpriced request-thread term; probe P2 named | merge review memo §5.2 |
+| fragment rebuild per credential at 10⁹: **~200 ms, flat in tier count** (199 ms at 1 tier, 198 ms at 512) | measured — P2, and it **refuted** the "modelled seconds" this document carried; the term is bounded, not conformant | `probes/2026-08-04-refresh-ladder/` |
 | flush-segment size uniformity at steady ingest | assumed | merge review memo §2 |
 | flush transients ≈1×/2–2.5×/1× buffer bytes (plan/execute/rebase; worst overlap ~3.5–5×); merge ≈5–7× input file bytes; dict clone 7.1 GB at 1.17×10⁸ terms per promoting flush | modelled (dict clone measured) — **no maintenance event's peak RSS has been measured**; the named probe: one instrumented ingest→`/control/flush`→publication cycle sampling `VmHWM`, one promoting cell | memory review, 2026-08-04; `probes/2026-08-03-dict-fst/` |
 
@@ -1291,7 +1290,12 @@ rotation and restart, the newest binding wins, and the forgotten holder accumula
 item stays visible, every binding still resolves and `segments_version` does not move (exists —
 `coalesce.rs`); 37 a coalesced manifest reopens with the tiers it names and every binding intact
 (exists — `coalesce.rs`); 38 a row deleted before its first flush stops pinning the WAL, and the
-entity stays denied, burned and rowless across the reclaim (exists — `rotation_e2e.rs`).
+entity stays denied, burned and rowless across the reclaim (exists — `rotation_e2e.rs`);
+39 a flush costs a live session no build and what the refresh produces equals a rebuild (exists —
+`projection_patch.rs`); 40 the window before a refresh serves stale geometry rather than
+rebuilding, the flushed item is not yet drawn, and the staleness ages out within two publications
+(exists — `projection_patch.rs`); 41 a racer inside a **merge's** refresh window is shed 429
+rather than paying the rebuild (⊘ — needs the row-space merge publication, Task 22b).
 
 ## Appendix R — Review record
 

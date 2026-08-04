@@ -223,6 +223,17 @@ enum Slot<K, V> {
 #[derive(Debug)]
 pub(crate) struct Building;
 
+/// What [`SingleFlightCache::peek`] found — a read that claims nothing.
+///
+/// The three states are distinguished because a caller under decision 0044 answers them
+/// differently: `Building` means a producer exists and the caller should fall back rather than
+/// start a second one; `Absent` means nothing is coming and the caller may build.
+pub(crate) enum Peek<V> {
+    Ready(Arc<V>),
+    Building,
+    Absent,
+}
+
 /// Operator-facing cache gauges. Every field is read from an atomic **without taking the slot
 /// lock**, deliberately, so that [`Self::slot_locks`] stays an honest measure of this type's own
 /// locking rather than of the caller's polling — the same discipline `crate::pins::PinStats` uses.
@@ -767,6 +778,64 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
         };
         // `dead` drops here, with the lock released (rule 4).
         removed
+    }
+
+    /// Read `key` **without claiming its slot**, distinguishing the three states.
+    ///
+    /// [`Self::get_or_derive`] cannot serve this purpose: a miss there inserts `Building`, which
+    /// commits the caller to producing a value and 429s every other arrival until it does.
+    /// Decision 0044's stale-serve path needs the opposite — a caller that finds a miss and then
+    /// declines to build, because a background refresh is producing the same key.
+    ///
+    /// **A hit touches recency, exactly as a hit through `get_or_derive` does.** A serve is a use;
+    /// counting it as one is what keeps a session that is being served from stale entries from
+    /// having its live entry evicted underneath it as "cold".
+    pub(crate) fn peek(&self, key: &K) -> Peek<V> {
+        let mut slots = self.lock_slots();
+        let new_tick = slots.next_tick;
+        let hit = match slots.map.get_mut(key) {
+            None => return Peek::Absent,
+            Some(Slot::Building { .. }) => return Peek::Building,
+            Some(Slot::Ready {
+                value,
+                key: slot_key,
+                tick,
+                uses,
+                ..
+            }) => {
+                *uses = uses.saturating_add(1);
+                let old_tick = std::mem::replace(tick, new_tick);
+                (Arc::clone(value), Arc::clone(slot_key), old_tick)
+            }
+        };
+        let (value, slot_key, old_tick) = hit;
+        slots.next_tick += 1;
+        slots.recency.remove(&old_tick);
+        slots.recency.insert(new_tick, slot_key);
+        slots.check();
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        Peek::Ready(value)
+    }
+
+    /// Every `Ready` entry as `(key, value)` — the background refresh's input.
+    ///
+    /// **Not a recency touch.** The refresh is not a use: counting it as one would keep an entry
+    /// whose session has gone away young for ever, since the refresh would touch it at every
+    /// publication and the LRU would never reach it. The entry the refresh *produces* starts at
+    /// the current tick like any other insert, so a session that stops asking still ages out.
+    pub(crate) fn ready_entries(&self) -> Vec<(K, Arc<V>)>
+    where
+        K: Clone,
+    {
+        let slots = self.lock_slots();
+        slots
+            .map
+            .iter()
+            .filter_map(|(key, slot)| match slot {
+                Slot::Ready { value, .. } => Some(((**key).clone(), Arc::clone(value))),
+                Slot::Building { .. } => None,
+            })
+            .collect()
     }
 
     /// **The only place this module *takes* the lock**, and the reason [`CacheStats::slot_locks`]

@@ -9,7 +9,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -105,10 +105,11 @@ pub struct EngineConfig {
     ///
     /// **No longer bounded from below by a pin TTL.** It used to be, through
     /// `pin_ttl_secs < drain_depth_max × flush_max_age_secs`, and that relation went with the pin
-    /// retention (`geometry-pinning.md` §0). What *does* bound it is the row-projection rebuild —
-    /// a measured 10.7 s at 10⁹ per session — so a tick shorter than a projection patch can absorb
-    /// costs every session that rebuild at every tick. That is a real floor and a different one;
-    /// see `crate::cache`.
+    /// retention (`geometry-pinning.md` §0). What *does* bound it is the background refresh: a
+    /// tick shorter than one refresh round (~0.7 s of pool time at the ~16 wide-grant entries a
+    /// 2 GiB bound holds — `probes/2026-08-04-refresh-ladder/`) leaves every session permanently
+    /// in the stale-serve window, and then two publications deep, where it rebuilds. That is a
+    /// real floor and a different one; see `crate::refresh`.
     pub flush_max_age_secs: u64,
 }
 
@@ -154,7 +155,9 @@ pub struct Session {
     pub fragment: Arc<FrozenFragment>,
     /// `satisfied`, sorted — the [`tessera_authz::FragmentCache`] key component, kept rather than
     /// re-sorted per request so bringing the fragment forward costs no allocation on a hit.
-    pub(crate) satisfied_sorted: Vec<TermId>,
+    /// `Arc` so the row-projection cache's entry can carry it for the background refresh, which
+    /// has no session registry to look it up in — see [`crate::cache::SessionGeometry`].
+    pub(crate) satisfied_sorted: Arc<Vec<TermId>>,
     /// `sha256(auth_data)` — the cache's caller obligation, kept for the same reason.
     ///
     /// A digest of the credential, never the credential: this lives for the session's lifetime in
@@ -457,6 +460,23 @@ pub struct Engine {
     /// `pub(crate)`: `viewport.rs`'s `Engine::viewport` (a different module, same crate) reads it
     /// on every request.
     pub(crate) serial_fallback_max_rows: AtomicU64,
+    /// Requests served from a one-generation-stale entry — the steady-state observable behind
+    /// decision 0044's stale-serve. A deployment where this rises and
+    /// [`Self::full_projection_builds`] does not is one where the refresh is keeping up.
+    pub(crate) stale_serves: AtomicU64,
+    /// Entries the background refresh has produced — the observable behind "the refresh is
+    /// keeping up", read beside [`Self::full_projection_builds`].
+    pub(crate) refreshes: Arc<AtomicU64>,
+    /// Whether a background refresh is producing the live generation's entries.
+    ///
+    /// **Set before the swap and cleared when the pass ends**, which is what makes the 429 rung of
+    /// `Engine::session_geometry`'s ladder bounded rather than open-ended: a racer landing between
+    /// the swap and the pool task's first insert must see `true`, or after a merge it takes the
+    /// measured 4.55 s rebuild inline (review finding F5). Shared with the executor, which is the
+    /// only writer.
+    pub(crate) refresh_in_flight: Arc<AtomicBool>,
+    /// Whether the background refresh runs — see [`crate::refresh::RefreshDeps::enabled`].
+    pub(crate) refresh_enabled: Arc<AtomicBool>,
     /// How many row projections were built from the whole fragment rather than derived from the
     /// preceding generation's — the observable behind [`Engine::full_projection_builds`].
     ///
@@ -698,6 +718,8 @@ impl Engine {
         // after `open`, having validated the figure; every other embedder (tests, benches,
         // examples) gets unbounded caches, which is what a read-only embedder wants.
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
+        let refresh_in_flight = Arc::new(AtomicBool::new(false));
+        let refresh_enabled = Arc::new(AtomicBool::new(true));
 
         Ok(Engine {
             generation: Arc::clone(&generation),
@@ -715,6 +737,10 @@ impl Engine {
             external_index: Arc::clone(&external_index),
             identity_key,
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
+            stale_serves: AtomicU64::new(0),
+            refreshes: Arc::new(AtomicU64::new(0)),
+            refresh_in_flight: Arc::clone(&refresh_in_flight),
+            refresh_enabled: Arc::clone(&refresh_enabled),
             full_projection_builds: AtomicU64::new(0),
         })
     }
@@ -755,6 +781,32 @@ impl Engine {
     /// out of this crate's public docs even in a `bench-timing` build; `pub` (not `pub(crate)`) is
     /// required only because `tests/*.rs` integration tests are separate crate compilation units
     /// that cannot see `pub(crate)` items in this library crate at all.
+    /// Turn the background refresh off, so a session stays in the stale-serve window.
+    ///
+    /// **A test hook, and gated so it cannot exist in a shipped build.** The window decision
+    /// 0044's rung 2 serves from is otherwise a race between the publication and the pool: a test
+    /// that slept to catch it would assert on scheduling. `fault-injection` is the gate the
+    /// integration suites already enable, and `scripts/check-layers.sh` asserts no normal
+    /// dependency edge does.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_background_refresh_for_test(&self, enabled: bool) {
+        self.refresh_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    /// How many requests were served from a one-generation-stale entry (decision 0044's rung 2),
+    /// and how many entries the background refresh has produced. Read together: a deployment where
+    /// the second rises and [`Self::full_projection_builds`] does not is one where the refresh is
+    /// keeping up with the tick.
+    pub fn stale_serves(&self) -> u64 {
+        self.stale_serves.load(Ordering::Relaxed)
+    }
+
+    /// See [`Self::stale_serves`].
+    pub fn refreshes(&self) -> u64 {
+        self.refreshes.load(Ordering::Relaxed)
+    }
+
     #[cfg(feature = "bench-timing")]
     #[doc(hidden)]
     pub fn set_serial_fallback_max_rows_for_test(&self, value: u64) {
@@ -804,6 +856,7 @@ impl Engine {
 
         let mut satisfied_sorted: Vec<TermId> = satisfied.iter().copied().collect();
         satisfied_sorted.sort_unstable();
+        let satisfied_sorted = Arc::new(satisfied_sorted);
 
         // The cache's caller obligation (`FragmentCache::get_or_build`'s doc): this hash must be
         // a function of the exact `auth_data` that produced `satisfied` above, which it is.
@@ -1122,12 +1175,16 @@ impl Engine {
     /// flush observable to a live session today. The incremental form is plan Task 12, with its
     /// byte-equality property test, and is not built (⊘).
     ///
-    /// **What that costs, honestly.** One `build_fragment_with_deltas` per *credential* per flush,
-    /// not per session: [`tessera_authz::FragmentCache`] keys on
+    /// **What that costs, and where it is now paid.** One `build_fragment_with_deltas` per
+    /// *credential*, not per session: [`tessera_authz::FragmentCache`] keys on
     /// `(satisfied, auth_data_hash, dict_len, watermark)`, so every session sharing a credential
-    /// shares the build, and every later request in the same generation is a hit. That is the
-    /// authorise path's own cost, paid again at each tick, against the row projection's *measured*
-    /// 10.7 s at 10⁹, which `RowProjectionCache::get_or_derive` does patch.
+    /// shares the build. **Measured at ~200 ms at 10⁹ and flat in tier count**
+    /// (`probes/2026-08-04-refresh-ladder/` — P2, which refuted the modelled-seconds figure the
+    /// corpus carried). That is three orders over decision 0044's request-path budget, so this no
+    /// longer runs per tick on a request thread: the background refresh (`crate::refresh`) calls
+    /// it at each publication, and a request reaches it only at establishment — rung 3 of
+    /// `Engine::session_geometry`'s ladder, and `Engine::item` when this session has no resident
+    /// entry at all.
     ///
     /// **Fail-closed on a busy build**: a concurrent build of the same key yields
     /// [`EngineError::FragmentBuilding`] (429) rather than a silent fall back to the stale
@@ -1381,6 +1438,14 @@ impl Engine {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: crate::coalesce::CoalescePolicy::default(),
                 external_index: Arc::clone(&self.external_index),
+                refresh: crate::refresh::RefreshDeps {
+                    cache: Arc::clone(&self.row_projection_cache),
+                    fragments: Arc::clone(&self.fragment_cache),
+                    pool: Arc::clone(&self.pool),
+                    in_flight: Arc::clone(&self.refresh_in_flight),
+                    refreshes: Arc::clone(&self.refreshes),
+                    enabled: Arc::clone(&self.refresh_enabled),
+                },
                 prefix_dir: self.prefix_dir.clone(),
                 identity_key: self.identity_key,
                 pool: Arc::clone(&self.pool),
@@ -1418,6 +1483,14 @@ impl Engine {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: crate::coalesce::CoalescePolicy::default(),
                 external_index: Arc::clone(&self.external_index),
+                refresh: crate::refresh::RefreshDeps {
+                    cache: Arc::clone(&self.row_projection_cache),
+                    fragments: Arc::clone(&self.fragment_cache),
+                    pool: Arc::clone(&self.pool),
+                    in_flight: Arc::clone(&self.refresh_in_flight),
+                    refreshes: Arc::clone(&self.refreshes),
+                    enabled: Arc::clone(&self.refresh_enabled),
+                },
                 prefix_dir: self.prefix_dir.clone(),
                 identity_key: self.identity_key,
                 pool: Arc::clone(&self.pool),

@@ -49,7 +49,7 @@ use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::{tile_ranges_all, tile_ranges_within};
 use tessera_types::{EntityId, GenerationStamp, TesseraId, API_VERSION};
 
-use crate::cache::RowProjectionKey;
+use crate::cache::{Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
 use crate::compose::{compose, visible_to, EffectiveMask, RowProjection};
 use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
@@ -391,7 +391,17 @@ impl Engine {
         // Brought forward before the visibility test, not after: the whole point of the test is
         // that it is the same three probes for every identifier (C-5), and a fragment resolved
         // per-entity would make the cost depend on which entity was asked for.
-        let fragment = self.fragment_for(session, &generation)?;
+        //
+        // **The served fragment, not the live one** (decision 0044). Rebuilding at the live
+        // watermark is a *measured* ~200 ms per credential per publication on this thread, and it
+        // would answer from a different watermark than the viewport beside it serves from — the
+        // two enforcement representations drifting under stale-serve. Falls back to a build only
+        // when this session has no resident entry at all, which is establishment. **No projection
+        // is constructed either way**: this is a read of the cache, never a claim on it.
+        let fragment = match self.row_projection_cache.freshest_fragment(session.token_id) {
+            Some(fragment) => fragment,
+            None => self.fragment_for(session, &generation)?,
+        };
 
         // ONE BIT, in entity space, O(1), before anything is looked up in row space.
         if !self.visible_to(&fragment, session, &generation, entity) {
@@ -448,6 +458,100 @@ fn check_cancelled(cancel: &Option<CancelToken>) -> Result<()> {
 }
 
 impl Engine {
+    /// This session's fragment and row projection for this request — **the three-rung ladder
+    /// decision 0044's D1 puts in front of every viewport.**
+    ///
+    /// 1. **The live entry**, if the background refresh has produced it. The steady state, and
+    ///    zero work on this thread.
+    /// 2. **The one-generation-stale entry**, served as it is. Sound for a flush and *only* for a
+    ///    flush: a flush appends, so every row id the stale entry holds still names the same
+    ///    entity, and what it lacks is the rows of items flushed since — which the live overlay
+    ///    and deny mask then compose over unchanged. The session sees the newest items one refresh
+    ///    later; that is fail-closed staleness, never a deny miss. `extends_to` is the predicate,
+    ///    and it is exact rather than heuristic: after a *merge* the boundary segment differs, so
+    ///    this rung refuses and rung 3 decides.
+    /// 3. **Build, or refuse.** If a refresh is in flight the request is shed with
+    ///    `ProjectionBuilding` (429, `Retry-After: 1`) rather than paying a rebuild the refresh is
+    ///    already paying — the bounded residual 0044 permits, and after a merge the only thing
+    ///    standing between a racer and the measured 4.55 s. If no refresh is in flight, nothing is
+    ///    coming and this request builds: session establishment, or a rebuild after eviction,
+    ///    neither of which is update-induced.
+    ///
+    /// **The fragment travels with the projection, and that is why they are one cache value.**
+    /// Resolving the fragment separately at the live watermark — which is what this path did until
+    /// stale-serve — would pair a live fragment with a stale projection and, worse, insert the
+    /// result under the *live* key, pinning the session's freshly flushed items invisible until
+    /// the next publication. See [`crate::cache::SessionGeometry`].
+    fn session_geometry(
+        &self,
+        session: &Session,
+        generation: &Generation,
+        slice: &str,
+        slice_data: &tessera_store::read::SliceData,
+        probe: &mut Probe,
+    ) -> Result<Arc<SessionGeometry>> {
+        let key = RowProjectionKey {
+            token_id: session.token_id,
+            slice: slice.to_string(),
+            segments_version: generation.segments_version,
+            prefix: generation.prefix.clone(),
+        };
+        if let Peek::Ready(geometry) = self.row_projection_cache.peek(&key) {
+            return Ok(geometry);
+        }
+
+        // Rung 2. The generation exactly one below is the only one the retention depth keeps
+        // (`crate::cache::KEEP_SUPERSEDED_GENERATIONS`) and the only one an append can be served
+        // across.
+        let space = &slice_data.row_space;
+        if let Some(previous) = key.segments_version.checked_sub(1) {
+            let stale_key = RowProjectionKey {
+                segments_version: previous,
+                ..key.clone()
+            };
+            if let Peek::Ready(geometry) = self.row_projection_cache.peek(&stale_key) {
+                if geometry.projection.extends_to(space) {
+                    self.stale_serves.fetch_add(1, Ordering::Relaxed);
+                    return Ok(geometry);
+                }
+            }
+        }
+
+        // Rung 3.
+        if self.refresh_in_flight.load(Ordering::SeqCst) {
+            return Err(EngineError::ProjectionBuilding);
+        }
+
+        // D-G slot-state single-flight (F4, `tessera-bench/src/arms/load.rs:34-76`): the map lock
+        // is held only for the O(1) `Building`/`Ready` transition — never across the build — so
+        // distinct sessions' first viewports do not serialise behind one global lock. A concurrent
+        // request racing the *same* key does not wait; it gets `ProjectionBuilding` and retries.
+        //
+        // **Guardrail (D-D/D-F): nothing reachable from a rayon worker below may touch this
+        // cache.** The value is resolved once, here, on the calling thread, strictly before the
+        // parallel tile sweep begins, and is then only *borrowed* by every `tile_result` call.
+        let fragment = self.fragment_for(session, generation)?;
+        probe.lap(|t| &mut t.fragment_forward_ns);
+        self.row_projection_cache
+            .get_or_derive(key, None, |_source| {
+                // Crosses entity space into row space over the *whole* fragment
+                // (`Permutation::project`'s cost note: seconds at 10⁹ rows). `Permutation::project`
+                // parallelises internally but owns no pool of its own — this is the one call site
+                // that supplies one, the same shared pool the tile sweep uses (D-D: no second,
+                // per-request pool).
+                probe.mark_projection_built();
+                self.full_projection_builds.fetch_add(1, Ordering::Relaxed);
+                let projection = self.pool.install(|| RowProjection::new(&fragment, space));
+                SessionGeometry {
+                    fragment: Arc::clone(&fragment),
+                    projection: Arc::new(projection),
+                    satisfied_sorted: Arc::clone(&session.satisfied_sorted),
+                    auth_data_hash: session.auth_data_hash,
+                }
+            })
+            .map_err(|_busy| EngineError::ProjectionBuilding)
+    }
+
     /// The masked viewport query — see [`ViewportRequest`] for the parameters and for the
     /// non-decreasing-`k` obligation that §7.2's nesting property rests on.
     ///
@@ -492,13 +596,6 @@ impl Engine {
 
         probe.lap(|t| &mut t.stamp_compare_ns);
 
-        // The session's fragment, brought forward to this generation's watermark if a flush has
-        // moved it since the session authorised. Resolved once, here, against the one generation
-        // snapshot this request loaded — see `Engine::fragment_for` for why a stale fragment is
-        // not merely suboptimal but silently drops every item flushed since.
-        let fragment = self.fragment_for(session, &generation)?;
-        probe.lap(|t| &mut t.fragment_forward_ns);
-
         let k = k.min(self.config.max_k);
 
         // Fail closed on a slice spanning partitions, for the same reason the segment guard below
@@ -539,73 +636,20 @@ impl Engine {
         let segments = segments_with_row_bases(slice, slice_data)?;
         probe.lap(|t| &mut t.slice_lookup_ns);
 
-        let cache_key = RowProjectionKey {
-            token_id: session.token_id,
-            slice: slice.to_string(),
-            segments_version: generation.segments_version,
-            prefix: generation.prefix.clone(),
-        };
-        // D-G slot-state single-flight (F4, `tessera-bench/src/arms/load.rs:34-76`): the map
-        // lock (`SingleFlightCache`) is held only for the O(1) `Building`/`Ready` transition —
-        // never across the build below — so distinct sessions' first viewports no longer
-        // serialise behind one global lock. Do NOT reintroduce that serialisation by narrowing
-        // this back to "lock, check, build, insert, unlock"; the F4 memo names exactly that as
-        // the anti-fix. A concurrent request racing the *same* key while this build is in flight
-        // does not wait for it — it gets `EngineError::ProjectionBuilding` and retries.
+        // **Zero update-induced work on this thread, in the steady state** (decision 0044's D1).
+        // Every flush advances `segments_version`, so every flush rotates this key for every live
+        // session; the *measured* costs of doing anything about that here are 4.55 s for a rebuild
+        // and 40.9 ms for the patch's bitmap clone alone (`probes/2026-08-04-refresh-ladder/`),
+        // against a budget of 0.2 ms. Neither fits. What runs instead is a background refresh at
+        // each publication (`crate::refresh`), and this is its request-side face: a three-rung
+        // ladder that builds nothing a refresh is about to produce.
         //
         // **Guardrail (D-D/D-F): nothing reachable from a rayon worker below may touch this
-        // cache.** `base` is resolved once, here, on the calling thread, strictly before the
-        // parallel tile sweep begins, and is then only *borrowed* (via `compose`'s `EffectiveMask`)
-        // by every `tile_result` call — never re-fetched or re-built per tile. If a future change
-        // ever did call `get_or_build` from inside a rayon worker, it would still be safe rather
-        // than corrupting: `SingleFlightCache`'s state machine (this module's doc above) has no
-        // notion of "friendly" re-entrancy, so a worker racing an in-flight build on the *same*
-        // key would simply see `Slot::Building` and get back `EngineError::ProjectionBuilding`,
-        // same as any other concurrent caller. That safety is incidental, not a licence — the
-        // design intent is that this cache is touched once per request, from the serial prefix,
-        // full stop.
-        // **The patch, and why it is on the ordinary request path rather than in the publication.**
-        // Every flush advances `segments_version`, so every flush rotates this key for every live
-        // session. Rebuilding is a *measured* 10.7 s at 10⁹, and a publication that pushed the work
-        // to every session at once would synchronise that across the whole population at every
-        // tick. Derived here instead: the session that asks pays, once, and pays a union over the
-        // new extents rather than a projection over the whole fragment.
-        //
-        // The source is the generation exactly one below — the only one the retention depth keeps
-        // (`crate::cache::KEEP_SUPERSEDED_GENERATIONS`) and the only one an append can be derived
-        // across. A miss on it, an eviction, a merge that permuted the covered prefix
-        // (`RowProjection::extends_to`), or a `segments_version` of 0 all fall through to the full
-        // build, which produces the identical value.
-        let derive_from =
-            cache_key
-                .segments_version
-                .checked_sub(1)
-                .map(|previous| RowProjectionKey {
-                    segments_version: previous,
-                    ..cache_key.clone()
-                });
-        let base: Arc<RowProjection> = self
-            .row_projection_cache
-            .get_or_derive(cache_key, derive_from.as_ref(), |source| {
-                // `Permutation::project` parallelises internally (ambient rayon,
-                // `par_chunks`/`par_sort_unstable`) but owns no pool of its own — this is the
-                // one call site that supplies one, the same shared pool `Engine::viewport`'s
-                // tile sweep uses (D-D: no second, per-request pool). Wrapping only this build,
-                // not the whole cache call, keeps the single-flight map lock's O(1) hold time
-                // (D-G) unaffected by the pool boundary.
-                let space = &slice_data.row_space;
-                match source.filter(|s| s.extends_to(space)) {
-                    Some(source) => self.pool.install(|| source.extend(&fragment, space)),
-                    None => {
-                        // Crosses entity space into row space over the *whole* fragment
-                        // (`Permutation::project`'s cost note: seconds at 10⁹ rows).
-                        probe.mark_projection_built();
-                        self.full_projection_builds.fetch_add(1, Ordering::Relaxed);
-                        self.pool.install(|| RowProjection::new(&fragment, space))
-                    }
-                }
-            })
-            .map_err(|_busy| EngineError::ProjectionBuilding)?;
+        // cache.** The value is resolved once, here, on the calling thread, strictly before the
+        // parallel tile sweep begins, and is then only *borrowed* (via `compose`'s
+        // `EffectiveMask`) by every `tile_result` call — never re-fetched or re-built per tile.
+        let geometry = self.session_geometry(session, &generation, slice, slice_data, &mut probe)?;
+        let base = Arc::clone(&geometry.projection);
         probe.lap(|t| &mut t.row_projection_ns);
 
         // D-C checkpoint: before compose, one of the two long serial-prefix stages this task

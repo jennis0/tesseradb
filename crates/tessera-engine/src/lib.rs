@@ -12,6 +12,7 @@ mod coalesce;
 pub mod compose;
 mod flush;
 mod geometry;
+mod refresh;
 pub mod select;
 pub mod session;
 mod single_flight;

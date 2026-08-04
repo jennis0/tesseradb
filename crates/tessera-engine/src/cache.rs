@@ -23,6 +23,9 @@ use std::sync::Arc;
 
 use croaring::Portable;
 
+use tessera_authz::FrozenFragment;
+use tessera_types::TermId;
+
 use crate::compose::RowProjection;
 use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache};
 
@@ -86,6 +89,53 @@ pub(crate) struct RowProjectionKey {
 #[derive(Debug)]
 pub(crate) struct CacheBusy;
 
+/// What [`RowProjectionCache::peek`] found. **Three states, not two**: a request under decision
+/// 0044 answers `Building` and `Absent` differently — the first means a refresh or a racer is
+/// producing this key and the request should fall back rather than start a second build, the
+/// second means nothing is coming and it may build.
+pub(crate) enum Peek {
+    Ready(Arc<SessionGeometry>),
+    Building,
+    Absent,
+}
+
+/// One session's geometry for one generation: the mask fragment **and** the projection taken over
+/// it, as a single value.
+///
+/// **They are one entry because stale-serve breaks the ordering that used to couple them**
+/// (decision 0044; review finding F5). Until stale-serve, `Engine::viewport` resolved the fragment
+/// first and always at the live watermark, so the projection it then built or derived was
+/// necessarily over that fragment — a coupling held by request ordering and by nothing in the
+/// types. Serving a one-generation-stale projection deliberately breaks that ordering: a
+/// projection derived from a stale fragment but inserted under the *new* `segments_version` key
+/// would pin the session's freshly flushed items invisible until the next publication — fail-closed,
+/// and a silent falsification of the ack→visibility bound. Carrying the pair makes the mismatch
+/// unexpressible instead of forbidden.
+///
+/// **What the refresh needs to produce the next one**, so a background pass needs no session
+/// registry — the engine has none, sessions being values the server holds. `satisfied_sorted` and
+/// `auth_data_hash` are the [`tessera_authz::FragmentCache`] key's caller half; both are already
+/// held per session, both are per-token, and neither is a credential (the hash is a digest of one).
+pub(crate) struct SessionGeometry {
+    /// The fragment `projection` was taken over — never the live one, unless they coincide.
+    pub(crate) fragment: Arc<FrozenFragment>,
+    pub(crate) projection: Arc<RowProjection>,
+    /// The credential's granted terms, sorted — the fragment cache's key component.
+    pub(crate) satisfied_sorted: Arc<Vec<TermId>>,
+    /// `sha256(auth_data)`, the fragment cache's caller obligation.
+    pub(crate) auth_data_hash: [u8; 32],
+}
+
+impl CacheWeight for SessionGeometry {
+    /// **The projection's bytes alone, and the omission is deliberate.** The fragment is an
+    /// `Arc` shared with the session that authorised it and with `FragmentCache`'s own bound, so
+    /// charging it here would bound the same bytes twice and shrink this cache to nothing at the
+    /// operating point it is sized for. What this cache owns is the projection.
+    fn cache_weight_bytes(&self) -> u64 {
+        self.projection.cache_weight_bytes()
+    }
+}
+
 impl CacheWeight for RowProjection {
     /// Serialised size — `O(containers touched)` and microseconds, the primitive design §10.4 names
     /// for exactly this.
@@ -126,7 +176,7 @@ impl CacheWeight for RowProjection {
 /// refuses a bound below `expected_concurrent_sessions × per_entry`, which is a floor on the first
 /// term and says nothing about the second.
 pub(crate) struct RowProjectionCache {
-    inner: SingleFlightCache<RowProjectionKey, RowProjection>,
+    inner: SingleFlightCache<RowProjectionKey, SessionGeometry>,
 }
 
 impl RowProjectionCache {
@@ -157,21 +207,18 @@ impl RowProjectionCache {
         self.inner.stats()
     }
 
-    /// Look up `key`, building it on this call if nobody else already is — **deriving from the
-    /// immediately-preceding generation's entry when it is still resident**.
+    /// Claim `key`'s slot and produce its value, or refuse if someone already has it.
+    ///
+    /// **Two callers, and neither is the ordinary request.** The background refresh
+    /// (`crate::refresh`) calls this at every geometry publication, once per resident key; a
+    /// request calls it only at rung 3 of `Engine::session_geometry`'s ladder — session
+    /// establishment, or a rebuild after eviction, neither of which is update-induced work
+    /// (decision 0044). The steady-state request path reads through [`Self::peek`] and claims
+    /// nothing.
     ///
     /// **Fallible on purpose, and `Err` does not mean failure.** `Err(CacheBusy)` means some other
     /// caller is building this key right now and this call declined to wait. `make` runs with no
     /// lock held and must be infallible — see [`SingleFlightCache::get_or_derive`].
-    ///
-    /// # Why this exists, in one number
-    ///
-    /// Every flush publishes a new `segments_version`, so every flush rotates **every** session's
-    /// projection key. A miss is a full `Permutation::project` over the session's whole fragment —
-    /// a *measured* 10.7 s at 10⁹ — and flush §9 states the consequence plainly: *"the fallback is
-    /// not an edge case but the steady state: a full 10.7 s projection per session per tick,
-    /// synchronised across the session population"*. Without this, the flush tick's real floor is
-    /// that rebuild, not any configured knob.
     ///
     /// # Why the patch equals a rebuild
     ///
@@ -190,26 +237,75 @@ impl RowProjectionCache {
     /// 4. `segments_version` strictly increases, so the source key names exactly one geometry
     ///    (`crate::geometry::check_publishable`).
     ///
-    /// **Premise 2 is what a merge breaks, and a merge is why the source key must be exact.** A
-    /// merge permutes row space within the merged span (`geometry-pinning.md` §4), so a projection
-    /// from before it cannot be extended into one from after it. The caller supplies
-    /// `derive_from` as the generation exactly one below the target and nothing else, and a merge —
-    /// which advances `segments_version` like any other publication — therefore presents no source
-    /// whose row space it has permuted **provided the caller derives only across an append**. That
-    /// is the caller's obligation, and `Engine::viewport` discharges it by deriving only when the
-    /// extents it is adding are the ones the source's row space does not already contain.
-    ///
-    /// A source miss is not a failure: `derive` falls back to the full build, so the answer is
-    /// identical either way and only the cost differs.
+    /// **Premise 2 is what a merge breaks.** A merge permutes row space within the merged span
+    /// (`geometry-pinning.md` §4), so a projection from before it cannot be extended into one from
+    /// after it. `RowProjection::extends_to` is the predicate that decides, and it is exact rather
+    /// than heuristic — the refresh checks it before extending and falls to a full build
+    /// otherwise, and the request path checks it before serving stale. The answer is identical
+    /// either way; only the cost differs.
     pub(crate) fn get_or_derive(
         &self,
         key: RowProjectionKey,
         derive_from: Option<&RowProjectionKey>,
-        make: impl FnOnce(Option<&RowProjection>) -> RowProjection,
-    ) -> Result<Arc<RowProjection>, CacheBusy> {
+        make: impl FnOnce(Option<&SessionGeometry>) -> SessionGeometry,
+    ) -> Result<Arc<SessionGeometry>, CacheBusy> {
         self.inner
             .get_or_derive(key, derive_from, make)
             .map_err(|_busy| CacheBusy)
+    }
+
+    /// Look `key` up **without claiming its slot** — the stale-serve path's read.
+    ///
+    /// [`Self::get_or_derive`] cannot be used for this: a miss there inserts `Building` and
+    /// commits the caller to producing a value, which is exactly what a request under decision
+    /// 0044 must *not* do when a background refresh is about to. This reads and touches recency,
+    /// and nothing else.
+    pub(crate) fn peek(&self, key: &RowProjectionKey) -> Peek {
+        match self.inner.peek(key) {
+            crate::single_flight::Peek::Ready(value) => Peek::Ready(value),
+            crate::single_flight::Peek::Building => Peek::Building,
+            crate::single_flight::Peek::Absent => Peek::Absent,
+        }
+    }
+
+    /// The freshest fragment this token has a resident entry for, if any — **what keeps the
+    /// drill-down and the viewport from drifting apart under stale-serve.**
+    ///
+    /// `Engine::item` answers an entity-space question against a fragment, and `Engine::viewport`
+    /// answers the row-space one against a projection taken over one. Until stale-serve both
+    /// resolved the fragment at the live watermark, so they necessarily agreed. Serving a
+    /// one-generation-stale projection breaks that: a drill-down at the live watermark would call
+    /// an item visible while the viewport beside it drew no mark for it — the two enforcement
+    /// representations drifting, which write-path §14's obligation 27 forbids. Taking the fragment
+    /// from the same entry the viewport serves restores the agreement by construction, and takes
+    /// the drill-down off the per-publication fragment rebuild at the same time (a *measured*
+    /// ~200 ms per credential — `probes/2026-08-04-refresh-ladder/`).
+    ///
+    /// **The fragment is not slice-scoped**, so any of this token's entries answers: the fragment
+    /// cache keys on `(satisfied, auth_data_hash, dict_len, watermark)` and none of those is a
+    /// slice. The freshest is taken because a later watermark is a strictly better answer to an
+    /// entity-space question.
+    ///
+    /// **Per token, never per entity** — the scan cost cannot depend on which identifier was
+    /// asked for, which is Critical C-5's constant-time property.
+    pub(crate) fn freshest_fragment(&self, token_id: u64) -> Option<Arc<FrozenFragment>> {
+        self.inner
+            .ready_entries()
+            .into_iter()
+            .filter(|(key, _)| key.token_id == token_id)
+            .max_by_key(|(key, _)| key.segments_version)
+            .map(|(_, geometry)| Arc::clone(&geometry.fragment))
+    }
+
+    /// Every `Ready` entry, as `(key, value)` — what the background refresh iterates.
+    ///
+    /// **O(cache residency), never O(sessions)** (decision 0035's shape, and 0044's D1): the
+    /// refresh's whole cost model is that it is bounded by what is resident rather than by how
+    /// many sessions exist, and this is where that becomes true. A session with no resident entry
+    /// is not refreshed and pays a build on its next request, which is establishment, not
+    /// update-induced work.
+    pub(crate) fn resident(&self) -> Vec<(RowProjectionKey, Arc<SessionGeometry>)> {
+        self.inner.ready_entries()
     }
 
     /// Remove every projection belonging to `token_id`. Called when a session is revoked.
@@ -265,10 +361,14 @@ impl RowProjectionCache {
     /// **Pruning at the swap, with depth zero, would be wrong**, and it is worth being precise
     /// about why since the pin argument for that is gone. A flush *extends* row space: the new
     /// generation's projection for a session is the old one plus the new extent's rows, so the
-    /// superseded entry is the input to the patch that avoids a *measured* 10.7 s rebuild at 10⁹.
-    /// Deleting it at the instant of the swap deletes the input before any request can use it,
-    /// and every session pays the full rebuild at every tick — which is exactly the steady-state
-    /// cost flush §9 names. The depth is what keeps the input alive for one tick.
+    /// superseded entry is both the input the background refresh extends and the entry rung 2 of
+    /// `Engine::session_geometry`'s ladder serves while the refresh runs. Deleting it at the
+    /// instant of the swap deletes both, and every session pays the full rebuild at every tick.
+    ///
+    /// **The depth is also what bounds stale-serve.** Rung 2 inserts nothing, so a session whose
+    /// refresh never runs would sit one generation behind for ever; at the next publication its
+    /// entry is two back, this removes it, and its next request builds. Fail-closed staleness,
+    /// bounded at two publications.
     ///
     /// Pruning on `segments_version` alone, ignoring the prefix, rests on [`RowProjectionKey`]'s
     /// fact 2 — and a merge is why it must: row ids inside a merged span name different entities
