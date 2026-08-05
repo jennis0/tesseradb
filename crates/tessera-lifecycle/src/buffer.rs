@@ -35,6 +35,8 @@
 //! `max_distinct_terms` bound is 200,000,000, vanishingly far from `u32::MAX`'s ~4.29 billion)
 //! makes that collision structurally impossible rather than merely unlikely-so-far.
 
+use std::sync::Arc;
+
 use rustc_hash::FxHashMap;
 
 use tessera_authz::Dict;
@@ -187,7 +189,24 @@ pub struct BufferedItem {
 /// never-mutated-after-publication value.
 #[derive(Debug, Default, Clone)]
 pub struct IngestBuffer {
-    items: FxHashMap<EntityId, BufferedItem>,
+    /// **`Arc<BufferedItem>`, because this map is cloned far more often than it is read.**
+    ///
+    /// `Executor::apply_window` deep-copies the whole buffer once per commit-window close, to build
+    /// the next generation's immutable snapshot — so with `B` rows buffered between flushes and a
+    /// close every `W`, a flush interval pays `B²/2W` item copies. Measured at 5.99 us/row (42% of
+    /// ingest) at a 250M base and 2.60 us/row at 1M; the difference is term density, since a
+    /// `BufferedItem` carries a `Vec<TermId>`, an `Option<Vec<u8>>`, a `String` and a scalars `Vec`
+    /// — four heap allocations copied per row per close.
+    ///
+    /// Behind an `Arc` the clone copies a pointer and bumps a refcount, and the items themselves
+    /// are shared across every generation that still names them. The snapshot property is
+    /// unchanged: an `Arc<BufferedItem>` is never mutated in place once a generation holds it —
+    /// [`IngestBuffer::set_wal_pos`] is the one writer and it goes through `Arc::make_mut`, which
+    /// copies only when the item is genuinely shared.
+    ///
+    /// This does **not** remove the O(buffered) term — the hash table itself is still copied per
+    /// close. It removes the per-item deep copy, which is what the measurement says dominates it.
+    items: FxHashMap<EntityId, Arc<BufferedItem>>,
 }
 
 impl IngestBuffer {
@@ -214,7 +233,7 @@ impl IngestBuffer {
     pub fn insert_row_with_terms(&mut self, row: &WalRow, terms: Vec<TermId>) {
         self.items.insert(
             row.entity_id,
-            BufferedItem {
+            Arc::new(BufferedItem {
                 terms,
                 external_id: row.external_id.clone(),
                 slice: row.slice.clone(),
@@ -222,7 +241,7 @@ impl IngestBuffer {
                 y: row.y,
                 scalars: row.scalars.clone(),
                 wal_pos: None,
-            },
+            }),
         );
     }
 
@@ -230,7 +249,9 @@ impl IngestBuffer {
     /// which is the ordinary case for a stamp arriving after a flush has consumed the row.
     pub fn set_wal_pos(&mut self, entity: EntityId, wal_pos: u64) {
         if let Some(item) = self.items.get_mut(&entity) {
-            item.wal_pos = Some(wal_pos);
+            // Copies only if a published generation still shares this item; at the call site it is
+            // stamped immediately after insert, where the refcount is one and this is in place.
+            Arc::make_mut(item).wal_pos = Some(wal_pos);
         }
     }
 
@@ -266,7 +287,7 @@ impl IngestBuffer {
     }
 
     pub fn get(&self, entity: EntityId) -> Option<&BufferedItem> {
-        self.items.get(&entity)
+        self.items.get(&entity).map(|item| &**item)
     }
 
     pub fn contains(&self, entity: EntityId) -> bool {
@@ -274,7 +295,7 @@ impl IngestBuffer {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&EntityId, &BufferedItem)> {
-        self.items.iter()
+        self.items.iter().map(|(entity, item)| (entity, &**item))
     }
 
     pub fn len(&self) -> usize {
