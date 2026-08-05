@@ -97,8 +97,26 @@ repeat = 5
 
 # --- writes ------------------------------------------------------------------------------------
 
-# Ask 6, batch half. Expect an fsync amortisation curve: a batch of 1 and a batch of 1000 cost the
-# same ~3.2 ms, so throughput rises ~4400x across this range with the knee near 1000.
+# Ask 6, rate half — the arm a throughput may be quoted from. Three axes: term density, `B/W`
+# (rows buffered between flushes over rows per commit-window close), and concurrent callers. One
+# label set and one scale on purpose: the base corpus is measured as barely moving ingest cost,
+# and every cell copies the bundle so it can flush into a private one. Figures and what they mean:
+# docs/evidence/memos/2026-08-05-ingest-rate.md.
+[[arm]]
+name = "ingest-rate"
+label_sets = ["categories-subclass"]
+scales = [2422486]
+density = [1, 3, 8]
+bw = [1, 4, 12, 24]
+submitters = [1, 2, 4, 8]
+batch = [10000]
+window = 10000
+min_steady_rows = 240000
+repeat = 5
+
+# Ask 6, batch half — ack latency against batch size into a buffer nothing flushes. It measures a
+# ramp: repetition n lands on a buffer of n*batch rows, so the cell reports the deepest half and
+# labels the depth-0 figure `cold`. Not a throughput; `ingest-rate` above is.
 [[arm]]
 name = "ingest-batch"
 label_sets = ["categories-archive", "categories-subclass", "hash-flat"]
@@ -110,9 +128,10 @@ repeat = 5
 # be ~27 minutes of pure fsync before any per-item cost is counted. The curve is established here
 # and extrapolated.
 #
-# Note the ingested rows never become *visible*: Phase 1 has no flush, so a buffered entity has no
-# row in the segment and `compose` skips it. This measures composition over rejected entries, which
-# is F2's per-item lower bound; the `changes` arm below measures the resolved-entry upper bound.
+# Note the ingested rows never become *visible*: this arm never drives a tick, so its buffered
+# entities have no row in the segment and `compose` skips them. That makes it F2's per-item lower
+# bound; the `changes` arm below measures the resolved-entry upper bound, and `ingest-rate` above is
+# the one arm here that flushes.
 [[arm]]
 name = "ingest-continuous"
 label_sets = ["categories-archive", "categories-subclass"]

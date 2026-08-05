@@ -96,6 +96,18 @@ struct ArmSpec {
     theta_target: Vec<u64>,
     #[serde(default)]
     batch: Vec<usize>,
+    /// `ingest-rate`: descriptors per row, `B/W`, and concurrent callers.
+    #[serde(default)]
+    density: Vec<usize>,
+    #[serde(default)]
+    bw: Vec<usize>,
+    #[serde(default)]
+    submitters: Vec<usize>,
+    /// `ingest-rate`: `ingest.commit_window_max_items`, and the floor on rows measured per cell.
+    #[serde(default)]
+    window: Option<usize>,
+    #[serde(default)]
+    min_steady_rows: Option<usize>,
     #[serde(default)]
     checkpoint: Vec<u64>,
     #[serde(default)]
@@ -233,6 +245,7 @@ fn estimated_cells(arm: &ArmSpec) -> usize {
         }
         "changes" => n(&arm.op, 3) * n(&arm.checkpoint, 4),
         "ingest-batch" => n(&arm.batch, 4),
+        "ingest-rate" => n(&arm.density, 3) * n(&arm.bw, 4) * n(&arm.submitters, 4),
         "ingest-continuous" => n(&arm.checkpoint, 5),
         "ingest-build" => 1,
         _ => 1,
@@ -299,6 +312,21 @@ fn dispatch(ctx: &Context, arm: &ArmSpec, seed: u64) -> Result<()> {
             seed,
         ),
         "ingest-batch" => super::ingest::run_batch(ctx, &or(&arm.batch, &[1, 10, 100, 1000]), seed),
+        // `batch` and `window` are scalars for this arm — one rows-per-call and one window
+        // ceiling, held fixed while the three axes sweep — so the shared `Vec` field is read for
+        // its first value, as `ingest-continuous` reads `k`.
+        "ingest-rate" => super::ingest::run_rate(
+            ctx,
+            &super::ingest::RateSweep {
+                density: &or(&arm.density, &[1, 3, 8]),
+                ratio: &or(&arm.bw, &[1, 4, 12, 24]),
+                submitters: &or(&arm.submitters, &[1, 2, 4, 8]),
+                batch: *or(&arm.batch, &[10_000]).first().unwrap_or(&10_000),
+                window: arm.window.unwrap_or(10_000),
+                min_steady_rows: arm.min_steady_rows.unwrap_or(240_000),
+                seed,
+            },
+        ),
         "ingest-continuous" => super::ingest::run_continuous(
             ctx,
             &or(&arm.checkpoint, &[500, 2_000, 5_000, 10_000, 25_000]),
@@ -321,7 +349,7 @@ fn dispatch(ctx: &Context, arm: &ArmSpec, seed: u64) -> Result<()> {
         }
         other => Err(format!(
             "unknown arm {other:?}. Known: authorise, tiles, gather, viewport, changes, \
-             ingest-batch, ingest-continuous, ingest-build. `load` is driven by \
+             ingest-batch, ingest-rate, ingest-continuous, ingest-build. `load` is driven by \
              scripts/bench_concurrency.py, which owns the server lifecycle."
         )
         .into()),
@@ -404,6 +432,7 @@ mod tests {
                         | "viewport"
                         | "changes"
                         | "ingest-batch"
+                        | "ingest-rate"
                         | "ingest-continuous"
                         | "ingest-build"
                 ),

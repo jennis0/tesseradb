@@ -34,8 +34,14 @@
 //! sat underneath it. At the post-fix noise floor the same sweep is clean —
 //! **3.10 → 3.34 → 5.27 → 6.45 µs/row at 0.0/1.5/5.5/11.5 predicted copies per row**, a slope of
 //! **291 ns per item copied**, against 200–220 ns measured independently in
-//! `probes/2026-07-31-ingest-baseline`. F3 is confirmed, and at ~37% of ingest cost it is now the
+//! `probes/2026-07-31-ingest-baseline`. F3 is confirmed, and at ~37% of ingest cost it was then the
 //! **largest single stage**.
+//!
+//! It is not any more, and the law is untouched — only its constant. A `BufferedItem` behind an
+//! `Arc` makes each copy a pointer rather than four heap allocations; the clone still costs
+//! `B²/2W`, now at ~13 ns per unit of `B/W` and **0–9% of ingest**, and `apply_window`'s per-row
+//! loop is the largest stage at 38–50%
+//! (`docs/evidence/memos/2026-08-05-ingest-rate.md` §2).
 //!
 //! The lesson worth keeping: a flat sweep refutes nothing until you know the noise floor is below
 //! the effect you are looking for.
@@ -45,8 +51,15 @@
 //! Batching amortises per-call overhead and reduces clone count, but `assign_sorted` is `n log n`
 //! in the window's rows — which `config.rs` warns about at `DEFAULT_COMMIT_WINDOW_MAX_ITEMS`
 //! ("not a free dial in the compression direction"). The two fight, and the measured curve turns:
-//! **6.94 → 4.43 → 4.92 → 7.90 µs/row at W = 10k / 40k / 120k / 240k.** The best of those is
-//! ~40,000 rows per call; one 240,000-row window is *worse* than twenty-four 10,000-row ones.
+//! **6.94 → 4.43 → 4.92 → 7.90 µs/row at W = 10k / 40k / 120k / 240k.** One 240,000-row window is
+//! *worse* than twenty-four 10,000-row ones, which is the shape that matters and which survives.
+//!
+//! **"~40,000" no longer holds, and nothing replaces it.** Re-measured after the `Arc` change
+//! lowered everything `assign_sorted` competes against: 5.95 / 2.66 / 3.14 µs/row at 1k / 10k / 40k
+//! (`docs/evidence/memos/2026-08-05-ingest-rate.md` §4). 1,000 is clearly the wrong side of the
+//! knee; 10,000 and 40,000 are 18% apart, inside that campaign's run-to-run bar, so the optimum is
+//! somewhere between them and this data cannot say where. The shipped `ingest_max_batch_rows` is
+//! 10,000 and is not on the wrong side.
 //!
 //! ## The knobs, and what they do
 //!

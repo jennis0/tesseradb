@@ -89,10 +89,16 @@ row's `Vec<TermId>`. Both columns buffer ~250,000 rows between flushes at a 10,0
 copies per row is 11.5 in both; what moved is the per-copy cost, 291 → ~520 ns. **The 2× is term
 density, not corpus size.**
 
-Two smaller results worth carrying: `record_batch` costs 1.80 µs/row for one `Vec<EntityId>` clone
-per batch into `accepted_batches`, **which is never pruned in-process**; and `allocate`'s tripling
-is `assign_sorted` comparing longer signatures — the `n log n` term `config.rs` warns about at
+Two smaller results worth carrying: `record_batch`'s per-batch `Vec<EntityId>` clone into
+`accepted_batches`, **which is never pruned in-process**; and `allocate`'s tripling is
+`assign_sorted` comparing longer signatures — the `n log n` term `config.rs` warns about at
 `DEFAULT_COMMIT_WINDOW_MAX_ITEMS`, surfacing as a term-density effect rather than a window-size one.
+
+> **Superseded 2026-08-05 for `record_batch`.** Its 1.80 µs/row here was allocator pressure from
+> its neighbour, not its own work — the dedicated run below confirmed the coupling, and measures
+> that clone at **~1.8 ns per row**, linear in batch rows, three orders of magnitude smaller.
+> `accepted_batches` going unpruned remains a memory argument and is not a throughput one.
+> [`2026-08-05-ingest-rate.md`](2026-08-05-ingest-rate.md) §5.
 
 ### The fix, and why the chunked buffer is shelved
 
@@ -116,7 +122,15 @@ stages the `Arc` change does not touch fell with it: `record_batch` 1.80 → ~0,
 copy was millions of allocations per round, and it was taxing every other
 allocation in the executor. **Consequence for reading the pre-Arc attribution:
 those stages were never as expensive as they measured** — they were being slowed
-by their neighbour. Worth a dedicated run before anything is built on it.
+by their neighbour.
+
+> **Confirmed 2026-08-05** by an A/B differing in that one file, swept over `B/W`:
+> at `B/W = 1`, where the clone runs over an empty buffer, the two builds are
+> indistinguishable in every stage (0.99× overall); at `B/W = 24` they differ 674×
+> in `record_batch` and 4.5× in `admit`. Three of the four reproduce and their real
+> costs are the post column. **`wal_append` does not** — it reads level or
+> marginally slower after the change, so that item is withdrawn.
+> [`2026-08-05-ingest-rate.md`](2026-08-05-ingest-rate.md) §5.
 
 **The chunked buffer is therefore shelved, not queued.** `buffer_clone` is now
 **8.4% of ingest at 250M**, so the whole restructure — a public type in

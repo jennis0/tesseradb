@@ -422,6 +422,13 @@ pub fn run_deny_ack(
             continue;
         }
         let visible_entities = crate::postings::union(&postings, &grant.terms)?;
+        // The buffer fill below is a *background* condition, not this arm's subject, so it is
+        // built at the same stated term density every other ingest arm writes at — see
+        // `arms::ingest`'s `grant_pool`. A density that varied here would move the deny-ack floor
+        // for a reason that has nothing to do with denies.
+        let dictionary = Dictionary::open(&fixture.root, &fixture.prefix)?;
+        let (fill_terms, fill_descriptors) =
+            crate::arms::ingest::ingest_density(&grant, &dictionary);
 
         for &op in &ops {
             for &depth in buffered {
@@ -479,7 +486,12 @@ pub fn run_deny_ack(
                 let mut filled = 0u64;
                 while filled < depth {
                     let n = ingest_batch.min((depth - filled) as usize);
-                    let rows = crate::arms::ingest::synth_rows(n, next_id, &grant.terms);
+                    let rows = crate::arms::ingest::synth_rows(
+                        n,
+                        next_id,
+                        &fill_terms,
+                        &fill_descriptors,
+                    );
                     next_id += n as u64;
                     engine.accept_ingest(rows, format!("fill-{next_id}"), [0u8; 32])?;
                     filled += n as u64;
@@ -514,13 +526,18 @@ pub fn run_deny_ack(
                 std::thread::scope(|scope| -> Result<()> {
                     let engine = &engine;
                     let (stop, queue_full, ingest_ok) = (&stop, &queue_full, &ingest_ok);
-                    let terms = &grant.terms;
+                    let (terms, descriptors) = (&fill_terms, &fill_descriptors);
                     let mut floods = Vec::new();
                     for w in 0..flood_workers {
                         floods.push(scope.spawn(move || {
                             let mut id = 1_000_000_000u64 + (w as u64) * 100_000_000;
                             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                                let rows = crate::arms::ingest::synth_rows(ingest_batch, id, terms);
+                                let rows = crate::arms::ingest::synth_rows(
+                                    ingest_batch,
+                                    id,
+                                    terms,
+                                    descriptors,
+                                );
                                 id += ingest_batch as u64;
                                 match engine.accept_ingest(
                                     rows,

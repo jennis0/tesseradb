@@ -201,9 +201,44 @@ enum Command {
     },
 
     /// Update ingest, batched: ack latency as a function of batch size.
+    ///
+    /// Measures a *ramp*, not a rate — nothing here flushes, so every repetition lands on a deeper
+    /// buffer. `ingest-rate` is the arm to quote a throughput from.
     IngestBatch {
         #[arg(long, value_delimiter = ',', default_values_t = [1usize, 10, 100, 1000, 10000])]
         batch: Vec<usize>,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+    },
+
+    /// Update ingest, sustained: rows per second against the **shape** of the write.
+    ///
+    /// Three axes, and none of them is the one `ingest-batch` sweeps: term density (the dominant
+    /// factor), `B/W` (rows buffered between flushes over rows per commit-window close, which
+    /// governs `apply_window`'s `B²/2W` clone term), and how many callers submit at once (a serial
+    /// caller gives the commit window a queue of one, so group commit collects nothing). Base
+    /// corpus size is fixed at one fixture: it is measured as barely moving ingest cost.
+    IngestRate {
+        /// Descriptors per row.
+        #[arg(long, value_delimiter = ',', default_values_t = [1usize, 3, 8])]
+        density: Vec<usize>,
+        /// `B/W`, in units of `--batch`: 1 flushes every commit window, 24 buffers 24 of them.
+        #[arg(long = "bw", value_delimiter = ',', default_values_t = [1usize, 4, 12, 24])]
+        bw: Vec<usize>,
+        /// Concurrent `/control/ingest` callers.
+        #[arg(long, value_delimiter = ',', default_values_t = [1usize, 2, 4, 8])]
+        submitters: Vec<usize>,
+        /// Rows per `accept_ingest` call — `ingest_max_batch_rows`, at the server's default.
+        #[arg(long, default_value_t = 10_000)]
+        batch: usize,
+        /// `ingest.commit_window_max_items`. A ceiling only: a serial caller closes a window per
+        /// call whatever this says (decision 0034 — no linger).
+        #[arg(long, default_value_t = 10_000)]
+        window: usize,
+        /// Rows measured per cell after the cold cycle is discarded. The cycle count is derived
+        /// from this and `B`, so a shallow buffer is not measured over fewer rows than a deep one.
+        #[arg(long = "min-steady-rows", default_value_t = 120_000)]
+        min_steady_rows: usize,
         #[arg(long, default_value_t = 0)]
         seed: u64,
     },
@@ -458,6 +493,26 @@ fn main() -> std::process::ExitCode {
             data_root,
         } => arms::ingest::run_build(&ctx, &scale, &label_set, &data_root),
         Command::IngestBatch { batch, seed } => arms::ingest::run_batch(&ctx, &batch, seed),
+        Command::IngestRate {
+            density,
+            bw,
+            submitters,
+            batch,
+            window,
+            min_steady_rows,
+            seed,
+        } => arms::ingest::run_rate(
+            &ctx,
+            &arms::ingest::RateSweep {
+                density: &density,
+                ratio: &bw,
+                submitters: &submitters,
+                batch,
+                window,
+                min_steady_rows,
+                seed,
+            },
+        ),
         Command::IngestConcurrent {
             submitters,
             batch,

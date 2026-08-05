@@ -1,0 +1,45 @@
+tessera-bench ingest-rate --density 3 --bw 1,12,24 --submitters 1 --batch 10000 --window 10000
+  --min-steady-rows 240000 --repeat 5 --scale 2422486
+
+'pre'  = crates/tessera-lifecycle/src/buffer.rs at 78759b1^ (BufferedItem by value)
+'post' = the same tree at 78759b1        (Arc<BufferedItem>)
+Nothing else differs between the two builds. us per ingested row.
+
+--- B/W = 1 ---
+  stage                 pre     post   pre/post
+  us/row TOTAL         2.46     2.49      0.99x
+  buffer_clone        0.001    0.000          -
+  record_batch        0.001    0.001      1.00x
+  admit               0.168    0.188      0.89x
+  wal_append          0.081    0.083      0.98x
+  allocate            0.319    0.347      0.92x
+  apply_rows          1.092    1.109      0.98x
+  wal_fsync           0.367    0.365      1.01x
+  swap                0.000    0.000          -
+  submit→receipt      2.688    2.780      0.97x
+
+--- B/W = 12 ---
+  stage                 pre     post   pre/post
+  us/row TOTAL         6.69     2.42      2.76x
+  buffer_clone        3.006    0.102     29.57x
+  record_batch        0.804    0.002    349.37x
+  admit               0.711    0.211      3.37x
+  wal_append          0.105    0.184      0.57x
+  allocate            0.582    0.661      0.88x
+  apply_rows          1.170    1.140      1.03x
+  wal_fsync           0.351    0.363      0.97x
+  swap                0.000    0.000          -
+  submit→receipt      8.212    3.056      2.69x
+
+--- B/W = 24 ---
+  stage                 pre     post   pre/post
+  us/row TOTAL        12.43     2.91      4.27x
+  buffer_clone        6.236    0.271     23.03x
+  record_batch        1.759    0.003    674.18x
+  admit               0.942    0.211      4.47x
+  wal_append          0.155    0.173      0.90x
+  allocate            1.159    0.656      1.77x
+  apply_rows          1.198    1.173      1.02x
+  wal_fsync           0.443    0.353      1.26x
+  swap                0.000    0.000          -
+  submit→receipt     14.668    3.336      4.40x

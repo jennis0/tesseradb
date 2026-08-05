@@ -1,0 +1,23 @@
+=== A: the rate table, shipped defaults (batch 10k = window 10k) ===
+ingest_rate: 48 cells written, 0 skipped (already in ledger)
+
+real	6m31.938s
+user	6m10.987s
+sys	0m46.084s
+=== B: the same shapes with the window ceiling raised, so a window can gather ===
+ingest_rate: 12 cells written, 0 skipped (already in ledger)
+
+real	1m37.276s
+user	1m34.092s
+sys	0m6.975s
+=== C: base-size control — the same shape at 250k and 2.42M ===
+ingest_rate: 2 cells written, 0 skipped (already in ledger)
+
+real	0m17.667s
+user	0m17.108s
+sys	0m1.573s
+=== D: batch size, to check record_batch's lap reads a per-batch cost ===
+ingest_rate: 1 cells written, 0 skipped (already in ledger)
+ingest_rate: 1 cells written, 0 skipped (already in ledger)
+ingest_rate: 1 cells written, 0 skipped (already in ledger)
+=== ALL DONE ===
