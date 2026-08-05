@@ -44,6 +44,28 @@
 //!   that resolved would additionally push into `pass_rows`/`fail_rows` and build the diff
 //!   bitmaps. Real per-item cost is at least this and probably more.
 //!
+//! **F3 — CONFIRMED 2026-08-05; the paragraph below is kept as it stood, because how it was wrong
+//! is instructive.** `crates/tessera-engine/src/write.rs`'s `WriteStage` (the write-path stage
+//! timing this note says does not exist — it does now) measures the buffer clone directly at
+//! **2.28 µs/row** at 240,000 buffered with a 10,000-row window, against ~200–220 ns per buffered
+//! item. The mechanism is real and the magnitude is small: **7% of ingest cost, not the driver.**
+//!
+//! Two other claims in this module doc did not survive the same instrumentation, and both sent a
+//! later reader down a wrong path:
+//!
+//! * **"Ingest throughput is an fsync amortisation story" is false at realistic batch sizes.**
+//!   Measured `wal_fsync` is 0.40–0.65 µs/row of ~32 — **2%**. It was true of the batch=1 cell this
+//!   arm's headline came from and does not generalise.
+//! * **The cost is `apply_window`'s per-row loop: `apply_rows` at 15.5 µs/row, ~48% of the total**,
+//!   with a further ~40% outside `close_window` in the submit/receipt round-trip. Nothing visible
+//!   in that loop — three `external_id` clones, a `slice` `String` clone, three hash inserts and a
+//!   lookup — accounts for it: four allocations at a generous 500 ns is 2.0 µs. **Shrinking
+//!   `BufferedItem` was tried and measured, and did not pay.** The residual is unattributed and
+//!   wants a profiler or finer laps inside the loop, not another hypothesis.
+//!
+//! What the original note got right, and what is worth keeping: the discipline of refusing to
+//! claim F3 on inference. It was correct at the depths it could reach.
+//!
 //! **F3: NOT confirmed by measurement — do not claim it is.** A single-item ack costs ~3.2 ms and
 //! is entirely fsync-dominated: a batch of 1 and a batch of 1000 cost the same. Any O(buffer)
 //! clone term is buried under that floor at reachable depths. The implied marginal ns-per-buffered-
@@ -74,11 +96,23 @@
 //!   (write-path §4), so "durable and invisible" is the arm's window, not the system's.
 //! * **Absorption — partly measured, and not here.** Flush, both halves of merge and the
 //!   background refresh exist; the compaction fold does not. What these arms still cannot show is
-//!   the steady state of a database that has been *running* and absorbing writes for a while —
-//!   `crates/tessera-engine/tests/soak.rs` is what covers that today (40 flushes → 2 segments,
-//!   5 delta tiers, one full projection build), and design §16's "how many live segments before
-//!   per-tile fan-out is noticeable" stays open because merge keeps the count too low here to
-//!   provoke it.
+//!   the steady state of a database that has been *running* and absorbing writes for a while.
+//!   `crates/tessera-engine/tests/soak.rs` covers the *shape* of it (40 flushes → 2 segments,
+//!   5 delta tiers, one full projection build); **`tests/scale.rs` covers it at size** since
+//!   2026-08-05, with the figures in `docs/evidence/memos/2026-08-05-write-path-at-scale.md`.
+//!
+//!   **What that measured, and it is not reassuring: the segment axis is not bounded.** The
+//!   entity-space coalesce does bound its three axes, repeatedly. The row-space merge does not
+//!   bound segments, because `MergePolicy::select`'s rule 3 refuses a window whose *total* exceeds
+//!   `max_merged_segment_bytes`. At the shipped 256 MiB cap and `tier_width` 4, a 250,000-row
+//!   extent is ~9.3 MiB, so tier 1 reaches ~37 MiB and tier 2 ~149 MiB — and four of *those* total
+//!   595 MiB, over the cap. **Merging therefore saturates at ~149 MiB and the segment count then
+//!   grows linearly, one per ~4M rows ingested** (measured: 2 → 17 segments over 200 flushes at a
+//!   250M base, while merges kept firing throughout). Design §16's "how many live segments before
+//!   per-tile fan-out is noticeable" is **still open**, and now has a rate attached to it rather
+//!   than only a question. The cap is raisable — write-path §7 only requires it strictly below the
+//!   base segment's size — but merge peak memory is a measured 4.4–4.9× the inputs' file bytes, so
+//!   raising it buys segment count with pool transient.
 //! * **`accept_change` — benchmarked since 2026-07-30 in `arms::changes`; this note is kept for
 //!   the half of it that stayed true until 2026-08-01.** `changes` measures ack, tail and the
 //!   visibility arithmetic against *overlay* depth. It never ingests, so its buffer is empty in
@@ -392,6 +426,7 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     max_tiles_per_request: 262_144,
                     compute_threads: tessera_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
+                    max_merged_segment_bytes: None,
                 },
             )?;
             // The WAL lives on a dedicated executor thread, so an engine that writes must start
@@ -503,6 +538,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 max_tiles_per_request: 262_144,
                 compute_threads: tessera_engine::default_compute_threads(),
                 flush_max_age_secs: 90,
+                max_merged_segment_bytes: None,
             },
         )?;
         // The WAL lives on a dedicated executor thread, so an engine that writes must start one.
@@ -733,6 +769,7 @@ pub fn run_concurrent(
                     max_tiles_per_request: 262_144,
                     compute_threads: tessera_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
+                    max_merged_segment_bytes: None,
                 },
             )?;
             // Generous, deliberately: this arm means to measure what a full window collects, never

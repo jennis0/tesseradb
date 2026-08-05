@@ -45,6 +45,7 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str, tick_secs
         tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: tick_secs,
+            max_merged_segment_bytes: None,
             ..config_uncapped()
         },
     )

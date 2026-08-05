@@ -41,6 +41,7 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
             // selected on the tick either way, and a background tick landing mid-assertion would
             // make the counts depend on wall-clock.
             flush_max_age_secs: 3600,
+            max_merged_segment_bytes: None,
             ..config()
         },
     )

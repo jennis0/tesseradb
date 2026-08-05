@@ -50,6 +50,7 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
             tessera_plugin::Passthrough::new(),
             EngineConfig {
                 flush_max_age_secs: 3600,
+                max_merged_segment_bytes: None,
                 ..config()
             },
         )
@@ -133,6 +134,7 @@ fn a_suppressed_holder_still_blocks_reingest() {
         tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
+            max_merged_segment_bytes: None,
             ..config()
         },
     )

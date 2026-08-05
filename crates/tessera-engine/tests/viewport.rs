@@ -361,6 +361,7 @@ fn theta_does_not_move_when_the_viewport_pans() {
             max_tiles_per_request: 262_144,
             compute_threads: default_compute_threads(),
             flush_max_age_secs: 90,
+            max_merged_segment_bytes: None,
         },
     )
     .unwrap();
@@ -435,6 +436,7 @@ fn no_visible_tile_is_ever_served_empty() {
             max_tiles_per_request: 262_144,
             compute_threads: default_compute_threads(),
             flush_max_age_secs: 90,
+            max_merged_segment_bytes: None,
         },
     )
     .unwrap();
@@ -1164,6 +1166,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             max_tiles_per_request: 262_144,
             compute_threads: default_compute_threads(),
             flush_max_age_secs: 90,
+            max_merged_segment_bytes: None,
         },
     )
     .expect("engine should open the 2.4M bundle");

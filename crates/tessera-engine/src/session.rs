@@ -111,6 +111,21 @@ pub struct EngineConfig {
     /// in the stale-serve window, and then two publications deep, where it rebuilds. That is a
     /// real floor and a different one; see `crate::refresh`.
     pub flush_max_age_secs: u64,
+    /// `merge.max_merged_segment_bytes` — the largest total one row-space merge may consume, and
+    /// therefore the ceiling on how far tiering can go before segments stop being mergeable.
+    ///
+    /// **`None` keeps the built-in default**; see [`default_merge_policy`] for what that is and why
+    /// it is a fixed number rather than a derivation. An explicit value is what a deployment sets
+    /// when it would rather spend pool memory than live segments — merge peak is a measured
+    /// 4.4–4.9× the inputs' file bytes (`probes/2026-08-04-maintenance-memory/`), so this trades
+    /// one directly for the other.
+    ///
+    /// **It reaches the merge policy from here.** `tessera-server` validated this key against
+    /// write-path §7's base-segment relation from the day the key existed, and then had nowhere to
+    /// send it: both `MaintenanceDeps` sites took `default_merge_policy()` unconditionally, so a
+    /// configured value was checked and discarded. That is the inert key decision 0045 forbids,
+    /// with the additional trap that validation made it look effective.
+    pub max_merged_segment_bytes: Option<u64>,
 }
 
 /// The row-space merge's policy (write-path §7).
@@ -127,11 +142,12 @@ pub struct EngineConfig {
 /// still refused at startup by `tessera-server`'s config loader. Both are kept deliberately: the
 /// structural exclusion lives in one function and a refactor could lose it, and the startup
 /// refusal is what would still be standing if it did.
-fn default_merge_policy() -> tessera_store::merge::MergePolicy {
+/// The row-space merge's policy, with `EngineConfig::max_merged_segment_bytes` applied when set.
+fn merge_policy(max_merged_segment_bytes: Option<u64>) -> tessera_store::merge::MergePolicy {
     tessera_store::merge::MergePolicy {
         tier_width: 4,
         segment_floor_bytes: 16 << 20,
-        max_merged_segment_bytes: 256 << 20,
+        max_merged_segment_bytes: max_merged_segment_bytes.unwrap_or(256 << 20),
     }
 }
 
@@ -1506,7 +1522,7 @@ impl Engine {
             crate::write::MaintenanceDeps {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: crate::coalesce::CoalescePolicy::default(),
-                merge: default_merge_policy(),
+                merge: merge_policy(self.config.max_merged_segment_bytes),
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 external_index: Arc::clone(&self.external_index),
@@ -1555,7 +1571,7 @@ impl Engine {
             crate::write::MaintenanceDeps {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: crate::coalesce::CoalescePolicy::default(),
-                merge: default_merge_policy(),
+                merge: merge_policy(self.config.max_merged_segment_bytes),
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 external_index: Arc::clone(&self.external_index),

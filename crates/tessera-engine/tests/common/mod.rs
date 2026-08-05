@@ -77,6 +77,8 @@ pub fn config() -> EngineConfig {
         // it is testing (`tests/pins.rs` does), so these must never be the reason a test passes.
         // A 300 s TTL means no case here reaches it by elapsing.
         flush_max_age_secs: 90,
+        // The built-in default; `tests/scale.rs` is where this knob is exercised.
+        max_merged_segment_bytes: None,
     }
 }
 

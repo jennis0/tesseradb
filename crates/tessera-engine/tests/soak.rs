@@ -74,6 +74,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
             // Prompt flushes only, so the round count is the flush count and nothing depends on
             // wall-clock.
             flush_max_age_secs: 3600,
+            max_merged_segment_bytes: None,
             ..config_uncapped()
         },
     )
@@ -241,6 +242,7 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
         tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
+            max_merged_segment_bytes: None,
             ..config_uncapped()
         },
     )

@@ -303,6 +303,17 @@ pub struct ExecutorHealth {
     /// Counted at all because lifecycle §1.3's "never queued behind work of unbounded duration" is
     /// a claim this file makes in code, and a claim of that shape needs a measurement beside it.
     apply_nanos_total: AtomicU64,
+    /// **The window close, partitioned** — the write-path equivalent of [`crate::timing`]'s
+    /// viewport breakdown, and the instrumentation `arms::ingest` said would be needed to attribute
+    /// ingest cost ("StageTimings covers the viewport path only; there is no write-path equivalent
+    /// yet"). Six stages that together partition `close_window`; `apply_nanos_total` above stays as
+    /// the coarse figure `/control/status` already publishes, and stages 4–6 sum to it.
+    ///
+    /// **The clock reads are gated, the call sites are not.** `stage_nanos` is written by
+    /// [`ExecutorHealth::lap`], which is a no-op without `bench-timing` — so the instrumented and
+    /// uninstrumented builds take the same path, exactly as `timing.rs` argues for the read side.
+    /// Zeros in a release build mean "not measured", never "free".
+    stage_nanos: [AtomicU64; WriteStage::COUNT],
     apply_nanos_max: AtomicU64,
     /// Work-lane jobs whose `execute` has returned. **The other half of the queue-depth gauge**:
     /// `work_submitted - work_completed` is what [`ExecutorStats::work_depth`] reports and what
@@ -428,6 +439,103 @@ pub struct ExecutorHealth {
     wal: Arc<WalMeter>,
 }
 
+/// The six stages a commit window's close partitions into, in the order `close_window` runs them.
+///
+/// **They partition wall clock on the executor thread**, so the sum plus whatever is unattributed
+/// is the close's whole duration. `Apply*` are the three inside `apply_window`, and together they
+/// are the coarse `apply_nanos_total` that `/control/status` already publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteStage {
+    /// `CommitWindow::allocate` — entity-id assignment and the signature sort.
+    Allocate,
+    /// The per-entry WAL append loop: serialise and write.
+    WalAppend,
+    /// One `fsync` for the whole window — group commit's amortisation half.
+    WalFsync,
+    /// `apply_window`'s deep copy of the ingest buffer (F3's operand).
+    ApplyBufferClone,
+    /// `apply_window`'s per-row loop: `established`, `established_inverse`, the buffer insert.
+    ApplyRows,
+    /// Within [`WriteStage::ApplyRows`]: the forward `established` insert (`Vec<u8>`-keyed).
+    RowEstablished,
+    /// Within [`WriteStage::ApplyRows`]: the `established_inverse` insert (`EntityId`-keyed).
+    RowEstablishedInv,
+    /// Within [`WriteStage::ApplyRows`]: `IngestBuffer::insert_row_with_terms`.
+    RowBufferInsert,
+    /// Within [`WriteStage::ApplyRows`]: `IngestBuffer::set_wal_pos`.
+    RowWalPos,
+    /// `admit_ingest`: taking a submitted job into the open commit window — the WAL record and the
+    /// window entry are built here, before anything is durable.
+    AdmitWindow,
+    /// `record_accepted_batch`: the idempotency index insert, which clones the batch's whole
+    /// `Vec<EntityId>` (one per batch, not per row).
+    RecordBatch,
+    /// **Outside `close_window` entirely**: the caller's `accept_ingest`, from entry to receipt.
+    ///
+    /// Overlaps every other stage rather than partitioning beside them — it is the whole of what a
+    /// `/control/ingest` handler waits on, and the executor's stages happen inside it. The
+    /// difference between this and the stages is queueing, the channel round-trip, and the
+    /// caller-side blocking wait, which is the ~2 µs/row `WriteStage` could not otherwise see.
+    SubmitToReceipt,
+    /// The generation swap.
+    ApplySwap,
+}
+
+impl WriteStage {
+    pub const COUNT: usize = 13;
+    pub const ALL: [WriteStage; Self::COUNT] = [
+        WriteStage::Allocate,
+        WriteStage::WalAppend,
+        WriteStage::WalFsync,
+        WriteStage::ApplyBufferClone,
+        WriteStage::ApplyRows,
+        WriteStage::ApplySwap,
+        WriteStage::RowEstablished,
+        WriteStage::RowEstablishedInv,
+        WriteStage::RowBufferInsert,
+        WriteStage::RowWalPos,
+        WriteStage::AdmitWindow,
+        WriteStage::RecordBatch,
+        WriteStage::SubmitToReceipt,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            WriteStage::Allocate => "allocate",
+            WriteStage::WalAppend => "wal_append",
+            WriteStage::WalFsync => "wal_fsync",
+            WriteStage::ApplyBufferClone => "buffer_clone",
+            WriteStage::ApplyRows => "apply_rows",
+            WriteStage::ApplySwap => "swap",
+            WriteStage::RowEstablished => "  .est_fwd",
+            WriteStage::RowEstablishedInv => "  .est_inv",
+            WriteStage::RowBufferInsert => "  .buf_insert",
+            WriteStage::RowWalPos => "  .wal_pos",
+            WriteStage::AdmitWindow => "admit",
+            WriteStage::RecordBatch => "record_batch",
+            WriteStage::SubmitToReceipt => "submit→receipt",
+        }
+    }
+}
+
+/// A lap mark. Carries an `Instant` only under `bench-timing`; a zero-sized token otherwise, so
+/// the uninstrumented build allocates no clock and the call sites need no `#[cfg]`.
+#[derive(Clone, Copy)]
+pub(crate) struct StageMark(#[cfg(feature = "bench-timing")] std::time::Instant);
+
+impl StageMark {
+    #[inline(always)]
+    pub(crate) fn now() -> Self {
+        #[cfg(feature = "bench-timing")]
+        {
+            StageMark(std::time::Instant::now())
+        }
+        #[cfg(not(feature = "bench-timing"))]
+        {
+            StageMark()
+        }
+    }
+}
+
 /// A snapshot of [`ExecutorHealth`], for `/control/status` and for tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutorStats {
@@ -436,6 +544,9 @@ pub struct ExecutorStats {
     pub deny_submitted: u64,
     /// See [`ExecutorHealth::apply_nanos_total`] — the whole apply step, not the clone alone.
     pub apply_nanos_total: u64,
+    /// Per-stage nanoseconds for the window close, indexed by [`WriteStage`]. **All zero without
+    /// `bench-timing`** — see [`ExecutorHealth::stage_nanos`].
+    pub stage_nanos: [u64; WriteStage::COUNT],
     pub apply_nanos_max: u64,
     /// Flush ticks fired since the executor started (§1.3).
     pub ticks: u64,
@@ -618,6 +729,7 @@ impl ExecutorHealth {
             merge_failures: AtomicU64::new(0),
             merge_completed_pending: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
+            stage_nanos: Default::default(),
             apply_nanos_max: AtomicU64::new(0),
             work_completed: AtomicU64::new(0),
             work_service_nanos_ewma: AtomicU64::new(0),
@@ -695,6 +807,7 @@ impl ExecutorHealth {
             work_submitted,
             deny_submitted: self.deny_submitted.load(Ordering::Relaxed),
             apply_nanos_total: self.apply_nanos_total.load(Ordering::Relaxed),
+            stage_nanos: std::array::from_fn(|i| self.stage_nanos[i].load(Ordering::Relaxed)),
             apply_nanos_max: self.apply_nanos_max.load(Ordering::Relaxed),
             wal_appends: self.wal.appends(),
             wal_fsyncs: self.wal.fsyncs(),
@@ -765,6 +878,24 @@ impl ExecutorHealth {
         let offset = at.saturating_duration_since(self.base).as_nanos() as u64;
         self.work_started_nanos
             .store(offset.saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// Charge the time since `mark` to `stage`, and return a fresh mark. A no-op without
+    /// `bench-timing`, where it returns `mark` unchanged and reads no clock.
+    #[inline(always)]
+    #[allow(unused_variables)]
+    fn lap(&self, stage: WriteStage, mark: StageMark) -> StageMark {
+        #[cfg(feature = "bench-timing")]
+        {
+            let now = std::time::Instant::now();
+            self.stage_nanos[stage as usize]
+                .fetch_add(now.duration_since(mark.0).as_nanos() as u64, Ordering::Relaxed);
+            StageMark(now)
+        }
+        #[cfg(not(feature = "bench-timing"))]
+        {
+            mark
+        }
     }
 
     fn record_apply(&self, nanos: u64) {
@@ -1110,7 +1241,7 @@ pub(crate) struct LiveState {
     /// The I9 allocator. **Written only by the executor**, never by a handler: entity ids are
     /// assigned at a window's close, on the one thread that also advances the high-water mark.
     allocator: Mutex<Allocator>,
-    established: Mutex<FxHashMap<Vec<u8>, EntityId>>,
+    established: Mutex<std::collections::HashMap<Vec<u8>, EntityId>>,
     established_inverse: Mutex<FxHashMap<EntityId, Vec<u8>>>,
     /// The descriptor resolver's extension state. Written from **both** sides, which is correct and
     /// is the one asymmetry in this type: ingest resolves in the handler *before* submitting
@@ -1385,7 +1516,7 @@ impl From<SubmitError> for AcceptError {
 pub(crate) struct WritePathState {
     wal: Wal,
     allocator: Allocator,
-    established: FxHashMap<Vec<u8>, EntityId>,
+    established: std::collections::HashMap<Vec<u8>, EntityId>,
     established_inverse: FxHashMap<EntityId, Vec<u8>>,
     resolver_state: ResolverState,
     accepted_batches: AcceptedBatches,
@@ -1446,6 +1577,12 @@ impl WritePath {
 
         let (overlay, mut buffer, established, resolver) =
             replay(&records, dict, seed, resolve_from_bundle).map_err(EngineError::Overlay)?;
+        // **Re-hashed at the boundary, once, at startup.** `replay` builds this with `FxHashMap`;
+        // the live index deliberately does not — see `WritePath::established`'s doc. Converting
+        // here costs one pass over the replayed set at open and keeps the hasher choice in one
+        // place rather than propagating it into `tessera-lifecycle`.
+        let established: std::collections::HashMap<Vec<u8>, EntityId> =
+            established.into_iter().collect();
 
         // **The buffer holds exactly the rows that have no geometry, and this is where that becomes
         // true.** Replay walks every retained WAL record, including the `IngestBatch` rows of every
@@ -1797,11 +1934,13 @@ impl WritePath {
         batch_id: String,
         body_hash: [u8; 32],
     ) -> Result<Vec<EntityId>, AcceptError> {
+        let mark = StageMark::now();
         let receipt = self.handle()?.submit(Command::Ingest {
             rows,
             batch_id,
             body_hash,
         })?;
+        self.health().lap(WriteStage::SubmitToReceipt, mark);
         match receipt.outcome {
             Ok(Ack::Ingested { entity_ids }) => Ok(entity_ids),
             Ok(Ack::Changed) => unreachable!("an Ingest command answers with Ack::Ingested"),
@@ -4056,7 +4195,9 @@ impl Executor {
             };
 
             let admitted;
+            let m = StageMark::now();
             (window, admitted) = self.admit_ingest(window, rows, batch_id, body_hash, respond);
+            self.health.lap(WriteStage::AdmitWindow, m);
             did_work = true;
             if admitted == Admission::YieldedAfterClose {
                 break;
@@ -4328,6 +4469,7 @@ impl Executor {
     fn close_window(&mut self, window: CommitWindow<Responder>) {
         let entries = window.len() as u64;
         let started = window.opened_at();
+        let mut mark = StageMark::now();
 
         let closed = match self.live.with_allocator(|a| window.allocate(a)) {
             Ok((closed, tally)) => {
@@ -4346,6 +4488,8 @@ impl Executor {
             }
         };
 
+        mark = self.health.lap(WriteStage::Allocate, mark);
+
         // One record per entry — batch identity is preserved through the window, which is what a
         // joined retry is answered off — appended in entries order, which is also apply order.
         let mut failed_at: Option<(usize, WalError)> = None;
@@ -4362,6 +4506,7 @@ impl Executor {
             }
             positions.push(at);
         }
+        mark = self.health.lap(WriteStage::WalAppend, mark);
         // **One fsync for the whole window.** This is the amortisation half of group commit; the
         // allocation scope above is the point of it.
         if failed_at.is_none() {
@@ -4373,6 +4518,7 @@ impl Executor {
                 failed_at = Some((0, e));
             }
         }
+        self.health.lap(WriteStage::WalFsync, mark);
         self.observe_wal();
         if let Some((index, error)) = failed_at {
             self.fail_window_wal(closed, index, error, entries, started);
@@ -4387,6 +4533,7 @@ impl Executor {
 
         // Recorded after the swap, so a concurrent replay of a batch id can never observe a window
         // where the generation has swapped but the idempotency index has not caught up.
+        let m = StageMark::now();
         for entry in &closed {
             let (batch_id, body_hash) = entry.batch_key();
             self.live.record_accepted_batch(
@@ -4395,6 +4542,7 @@ impl Executor {
                 entry.entity_ids.clone(),
             );
         }
+        self.health.lap(WriteStage::RecordBatch, m);
         self.observe_wal();
 
         // **N waiters, one proof.** A death partway through this loop leaves some waiters acked and
@@ -4548,8 +4696,10 @@ impl Executor {
     /// downstream reads it — the ack needs `entity_ids`, not terms.
     fn apply_window(&self, closed: &mut [ClosedEntry<Responder>], positions: &[u64]) -> Published {
         let started = std::time::Instant::now();
+        let mut mark = StageMark::now();
         let generation = self.generation.load_full();
         let mut buffer = (*generation.buffer).clone();
+        mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
 
         let mut established = lock_recover(&self.live.established);
         // Updated together in one critical section, so a `/control/changes` lookup and a
@@ -4566,16 +4716,22 @@ impl Executor {
             for (row, row_terms) in entry.rows().iter().zip(terms) {
                 // Contracts §3.4: no external id means nothing to establish. `None` must never
                 // collide with `None`, so this skips rather than inserting under a shared empty key.
+                let mut m = StageMark::now();
                 if let Some(external_id) = &row.external_id {
                     established.insert(external_id.clone(), row.entity_id);
+                    m = self.health.lap(WriteStage::RowEstablished, m);
                     established_inverse.insert(row.entity_id, external_id.clone());
+                    m = self.health.lap(WriteStage::RowEstablishedInv, m);
                 }
                 buffer.insert_row_with_terms(row, row_terms);
+                let m = self.health.lap(WriteStage::RowBufferInsert, m);
                 buffer.set_wal_pos(row.entity_id, *wal_pos);
+                self.health.lap(WriteStage::RowWalPos, m);
             }
         }
         drop(established);
         drop(established_inverse);
+        mark = self.health.lap(WriteStage::ApplyRows, mark);
 
         // Published here, at the one place buffer occupancy changes, so `/control/ingest`'s
         // occupancy bound reads a figure the executor maintains rather than one a handler derives
@@ -4599,7 +4755,9 @@ impl Executor {
             // adds a *buffered* row, which has no row id to be denied at.
             denied: Arc::clone(&generation.denied),
         };
-        self.publish(next, started)
+        let published = self.publish(next, started);
+        self.health.lap(WriteStage::ApplySwap, mark);
+        published
     }
 
     /// Clone the overlay **once**, apply every change in the window, publish **once**.

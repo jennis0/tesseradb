@@ -202,6 +202,7 @@ pub fn default_engine_config() -> EngineConfig {
         // The shipped defaults for lifecycle §2.2's two pin bounds — see the same two lines in
         // tessera-engine's `tests/common/mod.rs`.
         flush_max_age_secs: 90,
+        max_merged_segment_bytes: None,
     }
 }
 

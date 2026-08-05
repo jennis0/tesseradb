@@ -206,6 +206,7 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
         tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
+            max_merged_segment_bytes: None,
             ..config()
         },
     )

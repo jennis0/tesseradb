@@ -1,7 +1,7 @@
 //! The row-space merge, end to end — the half of merge that permutes row ids (write-path §7,
 //! decision 0044's D2/D3).
 //!
-//! Four properties, and each is fail-open or fail-closed the other way round:
+//! Five properties, and each is fail-open or fail-closed the other way round:
 //!
 //! - **The segment count comes down**, which is the axis the entity-space coalesce cannot bound
 //!   and the whole reason this half exists.
@@ -12,14 +12,37 @@
 //! - **Row space is permuted, so a projection that spans it cannot be served stale**, and the
 //!   refresh that produces the replacement is armed before the swap.
 //! - **A restart opens what was committed.**
+//! - **A deny still denies the entity it named, not the row it happened to occupy** — the deny
+//!   cases below, and the only fail-open on this list that no count assertion can see.
+//!
+//! ## Why the deny cases compare point sets rather than counts
+//!
+//! The deny mask is a bitmap over **rows**; the overlay names **entities**. A merge permutes row
+//! ids inside the merged span, so a mask carried across one keeps denying the row — which now
+//! names a different entity. The visible *count* is then still exactly right, because one item
+//! left the visible set and one entered it; what changed is *which*. Every count assertion in
+//! this file passes against that bug.
+//!
+//! So these cases assert on the served `tessera_id` set. `tessera_id` is a blinding permutation of
+//! the entity id under the deployment key (I10, decision 0014) — a function of the entity, never
+//! of the row — so it is stable across a merge by construction, and set equality across the swap
+//! is exactly the discrimination a count cannot make. `publish_merge` re-derives the mask over the
+//! new row space for this reason; these are the tests that hold it to it.
+//!
+//! **Not covered here, deliberately:** a suppression that arrives *between* a merge's execution on
+//! the pool and its publication on the executor. `publish_merge` re-derives from the live overlay
+//! at swap time, so the ordering is sound by construction, but there is no pause site between
+//! those two points and a test that raced them would assert on scheduling. Reaching it needs a
+//! pause site in the merge publication path, which is the same hook a crash-mid-merge test needs.
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::UnallocatedRow;
+use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 use tessera_types::EntityId;
 
 /// `MergePolicy::tier_width` — how many adjacent, same-tier extents select a merge.
@@ -41,6 +64,7 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
         tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
+            max_merged_segment_bytes: None,
             ..config_uncapped()
         },
     )
@@ -49,21 +73,6 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
         .start_write_executor(64)
         .expect("the executor starts once");
     engine
-}
-
-fn ingest(engine: &Engine, external_id: &str, x: f32, y: f32) -> EntityId {
-    let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
-        slice: "s0".to_string(),
-        descriptors: vec![b"0".to_vec()],
-        x,
-        y,
-        scalars: Vec::new(),
-        terms: engine.resolve_terms(&[b"0".to_vec()]),
-    };
-    engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
-        .expect("ingest is accepted")[0]
 }
 
 fn whole_extent() -> ViewportRequest<'static> {
@@ -86,27 +95,387 @@ fn viewport(engine: &Engine, session: &tessera_engine::Session) -> tessera_engin
     }
 }
 
-/// Flush `count` segments, one item each, and return their `(entity, external_id, x)` triples.
-fn flush_segments(engine: &Engine, count: usize) -> Vec<(EntityId, String, f32)> {
-    let mut items = Vec::new();
-    for i in 0..count {
-        let external_id = format!("ext-{i}");
-        let x = 5.0 * (i as f32 + 1.0);
-        let entity = ingest(engine, &external_id, x, 5.0);
-        items.push((entity, external_id, x));
-        let flushes = engine.write_executor_stats().flushes;
-        engine.request_flush();
-        wait_until("the flush to publish", || {
-            engine.write_executor_stats().flushes > flushes
-        });
-    }
-    items
+// ---------------------------------------------------------------------------------------------
+// Deny across a merge — see this module's doc for why these compare served sets, not counts.
+// ---------------------------------------------------------------------------------------------
+
+/// Items per interleaved segment. Above `TIER_WIDTH`, so the merged order cycles through every
+/// segment more than once and no row's position is a coincidence of the first cycle.
+const ROWS_EACH: usize = 8;
+
+/// The served set as `tessera_id`s.
+///
+/// `tessera_id` is a blinding permutation of the entity id under the deployment key (I10) — a
+/// function of the entity, never of the row — so it is stable across a merge by construction, and
+/// set equality across the swap is the discrimination a count cannot make.
+fn served_ids(
+    engine: &Engine,
+    session: &tessera_engine::Session,
+) -> BTreeSet<tessera_types::TesseraId> {
+    viewport(engine, session)
+        .points
+        .iter()
+        .map(|p| p.tessera_id)
+        .collect()
 }
 
 fn segment_count(engine: &Engine) -> usize {
     engine.generation().bundle.partitions["default"].slices["s0"]
         .segments
         .len()
+}
+
+fn rows_of(engine: &Engine, entities: &[EntityId]) -> Vec<Option<u32>> {
+    let generation = engine.generation();
+    let row_space = &generation.bundle.partitions["default"].slices["s0"].row_space;
+    entities
+        .iter()
+        .map(|e| row_space.row_of(*e).map(|r| r.raw()))
+        .collect()
+}
+
+/// Flush `TIER_WIDTH` segments of [`ROWS_EACH`] items each, laid out so that the segments
+/// **interleave in Morton order**.
+///
+/// **This is what makes the merge's permutation non-trivial, and it is load-bearing rather than
+/// incidental.** The obvious fixture — one item per flush, at ascending x — produces four
+/// single-row extents that are already in Morton order, so the merged segment concatenates them
+/// unchanged and *every row keeps its id*. Every assertion about a permuted row space is then
+/// vacuously true, including the deny cases below: the mask can be carried across the swap instead
+/// of re-derived and nothing observes the difference. Measured, not supposed — the single-item
+/// fixture reports rows 64,65,66,67 on both sides of the merge.
+///
+/// So segment `s` takes the x positions congruent to `s` modulo `TIER_WIDTH`, at a constant y.
+/// Morton order over a constant y is monotone in x, so the merged segment orders the rows
+/// `s0t0, s1t0, s2t0, s3t0, s0t1, …` and every row but the first cycle's moves. [`run_merge`]
+/// asserts that it did, so this can never silently regress to the identity.
+///
+/// **Every item carries `ALL_TERM`; the even-`t` ones additionally carry `SUBSET_TERM`**, so a
+/// sparse principal's view across the merge is expressible — the postings side of the same
+/// question, which a full-coverage credential cannot see.
+fn flush_interleaved_segments(engine: &Engine) -> Vec<Vec<(EntityId, String)>> {
+    let mut by_segment = Vec::new();
+    for s in 0..TIER_WIDTH {
+        let mut rows = Vec::new();
+        let mut items = Vec::new();
+        for t in 0..ROWS_EACH {
+            let external_id = format!("ext-{s}-{t}");
+            let descriptors = if t.is_multiple_of(2) {
+                vec![b"0".to_vec(), b"1".to_vec()]
+            } else {
+                vec![b"0".to_vec()]
+            };
+            rows.push(UnallocatedRow {
+                external_id: Some(external_id.as_bytes().to_vec()),
+                slice: "s0".to_string(),
+                // x ≡ s (mod TIER_WIDTH), scaled to distinct cells inside the extent.
+                x: ((t * TIER_WIDTH + s) * 20) as f32,
+                y: 5.0,
+                scalars: Vec::new(),
+                terms: engine.resolve_terms(&descriptors),
+                descriptors,
+            });
+            items.push(external_id);
+        }
+        let entities = engine
+            .accept_ingest(rows, format!("batch-{s}"), [s as u8; 32])
+            .expect("ingest is accepted");
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_until("the flush to publish", || {
+            engine.write_executor_stats().flushes > flushes
+        });
+        by_segment.push(entities.into_iter().zip(items).collect());
+    }
+    by_segment
+}
+
+/// An engine with `TIER_WIDTH` interleaved extents flushed and merge held until asked.
+fn engine_with_pending_merge(
+    tmp: &tempfile::TempDir,
+    root: &std::path::Path,
+) -> (Engine, Vec<(EntityId, String)>) {
+    build_fixture_n(
+        root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let engine = engine_at(tmp.path(), root);
+    engine.set_merge_for_test(false);
+    let flat = flush_interleaved_segments(&engine)
+        .into_iter()
+        .flatten()
+        .collect();
+    (engine, flat)
+}
+
+/// Run the merge, and **assert its permutation is not the identity**.
+///
+/// The guard belongs here rather than in one case: a fixture that stops interleaving makes every
+/// deny assertion below vacuously true rather than false, so nothing else in this file would
+/// notice. See [`flush_interleaved_segments`] for how that happened.
+fn run_merge(engine: &Engine, entities: &[EntityId]) {
+    let before = rows_of(engine, entities);
+    engine.set_merge_for_test(true);
+    engine.request_flush();
+    wait_until("the merge to publish", || {
+        engine.write_executor_stats().merges >= 1
+    });
+    let after = rows_of(engine, entities);
+    assert!(
+        before.iter().all(Option::is_some) && after.iter().all(Option::is_some),
+        "every flushed entity must still have a row: {before:?} -> {after:?}"
+    );
+    assert_ne!(
+        before, after,
+        "this merge permuted nothing, so every case below is vacuous — see \
+         flush_interleaved_segments"
+    );
+}
+
+/// **A suppression accepted before a merge still hides the same item afterwards.**
+///
+/// The fail-open this exists to catch is the one `publish_merge` re-derives the deny mask to
+/// avoid, and the one `crate::merge`'s own module doc names as its mutation: carry the mask
+/// forward instead, and every denied row id keeps denying a row that now belongs to a different
+/// entity. Two items are suppressed here and two stay hidden either way — so the assertion is set
+/// equality on the served `tessera_id`s, which tells "the same two are hidden" from "two are
+/// hidden".
+///
+/// **One suppression sits inside the merged span and one outside it.** The merge consumes the four
+/// flushed extents, not the base segment, so a base-segment entity's row does not move. A mask
+/// carried forward still gets that one right — which is how a bug here could survive a case that
+/// suppressed a single item and happened to pick the wrong one.
+///
+/// **Mutation:** replace `derive_denied(&live.overlay, &next_bundle)` in `publish_merge` with
+/// `Arc::clone(&live.denied)` and this fails on the set while every count in this file stays green.
+#[test]
+fn a_suppression_survives_a_merge_and_still_hides_the_same_item() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
+
+    let unsuppressed = served_ids(&engine, &session);
+    assert_eq!(unsuppressed.len(), 64 + TIER_WIDTH * ROWS_EACH);
+
+    // Inside the merged span: a flushed item the permutation moves. Taken from the *second* cycle
+    // (`t >= 1`), because the first cycle's rows are the one part of the merged order that can
+    // coincide with the pre-merge layout.
+    let inside = items[1].0;
+    // Outside it: a base-segment entity, whose row does not move. See this test's doc.
+    let outside = EntityId::new(source_to_new_map(&root, &engine.generation().prefix)[&11]);
+    for entity in [inside, outside] {
+        engine
+            .accept_change(entity, ChangeOp::Suppress, None)
+            .expect("a suppression is accepted");
+    }
+
+    let suppressed = served_ids(&engine, &session);
+    assert_eq!(
+        suppressed.len(),
+        unsuppressed.len() - 2,
+        "both suppressions are in force before the merge"
+    );
+    assert!(suppressed.is_subset(&unsuppressed));
+
+    run_merge(&engine, &entities);
+
+    assert_eq!(
+        served_ids(&engine, &session),
+        suppressed,
+        "a merge must hide the same two items afterwards — an equal-sized set hiding a different \
+         pair is the deny mask carried across the permutation instead of re-derived over it"
+    );
+    for entity in [inside, outside] {
+        assert!(
+            engine.generation().overlay.is_suppressed(entity),
+            "entity {} lost its suppression to the merge",
+            entity.raw()
+        );
+    }
+}
+
+/// **A sparse principal sees exactly its own items across a merge**, and a suppression inside that
+/// subset removes exactly one of them.
+///
+/// The full-coverage cases above exercise the row-space half. This is the postings half: the merge
+/// leaves every consumed segment's delta tier listed (`rebase_into`'s third rule) while moving the
+/// rows those postings' entities occupy, so a session whose visible set is a *subset* is where a
+/// tier dropped, double-counted, or resolved against the wrong row space would show. A principal
+/// holding only `SUBSET_TERM` sees the even-`t` ingested items and the base fixture's every-third.
+#[test]
+fn a_sparse_principal_sees_the_same_subset_across_a_merge() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
+
+    let sparse = engine.authorise(&subset_credential()).unwrap();
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let before = served_ids(&engine, &sparse);
+    // Every third base item carries SUBSET_TERM (common::terms_of), plus the even-t ingested ones.
+    let expected = (0..64u64).filter(|i| i.is_multiple_of(3)).count() + TIER_WIDTH * ROWS_EACH / 2;
+    assert_eq!(before.len(), expected, "the sparse principal's set before the merge");
+    assert!(
+        before.is_subset(&served_ids(&engine, &full)),
+        "and it is a subset of what full coverage sees"
+    );
+
+    // `(s=0, t=4)`: an even `t`, so it carries SUBSET_TERM and is in this principal's set, and far
+    // enough into the cycle that the merge genuinely moves its row. `(s=0, t=0)` holds the smallest
+    // x in the fixture, so it keeps row `row_base` on both sides of the swap and would make this
+    // case pass against a mask that was carried rather than re-derived.
+    let suppressed_entity = items[4].0;
+    engine
+        .accept_change(suppressed_entity, ChangeOp::Suppress, None)
+        .expect("a suppression is accepted");
+    let after_suppress = served_ids(&engine, &sparse);
+    assert_eq!(after_suppress.len(), before.len() - 1);
+
+    run_merge(&engine, &entities);
+
+    assert_eq!(
+        served_ids(&engine, &sparse),
+        after_suppress,
+        "the sparse principal's set must be unchanged by the merge, item for item — a tier \
+         resolved against the pre-merge row space keeps the cardinality and moves the membership"
+    );
+}
+
+/// **An unsuppress after a merge restores the item that was suppressed**, and no other.
+///
+/// Rule S (write-path §5.4) is the rule under test: a suppression retires **only** on unsuppress,
+/// and never touches postings — so the baseline it restores to is exact, and set equality against
+/// it is what names the restored item rather than merely counting it.
+///
+/// **Weaker than its siblings against the carried-mask mutation, and here is why**, so that nobody
+/// reads it as covering that: the unsuppress publishes its own generation, and *that* publication
+/// re-derives the mask correctly whatever the merge did. So this case still passes against a merge
+/// that carried the mask forward — the deny publication repairs it before the assertion looks. It
+/// covers Rule S across a permutation; `a_suppression_survives_a_merge_and_still_hides_the_same_item`
+/// is what covers the derivation.
+#[test]
+fn an_unsuppress_after_a_merge_restores_the_item_that_was_suppressed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
+
+    let baseline = served_ids(&engine, &session);
+    let entity = items[ROWS_EACH + 2].0;
+    engine
+        .accept_change(entity, ChangeOp::Suppress, None)
+        .expect("a suppression is accepted");
+    assert_eq!(served_ids(&engine, &session).len(), baseline.len() - 1);
+
+    run_merge(&engine, &entities);
+
+    engine
+        .accept_change(entity, ChangeOp::Unsuppress, None)
+        .expect("an unsuppress is accepted");
+    assert_eq!(
+        served_ids(&engine, &session),
+        baseline,
+        "the unsuppress must restore the entity that was suppressed, at its own identity — a set \
+         of the right size naming a different item is a mask resolved against a stale row space"
+    );
+    assert!(!engine.generation().overlay.is_suppressed(entity));
+}
+
+/// **A delete before a merge stays deleted across it and across a restart**, and the merge carries
+/// its tombstone into the manifest it commits.
+///
+/// Rule F (write-path §5.4): a deletion retires **only** at the compaction fold that executes it,
+/// and the fold does not exist — so nothing here retires, and the delete must still be in force
+/// after the merge has rewritten the segment its row lived in. A merge is row-count preserving by
+/// design (it is not the fold), so the deleted row is still *present* in the merged segment; what
+/// must survive is the overlay entry that hides it.
+///
+/// **Mutation:** have `rebase_into` drop `tombstones`, and the item returns on the restart rather
+/// than on the merge — which is why this case reopens.
+#[test]
+fn a_delete_before_a_merge_stays_deleted_across_it_and_a_restart() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
+
+    let baseline = served_ids(&engine, &session);
+    let deleted = items[ROWS_EACH * 2 + 3].0;
+    engine
+        .accept_change(deleted, ChangeOp::Delete, None)
+        .expect("a delete is accepted");
+    let after_delete = served_ids(&engine, &session);
+    assert_eq!(after_delete.len(), baseline.len() - 1);
+
+    run_merge(&engine, &entities);
+    assert_eq!(
+        served_ids(&engine, &session),
+        after_delete,
+        "the deleted item must still be the hidden one after the merge"
+    );
+
+    assert!(
+        engine.generation().bundle.partitions["default"]
+            .manifest
+            .tombstones
+            .contains(&deleted.raw()),
+        "the merge's manifest must carry the tombstone forward — nothing retires it before the \
+         fold, and the fold does not exist"
+    );
+
+    drop(engine);
+    let reopened = engine_at(tmp.path(), &root);
+    let session = reopened.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(
+        served_ids(&reopened, &session),
+        after_delete,
+        "and it is still deleted once the merged manifest is what the node opens"
+    );
+    assert!(reopened.generation().overlay.is_deleted(deleted));
+}
+
+/// **A suppression accepted while the merge is in flight is in force once it lands.**
+///
+/// Not the pause-site race — see this module's doc for what is out of reach — but the interleaving
+/// that *is* deterministic in its assertion: the deny is submitted after the tick that dispatches
+/// the merge, so it may be applied before or after `publish_merge` re-derives, and the property
+/// must hold either way. A publication that re-derived from a *captured* overlay rather than the
+/// live one loses the deny on exactly one of the two orderings, so this fails intermittently
+/// rather than never.
+#[test]
+fn a_suppression_racing_a_merge_is_in_force_once_both_have_landed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let baseline = served_ids(&engine, &session);
+    let entity = items[ROWS_EACH * 3 + 1].0;
+
+    engine.set_merge_for_test(true);
+    engine.request_flush();
+    engine
+        .accept_change(entity, ChangeOp::Suppress, None)
+        .expect("a suppression is accepted");
+    wait_until("the merge to publish", || {
+        engine.write_executor_stats().merges >= 1
+    });
+
+    let served = served_ids(&engine, &session);
+    assert_eq!(
+        served.len(),
+        baseline.len() - 1,
+        "the suppression is in force whichever side of the swap it landed"
+    );
+    assert!(served.is_subset(&baseline));
+    assert!(engine.generation().overlay.is_suppressed(entity));
 }
 
 /// **The segment count comes down and nothing is lost doing it.**
@@ -121,28 +490,16 @@ fn segment_count(engine: &Engine) -> usize {
 fn a_merge_collapses_segments_and_loses_no_item() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    build_fixture_n(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        64,
-    );
-    let engine = engine_at(tmp.path(), &root);
-    engine.set_merge_for_test(false);
-
-    let items = flush_segments(&engine, TIER_WIDTH);
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
     // The build segment plus one per flush.
     assert_eq!(segment_count(&engine), TIER_WIDTH + 1);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let before = viewport(&engine, &session);
     let visible_before: u64 = before.tiles.iter().map(|t| t.visible).sum();
-    assert_eq!(visible_before, 64 + TIER_WIDTH as u64);
+    assert_eq!(visible_before, (64 + TIER_WIDTH * ROWS_EACH) as u64);
 
-    engine.set_merge_for_test(true);
-    engine.request_flush();
-    wait_until("the merge to publish", || {
-        engine.write_executor_stats().merges >= 1
-    });
+    run_merge(&engine, &entities);
 
     assert_eq!(
         segment_count(&engine),
@@ -167,7 +524,7 @@ fn a_merge_collapses_segments_and_loses_no_item() {
     );
 
     // Every binding survives the run coalesce the merge performed on the way.
-    for (entity, external_id, _) in &items {
+    for (entity, external_id) in &items {
         assert_eq!(
             engine
                 .resolve_external_id(external_id.as_bytes())
@@ -196,26 +553,15 @@ fn a_merge_collapses_segments_and_loses_no_item() {
 fn a_merge_moves_geometry_and_the_refresh_replaces_every_projection() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    build_fixture_n(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        64,
-    );
-    let engine = engine_at(tmp.path(), &root);
-    engine.set_merge_for_test(false);
-    flush_segments(&engine, TIER_WIDTH);
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     viewport(&engine, &session);
     let geometry_before = engine.generation().segments_version;
     let builds_before = engine.full_projection_builds();
 
-    engine.set_merge_for_test(true);
-    engine.request_flush();
-    wait_until("the merge to publish", || {
-        engine.write_executor_stats().merges >= 1
-    });
+    run_merge(&engine, &entities);
     assert!(
         engine.generation().segments_version > geometry_before,
         "a merge permutes row space, so it must bump the geometry version — the only safe \
@@ -246,22 +592,13 @@ fn a_merge_moves_geometry_and_the_refresh_replaces_every_projection() {
 fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    build_fixture_n(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        64,
-    );
 
     let items = {
-        let engine = engine_at(tmp.path(), &root);
-        let items = flush_segments(&engine, TIER_WIDTH);
+        let (engine, items) = engine_with_pending_merge(&tmp, &root);
+        let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
         // The merge is selected on the tick, and the last flush's own tick ran before that flush
         // published — so one more tick is what dispatches it.
-        engine.request_flush();
-        wait_until("the merge to publish", || {
-            engine.write_executor_stats().merges >= 1
-        });
+        run_merge(&engine, &entities);
         items
     };
 
@@ -285,10 +622,10 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
     let out = viewport(&reopened, &session);
     assert_eq!(
         out.tiles.iter().map(|t| t.visible).sum::<u64>(),
-        64 + TIER_WIDTH as u64,
+        (64 + TIER_WIDTH * ROWS_EACH) as u64,
         "every item survives the merge and the restart"
     );
-    for (entity, external_id, _) in &items {
+    for (entity, external_id) in &items {
         assert!(
             generation.bundle.partitions["default"].slices["s0"]
                 .row_space
@@ -322,15 +659,8 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
 fn a_racer_inside_a_merges_refresh_window_is_shed_rather_than_rebuilding() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    build_fixture_n(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        64,
-    );
-    let engine = engine_at(tmp.path(), &root);
-    engine.set_merge_for_test(false);
-    flush_segments(&engine, TIER_WIDTH);
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     viewport(&engine, &session);
@@ -338,11 +668,7 @@ fn a_racer_inside_a_merges_refresh_window_is_shed_rather_than_rebuilding() {
 
     // Hold the refresh, then let the merge publish: the window stays open until we release it.
     engine.set_refresh_paused_for_test(true);
-    engine.set_merge_for_test(true);
-    engine.request_flush();
-    wait_until("the merge to publish", || {
-        engine.write_executor_stats().merges >= 1
-    });
+    run_merge(&engine, &entities);
 
     let refused = engine
         .viewport(&session, whole_extent())
@@ -363,7 +689,7 @@ fn a_racer_inside_a_merges_refresh_window_is_shed_rather_than_rebuilding() {
     let served = viewport(&engine, &session);
     assert_eq!(
         served.tiles.iter().map(|t| t.visible).sum::<u64>(),
-        64 + TIER_WIDTH as u64,
+        (64 + TIER_WIDTH * ROWS_EACH) as u64,
         "every item is visible once the refresh has replaced the entry"
     );
     assert_eq!(

@@ -83,6 +83,7 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
         tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: tick_secs,
+            max_merged_segment_bytes: None,
             ..config()
         },
     )
@@ -310,6 +311,7 @@ fn promotion_past_the_declared_term_ceiling_refuses_the_flush() {
         CappedTerms(2),
         EngineConfig {
             flush_max_age_secs: 1,
+            max_merged_segment_bytes: None,
             ..config()
         },
     )

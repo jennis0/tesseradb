@@ -193,6 +193,9 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         // The flush tick: the one write-path cadence, and the bound on how stale an acknowledged
         // item's absence may be (write-path §4.1).
         flush_max_age_secs: config.flush_max_age_secs,
+        // Validated against write-path §7's base-segment relation in `validate_merge_size`, and
+        // now delivered: before this it was checked and dropped.
+        max_merged_segment_bytes: config.max_merged_segment_bytes,
     };
     let mut engine = Engine::open(
         &config.bundle_path,
