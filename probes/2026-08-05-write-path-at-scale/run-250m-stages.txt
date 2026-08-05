@@ -1,0 +1,48 @@
+
+running 1 test
+scale: base=250000000 rounds=12 batch=250000 total=253000000
+test millions_of_ingested_rows_become_correctly_queryable has been running for over 60 seconds
+  base build: 114.711848925s (9.43 GiB bundle)
+  round 0: ack    1.7s | publish 434.2ms | refresh  55.5ms | visible=250250000 segments=2 deltas=1 merges=0 coalesces=0
+            stages us/row: allocate 0.25  wal_append 0.07  wal_fsync 0.68  buffer_clone 2.50  apply_rows 1.10  swap 0.00  .est_fwd 0.38  .est_inv 0.19  .buf_insert 0.42  .wal_pos 0.07  admit 0.34  record_batch 0.52  submit→receipt 6.48
+            disc  9667.8 MiB (live  9667.8 MiB, 1.00x orphan) | zoom z0(1t) 124.9ms [62434.3us/ts]  z2(16t) 126.8ms [3962.8us/ts]  z4(256t) 135.4ms [264.4us/ts]  z6(1682t) 62.7ms [18.6us/ts]  z8(1983t) 69.7ms [17.6us/ts]
+  round 1: ack    3.2s | publish 500.0ms | refresh  70.6ms | visible=250500000 segments=3 deltas=2 merges=0 coalesces=0
+            stages us/row: allocate 0.46  wal_append 0.09  wal_fsync 0.67  buffer_clone 3.98  apply_rows 1.17  swap 0.00  .est_fwd 0.46  .est_inv 0.22  .buf_insert 0.40  .wal_pos 0.07  admit 0.53  record_batch 0.89  submit→receipt 9.40
+            disc  9676.9 MiB (live  9676.8 MiB, 1.00x orphan) | zoom z0(1t) 127.4ms [42474.3us/ts]  z2(16t) 130.8ms [2726.0us/ts]  z4(256t) 138.9ms [180.9us/ts]  z6(2362t) 66.4ms [9.4us/ts]  z8(2973t) 80.2ms [9.0us/ts]
+  round 2: ack    3.5s | publish 650.9ms | refresh  71.1ms | visible=250750000 segments=4 deltas=3 merges=0 coalesces=0
+            stages us/row: allocate 0.62  wal_append 0.12  wal_fsync 0.68  buffer_clone 4.64  apply_rows 1.12  swap 0.00  .est_fwd 0.40  .est_inv 0.22  .buf_insert 0.40  .wal_pos 0.07  admit 0.62  record_batch 1.12  submit→receipt 10.79
+            disc  9685.9 MiB (live  9685.9 MiB, 1.00x orphan) | zoom z0(1t) 124.3ms [31071.0us/ts]  z2(16t) 125.1ms [1954.7us/ts]  z4(256t) 138.7ms [135.5us/ts]  z6(3040t) 72.4ms [6.0us/ts]  z8(3952t) 86.3ms [5.5us/ts]
+  round 3: ack    3.9s | publish 510.0ms | refresh  75.7ms | visible=251000000 segments=5 deltas=4 merges=0 coalesces=0
+            stages us/row: allocate 0.73  wal_append 0.18  wal_fsync 0.67  buffer_clone 5.05  apply_rows 1.29  swap 0.00  .est_fwd 0.52  .est_inv 0.26  .buf_insert 0.40  .wal_pos 0.07  admit 0.70  record_batch 1.29  submit→receipt 11.93
+            disc  9695.0 MiB (live  9695.0 MiB, 1.00x orphan) | zoom z0(1t) 125.4ms [25076.5us/ts]  z2(16t) 128.1ms [1600.9us/ts]  z4(256t) 140.9ms [110.1us/ts]  z6(3172t) 75.6ms [4.8us/ts]  z8(4936t) 95.9ms [3.9us/ts]
+  round 4: ack    3.8s | publish 535.4ms | refresh  70.6ms | visible=251250000 segments=3 deltas=5 merges=1 coalesces=0
+            stages us/row: allocate 0.80  wal_append 0.23  wal_fsync 0.60  buffer_clone 5.30  apply_rows 1.25  swap 0.00  .est_fwd 0.48  .est_inv 0.26  .buf_insert 0.41  .wal_pos 0.08  admit 0.76  record_batch 1.42  submit→receipt 12.49
+            disc  9740.4 MiB (live  9704.1 MiB, 1.00x orphan) | zoom z0(1t) 122.2ms [40736.0us/ts]  z2(16t) 125.4ms [2612.3us/ts]  z4(256t) 135.5ms [176.5us/ts]  z6(3308t) 80.9ms [8.2us/ts]  z8(5930t) 96.8ms [5.4us/ts]
+  round 5: ack    3.8s | publish 519.6ms | refresh  75.7ms | visible=251500000 segments=4 deltas=6 merges=1 coalesces=0
+            stages us/row: allocate 0.84  wal_append 0.27  wal_fsync 0.56  buffer_clone 5.49  apply_rows 1.22  swap 0.00  .est_fwd 0.45  .est_inv 0.25  .buf_insert 0.41  .wal_pos 0.08  admit 0.77  record_batch 1.52  submit→receipt 12.88
+            disc  9749.5 MiB (live  9713.1 MiB, 1.00x orphan) | zoom z0(1t) 121.6ms [30398.3us/ts]  z2(16t) 124.0ms [1937.0us/ts]  z4(256t) 135.7ms [132.5us/ts]  z6(3441t) 86.3ms [6.3us/ts]  z8(6905t) 104.4ms [3.8us/ts]
+  round 6: ack    4.0s | publish 534.6ms | refresh  75.7ms | visible=251750000 segments=5 deltas=7 merges=1 coalesces=0
+            stages us/row: allocate 0.89  wal_append 0.30  wal_fsync 0.53  buffer_clone 5.65  apply_rows 1.21  swap 0.00  .est_fwd 0.44  .est_inv 0.25  .buf_insert 0.41  .wal_pos 0.08  admit 0.81  record_batch 1.60  submit→receipt 13.27
+            disc  9758.6 MiB (live  9722.2 MiB, 1.00x orphan) | zoom z0(1t) 125.5ms [25100.2us/ts]  z2(16t) 127.4ms [1592.4us/ts]  z4(256t) 141.1ms [110.2us/ts]  z6(3487t) 88.8ms [5.1us/ts]  z8(7735t) 112.9ms [2.9us/ts]
+  round 7: ack    4.4s | publish 539.9ms | refresh  75.6ms | visible=252000000 segments=6 deltas=8 merges=1 coalesces=0
+            stages us/row: allocate 0.92  wal_append 0.33  wal_fsync 0.51  buffer_clone 5.78  apply_rows 1.37  swap 0.00  .est_fwd 0.56  .est_inv 0.29  .buf_insert 0.42  .wal_pos 0.08  admit 0.84  record_batch 1.67  submit→receipt 13.75
+            disc  9767.7 MiB (live  9731.3 MiB, 1.00x orphan) | zoom z0(1t) 128.7ms [21443.2us/ts]  z2(16t) 125.1ms [1303.5us/ts]  z4(256t) 142.6ms [92.8us/ts]  z6(3537t) 87.4ms [4.1us/ts]  z8(8542t) 124.4ms [2.4us/ts]
+  round 8: ack    4.1s | publish 555.9ms | refresh  80.8ms | visible=252250000 segments=4 deltas=2 merges=2 coalesces=1
+            stages us/row: allocate 0.94  wal_append 0.36  wal_fsync 0.49  buffer_clone 5.89  apply_rows 1.35  swap 0.00  .est_fwd 0.54  .est_inv 0.29  .buf_insert 0.42  .wal_pos 0.08  admit 0.87  record_batch 1.74  submit→receipt 14.02
+            disc  9813.1 MiB (live  9740.4 MiB, 1.01x orphan) | zoom z0(1t) 125.7ms [31425.3us/ts]  z2(16t) 127.5ms [1992.9us/ts]  z4(256t) 137.6ms [134.4us/ts]  z6(3569t) 89.2ms [6.3us/ts]  z8(9357t) 121.5ms [3.2us/ts]
+  round 9: ack    4.2s | publish 550.2ms | refresh 111.2ms | visible=252500000 segments=5 deltas=3 merges=2 coalesces=1
+            stages us/row: allocate 0.96  wal_append 0.38  wal_fsync 0.49  buffer_clone 5.99  apply_rows 1.33  swap 0.00  .est_fwd 0.52  .est_inv 0.29  .buf_insert 0.42  .wal_pos 0.08  admit 0.87  record_batch 1.80  submit→receipt 14.24
+            disc  9822.1 MiB (live  9749.4 MiB, 1.01x orphan) | zoom z0(1t) 123.1ms [24625.4us/ts]  z2(16t) 125.6ms [1569.6us/ts]  z4(256t) 139.4ms [108.9us/ts]  z6(3587t) 89.5ms [5.0us/ts]  z8(9938t) 130.6ms [2.6us/ts]
+  round 10: ack    4.3s | publish 600.8ms | refresh  15.1ms | visible=252750000 segments=6 deltas=4 merges=2 coalesces=1
+            stages us/row: allocate 0.98  wal_append 0.39  wal_fsync 0.48  buffer_clone 6.08  apply_rows 1.32  swap 0.00  .est_fwd 0.51  .est_inv 0.29  .buf_insert 0.43  .wal_pos 0.08  admit 0.88  record_batch 1.85  submit→receipt 14.46
+            disc  9831.5 MiB (live  9758.8 MiB, 1.01x orphan) | zoom z0(1t) 122.0ms [20335.1us/ts]  z2(16t) 124.9ms [1301.0us/ts]  z4(256t) 141.2ms [91.9us/ts]  z6(3617t) 89.5ms [4.1us/ts]  z8(10498t) 140.2ms [2.2us/ts]
+  round 11: ack    4.3s | publish 620.8ms | refresh  15.1ms | visible=253000000 segments=7 deltas=5 merges=2 coalesces=1
+            stages us/row: allocate 0.99  wal_append 0.41  wal_fsync 0.48  buffer_clone 6.16  apply_rows 1.31  swap 0.00  .est_fwd 0.49  .est_inv 0.29  .buf_insert 0.43  .wal_pos 0.08  admit 0.91  record_batch 1.90  submit→receipt 14.67
+            disc  9840.8 MiB (live  9768.1 MiB, 1.01x orphan) | zoom z0(1t) 125.5ms [17932.6us/ts]  z2(16t) 126.9ms [1133.4us/ts]  z4(256t) 141.4ms [78.9us/ts]  z6(3646t) 91.2ms [3.6us/ts]  z8(11071t) 149.5ms [1.9us/ts]
+  settled: segments=4, deltas=5, runs=6, dict extents=6, locators=3 (merges=3, coalesces=1, refreshes=15, full builds=1)
+  restart: 5.048412736s
+scale: 253000000 items, 227.890866862s end to end
+test millions_of_ingested_rows_become_correctly_queryable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 228.31s
+

@@ -1,0 +1,412 @@
+
+running 1 test
+scale: base=250000000 rounds=200 batch=250000 total=300000000
+test millions_of_ingested_rows_become_correctly_queryable has been running for over 60 seconds
+  base build: 114.918720044s (9.43 GiB bundle)
+  round 0: ack    2.0s | publish 425.4ms | refresh  60.8ms | visible=250250000 segments=2 deltas=1 merges=0 coalesces=0
+            disc  9667.8 MiB (live     9.1 MiB, 1065.17x orphan) | zoom z0(1t) 124.8ms [62391.8us/ts]  z2(16t) 126.5ms [3952.6us/ts]  z4(256t) 139.0ms [271.5us/ts]  z6(1682t) 67.4ms [20.0us/ts]  z8(1983t) 72.2ms [18.2us/ts]
+  round 1: ack    3.6s | publish 481.2ms | refresh  60.8ms | visible=250500000 segments=3 deltas=2 merges=0 coalesces=0
+            disc  9676.9 MiB (live    18.2 MiB, 533.09x orphan) | zoom z0(1t) 126.5ms [42172.6us/ts]  z2(16t) 130.2ms [2711.8us/ts]  z4(256t) 136.1ms [177.2us/ts]  z6(2362t) 72.6ms [10.2us/ts]  z8(2973t) 79.7ms [8.9us/ts]
+  round 2: ack    3.9s | publish 512.4ms | refresh  60.9ms | visible=250750000 segments=4 deltas=3 merges=0 coalesces=0
+            disc  9685.9 MiB (live    27.2 MiB, 355.72x orphan) | zoom z0(1t) 121.8ms [30443.6us/ts]  z2(16t) 125.9ms [1967.3us/ts]  z4(256t) 142.0ms [138.7us/ts]  z6(3040t) 75.2ms [6.2us/ts]  z8(3952t) 86.9ms [5.5us/ts]
+  round 3: ack    4.8s | publish 522.2ms | refresh  65.9ms | visible=251000000 segments=5 deltas=4 merges=0 coalesces=0
+            disc  9695.0 MiB (live    36.3 MiB, 267.04x orphan) | zoom z0(1t) 192.4ms [38482.4us/ts]  z2(16t) 131.5ms [1644.0us/ts]  z4(256t) 158.3ms [123.7us/ts]  z6(3172t) 80.0ms [5.0us/ts]  z8(4936t) 108.7ms [4.4us/ts]
+  round 4: ack    4.6s | publish 532.5ms | refresh  65.9ms | visible=251250000 segments=3 deltas=5 merges=1 coalesces=0
+            disc  9740.4 MiB (live    45.4 MiB, 214.66x orphan) | zoom z0(1t) 122.6ms [40872.7us/ts]  z2(16t) 125.9ms [2622.7us/ts]  z4(256t) 151.6ms [197.4us/ts]  z6(3308t) 78.7ms [7.9us/ts]  z8(5930t) 93.3ms [5.2us/ts]
+  round 5: ack    4.4s | publish 516.4ms | refresh  55.8ms | visible=251500000 segments=4 deltas=6 merges=1 coalesces=0
+            disc  9749.5 MiB (live    54.5 MiB, 179.05x orphan) | zoom z0(1t) 126.5ms [31612.7us/ts]  z2(16t) 126.6ms [1978.6us/ts]  z4(256t) 153.1ms [149.6us/ts]  z6(3441t) 93.2ms [6.8us/ts]  z8(6905t) 107.6ms [3.9us/ts]
+  round 6: ack    4.9s | publish 537.4ms | refresh  60.8ms | visible=251750000 segments=5 deltas=7 merges=1 coalesces=0
+            disc  9758.6 MiB (live    63.5 MiB, 153.61x orphan) | zoom z0(1t) 129.2ms [25843.9us/ts]  z2(16t) 127.3ms [1591.6us/ts]  z4(256t) 156.4ms [122.2us/ts]  z6(3487t) 99.9ms [5.7us/ts]  z8(7735t) 119.0ms [3.1us/ts]
+  round 7: ack    5.5s | publish 522.1ms | refresh  60.8ms | visible=252000000 segments=6 deltas=8 merges=1 coalesces=0
+            disc  9767.7 MiB (live    72.6 MiB, 134.53x orphan) | zoom z0(1t) 125.1ms [20856.0us/ts]  z2(16t) 128.9ms [1342.3us/ts]  z4(256t) 141.2ms [91.9us/ts]  z6(3537t) 89.4ms [4.2us/ts]  z8(8542t) 117.3ms [2.3us/ts]
+  round 8: ack    4.4s | publish 572.7ms | refresh  71.0ms | visible=252250000 segments=4 deltas=2 merges=2 coalesces=1
+            disc  9813.1 MiB (live    81.7 MiB, 120.16x orphan) | zoom z0(1t) 121.5ms [30367.6us/ts]  z2(16t) 126.9ms [1982.5us/ts]  z4(256t) 137.1ms [133.9us/ts]  z6(3569t) 89.5ms [6.3us/ts]  z8(9357t) 121.2ms [3.2us/ts]
+  round 9: ack    4.6s | publish 537.0ms | refresh  65.7ms | visible=252500000 segments=5 deltas=3 merges=2 coalesces=1
+            disc  9822.1 MiB (live    90.7 MiB, 108.24x orphan) | zoom z0(1t) 121.4ms [24280.8us/ts]  z2(16t) 127.0ms [1588.0us/ts]  z4(256t) 140.7ms [109.9us/ts]  z6(3587t) 86.8ms [4.8us/ts]  z8(9938t) 129.4ms [2.6us/ts]
+  round 10: ack    4.1s | publish 545.6ms | refresh  70.6ms | visible=252750000 segments=6 deltas=4 merges=2 coalesces=1
+            disc  9831.5 MiB (live   100.1 MiB, 98.26x orphan) | zoom z0(1t) 125.5ms [20910.0us/ts]  z2(16t) 129.5ms [1349.2us/ts]  z4(256t) 152.1ms [99.0us/ts]  z6(3617t) 86.9ms [4.0us/ts]  z8(10498t) 135.6ms [2.2us/ts]
+  round 11: ack    4.2s | publish 520.8ms | refresh  70.8ms | visible=253000000 segments=7 deltas=5 merges=2 coalesces=1
+            disc  9840.8 MiB (live   109.4 MiB, 89.97x orphan) | zoom z0(1t) 118.4ms [16913.1us/ts]  z2(16t) 116.9ms [1044.1us/ts]  z4(256t) 140.7ms [78.5us/ts]  z6(3646t) 84.8ms [3.3us/ts]  z8(11071t) 137.3ms [1.8us/ts]
+  round 12: ack    4.1s | publish 542.0ms | refresh  70.8ms | visible=253250000 segments=5 deltas=6 merges=3 coalesces=1
+            disc  9886.9 MiB (live   118.7 MiB, 83.30x orphan) | zoom z0(1t) 122.2ms [24448.8us/ts]  z2(16t) 134.2ms [1677.0us/ts]  z4(256t) 137.9ms [107.7us/ts]  z6(3664t) 86.7ms [4.7us/ts]  z8(11637t) 141.8ms [2.4us/ts]
+  round 13: ack    4.4s | publish 531.9ms | refresh  76.0ms | visible=253500000 segments=6 deltas=7 merges=3 coalesces=1
+            disc  9896.2 MiB (live   128.0 MiB, 77.32x orphan) | zoom z0(1t) 131.9ms [21987.9us/ts]  z2(16t) 126.5ms [1317.7us/ts]  z4(256t) 139.2ms [90.6us/ts]  z6(3688t) 104.7ms [4.7us/ts]  z8(12222t) 163.2ms [2.2us/ts]
+  round 14: ack    5.5s | publish 526.6ms | refresh  65.9ms | visible=253750000 segments=7 deltas=8 merges=3 coalesces=1
+            disc  9905.5 MiB (live   137.3 MiB, 72.14x orphan) | zoom z0(1t) 131.5ms [18787.4us/ts]  z2(16t) 130.3ms [1163.1us/ts]  z4(256t) 151.9ms [84.8us/ts]  z6(3720t) 97.2ms [3.7us/ts]  z8(12814t) 215.6ms [2.4us/ts]
+  round 15: ack    4.5s | publish 531.4ms | refresh  70.7ms | visible=254000000 segments=8 deltas=2 merges=3 coalesces=2
+            disc  9914.9 MiB (live   146.6 MiB, 67.62x orphan) | zoom z0(1t) 125.8ms [15720.6us/ts]  z2(16t) 133.3ms [1041.7us/ts]  z4(256t) 131.0ms [63.9us/ts]  z6(3734t) 85.4ms [2.9us/ts]  z8(13070t) 197.3ms [1.9us/ts]
+  round 16: ack    4.0s | publish 505.3ms | refresh  86.2ms | visible=254250000 segments=6 deltas=3 merges=4 coalesces=2
+            disc  9961.5 MiB (live   155.9 MiB, 63.88x orphan) | zoom z0(1t) 120.9ms [20148.2us/ts]  z2(16t) 122.8ms [1279.1us/ts]  z4(256t) 132.0ms [85.9us/ts]  z6(3742t) 82.9ms [3.7us/ts]  z8(13334t) 173.2ms [2.2us/ts]
+  round 17: ack    4.2s | publish 598.2ms | refresh  81.1ms | visible=254500000 segments=4 deltas=4 merges=4 coalesces=2
+            disc 10117.4 MiB (live   165.2 MiB, 61.23x orphan) | zoom z0(1t) 127.5ms [31872.2us/ts]  z2(16t) 123.6ms [1931.8us/ts]  z4(256t) 134.3ms [131.1us/ts]  z6(3762t) 101.3ms [6.7us/ts]  z8(13593t) 167.9ms [3.1us/ts]
+  round 18: ack    4.3s | publish 583.0ms | refresh  65.9ms | visible=254750000 segments=5 deltas=5 merges=5 coalesces=2
+            disc 10126.7 MiB (live   174.6 MiB, 58.02x orphan) | zoom z0(1t) 123.4ms [24670.2us/ts]  z2(16t) 125.9ms [1573.8us/ts]  z4(256t) 148.2ms [115.8us/ts]  z6(3782t) 91.2ms [4.8us/ts]  z8(13851t) 200.9ms [2.9us/ts]
+  round 19: ack    4.5s | publish 530.0ms | refresh  95.9ms | visible=255000000 segments=6 deltas=6 merges=5 coalesces=2
+            disc 10136.0 MiB (live   183.9 MiB, 55.13x orphan) | zoom z0(1t) 135.0ms [22503.3us/ts]  z2(16t) 128.8ms [1341.4us/ts]  z4(256t) 143.3ms [93.3us/ts]  z6(3788t) 93.2ms [4.1us/ts]  z8(14107t) 238.6ms [2.8us/ts]
+  round 20: ack    4.1s | publish 540.8ms | refresh  80.9ms | visible=255250000 segments=4 deltas=7 merges=6 coalesces=2
+            disc 10182.6 MiB (live   193.2 MiB, 52.71x orphan) | zoom z0(1t) 116.7ms [29180.4us/ts]  z2(16t) 117.6ms [1838.0us/ts]  z4(256t) 128.8ms [125.8us/ts]  z6(3800t) 90.8ms [6.0us/ts]  z8(14363t) 170.7ms [3.0us/ts]
+  round 21: ack    4.0s | publish 556.9ms | refresh  60.7ms | visible=255500000 segments=5 deltas=8 merges=6 coalesces=2
+            disc 10192.0 MiB (live   202.5 MiB, 50.33x orphan) | zoom z0(1t) 124.3ms [24859.6us/ts]  z2(16t) 124.1ms [1551.7us/ts]  z4(256t) 146.1ms [114.1us/ts]  z6(3818t) 89.6ms [4.7us/ts]  z8(14624t) 191.1ms [2.6us/ts]
+  round 22: ack    4.3s | publish 536.9ms | refresh  86.1ms | visible=255750000 segments=6 deltas=2 merges=6 coalesces=3
+            disc 10201.3 MiB (live   211.8 MiB, 48.16x orphan) | zoom z0(1t) 125.5ms [20911.7us/ts]  z2(16t) 134.0ms [1395.7us/ts]  z4(256t) 141.1ms [91.9us/ts]  z6(3834t) 92.3ms [4.0us/ts]  z8(14881t) 203.3ms [2.3us/ts]
+  round 23: ack    4.2s | publish 526.3ms | refresh  75.9ms | visible=256000000 segments=7 deltas=3 merges=6 coalesces=3
+            disc 10210.6 MiB (live   221.1 MiB, 46.18x orphan) | zoom z0(1t) 129.0ms [18433.4us/ts]  z2(16t) 125.7ms [1122.7us/ts]  z4(256t) 139.0ms [77.6us/ts]  z6(3840t) 92.2ms [3.4us/ts]  z8(15141t) 231.9ms [2.2us/ts]
+  round 24: ack    4.6s | publish 642.3ms | refresh  85.9ms | visible=256250000 segments=5 deltas=4 merges=7 coalesces=3
+            disc 10257.2 MiB (live   230.4 MiB, 44.51x orphan) | zoom z0(1t) 126.4ms [25287.0us/ts]  z2(16t) 130.5ms [1630.8us/ts]  z4(256t) 147.3ms [115.0us/ts]  z6(3856t) 98.2ms [5.1us/ts]  z8(15405t) 209.1ms [2.7us/ts]
+  round 25: ack    4.2s | publish 540.7ms | refresh  62.2ms | visible=256500000 segments=6 deltas=5 merges=7 coalesces=3
+            disc 10266.5 MiB (live   239.7 MiB, 42.82x orphan) | zoom z0(1t) 117.2ms [19535.5us/ts]  z2(16t) 122.6ms [1277.3us/ts]  z4(256t) 134.4ms [87.5us/ts]  z6(3872t) 89.6ms [3.9us/ts]  z8(15661t) 251.1ms [2.7us/ts]
+  round 26: ack    4.5s | publish 557.4ms | refresh  91.2ms | visible=256750000 segments=7 deltas=6 merges=7 coalesces=3
+            disc 10275.8 MiB (live   249.1 MiB, 41.26x orphan) | zoom z0(1t) 131.5ms [18790.8us/ts]  z2(16t) 128.6ms [1148.5us/ts]  z4(256t) 142.1ms [79.3us/ts]  z6(3878t) 96.9ms [3.6us/ts]  z8(15916t) 216.2ms [1.9us/ts]
+  round 27: ack    4.6s | publish 603.2ms | refresh  91.3ms | visible=257000000 segments=8 deltas=7 merges=7 coalesces=3
+            disc 10285.2 MiB (live   258.4 MiB, 39.81x orphan) | zoom z0(1t) 170.1ms [21266.3us/ts]  z2(16t) 170.1ms [1328.7us/ts]  z4(256t) 186.9ms [91.2us/ts]  z6(3890t) 127.4ms [4.1us/ts]  z8(16170t) 299.8ms [2.3us/ts]
+  round 28: ack    7.8s | publish    1.1s | refresh  53.9ms | visible=257250000 segments=6 deltas=8 merges=8 coalesces=3
+            disc 10331.8 MiB (live   267.7 MiB, 38.60x orphan) | zoom z0(1t) 139.2ms [23198.4us/ts]  z2(16t) 214.8ms [2237.4us/ts]  z4(256t) 150.5ms [98.0us/ts]  z6(3910t) 121.3ms [5.2us/ts]  z8(16431t) 460.9ms [4.7us/ts]
+  round 29: ack    9.6s | publish 893.2ms | refresh 109.2ms | visible=257500000 segments=7 deltas=2 merges=8 coalesces=4
+            disc 10341.1 MiB (live   277.0 MiB, 37.33x orphan) | zoom z0(1t) 168.3ms [24039.5us/ts]  z2(16t) 135.9ms [1213.0us/ts]  z4(256t) 265.9ms [148.4us/ts]  z6(3924t) 103.2ms [3.8us/ts]  z8(16692t) 486.6ms [4.2us/ts]
+  round 30: ack    6.6s | publish 773.3ms | refresh  84.3ms | visible=257750000 segments=8 deltas=3 merges=8 coalesces=4
+            disc 10350.4 MiB (live   286.3 MiB, 36.15x orphan) | zoom z0(1t) 223.6ms [27947.1us/ts]  z2(16t) 160.5ms [1253.5us/ts]  z4(256t) 292.9ms [143.0us/ts]  z6(3938t) 136.6ms [4.3us/ts]  z8(16946t) 308.0ms [2.3us/ts]
+  round 31: ack    6.5s | publish 968.9ms | refresh 160.5ms | visible=258000000 segments=9 deltas=4 merges=8 coalesces=4
+            disc 10359.7 MiB (live   295.6 MiB, 35.04x orphan) | zoom z0(1t) 150.9ms [16767.4us/ts]  z2(16t) 148.9ms [1033.8us/ts]  z4(256t) 205.3ms [89.1us/ts]  z6(3950t) 127.1ms [3.6us/ts]  z8(17208t) 729.7ms [4.7us/ts]
+  round 32: ack    8.4s | publish 903.2ms | refresh 107.2ms | visible=258250000 segments=7 deltas=5 merges=9 coalesces=4
+            disc 10406.3 MiB (live   304.9 MiB, 34.13x orphan) | zoom z0(1t) 190.1ms [27161.0us/ts]  z2(16t) 220.0ms [1964.4us/ts]  z4(256t) 336.8ms [188.0us/ts]  z6(3964t) 136.6ms [4.9us/ts]  z8(17468t) 559.6ms [4.6us/ts]
+  round 33: ack    7.8s | publish    1.3s | refresh 285.8ms | visible=258500000 segments=5 deltas=6 merges=9 coalesces=4
+            disc 10564.6 MiB (live   314.2 MiB, 33.62x orphan) | zoom z0(1t) 258.5ms [51695.6us/ts]  z2(16t) 283.0ms [3537.6us/ts]  z4(256t) 159.0ms [124.2us/ts]  z6(3970t) 113.7ms [5.7us/ts]  z8(17718t) 410.2ms [4.6us/ts]
+  round 34: ack    8.3s | publish 961.0ms | refresh 104.1ms | visible=258750000 segments=6 deltas=7 merges=10 coalesces=4
+            disc 10574.0 MiB (live   323.5 MiB, 32.68x orphan) | zoom z0(1t) 330.5ms [55085.4us/ts]  z2(16t) 282.2ms [2939.3us/ts]  z4(256t) 201.6ms [131.2us/ts]  z6(3982t) 216.4ms [9.1us/ts]  z8(17981t) 517.8ms [4.8us/ts]
+  round 35: ack    7.8s | publish    1.0s | refresh  82.2ms | visible=259000000 segments=7 deltas=8 merges=10 coalesces=4
+            disc 10583.3 MiB (live   332.9 MiB, 31.79x orphan) | zoom z0(1t) 204.0ms [29146.2us/ts]  z2(16t) 286.8ms [2560.5us/ts]  z4(256t) 330.3ms [184.3us/ts]  z6(3994t) 175.2ms [6.3us/ts]  z8(18237t) 484.6ms [3.8us/ts]
+  round 36: ack    5.3s | publish 642.4ms | refresh  20.8ms | visible=259250000 segments=5 deltas=2 merges=11 coalesces=5
+            disc 10629.9 MiB (live   342.2 MiB, 31.07x orphan) | zoom z0(1t) 134.1ms [26822.0us/ts]  z2(16t) 138.5ms [1731.4us/ts]  z4(256t) 151.9ms [118.7us/ts]  z6(4000t) 109.7ms [5.5us/ts]  z8(18501t) 281.7ms [3.0us/ts]
+  round 37: ack    4.5s | publish 745.3ms | refresh  20.9ms | visible=259500000 segments=6 deltas=3 merges=11 coalesces=5
+            disc 10639.2 MiB (live   351.5 MiB, 30.27x orphan) | zoom z0(1t) 139.2ms [23201.3us/ts]  z2(16t) 141.6ms [1474.6us/ts]  z4(256t) 161.7ms [105.3us/ts]  z6(4006t) 115.6ms [4.8us/ts]  z8(18763t) 267.7ms [2.4us/ts]
+  round 38: ack    4.4s | publish 552.2ms | refresh  10.2ms | visible=259750000 segments=7 deltas=4 merges=11 coalesces=5
+            disc 10648.6 MiB (live   360.8 MiB, 29.51x orphan) | zoom z0(1t) 129.9ms [18563.3us/ts]  z2(16t) 129.1ms [1152.7us/ts]  z4(256t) 151.5ms [84.5us/ts]  z6(4020t) 101.0ms [3.6us/ts]  z8(19021t) 277.3ms [2.1us/ts]
+  round 39: ack    4.3s | publish 535.9ms | refresh  10.1ms | visible=260000000 segments=8 deltas=5 merges=11 coalesces=5
+            disc 10657.9 MiB (live   370.1 MiB, 28.80x orphan) | zoom z0(1t) 121.1ms [15141.1us/ts]  z2(16t) 122.0ms [952.9us/ts]  z4(256t) 154.7ms [75.5us/ts]  z6(4032t) 92.3ms [2.9us/ts]  z8(19285t) 273.7ms [1.8us/ts]
+  round 40: ack    4.0s | publish 587.1ms | refresh  10.1ms | visible=260250000 segments=6 deltas=6 merges=12 coalesces=5
+            disc 10704.5 MiB (live   379.4 MiB, 28.21x orphan) | zoom z0(1t) 130.2ms [21700.2us/ts]  z2(16t) 130.0ms [1354.3us/ts]  z4(256t) 147.7ms [96.2us/ts]  z6(4032t) 105.0ms [4.3us/ts]  z8(19533t) 369.1ms [3.1us/ts]
+  round 41: ack    4.2s | publish 556.7ms | refresh  10.1ms | visible=260500000 segments=7 deltas=7 merges=12 coalesces=5
+            disc 10713.8 MiB (live   388.7 MiB, 27.56x orphan) | zoom z0(1t) 140.3ms [20039.2us/ts]  z2(16t) 136.0ms [1214.5us/ts]  z4(256t) 159.5ms [89.0us/ts]  z6(4042t) 100.9ms [3.6us/ts]  z8(19793t) 300.0ms [2.2us/ts]
+  round 42: ack    4.4s | publish 556.8ms | refresh  10.1ms | visible=260750000 segments=8 deltas=8 merges=12 coalesces=5
+            disc 10723.1 MiB (live   398.0 MiB, 26.94x orphan) | zoom z0(1t) 120.3ms [15040.1us/ts]  z2(16t) 122.1ms [953.7us/ts]  z4(256t) 135.3ms [66.1us/ts]  z6(4048t) 90.3ms [2.8us/ts]  z8(20054t) 261.7ms [1.6us/ts]
+  round 43: ack    4.0s | publish 510.5ms | refresh  60.6ms | visible=261000000 segments=9 deltas=2 merges=12 coalesces=6
+            disc 10732.5 MiB (live   407.4 MiB, 26.35x orphan) | zoom z0(1t) 120.3ms [13366.2us/ts]  z2(16t) 124.2ms [862.8us/ts]  z4(256t) 155.0ms [67.3us/ts]  z6(4054t) 98.8ms [2.7us/ts]  z8(20312t) 287.6ms [1.6us/ts]
+  round 44: ack    4.2s | publish 582.7ms | refresh  10.1ms | visible=261250000 segments=7 deltas=3 merges=13 coalesces=6
+            disc 10779.1 MiB (live   416.7 MiB, 25.87x orphan) | zoom z0(1t) 133.1ms [19020.0us/ts]  z2(16t) 134.5ms [1200.6us/ts]  z4(256t) 149.2ms [83.3us/ts]  z6(4054t) 102.0ms [3.6us/ts]  z8(20577t) 284.2ms [2.0us/ts]
+  round 45: ack    4.6s | publish 547.5ms | refresh  15.2ms | visible=261500000 segments=8 deltas=4 merges=13 coalesces=6
+            disc 10788.4 MiB (live   426.0 MiB, 25.33x orphan) | zoom z0(1t) 127.6ms [15948.0us/ts]  z2(16t) 141.6ms [1106.0us/ts]  z4(256t) 151.8ms [74.1us/ts]  z6(4068t) 99.8ms [3.1us/ts]  z8(20833t) 311.3ms [1.9us/ts]
+  round 46: ack    4.6s | publish 598.5ms | refresh  15.2ms | visible=261750000 segments=9 deltas=5 merges=13 coalesces=6
+            disc 10797.7 MiB (live   435.3 MiB, 24.81x orphan) | zoom z0(1t) 132.5ms [14718.3us/ts]  z2(16t) 133.7ms [928.3us/ts]  z4(256t) 157.7ms [68.5us/ts]  z6(4068t) 103.2ms [2.8us/ts]  z8(21095t) 326.0ms [1.7us/ts]
+  round 47: ack    4.3s | publish 577.5ms | refresh  65.7ms | visible=262000000 segments=10 deltas=6 merges=13 coalesces=6
+            disc 10807.0 MiB (live   444.6 MiB, 24.31x orphan) | zoom z0(1t) 127.7ms [12774.6us/ts]  z2(16t) 131.8ms [824.0us/ts]  z4(256t) 148.9ms [58.2us/ts]  z6(4068t) 99.3ms [2.4us/ts]  z8(21346t) 309.3ms [1.4us/ts]
+  round 48: ack    4.7s | publish 607.6ms | refresh  70.8ms | visible=262250000 segments=8 deltas=7 merges=14 coalesces=6
+            disc 10853.6 MiB (live   453.9 MiB, 23.91x orphan) | zoom z0(1t) 125.8ms [15725.8us/ts]  z2(16t) 145.7ms [1137.9us/ts]  z4(256t) 144.6ms [70.6us/ts]  z6(4068t) 98.2ms [3.0us/ts]  z8(21603t) 381.1ms [2.2us/ts]
+  round 49: ack    4.6s | publish 608.0ms | refresh  81.0ms | visible=262500000 segments=6 deltas=8 merges=15 coalesces=6
+            disc 11012.0 MiB (live   463.2 MiB, 23.77x orphan) | zoom z0(1t) 129.3ms [21548.6us/ts]  z2(16t) 130.5ms [1358.9us/ts]  z4(256t) 145.4ms [94.7us/ts]  z6(4080t) 114.6ms [4.7us/ts]  z8(21866t) 307.1ms [2.3us/ts]
+  round 50: ack    4.4s | publish 566.7ms | refresh  10.2ms | visible=262750000 segments=7 deltas=2 merges=15 coalesces=7
+            disc 11021.3 MiB (live   472.5 MiB, 23.32x orphan) | zoom z0(1t) 130.9ms [18696.0us/ts]  z2(16t) 130.1ms [1161.9us/ts]  z4(256t) 145.2ms [81.0us/ts]  z6(4080t) 99.9ms [3.5us/ts]  z8(22121t) 311.9ms [2.0us/ts]
+  round 51: ack    4.3s | publish 551.8ms | refresh  15.2ms | visible=263000000 segments=8 deltas=3 merges=15 coalesces=7
+            disc 11030.6 MiB (live   481.8 MiB, 22.89x orphan) | zoom z0(1t) 131.0ms [16378.3us/ts]  z2(16t) 143.2ms [1118.5us/ts]  z4(256t) 139.9ms [68.3us/ts]  z6(4086t) 97.4ms [3.0us/ts]  z8(22385t) 382.7ms [2.1us/ts]
+  round 52: ack    4.6s | publish 583.1ms | refresh  65.8ms | visible=263250000 segments=6 deltas=4 merges=16 coalesces=7
+            disc 11077.2 MiB (live   491.2 MiB, 22.55x orphan) | zoom z0(1t) 127.8ms [21299.6us/ts]  z2(16t) 128.7ms [1340.2us/ts]  z4(256t) 143.2ms [93.2us/ts]  z6(4086t) 113.4ms [4.6us/ts]  z8(22647t) 305.0ms [2.2us/ts]
+  round 53: ack    4.5s | publish 552.2ms | refresh  65.8ms | visible=263500000 segments=7 deltas=5 merges=16 coalesces=7
+            disc 11086.5 MiB (live   500.5 MiB, 22.15x orphan) | zoom z0(1t) 136.4ms [19480.9us/ts]  z2(16t) 154.8ms [1381.9us/ts]  z4(256t) 150.5ms [84.0us/ts]  z6(4090t) 104.9ms [3.7us/ts]  z8(22902t) 316.0ms [2.0us/ts]
+  round 54: ack    4.7s | publish 556.9ms | refresh  10.1ms | visible=263750000 segments=8 deltas=6 merges=16 coalesces=7
+            disc 11095.9 MiB (live   509.8 MiB, 21.77x orphan) | zoom z0(1t) 144.8ms [18105.5us/ts]  z2(16t) 135.1ms [1055.5us/ts]  z4(256t) 152.8ms [74.6us/ts]  z6(4090t) 103.8ms [3.2us/ts]  z8(23156t) 354.8ms [1.9us/ts]
+  round 55: ack    4.9s | publish 563.2ms | refresh  10.1ms | visible=264000000 segments=9 deltas=7 merges=16 coalesces=7
+            disc 11105.2 MiB (live   519.1 MiB, 21.39x orphan) | zoom z0(1t) 132.7ms [14744.2us/ts]  z2(16t) 144.3ms [1002.0us/ts]  z4(256t) 153.9ms [66.8us/ts]  z6(4090t) 104.6ms [2.8us/ts]  z8(23411t) 334.4ms [1.6us/ts]
+  round 56: ack    4.7s | publish 669.5ms | refresh  15.2ms | visible=264250000 segments=7 deltas=8 merges=17 coalesces=7
+            disc 11151.8 MiB (live   528.4 MiB, 21.10x orphan) | zoom z0(1t) 131.2ms [18741.8us/ts]  z2(16t) 135.3ms [1207.8us/ts]  z4(256t) 156.8ms [87.5us/ts]  z6(4090t) 101.7ms [3.6us/ts]  z8(23675t) 331.5ms [2.0us/ts]
+  round 57: ack    4.4s | publish 547.3ms | refresh  70.8ms | visible=264500000 segments=8 deltas=2 merges=17 coalesces=8
+            disc 11161.1 MiB (live   537.7 MiB, 20.76x orphan) | zoom z0(1t) 128.4ms [16045.0us/ts]  z2(16t) 130.6ms [1020.6us/ts]  z4(256t) 148.1ms [72.3us/ts]  z6(4090t) 100.2ms [3.1us/ts]  z8(23937t) 328.7ms [1.7us/ts]
+  round 58: ack    7.4s | publish 542.1ms | refresh  10.1ms | visible=264750000 segments=9 deltas=3 merges=17 coalesces=8
+            disc 11170.5 MiB (live   547.0 MiB, 20.42x orphan) | zoom z0(1t) 133.0ms [14779.4us/ts]  z2(16t) 130.8ms [908.1us/ts]  z4(256t) 150.4ms [65.3us/ts]  z6(4090t) 101.0ms [2.7us/ts]  z8(24197t) 463.2ms [2.1us/ts]
+  round 59: ack    4.3s | publish 547.2ms | refresh  10.1ms | visible=265000000 segments=10 deltas=4 merges=17 coalesces=8
+            disc 11179.8 MiB (live   556.3 MiB, 20.09x orphan) | zoom z0(1t) 129.6ms [12958.0us/ts]  z2(16t) 135.6ms [847.6us/ts]  z4(256t) 148.8ms [58.1us/ts]  z6(4090t) 100.9ms [2.5us/ts]  z8(24461t) 454.4ms [1.9us/ts]
+  round 60: ack    4.2s | publish 577.4ms | refresh  10.1ms | visible=265250000 segments=8 deltas=5 merges=18 coalesces=8
+            disc 11226.4 MiB (live   565.7 MiB, 19.85x orphan) | zoom z0(1t) 129.5ms [16189.0us/ts]  z2(16t) 137.9ms [1077.0us/ts]  z4(256t) 151.7ms [74.1us/ts]  z6(4096t) 101.6ms [3.1us/ts]  z8(24707t) 335.3ms [1.7us/ts]
+  round 61: ack    4.2s | publish 596.5ms | refresh  15.2ms | visible=265500000 segments=9 deltas=6 merges=18 coalesces=8
+            disc 11235.7 MiB (live   575.0 MiB, 19.54x orphan) | zoom z0(1t) 131.2ms [14577.3us/ts]  z2(16t) 128.2ms [890.5us/ts]  z4(256t) 145.6ms [63.2us/ts]  z6(4096t) 102.9ms [2.8us/ts]  z8(24961t) 348.6ms [1.6us/ts]
+  round 62: ack    4.3s | publish 577.8ms | refresh  10.1ms | visible=265750000 segments=10 deltas=7 merges=18 coalesces=8
+            disc 11245.0 MiB (live   584.3 MiB, 19.25x orphan) | zoom z0(1t) 131.0ms [13103.2us/ts]  z2(16t) 131.8ms [824.0us/ts]  z4(256t) 150.7ms [58.9us/ts]  z6(4096t) 117.8ms [2.9us/ts]  z8(25221t) 346.0ms [1.4us/ts]
+  round 63: ack    4.4s | publish 582.6ms | refresh  65.8ms | visible=266000000 segments=11 deltas=8 merges=18 coalesces=8
+            disc 11254.4 MiB (live   593.6 MiB, 18.96x orphan) | zoom z0(1t) 136.2ms [12385.4us/ts]  z2(16t) 132.5ms [752.8us/ts]  z4(256t) 153.6ms [54.5us/ts]  z6(4096t) 103.7ms [2.3us/ts]  z8(25480t) 354.2ms [1.3us/ts]
+  round 64: ack    4.4s | publish 582.4ms | refresh  86.3ms | visible=266250000 segments=9 deltas=2 merges=19 coalesces=9
+            disc 11301.0 MiB (live   602.9 MiB, 18.74x orphan) | zoom z0(1t) 136.1ms [15126.5us/ts]  z2(16t) 135.9ms [943.7us/ts]  z4(256t) 151.7ms [65.8us/ts]  z6(4096t) 132.4ms [3.6us/ts]  z8(25744t) 353.4ms [1.5us/ts]
+  round 65: ack    4.3s | publish 679.3ms | refresh  20.3ms | visible=266500000 segments=7 deltas=3 merges=19 coalesces=9
+            disc 11459.3 MiB (live   612.2 MiB, 18.72x orphan) | zoom z0(1t) 246.1ms [35153.1us/ts]  z2(16t) 128.5ms [1147.0us/ts]  z4(256t) 150.0ms [83.7us/ts]  z6(4096t) 102.9ms [3.6us/ts]  z8(26003t) 532.0ms [2.9us/ts]
+  round 66: ack    4.2s | publish 572.5ms | refresh  96.2ms | visible=266750000 segments=8 deltas=4 merges=20 coalesces=9
+            disc 11468.6 MiB (live   621.5 MiB, 18.45x orphan) | zoom z0(1t) 128.2ms [16029.0us/ts]  z2(16t) 137.3ms [1073.0us/ts]  z4(256t) 159.5ms [77.9us/ts]  z6(4096t) 102.6ms [3.1us/ts]  z8(26263t) 357.8ms [1.7us/ts]
+  round 67: ack    4.4s | publish 598.1ms | refresh  10.1ms | visible=267000000 segments=9 deltas=5 merges=20 coalesces=9
+            disc 11478.0 MiB (live   630.8 MiB, 18.19x orphan) | zoom z0(1t) 131.0ms [14560.9us/ts]  z2(16t) 134.3ms [932.3us/ts]  z4(256t) 168.5ms [73.1us/ts]  z6(4096t) 110.7ms [3.0us/ts]  z8(26515t) 496.7ms [2.1us/ts]
+  round 68: ack    4.5s | publish 542.1ms | refresh  70.9ms | visible=267250000 segments=7 deltas=6 merges=21 coalesces=9
+            disc 11524.6 MiB (live   640.2 MiB, 18.00x orphan) | zoom z0(1t) 131.0ms [18712.5us/ts]  z2(16t) 137.3ms [1226.0us/ts]  z4(256t) 149.5ms [83.4us/ts]  z6(4096t) 105.1ms [3.7us/ts]  z8(26767t) 378.5ms [2.0us/ts]
+  round 69: ack    4.4s | publish 593.0ms | refresh  86.1ms | visible=267500000 segments=8 deltas=7 merges=21 coalesces=9
+            disc 11533.9 MiB (live   649.5 MiB, 17.76x orphan) | zoom z0(1t) 126.5ms [15809.2us/ts]  z2(16t) 129.8ms [1014.1us/ts]  z4(256t) 147.4ms [72.0us/ts]  z6(4096t) 104.0ms [3.2us/ts]  z8(27039t) 372.3ms [1.7us/ts]
+  round 70: ack    4.4s | publish 608.2ms | refresh  91.1ms | visible=267750000 segments=9 deltas=8 merges=21 coalesces=9
+            disc 11543.2 MiB (live   658.8 MiB, 17.52x orphan) | zoom z0(1t) 156.9ms [17437.3us/ts]  z2(16t) 153.7ms [1067.3us/ts]  z4(256t) 154.4ms [67.0us/ts]  z6(4096t) 103.6ms [2.8us/ts]  z8(27296t) 537.8ms [2.2us/ts]
+  round 71: ack    4.4s | publish 577.9ms | refresh 111.5ms | visible=268000000 segments=10 deltas=2 merges=21 coalesces=10
+            disc 11552.6 MiB (live   668.1 MiB, 17.29x orphan) | zoom z0(1t) 136.8ms [13677.1us/ts]  z2(16t) 133.0ms [831.4us/ts]  z4(256t) 156.2ms [61.0us/ts]  z6(4096t) 108.2ms [2.6us/ts]  z8(27557t) 387.5ms [1.4us/ts]
+  round 72: ack    4.3s | publish 638.3ms | refresh  15.2ms | visible=268250000 segments=8 deltas=3 merges=22 coalesces=10
+            disc 11599.2 MiB (live   677.4 MiB, 17.12x orphan) | zoom z0(1t) 131.6ms [16448.8us/ts]  z2(16t) 135.1ms [1055.3us/ts]  z4(256t) 151.2ms [73.8us/ts]  z6(4096t) 123.7ms [3.8us/ts]  z8(27819t) 530.1ms [2.4us/ts]
+  round 73: ack    4.4s | publish 618.5ms | refresh  10.1ms | visible=268500000 segments=9 deltas=4 merges=22 coalesces=10
+            disc 11608.5 MiB (live   686.7 MiB, 16.90x orphan) | zoom z0(1t) 135.6ms [15061.5us/ts]  z2(16t) 134.6ms [934.5us/ts]  z4(256t) 175.0ms [76.0us/ts]  z6(4096t) 107.6ms [2.9us/ts]  z8(28065t) 517.8ms [2.1us/ts]
+  round 74: ack    4.6s | publish 572.9ms | refresh  10.1ms | visible=268750000 segments=10 deltas=5 merges=22 coalesces=10
+            disc 11617.8 MiB (live   696.0 MiB, 16.69x orphan) | zoom z0(1t) 128.3ms [12833.1us/ts]  z2(16t) 131.3ms [820.9us/ts]  z4(256t) 157.4ms [61.5us/ts]  z6(4096t) 111.9ms [2.7us/ts]  z8(28319t) 407.6ms [1.4us/ts]
+  round 75: ack    4.6s | publish 582.9ms | refresh  15.1ms | visible=269000000 segments=11 deltas=6 merges=22 coalesces=10
+            disc 11627.2 MiB (live   705.3 MiB, 16.48x orphan) | zoom z0(1t) 132.2ms [12017.8us/ts]  z2(16t) 135.1ms [767.5us/ts]  z4(256t) 164.8ms [58.5us/ts]  z6(4096t) 120.4ms [2.7us/ts]  z8(28567t) 395.4ms [1.3us/ts]
+  round 76: ack    4.6s | publish 613.1ms | refresh  10.1ms | visible=269250000 segments=9 deltas=7 merges=23 coalesces=10
+            disc 11673.7 MiB (live   714.6 MiB, 16.33x orphan) | zoom z0(1t) 133.1ms [14786.8us/ts]  z2(16t) 137.1ms [952.0us/ts]  z4(256t) 177.7ms [77.1us/ts]  z6(4096t) 122.6ms [3.3us/ts]  z8(28839t) 551.8ms [2.1us/ts]
+  round 77: ack    4.5s | publish 547.5ms | refresh  65.8ms | visible=269500000 segments=10 deltas=8 merges=23 coalesces=10
+            disc 11683.1 MiB (live   724.0 MiB, 16.14x orphan) | zoom z0(1t) 142.1ms [14205.4us/ts]  z2(16t) 135.5ms [847.0us/ts]  z4(256t) 149.5ms [58.4us/ts]  z6(4096t) 104.8ms [2.6us/ts]  z8(29101t) 395.8ms [1.4us/ts]
+  round 78: ack    4.6s | publish 613.4ms | refresh  10.1ms | visible=269750000 segments=11 deltas=2 merges=23 coalesces=11
+            disc 11692.4 MiB (live   733.3 MiB, 15.95x orphan) | zoom z0(1t) 131.1ms [11917.6us/ts]  z2(16t) 133.2ms [756.7us/ts]  z4(256t) 159.3ms [56.6us/ts]  z6(4096t) 117.8ms [2.6us/ts]  z8(29356t) 431.2ms [1.3us/ts]
+  round 79: ack    4.6s | publish 583.0ms | refresh  10.1ms | visible=270000000 segments=12 deltas=3 merges=23 coalesces=11
+            disc 11701.8 MiB (live   742.6 MiB, 15.76x orphan) | zoom z0(1t) 132.6ms [11048.7us/ts]  z2(16t) 151.2ms [787.6us/ts]  z4(256t) 177.5ms [57.8us/ts]  z6(4096t) 108.9ms [2.2us/ts]  z8(29620t) 612.0ms [1.7us/ts]
+  round 80: ack    5.2s | publish 572.6ms | refresh  70.9ms | visible=270250000 segments=10 deltas=4 merges=24 coalesces=11
+            disc 11748.4 MiB (live   751.9 MiB, 15.62x orphan) | zoom z0(1t) 159.1ms [15910.3us/ts]  z2(16t) 136.8ms [855.0us/ts]  z4(256t) 153.7ms [60.1us/ts]  z6(4096t) 109.3ms [2.7us/ts]  z8(29868t) 551.1ms [1.8us/ts]
+  round 81: ack    4.5s | publish 618.7ms | refresh  86.2ms | visible=270500000 segments=8 deltas=5 merges=25 coalesces=11
+            disc 11906.7 MiB (live   761.2 MiB, 15.64x orphan) | zoom z0(1t) 132.1ms [16508.0us/ts]  z2(16t) 158.4ms [1237.5us/ts]  z4(256t) 149.8ms [73.1us/ts]  z6(4096t) 105.4ms [3.2us/ts]  z8(30125t) 424.1ms [1.8us/ts]
+  round 82: ack    4.3s | publish 547.1ms | refresh  15.2ms | visible=270750000 segments=9 deltas=6 merges=25 coalesces=11
+            disc 11916.0 MiB (live   770.5 MiB, 15.46x orphan) | zoom z0(1t) 133.4ms [14820.1us/ts]  z2(16t) 136.1ms [944.9us/ts]  z4(256t) 154.6ms [67.1us/ts]  z6(4096t) 107.9ms [2.9us/ts]  z8(30385t) 419.0ms [1.5us/ts]
+  round 83: ack    4.5s | publish 552.2ms | refresh  15.2ms | visible=271000000 segments=10 deltas=7 merges=25 coalesces=11
+            disc 11925.4 MiB (live   779.8 MiB, 15.29x orphan) | zoom z0(1t) 132.9ms [13294.8us/ts]  z2(16t) 134.4ms [840.0us/ts]  z4(256t) 153.4ms [59.9us/ts]  z6(4096t) 112.1ms [2.7us/ts]  z8(30651t) 435.9ms [1.4us/ts]
+  round 84: ack    4.4s | publish 557.4ms | refresh  15.2ms | visible=271250000 segments=8 deltas=8 merges=26 coalesces=11
+            disc 11971.9 MiB (live   789.1 MiB, 15.17x orphan) | zoom z0(1t) 136.5ms [17059.4us/ts]  z2(16t) 142.3ms [1112.1us/ts]  z4(256t) 151.2ms [73.8us/ts]  z6(4096t) 108.9ms [3.3us/ts]  z8(30916t) 573.3ms [2.3us/ts]
+  round 85: ack    4.2s | publish 552.6ms | refresh  65.8ms | visible=271500000 segments=9 deltas=2 merges=26 coalesces=12
+            disc 11981.3 MiB (live   798.5 MiB, 15.01x orphan) | zoom z0(1t) 130.2ms [14465.9us/ts]  z2(16t) 130.9ms [909.2us/ts]  z4(256t) 151.0ms [65.5us/ts]  z6(4096t) 114.8ms [3.1us/ts]  z8(31173t) 419.2ms [1.5us/ts]
+  round 86: ack    4.2s | publish 557.1ms | refresh  65.8ms | visible=271750000 segments=10 deltas=3 merges=26 coalesces=12
+            disc 11990.6 MiB (live   807.8 MiB, 14.84x orphan) | zoom z0(1t) 131.3ms [13130.0us/ts]  z2(16t) 137.4ms [858.6us/ts]  z4(256t) 155.0ms [60.6us/ts]  z6(4096t) 113.1ms [2.8us/ts]  z8(31426t) 443.5ms [1.4us/ts]
+  round 87: ack    4.4s | publish 557.2ms | refresh  15.2ms | visible=272000000 segments=11 deltas=4 merges=26 coalesces=12
+            disc 12000.0 MiB (live   817.1 MiB, 14.69x orphan) | zoom z0(1t) 134.5ms [12224.4us/ts]  z2(16t) 137.6ms [781.7us/ts]  z4(256t) 157.5ms [55.9us/ts]  z6(4096t) 111.2ms [2.5us/ts]  z8(31678t) 438.4ms [1.3us/ts]
+  round 88: ack    4.3s | publish 582.5ms | refresh  65.8ms | visible=272250000 segments=9 deltas=5 merges=27 coalesces=12
+            disc 12046.6 MiB (live   826.4 MiB, 14.58x orphan) | zoom z0(1t) 135.6ms [15063.8us/ts]  z2(16t) 137.1ms [952.0us/ts]  z4(256t) 152.3ms [66.1us/ts]  z6(4096t) 108.4ms [2.9us/ts]  z8(31930t) 443.0ms [1.5us/ts]
+  round 89: ack    4.2s | publish 527.2ms | refresh  86.1ms | visible=272500000 segments=10 deltas=6 merges=27 coalesces=12
+            disc 12055.9 MiB (live   835.7 MiB, 14.43x orphan) | zoom z0(1t) 131.8ms [13180.7us/ts]  z2(16t) 132.9ms [830.5us/ts]  z4(256t) 151.6ms [59.2us/ts]  z6(4096t) 105.8ms [2.6us/ts]  z8(32194t) 440.0ms [1.4us/ts]
+  round 90: ack    4.2s | publish 567.5ms | refresh  81.1ms | visible=272750000 segments=11 deltas=7 merges=27 coalesces=12
+            disc 12065.2 MiB (live   845.0 MiB, 14.28x orphan) | zoom z0(1t) 129.1ms [11731.9us/ts]  z2(16t) 133.9ms [760.6us/ts]  z4(256t) 154.4ms [54.8us/ts]  z6(4096t) 106.0ms [2.4us/ts]  z8(32457t) 585.4ms [1.6us/ts]
+  round 91: ack    4.2s | publish 536.8ms | refresh  86.0ms | visible=273000000 segments=12 deltas=8 merges=27 coalesces=12
+            disc 12074.5 MiB (live   854.3 MiB, 14.13x orphan) | zoom z0(1t) 135.4ms [11280.3us/ts]  z2(16t) 134.1ms [698.6us/ts]  z4(256t) 152.9ms [49.8us/ts]  z6(4096t) 103.3ms [2.1us/ts]  z8(32719t) 517.4ms [1.3us/ts]
+  round 92: ack    4.3s | publish 603.0ms | refresh  70.8ms | visible=273250000 segments=10 deltas=2 merges=28 coalesces=13
+            disc 12121.2 MiB (live   863.6 MiB, 14.04x orphan) | zoom z0(1t) 132.4ms [13240.5us/ts]  z2(16t) 138.3ms [864.3us/ts]  z4(256t) 160.9ms [62.8us/ts]  z6(4096t) 112.6ms [2.7us/ts]  z8(32981t) 450.5ms [1.4us/ts]
+  round 93: ack    4.2s | publish 562.2ms | refresh  15.2ms | visible=273500000 segments=11 deltas=3 merges=28 coalesces=13
+            disc 12130.5 MiB (live   873.0 MiB, 13.90x orphan) | zoom z0(1t) 134.2ms [12199.1us/ts]  z2(16t) 136.7ms [776.6us/ts]  z4(256t) 157.0ms [55.7us/ts]  z6(4096t) 107.8ms [2.4us/ts]  z8(33229t) 449.2ms [1.2us/ts]
+  round 94: ack    4.3s | publish 532.0ms | refresh  15.2ms | visible=273750000 segments=12 deltas=4 merges=28 coalesces=13
+            disc 12139.8 MiB (live   882.3 MiB, 13.76x orphan) | zoom z0(1t) 132.4ms [11034.9us/ts]  z2(16t) 134.0ms [698.0us/ts]  z4(256t) 153.4ms [49.9us/ts]  z6(4096t) 113.8ms [2.3us/ts]  z8(33483t) 517.2ms [1.3us/ts]
+  round 95: ack    4.5s | publish 536.9ms | refresh  65.8ms | visible=274000000 segments=13 deltas=5 merges=28 coalesces=13
+            disc 12149.2 MiB (live   891.6 MiB, 13.63x orphan) | zoom z0(1t) 135.8ms [10448.1us/ts]  z2(16t) 136.0ms [653.8us/ts]  z4(256t) 154.1ms [46.3us/ts]  z6(4096t) 107.0ms [2.0us/ts]  z8(33732t) 521.4ms [1.2us/ts]
+  round 96: ack    4.3s | publish 542.3ms | refresh  65.6ms | visible=274250000 segments=11 deltas=6 merges=29 coalesces=13
+            disc 12195.8 MiB (live   900.9 MiB, 13.54x orphan) | zoom z0(1t) 135.7ms [12340.0us/ts]  z2(16t) 142.1ms [807.6us/ts]  z4(256t) 155.6ms [55.3us/ts]  z6(4096t) 107.6ms [2.4us/ts]  z8(33995t) 630.2ms [1.7us/ts]
+  round 97: ack    4.3s | publish 582.9ms | refresh  86.1ms | visible=274500000 segments=9 deltas=7 merges=30 coalesces=13
+            disc 12354.1 MiB (live   910.2 MiB, 13.57x orphan) | zoom z0(1t) 132.4ms [14708.9us/ts]  z2(16t) 138.9ms [964.4us/ts]  z4(256t) 157.0ms [68.1us/ts]  z6(4096t) 104.4ms [2.8us/ts]  z8(34263t) 447.8ms [1.5us/ts]
+  round 98: ack    4.2s | publish 542.3ms | refresh  86.1ms | visible=274750000 segments=10 deltas=8 merges=30 coalesces=13
+            disc 12363.4 MiB (live   919.5 MiB, 13.45x orphan) | zoom z0(1t) 130.7ms [13066.6us/ts]  z2(16t) 132.7ms [829.4us/ts]  z4(256t) 157.1ms [61.4us/ts]  z6(4096t) 107.3ms [2.6us/ts]  z8(34520t) 468.2ms [1.4us/ts]
+  round 99: ack    4.4s | publish 587.5ms | refresh 101.3ms | visible=275000000 segments=11 deltas=2 merges=30 coalesces=14
+            disc 12372.8 MiB (live   928.8 MiB, 13.32x orphan) | zoom z0(1t) 134.9ms [12261.9us/ts]  z2(16t) 139.3ms [791.5us/ts]  z4(256t) 155.1ms [55.1us/ts]  z6(4096t) 107.0ms [2.4us/ts]  z8(34776t) 474.7ms [1.2us/ts]
+  round 100: ack    4.1s | publish 607.8ms | refresh  86.2ms | visible=275250000 segments=9 deltas=3 merges=31 coalesces=14
+            disc 12419.6 MiB (live   938.4 MiB, 13.24x orphan) | zoom z0(1t) 131.5ms [14609.1us/ts]  z2(16t) 135.2ms [938.9us/ts]  z4(256t) 153.0ms [66.4us/ts]  z6(4096t) 106.9ms [2.9us/ts]  z8(35022t) 480.3ms [1.5us/ts]
+  round 101: ack    4.1s | publish 562.0ms | refresh  10.1ms | visible=275500000 segments=10 deltas=4 merges=31 coalesces=14
+            disc 12429.2 MiB (live   947.9 MiB, 13.11x orphan) | zoom z0(1t) 131.6ms [13159.6us/ts]  z2(16t) 134.6ms [841.2us/ts]  z4(256t) 158.4ms [61.9us/ts]  z6(4096t) 107.9ms [2.6us/ts]  z8(35282t) 483.8ms [1.4us/ts]
+  round 102: ack    4.2s | publish 577.2ms | refresh  10.1ms | visible=275750000 segments=11 deltas=5 merges=31 coalesces=14
+            disc 12438.8 MiB (live   957.5 MiB, 12.99x orphan) | zoom z0(1t) 141.5ms [12867.5us/ts]  z2(16t) 137.4ms [780.7us/ts]  z4(256t) 158.9ms [56.4us/ts]  z6(4096t) 108.5ms [2.4us/ts]  z8(35536t) 501.1ms [1.3us/ts]
+  round 103: ack    4.4s | publish 536.7ms | refresh  60.8ms | visible=276000000 segments=12 deltas=6 merges=31 coalesces=14
+            disc 12448.3 MiB (live   967.0 MiB, 12.87x orphan) | zoom z0(1t) 133.8ms [11148.9us/ts]  z2(16t) 140.8ms [733.1us/ts]  z4(256t) 155.8ms [50.7us/ts]  z6(4096t) 111.1ms [2.3us/ts]  z8(35794t) 493.1ms [1.1us/ts]
+  round 104: ack    4.3s | publish 547.2ms | refresh  65.8ms | visible=276250000 segments=10 deltas=7 merges=32 coalesces=14
+            disc 12496.1 MiB (live   976.6 MiB, 12.80x orphan) | zoom z0(1t) 134.8ms [13482.8us/ts]  z2(16t) 136.4ms [852.7us/ts]  z4(256t) 155.4ms [60.7us/ts]  z6(4096t) 108.0ms [2.6us/ts]  z8(36065t) 487.8ms [1.4us/ts]
+  round 105: ack    4.2s | publish 521.7ms | refresh  96.2ms | visible=276500000 segments=11 deltas=8 merges=32 coalesces=14
+            disc 12505.7 MiB (live   986.1 MiB, 12.68x orphan) | zoom z0(1t) 132.0ms [12004.2us/ts]  z2(16t) 139.0ms [789.9us/ts]  z4(256t) 156.1ms [55.4us/ts]  z6(4096t) 111.6ms [2.5us/ts]  z8(36326t) 557.0ms [1.4us/ts]
+  round 106: ack    4.6s | publish 552.0ms | refresh  91.1ms | visible=276750000 segments=12 deltas=2 merges=32 coalesces=15
+            disc 12515.3 MiB (live   995.7 MiB, 12.57x orphan) | zoom z0(1t) 133.8ms [11146.5us/ts]  z2(16t) 137.4ms [715.5us/ts]  z4(256t) 161.8ms [52.7us/ts]  z6(4096t) 116.9ms [2.4us/ts]  z8(36578t) 512.4ms [1.2us/ts]
+  round 107: ack    4.4s | publish 537.2ms | refresh  60.8ms | visible=277000000 segments=13 deltas=3 merges=32 coalesces=15
+            disc 12524.9 MiB (live  1005.2 MiB, 12.46x orphan) | zoom z0(1t) 131.4ms [10109.0us/ts]  z2(16t) 135.2ms [650.1us/ts]  z4(256t) 156.1ms [46.9us/ts]  z6(4096t) 116.7ms [2.2us/ts]  z8(36828t) 498.6ms [1.0us/ts]
+  round 108: ack    4.5s | publish 587.7ms | refresh  10.2ms | visible=277250000 segments=11 deltas=4 merges=33 coalesces=15
+            disc 12572.7 MiB (live  1014.8 MiB, 12.39x orphan) | zoom z0(1t) 138.5ms [12594.8us/ts]  z2(16t) 139.1ms [790.4us/ts]  z4(256t) 156.8ms [55.7us/ts]  z6(4096t) 110.4ms [2.5us/ts]  z8(37086t) 567.4ms [1.4us/ts]
+  round 109: ack    4.5s | publish 557.2ms | refresh  70.9ms | visible=277500000 segments=12 deltas=5 merges=33 coalesces=15
+            disc 12582.2 MiB (live  1024.3 MiB, 12.28x orphan) | zoom z0(1t) 136.1ms [11345.6us/ts]  z2(16t) 144.9ms [754.8us/ts]  z4(256t) 159.1ms [51.8us/ts]  z6(4096t) 110.2ms [2.2us/ts]  z8(37342t) 512.6ms [1.1us/ts]
+  round 110: ack    4.4s | publish 552.0ms | refresh  96.1ms | visible=277750000 segments=13 deltas=6 merges=33 coalesces=15
+            disc 12591.8 MiB (live  1033.9 MiB, 12.18x orphan) | zoom z0(1t) 134.1ms [10319.1us/ts]  z2(16t) 143.0ms [687.6us/ts]  z4(256t) 161.8ms [48.6us/ts]  z6(4096t) 172.5ms [3.2us/ts]  z8(37600t) 586.9ms [1.2us/ts]
+  round 111: ack    4.4s | publish 577.4ms | refresh  60.5ms | visible=278000000 segments=14 deltas=7 merges=33 coalesces=15
+            disc 12601.4 MiB (live  1043.4 MiB, 12.08x orphan) | zoom z0(1t) 133.5ms [9533.2us/ts]  z2(16t) 140.0ms [625.1us/ts]  z4(256t) 163.4ms [45.6us/ts]  z6(4096t) 110.2ms [1.9us/ts]  z8(37869t) 711.9ms [1.3us/ts]
+  round 112: ack    4.3s | publish 552.2ms | refresh  10.2ms | visible=278250000 segments=12 deltas=8 merges=34 coalesces=15
+            disc 12649.2 MiB (live  1053.0 MiB, 12.01x orphan) | zoom z0(1t) 133.7ms [11144.9us/ts]  z2(16t) 135.2ms [704.0us/ts]  z4(256t) 155.3ms [50.6us/ts]  z6(4096t) 110.5ms [2.2us/ts]  z8(38119t) 679.9ms [1.5us/ts]
+  round 113: ack    4.4s | publish 628.4ms | refresh  76.0ms | visible=278500000 segments=10 deltas=2 merges=35 coalesces=16
+            disc 12810.7 MiB (live  1062.5 MiB, 12.06x orphan) | zoom z0(1t) 142.5ms [14247.3us/ts]  z2(16t) 138.7ms [867.0us/ts]  z4(256t) 154.9ms [60.5us/ts]  z6(4096t) 108.5ms [2.6us/ts]  z8(38367t) 541.4ms [1.4us/ts]
+  round 114: ack    4.3s | publish 567.2ms | refresh  10.2ms | visible=278750000 segments=11 deltas=3 merges=35 coalesces=16
+            disc 12820.2 MiB (live  1072.1 MiB, 11.96x orphan) | zoom z0(1t) 133.7ms [12158.8us/ts]  z2(16t) 136.3ms [774.2us/ts]  z4(256t) 155.6ms [55.2us/ts]  z6(4096t) 111.2ms [2.5us/ts]  z8(38627t) 557.2ms [1.3us/ts]
+  round 115: ack    4.6s | publish 582.9ms | refresh  71.0ms | visible=279000000 segments=12 deltas=4 merges=35 coalesces=16
+            disc 12829.8 MiB (live  1081.6 MiB, 11.86x orphan) | zoom z0(1t) 135.0ms [11247.6us/ts]  z2(16t) 141.6ms [737.6us/ts]  z4(256t) 159.7ms [52.0us/ts]  z6(4096t) 113.6ms [2.3us/ts]  z8(38885t) 550.0ms [1.2us/ts]
+  round 116: ack    4.7s | publish 608.1ms | refresh  70.9ms | visible=279250000 segments=10 deltas=5 merges=36 coalesces=16
+            disc 12877.6 MiB (live  1091.2 MiB, 11.80x orphan) | zoom z0(1t) 138.7ms [13873.0us/ts]  z2(16t) 139.8ms [873.6us/ts]  z4(256t) 160.3ms [62.6us/ts]  z6(4096t) 112.4ms [2.7us/ts]  z8(39142t) 563.0ms [1.4us/ts]
+  round 117: ack   11.2s | publish 572.4ms | refresh 101.4ms | visible=279500000 segments=11 deltas=6 merges=36 coalesces=16
+            disc 12887.2 MiB (live  1100.7 MiB, 11.71x orphan) | zoom z0(1t) 135.4ms [12311.4us/ts]  z2(16t) 137.1ms [779.1us/ts]  z4(256t) 156.5ms [55.6us/ts]  z6(4096t) 120.0ms [2.7us/ts]  z8(39404t) 542.4ms [1.3us/ts]
+  round 118: ack    4.5s | publish 587.4ms | refresh  65.9ms | visible=279750000 segments=12 deltas=7 merges=36 coalesces=16
+            disc 12896.7 MiB (live  1110.3 MiB, 11.62x orphan) | zoom z0(1t) 136.9ms [11411.0us/ts]  z2(16t) 141.9ms [738.9us/ts]  z4(256t) 165.0ms [53.7us/ts]  z6(4096t) 110.6ms [2.3us/ts]  z8(39670t) 569.4ms [1.2us/ts]
+  round 119: ack    4.6s | publish 607.8ms | refresh  91.1ms | visible=280000000 segments=13 deltas=8 merges=36 coalesces=16
+            disc 12906.3 MiB (live  1119.8 MiB, 11.53x orphan) | zoom z0(1t) 135.0ms [10383.4us/ts]  z2(16t) 141.3ms [679.3us/ts]  z4(256t) 157.6ms [47.4us/ts]  z6(4096t) 116.1ms [2.2us/ts]  z8(39926t) 597.4ms [1.2us/ts]
+  round 120: ack    4.6s | publish 669.7ms | refresh 116.5ms | visible=280250000 segments=11 deltas=2 merges=37 coalesces=17
+            disc 12954.1 MiB (live  1129.4 MiB, 11.47x orphan) | zoom z0(1t) 140.0ms [12727.8us/ts]  z2(16t) 154.3ms [876.9us/ts]  z4(256t) 168.4ms [59.8us/ts]  z6(4096t) 111.5ms [2.5us/ts]  z8(40174t) 610.9ms [1.4us/ts]
+  round 121: ack    4.7s | publish 623.6ms | refresh 116.6ms | visible=280500000 segments=12 deltas=3 merges=37 coalesces=17
+            disc 12963.7 MiB (live  1138.9 MiB, 11.38x orphan) | zoom z0(1t) 145.6ms [12136.3us/ts]  z2(16t) 165.1ms [859.7us/ts]  z4(256t) 166.1ms [54.1us/ts]  z6(4096t) 114.7ms [2.3us/ts]  z8(40437t) 741.1ms [1.5us/ts]
+  round 122: ack    4.5s | publish 613.1ms | refresh  15.2ms | visible=280750000 segments=13 deltas=4 merges=37 coalesces=17
+            disc 12973.3 MiB (live  1148.5 MiB, 11.30x orphan) | zoom z0(1t) 139.3ms [10718.0us/ts]  z2(16t) 147.5ms [708.9us/ts]  z4(256t) 161.2ms [48.4us/ts]  z6(4096t) 114.3ms [2.1us/ts]  z8(40696t) 587.4ms [1.1us/ts]
+  round 123: ack    4.5s | publish 603.4ms | refresh  70.9ms | visible=281000000 segments=14 deltas=5 merges=37 coalesces=17
+            disc 12982.8 MiB (live  1158.0 MiB, 11.21x orphan) | zoom z0(1t) 136.8ms [9769.9us/ts]  z2(16t) 141.8ms [633.2us/ts]  z4(256t) 192.5ms [53.7us/ts]  z6(4096t) 115.8ms [2.0us/ts]  z8(40944t) 581.5ms [1.0us/ts]
+  round 124: ack    4.5s | publish 628.0ms | refresh  76.0ms | visible=281250000 segments=12 deltas=6 merges=38 coalesces=17
+            disc 13030.6 MiB (live  1167.6 MiB, 11.16x orphan) | zoom z0(1t) 138.0ms [11496.3us/ts]  z2(16t) 140.1ms [729.5us/ts]  z4(256t) 171.5ms [55.8us/ts]  z6(4096t) 114.7ms [2.3us/ts]  z8(41208t) 584.1ms [1.2us/ts]
+  round 125: ack    4.5s | publish 623.1ms | refresh  75.9ms | visible=281500000 segments=13 deltas=7 merges=38 coalesces=17
+            disc 13040.2 MiB (live  1177.1 MiB, 11.08x orphan) | zoom z0(1t) 135.0ms [10383.7us/ts]  z2(16t) 139.4ms [670.2us/ts]  z4(256t) 157.6ms [47.4us/ts]  z6(4096t) 128.6ms [2.4us/ts]  z8(41468t) 588.7ms [1.1us/ts]
+  round 126: ack    4.5s | publish 597.9ms | refresh 101.3ms | visible=281750000 segments=14 deltas=8 merges=38 coalesces=17
+            disc 13049.8 MiB (live  1186.7 MiB, 11.00x orphan) | zoom z0(1t) 138.0ms [9856.4us/ts]  z2(16t) 139.5ms [622.8us/ts]  z4(256t) 160.8ms [44.9us/ts]  z6(4096t) 120.1ms [2.1us/ts]  z8(41718t) 590.8ms [1.0us/ts]
+  round 127: ack    4.6s | publish 618.3ms | refresh 121.6ms | visible=282000000 segments=15 deltas=2 merges=38 coalesces=18
+            disc 13059.4 MiB (live  1196.2 MiB, 10.92x orphan) | zoom z0(1t) 140.3ms [9355.7us/ts]  z2(16t) 138.4ms [576.8us/ts]  z4(256t) 167.9ms [43.7us/ts]  z6(4096t) 116.5ms [1.9us/ts]  z8(41977t) 648.8ms [1.0us/ts]
+  round 128: ack    4.4s | publish 633.4ms | refresh  96.2ms | visible=282250000 segments=13 deltas=3 merges=39 coalesces=18
+            disc 13107.2 MiB (live  1205.8 MiB, 10.87x orphan) | zoom z0(1t) 142.1ms [10933.9us/ts]  z2(16t) 141.8ms [681.6us/ts]  z4(256t) 168.7ms [50.7us/ts]  z6(4096t) 118.8ms [2.2us/ts]  z8(42237t) 604.0ms [1.1us/ts]
+  round 129: ack    4.5s | publish 653.6ms | refresh 106.4ms | visible=282500000 segments=11 deltas=4 merges=40 coalesces=18
+            disc 13269.6 MiB (live  1215.3 MiB, 10.92x orphan) | zoom z0(1t) 136.5ms [12412.7us/ts]  z2(16t) 139.9ms [794.8us/ts]  z4(256t) 166.3ms [59.1us/ts]  z6(4096t) 112.6ms [2.5us/ts]  z8(42501t) 719.1ms [1.5us/ts]
+  round 130: ack    4.4s | publish 644.4ms | refresh  96.3ms | visible=282750000 segments=12 deltas=5 merges=40 coalesces=18
+            disc 13279.2 MiB (live  1224.9 MiB, 10.84x orphan) | zoom z0(1t) 139.1ms [11592.4us/ts]  z2(16t) 169.0ms [880.1us/ts]  z4(256t) 183.3ms [59.7us/ts]  z6(4096t) 116.2ms [2.4us/ts]  z8(42751t) 614.2ms [1.2us/ts]
+  round 131: ack    4.6s | publish 592.8ms | refresh 101.4ms | visible=283000000 segments=13 deltas=6 merges=40 coalesces=18
+            disc 13288.7 MiB (live  1234.4 MiB, 10.77x orphan) | zoom z0(1t) 135.8ms [10443.0us/ts]  z2(16t) 140.8ms [677.0us/ts]  z4(256t) 158.6ms [47.7us/ts]  z6(4096t) 113.8ms [2.1us/ts]  z8(43013t) 603.6ms [1.1us/ts]
+  round 132: ack    4.6s | publish 618.2ms | refresh  91.2ms | visible=283250000 segments=11 deltas=7 merges=41 coalesces=18
+            disc 13336.5 MiB (live  1244.0 MiB, 10.72x orphan) | zoom z0(1t) 137.3ms [12477.5us/ts]  z2(16t) 140.2ms [796.8us/ts]  z4(256t) 158.2ms [56.2us/ts]  z6(4096t) 113.2ms [2.5us/ts]  z8(43272t) 645.2ms [1.4us/ts]
+  round 133: ack    4.5s | publish 562.1ms | refresh  86.1ms | visible=283500000 segments=12 deltas=8 merges=41 coalesces=18
+            disc 13346.1 MiB (live  1253.5 MiB, 10.65x orphan) | zoom z0(1t) 140.4ms [11697.7us/ts]  z2(16t) 141.2ms [735.7us/ts]  z4(256t) 158.5ms [51.6us/ts]  z6(4096t) 145.3ms [3.0us/ts]  z8(43522t) 650.2ms [1.2us/ts]
+  round 134: ack    4.8s | publish 592.7ms | refresh 121.6ms | visible=283750000 segments=13 deltas=2 merges=41 coalesces=19
+            disc 13355.7 MiB (live  1263.1 MiB, 10.57x orphan) | zoom z0(1t) 147.9ms [11380.4us/ts]  z2(16t) 139.8ms [671.9us/ts]  z4(256t) 160.8ms [48.3us/ts]  z6(4096t) 131.1ms [2.5us/ts]  z8(43784t) 626.0ms [1.1us/ts]
+  round 135: ack    4.5s | publish 592.7ms | refresh  15.2ms | visible=284000000 segments=14 deltas=3 merges=41 coalesces=19
+            disc 13365.3 MiB (live  1272.6 MiB, 10.50x orphan) | zoom z0(1t) 146.9ms [10489.6us/ts]  z2(16t) 144.5ms [645.1us/ts]  z4(256t) 162.3ms [45.3us/ts]  z6(4096t) 126.2ms [2.2us/ts]  z8(44042t) 631.1ms [1.0us/ts]
+  round 136: ack    4.7s | publish 608.0ms | refresh  70.9ms | visible=284250000 segments=12 deltas=4 merges=42 coalesces=19
+            disc 13413.1 MiB (live  1282.2 MiB, 10.46x orphan) | zoom z0(1t) 141.5ms [11795.6us/ts]  z2(16t) 141.9ms [739.3us/ts]  z4(256t) 166.6ms [54.2us/ts]  z6(4096t) 114.6ms [2.3us/ts]  z8(44304t) 620.6ms [1.2us/ts]
+  round 137: ack    4.6s | publish 598.1ms | refresh  10.1ms | visible=284500000 segments=13 deltas=5 merges=42 coalesces=19
+            disc 13422.6 MiB (live  1291.7 MiB, 10.39x orphan) | zoom z0(1t) 136.1ms [10469.9us/ts]  z2(16t) 139.7ms [671.7us/ts]  z4(256t) 165.7ms [49.8us/ts]  z6(4096t) 117.2ms [2.2us/ts]  z8(44559t) 628.4ms [1.1us/ts]
+  round 138: ack    4.6s | publish 618.4ms | refresh  70.9ms | visible=284750000 segments=14 deltas=6 merges=42 coalesces=19
+            disc 13432.2 MiB (live  1301.3 MiB, 10.32x orphan) | zoom z0(1t) 138.0ms [9859.5us/ts]  z2(16t) 150.0ms [669.8us/ts]  z4(256t) 162.0ms [45.2us/ts]  z6(4096t) 116.0ms [2.0us/ts]  z8(44817t) 622.8ms [1.0us/ts]
+  round 139: ack    4.6s | publish 613.5ms | refresh  91.2ms | visible=285000000 segments=15 deltas=7 merges=42 coalesces=19
+            disc 13441.8 MiB (live  1310.8 MiB, 10.25x orphan) | zoom z0(1t) 140.7ms [9382.8us/ts]  z2(16t) 142.3ms [592.9us/ts]  z4(256t) 164.6ms [42.9us/ts]  z6(4096t) 117.4ms [1.9us/ts]  z8(45082t) 835.4ms [1.2us/ts]
+  round 140: ack    4.5s | publish 653.8ms | refresh  91.3ms | visible=285250000 segments=13 deltas=8 merges=43 coalesces=19
+            disc 13489.6 MiB (live  1320.4 MiB, 10.22x orphan) | zoom z0(1t) 145.0ms [11156.1us/ts]  z2(16t) 144.1ms [692.8us/ts]  z4(256t) 163.6ms [49.2us/ts]  z6(4096t) 120.3ms [2.3us/ts]  z8(45338t) 644.3ms [1.1us/ts]
+  round 141: ack    4.4s | publish 643.1ms | refresh  20.2ms | visible=285500000 segments=14 deltas=2 merges=43 coalesces=20
+            disc 13499.2 MiB (live  1329.9 MiB, 10.15x orphan) | zoom z0(1t) 138.6ms [9899.2us/ts]  z2(16t) 141.8ms [633.1us/ts]  z4(256t) 163.6ms [45.6us/ts]  z6(4096t) 118.3ms [2.1us/ts]  z8(45602t) 660.5ms [1.0us/ts]
+  round 142: ack    4.4s | publish 567.4ms | refresh  15.2ms | visible=285750000 segments=15 deltas=3 merges=43 coalesces=20
+            disc 13508.8 MiB (live  1339.5 MiB, 10.09x orphan) | zoom z0(1t) 140.6ms [9375.9us/ts]  z2(16t) 143.2ms [596.5us/ts]  z4(256t) 167.1ms [43.5us/ts]  z6(4096t) 114.5ms [1.9us/ts]  z8(45861t) 730.6ms [1.1us/ts]
+  round 143: ack    4.5s | publish 612.8ms | refresh  65.9ms | visible=286000000 segments=16 deltas=4 merges=43 coalesces=20
+            disc 13518.4 MiB (live  1349.0 MiB, 10.02x orphan) | zoom z0(1t) 138.4ms [8648.9us/ts]  z2(16t) 144.0ms [562.6us/ts]  z4(256t) 168.8ms [41.2us/ts]  z6(4096t) 123.2ms [1.9us/ts]  z8(46119t) 843.3ms [1.1us/ts]
+  round 144: ack    4.7s | publish 663.8ms | refresh  70.9ms | visible=286250000 segments=14 deltas=5 merges=44 coalesces=20
+            disc 13566.2 MiB (live  1358.6 MiB, 9.99x orphan) | zoom z0(1t) 141.5ms [10104.7us/ts]  z2(16t) 145.3ms [648.8us/ts]  z4(256t) 170.0ms [47.4us/ts]  z6(4096t) 129.5ms [2.3us/ts]  z8(46375t) 659.0ms [1.0us/ts]
+  round 145: ack    4.6s | publish 755.0ms | refresh 111.5ms | visible=286500000 segments=12 deltas=6 merges=45 coalesces=20
+            disc 13728.6 MiB (live  1368.1 MiB, 10.03x orphan) | zoom z0(1t) 144.4ms [12033.4us/ts]  z2(16t) 142.0ms [739.6us/ts]  z4(256t) 161.5ms [52.6us/ts]  z6(4096t) 127.3ms [2.6us/ts]  z8(46631t) 661.1ms [1.2us/ts]
+  round 146: ack    4.5s | publish 663.8ms | refresh  76.0ms | visible=286750000 segments=13 deltas=7 merges=45 coalesces=20
+            disc 13738.1 MiB (live  1377.7 MiB, 9.97x orphan) | zoom z0(1t) 140.1ms [10774.8us/ts]  z2(16t) 140.4ms [674.9us/ts]  z4(256t) 179.5ms [53.9us/ts]  z6(4096t) 115.3ms [2.2us/ts]  z8(46892t) 638.7ms [1.0us/ts]
+  round 147: ack    4.7s | publish 612.9ms | refresh  15.2ms | visible=287000000 segments=14 deltas=8 merges=45 coalesces=20
+            disc 13747.7 MiB (live  1387.2 MiB, 9.91x orphan) | zoom z0(1t) 139.8ms [9985.2us/ts]  z2(16t) 149.4ms [666.9us/ts]  z4(256t) 170.2ms [47.5us/ts]  z6(4096t) 125.8ms [2.2us/ts]  z8(47149t) 671.1ms [1.0us/ts]
+  round 148: ack    4.7s | publish 655.0ms | refresh  76.0ms | visible=287250000 segments=12 deltas=2 merges=46 coalesces=21
+            disc 13795.6 MiB (live  1396.8 MiB, 9.88x orphan) | zoom z0(1t) 143.0ms [11917.4us/ts]  z2(16t) 142.6ms [742.8us/ts]  z4(256t) 162.5ms [52.9us/ts]  z6(4096t) 118.7ms [2.4us/ts]  z8(47409t) 751.4ms [1.3us/ts]
+  round 149: ack    4.5s | publish 602.7ms | refresh  65.8ms | visible=287500000 segments=13 deltas=3 merges=46 coalesces=21
+            disc 13805.1 MiB (live  1406.3 MiB, 9.82x orphan) | zoom z0(1t) 138.5ms [10652.4us/ts]  z2(16t) 139.5ms [670.8us/ts]  z4(256t) 163.3ms [49.1us/ts]  z6(4096t) 116.9ms [2.2us/ts]  z8(47673t) 648.6ms [1.0us/ts]
+  round 150: ack    4.5s | publish 633.4ms | refresh  10.2ms | visible=287750000 segments=14 deltas=4 merges=46 coalesces=21
+            disc 13814.7 MiB (live  1415.9 MiB, 9.76x orphan) | zoom z0(1t) 138.9ms [9923.2us/ts]  z2(16t) 142.0ms [634.0us/ts]  z4(256t) 170.2ms [47.5us/ts]  z6(4096t) 115.0ms [2.0us/ts]  z8(47929t) 659.5ms [1.0us/ts]
+  round 151: ack    4.6s | publish 592.8ms | refresh  10.1ms | visible=288000000 segments=15 deltas=5 merges=46 coalesces=21
+            disc 13824.3 MiB (live  1425.4 MiB, 9.70x orphan) | zoom z0(1t) 138.9ms [9260.2us/ts]  z2(16t) 142.6ms [594.0us/ts]  z4(256t) 165.7ms [43.2us/ts]  z6(4096t) 119.4ms [1.9us/ts]  z8(48184t) 734.9ms [1.0us/ts]
+  round 152: ack    4.7s | publish 683.3ms | refresh  70.9ms | visible=288250000 segments=13 deltas=6 merges=47 coalesces=21
+            disc 13872.1 MiB (live  1435.0 MiB, 9.67x orphan) | zoom z0(1t) 141.5ms [10881.6us/ts]  z2(16t) 141.4ms [679.6us/ts]  z4(256t) 166.4ms [50.0us/ts]  z6(4096t) 120.3ms [2.3us/ts]  z8(48438t) 664.6ms [1.1us/ts]
+  round 153: ack    4.6s | publish 577.5ms | refresh  70.9ms | visible=288500000 segments=14 deltas=7 merges=47 coalesces=21
+            disc 13881.6 MiB (live  1444.5 MiB, 9.61x orphan) | zoom z0(1t) 140.7ms [10050.1us/ts]  z2(16t) 144.4ms [644.8us/ts]  z4(256t) 167.3ms [46.7us/ts]  z6(4096t) 115.2ms [2.0us/ts]  z8(48699t) 669.3ms [1.0us/ts]
+  round 154: ack    4.5s | publish 597.9ms | refresh  91.2ms | visible=288750000 segments=15 deltas=8 merges=47 coalesces=21
+            disc 13891.2 MiB (live  1454.1 MiB, 9.55x orphan) | zoom z0(1t) 139.1ms [9271.6us/ts]  z2(16t) 144.4ms [601.6us/ts]  z4(256t) 168.9ms [44.0us/ts]  z6(4096t) 122.0ms [2.0us/ts]  z8(48960t) 669.4ms [0.9us/ts]
+  round 155: ack    4.6s | publish 638.6ms | refresh  96.2ms | visible=289000000 segments=16 deltas=2 merges=47 coalesces=22
+            disc 13900.8 MiB (live  1463.6 MiB, 9.50x orphan) | zoom z0(1t) 143.0ms [8934.9us/ts]  z2(16t) 152.2ms [594.3us/ts]  z4(256t) 171.4ms [41.8us/ts]  z6(4096t) 117.5ms [1.8us/ts]  z8(49214t) 899.8ms [1.1us/ts]
+  round 156: ack    4.6s | publish 572.9ms | refresh  70.9ms | visible=289250000 segments=14 deltas=3 merges=48 coalesces=22
+            disc 13948.6 MiB (live  1473.2 MiB, 9.47x orphan) | zoom z0(1t) 140.9ms [10066.5us/ts]  z2(16t) 145.6ms [649.8us/ts]  z4(256t) 167.6ms [46.8us/ts]  z6(4096t) 118.6ms [2.1us/ts]  z8(49476t) 654.6ms [0.9us/ts]
+  round 157: ack    4.6s | publish 576.9ms | refresh  90.8ms | visible=289500000 segments=15 deltas=4 merges=48 coalesces=22
+            disc 13958.2 MiB (live  1482.7 MiB, 9.41x orphan) | zoom z0(1t) 139.4ms [9290.2us/ts]  z2(16t) 141.9ms [591.2us/ts]  z4(256t) 165.8ms [43.2us/ts]  z6(4096t) 120.5ms [2.0us/ts]  z8(49736t) 745.7ms [1.0us/ts]
+  round 158: ack    4.7s | publish 648.3ms | refresh  76.0ms | visible=289750000 segments=16 deltas=5 merges=48 coalesces=22
+            disc 13967.8 MiB (live  1492.3 MiB, 9.36x orphan) | zoom z0(1t) 140.3ms [8770.6us/ts]  z2(16t) 145.7ms [569.2us/ts]  z4(256t) 169.3ms [41.3us/ts]  z6(4096t) 136.8ms [2.1us/ts]  z8(49986t) 710.6ms [0.9us/ts]
+  round 159: ack    4.9s | publish 622.9ms | refresh  76.2ms | visible=290000000 segments=17 deltas=6 merges=48 coalesces=22
+            disc 13977.4 MiB (live  1501.9 MiB, 9.31x orphan) | zoom z0(1t) 141.9ms [8348.7us/ts]  z2(16t) 145.2ms [533.8us/ts]  z4(256t) 175.2ms [40.3us/ts]  z6(4096t) 120.7ms [1.7us/ts]  z8(50249t) 691.5ms [0.8us/ts]
+  round 160: ack    4.6s | publish 613.0ms | refresh 101.4ms | visible=290250000 segments=15 deltas=7 merges=49 coalesces=22
+            disc 14025.2 MiB (live  1511.4 MiB, 9.28x orphan) | zoom z0(1t) 143.7ms [9578.0us/ts]  z2(16t) 147.1ms [612.8us/ts]  z4(256t) 171.0ms [44.5us/ts]  z6(4096t) 126.2ms [2.1us/ts]  z8(50505t) 693.3ms [0.9us/ts]
+  round 161: ack    4.6s | publish 648.3ms | refresh  81.1ms | visible=290500000 segments=13 deltas=8 merges=49 coalesces=22
+            disc 14187.6 MiB (live  1521.0 MiB, 9.33x orphan) | zoom z0(1t) 561.8ms [43215.8us/ts]  z2(16t) 144.3ms [693.7us/ts]  z4(256t) 174.0ms [52.3us/ts]  z6(4096t) 136.4ms [2.6us/ts]  z8(50769t) 860.4ms [1.3us/ts]
+  round 162: ack    4.5s | publish 689.2ms | refresh  10.1ms | visible=290750000 segments=14 deltas=2 merges=50 coalesces=23
+            disc 14197.2 MiB (live  1530.5 MiB, 9.28x orphan) | zoom z0(1t) 137.4ms [9813.4us/ts]  z2(16t) 173.1ms [772.7us/ts]  z4(256t) 168.9ms [47.1us/ts]  z6(4096t) 117.4ms [2.0us/ts]  z8(51031t) 784.6ms [1.1us/ts]
+  round 163: ack    4.6s | publish 638.2ms | refresh  15.2ms | visible=291000000 segments=15 deltas=3 merges=50 coalesces=23
+            disc 14206.8 MiB (live  1540.0 MiB, 9.22x orphan) | zoom z0(1t) 141.0ms [9398.3us/ts]  z2(16t) 143.5ms [597.9us/ts]  z4(256t) 165.2ms [43.0us/ts]  z6(4096t) 119.9ms [2.0us/ts]  z8(51289t) 782.1ms [1.0us/ts]
+  round 164: ack    4.7s | publish 723.3ms | refresh  76.0ms | visible=291250000 segments=13 deltas=4 merges=51 coalesces=23
+            disc 14254.6 MiB (live  1549.6 MiB, 9.20x orphan) | zoom z0(1t) 141.8ms [10909.8us/ts]  z2(16t) 157.3ms [756.4us/ts]  z4(256t) 171.5ms [51.5us/ts]  z6(4096t) 118.1ms [2.2us/ts]  z8(51553t) 734.9ms [1.1us/ts]
+  round 165: ack    4.6s | publish 597.8ms | refresh  10.1ms | visible=291500000 segments=14 deltas=5 merges=51 coalesces=23
+            disc 14264.1 MiB (live  1559.1 MiB, 9.15x orphan) | zoom z0(1t) 140.5ms [10035.7us/ts]  z2(16t) 145.3ms [648.8us/ts]  z4(256t) 167.8ms [46.8us/ts]  z6(4096t) 136.1ms [2.4us/ts]  z8(51801t) 724.0ms [1.0us/ts]
+  round 166: ack    4.5s | publish 552.4ms | refresh  70.9ms | visible=291750000 segments=15 deltas=6 merges=51 coalesces=23
+            disc 14273.7 MiB (live  1568.7 MiB, 9.10x orphan) | zoom z0(1t) 139.2ms [9279.4us/ts]  z2(16t) 146.3ms [609.7us/ts]  z4(256t) 173.3ms [45.1us/ts]  z6(4096t) 116.6ms [1.9us/ts]  z8(52061t) 767.2ms [1.0us/ts]
+  round 167: ack    4.9s | publish 638.3ms | refresh 116.9ms | visible=292000000 segments=16 deltas=7 merges=51 coalesces=23
+            disc 14283.3 MiB (live  1578.3 MiB, 9.05x orphan) | zoom z0(1t) 139.7ms [8730.4us/ts]  z2(16t) 144.5ms [564.5us/ts]  z4(256t) 168.6ms [41.2us/ts]  z6(4096t) 139.5ms [2.1us/ts]  z8(52322t) 714.7ms [0.9us/ts]
+  round 168: ack    4.8s | publish 724.5ms | refresh  96.2ms | visible=292250000 segments=14 deltas=8 merges=52 coalesces=23
+            disc 14331.1 MiB (live  1587.8 MiB, 9.03x orphan) | zoom z0(1t) 142.0ms [10144.7us/ts]  z2(16t) 144.5ms [645.1us/ts]  z4(256t) 168.0ms [46.9us/ts]  z6(4096t) 121.6ms [2.1us/ts]  z8(52580t) 735.3ms [1.0us/ts]
+  round 169: ack    4.8s | publish 760.5ms | refresh  10.2ms | visible=292500000 segments=15 deltas=2 merges=52 coalesces=24
+            disc 14340.7 MiB (live  1597.3 MiB, 8.98x orphan) | zoom z0(1t) 142.7ms [9515.8us/ts]  z2(16t) 149.7ms [623.7us/ts]  z4(256t) 168.7ms [43.9us/ts]  z6(4096t) 122.8ms [2.0us/ts]  z8(52845t) 849.6ms [1.1us/ts]
+  round 170: ack    4.6s | publish 709.1ms | refresh  75.9ms | visible=292750000 segments=16 deltas=3 merges=52 coalesces=24
+            disc 14350.3 MiB (live  1606.9 MiB, 8.93x orphan) | zoom z0(1t) 145.2ms [9072.5us/ts]  z2(16t) 151.4ms [591.5us/ts]  z4(256t) 176.6ms [43.1us/ts]  z6(4096t) 122.0ms [1.9us/ts]  z8(53101t) 749.6ms [0.9us/ts]
+  round 171: ack    4.9s | publish 678.9ms | refresh 111.4ms | visible=293000000 segments=17 deltas=4 merges=52 coalesces=24
+            disc 14359.9 MiB (live  1616.5 MiB, 8.88x orphan) | zoom z0(1t) 144.9ms [8521.6us/ts]  z2(16t) 145.5ms [535.0us/ts]  z4(256t) 176.4ms [40.5us/ts]  z6(4096t) 161.8ms [2.3us/ts]  z8(53363t) 763.7ms [0.8us/ts]
+  round 172: ack    5.0s | publish 775.4ms | refresh  66.1ms | visible=293250000 segments=15 deltas=5 merges=53 coalesces=24
+            disc 14407.7 MiB (live  1626.0 MiB, 8.86x orphan) | zoom z0(1t) 143.8ms [9589.3us/ts]  z2(16t) 159.4ms [664.3us/ts]  z4(256t) 173.4ms [45.1us/ts]  z6(4096t) 122.5ms [2.0us/ts]  z8(53614t) 934.9ms [1.2us/ts]
+  round 173: ack    4.8s | publish 678.5ms | refresh 101.3ms | visible=293500000 segments=16 deltas=6 merges=53 coalesces=24
+            disc 14417.2 MiB (live  1635.6 MiB, 8.81x orphan) | zoom z0(1t) 151.3ms [9455.6us/ts]  z2(16t) 149.0ms [582.1us/ts]  z4(256t) 180.3ms [44.0us/ts]  z6(4096t) 127.9ms [2.0us/ts]  z8(53871t) 917.0ms [1.1us/ts]
+  round 174: ack    4.9s | publish 663.4ms | refresh 111.5ms | visible=293750000 segments=17 deltas=7 merges=53 coalesces=24
+            disc 14426.8 MiB (live  1645.1 MiB, 8.77x orphan) | zoom z0(1t) 147.3ms [8665.8us/ts]  z2(16t) 150.2ms [552.3us/ts]  z4(256t) 179.8ms [41.3us/ts]  z6(4096t) 136.4ms [2.0us/ts]  z8(54134t) 824.7ms [0.9us/ts]
+  round 175: ack    5.0s | publish 648.3ms | refresh 101.4ms | visible=294000000 segments=18 deltas=8 merges=53 coalesces=24
+            disc 14436.4 MiB (live  1654.7 MiB, 8.72x orphan) | zoom z0(1t) 147.8ms [8208.9us/ts]  z2(16t) 150.2ms [521.5us/ts]  z4(256t) 179.0ms [38.9us/ts]  z6(4096t) 128.9ms [1.7us/ts]  z8(54389t) 854.5ms [0.9us/ts]
+  round 176: ack    4.9s | publish 714.2ms | refresh  76.0ms | visible=294250000 segments=16 deltas=2 merges=54 coalesces=25
+            disc 14484.3 MiB (live  1664.2 MiB, 8.70x orphan) | zoom z0(1t) 144.0ms [9000.8us/ts]  z2(16t) 155.5ms [607.3us/ts]  z4(256t) 174.5ms [42.6us/ts]  z6(4096t) 134.1ms [2.0us/ts]  z8(54653t) 1.1s [1.2us/ts]
+  round 177: ack    5.1s | publish 699.7ms | refresh  81.0ms | visible=294500000 segments=14 deltas=3 merges=54 coalesces=25
+            disc 14646.7 MiB (live  1673.8 MiB, 8.75x orphan) | zoom z0(1t) 567.6ms [40539.4us/ts]  z2(16t) 148.3ms [662.1us/ts]  z4(256t) 169.1ms [47.2us/ts]  z6(4096t) 125.3ms [2.2us/ts]  z8(54915t) 754.8ms [1.0us/ts]
+  round 178: ack    4.9s | publish 622.8ms | refresh  86.1ms | visible=294750000 segments=15 deltas=4 merges=55 coalesces=25
+            disc 14656.2 MiB (live  1683.3 MiB, 8.71x orphan) | zoom z0(1t) 146.6ms [9771.7us/ts]  z2(16t) 149.9ms [624.7us/ts]  z4(256t) 177.1ms [46.1us/ts]  z6(4096t) 123.6ms [2.0us/ts]  z8(55170t) 957.6ms [1.2us/ts]
+  round 179: ack    5.1s | publish 612.7ms | refresh 111.7ms | visible=295000000 segments=16 deltas=5 merges=55 coalesces=25
+            disc 14665.8 MiB (live  1692.9 MiB, 8.66x orphan) | zoom z0(1t) 146.6ms [9163.6us/ts]  z2(16t) 153.0ms [597.6us/ts]  z4(256t) 175.1ms [42.7us/ts]  z6(4096t) 125.3ms [1.9us/ts]  z8(55424t) 777.1ms [0.9us/ts]
+  round 180: ack    5.0s | publish 618.3ms | refresh  70.9ms | visible=295250000 segments=14 deltas=6 merges=56 coalesces=25
+            disc 14713.6 MiB (live  1702.4 MiB, 8.64x orphan) | zoom z0(1t) 142.8ms [10201.7us/ts]  z2(16t) 146.4ms [653.7us/ts]  z4(256t) 171.3ms [47.8us/ts]  z6(4096t) 126.6ms [2.2us/ts]  z8(55679t) 876.7ms [1.1us/ts]
+  round 181: ack    4.7s | publish 613.1ms | refresh  96.3ms | visible=295500000 segments=15 deltas=7 merges=56 coalesces=25
+            disc 14723.2 MiB (live  1712.0 MiB, 8.60x orphan) | zoom z0(1t) 144.9ms [9659.2us/ts]  z2(16t) 146.4ms [610.2us/ts]  z4(256t) 170.4ms [44.4us/ts]  z6(4096t) 127.9ms [2.1us/ts]  z8(55943t) 798.1ms [1.0us/ts]
+  round 182: ack    4.9s | publish 602.8ms | refresh  96.3ms | visible=295750000 segments=16 deltas=8 merges=56 coalesces=25
+            disc 14732.8 MiB (live  1721.5 MiB, 8.56x orphan) | zoom z0(1t) 155.7ms [9730.0us/ts]  z2(16t) 147.9ms [577.9us/ts]  z4(256t) 175.6ms [42.9us/ts]  z6(4096t) 127.0ms [1.9us/ts]  z8(56205t) 886.8ms [1.0us/ts]
+  round 183: ack    4.9s | publish 663.3ms | refresh 111.1ms | visible=296000000 segments=17 deltas=2 merges=56 coalesces=26
+            disc 14742.4 MiB (live  1731.1 MiB, 8.52x orphan) | zoom z0(1t) 144.6ms [8505.8us/ts]  z2(16t) 148.2ms [544.8us/ts]  z4(256t) 180.0ms [41.4us/ts]  z6(4096t) 122.6ms [1.8us/ts]  z8(56465t) 1.1s [1.1us/ts]
+  round 184: ack    5.0s | publish 719.0ms | refresh  76.0ms | visible=296250000 segments=15 deltas=3 merges=57 coalesces=26
+            disc 14790.2 MiB (live  1740.6 MiB, 8.50x orphan) | zoom z0(1t) 148.3ms [9889.4us/ts]  z2(16t) 149.6ms [623.4us/ts]  z4(256t) 173.3ms [45.1us/ts]  z6(4096t) 140.7ms [2.3us/ts]  z8(56729t) 781.5ms [0.9us/ts]
+  round 185: ack    4.8s | publish 678.9ms | refresh 116.8ms | visible=296500000 segments=16 deltas=4 merges=57 coalesces=26
+            disc 14799.8 MiB (live  1750.2 MiB, 8.46x orphan) | zoom z0(1t) 144.7ms [9043.3us/ts]  z2(16t) 148.7ms [580.8us/ts]  z4(256t) 173.3ms [42.3us/ts]  z6(4096t) 122.7ms [1.9us/ts]  z8(56975t) 850.8ms [0.9us/ts]
+  round 186: ack    5.0s | publish 708.9ms | refresh 101.4ms | visible=296750000 segments=17 deltas=5 merges=57 coalesces=26
+            disc 14809.4 MiB (live  1759.7 MiB, 8.42x orphan) | zoom z0(1t) 141.0ms [8294.2us/ts]  z2(16t) 149.7ms [550.4us/ts]  z4(256t) 174.6ms [40.1us/ts]  z6(4096t) 126.7ms [1.8us/ts]  z8(57229t) 858.4ms [0.9us/ts]
+  round 187: ack    4.9s | publish 658.7ms | refresh 111.2ms | visible=297000000 segments=18 deltas=6 merges=57 coalesces=26
+            disc 14818.9 MiB (live  1769.3 MiB, 8.38x orphan) | zoom z0(1t) 143.6ms [7980.0us/ts]  z2(16t) 153.8ms [534.0us/ts]  z4(256t) 177.1ms [38.4us/ts]  z6(4096t) 124.2ms [1.7us/ts]  z8(57489t) 794.0ms [0.8us/ts]
+  round 188: ack    5.0s | publish 683.8ms | refresh  96.4ms | visible=297250000 segments=16 deltas=7 merges=58 coalesces=26
+            disc 14866.7 MiB (live  1778.8 MiB, 8.36x orphan) | zoom z0(1t) 145.8ms [9114.5us/ts]  z2(16t) 151.1ms [590.4us/ts]  z4(256t) 178.9ms [43.7us/ts]  z6(4096t) 125.6ms [1.9us/ts]  z8(57748t) 810.2ms [0.9us/ts]
+  round 189: ack    5.2s | publish 709.4ms | refresh 101.2ms | visible=297500000 segments=17 deltas=8 merges=58 coalesces=26
+            disc 14876.3 MiB (live  1788.4 MiB, 8.32x orphan) | zoom z0(1t) 145.5ms [8561.2us/ts]  z2(16t) 152.1ms [559.1us/ts]  z4(256t) 176.6ms [40.6us/ts]  z6(4096t) 128.7ms [1.8us/ts]  z8(58012t) 821.4ms [0.8us/ts]
+  round 190: ack    4.9s | publish 704.3ms | refresh 101.3ms | visible=297750000 segments=18 deltas=2 merges=58 coalesces=27
+            disc 14886.0 MiB (live  1797.9 MiB, 8.28x orphan) | zoom z0(1t) 143.3ms [7959.3us/ts]  z2(16t) 152.1ms [528.2us/ts]  z4(256t) 175.8ms [38.2us/ts]  z6(4096t) 132.9ms [1.8us/ts]  z8(58271t) 912.5ms [0.9us/ts]
+  round 191: ack    4.9s | publish 704.3ms | refresh 126.7ms | visible=298000000 segments=19 deltas=3 merges=58 coalesces=27
+            disc 14895.5 MiB (live  1807.5 MiB, 8.24x orphan) | zoom z0(1t) 145.1ms [7637.4us/ts]  z2(16t) 155.6ms [512.0us/ts]  z4(256t) 176.8ms [36.3us/ts]  z6(4096t) 126.9ms [1.6us/ts]  z8(58531t) 946.2ms [0.9us/ts]
+  round 192: ack    4.9s | publish 775.1ms | refresh 101.3ms | visible=298250000 segments=17 deltas=4 merges=59 coalesces=27
+            disc 14943.3 MiB (live  1817.0 MiB, 8.22x orphan) | zoom z0(1t) 145.0ms [8528.9us/ts]  z2(16t) 154.8ms [569.0us/ts]  z4(256t) 183.2ms [42.1us/ts]  z6(4096t) 124.3ms [1.8us/ts]  z8(58783t) 938.4ms [0.9us/ts]
+  round 193: ack    4.9s | publish 783.0ms | refresh 106.2ms | visible=298500000 segments=15 deltas=5 merges=60 coalesces=27
+            disc 15105.7 MiB (live  1826.6 MiB, 8.27x orphan) | zoom z0(1t) 146.7ms [9782.7us/ts]  z2(16t) 151.6ms [631.5us/ts]  z4(256t) 175.0ms [45.6us/ts]  z6(4096t) 124.8ms [2.0us/ts]  z8(59035t) 982.2ms [1.1us/ts]
+  round 194: ack    5.0s | publish 739.6ms | refresh 121.4ms | visible=298750000 segments=16 deltas=6 merges=60 coalesces=27
+            disc 15115.3 MiB (live  1836.1 MiB, 8.23x orphan) | zoom z0(1t) 148.7ms [9294.0us/ts]  z2(16t) 149.8ms [585.3us/ts]  z4(256t) 175.9ms [43.0us/ts]  z6(4096t) 124.7ms [1.9us/ts]  z8(59307t) 812.3ms [0.9us/ts]
+  round 195: ack    5.0s | publish 684.1ms | refresh  91.2ms | visible=299000000 segments=17 deltas=7 merges=60 coalesces=27
+            disc 15124.9 MiB (live  1845.7 MiB, 8.19x orphan) | zoom z0(1t) 144.4ms [8495.8us/ts]  z2(16t) 147.1ms [540.9us/ts]  z4(256t) 176.9ms [40.7us/ts]  z6(4096t) 126.8ms [1.8us/ts]  z8(59564t) 864.1ms [0.9us/ts]
+  round 196: ack    5.0s | publish 688.5ms | refresh 101.2ms | visible=299250000 segments=15 deltas=8 merges=61 coalesces=27
+            disc 15172.7 MiB (live  1855.2 MiB, 8.18x orphan) | zoom z0(1t) 147.7ms [9847.6us/ts]  z2(16t) 152.4ms [634.9us/ts]  z4(256t) 177.3ms [46.2us/ts]  z6(4096t) 127.3ms [2.1us/ts]  z8(59825t) 1.1s [1.2us/ts]
+  round 197: ack    5.1s | publish 749.7ms | refresh 106.3ms | visible=299500000 segments=16 deltas=2 merges=61 coalesces=28
+            disc 15182.3 MiB (live  1864.8 MiB, 8.14x orphan) | zoom z0(1t) 144.5ms [9030.4us/ts]  z2(16t) 152.0ms [593.6us/ts]  z4(256t) 178.7ms [43.6us/ts]  z6(4096t) 127.5ms [1.9us/ts]  z8(60087t) 902.5ms [0.9us/ts]
+  round 198: ack    4.9s | publish 613.0ms | refresh 101.3ms | visible=299750000 segments=17 deltas=3 merges=61 coalesces=28
+            disc 15191.9 MiB (live  1874.3 MiB, 8.11x orphan) | zoom z0(1t) 146.9ms [8638.4us/ts]  z2(16t) 151.7ms [557.8us/ts]  z4(256t) 179.0ms [41.1us/ts]  z6(4096t) 138.1ms [2.0us/ts]  z8(60333t) 858.2ms [0.8us/ts]
+  round 199: ack    5.0s | publish 638.4ms | refresh  86.0ms | visible=300000000 segments=18 deltas=4 merges=61 coalesces=28
+            disc 15201.5 MiB (live  1883.9 MiB, 8.07x orphan) | zoom z0(1t) 147.7ms [8203.2us/ts]  z2(16t) 153.4ms [532.7us/ts]  z4(256t) 182.5ms [39.6us/ts]  z6(4096t) 127.7ms [1.7us/ts]  z8(60587t) 1.0s [0.9us/ts]
+  settled: segments=15, deltas=4, runs=17, dict extents=5, locators=14 (merges=62, coalesces=28, refreshes=261, full builds=1)
+  restart: 7.723532239s
+scale: 300000000 items, 2111.981998646s end to end
+test millions_of_ingested_rows_become_correctly_queryable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2115.34s
+
