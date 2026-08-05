@@ -94,6 +94,41 @@ per batch into `accepted_batches`, **which is never pruned in-process**; and `al
 is `assign_sorted` comparing longer signatures — the `n log n` term `config.rs` warns about at
 `DEFAULT_COMMIT_WINDOW_MAX_ITEMS`, surfacing as a term-density effect rather than a window-size one.
 
+### The fix, and why the chunked buffer is shelved
+
+A `BufferedItem` behind an `Arc` — so the per-close map clone copies a pointer
+instead of the item's four heap allocations. Measured, µs per ingested row:
+
+| | 1M base, 1 desc | 250M base, 3 desc |
+|---|---|---|
+| `buffer_clone` | 2.60 → **0.24** | 5.99 → **0.22** |
+| `submit→receipt` | 7.15 → **2.11** | 14.24 → **2.63** |
+| `ack` per 250,000-row round | | ~4.5 s → **731 ms** |
+
+**It transfers to scale, and the hasher fix did not.** 3.4× at 1M and 5.4× at
+250M, against 5.5× and nothing. The difference is what each targets: the clone's
+operand is the row's term vector, so its cost rises with term density — and term
+density is what separates a fixture from a deployment.
+
+**An allocator-pressure coupling, and it is the more useful finding.** Four
+stages the `Arc` change does not touch fell with it: `record_batch` 1.80 → ~0,
+`admit` 0.87 → 0.20, `wal_append` 0.38 → 0.09, `allocate` 0.96 → 0.35. The deep
+copy was millions of allocations per round, and it was taxing every other
+allocation in the executor. **Consequence for reading the pre-Arc attribution:
+those stages were never as expensive as they measured** — they were being slowed
+by their neighbour. Worth a dedicated run before anything is built on it.
+
+**The chunked buffer is therefore shelved, not queued.** `buffer_clone` is now
+**8.4% of ingest at 250M**, so the whole restructure — a public type in
+`tessera-lifecycle`, four `remove` call sites, `plan_flush`, `compose`, and a
+ruling on `2026-08-05-ingest-buffer-snapshot.md`'s Q2 — has a ceiling of single
+digits. Three things would reopen it, and none is pressing: **B/W growing** (the
+`B²/2W` term is linear in the flush interval, and 250,000 buffered is modest for
+a 90 s tick under load); the **`plan_flush` transient** becoming the binding
+memory constraint (≈1×B, which `Arc<Chunk>` retires — a memory argument, not a
+throughput one); and **`oldest_wal_pos`**, an unmeasured O(n) fold on the
+rotation path that chunking makes O(1).
+
 ### The external-id hasher, and the limits of the 5.5× it bought
 
 `WritePath::established` was an `FxHashMap<Vec<u8>, EntityId>`. FxHash is tuned for integer-like
