@@ -605,7 +605,7 @@ impl FragmentCache {
     /// It does not need to be selectable. **At the instant the identity rotates, every existing
     /// entry is under the superseded one**, so "everything present now" *is* the set §8 names,
     /// exactly rather than approximately. That is what makes this correct without the format change
-    /// the alternative would need (owner ruling, 2026-08-06).
+    /// the alternative would need (decision 0055).
     ///
     /// **List before the swap, delete after it**, which is why this is separate from
     /// [`Self::sweep`]. Deleting before the swap discards a cache that is still the live one if the

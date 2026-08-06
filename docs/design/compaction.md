@@ -31,7 +31,7 @@ restated); the bundle bytes (contracts §2); ingest, the commit window, the WAL,
 lane, merge and coalesce (write-path §1–§7, normative, cited here and unchanged by this design).
 **Reads against:** architecture §4, §10.2, §11.1–§11.3, Appendix C; contracts §2.1–§2.6, §3.4;
 write-path §4–§9 and especially **§5.4 (Rule S / Rule F)** and **§8 (the seam)**; SA §6.6, §6.7;
-lifecycle §2; decisions 0013, 0040, 0041, 0042, 0043, 0044, 0046, 0047, 0048.
+lifecycle §2; decisions 0013, 0040, 0041, 0042, 0043, 0044, 0046, 0047, 0048, 0054, 0055.
 **Citation convention:** unprefixed `§n` is the architecture design; `write-path §n`,
 `contracts §n`, `SA §n`, `lifecycle §n` as named. This document's own sections are **spec §n**,
 and are cited from elsewhere as `compaction §n`.
@@ -716,9 +716,9 @@ implies.** A cache entry is `<canonical key>.frag`, and the key is a SHA-256 ove
 identity among other things — a hash does not invert, and nothing beside the file carries the
 identity, so "the entries under superseded identities" cannot be picked out by name. It does not
 need to be: **at the instant the identity rotates, every existing entry is under the superseded
-one**, so *everything present* is that set exactly rather than approximately (owner ruling,
-2026-08-06 — the alternative, putting the identity in the filename, is a format change that buys
-only the ability to sweep later). The listing is taken **before** the swap and deleted **after**
+one**, so *everything present* is that set exactly rather than approximately (decision 0055 — the
+alternative, putting the identity in the filename, is a format change that buys only the ability to
+sweep later). The listing is taken **before** the swap and deleted **after**
 it, which closes both hazards at once: a listing taken earlier can never name an entry a request
 wrote after the swap under the *new* identity, and a publication that fails deletes nothing.
 Unlinking an entry a live request still holds is safe — a `FrozenFragment` is a mapping, and on
@@ -797,8 +797,8 @@ until then they are marked as assumed in spec §14 and a deployment may set eith
 `scripts/check-layers.sh` is unaffected: the engine already depends on both store and authz, and
 the fold adds no publisher — it goes through the executor like everything else.
 
-**The rule this table follows: a writer for a bundle artefact lives in `tessera-store`** (owner
-ruling, 2026-08-06), and it is now true of all of them rather than most. `SegmentWriter`,
+**The rule this table follows: a writer for a bundle artefact lives in `tessera-store`**
+(decision 0054), and it is now true of all of them rather than most. `SegmentWriter`,
 `PermutationWriter`, `RunWriter` and `LocatorWriter` were already there. Three were not, each for
 its own accident of history: `PairsParquetWriter` because a build was its only producer until pass 2
 became its second; `MANIFEST.json` and `CURRENT` for the same reason; and `write_segments_manifest`
