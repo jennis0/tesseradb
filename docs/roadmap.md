@@ -116,12 +116,15 @@ between them** at `flush_max_age_secs` per slice. That releases the theme's one 
 constraint: [#8] no longer presupposes [#3], because landing into a *running* deployment now means
 something — publication makes the items visible.
 
-What is left is [#4], the deny machinery a mutable deployment needs. Two retirement rules retire
-two different ways ([`design/write-path.md`](design/write-path.md) §5.4), and the stamp ledger the
-issue title names is **deleted from the spec rather than deferred** — so [#4] is the compaction
-fold, which is the rule with nothing to run at. Nothing but an unsuppress retires today, which is
-fail-closed and is why the theme is safe to sequence late. Compaction belongs to [#4], because the
-fold is what compaction is for in invariant terms.
+What is left is the deny machinery a mutable deployment needs, and it has collapsed to one
+obligation. Two retirement rules retire two different ways
+([`design/write-path.md`](design/write-path.md) §5.4); the stamp ledger [#4]'s title names is
+**deleted from the spec rather than deferred**, and the predicate-change rule has no producer and
+no machinery ([decision 0048](decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)).
+Rule S is built. So what remains of [#4] is *deletions retire at the fold* — which is [#73], the
+compaction epic, designed against [`design/compaction.md`](design/compaction.md) and broken into
+eight tasks. Nothing but an unsuppress retires today, which is fail-closed and is why the theme is
+safe to sequence late.
 
 The theme's remaining difficulty is identity rather than throughput. Entity identifiers are
 append-only and assigned in signature order, and that ordering is scoped to whatever one commit
@@ -355,6 +358,7 @@ and has no single position. Every downstream property rests on it. No design exi
 
 [#3]: https://github.com/jennis0/tessera-index/issues/3
 [#4]: https://github.com/jennis0/tessera-index/issues/4
+[#73]: https://github.com/jennis0/tessera-index/issues/73
 [#5]: https://github.com/jennis0/tessera-index/issues/5
 [#6]: https://github.com/jennis0/tessera-index/issues/6
 [#7]: https://github.com/jennis0/tessera-index/issues/7
