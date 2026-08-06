@@ -9,7 +9,8 @@ pub use fragment::{
     build_fragment, build_fragment_with_deltas, FragmentCache, FragmentCacheError, FrozenFragment,
 };
 pub use postings::{
-    encode_posting, write_posting_records, write_postings, PostingRef, PostingsReader,
+    encode_posting, encode_posting_bitmap, write_posting_records, write_postings, PostingRef,
+    PostingsReader,
     PostingsSpool,
 };
 pub use tier::{coalesce_delta_tiers, write_delta_tier, DeltaTier};

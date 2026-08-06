@@ -28,12 +28,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BinaryArray, UInt32Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::writer::FileWriter;
-use arrow::record_batch::RecordBatch;
 use sha2::{Digest, Sha256};
 
 use tessera_spatial::fixed32;
@@ -43,7 +38,7 @@ use tessera_types::{EntityId, IdentityKey, TesseraId, ROW_ABSENT};
 use crate::error::{Result, StoreError};
 use crate::manifest::{FileDigest, LocatorExtent, Quantisation, SegmentDescriptor};
 use crate::permutation::SegmentExtent;
-use crate::write::write_segment;
+use crate::write::{write_segment, RunWriter};
 
 /// One item a flush is about to give geometry to.
 ///
@@ -262,39 +257,21 @@ fn tessera_id_of(key: &IdentityKey, shard_id: u32, entity: EntityId) -> Result<T
 /// One external-id extent: `external_id: Binary` and `entity_id: UInt32`, ascending by the id
 /// bytes. The shape `crate::sidecar` binary-searches, and it verifies that sortedness at open —
 /// so an unsorted extent is a refusal there rather than a wrong answer here.
+///
+/// **One of [`crate::write::RunWriter`]'s two producers, not a second writer**, on the same
+/// argument [`write_flush_segment`] delegates to `SegmentWriter` for: the flush holds its rows
+/// anyway, so nothing is streamed *in* here, but this path and the coalesce's k-way merge cannot
+/// then drift apart in what `external-ids.arrow` looks like.
 pub(crate) fn write_external_id_run(path: &Path, rows: &[(&[u8], u32)]) -> Result<()> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
-        Field::new("entity_id", DataType::UInt32, false),
-    ]));
-    let external: ArrayRef = Arc::new(BinaryArray::from_iter_values(
-        rows.iter().map(|(id, _)| *id),
-    ));
-    let entity: ArrayRef = Arc::new(UInt32Array::from_iter_values(rows.iter().map(|(_, e)| *e)));
-    let batch = RecordBatch::try_new(schema.clone(), vec![external, entity]).map_err(|e| {
-        StoreError::MalformedBundle {
-            detail: format!("external-ids.arrow: {e}"),
-        }
-    })?;
-
     let io = |source| StoreError::Io {
         path: path.to_path_buf(),
         source,
     };
-    let file = File::create(path).map_err(io)?;
-    let mut writer = FileWriter::try_new(BufWriter::new(file), &schema).map_err(|e| {
-        StoreError::MalformedBundle {
-            detail: format!("external-ids.arrow: {e}"),
-        }
-    })?;
-    writer
-        .write(&batch)
-        .map_err(|e| StoreError::MalformedBundle {
-            detail: format!("external-ids.arrow: {e}"),
-        })?;
-    writer.finish().map_err(|e| StoreError::MalformedBundle {
-        detail: format!("external-ids.arrow: {e}"),
-    })?;
+    let mut writer = RunWriter::create(path).map_err(io)?;
+    for (external_id, entity) in rows {
+        writer.append(external_id, *entity).map_err(io)?;
+    }
+    writer.finish().map_err(io)?;
     Ok(())
 }
 

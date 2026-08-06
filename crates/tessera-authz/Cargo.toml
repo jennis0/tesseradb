@@ -13,5 +13,6 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+croaring = { workspace = true }
 proptest = { workspace = true }
 rand = { workspace = true }

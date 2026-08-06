@@ -531,3 +531,100 @@ fn write_columns_from_parts_rejects_short_and_misaligned_buffers_without_panicki
         "error should name the alignment failure: {err}"
     );
 }
+
+/// **Scatter order is free, and it produces exactly the bytes the sequential path does.**
+///
+/// This is the property compaction's pass 1 needs and the old writer could not offer: the fold
+/// emits rows in `(morton, tessera_id)` order and learns `perm[entity]` in *that* order, which is
+/// not entity order. `write_permutation` remains the sequential producer, and the two must not be
+/// allowed to drift — so the assertion is on the whole file, not on a slot.
+///
+/// **Mutation:** write the slot natively rather than little-endian in `PermutationWriter::set`,
+/// or move the header's field order, and these bytes stop matching.
+#[test]
+fn a_scattered_permutation_is_byte_identical_to_a_sequential_one() {
+    use tessera_store::write::PermutationWriter;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bound = 64u64;
+    // Row order with deliberate gaps: entities 7, 19 and 40 never get a row, so the absent
+    // sentinel has to survive in three interior slots rather than only at the tail.
+    let row_order: Vec<EntityId> = [3u64, 11, 0, 55, 28, 63, 1, 44]
+        .into_iter()
+        .map(EntityId::new)
+        .collect();
+
+    let sequential = dir.path().join("sequential.bin");
+    write_permutation(&sequential, &row_order, bound).expect("the sequential path writes");
+
+    // The same mapping, learned in an order unrelated to either entity or row — which is what a
+    // Morton-ordered pass 1 produces.
+    let scattered = dir.path().join("scattered.bin");
+    let mut writer = PermutationWriter::create(&scattered, bound).expect("create");
+    let mut shuffled: Vec<(usize, EntityId)> = row_order.iter().copied().enumerate().collect();
+    shuffled.sort_by_key(|(row, entity)| entity.raw().wrapping_mul(7).wrapping_add(*row as u64));
+    for (row, entity) in shuffled {
+        writer.set(entity, row as u32).expect("set");
+    }
+    writer.finish().expect("finish");
+
+    assert_eq!(
+        fs::read(&sequential).unwrap(),
+        fs::read(&scattered).unwrap(),
+        "the scattered and sequential producers must write the same permutation.bin byte for byte"
+    );
+}
+
+/// **An entity that never got a row reads as absent, not as row 0.**
+///
+/// A freshly extended file reads as zeros and zero is a real row belonging to a real entity, so a
+/// writer that skipped the sentinel fill would serve one entity's coordinates under every id that
+/// has none — a cross-identity disclosure with no error anywhere. The mapped writer fills
+/// `bound × 4` bytes of `0xFF` up front for exactly this reason.
+///
+/// **Mutation:** delete the `map[HEADER..].fill(0xFF)` in `PermutationWriter::create` and every
+/// gap below resolves to row 0.
+#[test]
+fn an_entity_with_no_row_is_absent_rather_than_row_zero() {
+    use tessera_store::write::PermutationWriter;
+    use tessera_store::Permutation;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("permutation.bin");
+    let mut writer = PermutationWriter::create(&path, 16).expect("create");
+    // Only entity 9 gets a row, and it is row 0 — the value an unfilled slot would masquerade as.
+    writer.set(EntityId::new(9), 0).expect("set");
+    writer.finish().expect("finish");
+
+    let perm = Permutation::load(&path).expect("the permutation loads");
+    assert_eq!(
+        perm.row_of(EntityId::new(9)).map(|r| r.raw()),
+        Some(0),
+        "the one entity with a row keeps it"
+    );
+    for entity in (0..16u64).filter(|e| *e != 9) {
+        assert!(
+            perm.row_of(EntityId::new(entity)).is_none(),
+            "entity {entity} never got a row and must be absent, not row 0"
+        );
+    }
+}
+
+/// One entity cannot occupy two rows, and the refusal names it — the check that stops a scatter
+/// silently overwriting a slot it already filled.
+#[test]
+fn a_scattered_duplicate_entity_is_refused() {
+    use tessera_store::write::PermutationWriter;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("permutation.bin");
+    let mut writer = PermutationWriter::create(&path, 16).expect("create");
+    writer.set(EntityId::new(4), 1).expect("the first set lands");
+    let err = writer
+        .set(EntityId::new(4), 2)
+        .expect_err("a second row for one entity must be refused");
+    assert!(
+        err.to_string().contains('4'),
+        "the refusal must name the entity: {err}"
+    );
+}
