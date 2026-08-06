@@ -12,7 +12,7 @@
 //! deletion denies never retire, there being no stamp ledger — and it is an obligation the
 //! compaction spec inherits rather than a caveat this one absorbs.
 //!
-//! ## The three dispositions do different things, and uniformity here is fail-open
+//! ## The two dispositions do different things, and uniformity here is fail-open
 //!
 //! Lifecycle §3.1 gives each a different relationship to the postings, so each gets a different
 //! answer:
@@ -22,9 +22,11 @@
 //!   reveal** — the item would have no row, and unsuppressing it would show nothing.
 //! - **Deleted → never written into the segment.** The ID stays burned (I9), no row is created,
 //!   and the deny entry stands.
-//! - **Carrying an evaluate entry → the buffered row's terms are written, and the entry stands.**
-//!   Writing the *entry's* current terms instead would be the fold, which is invariant-bearing and
-//!   compaction's. This is the sentence that stops the fold arriving as a simplification.
+//!
+//! A third disposition, an evaluate entry, is **deleted** (decision 0048): a flush wrote the
+//! buffered row's terms and let the entry stand, because writing the *entry's* current terms would
+//! have been the fold — invariant-bearing, and compaction's. Nothing here needs that rule any more,
+//! but the rule it protected still holds for the two above: this pass never folds.
 //!
 //! ## Every buffered row has a cell (§6)
 //!
@@ -613,8 +615,7 @@ fn digest_of(path: &Path) -> Result<FileDigest, String> {
 /// Whether `entity` is deleted as of this overlay.
 ///
 /// **Only `deleted` excludes an item from a flush.** `suppressed` does not — the row must exist for
-/// a later unsuppress to reveal — and `evaluate_terms` does not, because the terms written are the
-/// buffered row's and the entry stands. Reading any other field here is the fold arriving as a
+/// a later unsuppress to reveal. Reading any other field here is the fold arriving as a
 /// simplification; see this module's doc.
 ///
 /// Unreachable in the steady state and kept deliberately: a delete now drops its row from the

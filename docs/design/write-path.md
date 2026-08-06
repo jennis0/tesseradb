@@ -534,8 +534,8 @@ completed flush already wrote), the executor:
 ### 4.5 The record and the rotation
 
 After the swap, rotation: the WAL seals its active member, opens the next, writes a **compacted
-overlay snapshot at its head** — the three stores restated as entity-keyed records carrying raw
-descriptors — fsyncs it, and only then deletes members wholly below the reclaim bound,
+overlay snapshot at its head** — the stores restated as entity-keyed `(entity, op)` records —
+fsyncs it, and only then deletes members wholly below the reclaim bound,
 **oldest first**
 (a gap mid-sequence fails closed at the next open, so deletion order is what keeps a benign
 crash from manufacturing one). **The reclaim bound is the oldest surviving buffered row's
@@ -904,7 +904,7 @@ the residual is recorded at contracts §2.3, not closed.
 | 200 | durable **and** in force — the caller's own next request observes it |
 | 404 `unknown` | an address that resolved to nothing — including an item whose ingest is still held in a commit window (spec §1.1's stated gap: verify, don't trust, when revoking during a bulk load). **The whole batch applied nothing** |
 | 409 | stale `idset` — re-resolve by external id; decided before any inversion. **The whole batch applied nothing** |
-| 422 `contract` | unknown op, both/neither address forms, bad base64, non-string `tessera_id`, `idset` beside an `external_id`, two idsets in one request, a bad `access` field. Wholesale refusal, nothing applied |
+| 422 `contract` | unknown op — including the withdrawn `predicate`, whose detail names the delete-plus-re-ingest flow — both/neither address forms, bad base64, non-string `tessera_id`, `idset` beside an `external_id`, two idsets in one request. Wholesale refusal, nothing applied |
 | 429 | **never** — the lane cannot produce one |
 | 500 `fail-closed` | durability owed; deletes/suppresses in the failed window are already in force on the live node; **retry — always safe** (idempotent); the residual if never retried is re-exposure at the next restart |
 | 503 `not-ready` | the executor is not running; nothing was taken. A batch fold reports 500 over 503 when any item may be in force |
@@ -937,7 +937,7 @@ the residual is recorded at contracts §2.3, not closed.
   before the notification obligation is discharged.
 - **What a viewer must never see**, and which mechanism forbids each: an acknowledged deny's
   item after the ack (swap-before-ack); a deleted item resurrected by `delete → suppress →
-  unsuppress` (three stores; re-derivation on removal); a suppressed item revealed by a
+  unsuppress` (separate stores; re-derivation on removal); a suppressed item revealed by a
   retirement (Rule S — no stamp exists to act on); a denied item served from a stale cached
   artefact (the mask is applied after every cache; fragments never carry deny state, so no
   cached fragment can bake in its absence); a deny lost across restart after its 200

@@ -583,7 +583,8 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     assert!(!buffer.contains(e(ENTITY_Y)));
 
     // Compose against the Step 1 fixture (its `satisfied` set already contains `TermId(0)`) and
-    // confirm both entities are excluded from the effective mask despite Y's satisfied predicate.
+    // confirm both entities are excluded from the effective mask: X because delete is terminal
+    // under a later unsuppress, Y because its delete outranks the suppression that preceded it.
     let fx = build_fixture();
     let mask = compose_with(&fx, &overlay, &buffer);
     assert!(!mask.contains_row(ENTITY_X as u32));

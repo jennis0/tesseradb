@@ -2,12 +2,12 @@
 //!
 //! Composition used to answer the row-space question — *is this row denied* — by walking the deny
 //! sets and resolving `row_of` per denied entity, on every request. That made per-request work grow
-//! with denies **ever accepted**, which is a cost curve nothing retires: deletions and predicate
-//! changes wait on a compaction fold that does not exist. `Generation::denied` is the same fact as
+//! with denies **ever accepted**, which is a cost curve nothing retires: deletions wait on a
+//! compaction fold that does not exist. `Generation::denied` is the same fact as
 //! a row-space bitmap, folded into `compose`'s existing diffs with one `andnot`.
 //!
 //! **Two representations of one truth, so the differential test is the licence for holding them.**
-//! The three entity-space stores stay authoritative and `compose::verdict` stays the single answer
+//! The entity-space stores stay authoritative and `compose::verdict` stays the single answer
 //! for `visible_to`, label gating and cluster visibility. `visible_to(e) ≡ contains_row(row_of(e))`
 //! wherever a row exists is what keeps them from drifting, and is the reason the mask may exist at
 //! all.
@@ -231,7 +231,7 @@ fn a_suppressed_buffered_item_is_masked_the_moment_it_gains_a_row() {
 }
 
 /// **The differential obligation** (memo §6): the entity-space verdict and the row-space mask agree
-/// for every entity with a row, across all four dispositions. Two representations of one truth are
+/// for every entity with a row, across every disposition. Two representations of one truth are
 /// only licensed while this holds.
 #[test]
 fn visible_to_agrees_with_contains_row_for_every_disposition() {
@@ -266,11 +266,11 @@ fn visible_to_agrees_with_contains_row_for_every_disposition() {
             entity.raw()
         );
     }
-    // …and the fixture is doing what it claims: not all five agree by being uniformly visible.
+    // …and the fixture is doing what it claims: not all four agree by being uniformly visible.
     assert!(
         !visible_in_entity_space(&engine, &session, deleted)
             && visible_in_entity_space(&engine, &session, untouched),
-        "the four dispositions must actually differ, or this test proves nothing"
+        "the dispositions must actually differ, or this test proves nothing"
     );
 }
 

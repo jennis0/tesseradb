@@ -1243,11 +1243,12 @@ pub(crate) struct LiveState {
     allocator: Mutex<Allocator>,
     established: Mutex<std::collections::HashMap<Vec<u8>, EntityId>>,
     established_inverse: Mutex<FxHashMap<EntityId, Vec<u8>>>,
-    /// The descriptor resolver's extension state. Written from **both** sides, which is correct and
-    /// is the one asymmetry in this type: ingest resolves in the handler *before* submitting
-    /// (signature-sorted assignment needs the term set to compute a sort key before any ID exists —
-    /// the structural exception argued at [`WritePath::resolve_terms`]), while a change resolves on
-    /// the executor *after* its own append has been fsynced.
+    /// The descriptor resolver's extension state. Written from **one** side only: ingest resolves
+    /// in the handler *before* submitting, because signature-sorted assignment needs the term set to
+    /// compute a sort key before any ID exists — the structural exception argued at
+    /// [`WritePath::resolve_terms`]. A change used to resolve on the executor *after* its own append
+    /// was fsynced, which made this the one asymmetry in the type; that deferred pass had no
+    /// consumer once the evaluate store went and is deleted (decision 0048).
     resolver_state: Mutex<ResolverState>,
     accepted_batches: Mutex<AcceptedBatches>,
 }
@@ -3805,7 +3806,8 @@ impl Executor {
     ///
     /// - every [`ChangeOp::Delete`] and [`ChangeOp::Suppress`] **in the window** is applied anyway —
     ///   the items are hidden immediately — and every waiter still gets an error;
-    /// - every [`ChangeOp::Unsuppress`] and [`ChangeOp::Predicate`] applies **nothing**.
+    /// - every [`ChangeOp::Unsuppress`] applies **nothing** — the whole non-deny class, since
+    ///   decision 0048 deleted `Predicate`.
     ///
     /// The scope is lifecycle §4's and it is not uniform, which is what distinguishes this from the
     /// ingest window's failure path (`Executor::fail_window_wal` applies nothing at all). Making it

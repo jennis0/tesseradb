@@ -516,7 +516,7 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
 ///
 /// Because lifecycle §4's apply-anyway rule is scoped to `Delete`/`Suppress` and the executor
 /// honours that scope (`write.rs`'s `Executor::commit_denies`, whose failure fold applies the
-/// `Delete`/`Suppress` entries of a deny window and nothing else: a `Predicate`/`Unsuppress` whose
+/// `Delete`/`Suppress` entries of a deny window and nothing else: an `Unsuppress` whose
 /// append fails is refused **without** applying). An op-blind fold over `ExecError::Wal` gets
 /// **both** halves wrong: a batch of only failed non-deny ops would answer a body asserting a
 /// deletion or suppression "may be in force" when it contained neither, and `[suppress
@@ -615,7 +615,7 @@ pub fn map_change_batch_error(
 ///
 /// Only `Wal` can be, and only for a `Delete`/`Suppress`: lifecycle §4's apply-anyway rule is scoped
 /// to those two ops and `write.rs`'s `Executor::commit_denies` applies exactly that scope — a
-/// `Predicate`/`Unsuppress` whose append failed is refused **without** being applied, because an
+/// `Unsuppress` whose append failed is refused **without** being applied, because an
 /// `Unsuppress` applied without durability would re-expose an item that replay still hides.
 ///
 /// The two 409-class variants are contract answers with no effect by definition (contracts §3.1:

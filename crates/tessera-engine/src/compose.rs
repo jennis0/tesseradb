@@ -18,7 +18,7 @@
 //! row-space image of `deleted ∪ suppressed`, derived by [`derive_denied`] — and are folded in as
 //! `minus ∪= denied ∩ base`, `plus ∖= denied`. Two reasons, and the second is the load-bearing
 //! one. The walk was O(denies **ever accepted**) per request, which is a cost curve nothing
-//! retires: two of the three retirement rules do not exist, so the deny set only grows. And
+//! retires: one of the two retirement rules does not exist, so the deny set only grows. And
 //! `andnot` is self-clamping, so the deny half can no longer get the clamps above wrong at all —
 //! a deny cannot lose an ordering argument it never enters.
 //!
@@ -521,7 +521,7 @@ pub fn denied_rows_of(overlay: &Overlay, row_space: &RowSpace) -> Bitmap {
 ///
 /// **The frozen fragment is not a parameter**: `base` is already its row-space projection, and an
 /// entity with no verdict falls through to `base` by construction. It used to be taken for its
-/// `watermark` alone, to gate rule 4; that gate is gone (see [`verdict`]), and with it the last
+/// `watermark` alone, to gate the buffer rule; that gate is gone (see [`verdict`]), and with it the last
 /// reason for this function to see the fragment at all.
 ///
 /// `satisfied` is the viewer's granted term set (already resolved to `TermId`s by the auth plugin

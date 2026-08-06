@@ -1750,9 +1750,11 @@ fn hex_encode(bytes: &[u8]) -> String {
 ///
 /// The sidecar is per-extent lazy: nothing is opened, mapped or digested until the
 /// first resolution, and then only the one extent the key falls in — never the whole family.
-/// This is the `resolve_from_bundle` seam `tessera_lifecycle::overlay::replay` uses,
-/// authorisation-bearing because `/control/changes` denies whichever entity it resolves to — a
-/// wrong resolution denies the wrong entity and leaves the intended target visible.
+/// This is the seam `/control/changes` resolves an external id through **at admission**,
+/// authorisation-bearing because the endpoint denies whichever entity it resolves to — a wrong
+/// resolution denies the wrong entity and leaves the intended target visible. WAL replay no longer
+/// resolves external ids at all: the only record that needed it was deleted with `WAL_VERSION` 5
+/// (decision 0048), so the resolution happens exactly once, here, before the record is written.
 pub(crate) struct ExternalIdIndex(tessera_store::ExternalIdSidecar);
 
 impl ExternalIdIndex {
@@ -1769,14 +1771,13 @@ impl ExternalIdIndex {
         .map(ExternalIdIndex)
     }
 
-    /// **Fallible, closing review round 4's Critical C3.** `resolve_from_bundle`'s closure
-    /// signature in `tessera_lifecycle::overlay::replay` now takes a generic error parameter
-    /// rather than a fixed `Option` — `tessera-lifecycle` does not depend on `tessera-store`, so
-    /// the closure cannot name `StoreError` itself, but it can return any `Result<_, E>` and let
-    /// the caller's `E` be inferred as `StoreError` here. A corrupt extent, a digest mismatch or
-    /// a shuffled extent list now propagates as `Err(StoreError::InvalidSidecar)` through
-    /// `replay`/`Engine::open`/`Engine::resolve_external_id`, rather than the previous panic —
-    /// still fail-closed in effect, but no longer a panic in an async handler or at open.
+    /// **Fallible, closing review round 4's Critical C3.** A corrupt extent, a digest mismatch or
+    /// a shuffled extent list propagates as `Err(StoreError::InvalidSidecar)` through
+    /// `Engine::resolve_external_id` to the handler, rather than the panic this once was — still
+    /// fail-closed in effect, but no longer a panic in an async handler. *(The generic error
+    /// parameter this doc used to explain existed so `tessera-lifecycle`, which cannot name
+    /// `StoreError`, could take the closure at replay; replay no longer resolves external ids —
+    /// decision 0048 — so only the live path remains.)*
     fn resolve(&self, external_id: &[u8]) -> std::result::Result<Option<EntityId>, StoreError> {
         self.0.resolve(external_id)
     }
