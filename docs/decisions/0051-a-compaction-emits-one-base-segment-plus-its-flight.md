@@ -19,7 +19,7 @@ is interchange specification.
 
 ## The decision
 
-**The sentence is narrowed** (contracts r20). A compaction emits exactly one **base** segment per
+**The sentence is narrowed** (contracts r21). A compaction emits exactly one **base** segment per
 partition-slice, plus whatever extents were published during its flight.
 
 ## Why

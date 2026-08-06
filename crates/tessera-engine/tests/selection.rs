@@ -22,22 +22,12 @@ use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
 use tessera_engine::select::{
     decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
 };
-use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay, PredicateChange};
+use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_spatial::{fixed32, morton_of, tiler::sort_batch, Bounds, Tile, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{tile_ranges, Permutation, RowSpace};
 use tessera_types::{EntityId, TermId, TesseraId};
-
-/// A predicate change over already-resolved term ids. Its descriptors are stand-ins — nothing here
-/// resolves them — but they are stated anyway, because `PredicateChange` exists precisely so the
-/// two halves cannot be set independently.
-fn evaluate(terms: &[u32]) -> PredicateChange {
-    PredicateChange {
-        descriptors: terms.iter().map(|t| t.to_string().into_bytes()).collect(),
-        terms: terms.iter().map(|t| TermId::new(*t)).collect(),
-    }
-}
 
 const EXTENT: Bounds = Bounds {
     x_min: 0.0,
@@ -101,7 +91,12 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
 ///
 /// Uses an identity permutation so entity ids and row indices coincide — see the module doc.
 fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
-    mask_over_with(visible_rows, row_count, &Overlay::default())
+    mask_over_with(
+        visible_rows,
+        row_count,
+        &Overlay::default(),
+        &IngestBuffer::default(),
+    )
 }
 
 /// [`mask_over`], but composed against `overlay` — how the run-decode tests obtain masks with
@@ -111,6 +106,7 @@ fn mask_over_with(
     visible_rows: &[u32],
     row_count: u32,
     overlay: &Overlay,
+    buffer: &IngestBuffer,
 ) -> (TempDir, EffectiveMask) {
     let temp = TempDir::new().unwrap();
     let bound = row_count as u64;
@@ -135,14 +131,7 @@ fn mask_over_with(
     let base = Arc::new(RowProjection::new(&fragment, &perm));
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
     let denied = tessera_engine::denied_rows_of(overlay, &perm);
-    let mask = compose(
-        &satisfied,
-        overlay,
-        &IngestBuffer::default(),
-        base,
-        &perm,
-        &denied,
-    );
+    let mask = compose(&satisfied, overlay, buffer, base, &perm, &denied);
     (temp, mask)
 }
 
@@ -924,30 +913,41 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
     for (shape, visible_rows) in &shapes {
         for diffs_present in [false, true] {
             let mut overlay = Overlay::new();
+            let mut buffer = IngestBuffer::default();
             if diffs_present {
                 // `minus ⊆ base`: suppress a sample of visible rows below `diffs_bound`.
-                // `plus ∩ base = ∅`: widen a sample of invisible rows below `diffs_bound` via a
-                // predicate onto the granted term (entity id == row index in this fixture).
+                // `plus ∩ base = ∅`: buffer a sample of invisible rows below `diffs_bound` under
+                // the granted term (entity id == row index in this fixture, and the permutation is
+                // the identity, so a buffered entity has a row here). The evaluate store used to
+                // supply this half; with it gone (decision 0048) the buffer is the only source of
+                // a `plus` row.
                 for &row in visible_rows
                     .iter()
                     .filter(|&&r| r < diffs_bound)
                     .step_by(43)
                 {
-                    overlay.apply(EntityId::new(row as u64), ChangeOp::Suppress, None);
+                    overlay.apply(EntityId::new(row as u64), ChangeOp::Suppress);
                 }
                 let vis_set: HashSet<u32> = visible_rows.iter().copied().collect();
                 for row in (0..diffs_bound)
                     .filter(|r| !vis_set.contains(r))
                     .step_by(11)
                 {
-                    overlay.apply(
-                        EntityId::new(row as u64),
-                        ChangeOp::Predicate,
-                        Some(evaluate(&[0])),
+                    buffer.insert_row_with_terms(
+                        &tessera_lifecycle::WalRow {
+                            external_id: None,
+                            entity_id: EntityId::new(row as u64),
+                            slice: "s0".to_string(),
+                            descriptors: Vec::new(),
+                            x: 0.0,
+                            y: 0.0,
+                            scalars: Vec::new(),
+                        },
+                        vec![TermId::new(0)],
                     );
                 }
             }
-            let (_t, mask) = mask_over_with(visible_rows, n, &overlay);
+            let (_t, mask) = mask_over_with(visible_rows, n, &overlay, &buffer);
             assert_eq!(
                 mask.diffs_are_empty(),
                 !diffs_present,

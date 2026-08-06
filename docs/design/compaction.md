@@ -10,7 +10,7 @@ slower fold is an acceptable price for a gentler one (spec §6.1). **The two own
 document owed against documents it defers to have landed** (2026-08-06): `architecture.md` §11.3 is
 corrected — a fold *does* invalidate the term index and every mask fragment (r34, decision 0050) —
 and contracts §2.1 is narrowed to one *base* segment per partition-slice plus the fold's in-flight
-extents (r20, decision 0051). **What remains before it becomes normative:** a re-review of spec §5
+extents (r21, decision 0051). **What remains before it becomes normative:** a re-review of spec §5
 and §6 only, both of which changed shape at r4. Code may be written against it meanwhile; that
 re-review gates promotion, not implementation.
 **Owns:** the fold — what it executes, what it carries forward, how it is published, what retires
@@ -911,7 +911,7 @@ neither** — dropping the row while leaving the postings would let Rule F's ret
 item it retired (architecture r34, decision 0050). contracts §2.1's *"exactly one segment per
 partition-slice"* is narrowed to one **base** segment plus the fold's in-flight extents, since a
 fold that never blocks flush cannot emit one and the alternative was a write outage of the fold's
-whole length (contracts r20, decision 0051). The property that sentence protected survives intact:
+whole length (contracts r21, decision 0051). The property that sentence protected survives intact:
 carried-forward segments are extents with their own addressing, exactly as flush segments already
 are.
 
@@ -981,7 +981,7 @@ session pays `window + 10.7 s` rather than the tail, §6.3's cost list gains the
 
 **The two owed rulings, as landed — both in this design's favour, and both cost the *other*
 document a revision.** `architecture.md` r34 corrects §11.3's denial that a compaction
-invalidates the term index or masks (decision 0050); contracts r20 narrows §2.1 to one base segment
+invalidates the term index or masks (decision 0050); contracts r21 narrows §2.1 to one base segment
 plus the fold's in-flight extents (decision 0051). Neither changes a line of this design's
 mechanism — what changes is that the documents this one defers to now say what it always required,
 so an implementation written to spec §3–§5 is no longer written against the corpus. Also at r5:

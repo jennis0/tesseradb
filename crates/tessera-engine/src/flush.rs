@@ -12,7 +12,7 @@
 //! deletion denies never retire, there being no stamp ledger — and it is an obligation the
 //! compaction spec inherits rather than a caveat this one absorbs.
 //!
-//! ## The three dispositions do different things, and uniformity here is fail-open
+//! ## The two dispositions do different things, and uniformity here is fail-open
 //!
 //! Lifecycle §3.1 gives each a different relationship to the postings, so each gets a different
 //! answer:
@@ -22,9 +22,11 @@
 //!   reveal** — the item would have no row, and unsuppressing it would show nothing.
 //! - **Deleted → never written into the segment.** The ID stays burned (I9), no row is created,
 //!   and the deny entry stands.
-//! - **Carrying an evaluate entry → the buffered row's terms are written, and the entry stands.**
-//!   Writing the *entry's* current terms instead would be the fold, which is invariant-bearing and
-//!   compaction's. This is the sentence that stops the fold arriving as a simplification.
+//!
+//! A third disposition, an evaluate entry, is **deleted** (decision 0048): a flush wrote the
+//! buffered row's terms and let the entry stand, because writing the *entry's* current terms would
+//! have been the fold — invariant-bearing, and compaction's. Nothing here needs that rule any more,
+//! but the rule it protected still holds for the two above: this pass never folds.
 //!
 //! ## Every buffered row has a cell (§6)
 //!
@@ -613,8 +615,7 @@ fn digest_of(path: &Path) -> Result<FileDigest, String> {
 /// Whether `entity` is deleted as of this overlay.
 ///
 /// **Only `deleted` excludes an item from a flush.** `suppressed` does not — the row must exist for
-/// a later unsuppress to reveal — and `evaluate_terms` does not, because the terms written are the
-/// buffered row's and the entry stands. Reading any other field here is the fold arriving as a
+/// a later unsuppress to reveal. Reading any other field here is the fold arriving as a
 /// simplification; see this module's doc.
 ///
 /// Unreachable in the steady state and kept deliberately: a delete now drops its row from the
@@ -633,7 +634,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use tessera_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
-    use tessera_lifecycle::{IngestBuffer, PredicateChange};
+    use tessera_lifecycle::IngestBuffer;
     use tessera_store::manifest::{IdentityDescriptor, Manifest, Quantisation};
     use tessera_store::Bundle;
     use tessera_types::{TermId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
@@ -679,7 +680,7 @@ mod tests {
     ) -> Generation {
         let mut overlay = Overlay::new();
         for (entity, op) in changes {
-            overlay.apply(EntityId::new(*entity), *op, None);
+            overlay.apply(EntityId::new(*entity), *op);
         }
         generation_of(overlay, buffer_with(buffered))
     }
@@ -780,30 +781,6 @@ mod tests {
             plan.items[0].0,
             EntityId::new(8),
             "the deleted entity contributes no row"
-        );
-    }
-
-    /// **Writing the evaluate entry's current terms would be the fold**, which is
-    /// invariant-bearing and compaction's. The buffered row's terms are what the tier carries, and
-    /// the entry stands.
-    #[test]
-    fn an_evaluate_entry_leaves_the_buffered_rows_terms_alone() {
-        let mut overlay = Overlay::new();
-        overlay.apply(
-            EntityId::new(7),
-            ChangeOp::Predicate,
-            Some(PredicateChange {
-                descriptors: vec![b"ninety-nine".to_vec()],
-                terms: vec![TermId::new(99)],
-            }),
-        );
-        let generation = generation_of(overlay, buffer_with(&[(7, item(&[1]))]));
-
-        let plan = plan(&generation).expect("an evaluate entry does not stop a flush");
-        assert_eq!(
-            plan.items[0].1.terms,
-            vec![TermId::new(1)],
-            "the WAL row's terms, never the entry's — writing the entry's is the fold"
         );
     }
 

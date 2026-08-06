@@ -307,7 +307,7 @@ fn dispatch(ctx: &Context, arm: &ArmSpec, seed: u64) -> Result<()> {
         ),
         "changes" => super::changes::run(
             ctx,
-            &or(&arm.op, &strings(&["suppress", "delete", "predicate"])),
+            &or(&arm.op, &strings(&["suppress", "delete"])),
             &or(&arm.checkpoint, &[100, 1_000, 5_000, 20_000]),
             seed,
         ),

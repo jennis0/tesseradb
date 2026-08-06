@@ -107,7 +107,7 @@ fn a_flush_manifest_carries_the_deny_state_at_publication() {
 
     let suppressed = entity_of_source(&root, 7);
     engine
-        .accept_change(suppressed, ChangeOp::Suppress, None)
+        .accept_change(suppressed, ChangeOp::Suppress)
         .expect("the suppression is accepted");
 
     ingest(&engine, "ext-1");
@@ -143,7 +143,7 @@ fn an_unsuppress_is_absent_from_the_next_manifest() {
     let entity = entity_of_source(&root, 7);
 
     engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect("accepted");
     ingest(&engine, "ext-1");
     wait_until("the first flush", || {
@@ -152,7 +152,7 @@ fn an_unsuppress_is_absent_from_the_next_manifest() {
     assert_eq!(suppressed_in(&newest_manifest(&root).1), vec![entity.raw()]);
 
     engine
-        .accept_change(entity, ChangeOp::Unsuppress, None)
+        .accept_change(entity, ChangeOp::Unsuppress)
         .expect("accepted");
     ingest(&engine, "ext-2");
     wait_until("the second flush", || {
@@ -176,10 +176,10 @@ fn a_delete_reaches_tombstones_and_a_suppress_reaches_deny() {
     let deleted = entity_of_source(&root, 11);
     let suppressed = entity_of_source(&root, 12);
     engine
-        .accept_change(deleted, ChangeOp::Delete, None)
+        .accept_change(deleted, ChangeOp::Delete)
         .expect("accepted");
     engine
-        .accept_change(suppressed, ChangeOp::Suppress, None)
+        .accept_change(suppressed, ChangeOp::Suppress)
         .expect("accepted");
 
     ingest(&engine, "ext-1");
@@ -211,7 +211,7 @@ fn a_node_restored_from_the_bundle_alone_honours_the_published_deny() {
         let before = visible_count(&engine, &session);
 
         engine
-            .accept_change(suppressed, ChangeOp::Suppress, None)
+            .accept_change(suppressed, ChangeOp::Suppress)
             .expect("accepted");
         ingest(&engine, "ext-1");
         wait_until("the flush to publish", || {
@@ -273,7 +273,7 @@ fn an_accepted_deny_publishes_without_moving_the_geometry_version() {
     let entity = entity_of_source(&root, 7);
 
     engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect("accepted");
     wait_until("the overlay publication", || {
         engine.write_executor_stats().overlay_publications >= 1

@@ -1,6 +1,6 @@
 # Tessera — Contracts Specification
 
-**Status:** Draft r20 — r19 plus one narrowing: §2.1's "exactly one segment per partition-slice" becomes "one **base** segment, plus a compaction's in-flight extents", because a fold that never blocks flush cannot emit one. No field is added, removed or retyped (Appendix R)
+**Status:** Draft r21 — r20 (decision 0048: the evaluate machinery is deleted, not carried) plus one narrowing: §2.1's "exactly one segment per partition-slice" becomes "one **base** segment, plus a compaction's in-flight extents", because a fold that never blocks flush cannot emit one. Neither revision adds, removes or retypes a field (Appendix R)
 **Owns:** the byte- and schema-level definition of the boundaries named in the system architecture §4: the bundle format, the service API, the plugin ABI and the wire format. `§n` refers to the design (r30); `SA §n` to the system architecture (r10). **Precedence:** the design is the specification and this document defers to it; the eleven recorded deviations in §0.3 govern where this document and the *system architecture* differ, and are proposed back to it. Deviations 6 and 8 have a design companion already applied at the design's r21, so they record an alignment rather than an outstanding proposal.
 
 ---
@@ -380,7 +380,7 @@ The first two are contract because they are unconditional and the shipped client
 
 `POST /v1/items/{tessera_id}` *(r6)* — `{pin?, idset?}` → JSON scalars, the caller's `external_id` where one exists, and drill-down fields. **`404 unknown` is returned identically** for "no such ID" and "exists but is not visible to this principal": same status, same code, same detail string, no branch-dependent logging or metrics.
 
-**The endpoint answers one bit — is this entity visible to this session — and it answers it in entity space** *(r6)*. Inversion of the `tessera_id` is a pure function taking no I/O; the visibility test that follows is `fragment.contains(entity)` adjusted by the overlay's `deleted > suppressed > evaluate_terms` precedence and the ingest buffer, resolved per entity exactly as I1's mask composition over the §11.2 overlay resolves it. That is O(1), constructs **no row-space projection**, and does **identical work for an identifier that names nothing and one that names an invisible item** — which is what closes the endpoint's timing channel rather than narrowing it (design Appendix C, C4 annotation). A row is looked up only *after* the answer is already "visible", and the external-ID sidecar is read only after that. `priority` is not returned — not because it may not be (r6 retires that prohibition; it is a prefix of the `tessera_id` in the same response) but because a drill-down has no use for a sort key.
+**The endpoint answers one bit — is this entity visible to this session — and it answers it in entity space** *(r6)*. Inversion of the `tessera_id` is a pure function taking no I/O; the visibility test that follows is `fragment.contains(entity)` adjusted by the overlay's `deleted > suppressed` precedence and the ingest buffer, resolved per entity exactly as I1's mask composition over the §11.2 overlay resolves it. That is O(1), constructs **no row-space projection**, and does **identical work for an identifier that names nothing and one that names an invisible item** — which is what closes the endpoint's timing channel rather than narrowing it (design Appendix C, C4 annotation). A row is looked up only *after* the answer is already "visible", and the external-ID sidecar is read only after that. `priority` is not returned — not because it may not be (r6 retires that prohibition; it is a prefix of the `tessera_id` in the same response) but because a drill-down has no use for a sort key.
 
 If `idset` is supplied and differs from `identity.idset` (§2.2), the response is `409 conflict` — *"stale idset; re-resolve by external_id"* — decided before inversion and identically for every identifier.
 
@@ -397,7 +397,7 @@ If `idset` is supplied and differs from `identity.idset` (§2.2), the response i
 | Endpoint | Essentials |
 |---|---|
 | `POST /control/ingest` | **Arrow**: `(external_id: binary, x: float32, y: float32, access: utf8, node_id: utf8?, …declared scalars)` + headers `x-tessera-batch-id`, `x-tessera-slice` (optional when the bundle has one slice; `422` if ambiguous). 200 after WAL fsync: `{accepted, over_bound, over_bound_ids: [first 100…]}` — over-bound items are **indexed regardless** (bounds warn, never exclude — §6.2 r16); identity is what makes the warn a usable data-quality signal, so the ids are **base64**, as every external ID on this plane is (§1: they are arbitrary bytes and JSON has no binary type). An item with no external id is counted in `over_bound` and named in no list. Idempotency: the batch id maps to the SHA-256 of the raw request body; a retry must resend identical bytes (Arrow serialisation is not canonical, so re-serialising is the client's bug to avoid). *(r6; scoped at r17)* Duplicate detection is on the caller's `external_id` where one is supplied, against both the in-flight batch and the bundle's external-ID sidecar: duplicates are `409 conflict` with the offending IDs in `detail`, and **the batch has no effect**. **A holder that is *deleted* does not collide** (decision 0047 — edit is delete + re-ingest, and the service's retention of a dead binding never refuses a write); a **suppressed** holder still does, suppression being temporary hiding. Re-ingest re-binds the id: resolution is newest-binding-first everywhere. `external_id` is optional; an item without one is addressable only by its `tessera_id`, which the response returns per accepted row |
-| `POST /control/changes` | JSON `[{external_id \| (tessera_id, idset), op: "delete"\|"suppress"\|"unsuppress"}]`. **The `predicate` op is withdrawn** *(r17; decision 0047 — edit is delete + re-ingest)*: naming it is a 422 whose detail says so, and the `access` field went with it. Evaluate records already in WALs replay unchanged; no new one is accepted. 200 after WAL fsync; never 429; deny ops trigger immediate side-manifest publication (2.3). **Exactly one address form per element**, both or neither is `422`. `tessera_id` is **string-encoded** — a bare JSON number silently loses `u64`s past 2⁵³ in most clients, and a mis-parsed identifier denies the wrong entity — and must carry the `idset` it was minted under (`/v1/meta`), which is `409` if stale, decided **before any inversion**. An identifier that inverts outside this deployment's shard or past its allocator high-water is `404` and the **whole batch applies nothing**: the permutation is total, so the range check is the entire misdirection guard. The second form exists because §3.4 r6 makes `external_id` optional at ingest, and an item that arrived without one is otherwise addressable by nothing here. **Neither form reaches the WAL**: the entity is resolved once, at admission, and persisted, so replay is identical under a rotated key |
+| `POST /control/changes` | JSON `[{external_id \| (tessera_id, idset), op: "delete"\|"suppress"\|"unsuppress"}]`. **The `predicate` op is withdrawn** *(r17; decision 0047 — edit is delete + re-ingest)*: naming it is a 422 whose detail says so, and the `access` field went with it. Its machinery is **deleted** *(r20; decision 0048)* — no deployment exists, so no WAL carries an evaluate record to replay. 200 after WAL fsync; never 429; deny ops trigger immediate side-manifest publication (2.3). **Exactly one address form per element**, both or neither is `422`. `tessera_id` is **string-encoded** — a bare JSON number silently loses `u64`s past 2⁵³ in most clients, and a mis-parsed identifier denies the wrong entity — and must carry the `idset` it was minted under (`/v1/meta`), which is `409` if stale, decided **before any inversion**. An identifier that inverts outside this deployment's shard or past its allocator high-water is `404` and the **whole batch applies nothing**: the permutation is total, so the range check is the entire misdirection guard. The second form exists because §3.4 r6 makes `external_id` optional at ingest, and an item that arrived without one is otherwise addressable by nothing here. **Neither form reaches the WAL**: the entity is resolved once, at admission, and persisted, so replay is identical under a rotated key |
 | `POST /control/labels` *(Ph 3)* | text, tier, node ID, generating set as external IDs |
 | `GET /control/labels/invalidated?cursor=` *(Ph 3)* | `{items: [{label_id, cause}], next_cursor}` |
 | `GET /control/nodes/{node_id}/term-distribution` *(Ph 3)* | caller's node ID string; build data |
@@ -471,7 +471,7 @@ The WAL; frozen mirrors, derived tile tables and candidate lists (deviation 3); 
 
 ## Appendix R — Review record
 
-**r20** narrows one sentence in §2.1 and changes nothing on disc (2026-08-06, owner ruling;
+**r21** narrows one sentence in §2.1 and changes nothing on disc (2026-08-06, owner ruling;
 decision 0051). *"Every compaction emit[s] exactly one segment per partition-slice"* becomes *one
 **base** segment, plus whatever extents the compaction's flight published*. The finding is
 `compaction.md`'s r3 adversarial round: a fold that never blocks flush **cannot** satisfy the old
@@ -482,6 +482,18 @@ which is why this is a narrowing and not a `bundle_format` bump**: carried-forwa
 extents addressed exactly as flush segments already are between compactions, and the slice-level
 permutation's single-segment addressing was always addressing the *base*. Readers, writers and
 the oracle are unaffected.
+
+**r20** applies decision [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)
+(owner, 2026-08-06): no deployment exists, so machinery kept only for a state an earlier version
+could have produced is deleted rather than carried. r17 withdrew the `predicate` op at the
+boundary but left the evaluate machinery dormant "for records already in WALs"; there are none.
+§3.4's op list now says the machinery is deleted rather than dormant, and §2.6's drill-down
+precedence loses its `evaluate_terms` term. The wire contract is **unchanged**: `predicate` was
+already a 422 and `access` already gone, so no conforming request's answer moves. What this does
+not license is in the decision's own "what it does not license": fail-closed guards stay, the
+Python oracle and conformance suite are still second readers, and format-stability rules are
+invariants of a running process rather than of an upgrade path.
+
 
 **r19** finishes r18 on layout rather than on fields, from the write-path promotion's audit
 (2026-08-04). **No field is added, removed or retyped, and no reader behaviour changes.**

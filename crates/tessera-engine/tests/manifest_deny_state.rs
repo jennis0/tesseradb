@@ -171,7 +171,7 @@ fn a_wal_unsuppress_beats_a_manifest_suppression_that_predates_it() {
         // below is standing in for; the unsuppress is the one that outlives it.
         for op in [ChangeOp::Suppress, ChangeOp::Unsuppress] {
             engine
-                .accept_change(EntityId::new(entity), op, None)
+                .accept_change(EntityId::new(entity), op)
                 .expect("the change is accepted");
         }
         assert_eq!(

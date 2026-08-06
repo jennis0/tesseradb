@@ -138,9 +138,7 @@ fn an_accepted_deny_moves_no_geometry() {
     let entity = source_to_new_map(&root, &before.prefix)[&7];
     engine
         .accept_change(EntityId::new(entity),
-            ChangeOp::Suppress,
-            None,
-        )
+            ChangeOp::Suppress)
         .expect("a suppression is accepted");
 
     let after = engine.generation();
@@ -186,7 +184,7 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
 
     let entity = source_to_new_map(&root, &engine.generation().prefix)[&3];
     engine
-        .accept_change(EntityId::new(entity), ChangeOp::Suppress, None)
+        .accept_change(EntityId::new(entity), ChangeOp::Suppress)
         .expect("a suppression is accepted");
 
     // The tick fires within a second; growth (the ChangeByEntity record) triggers a rotation,

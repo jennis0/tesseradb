@@ -688,9 +688,7 @@ fn concurrent_ingest_and_change_both_survive() {
         barrier_a.wait();
         engine_a
             .accept_change(suppress_entity,
-                tessera_lifecycle::ChangeOp::Suppress,
-                None,
-            )
+                tessera_lifecycle::ChangeOp::Suppress)
             .expect("change should be accepted");
     });
 
@@ -1583,7 +1581,7 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
 
 /// **What a partly-applied change batch reports.**
 ///
-/// `[suppress A, predicate B, suppress C]` with the WAL poisoned mid-batch. A's fsync fails, so A
+/// `[suppress A, unsuppress B, suppress C]` with the WAL poisoned mid-batch. A's fsync fails, so A
 /// is applied anyway and the handle poisons; B is a **non**-deny, so its refused append applies
 /// nothing (lifecycle §4's apply-anyway rule is scoped to `Delete`/`Suppress`, deliberately — an
 /// unsuppress applied without durability would re-expose an item replay still hides); C's append is
@@ -1692,8 +1690,8 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
     // that says nothing was applied). The op-blind fold counted it as possibly-in-force along
     // with the two suppressions, so `some_not_applied` was false and this body never told the
     // operator that a third of their batch had not taken hold. (This slot exercised `predicate`
-    // until decision 0047 withdrew the op; `unsuppress` is the other member of the same
-    // applies-nothing fold half, so the discrimination is unchanged.)
+    // until decision 0047 withdrew the op and decision 0048 deleted it; `unsuppress` is now the
+    // whole applies-nothing fold half, so the discrimination is unchanged.)
     assert!(
         detail.contains("NOT applied"),
         "item 2 is an `unsuppress`: refused without applying, so the operator must be told to \
@@ -3357,13 +3355,15 @@ async fn a_change_batch_of_n_costs_one_fsync() {
 /// to expose; without that leg the widened fold would change nothing observable and the test would
 /// assert nothing.
 ///
-/// **The batch is deliberately three items and carries no `predicate`, and that is not tidiness.**
-/// With a fourth `predicate` item the widened-fold mutation was **green**: the failure fold applies
-/// with no resolved terms, so a widened fold gave that item an *empty* evaluate-terms set and hid
-/// it — which cancelled the newly-visible B in an aggregate count, and 997 is 997 either way. The
-/// count has to be attributable to survive as evidence. The `predicate` leg of the same fold is
-/// covered by `a_partially_applied_change_batch_reports_one_honest_status`, where it is the only
-/// non-deny item.
+/// **The batch is deliberately three items, and that is not tidiness.** It used to be worth saying
+/// that it carried no `predicate`: with a fourth `predicate` item the widened-fold mutation was
+/// **green**, because the failure fold applies with no resolved terms, so a widened fold gave that
+/// item an *empty* evaluate-terms set and hid it — cancelling the newly-visible B in an aggregate
+/// count, and 997 is 997 either way. The count has to be attributable to survive as evidence. That
+/// hazard is now unreachable (decision 0048 deleted the op's machinery), but the three-item shape
+/// is kept: it is what makes the count attributable. The applies-nothing leg of the same fold is
+/// covered by `a_partially_applied_change_batch_reports_one_honest_status`, where the `unsuppress`
+/// is the only non-deny item.
 #[tokio::test]
 async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
     if skip_under_root() {
@@ -3450,8 +3450,7 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
     );
     assert!(
         detail.contains("NOT applied"),
-        "the unsuppress and the predicate did not take hold and the operator must be told; got: \
-         {detail}"
+        "the unsuppress did not take hold and the operator must be told; got: {detail}"
     );
 
     assert_eq!(

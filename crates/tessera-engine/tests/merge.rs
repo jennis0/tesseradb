@@ -269,7 +269,7 @@ fn a_suppression_survives_a_merge_and_still_hides_the_same_item() {
     let outside = EntityId::new(source_to_new_map(&root, &engine.generation().prefix)[&11]);
     for entity in [inside, outside] {
         engine
-            .accept_change(entity, ChangeOp::Suppress, None)
+            .accept_change(entity, ChangeOp::Suppress)
             .expect("a suppression is accepted");
     }
 
@@ -331,7 +331,7 @@ fn a_sparse_principal_sees_the_same_subset_across_a_merge() {
     // case pass against a mask that was carried rather than re-derived.
     let suppressed_entity = items[4].0;
     engine
-        .accept_change(suppressed_entity, ChangeOp::Suppress, None)
+        .accept_change(suppressed_entity, ChangeOp::Suppress)
         .expect("a suppression is accepted");
     let after_suppress = served_ids(&engine, &sparse);
     assert_eq!(after_suppress.len(), before.len() - 1);
@@ -369,14 +369,14 @@ fn an_unsuppress_after_a_merge_restores_the_item_that_was_suppressed() {
     let baseline = served_ids(&engine, &session);
     let entity = items[ROWS_EACH + 2].0;
     engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect("a suppression is accepted");
     assert_eq!(served_ids(&engine, &session).len(), baseline.len() - 1);
 
     run_merge(&engine, &entities);
 
     engine
-        .accept_change(entity, ChangeOp::Unsuppress, None)
+        .accept_change(entity, ChangeOp::Unsuppress)
         .expect("an unsuppress is accepted");
     assert_eq!(
         served_ids(&engine, &session),
@@ -409,7 +409,7 @@ fn a_delete_before_a_merge_stays_deleted_across_it_and_a_restart() {
     let baseline = served_ids(&engine, &session);
     let deleted = items[ROWS_EACH * 2 + 3].0;
     engine
-        .accept_change(deleted, ChangeOp::Delete, None)
+        .accept_change(deleted, ChangeOp::Delete)
         .expect("a delete is accepted");
     let after_delete = served_ids(&engine, &session);
     assert_eq!(after_delete.len(), baseline.len() - 1);
@@ -462,7 +462,7 @@ fn a_suppression_racing_a_merge_is_in_force_once_both_have_landed() {
     engine.set_merge_for_test(true);
     engine.request_flush();
     engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect("a suppression is accepted");
     wait_until("the merge to publish", || {
         engine.write_executor_stats().merges >= 1

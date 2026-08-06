@@ -141,16 +141,8 @@ pub enum Command {
     /// carries the result — so the executor re-resolves nothing inside its critical section, and
     /// the record it appends names the entity rather than an identifier whose meaning depends on
     /// a key (`WalRecord::ChangeByEntity`). An item ingested without an external id is addressable
-    /// only this way, which is the hole the second address form closes.
-    ///
-    /// `descriptors` carries the new predicate's raw term descriptors for
-    /// [`ChangeOp::Predicate`] and is `None` for the three disposition ops, which change
-    /// disposition without touching terms.
-    Change {
-        entity: EntityId,
-        op: ChangeOp,
-        descriptors: Option<Vec<Vec<u8>>>,
-    },
+    /// only this way, which is the hole addressing by entity closes.
+    Change { entity: EntityId, op: ChangeOp },
 }
 
 impl Command {
@@ -158,7 +150,7 @@ impl Command {
     /// lane): the unbounded queue the executor drains to empty before it touches work.
     ///
     /// The lane is chosen by **endpoint, not by op**. Every `/control/changes` entry takes it,
-    /// including [`ChangeOp::Unsuppress`] and [`ChangeOp::Predicate`], because the property being
+    /// including [`ChangeOp::Unsuppress`], because the property being
     /// preserved is contracts §3.1's: `/control/changes` cannot answer 429. Batching a security
     /// operation for latency is acceptable; refusing one for load is not — and an `Unsuppress`
     /// shed for load leaves an item hidden that a caller was told to expect back, which is a
@@ -308,7 +300,7 @@ pub enum Ack {
     /// `tessera_id` for the response (contracts §3.4 r6), which is the only reason an entity ID
     /// is materialised outside the engine at all (I10).
     Ingested { entity_ids: Vec<EntityId> },
-    /// A disposition or predicate change applied. Nothing to return: the caller named the item.
+    /// A disposition change applied. Nothing to return: the caller named the item.
     Changed,
 }
 
@@ -490,20 +482,14 @@ mod tests {
     }
 
     /// The lane asymmetry, asserted on the vocabulary itself: every `/control/changes` command
-    /// takes the never-shed lane regardless of op — including `Unsuppress` and `Predicate`, the
-    /// two a reader is most likely to assume are ordinary work — and ingest never does.
+    /// takes the never-shed lane regardless of op — including `Unsuppress`, the one a reader is
+    /// most likely to assume is ordinary work — and ingest never does.
     #[test]
     fn every_change_rides_the_never_shed_lane_and_no_ingest_does() {
-        for op in [
-            ChangeOp::Delete,
-            ChangeOp::Suppress,
-            ChangeOp::Unsuppress,
-            ChangeOp::Predicate,
-        ] {
+        for op in [ChangeOp::Delete, ChangeOp::Suppress, ChangeOp::Unsuppress] {
             let cmd = Command::Change {
                 entity: EntityId::new(1),
                 op,
-                descriptors: None,
             };
             assert!(cmd.is_never_shed(), "{op:?} must not be sheddable for load");
         }

@@ -2,12 +2,12 @@
 //!
 //! Composition used to answer the row-space question — *is this row denied* — by walking the deny
 //! sets and resolving `row_of` per denied entity, on every request. That made per-request work grow
-//! with denies **ever accepted**, which is a cost curve nothing retires: deletions and predicate
-//! changes wait on a compaction fold that does not exist. `Generation::denied` is the same fact as
+//! with denies **ever accepted**, which is a cost curve nothing retires: deletions wait on a
+//! compaction fold that does not exist. `Generation::denied` is the same fact as
 //! a row-space bitmap, folded into `compose`'s existing diffs with one `andnot`.
 //!
 //! **Two representations of one truth, so the differential test is the licence for holding them.**
-//! The three entity-space stores stay authoritative and `compose::verdict` stays the single answer
+//! The entity-space stores stay authoritative and `compose::verdict` stays the single answer
 //! for `visible_to`, label gating and cluster visibility. `visible_to(e) ≡ contains_row(row_of(e))`
 //! wherever a row exists is what keeps them from drifting, and is the reason the mask may exist at
 //! all.
@@ -78,7 +78,7 @@ fn ingest(engine: &Engine, external_id: &str) -> EntityId {
 
 fn change(engine: &Engine, entity: EntityId, op: ChangeOp) {
     engine
-        .accept_change(entity, op, None)
+        .accept_change(entity, op)
         .expect("the change is accepted");
 }
 
@@ -231,7 +231,7 @@ fn a_suppressed_buffered_item_is_masked_the_moment_it_gains_a_row() {
 }
 
 /// **The differential obligation** (memo §6): the entity-space verdict and the row-space mask agree
-/// for every entity with a row, across all four dispositions. Two representations of one truth are
+/// for every entity with a row, across every disposition. Two representations of one truth are
 /// only licensed while this holds.
 #[test]
 fn visible_to_agrees_with_contains_row_for_every_disposition() {
@@ -243,28 +243,19 @@ fn visible_to_agrees_with_contains_row_for_every_disposition() {
     let deleted = EntityId::new(11);
     let suppressed = EntityId::new(12);
     let unsuppressed = EntityId::new(13);
-    let predicated = EntityId::new(14);
     let untouched = EntityId::new(15);
 
     change(&engine, deleted, ChangeOp::Delete);
     change(&engine, suppressed, ChangeOp::Suppress);
     change(&engine, unsuppressed, ChangeOp::Suppress);
     change(&engine, unsuppressed, ChangeOp::Unsuppress);
-    engine
-        .accept_change(predicated,
-            ChangeOp::Predicate,
-            // A term this session does not hold, so the predicate flips it invisible.
-            Some(vec![b"1".to_vec()]),
-        )
-        .expect("the predicate change is accepted");
-
     // Both routes as a client reaches them: `/v1/items` answers in entity space (`visible_to`
     // over the overlay and the buffer), and a drawn mark is the row-space mask's answer — caps are
     // raised and θ is saturated in this fixture, so selection serves every visible row and
     // "is it drawn" is exactly `contains_row`.
     let drawn = drawn_marks(&engine, &session);
 
-    for entity in [deleted, suppressed, unsuppressed, predicated, untouched] {
+    for entity in [deleted, suppressed, unsuppressed, untouched] {
         let row = row_of(&engine, entity);
         let by_entity = visible_in_entity_space(&engine, &session, entity);
         let by_row = drawn.contains(&engine.tessera_id_of(entity).unwrap().raw());
@@ -275,11 +266,11 @@ fn visible_to_agrees_with_contains_row_for_every_disposition() {
             entity.raw()
         );
     }
-    // …and the fixture is doing what it claims: not all five agree by being uniformly visible.
+    // …and the fixture is doing what it claims: not all four agree by being uniformly visible.
     assert!(
         !visible_in_entity_space(&engine, &session, deleted)
             && visible_in_entity_space(&engine, &session, untouched),
-        "the four dispositions must actually differ, or this test proves nothing"
+        "the dispositions must actually differ, or this test proves nothing"
     );
 }
 
@@ -299,7 +290,7 @@ fn a_deep_deny_set_changes_no_answer() {
         .iter()
         .map(|entity| {
             engine
-                .submit_change(*entity, ChangeOp::Suppress, None)
+                .submit_change(*entity, ChangeOp::Suppress)
                 .expect("the change is submitted")
         })
         .collect();

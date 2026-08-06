@@ -4,8 +4,8 @@
 //! module's positional CRC rule is the difference between ordinary crash recovery and silent
 //! loss of acked security state. [`alloc`] is the append-only, never-reusing entity-ID allocator
 //! (I9) plus the signature-sorted assignment helper appended items go through. [`overlay`] and
-//! [`buffer`] are the replayed WAL's live authorisation-relevant state: the overlay's three
-//! independent deny/evaluate facts and the ingest buffer.
+//! [`buffer`] are the replayed WAL's live authorisation-relevant state: the overlay's two
+//! independent deny facts and the ingest buffer.
 //!
 //! [`command`] is the write-executor vocabulary and [`window`] the commit window it is gathered
 //! into. The executor thread that consumes both lives in `tessera-engine`, not here: only that
@@ -23,7 +23,7 @@ pub use alloc::{assign_sorted, high_water_from, Allocator, PendingItem};
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
 pub use command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
 pub use faults::WalMeter;
-pub use overlay::{replay, Overlay, OverlayError, PredicateChange};
+pub use overlay::{replay, Overlay};
 pub use wal::{
     ChangeOp, ExecutorWal, OverlaySnapshotEntry, Wal, WalError, WalRecord, WalRow, WalScalar,
 };

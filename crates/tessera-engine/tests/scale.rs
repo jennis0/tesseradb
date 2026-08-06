@@ -732,7 +732,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
         .clone();
     let before_deny = masked_total(&engine, &full);
     engine
-        .accept_change(suppressed.entity, ChangeOp::Suppress, None)
+        .accept_change(suppressed.entity, ChangeOp::Suppress)
         .expect("a suppression is accepted");
     assert_eq!(
         masked_total(&engine, &full),
