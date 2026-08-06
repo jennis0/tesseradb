@@ -40,9 +40,8 @@
 //! `ExternalIdSidecar::deferred_from_manifest` also derives the base locator's path from
 //! `external_id_runs[0]`, which stops resolving the moment that entry is not the build's.
 //!
-//! **A merge retires nothing.** No tombstone is applied, no evaluate entry consulted, no posting
-//! dropped for a deleted entity. A pass here that did any of those has left this module and entered
-//! compaction's.
+//! **A merge retires nothing.** No tombstone is applied and no posting is dropped for a deleted
+//! entity. A pass here that did either has left this module and entered compaction's.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

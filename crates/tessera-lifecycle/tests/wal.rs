@@ -22,10 +22,9 @@ fn sidecar(base: &Path, n: u64) -> std::path::PathBuf {
 }
 
 fn sample_record(tag: u8) -> WalRecord {
-    WalRecord::Change {
-        external_id: vec![tag, tag, tag],
+    WalRecord::ChangeByEntity {
+        entity_id: tessera_types::EntityId::new(tag as u64),
         op: ChangeOp::Delete,
-        descriptors: None,
     }
 }
 

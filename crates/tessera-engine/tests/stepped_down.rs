@@ -133,8 +133,6 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
     engine
         .accept_change(
             tessera_types::EntityId::new(entity),
-            tessera_lifecycle::ChangeOp::Suppress,
-            None,
-        )
+            tessera_lifecycle::ChangeOp::Suppress)
         .expect("denies are never gated on step-down");
 }

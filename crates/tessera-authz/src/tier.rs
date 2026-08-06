@@ -193,8 +193,8 @@ impl DeltaTier {
 /// dropped, nothing consulted. This is to postings exactly what the Morton merge-sort is to a
 /// segment's codes.
 ///
-/// **A merge retires nothing** (write-path §7). No tombstone is applied, no evaluate entry's terms are
-/// read, no overlay entry becomes retirable: a merge that dropped a posting because an entity was
+/// **A merge retires nothing** (write-path §7). No tombstone is applied and no overlay entry
+/// becomes retirable: a merge that dropped a posting because an entity was
 /// deleted would be performing the compaction fold, which is invariant-bearing work this layer must
 /// not do. The dedup is set semantics over identical pairs, so it changes no viewer's answer.
 ///

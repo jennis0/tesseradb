@@ -72,7 +72,7 @@ use tessera_lifecycle::alloc::{high_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::WalMeter;
-use tessera_lifecycle::overlay::{replay, PredicateChange};
+use tessera_lifecycle::overlay::replay;
 use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord};
 use tessera_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
 use tessera_lifecycle::{IngestBuffer, Overlay};
@@ -84,7 +84,7 @@ use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{DenyEntry as ManifestDenyEntry, SegmentsManifest};
 use tessera_store::merge::MergePolicy;
-use tessera_store::{Bundle, StoreError};
+use tessera_store::Bundle;
 use tessera_types::{EntityId, IdentityKey, TermId};
 
 use crate::session::EngineError;
@@ -1243,11 +1243,12 @@ pub(crate) struct LiveState {
     allocator: Mutex<Allocator>,
     established: Mutex<std::collections::HashMap<Vec<u8>, EntityId>>,
     established_inverse: Mutex<FxHashMap<EntityId, Vec<u8>>>,
-    /// The descriptor resolver's extension state. Written from **both** sides, which is correct and
-    /// is the one asymmetry in this type: ingest resolves in the handler *before* submitting
-    /// (signature-sorted assignment needs the term set to compute a sort key before any ID exists —
-    /// the structural exception argued at [`WritePath::resolve_terms`]), while a change resolves on
-    /// the executor *after* its own append has been fsynced.
+    /// The descriptor resolver's extension state. Written from **one** side only: ingest resolves
+    /// in the handler *before* submitting, because signature-sorted assignment needs the term set to
+    /// compute a sort key before any ID exists — the structural exception argued at
+    /// [`WritePath::resolve_terms`]. A change used to resolve on the executor *after* its own append
+    /// was fsynced, which made this the one asymmetry in the type; that deferred pass had no
+    /// consumer once the evaluate store went and is deleted (decision 0048).
     resolver_state: Mutex<ResolverState>,
     accepted_batches: Mutex<AcceptedBatches>,
 }
@@ -1547,7 +1548,6 @@ impl WritePath {
         manifest_high_water: u64,
         dict: &Dict,
         initial_deny: &[(EntityId, ChangeOp)],
-        resolve_from_bundle: impl Fn(&[u8]) -> std::result::Result<Option<EntityId>, StoreError>,
         has_row: impl Fn(EntityId) -> bool,
     ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
@@ -1572,11 +1572,10 @@ impl WritePath {
         // the publication gap.
         let mut seed = Overlay::new();
         for (entity, op) in initial_deny {
-            seed.apply(*entity, *op, None);
+            seed.apply(*entity, *op);
         }
 
-        let (overlay, mut buffer, established, resolver) =
-            replay(&records, dict, seed, resolve_from_bundle).map_err(EngineError::Overlay)?;
+        let (overlay, mut buffer, established, resolver) = replay(&records, dict, seed);
         // **Re-hashed at the boundary, once, at startup.** `replay` builds this with `FxHashMap`;
         // the live index deliberately does not — see `WritePath::established`'s doc. Converting
         // here costs one pass over the replayed set at open and keeps the hasher choice in one
@@ -1958,13 +1957,8 @@ impl WritePath {
     /// **This is the one-item shape.** A caller with a whole request's worth of changes wants
     /// [`WritePath::submit_change`], because waiting here between items is what reduces the deny
     /// lane's group commit to one entry per window.
-    pub(crate) fn accept_change(
-        &self,
-        entity: EntityId,
-        op: ChangeOp,
-        raw_descriptors: Option<Vec<Vec<u8>>>,
-    ) -> Result<(), AcceptError> {
-        self.submit_change(entity, op, raw_descriptors)?.wait()
+    pub(crate) fn accept_change(&self, entity: EntityId, op: ChangeOp) -> Result<(), AcceptError> {
+        self.submit_change(entity, op)?.wait()
     }
 
     /// Enqueue one `/control/changes` entry **without waiting for its receipt**.
@@ -1978,13 +1972,8 @@ impl WritePath {
         &self,
         entity: EntityId,
         op: ChangeOp,
-        raw_descriptors: Option<Vec<Vec<u8>>>,
     ) -> Result<PendingChange, AcceptError> {
-        let pending = self.handle()?.enqueue(Command::Change {
-            entity,
-            op,
-            descriptors: raw_descriptors,
-        })?;
+        let pending = self.handle()?.enqueue(Command::Change { entity, op })?;
         Ok(PendingChange(pending))
     }
 }
@@ -2659,7 +2648,6 @@ struct DenyEntry {
     record: WalRecord,
     entity: EntityId,
     op: ChangeOp,
-    raw_descriptors: Option<Vec<Vec<u8>>>,
     respond: Responder,
 }
 
@@ -2702,12 +2690,11 @@ struct Executor {
     next_manifest_n: u64,
     /// Whether the overlay holds deny state no side-manifest carries yet.
     ///
-    /// Set by any window containing a `Delete`, `Suppress` or `Unsuppress`; cleared only by a
-    /// successful publication. A window of pure `Predicate` changes does not set it — a predicate
-    /// change's durable home is the WAL alone, by design (lifecycle §3.1), and no manifest field
-    /// carries one. It persists across a refused publication, which is what makes a node that was
-    /// poisoned or diverged publish once on its own after recovery rather than waiting for its
-    /// next deny.
+    /// Set by any window of changes — every remaining op is a `Delete`, `Suppress` or
+    /// `Unsuppress`, and each of the three moves state a manifest carries; cleared only by a
+    /// successful publication. It persists across a refused publication, which is what makes a node
+    /// that was poisoned or diverged publish once on its own after recovery rather than waiting for
+    /// its next deny.
     deny_dirty: bool,
     /// Deny windows applied since the last publication — the counter
     /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
@@ -3758,12 +3745,7 @@ impl Executor {
                 break;
             };
             let Job { command, respond } = job;
-            let Command::Change {
-                entity,
-                op,
-                descriptors,
-            } = command
-            else {
+            let Command::Change { entity, op } = command else {
                 // Unreachable while the lane follows the command (`Command::is_never_shed`): only a
                 // `Change` rides the deny queue. Executed rather than dropped, so a future variant
                 // that lands here is answered instead of silently losing its waiter — and the
@@ -3780,11 +3762,9 @@ impl Executor {
                 record: WalRecord::ChangeByEntity {
                     entity_id: entity,
                     op,
-                    descriptors: descriptors.clone(),
                 },
                 entity,
                 op,
-                raw_descriptors: descriptors,
                 respond,
             });
         }
@@ -3826,7 +3806,8 @@ impl Executor {
     ///
     /// - every [`ChangeOp::Delete`] and [`ChangeOp::Suppress`] **in the window** is applied anyway —
     ///   the items are hidden immediately — and every waiter still gets an error;
-    /// - every [`ChangeOp::Unsuppress`] and [`ChangeOp::Predicate`] applies **nothing**.
+    /// - every [`ChangeOp::Unsuppress`] applies **nothing** — the whole non-deny class, since
+    ///   decision 0048 deleted `Predicate`.
     ///
     /// The scope is lifecycle §4's and it is not uniform, which is what distinguishes this from the
     /// ingest window's failure path (`Executor::fail_window_wal` applies nothing at all). Making it
@@ -3885,10 +3866,10 @@ impl Executor {
         if let Some((index, error)) = failed_at {
             // Lifecycle §4's exception, per entry — see this function's doc for why the fold is not
             // uniform and why position is not a term in it.
-            let applied: Vec<(EntityId, ChangeOp, Option<PredicateChange>)> = entries
+            let applied: Vec<(EntityId, ChangeOp)> = entries
                 .iter()
                 .filter(|e| matches!(e.op, ChangeOp::Delete | ChangeOp::Suppress))
-                .map(|e| (e.entity, e.op, None))
+                .map(|e| (e.entity, e.op))
                 .collect();
             if !applied.is_empty() {
                 // **Deliberately does not mark the overlay dirty.** These entries were applied
@@ -3915,48 +3896,23 @@ impl Executor {
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
 
-        // Resolution is deferred to **after** the append succeeds: a change's resolved terms are
-        // needed only for the apply below, so there is no reason to mint an extension id for a
-        // record that might never become durable. `Delete`/`Suppress`/`Unsuppress` carry no
-        // descriptors, so a window of pure denies resolves nothing at all.
-        //
-        // Against the **current** generation's dictionary (§3.2): a descriptor a flush has since
-        // promoted must resolve to its durable ordinal, or every later change would go on minting
-        // a fresh extension id for a term that already has one.
-        let dict = Arc::clone(&self.generation.load().dict);
-        let applied: Vec<(EntityId, ChangeOp, Option<PredicateChange>)> = entries
-            .iter()
-            .map(|e| {
-                (
-                    e.entity,
-                    e.op,
-                    e.raw_descriptors.as_ref().map(|ds| PredicateChange {
-                        terms: self.live.resolve_terms(&dict, ds),
-                        descriptors: ds.clone(),
-                    }),
-                )
-            })
-            .collect();
-        // **Whether this window owes the disc a publication**, decided before the entries are
-        // consumed by the ack loop. Predicate changes are excluded deliberately: their durable
-        // home is the WAL alone, and no manifest field carries one (lifecycle §3.1).
-        let touches_deny_state = entries.iter().any(|e| {
-            matches!(
-                e.op,
-                ChangeOp::Delete | ChangeOp::Suppress | ChangeOp::Unsuppress
-            )
-        });
+        let applied: Vec<(EntityId, ChangeOp)> =
+            entries.iter().map(|e| (e.entity, e.op)).collect();
 
         // One overlay clone, one generation, **one swap** for every entry in the window.
+        //
+        // **Every window owes the disc a publication.** There used to be a test here for whether
+        // any entry touched deny state, because a `Predicate` change's durable home was the WAL
+        // alone and no manifest field carried one; with that op deleted (decision 0048) each of the
+        // three remaining ops moves state a `SEGMENTS-<n>.json` carries, and a window is never
+        // empty — `commit_denies` is only ever called with entries.
         let published = self.apply_changes(applied);
-        if touches_deny_state {
-            self.deny_dirty = true;
-            self.windows_since_publication += 1;
-            // The liveness floor: a drain that never closes still publishes. See
-            // `OVERLAY_PUBLICATION_MAX_WINDOWS`.
-            if self.windows_since_publication >= OVERLAY_PUBLICATION_MAX_WINDOWS {
-                self.publish_overlay_state();
-            }
+        self.deny_dirty = true;
+        self.windows_since_publication += 1;
+        // The liveness floor: a drain that never closes still publishes. See
+        // `OVERLAY_PUBLICATION_MAX_WINDOWS`.
+        if self.windows_since_publication >= OVERLAY_PUBLICATION_MAX_WINDOWS {
+            self.publish_overlay_state();
         }
 
         // **k waiters, one proof.** A death partway through this loop leaves some waiters acked and
@@ -4643,19 +4599,13 @@ impl Executor {
             }
             // A window of one entry is exactly the per-command semantics this path used to have,
             // which is why there is no second deny implementation to keep in step with the first.
-            Command::Change {
-                entity,
-                op,
-                descriptors,
-            } => self.commit_denies(vec![DenyEntry {
+            Command::Change { entity, op } => self.commit_denies(vec![DenyEntry {
                 record: WalRecord::ChangeByEntity {
                     entity_id: entity,
                     op,
-                    descriptors: descriptors.clone(),
                 },
                 entity,
                 op,
-                raw_descriptors: descriptors,
                 respond,
             }]),
         }
@@ -4779,20 +4729,17 @@ impl Executor {
     /// pinned request the moment it is accepted, without expiring the pin.
     fn apply_changes(
         &self,
-        changes: Vec<(EntityId, ChangeOp, Option<PredicateChange>)>,
+        changes: Vec<(EntityId, ChangeOp)>,
     ) -> Published {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let mut overlay: Overlay = (*generation.overlay).clone();
-        // The change is **moved** into the overlay rather than borrowed: it is per entry, and
-        // cloning it here would be a per-entry cost on the one thread every write is serialised
-        // through.
         // What the window did, for the mask below: which entities it denied, and whether any
         // removal happened at all.
         let mut newly_denied: Vec<EntityId> = Vec::new();
         let mut deleted: Vec<EntityId> = Vec::new();
         let mut unsuppressed = false;
-        for (entity, op, predicate) in changes {
+        for (entity, op) in changes {
             match op {
                 ChangeOp::Delete => {
                     newly_denied.push(entity);
@@ -4800,9 +4747,8 @@ impl Executor {
                 }
                 ChangeOp::Suppress => newly_denied.push(entity),
                 ChangeOp::Unsuppress => unsuppressed = true,
-                ChangeOp::Predicate => {}
             }
-            overlay.apply(entity, op, predicate);
+            overlay.apply(entity, op);
         }
 
         // **It alarms; it does not act** — there is no compaction fold, so an operator who sets

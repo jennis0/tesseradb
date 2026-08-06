@@ -132,7 +132,7 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
                     }
                 }
             }
-            WalRecord::Change { .. } | WalRecord::ChangeByEntity { .. } => {}
+            WalRecord::ChangeByEntity { .. } => {}
         }
     }
     hw
@@ -263,12 +263,11 @@ mod tests {
         assert_eq!(high_water_from(&[row(5)]), 6);
         // A later, lower row must not pull the high-water mark backwards.
         assert_eq!(high_water_from(&[row(5), row(3)]), 6);
-        // Change records carry no entity-ID information.
+        // Change records carry no entity-ID information beyond an entity already allocated.
         assert_eq!(
-            high_water_from(&[WalRecord::Change {
-                external_id: vec![1],
+            high_water_from(&[WalRecord::ChangeByEntity {
+                entity_id: EntityId::new(1),
                 op: crate::wal::ChangeOp::Delete,
-                descriptors: None,
             }]),
             0
         );
