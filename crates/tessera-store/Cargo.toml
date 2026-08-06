@@ -7,6 +7,9 @@ edition = "2021"
 tessera-types = { path = "../tessera-types" }
 tessera-spatial = { path = "../tessera-spatial" }
 arrow = { workspace = true }
+# `terms/pairs.parquet` is the one bundle artefact contracts §2 defines in Parquet rather than
+# Arrow IPC; see `src/pairs.rs` for why its writer lives here with the other six.
+parquet = { workspace = true }
 croaring = { workspace = true }
 memmap2 = { workspace = true }
 rayon = { workspace = true }

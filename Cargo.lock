@@ -2310,6 +2310,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "chrono",
+ "croaring",
  "libc",
  "parquet",
  "proptest",
@@ -2440,6 +2441,7 @@ dependencies = [
  "arrow",
  "croaring",
  "memmap2",
+ "parquet",
  "proptest",
  "rand 0.8.7",
  "rayon",

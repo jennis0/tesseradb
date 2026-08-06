@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use tessera_authz::{DeltaTier, Dict, PostingsReader};
+use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
@@ -34,7 +34,7 @@ pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProject
 // The publication guard's refusal, which a publisher outside this crate must handle.
 // `check_publishable` itself stays private: whether a geometry may be published is this crate's
 // judgement, and a caller that could ask separately could also act on a stale answer.
-pub use geometry::{GeometryRefused, GeometryRefusedReason};
+pub use geometry::{GeometryPublication, GeometryRefused, GeometryRefusedReason};
 pub use session::{
     default_compute_threads, Engine, EngineConfig, EngineError, Session, SliceSegments,
 };
@@ -96,10 +96,11 @@ pub use write::{estimate_retry_after_s, RETRY_AFTER_MAX_SECS, RETRY_AFTER_MIN_SE
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1).
 ///
-/// **⊘ Partially implemented:** §1.1's compaction fields are absent, there being no compaction.
-/// Merge no longer is: both halves publish through this type — the entity-space coalesce without
-/// moving `segments_version`, the row-space merge as its own swap (`crate::coalesce`,
-/// `crate::merge`).
+/// **⊘ No compaction exists**, but this type is what one would publish: the fields a fold rotates
+/// — the base postings, the fragment cache and the bundle identity it keys, and the external-id
+/// sidecar — are here rather than on `Engine`, which is what makes a prefix flip expressible at all
+/// (compaction §4). Merge publishes through this type too: the entity-space coalesce without moving
+/// `segments_version`, the row-space merge as its own swap (`crate::coalesce`, `crate::merge`).
 pub struct Generation {
     /// The bundle's `CURRENT` prefix (e.g. `"v00000"`) this generation was loaded from.
     pub prefix: String,
@@ -124,6 +125,34 @@ pub struct Generation {
     pub dict: Arc<Dict>,
     /// The base postings — the build's `terms/postings.arrow`, unchanged by any flush.
     pub postings: Arc<PostingsReader>,
+    /// The mask-fragment cache, and through it **this generation's bundle identity** — the
+    /// MANIFEST digest of the prefix `postings` was read from.
+    ///
+    /// **On the generation rather than beside it, and that is what makes Rule F's safety
+    /// structural** (write-path §5.4, compaction §4). A fold rewrites the term index and publishes
+    /// a new prefix, so every fragment built from the old one names entities the new postings no
+    /// longer contain — and it advances no watermark, so nothing keyed on the watermark can see
+    /// it. Bound at `Engine::open` for the process lifetime, as it was, nothing could rotate the
+    /// fragment identity in-process at all, and a fold published through that seam would leave
+    /// every pre-fold fragment reachable by key — *including* the persisted `.frag` files, across
+    /// a restart. Here, a request loads one pointer and gets postings, identity and fragment cache
+    /// that agree, exactly as I11's within-request rule already requires for geometry.
+    ///
+    /// **Swapping this is necessary and is not sufficient.** Two holders sit outside it — a
+    /// `Session`'s own `Arc<FrozenFragment>`, and `SessionGeometry`'s — and a replaced container
+    /// reaches neither. The comparison is therefore made at composition, against
+    /// [`tessera_authz::FrozenFragment::identity`]: `Engine::fragment_for` for the first,
+    /// `RowProjectionCache::freshest_fragment`'s prefix scoping for the second.
+    pub(crate) fragments: Arc<FragmentCache>,
+    /// External ids established by the bundle's runs — the reader half of contracts §2.4.
+    ///
+    /// **Per generation, because a fold is not content-preserving.** The entity-space coalesce
+    /// that first made this swappable is: an old sidecar and a new generation answer identically
+    /// for every key, so which one a request held could not be observed. A fold drops the retired
+    /// entities' keys (compaction §3, pass 3) and rewrites the locator into a new prefix, so a
+    /// request pairing the new geometry with the pre-fold sidecar would resolve through files the
+    /// old prefix holds and reclamation is about to delete. One pointer, one answer.
+    pub(crate) external_index: Arc<crate::session::ExternalIdIndex>,
     /// One sparse delta postings tier per flush segment, in publication order.
     ///
     /// A fragment build unions the base with every live tier over the session's satisfied terms
@@ -161,6 +190,80 @@ pub struct Generation {
     /// this generation holds, and the read path treats that as fail-closed rather than as "nothing
     /// denied".
     pub denied: Arc<DenyMask>,
+}
+
+impl Generation {
+    /// The MANIFEST digest of the prefix this generation's postings, dictionary and term index
+    /// were read from — see [`Generation::fragments`], which is where it is held so that it and
+    /// the cache it keys cannot disagree.
+    pub(crate) fn bundle_identity(&self) -> [u8; 32] {
+        self.fragments.bundle_identity()
+    }
+}
+
+/// The two [`Generation`] fields a synthetic fixture cannot meaningfully build, for the three
+/// in-crate test modules that construct a `Generation` over an *empty* bundle.
+///
+/// The fragment cache is over a path nothing writes — [`FragmentCache::new`] touches no filesystem,
+/// and a fixture whose bundle carries no postings never reaches a build. The sidecar is over a
+/// manifest naming no runs, which is the same `deferred` shape a bundle with no external ids opens
+/// with. Both exist so that adding a field to `Generation` stays a compile error at the sites that
+/// have an opinion about it, and one line at the sites that do not.
+#[cfg(test)]
+pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::ExternalIdIndex>) {
+    let manifest = tessera_store::manifest::SegmentsManifest {
+        watermark: 0,
+        entity_id_high_water: 0,
+        segments: Vec::new(),
+        deltas: Vec::new(),
+        dict_extents: Vec::new(),
+        external_id_runs: Vec::new(),
+        locator_extents: Vec::new(),
+        tombstones: Vec::new(),
+        deny: Vec::new(),
+        files: std::collections::BTreeMap::new(),
+    };
+    let bundle_manifest = tessera_store::manifest::Manifest {
+        bundle_format: 1,
+        created_at: String::new(),
+        data_plugin_hash: String::new(),
+        declared_bounds: serde_json::json!({}),
+        declared_scalars: vec![],
+        small_term_threshold: 32,
+        quantisation: Quantisation {
+            x_min: 0.0,
+            x_max: 1.0,
+            y_min: 0.0,
+            y_max: 1.0,
+        },
+        entity_id_high_water: 0,
+        identity: tessera_store::manifest::IdentityDescriptor {
+            construction: "siphash-2-4".to_string(),
+            rounds: 1,
+            key: "0123456789abcdef0123456789abcdef".to_string(),
+            shard_id: 0,
+            idset: 1,
+        },
+        slices: vec![],
+        partitions: vec![],
+        provenance: serde_json::json!({}),
+        files: std::collections::BTreeMap::new(),
+    };
+    (
+        Arc::new(FragmentCache::new(
+            std::path::Path::new("fixture-fragment-cache-never-written"),
+            [0u8; 32],
+            [0u8; 32],
+        )),
+        Arc::new(
+            session::ExternalIdIndex::open(
+                &bundle_manifest,
+                &manifest,
+                std::path::Path::new("fixture-prefix-never-read"),
+            )
+            .expect("a manifest naming no runs opens deferred"),
+        ),
+    )
 }
 
 /// Per-slice row-space deny masks — see [`Generation::denied`].

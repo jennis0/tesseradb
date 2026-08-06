@@ -1,5 +1,5 @@
 //! Coalescing external-id runs: the half of a merge that is about **entity** space, reusable on
-//! its own.
+//! its own — and, at the fold's scale, compaction's pass 3 (compaction §3).
 //!
 //! A run is a file sorted by *caller-supplied* keys (contracts §2.4), and a lookup searches every
 //! run whose own bounds admit the key — so the run count is a term in the ingest duplicate check
@@ -9,13 +9,31 @@
 //! coalesce publication calls it without touching a segment at all.
 //!
 //! **The merge is streaming**, holding *k* cursors rather than every pair, because compaction's
-//! pass 3 runs this over the whole corpus's runs (compaction §3) and a merge may not carry a
-//! `Vec` of every external id in its inputs.
+//! pass 3 runs this over the whole corpus's runs and a merge may not carry a `Vec` of every
+//! external id in its inputs.
 //!
-//! **Nothing here retires anything.** The keep-newest rule below drops an *older binding of the
-//! same key*, which decision 0047 makes a forgotten, deleted holder — not a live entity's row, not
-//! a posting, not an overlay entry. A function here that dropped a key because its entity was
-//! deleted would be performing the compaction fold.
+//! **One merge, two entry points, one implementation.** [`merge_runs`] (via
+//! [`coalesce_external_id_runs`]) is the ordinary maintenance coalesce: nothing is dropped, and
+//! the locator is a small in-memory `Vec`, because the span a merge ever covers is bounded by the
+//! run-count policy this module exists to enforce. [`fold_external_id_runs`] is the **same**
+//! keep-newest merge — `merge_runs_core` beneath both is the one implementation, never two — with
+//! the two things a merge's span never needs: dropping the keys of the entities `tombstones`
+//! names, and writing the locator through [`crate::locator::LocatorWriter`]'s mapping rather than
+//! a `Vec`, because the fold's span is the whole entity space (compaction §3: 4 GB resident at
+//! 10⁹ as a `Vec`, page cache through a mapping).
+//!
+//! **Dropping a key here is not Rule F's retirement, and does not claim to be.** Rule F's route
+//! out of `Overlay::deleted` is `Overlay::retire` (`tessera-lifecycle`, compaction §5) — a
+//! different store in a different crate. What this module owns is the artefact half compaction
+//! §3's pass 3 requires: an entity named in `tombstones` leaves run 0, and its locator slot reads
+//! [`tessera_types::ROW_ABSENT`] rather than a live ordinal — one of the artefacts `executed`'s
+//! derivation (compaction §5) checks an entity's absence from. Doing this is necessary — a
+//! binding left standing turns a lawful re-ingest of that external id into a 409, because the
+//! engine's duplicate check exempts a holder only while `overlay.is_deleted` is true
+//! (`tessera-engine`'s `established_collisions`), and retirement makes that false (decision 0047)
+//! — and it is **not** sufficient alone: the live `established` map the engine holds in memory
+//! must be cleared at the same swap, or that path still answers with the dropped key. That half is
+//! the engine's, not this module's.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -24,19 +42,22 @@ use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, BinaryArray, UInt32Array};
 use arrow::ipc::reader::FileReader;
+use croaring::Bitmap;
 
 use tessera_types::ROW_ABSENT;
 
 use crate::error::{Result, StoreError};
 use crate::flush::write_u32_array;
+use crate::locator::LocatorWriter;
 use crate::write::RunWriter;
 
 /// Coalesce `runs` — prefix-relative order, **oldest first** — into one run and one locator
 /// under `out_dir`, covering `[entity_lo, entity_hi]`. Returns the coalesced run's row count.
 ///
-/// The entity-space publication's whole file-writing half, and **compaction's pass 3**
-/// (compaction §3): a k-way merge over runs that are each already sorted by caller key, holding
-/// *k* cursors rather than every pair.
+/// The entity-space publication's whole file-writing half — the **ordinary maintenance** entry
+/// point; see [`fold_external_id_runs`] for the fold's own, over the whole corpus rather than one
+/// maintenance window (compaction §3, pass 3): a k-way merge over runs that are each already
+/// sorted by caller key, holding *k* cursors rather than every pair.
 ///
 /// **Oldest first is the keep-newest rule's only input.** A key present in two runs resolves to
 /// the newest binding (decision 0047: delete plus re-ingest re-binds an external id, so the older
@@ -50,6 +71,39 @@ pub fn coalesce_external_id_runs(
     out_dir: &Path,
 ) -> Result<usize> {
     merge_runs(&open_runs(runs)?, entity_lo, entity_hi, out_dir)
+}
+
+/// Compaction's pass 3, the fold's own entry point (compaction §3): the **same** keep-newest merge
+/// as [`coalesce_external_id_runs`] over the live external-id runs, but dropping the keys of every
+/// entity `tombstones` names and writing the locator through a **memory-mapped** file rather than
+/// an in-memory `Vec` — see the module doc for why the fold needs both and an ordinary coalesce
+/// needs neither.
+///
+/// `entity_lo`/`entity_hi` are the caller's — the fold's own snapshot bound (`D₀`'s entity space),
+/// never derived from the runs (see `merge_runs_core`'s `emit` closure for why) and never widened
+/// to the live high-water past it. The carried-forward `locator_extents` cover every entity past
+/// `entity_hi` (contracts §2.4); a locator sized past the snapshot swallows them and answers "no
+/// external id" for an item that has one — the fatal trap this function exists not to repeat.
+///
+/// `tombstones` is `D₀`, the fold's tombstone clone (compaction §1) — the same set passes 1 and 2
+/// execute over, never `executed` (compaction §5: `executed` is derived at publication, hours
+/// after this pass has run).
+pub fn fold_external_id_runs(
+    runs: &[PathBuf],
+    entity_lo: u64,
+    entity_hi: u64,
+    tombstones: &Bitmap,
+    out_dir: &Path,
+) -> Result<usize> {
+    merge_runs_core(
+        &open_runs(runs)?,
+        entity_lo,
+        entity_hi,
+        out_dir,
+        Some(tombstones),
+        // The fold's span is the whole entity space, whether or not `D₀` is empty this round.
+        LocatorStorage::Mapped,
+    )
 }
 
 /// Open each run as a cursor, **oldest first**, holding only its mapped batches and a position.
@@ -121,27 +175,60 @@ impl RunCursor {
     }
 }
 
-/// Merge `cursors` (oldest first) into one run and one locator under `out_dir`, streaming.
-///
-/// **The output is exactly what a stable sort of the concatenation followed by a keep-last pass
-/// produces**, which is what this replaced: ascending by key, ties broken by ascending run index
-/// and then position, with only the last of each equal-key group emitted. That equivalence is the
-/// whole correctness argument — see `coalesce_runs::a_key_in_two_runs_keeps_the_newest_binding`,
-/// which is where the tie-break is pinned, and
-/// `merge_execution::the_external_id_runs_coalesce_in_key_order` for the ordering.
-///
-/// **A heap that clones the key, rather than a linear scan or a borrow-free tournament.** A scan
-/// over *k* per row is O(n·k), which is fine at a merge's `tier_width` of 4 and not at a fold's
-/// live run count; a tournament over borrowed keys cannot be expressed without either unsafe or a
-/// hand-rolled sift, since the comparison borrows the cursors the pop mutates. External ids are
-/// capped at 64 bytes (contracts §1) and the fold is single-threaded and IO-throttled to
-/// 128 MiB/s (compaction §6.1), so one small allocation per key buys O(n log k) and an obviously
-/// correct pop. Memory stays O(k), which is the point.
+/// Merge `cursors` (oldest first) into one run and one locator under `out_dir`, streaming — the
+/// ordinary maintenance shape: nothing dropped, the locator a small in-memory `Vec`. See
+/// [`fold_external_id_runs`] for the fold's own call, which drops tombstoned keys and maps the
+/// locator instead.
 pub(crate) fn merge_runs(
     cursors: &[RunCursor],
     entity_lo: u64,
     entity_hi: u64,
     out_dir: &Path,
+) -> Result<usize> {
+    merge_runs_core(cursors, entity_lo, entity_hi, out_dir, None, LocatorStorage::Buffered)
+}
+
+/// The one keep-newest k-way merge, shared by [`merge_runs`] and [`fold_external_id_runs`] — **no
+/// second implementation of the tie-break exists**, so a fix or a regression in one path is a fix
+/// or a regression in both.
+///
+/// **The output is exactly what a stable sort of the concatenation followed by a keep-last pass
+/// produces**, which is what this replaced: ascending by key, ties broken by ascending run index
+/// and then position, with only the last of each equal-key group emitted, **and then, if
+/// `tombstones` names that survivor's entity, dropped entirely rather than falling back to an
+/// older binding of the same key** — an older binding under decision 0047 is already a forgotten,
+/// deleted holder, tombstoned or not, so there is nothing to fall back *to*. That equivalence is
+/// the whole correctness argument for the merge half — see
+/// `coalesce_runs::a_key_in_two_runs_keeps_the_newest_binding`, where the tie-break is pinned, and
+/// `merge_execution::the_external_id_runs_coalesce_in_key_order` for the ordering —
+/// `fold_external_ids::a_tombstoned_newest_binding_drops_the_key_rather_than_falling_back` is the
+/// tombstone half's own pin.
+///
+/// **A heap that clones the key, rather than a linear scan or a borrow-free tournament.** A scan
+/// over *k* per row is O(n·k), which is fine at a merge's `tier_width` of 4 and not at a fold's
+/// live run count; a tournament over borrowed keys cannot be expressed without either unsafe or a
+/// hand-rolled sift, since the comparison borrows the cursors the pop mutates. External ids are
+/// capped at 64 bytes (contracts §1), and every one of the fold's inputs is read through a mapping
+/// rather than a rate-limited stream — there is no read to throttle between, and the mitigation
+/// for the page-cache pressure that leaves is `madvise(MADV_SEQUENTIAL)` (decision 0052), not a
+/// rate (compaction §6.1's 128 MiB/s figure was evidence about pollution, not a mechanism this
+/// design can set — refuted at r5). So one small allocation per key buys O(n log k) and an
+/// obviously correct pop, and memory stays O(k) regardless of which caller this is.
+///
+/// **The filter and the locator's storage are two parameters, not one.** They happen to move
+/// together at this crate's only two call sites — a coalesce filters nothing and its span is
+/// policy-bounded, a fold filters `D₀` and its span is the whole entity space — but they are
+/// independent properties, and inferring the second from the first would put a 4 GB decision behind
+/// a predicate about deletions. A fold with an *empty* `D₀` is an ordinary case (compaction §5: an
+/// entity whose row survives is simply not retired this round), and it still needs the mapped
+/// locator.
+fn merge_runs_core(
+    cursors: &[RunCursor],
+    entity_lo: u64,
+    entity_hi: u64,
+    out_dir: &Path,
+    tombstones: Option<&Bitmap>,
+    storage: LocatorStorage,
 ) -> Result<usize> {
     let span =
         usize::try_from(entity_hi - entity_lo + 1).map_err(|_| StoreError::MalformedBundle {
@@ -167,20 +254,24 @@ pub(crate) fn merge_runs(
         }
     }
 
+    let locator_path = out_dir.join("ext-locator.u32");
     let io = |source| StoreError::Io {
         path: out_dir.join("external-ids.arrow"),
         source,
     };
     let mut writer = RunWriter::create(&out_dir.join("external-ids.arrow")).map_err(io)?;
-    let mut locator = vec![ROW_ABSENT; span];
+    let mut locator = match storage {
+        LocatorStorage::Mapped => LocatorSink::mapped(&locator_path, span as u64)?,
+        LocatorStorage::Buffered => LocatorSink::buffered(span),
+    };
     let mut pending: Option<(Vec<u8>, u32)> = None;
     let mut rows = 0usize;
 
     let emit = |writer: &mut RunWriter,
-                    locator: &mut Vec<u32>,
-                    rows: &mut usize,
-                    key: &[u8],
-                    entity: u32|
+                locator: &mut LocatorSink,
+                rows: &mut usize,
+                key: &[u8],
+                entity: u32|
      -> Result<()> {
         // **The locator's span is the caller's, never derived from the entities present** — an
         // entity ingested without an external id has no pair here at all, so a span taken from the
@@ -196,14 +287,22 @@ pub(crate) fn merge_runs(
                  span {entity_lo}..={entity_hi} — the reverse direction would have no home for it"
             ),
         })?;
-        locator[slot] = *rows as u32;
-        writer.append(key, entity).map_err(|source| StoreError::Io {
-            path: out_dir.join("external-ids.arrow"),
-            source,
-        })?;
+        locator.set(&locator_path, slot, *rows as u32)?;
+        writer
+            .append(key, entity)
+            .map_err(|source| StoreError::Io {
+                path: out_dir.join("external-ids.arrow"),
+                source,
+            })?;
         *rows += 1;
         Ok(())
     };
+
+    // An entity the caller's tombstone set names is dropped — not written to run 0, not given a
+    // locator slot (whose sentinel fill then answers "no external id" for it, correctly). See the
+    // module doc: this is the artefact half of what the fold needs here, never Rule F's retirement
+    // itself.
+    let is_tombstoned = |entity: u32| tombstones.is_some_and(|t| t.contains(entity));
 
     while let Some(Reverse((key, run))) = heap.pop() {
         let entity = cursors[run]
@@ -218,18 +317,86 @@ pub(crate) fn merge_runs(
         // Keep-last, with one item of lookahead: the pending pair survives only if the pair that
         // follows it carries a different key. A newer binding of the same key supersedes it.
         if let Some((prev_key, prev_entity)) = pending.take() {
-            if prev_key != key {
+            if prev_key != key && !is_tombstoned(prev_entity) {
                 emit(&mut writer, &mut locator, &mut rows, &prev_key, prev_entity)?;
             }
         }
         pending = Some((key, entity));
     }
     if let Some((key, entity)) = pending {
-        emit(&mut writer, &mut locator, &mut rows, &key, entity)?;
+        if !is_tombstoned(entity) {
+            emit(&mut writer, &mut locator, &mut rows, &key, entity)?;
+        }
     }
 
     let written = writer.finish().map_err(io)?;
     debug_assert_eq!(written, rows);
-    write_u32_array(&out_dir.join("ext-locator.u32"), &locator)?;
+    locator.finish(&locator_path)?;
     Ok(rows)
+}
+
+/// Where a merge's (or the fold's) surviving `entity → ordinal` pairs go while the merge runs.
+///
+/// An ordinary coalesce's span is bounded by the maintenance policy that caps external-id run
+/// count (contracts §2.4), so an in-memory array costs nothing worth avoiding — [`Self::Buffered`]
+/// is exactly what [`write_u32_array`] wrote directly before this type existed, same bytes, same
+/// call, now behind one match arm. The fold's span is the whole entity space, so it uses
+/// [`Self::Mapped`] instead — see [`crate::locator`]'s module doc for why that is a distinct
+/// writer rather than a generalisation of `PermutationWriter`.
+enum LocatorSink {
+    Buffered(Vec<u32>),
+    Mapped(LocatorWriter),
+}
+
+/// Which of the two [`LocatorSink`]s a caller wants — chosen by the **span**, never inferred from
+/// whether that caller also filters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocatorStorage {
+    /// A span bounded by the maintenance policy that caps run count: an in-memory `Vec` costs
+    /// nothing worth avoiding.
+    Buffered,
+    /// A corpus-sized span — 4 GB at 10⁹ — where a `Vec` is anonymous memory the kernel can only
+    /// page to swap, and a mapping is reclaimable page cache.
+    Mapped,
+}
+
+impl LocatorSink {
+    fn buffered(span: usize) -> Self {
+        LocatorSink::Buffered(vec![ROW_ABSENT; span])
+    }
+
+    fn mapped(path: &Path, span: u64) -> Result<Self> {
+        LocatorWriter::create(path, span)
+            .map(LocatorSink::Mapped)
+            .map_err(|source| StoreError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
+
+    fn set(&mut self, path: &Path, slot: usize, ordinal: u32) -> Result<()> {
+        match self {
+            LocatorSink::Buffered(v) => {
+                v[slot] = ordinal;
+                Ok(())
+            }
+            LocatorSink::Mapped(w) => {
+                w.set(slot as u64, ordinal)
+                    .map_err(|source| StoreError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    })
+            }
+        }
+    }
+
+    fn finish(self, path: &Path) -> Result<()> {
+        match self {
+            LocatorSink::Buffered(v) => write_u32_array(path, &v),
+            LocatorSink::Mapped(w) => w.finish().map_err(|source| StoreError::Io {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
 }

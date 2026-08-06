@@ -911,3 +911,92 @@ fn tile_ranges_all_over_an_empty_tile_set_is_empty() {
     let seg = &bundle.partitions["default"].slices["main"].segments[0];
     assert!(tessera_store::tile_ranges_all(seg, &[]).is_empty());
 }
+
+/// **The fourth constructor: a prefix this process just wrote opens without re-hashing it.**
+///
+/// [`open_written_prefix`] exists because a fold must serve from a prefix it has *this moment*
+/// finished writing and digesting, in-process (compaction §4 step 5, decision D1). It is the only
+/// route that opens a prefix by name rather than through `CURRENT`, and the only one that skips the
+/// digest sweep and `Permutation::validate_rows`.
+///
+/// Asserted two ways, because the constructor's value is exactly the difference between them.
+#[test]
+fn a_just_written_prefix_opens_to_the_same_bundle_without_re_verifying_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (items, codes) = build_bundle(dir.path(), 200);
+
+    let verified = open_bundle(dir.path()).expect("the read protocol in full");
+    let trusted = tessera_store::open_written_prefix(dir.path(), "v00000")
+        .expect("a prefix this process wrote");
+
+    // Same bundle, by every structure a request reads.
+    let a = &verified.partitions["default"].slices["main"].segments[0];
+    let b = &trusted.partitions["default"].slices["main"].segments[0];
+    assert_eq!(a.seg_id, b.seg_id);
+    assert_eq!(a.row_count, items.len() as u32);
+    assert_eq!(b.row_count, a.row_count);
+    assert_eq!(b.morton.u32(), codes.as_slice());
+    assert_eq!(b.columns.tessera_id(), a.columns.tessera_id());
+    assert_eq!(
+        verified.partitions["default"].segments_n,
+        trusted.partitions["default"].segments_n
+    );
+
+    // And it does not read `CURRENT` at all — the fold calls it after the flip, but naming the
+    // prefix is what makes the call independent of the commit having landed.
+    fs::remove_file(dir.path().join("CURRENT")).expect("remove CURRENT");
+    tessera_store::open_written_prefix(dir.path(), "v00000")
+        .expect("the prefix is named, not looked up");
+}
+
+/// **What the trusted constructor skips is bytes-from-storage checks, and nothing else.**
+///
+/// A file whose content no longer matches its digest opens here — that is the whole premise, and
+/// stating it as a test is what stops the premise from being quietly widened. `open_bundle` on the
+/// same tree fails closed, which is the half that must never change.
+#[test]
+fn a_just_written_prefix_skips_the_digest_sweep_and_open_bundle_does_not() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 40);
+
+    let columns_path = dir
+        .path()
+        .join("v00000/partitions/default/slices/main/segments/seg0/columns.arrow");
+    let mut bytes = fs::read(&columns_path).expect("read columns.arrow");
+    // Mid-file, inside the record batch body rather than the footer, so the file still *parses*:
+    // the only thing that separates it from the original is the digest, which is exactly the check
+    // under test.
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    fs::write(&columns_path, &bytes).expect("rewrite columns.arrow");
+
+    assert!(
+        open_bundle(dir.path()).is_err(),
+        "a bundle whose bytes were not checked is a bundle whose authorisation data was not \
+         checked — this direction is unconditional and must stay so"
+    );
+    assert!(
+        tessera_store::open_written_prefix(dir.path(), "v00000").is_ok(),
+        "and the trusted constructor does not re-derive a digest its caller just computed"
+    );
+}
+
+/// **The structural checks are kept**, so a self-inconsistent manifest fails closed on this route
+/// too. `row_count` disagreeing with the file it names is a writer bug, not a storage fault, and
+/// the premise ("this process wrote these bytes") does not cover it.
+#[test]
+fn a_just_written_prefix_still_refuses_a_manifest_that_disagrees_with_its_own_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 40);
+
+    edit_segments_manifest(dir.path(), |value| {
+        value["segments"][0]["row_count"] = serde_json::json!(39);
+    });
+
+    let err = tessera_store::open_written_prefix(dir.path(), "v00000")
+        .expect_err("the manifest disagrees with morton.u32 and columns.arrow");
+    assert!(
+        matches!(err, StoreError::MalformedBundle { .. }),
+        "expected MalformedBundle, got: {err}"
+    );
+}

@@ -461,3 +461,87 @@ fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
     let got: HashSet<u32> = frozen.view().iter().collect();
     assert_eq!(got, expected);
 }
+
+/// **A rotation starts empty and carries the byte bound** — the two halves of
+/// [`FragmentCache::rotate`], which is what a compaction's publication installs.
+///
+/// Emptiness is a correctness property and the bound is an operational one, and they pull in
+/// opposite directions, which is why both are here. Both maps are keyed under the old identity:
+/// `slots` by the canonical key, `key_memo` by a credential whose memoised value *is* a canonical
+/// key. Carrying either forward hands a post-fold caller a pre-fold fragment — the memo without
+/// even a lookup that could miss. Carrying the bound forward is the opposite obligation: it arrives
+/// once at startup through `set_memory_bound`, nothing re-applies it, and a rotation that reset it
+/// to unbounded would silently undo the startup refusal that validated it.
+#[test]
+fn a_rotation_starts_empty_and_keeps_the_byte_bound() {
+    let corpus_dir = TempDir::new().unwrap();
+    let (path, _per_term) = write_random_postings(corpus_dir.path(), 17, 5);
+    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+
+    let cache_dir = TempDir::new().unwrap();
+    let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
+    let auth_data_hash = [1u8; 32];
+
+    let cache = FragmentCache::new(cache_dir.path(), [9u8; 32], [7u8; 32]);
+    cache.set_memory_bound(64 * 1024 * 1024);
+    cache
+        .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
+        .unwrap();
+    assert_eq!(cache.rebuild_count(), 1);
+    assert_eq!(cache.slot_count(), 1);
+    let key_before = cache.canonical_key_for(&terms, 1);
+
+    let rotated = cache.rotate([10u8; 32]);
+    assert_eq!(rotated.slot_count(), 0, "no slot survives the identity");
+    assert_eq!(
+        rotated.stats().bound_bytes,
+        64 * 1024 * 1024,
+        "the validated bound is carried, or a rotation quietly unbounds the cache"
+    );
+    assert_ne!(rotated.canonical_key_for(&terms, 1), key_before);
+
+    // The same credential, the same dictionary length, the same watermark — the whole of the memo
+    // key, unchanged by a fold. A carried memo would answer `key_before` here, find the persisted
+    // pre-rotation `.frag` under that name, and return it having rebuilt nothing.
+    rotated
+        .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
+        .unwrap();
+    assert_eq!(
+        rotated.rebuild_count(),
+        1,
+        "the rotated cache re-unioned the postings rather than reaching the pre-rotation entry"
+    );
+}
+
+/// The identity a fragment reports is the one whose cache produced it — what
+/// `Engine::fragment_for` compares against the live generation's, because a fold advances no
+/// watermark and the watermark test alone cannot see one.
+#[test]
+fn a_fragment_carries_the_identity_it_was_built_under() {
+    let corpus_dir = TempDir::new().unwrap();
+    let (path, _per_term) = write_random_postings(corpus_dir.path(), 19, 5);
+    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+
+    let cache_dir = TempDir::new().unwrap();
+    let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
+
+    let cache = FragmentCache::new(cache_dir.path(), [9u8; 32], [7u8; 32]);
+    let built = cache
+        .get_or_build(&terms, [1u8; 32], 0, &reader, &[], 1)
+        .unwrap();
+    assert_eq!(built.identity, [9u8; 32]);
+    assert_eq!(cache.bundle_identity(), [9u8; 32]);
+
+    // And a fragment reopened from the persisted pair carries it too, so the comparison survives a
+    // restart rather than holding only for the process that built it.
+    let reopened = FragmentCache::new(cache_dir.path(), [9u8; 32], [7u8; 32])
+        .get_or_build(&terms, [1u8; 32], 0, &reader, &[], 1)
+        .unwrap();
+    assert_eq!(reopened.identity, [9u8; 32]);
+
+    let rotated = cache.rotate([10u8; 32]);
+    let rebuilt = rotated
+        .get_or_build(&terms, [1u8; 32], 0, &reader, &[], 1)
+        .unwrap();
+    assert_eq!(rebuilt.identity, [10u8; 32]);
+}

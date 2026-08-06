@@ -34,6 +34,11 @@
 //! halves ride on [`crate::cache::SessionGeometry`], and the projection comes from the previous
 //! entry by the same `extend` the request path used to do.
 //!
+//! **The fragment cache comes from the generation being refreshed, never from a handle taken at
+//! startup.** A fold rotates it (`Generation::fragments`), so a pass holding the cache it was
+//! constructed with would rebuild every entry's fragment under the *superseded* bundle identity —
+//! every folded-away entity back in every refreshed mask, published under the new geometry's key.
+//!
 //! ## The two orderings that are load-bearing
 //!
 //! **`refresh_in_flight` is set before the swap**, by the executor, not here. A racer landing
@@ -49,7 +54,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use tessera_authz::{FragmentCache, FragmentCacheError};
+use tessera_authz::FragmentCacheError;
 
 use crate::cache::{RowProjectionCache, RowProjectionKey, SessionGeometry};
 use crate::compose::RowProjection;
@@ -107,7 +112,6 @@ fn carry_for(key: &RowProjectionKey, generation: &Generation) -> Carry {
 /// pre-0044 behaviour rather than wedging a session at 429 for ever.
 pub(crate) fn refresh_resident(
     cache: &RowProjectionCache,
-    fragments: &FragmentCache,
     pool: &rayon::ThreadPool,
     generation: &Generation,
 ) -> usize {
@@ -129,7 +133,7 @@ pub(crate) fn refresh_resident(
         // **Built before the cache call, because `make` must be infallible** — the single-flight
         // state machine has no way to carry a failure out of a slot, and stuffing one into the
         // value would cache it (I13a).
-        let fragment = match fragments.get_or_build(
+        let fragment = match generation.fragments.get_or_build(
             &previous.satisfied_sorted,
             previous.auth_data_hash,
             generation.dict.len(),
@@ -218,7 +222,6 @@ fn clear_if_current(in_flight: &std::sync::atomic::AtomicU64, mine: u64) {
 /// exactly as a flush's context is.
 pub(crate) struct RefreshDeps {
     pub(crate) cache: Arc<RowProjectionCache>,
-    pub(crate) fragments: Arc<FragmentCache>,
     pub(crate) pool: Arc<rayon::ThreadPool>,
     /// The `segments_version` whose refresh pass is in flight, or [`NO_REFRESH`].
     ///
@@ -262,7 +265,6 @@ impl RefreshDeps {
     /// leave the window this exists to close — see the module doc.
     pub(crate) fn spawn(&self, generation: Arc<Generation>) {
         let cache = Arc::clone(&self.cache);
-        let fragments = Arc::clone(&self.fragments);
         let pool = Arc::clone(&self.pool);
         let in_flight = Arc::clone(&self.in_flight);
         let refreshes = Arc::clone(&self.refreshes);
@@ -281,7 +283,7 @@ impl RefreshDeps {
             while paused.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
-            let produced = refresh_resident(&cache, &fragments, &pool, &generation);
+            let produced = refresh_resident(&cache, &pool, &generation);
             refreshes.fetch_add(produced as u64, Ordering::Relaxed);
             clear_if_current(&in_flight, mine);
         });
@@ -334,6 +336,7 @@ mod tests {
             provenance: serde_json::json!({}),
             files: BTreeMap::new(),
         };
+        let (fragments, external_index) = crate::synthetic_generation_parts();
         Generation {
             prefix: prefix.to_string(),
             segments_version,
@@ -344,6 +347,8 @@ mod tests {
             }),
             dict: Arc::new(tessera_authz::Dict::load(&[]).expect("an empty dict needs no file")),
             postings: Arc::new(empty_postings()),
+            fragments,
+            external_index,
             delta_postings: Vec::new(),
             overlay_version: 0,
             overlay: Arc::new(Overlay::new()),

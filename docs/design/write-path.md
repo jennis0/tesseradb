@@ -783,28 +783,22 @@ either way.)*
   is ever acceptable. The safety property is an **identity match**: a fold publishes a new prefix, whose manifest digest
   rotates the fragment identity, so no pre-fold fragment is reachable by key afterwards; a
   request is entirely pre-fold or entirely post-fold because it loads one generation pointer.
-  **Three gaps must close in the same change as the first fold**, and the third is the one this
-  rule's safety actually hangs on (found in review, 2026-08-04): (1) the in-memory fragment memo
-  key carries no generation identity; (2) a session-held fragment rebuilds only when its
-  watermark is behind — a fold advances no watermark; and (3) **nothing can rotate the fragment
-  identity in-process at all**: `bundle_identity` — the MANIFEST digest keying both the
-  in-memory slots and the *persisted* `.frag` files — is bound once at `Engine::open`, and the
-  only geometry-publication seam carries no postings reader and no identity; its own doc calls
-  it "compaction-shaped" precisely because it presumes the term index and dictionary are
-  unchanged, which is the premise the fold breaks. A fold published through today's seam would
-  leave every pre-fold fragment reachable by key — across a restart of the fragment map, since
-  the key names the persisted file — and Rule F would then serve a folded-away deletion. One
-  rule closes all three: *a fragment carries the identity of the generation whose postings built
-  it, composition uses it only when that matches, and the fold's publication path must carry new
-  postings and a new identity — or the fold is an offline operation (publish, then restart), and
-  §8 must say which.*
+  One rule closes the three gaps this used to enumerate (found in review, 2026-08-04): *a
+  fragment carries the identity of the generation whose postings built it, composition uses it
+  only when that matches, and the fold's publication path carries new postings and a new
+  identity.* The alternative it left open — an offline fold, publish then restart — is declined
+  (decision D1, compaction §13): the fold is in-process. **The publication seam does all of
+  this**, and compaction §4 is where it is described; what closes the rule at *composition*
+  rather than at a container is that both pre-fold fragment holders sit outside `FragmentCache`
+  — the session's own `Arc`, and the row-projection cache's freshest-entry read.
 - The earlier stamp-ledger design (per-deny tombstone stamps, `stamp_counts`,
   `min_live_stamp`, the two-kind retirement floor) is **deleted from the spec, not deferred**:
   it bought incremental early retirement that no requirement asks for, now that the read path's
   deny term is a mask rather than a walk. It was not wrong; it was precision nothing pays for.
 
-⊘ **Today nothing retires at all** — no fold exists. Deletion denies are
-immortal; the overlay grows monotonically under deletion churn;
+⊘ **Today nothing retires at all** — no fold exists. `Overlay::retire` is Rule F's route and the
+publication seam carries it, but nothing derives an executed set, so every publication passes an
+empty one: deletion denies are immortal; the overlay grows monotonically under deletion churn;
 `overlay_soft_limit` (500,000) alarms on depth and nothing acts, because the lever its response
 should pull — *schedule a compaction* — does not exist. Fail-closed, and not the mechanism.
 
@@ -1101,10 +1095,12 @@ is not thereby unsafe, only refused.
 ## 8. Where compaction sits — the seam, stated so it is not rediscovered
 
 ⊘ **Compaction does not exist.** No fold, no prefix rewrite, no `CURRENT` flip, no
-re-ranking, no batch-grid change. Everything in this section is obligation, not description.
-A **provisional** design answering this section's obligation list is drafted at
-[`compaction.md`](compaction.md) (2026-08-05, under review, nothing built); this section stays the
-boundary statement and wins until that document is promoted.
+re-ranking, no batch-grid change. Everything in this section is obligation, not description —
+except the **publication seam** it would go through, which is built because Rule F's safety hangs
+on it and because everything else in the fold publishes through it. A **provisional** design
+answering this section's obligation list is at [`compaction.md`](compaction.md) (2026-08-05,
+reviewed at r3 and r5, the seam built); this section stays the boundary statement and wins until
+that document is promoted.
 
 Compaction is the **invariant-bearing** half flush and merge are defined by contrast with: it
 folds — snapshot-covered delta tiers into base postings, tombstoned rows out of row space **and
@@ -1122,10 +1118,9 @@ because an overwrite after the first flush silently deletes acked, visible items
 the deployment's **only** reorganisation path: the fold, re-ranking, a batch-grid change. Not
 re-quantisation (decision 0040: bounds are immutable per slice; a wrong extent is a migration).
 
-Obligations already accumulated against it, from this document alone: **Rule F's three gaps**
-(spec §5.4 — above all, a publication path that can carry the fold's rewritten postings and
-rotate the fragment identity, which today's compaction-shaped seam cannot; or a ruled offline
-fold); the deletion accepted
+Obligations already accumulated against it, from this document alone: **Rule F's gaps** (spec
+§5.4 — a publication path that carries the fold's rewritten postings and rotates the fragment
+identity; ✔ built, compaction §4); the deletion accepted
 after a flush snapshot whose row exists (spec §4.2); the immortal overlay (spec §5.4);
 `overlay_soft_limit`'s response becoming *schedule a compaction*; the dictionary's monotone
 length (the staleness hint's counter — a renumbering compaction must not reduce it); the
@@ -1351,6 +1346,17 @@ item, moves no point and keeps every binding (exists — `merge.rs`); 43 a merge
 with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`).
 
 ## Appendix R — Review record
+
+**r9 (2026-08-06) — Rule F's gaps are closed, and §5.4 stops enumerating them.** The publication
+seam now carries the fold's rewritten postings, the bundle identity and the fragment cache it keys,
+the external-id sidecar and the executed retirement set, in one swap; the prefix directory a
+side-manifest is written into is derived from the publishing generation rather than captured at
+open, which is the fourth gap and the one whose failure loses acked deny state silently; and
+`Overlay::retire` is Rule F's route out of `deleted`, with no sibling for `suppressed`. Nothing
+retires yet — no fold derives an executed set — so §5.4's ⊘ stands with its reason narrowed. §8's
+obligation list drops the seam and keeps everything else. The alternative §5.4 left open, an offline
+fold, is declined by compaction's D1; the mechanism is described at compaction §4 and this section
+stays the boundary statement.
 
 **r8 (2026-08-06) — decision 0048: the evaluate machinery is deleted, not carried.** Tessera has
 no deployment, so "entries arise only from pre-0047 WALs" (r5's reason for keeping the machinery

@@ -102,6 +102,11 @@ pub enum StoreError {
     /// `..`, absolute, or containing a path separator where a single opaque component was
     /// expected. Bundle contents are trusted for shape but never for path escape.
     UnsafePath { what: String, value: String },
+    /// Writing `terms/pairs.parquet` failed in the Parquet encoder — see [`crate::pairs`]. Its
+    /// own variant rather than `Io` or `MalformedBundle`: an encoder failure is neither a
+    /// filesystem fault nor a claim about a bundle already on disc, and the two producers (a build
+    /// and compaction's pass 2) both need to report it as what it is.
+    Parquet { path: PathBuf, detail: String },
     /// `columns.arrow` failed Arrow IPC / schema validation (wrong column count, name, type,
     /// more than one record batch, compressed buffers, or misaligned buffers).
     InvalidColumns { path: PathBuf, detail: String },
@@ -191,6 +196,9 @@ impl fmt::Display for StoreError {
             ),
             StoreError::UnsafePath { what, value } => {
                 write!(f, "unsafe path in manifest ({what}): '{value}'")
+            }
+            StoreError::Parquet { path, detail } => {
+                write!(f, "writing {}: {detail}", path.display())
             }
             StoreError::InvalidColumns { path, detail } => {
                 write!(f, "invalid columns.arrow at {}: {detail}", path.display())

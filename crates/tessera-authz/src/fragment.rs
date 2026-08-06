@@ -236,6 +236,23 @@ pub struct FrozenFragment {
     /// [`FragmentCache`]'s module doc for the sidecar layout) so a reopened fragment restores it
     /// without the caller having to remember it out of band.
     pub watermark: u64,
+    /// The bundle identity of the [`FragmentCache`] that produced this fragment — the MANIFEST
+    /// digest of the prefix whose postings it was unioned from.
+    ///
+    /// **Not persisted, and it does not need to be**: [`canonical_key`] already hashes the
+    /// identity, so a `.frag` file can only ever be *found* under a key carrying the identity it
+    /// was built under. This field records which one that was, so a holder outside the cache can
+    /// ask.
+    ///
+    /// **What it is for.** A compaction rewrites the term index and publishes a new prefix, so
+    /// the postings a pre-fold fragment was unioned from no longer describe the live bundle — and
+    /// a fold advances no watermark, so the watermark test cannot see it. A holder that kept a
+    /// fragment across a fold (a `Session`, which holds one for its whole lifetime) would go on
+    /// composing against a mask that still contains every folded-away entity, which is Rule F's
+    /// retirement re-exposing exactly what it retired (write-path §5.4). The comparison is made
+    /// where the fragment is *composed*, not arranged for by swapping the cache: a cache swap
+    /// does not reach a fragment somebody already holds by `Arc`.
+    pub identity: [u8; 32],
 }
 
 impl FrozenFragment {
@@ -264,7 +281,7 @@ impl FrozenFragment {
     /// sidecar — a corrupt or tampered cache entry must never reach
     /// `BitmapView::deserialize::<Frozen>`, whose safety contract we could not otherwise
     /// discharge for bytes we did not just produce ourselves.
-    fn open(frag_path: &Path, meta_path: &Path) -> io::Result<Self> {
+    fn open(frag_path: &Path, meta_path: &Path, identity: [u8; 32]) -> io::Result<Self> {
         let meta = std::fs::read(meta_path)?;
         if meta.len() != META_LEN {
             return Err(invalid_data(format!(
@@ -304,7 +321,11 @@ impl FrozenFragment {
             )));
         }
 
-        Ok(FrozenFragment { mmap, watermark })
+        Ok(FrozenFragment {
+            mmap,
+            watermark,
+            identity,
+        })
     }
 
     /// Serialise `bitmap` in `Frozen` format and persist it (plus its watermark/length/digest
@@ -315,6 +336,7 @@ impl FrozenFragment {
         meta_path: &Path,
         bitmap: &Bitmap,
         watermark: u64,
+        identity: [u8; 32],
     ) -> io::Result<Self> {
         // `serialize_into_vec` inserts whatever front padding CRoaring's `Frozen` format needs to
         // hand back a 32-byte-aligned *in-memory* slice; the slice's own bytes are the exact
@@ -360,7 +382,7 @@ impl FrozenFragment {
             }
         }
 
-        Self::open(frag_path, meta_path)
+        Self::open(frag_path, meta_path, identity)
     }
 }
 
@@ -536,6 +558,45 @@ impl FragmentCache {
             slots: SingleFlightCache::new(u64::MAX),
             rebuilds: AtomicU64::new(0),
         }
+    }
+
+    /// A cache over the same directory and the same auth plugin, under a **new bundle identity**
+    /// — what a compaction's publication installs, and the only way this identity ever changes.
+    ///
+    /// **Rotation is a fresh cache, never a mutation of this one, because both maps are keyed
+    /// under the old identity.** `slots` is keyed by the canonical key, which hashes the identity;
+    /// `key_memo` maps a credential to a canonical key it computed under the identity. Storing a
+    /// new identity in place would leave every entry in both maps reachable by a key no live
+    /// lookup can produce for `slots`, and — the fail-open — reachable by exactly the key a live
+    /// lookup *does* produce for `key_memo`, which returns the memoised canonical key without
+    /// re-deriving it. A post-fold authorise would then be handed the pre-fold fragment: every
+    /// folded-away entity back in the mask, with no error. Starting empty makes that unexpressible
+    /// rather than forbidden.
+    ///
+    /// The persisted `.frag`/`.meta` pairs are left alone and become unreachable for the same
+    /// reason — their names are the old identity's keys, and nothing will ever compute one again.
+    /// Sweeping them is reclamation's (compaction §8), not this call's.
+    ///
+    /// **The byte bound is carried across**, because it is a validated deployment setting that
+    /// arrives once at startup ([`Self::set_memory_bound`]) and nothing would re-apply it. A
+    /// rotation that silently unbounded the cache would undo the startup refusal
+    /// `tessera_server::prepare` exists to enforce.
+    pub fn rotate(&self, bundle_identity: [u8; 32]) -> Self {
+        FragmentCache {
+            dir: self.dir.clone(),
+            bundle_identity,
+            auth_plugin_hash: self.auth_plugin_hash,
+            key_memo: Mutex::new(FxHashMap::default()),
+            slots: SingleFlightCache::new(self.slots.stats().bound_bytes),
+            rebuilds: AtomicU64::new(0),
+        }
+    }
+
+    /// The bundle identity every key in this cache is computed under — the MANIFEST digest of the
+    /// prefix whose postings its fragments were unioned from. Compared against
+    /// [`FrozenFragment::identity`] wherever a fragment a caller already holds is composed.
+    pub fn bundle_identity(&self) -> [u8; 32] {
+        self.bundle_identity
     }
 
     /// Bound the **in-memory** tier at `bytes`. The digest-verified `.frag` sidecar tier is
@@ -768,14 +829,22 @@ impl FragmentCache {
                 // would add. This only runs on a genuine slot-state miss (never on a `Ready`
                 // hit), so it is the cold path: a first-ever build in this process, or a
                 // fragment another process already persisted.
-                if let Ok(frozen) = FrozenFragment::open(&frag_path, &meta_path) {
+                if let Ok(frozen) =
+                    FrozenFragment::open(&frag_path, &meta_path, self.bundle_identity)
+                {
                     return Ok(frozen);
                 }
 
                 create_private_dir_all(&self.dir)?;
                 let bitmap = build_fragment_with_deltas(satisfied, postings, deltas)?;
                 self.rebuilds.fetch_add(1, Ordering::Relaxed);
-                FrozenFragment::build_and_persist(&frag_path, &meta_path, &bitmap, watermark)
+                FrozenFragment::build_and_persist(
+                    &frag_path,
+                    &meta_path,
+                    &bitmap,
+                    watermark,
+                    self.bundle_identity,
+                )
             })
             .map_err(|e| match e {
                 SingleFlightError::Building => FragmentCacheError::Building,

@@ -79,12 +79,11 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 
 use crate::cache::RowProjectionCache;
 use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
-use crate::geometry::{check_publishable, GeometryRefused};
+use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
 use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{DenyEntry as ManifestDenyEntry, SegmentsManifest};
 use tessera_store::merge::MergePolicy;
-use tessera_store::Bundle;
 use tessera_types::{EntityId, IdentityKey, TermId};
 
 use crate::session::EngineError;
@@ -1759,7 +1758,7 @@ impl WritePath {
                     next_manifest_n: flush.next_manifest_n,
                     deny_dirty: false,
                     windows_since_publication: 0,
-                    prefix_dir: flush.prefix_dir,
+                    bundle_root: flush.bundle_root,
                     identity_key: flush.identity_key,
                     pool: flush.pool,
                     max_distinct_terms: flush.max_distinct_terms,
@@ -1770,7 +1769,6 @@ impl WritePath {
                     coalesce_attempt: 0,
                     coalesce_done: coalesce_rx,
                     coalesce_submit: coalesce_tx,
-                    external_index: flush.external_index,
                     refresh: flush.refresh,
                     merge_policy: flush.merge,
                     coalesce_enabled: flush.coalesce_enabled,
@@ -1893,24 +1891,12 @@ impl WritePath {
     /// Rides the work lane and is never shed — see [`LifecycleHandle::publish_geometry`].
     pub(crate) fn publish_geometry(
         &self,
-        prefix: String,
-        segments_version: u64,
-        watermark: u64,
-        bundle: Arc<Bundle>,
-        dict: Arc<Dict>,
-        delta_postings: Vec<Arc<DeltaTier>>,
+        publication: GeometryPublication,
     ) -> std::result::Result<(), PublishGeometryError> {
         self.handle
             .as_ref()
             .ok_or(PublishGeometryError::NoExecutor)?
-            .publish_geometry(
-                prefix,
-                segments_version,
-                watermark,
-                bundle,
-                dict,
-                delta_postings,
-            )
+            .publish_geometry(publication)
     }
 
     pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
@@ -2069,12 +2055,7 @@ pub(crate) struct Job {
 pub(crate) enum ExecutorWork {
     Lifecycle(Job),
     PublishGeometry {
-        prefix: String,
-        segments_version: u64,
-        watermark: u64,
-        bundle: Arc<Bundle>,
-        dict: Arc<Dict>,
-        delta_postings: Vec<Arc<DeltaTier>>,
+        publication: GeometryPublication,
         respond: SyncSender<std::result::Result<(), GeometryRefused>>,
     },
 }
@@ -2089,6 +2070,17 @@ pub enum PublishGeometryError {
     /// publish at all. Reachable only by an embedder that skipped `start_write_executor`;
     /// `tessera-server` starts it unconditionally.
     NoExecutor,
+    /// [`crate::Engine::publish_rotated_prefix`] was offered a prefix `CURRENT` does not name.
+    ///
+    /// **Refused rather than published**, because `CURRENT` is the commit point and the bundle
+    /// identity *is* the digest it names (contracts §2.1). Publishing an uncommitted prefix would
+    /// leave the process serving geometry a restart could not find, and nothing would detect the
+    /// disagreement until that restart.
+    PrefixNotCommitted { offered: String, current: String },
+    /// [`crate::Engine::publish_rotated_prefix`] could not open the prefix it was handed, or one of
+    /// the artefacts inside it. Its files stand as orphans under a prefix nothing serves, and
+    /// nothing was swapped.
+    PrefixNotOpenable(String),
 }
 
 impl std::fmt::Display for PublishGeometryError {
@@ -2098,6 +2090,14 @@ impl std::fmt::Display for PublishGeometryError {
             PublishGeometryError::NoExecutor => f.write_str(
                 "this engine has no write executor, and a geometry publication is a swap on that                  thread (lifecycle §1.3)",
             ),
+            PublishGeometryError::PrefixNotCommitted { offered, current } => write!(
+                f,
+                "refusing to publish prefix '{offered}': CURRENT names '{current}', so the \
+                 publication is not committed and a restart would not find it"
+            ),
+            PublishGeometryError::PrefixNotOpenable(detail) => {
+                write!(f, "the written prefix would not open: {detail}")
+            }
         }
     }
 }
@@ -2188,22 +2188,12 @@ impl LifecycleHandle {
     /// reason: a token may be spurious, never missing.
     pub(crate) fn publish_geometry(
         &self,
-        prefix: String,
-        segments_version: u64,
-        watermark: u64,
-        bundle: Arc<Bundle>,
-        dict: Arc<Dict>,
-        delta_postings: Vec<Arc<DeltaTier>>,
+        publication: GeometryPublication,
     ) -> std::result::Result<(), PublishGeometryError> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.work
             .send(ExecutorWork::PublishGeometry {
-                prefix,
-                segments_version,
-                watermark,
-                bundle,
-                dict,
-                delta_postings,
+                publication,
                 respond: tx,
             })
             .map_err(|_| PublishGeometryError::NoExecutor)?;
@@ -2513,10 +2503,6 @@ pub(crate) struct MaintenanceDeps {
     pub(crate) max_age_secs: u64,
     /// The entity-space coalesce's policy — see [`crate::coalesce::CoalescePolicy`].
     pub(crate) coalesce: crate::coalesce::CoalescePolicy,
-    /// The external-id sidecar, so a coalesce publication can install the one it just wrote. The
-    /// executor is the only writer of this cell, exactly as it is the only publisher of
-    /// generations.
-    pub(crate) external_index: Arc<arc_swap::ArcSwap<crate::session::ExternalIdIndex>>,
     /// What a geometry publication needs to start the background refresh decision 0044's D1
     /// rules — see [`crate::refresh`].
     pub(crate) refresh: crate::refresh::RefreshDeps,
@@ -2525,9 +2511,9 @@ pub(crate) struct MaintenanceDeps {
     /// Whether the coalesce and the merge run at all — see `Engine::merge_enabled`.
     pub(crate) coalesce_enabled: Arc<AtomicBool>,
     pub(crate) merge_enabled: Arc<AtomicBool>,
-    /// The bundle's current prefix directory. A flush writes inside it, and never touches
-    /// `MANIFEST.json` or `CURRENT`.
-    pub(crate) prefix_dir: PathBuf,
+    /// The bundle **root**, from which the live prefix directory is derived per use — see
+    /// [`Executor::prefix_dir`] and `Engine::bundle_root`.
+    pub(crate) bundle_root: PathBuf,
     pub(crate) identity_key: IdentityKey,
     /// D-D's one shared compute pool — a flush's segment write runs on it, off this thread,
     /// because this thread is the one that must reach a queued deny promptly (§1.1).
@@ -2699,10 +2685,17 @@ struct Executor {
     /// Deny windows applied since the last publication — the counter
     /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
     windows_since_publication: u64,
-    /// The bundle prefix directory a flush writes into. A flush publishes **inside the current
-    /// prefix** — never `MANIFEST.json`, never `CURRENT` — which is what separates it from a
-    /// compaction.
-    prefix_dir: PathBuf,
+    /// The bundle root. **Not the prefix directory, and that is the fourth gap of compaction §4.**
+    ///
+    /// A flush publishes *inside* the live prefix — never `MANIFEST.json`, never `CURRENT` — which
+    /// is what separates it from a compaction, and for as long as nothing could publish a new
+    /// prefix a directory captured once was the same value. A fold breaks that: the first deny
+    /// published after a flip would write its side-manifest into the prefix reclamation is about
+    /// to delete, which is acked deny state gone from the restore path with no error anywhere.
+    /// Storing a second copy and rotating it is not the fix — it is one more thing to miss at one
+    /// of eight call sites. [`Executor::prefix_dir`] derives it from the live generation instead,
+    /// and a derived value cannot go stale.
+    bundle_root: PathBuf,
     identity_key: IdentityKey,
     /// The shared compute pool a flush executes on (§1.1), and the handle it submits its completed
     /// unit back through.
@@ -2729,8 +2722,6 @@ struct Executor {
     coalesce_attempt: u64,
     coalesce_done: Receiver<crate::coalesce::CompletedCoalesce>,
     coalesce_submit: Sender<crate::coalesce::CompletedCoalesce>,
-    /// The external-id sidecar cell — see [`MaintenanceDeps::external_index`].
-    external_index: Arc<arc_swap::ArcSwap<crate::session::ExternalIdIndex>>,
     /// The background refresh's dependencies — see [`crate::refresh`].
     refresh: crate::refresh::RefreshDeps,
     /// The row-space merge's policy, its in-flight flag, its attempt counter and its own
@@ -2993,7 +2984,7 @@ impl Executor {
 
         self.coalesce_attempt += 1;
         let ctx = crate::coalesce::CoalesceContext {
-            prefix_dir: self.prefix_dir.clone(),
+            prefix_dir: self.prefix_dir(generation),
             prefix: generation.prefix.clone(),
             // The same never-reused shape a `seg_id` has, and for the same reason: two passes at
             // one `n` would otherwise write one path, and the second `File::create` truncates
@@ -3061,7 +3052,7 @@ impl Executor {
 
         self.merge_attempt += 1;
         let ctx = crate::merge::MergeContext {
-            prefix_dir: self.prefix_dir.clone(),
+            prefix_dir: self.prefix_dir(generation),
             prefix: generation.prefix.clone(),
             // The same never-reused shape a flush's `seg_id` has, and for the same reason: two
             // attempts at one `n` would otherwise write one path, and the second `File::create`
@@ -3151,7 +3142,7 @@ impl Executor {
 
         let manifest_n = self.allocate_manifest_n();
         if let Err(e) = crate::flush::write_segments_manifest(
-            &self.prefix_dir,
+            &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
             &manifest,
@@ -3206,6 +3197,8 @@ impl Executor {
             bundle: next_bundle,
             dict: Arc::clone(&live.dict),
             postings: Arc::clone(&live.postings),
+            fragments: Arc::clone(&live.fragments),
+            external_index: Arc::clone(&live.external_index),
             // **The consumed segments' delta tiers stay listed**, and the entities they carry
             // still have rows — in the merged segment. Dropping one would make every item it
             // carries invisible to every session. See `crate::merge::rebase_into`.
@@ -3292,7 +3285,7 @@ impl Executor {
 
         let manifest_n = self.allocate_manifest_n();
         if let Err(e) = crate::flush::write_segments_manifest(
-            &self.prefix_dir,
+            &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
             &manifest,
@@ -3312,7 +3305,7 @@ impl Executor {
         let next_index = match crate::session::ExternalIdIndex::open(
             &live.bundle.manifest,
             &manifest,
-            &self.prefix_dir,
+            &self.prefix_dir(&live),
         ) {
             Ok(index) => index,
             Err(e) => {
@@ -3385,6 +3378,14 @@ impl Executor {
             bundle: next_bundle,
             dict: Arc::clone(&live.dict),
             postings: Arc::clone(&live.postings),
+            fragments: Arc::clone(&live.fragments),
+            // **The sidecar rides the swap, rather than being stored beside it.** It used to be an
+            // `ArcSwap` on the `Engine`, stored one statement after this publication; that was
+            // sound here because a coalesce is content-preserving, and it is not sound for a fold,
+            // which drops the retired entities' keys and writes into a new prefix. One pointer
+            // now carries both, so no request can ever hold a generation and a sidecar from two
+            // publications.
+            external_index: Arc::new(next_index),
             delta_postings,
             overlay_version: live.overlay_version,
             overlay: Arc::clone(&live.overlay),
@@ -3392,7 +3393,6 @@ impl Executor {
             denied: Arc::clone(&live.denied),
         };
         let _published = self.publish(next, started);
-        self.external_index.store(Arc::new(next_index));
         self.health.coalesces.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -3514,7 +3514,7 @@ impl Executor {
             contexts.push((
                 plan,
                 crate::flush::FlushContext {
-                    prefix_dir: self.prefix_dir.clone(),
+                    prefix_dir: self.prefix_dir(generation),
                     partition: partition.clone(),
                     slice: slice.clone(),
                     // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
@@ -4098,12 +4098,7 @@ impl Executor {
             let job = match work {
                 ExecutorWork::Lifecycle(job) => job,
                 ExecutorWork::PublishGeometry {
-                    prefix,
-                    segments_version,
-                    watermark,
-                    bundle,
-                    dict,
-                    delta_postings,
+                    publication,
                     respond,
                 } => {
                     // **The open window closes first, and that is ordering rather than tidiness.**
@@ -4116,14 +4111,7 @@ impl Executor {
                     if !window.is_empty() {
                         window = self.close_and_reopen(window);
                     }
-                    let _ = respond.send(self.publish_geometry(
-                        prefix,
-                        segments_version,
-                        watermark,
-                        bundle,
-                        dict,
-                        delta_postings,
-                    ));
+                    let _ = respond.send(self.publish_geometry(publication));
                     self.health.note_work_refused();
                     did_work = true;
                     continue;
@@ -4214,6 +4202,25 @@ impl Executor {
     fn next_flush_attempt(&mut self) -> u64 {
         self.flush_attempt += 1;
         self.flush_attempt
+    }
+
+    /// The prefix directory to write into, **derived from the generation the caller is publishing
+    /// against** rather than remembered.
+    ///
+    /// This is compaction §4's fourth gap, closed by construction. Every write inside a bundle
+    /// belongs to one prefix, and which prefix that is changes when a fold flips `CURRENT`. The
+    /// alternative — a stored `PathBuf` rotated at the flip — has to be got right at all eight
+    /// sites that use it, and the one that would be missed is not the flush path anybody would
+    /// think to check: it is [`Executor::publish_deny_state`], where the first deny published
+    /// after a flip writes its side-manifest into the prefix reclamation is about to delete. Acked
+    /// deny state, absent from the restore path, no error anywhere. A derived value cannot be
+    /// missed.
+    ///
+    /// Every caller already holds the generation it is acting on — publications load it to rebase
+    /// against, and the maintenance planners load it to plan from — so this costs one `join` and
+    /// no lookup.
+    fn prefix_dir(&self, generation: &Generation) -> PathBuf {
+        self.bundle_root.join(&generation.prefix)
     }
 
     /// Take the next side-manifest number. See [`Executor::next_manifest_n`].
@@ -4703,6 +4710,8 @@ impl Executor {
             bundle: Arc::clone(&generation.bundle),
             dict: Arc::clone(&generation.dict),
             postings: Arc::clone(&generation.postings),
+            fragments: Arc::clone(&generation.fragments),
+            external_index: Arc::clone(&generation.external_index),
             delta_postings: generation.delta_postings.clone(),
             overlay: Arc::clone(&generation.overlay),
             // Neither the deny sets nor the row space moved, so the mask is unchanged. An ingest
@@ -4843,6 +4852,8 @@ impl Executor {
             bundle: Arc::clone(&generation.bundle),
             dict: Arc::clone(&generation.dict),
             postings: Arc::clone(&generation.postings),
+            fragments: Arc::clone(&generation.fragments),
+            external_index: Arc::clone(&generation.external_index),
             delta_postings: generation.delta_postings.clone(),
             buffer,
             denied,
@@ -4888,7 +4899,12 @@ impl Executor {
             write_deny_state(&mut manifest, &live.overlay);
             let n = self.allocate_manifest_n();
             if let Err(e) =
-                crate::flush::write_segments_manifest(&self.prefix_dir, partition, n, &manifest)
+                crate::flush::write_segments_manifest(
+                    &self.prefix_dir(&live),
+                    partition,
+                    n,
+                    &manifest,
+                )
             {
                 tracing::error!(
                     error = %e,
@@ -4984,7 +5000,7 @@ impl Executor {
         // retained, the next tick re-plans. The same posture as every other flush failure, and
         // the reason the write precedes the swap.
         if let Err(e) = crate::flush::write_segments_manifest(
-            &self.prefix_dir,
+            &self.prefix_dir(&live),
             &completed.partition,
             manifest_n,
             &manifest,
@@ -5047,6 +5063,8 @@ impl Executor {
             bundle: next_bundle,
             dict: completed.dict,
             postings: Arc::clone(&live.postings),
+            fragments: Arc::clone(&live.fragments),
+            external_index: Arc::clone(&live.external_index),
             delta_postings,
             overlay_version: live.overlay_version,
             overlay: Arc::clone(&live.overlay),
@@ -5200,23 +5218,61 @@ impl Executor {
     ///
     /// `check_publishable` is evaluated against the generation actually being replaced, which is
     /// the one loaded here, because this is the only thread that can replace it.
+    ///
+    /// # The one swap, and everything that rides it
+    ///
+    /// Compaction §4 step 6: prefix, `segments_version`, watermark, bundle, dictionary and tier
+    /// list always; and, when the publication carries a `PrefixRotation`, the base postings, the
+    /// fragment cache and the identity it keys, the external-id sidecar, and the retirement of the
+    /// executed deletions — all through the single `store` below. Not a sequence of stores that a
+    /// request could land between: a request loads one pointer and gets a geometry, a term index,
+    /// a fragment identity and a sidecar that agree.
     fn publish_geometry(
         &mut self,
-        prefix: String,
-        segments_version: u64,
-        watermark: u64,
-        bundle: Arc<Bundle>,
-        dict: Arc<Dict>,
-        delta_postings: Vec<Arc<DeltaTier>>,
+        publication: GeometryPublication,
     ) -> std::result::Result<(), GeometryRefused> {
+        let GeometryPublication {
+            prefix,
+            segments_version,
+            watermark,
+            bundle,
+            dict,
+            delta_postings,
+            rotation,
+        } = publication;
         let started = std::time::Instant::now();
         let previous = self.generation.load_full();
-        check_publishable(&previous, &prefix, segments_version)?;
+        check_publishable(&previous, &prefix, segments_version, watermark)?;
+
+        // **Rule F, in the fold's own swap and nowhere else** (write-path §5.4). An entry
+        // withdrawn while the old geometry is still live re-exposes the item for the width of that
+        // window, so the overlay is cloned, retired against, and published — never mutated in
+        // place on a shared `Arc`, which the read path is holding.
+        //
+        // `overlay_version` moves **only** when something actually retired. A geometry-only swap
+        // that bumped it would falsely signal a change on lifecycle §1.2's *security-state* axis,
+        // which §8.5's cache keys read; a retirement that did not bump it would be a real change
+        // to that state, invisible to the same keys.
+        let (overlay, overlay_version) = match rotation.as_ref().map(|r| &r.retired) {
+            Some(retired) if !retired.is_empty() => {
+                let mut overlay = (*previous.overlay).clone();
+                let count = overlay.retire(retired);
+                tracing::info!(
+                    retired = count,
+                    prefix = %prefix,
+                    "Rule F: executed deletions retired in the fold's own publication"
+                );
+                (Arc::new(overlay), previous.overlay_version + 1)
+            }
+            _ => (Arc::clone(&previous.overlay), previous.overlay_version),
+        };
 
         // Rebuilt against the new row space: row ids mean something only within one
         // `segments_version`, so a geometry publication invalidates every row in the old mask
-        // (`derive_denied`). Taken before `bundle` moves into the generation.
-        let denied = Arc::new(crate::compose::derive_denied(&previous.overlay, &bundle));
+        // (`derive_denied`). Derived from the **retired** overlay, not the previous one, or the
+        // retired entities would keep their rows in the mask over a row space that no longer holds
+        // them. Taken before `bundle` moves into the generation.
+        let denied = Arc::new(crate::compose::derive_denied(&overlay, &bundle));
 
         let next = Generation {
             prefix,
@@ -5224,10 +5280,20 @@ impl Executor {
             watermark,
             bundle,
             dict,
-            postings: Arc::clone(&previous.postings),
+            postings: rotation
+                .as_ref()
+                .map_or_else(|| Arc::clone(&previous.postings), |r| Arc::clone(&r.postings)),
+            fragments: rotation.as_ref().map_or_else(
+                || Arc::clone(&previous.fragments),
+                |r| Arc::clone(&r.fragments),
+            ),
+            external_index: rotation.as_ref().map_or_else(
+                || Arc::clone(&previous.external_index),
+                |r| Arc::clone(&r.external_index),
+            ),
             delta_postings,
-            overlay_version: previous.overlay_version,
-            overlay: Arc::clone(&previous.overlay),
+            overlay_version,
+            overlay,
             buffer: Arc::clone(&previous.buffer),
             denied,
         };

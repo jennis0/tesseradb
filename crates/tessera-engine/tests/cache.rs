@@ -29,6 +29,7 @@ use tessera_store::read::open_bundle;
 use tessera_store::Bundle;
 
 use common::*;
+use tessera_engine::GeometryPublication;
 
 /// The whole-extent, depth-0 request every count assertion below uses: one tile, so
 /// `tiles[0].visible` is the session's total visible count (θ is saturated by `common::config`).
@@ -83,15 +84,26 @@ fn publish_second_geometry(engine: &Engine, tmp: &TempDir, prefix: &str, n: u64)
     // From the **live** generation, not the freshly-built bundle's own (always 0): a second
     // publication must strictly increase what is live, not what it was built from.
     let next_version = engine.generation().segments_version + 1;
+    // **The live watermark, not this fixture's own**, for the same reason. This bundle is a
+    // *different corpus* rather than a successor to the live one — that is the whole trick that
+    // makes the geometry move — so its watermark is smaller, and `check_publishable` refuses a
+    // regression: composition treats every entity at or above the watermark as buffered rather
+    // than rowed, so lowering it would hide the gap from every principal. What these cases need
+    // is a new row space under a new `segments_version`, which is exactly what they still get.
+    let live_watermark = engine.generation().watermark;
+    assert!(
+        watermark_of(&second) <= live_watermark,
+        "the fixture's premise: a smaller second corpus is not a successor"
+    );
     engine
-        .publish_geometry(
+        .publish_geometry(GeometryPublication::within_prefix(
             prefix.to_string(),
             next_version,
-            watermark_of(&second),
+            live_watermark,
             second,
             engine.generation().dict.clone(),
             Vec::new(),
-        )
+        ))
         .expect("a strictly-increasing segments_version publishes");
     next_version
 }

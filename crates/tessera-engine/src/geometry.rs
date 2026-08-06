@@ -40,7 +40,113 @@
 //! (`geometry-pinning.md` §4). A cache keyed on the prefix would survive that and serve one
 //! entity's rows under another's mask.
 
+use std::sync::Arc;
+
+use croaring::Bitmap;
+
+use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
+use tessera_store::Bundle;
+
+use crate::session::ExternalIdIndex;
 use crate::Generation;
+
+/// One geometry publication, whole — **the single seam a generation swap may go through**, and the
+/// only thing in this process that moves `segments_version`.
+///
+/// A value rather than an argument list because it grew past the point where a caller could get it
+/// right positionally: three of its scalars are `u64` or `String`, and the widening compaction §4
+/// requires adds four more artefacts. `MaintenanceDeps` made the same move for the same reason.
+///
+/// # What a caller supplies, and what is carried forward
+///
+/// `prefix`, `segments_version` and `watermark` are the new prefix's own SEGMENTS manifest values.
+/// They are taken separately from `bundle` because the caller — a flush, a merge, or a fold's
+/// publication — is what decides the `n` the new manifest carries. `segments_version` must strictly
+/// increase; see [`GeometryRefused`] and [`check_publishable`].
+///
+/// `dict` and `delta_postings` are published with the geometry because a flush produces both: it
+/// promotes novel descriptors to durable ordinals and publishes the assignment as a `dict_extents`
+/// entry (§3.2), and it publishes one sparse delta tier per segment (§5.2). A caller with neither
+/// passes the live generation's own.
+///
+/// **`overlay`, `buffer` and `overlay_version` have no field here, and that is load-bearing.** They
+/// are carried forward from whatever generation is live at the instant of the swap, so this type
+/// structurally cannot regress authorisation state — there is no parameter that could carry a stale
+/// one, which is what lets it exist as a public API at all. The single exception is
+/// [`PrefixRotation::retired`], which subtracts and never adds.
+pub struct GeometryPublication {
+    pub prefix: String,
+    pub segments_version: u64,
+    pub watermark: u64,
+    pub bundle: Arc<Bundle>,
+    pub dict: Arc<Dict>,
+    pub delta_postings: Vec<Arc<DeltaTier>>,
+    /// `None` for a publication that stays within the live prefix — every flush and every merge.
+    /// See [`PrefixRotation`].
+    pub(crate) rotation: Option<PrefixRotation>,
+}
+
+/// The four things a publication into a **new prefix** must carry, and they travel together
+/// because separating them is the fail-open.
+///
+/// A fold rewrites the term index, the fragment identity and the external-id runs, and retires the
+/// deletions it executed. Each of those alone is wrong:
+///
+/// - new postings with the old fragment identity serves every session a mask built from a term
+///   index that no longer exists, under a key nothing invalidates — a fold advances no watermark;
+/// - a rotated identity with the old postings makes every fragment rebuild from the superseded
+///   prefix's file;
+/// - a new prefix with the old external-id sidecar resolves through files reclamation is about to
+///   delete, and answers for keys the fold dropped;
+/// - and **retirement without the identity rotation is Rule F's fail-open in its pure form**
+///   (write-path §5.4): withdrawing the tombstone while a pre-fold fragment is still reachable
+///   re-exposes the item the deletion hid. That is why `retired` lives *here* rather than beside
+///   the rotation — a caller cannot ask for one without the other.
+pub(crate) struct PrefixRotation {
+    /// The new prefix's base postings.
+    pub(crate) postings: Arc<PostingsReader>,
+    /// The fragment cache under the new prefix's MANIFEST digest — [`FragmentCache::rotate`].
+    pub(crate) fragments: Arc<FragmentCache>,
+    /// The new prefix's external-id sidecar.
+    pub(crate) external_index: Arc<ExternalIdIndex>,
+    /// The executed deletions leaving `deleted` in this swap — Rule F, and empty for a rotation
+    /// that retires nothing. **The caller's obligation is compaction §5's rule**, restated at
+    /// `tessera_lifecycle::Overlay::retire`: only entities whose row *and* postings this
+    /// publication demonstrably removed, derived from what it carried forward and never from what
+    /// the plan predicted.
+    pub(crate) retired: Bitmap,
+}
+
+impl GeometryPublication {
+    /// A publication **within the live prefix** — what a flush and a merge make. The term index,
+    /// the fragment identity and the external-id sidecar all carry forward from the live
+    /// generation.
+    pub fn within_prefix(
+        prefix: String,
+        segments_version: u64,
+        watermark: u64,
+        bundle: Arc<Bundle>,
+        dict: Arc<Dict>,
+        delta_postings: Vec<Arc<DeltaTier>>,
+    ) -> Self {
+        GeometryPublication {
+            prefix,
+            segments_version,
+            watermark,
+            bundle,
+            dict,
+            delta_postings,
+            rotation: None,
+        }
+    }
+
+    /// Carry a [`PrefixRotation`] — what a fold's publication makes, and nothing else. Assembled
+    /// by [`crate::session::Engine::publish_rotated_prefix`], which is the only producer.
+    pub(crate) fn rotating(mut self, rotation: PrefixRotation) -> Self {
+        self.rotation = Some(rotation);
+        self
+    }
+}
 
 /// Why [`check_publishable`] refused a geometry publication.
 ///
@@ -51,6 +157,8 @@ use crate::Generation;
 pub enum GeometryRefusedReason {
     /// The offered `segments_version` does not strictly exceed the live one.
     SegmentsVersionNotIncreasing,
+    /// The offered `watermark` is behind the live one.
+    WatermarkRegresses,
 }
 
 impl std::fmt::Display for GeometryRefusedReason {
@@ -60,6 +168,11 @@ impl std::fmt::Display for GeometryRefusedReason {
                 "segments_version must strictly increase; the row-projection cache keys on it, so \
                  a bundle swap that left it unchanged would serve a projection built against the \
                  old row space to a request answered from the new one (I11)",
+            ),
+            GeometryRefusedReason::WatermarkRegresses => f.write_str(
+                "the watermark may not move backwards: composition treats every entity at or above \
+                 it as buffered rather than rowed, so lowering it hides every entity between the \
+                 two values from every principal until the next flush raises it again",
             ),
         }
     }
@@ -73,6 +186,18 @@ pub struct GeometryRefused {
     pub offered_prefix: String,
     pub offered_segments_version: u64,
     pub reason: GeometryRefusedReason,
+}
+
+impl GeometryRefused {
+    fn new(live: &Generation, prefix: &str, segments_version: u64, reason: GeometryRefusedReason) -> Self {
+        GeometryRefused {
+            live_prefix: live.prefix.clone(),
+            live_segments_version: live.segments_version,
+            offered_prefix: prefix.to_string(),
+            offered_segments_version: segments_version,
+            reason,
+        }
+    }
 }
 
 impl std::fmt::Display for GeometryRefused {
@@ -102,21 +227,37 @@ impl std::error::Error for GeometryRefused {}
 /// `seg_id`s are never reused across compactions or prefixes (lifecycle §5.2, contracts §2.1), so
 /// strict monotonicity is what the format already promises; this only refuses to be the place it is
 /// broken.
+///
+/// **The watermark may not regress**, and that guard is here rather than at any one caller because
+/// each of the three reaches it differently. A flush's watermark is its own new, strictly greater
+/// value; a merge passes the live one through; and a fold must pass the live one *untouched* —
+/// compaction §4 step 2 names deriving it from the fold's inputs as the way to move it backwards
+/// past every entity accepted since the fold's snapshot. Composition treats an entity at or above
+/// the watermark as buffered rather than rowed, so a lowered watermark makes every entity in the
+/// gap invisible to every principal: fail-closed, silent, and cleared only by the next flush.
 pub(crate) fn check_publishable(
     live: &Generation,
     prefix: &str,
     segments_version: u64,
+    watermark: u64,
 ) -> Result<(), GeometryRefused> {
-    if segments_version > live.segments_version {
-        return Ok(());
+    if segments_version <= live.segments_version {
+        return Err(GeometryRefused::new(
+            live,
+            prefix,
+            segments_version,
+            GeometryRefusedReason::SegmentsVersionNotIncreasing,
+        ));
     }
-    Err(GeometryRefused {
-        live_prefix: live.prefix.clone(),
-        live_segments_version: live.segments_version,
-        offered_prefix: prefix.to_string(),
-        offered_segments_version: segments_version,
-        reason: GeometryRefusedReason::SegmentsVersionNotIncreasing,
-    })
+    if watermark < live.watermark {
+        return Err(GeometryRefused::new(
+            live,
+            prefix,
+            segments_version,
+            GeometryRefusedReason::WatermarkRegresses,
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -137,10 +278,10 @@ mod tests {
         tessera_authz::PostingsReader::open(&path, false).expect("it opens")
     }
 
-    /// A `Generation` over an empty synthetic bundle. `check_publishable` reads two scalars off
+    /// A `Generation` over an empty synthetic bundle. `check_publishable` reads three scalars off
     /// it, so an empty partition map is enough and building a real one would make this test about
     /// the fixture instead.
-    fn generation_at(prefix: &str, segments_version: u64) -> Generation {
+    fn generation_at(prefix: &str, segments_version: u64, watermark: u64) -> Generation {
         let manifest = Manifest {
             bundle_format: 1,
             created_at: "2026-07-31T00:00:00Z".to_string(),
@@ -167,16 +308,19 @@ mod tests {
             provenance: serde_json::json!({}),
             files: BTreeMap::new(),
         };
+        let (fragments, external_index) = crate::synthetic_generation_parts();
         Generation {
             prefix: prefix.to_string(),
             segments_version,
-            watermark: 0,
+            watermark,
             bundle: Arc::new(Bundle {
                 manifest,
                 partitions: HashMap::new(),
             }),
             dict: Arc::new(tessera_authz::Dict::load(&[]).expect("an empty dict needs no file")),
             postings: Arc::new(empty_postings()),
+            fragments,
+            external_index,
             delta_postings: Vec::new(),
             overlay_version: 0,
             overlay: Arc::new(Overlay::new()),
@@ -188,12 +332,12 @@ mod tests {
 
     #[test]
     fn a_publication_must_strictly_increase_the_segments_version() {
-        let live = generation_at("p-1", 7);
-        assert!(check_publishable(&live, "p-1", 8).is_ok());
-        assert!(check_publishable(&live, "p-2", 8).is_ok(), "a new prefix");
+        let live = generation_at("p-1", 7, 100);
+        assert!(check_publishable(&live, "p-1", 8, 100).is_ok());
+        assert!(check_publishable(&live, "p-2", 8, 100).is_ok(), "a new prefix");
 
         for offered in [7u64, 6, 0] {
-            let refused = check_publishable(&live, "p-1", offered)
+            let refused = check_publishable(&live, "p-1", offered, 100)
                 .expect_err("a non-increasing segments_version is refused");
             assert_eq!(
                 refused.reason,
@@ -201,6 +345,28 @@ mod tests {
             );
             assert_eq!(refused.live_segments_version, 7);
         }
+    }
+
+    /// **A publication may raise the watermark or leave it, never lower it.**
+    ///
+    /// A flush raises it; a merge and a fold pass the live value through untouched. The refusal
+    /// exists for the third of those: compaction §4 step 2 names deriving the watermark from the
+    /// *fold's inputs* as the way it moves backwards, past every entity accepted since the fold's
+    /// snapshot — and composition treats an entity at or above the watermark as buffered rather
+    /// than rowed, so the gap goes invisible to every principal with no error until the next flush.
+    ///
+    /// **Mutations this kills:** dropping the check; making it strict (a merge and a fold both pass
+    /// the live value, so `>` would refuse every one of them).
+    #[test]
+    fn a_publication_may_not_lower_the_watermark() {
+        let live = generation_at("p-1", 7, 100);
+
+        assert!(check_publishable(&live, "p-1", 8, 100).is_ok(), "a merge or a fold passes it through");
+        assert!(check_publishable(&live, "p-1", 8, 101).is_ok(), "a flush raises it");
+
+        let refused = check_publishable(&live, "p-2", 8, 99)
+            .expect_err("a watermark behind the live one is refused");
+        assert_eq!(refused.reason, GeometryRefusedReason::WatermarkRegresses);
     }
 
     /// The refusal message names the mechanism that would break, not the one that used to. A

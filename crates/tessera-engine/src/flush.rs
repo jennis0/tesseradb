@@ -715,6 +715,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("a temp dir");
         let postings_path = dir.path().join("postings.arrow");
         tessera_authz::write_postings(&postings_path, &[], 32).expect("an empty postings file");
+        let (fragments, external_index) = crate::synthetic_generation_parts();
         Generation {
             prefix: "v00000".to_string(),
             segments_version: 0,
@@ -727,6 +728,8 @@ mod tests {
             postings: Arc::new(
                 tessera_authz::PostingsReader::open(&postings_path, false).expect("it opens"),
             ),
+            fragments,
+            external_index,
             delta_postings: Vec::new(),
             overlay_version: 0,
             overlay: Arc::new(overlay),

@@ -2,6 +2,7 @@ pub mod dict;
 pub mod fragment;
 pub mod postings;
 mod single_flight;
+pub mod term_sweep;
 pub mod tier;
 
 pub use dict::{coalesce_dict_extents, Dict, DictStreamWriter, DictWriter};
@@ -13,4 +14,5 @@ pub use postings::{
     PostingsReader,
     PostingsSpool,
 };
+pub use term_sweep::sweep_term_postings;
 pub use tier::{coalesce_delta_tiers, write_delta_tier, DeltaTier};

@@ -31,13 +31,10 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use arrow::array::{ArrayRef, BinaryArray, UInt32Array, UInt64Array};
+use arrow::array::{ArrayRef, BinaryArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter as ArrowFileWriter;
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, Encoding};
-use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
 use sha2::{Digest, Sha256};
 
 use tessera_authz::{write_postings, DictWriter};
@@ -49,6 +46,7 @@ use tessera_store::manifest::{
     PartitionDescriptor, Quantisation, SegmentDescriptor, SegmentsManifest, SliceDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
+use tessera_store::PairsParquetWriter;
 use tessera_types::{
     EntityId, IdentityKey, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
     SMALL_TERM_THRESHOLD_DEFAULT,
@@ -743,114 +741,13 @@ pub fn verify(root: &Path) -> Result<VerifyReport> {
     })
 }
 
-/// Write `pairs.parquet` (R4): `(entity_id: uint64, term_id: uint32)` sorted by
-/// `(term_id, entity_id)`, DELTA_BINARY_PACKED on both columns.
-///
-/// Rows are pushed in the required order rather than sorted here — both builds emit terms in
-/// ordinal order and each term's entities ascending, so the sort *is* the iteration order. The
-/// file is off both request paths (build-cadence and oracle reads only), so the encoding is
-/// chosen for the oracle's benefit, not for query latency.
-pub(crate) struct PairsParquetWriter {
-    path: PathBuf,
-    schema: std::sync::Arc<Schema>,
-    writer: ArrowWriter<File>,
-    entities: Vec<u64>,
-    terms: Vec<u32>,
-}
-
-impl PairsParquetWriter {
-    /// Rows per record batch. Bounds the writer's own memory no matter how many pairs arrive.
-    const BATCH: usize = 1 << 16;
-
-    pub(crate) fn create(path: &Path) -> Result<Self> {
-        let schema = std::sync::Arc::new(Schema::new(vec![
-            Field::new("entity_id", DataType::UInt64, false),
-            Field::new("term_id", DataType::UInt32, false),
-        ]));
-        let props = WriterProperties::builder()
-            .set_writer_version(WriterVersion::PARQUET_2_0)
-            .set_encoding(Encoding::DELTA_BINARY_PACKED)
-            .set_dictionary_enabled(false)
-            .set_statistics_enabled(EnabledStatistics::Chunk)
-            .set_compression(Compression::SNAPPY)
-            .build();
-        let file = File::create(path).map_err(|e| BuildError::io(path, e))?;
-        let writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
-            .map_err(|e| BuildError::parquet(path, e))?;
-        Ok(PairsParquetWriter {
-            path: path.to_path_buf(),
-            schema,
-            writer,
-            entities: Vec::with_capacity(Self::BATCH),
-            terms: Vec::with_capacity(Self::BATCH),
-        })
-    }
-
-    pub(crate) fn push(&mut self, entity_id: u64, term_id: u32) -> Result<()> {
-        self.entities.push(entity_id);
-        self.terms.push(term_id);
-        if self.entities.len() == Self::BATCH {
-            self.flush()?;
-        }
-        Ok(())
-    }
-
-    /// Push one term's whole (ascending) entity list. Batch boundaries fall at exactly the
-    /// rows they would under per-row [`push`] — fill to `BATCH`, flush, continue — so the
-    /// file bytes are identical; only the 1.7 × 10⁹ call-per-row overhead is gone.
-    pub(crate) fn push_run(&mut self, term_id: u32, entities: &[u32]) -> Result<()> {
-        let mut rest = entities;
-        while !rest.is_empty() {
-            let take = (Self::BATCH - self.entities.len()).min(rest.len());
-            let (now, later) = rest.split_at(take);
-            self.entities.extend(now.iter().map(|&e| e as u64));
-            self.terms.extend(std::iter::repeat_n(term_id, now.len()));
-            if self.entities.len() == Self::BATCH {
-                self.flush()?;
-            }
-            rest = later;
-        }
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        if self.entities.is_empty() {
-            return Ok(());
-        }
-        let batch = RecordBatch::try_new(
-            self.schema.clone(),
-            vec![
-                std::sync::Arc::new(UInt64Array::from(std::mem::take(&mut self.entities)))
-                    as ArrayRef,
-                std::sync::Arc::new(UInt32Array::from(std::mem::take(&mut self.terms))) as ArrayRef,
-            ],
-        )
-        .map_err(|e| BuildError::arrow(&self.path, e))?;
-        self.entities.reserve(Self::BATCH);
-        self.terms.reserve(Self::BATCH);
-        self.writer
-            .write(&batch)
-            .map_err(|e| BuildError::parquet(&self.path, e))
-    }
-
-    pub(crate) fn finish(mut self) -> Result<()> {
-        self.flush()?;
-        let path = self.path.clone();
-        self.writer
-            .close()
-            .map_err(|e| BuildError::parquet(&path, e))?;
-        fsync_file(&path)
-    }
-}
-
 fn write_pairs_parquet(path: &Path, per_term: &[Vec<u32>]) -> Result<()> {
     let mut writer = PairsParquetWriter::create(path)?;
     for (t, entity_ids) in per_term.iter().enumerate() {
-        for &entity in entity_ids {
-            writer.push(entity as u64, t as u32)?;
-        }
+        writer.push_run(t as u32, entity_ids)?;
     }
-    writer.finish()
+    writer.finish()?;
+    Ok(())
 }
 
 /// Write `external-ids-0.arrow` (R4; r6 narrows `entity_id` to `uint32`) and

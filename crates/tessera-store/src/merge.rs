@@ -34,15 +34,15 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::fs;
 use std::path::Path;
 
-use tessera_spatial::tiler::{ScalarType, ScalarValue};
+use tessera_spatial::tiler::ScalarType;
 use tessera_types::{IdentityKey, TesseraId, ROW_ABSENT};
 
 use crate::coalesce::{merge_runs, open_runs};
 use crate::error::{Result, StoreError};
+use crate::segment_cursor::{gather_scalars, SegmentCursor};
 use crate::flush::{digest_of, FlushOutput};
 use crate::manifest::{LocatorExtent, SegmentDescriptor};
 use crate::permutation::SegmentExtent;
-use crate::read::{ColumnsRef, MortonSlice, ScalarSlice};
 use crate::write::{SegmentRow, SegmentWriter};
 
 /// What a merge is allowed to take.
@@ -211,6 +211,9 @@ pub struct MergeSpec<'a> {
 /// offered that as a decorator. Here the Morton order *is* the tile index — a segment that is not
 /// internally sorted breaks `tile_ranges`' binary search outright — so it cannot be skipped and
 /// there is nothing to make conditional on a document count.
+/// Names this producer in any error the shared cursor or scalar adapter raises.
+const OP: &str = "execute_merge";
+
 pub fn execute_merge(
     prefix_dir: &Path,
     partition: &str,
@@ -244,11 +247,11 @@ pub fn execute_merge(
             .join(seg_id)
     };
 
-    let mut cursors: Vec<InputCursor> = Vec::with_capacity(spec.inputs.len());
+    let mut cursors: Vec<SegmentCursor> = Vec::with_capacity(spec.inputs.len());
     let mut run_paths: Vec<std::path::PathBuf> = Vec::with_capacity(spec.inputs.len());
     for input in spec.inputs {
         let dir = seg_path(&input.seg_id);
-        cursors.push(InputCursor::open(&dir, input.seg_id.clone())?);
+        cursors.push(SegmentCursor::open(&dir, input.seg_id.clone(), OP)?);
         run_paths.push(dir.join("external-ids.arrow"));
     }
     // Opened here, with the segment cursors, so a missing or malformed run fails the merge before
@@ -303,7 +306,7 @@ pub fn execute_merge(
                 ),
             });
         }
-        let scalars = gather_scalars(&cursor.columns, spec.scalar_schema, row, &cursor.seg_id)?;
+        let scalars = gather_scalars(&cursor.columns, spec.scalar_schema, row, &cursor.seg_id, OP)?;
         writer
             .append(SegmentRow {
                 tessera_id,
@@ -380,96 +383,3 @@ pub fn execute_merge(
     })
 }
 
-/// A position in one already-sorted input segment: its two mapped files, and the row the merge has
-/// reached in them.
-///
-/// **This is the whole of what a k-way merge costs per input.** Both files are mmapped and
-/// uncompressed by contract (§10.3, contracts §2.6), so a cursor is an index into a mapping rather
-/// than a decoded batch, and the merge holds *k* of these instead of the corpus.
-struct InputCursor {
-    seg_id: String,
-    morton: MortonSlice,
-    columns: ColumnsRef,
-    row: usize,
-    rows: usize,
-}
-
-impl InputCursor {
-    fn open(dir: &Path, seg_id: String) -> Result<Self> {
-        let morton = MortonSlice::load(&dir.join("morton.u32"))?;
-        let columns = ColumnsRef::load(&dir.join("columns.arrow"))?;
-        let rows = morton.len();
-        if rows != columns.tessera_id().len() || rows != columns.residual().len() {
-            return Err(StoreError::MalformedBundle {
-                detail: format!(
-                    "execute_merge: segment '{seg_id}' has {rows} codes against {} identities",
-                    columns.tessera_id().len()
-                ),
-            });
-        }
-        Ok(InputCursor {
-            seg_id,
-            morton,
-            columns,
-            row: 0,
-            rows,
-        })
-    }
-
-    /// This cursor's current `(morton, tessera_id)`, or `None` once it is spent.
-    ///
-    /// `MortonSlice::load` verified the codes ascend, so the sequence a cursor offers is
-    /// non-decreasing and the heap's output is sorted — the property `SegmentWriter::append`
-    /// asserts and `tile_ranges`' binary search needs.
-    fn key(&self) -> Option<(u32, u64)> {
-        (self.row < self.rows)
-            .then(|| (self.morton.u32()[self.row], self.columns.tessera_id()[self.row]))
-    }
-}
-
-/// This row's declared scalars, in schema order — the shape [`SegmentRow`] wants.
-///
-/// **A column the input lacks, or holds under another type, fails the merge**, and the alternative
-/// is why: a `filter_map` here drops the missing one and shifts every later scalar up a position,
-/// so the merged segment's columns are silently transposed — every value present, every value
-/// against the wrong name, no error anywhere. Unreachable through [`crate::write::write_segment`],
-/// which emits the declared schema in full; reachable the moment a merge takes an input this
-/// process did not write, which is what a stepped-down or hand-repaired bundle is.
-fn gather_scalars(
-    columns: &ColumnsRef,
-    schema: &[(String, ScalarType)],
-    row: usize,
-    seg_id: &str,
-) -> Result<Vec<ScalarValue>> {
-    let mismatch = |declared: ScalarType, found: &str| StoreError::MalformedBundle {
-        detail: format!(
-            "execute_merge: segment '{seg_id}' holds scalar column of type {found} where the \
-             bundle declares {declared:?}; merging it would write the value under another \
-             column's name"
-        ),
-    };
-    schema
-        .iter()
-        .map(|(name, declared)| {
-            let slice = columns
-                .scalar(name)
-                .ok_or_else(|| StoreError::MalformedBundle {
-                    detail: format!(
-                        "execute_merge: segment '{seg_id}' has no scalar column '{name}', which \
-                         this bundle declares; dropping it would shift every later scalar into \
-                         the wrong column"
-                    ),
-                })?;
-            match (slice, declared) {
-                (ScalarSlice::U64(v), ScalarType::U64) => Ok(ScalarValue::U64(v[row])),
-                (ScalarSlice::F32(v), ScalarType::F32) => Ok(ScalarValue::F32(v[row])),
-                (ScalarSlice::Utf8(v), ScalarType::Utf8) => {
-                    Ok(ScalarValue::Utf8(v.value(row).to_string()))
-                }
-                (ScalarSlice::U64(_), declared) => Err(mismatch(*declared, "u64")),
-                (ScalarSlice::F32(_), declared) => Err(mismatch(*declared, "f32")),
-                (ScalarSlice::Utf8(_), declared) => Err(mismatch(*declared, "utf8")),
-            }
-        })
-        .collect()
-}

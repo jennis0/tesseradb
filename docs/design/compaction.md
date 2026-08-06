@@ -1,10 +1,12 @@
 # Compaction — design
 
 **Date:** 2026-08-05
-**Status:** **Provisional — r4, the review round dispositioned.** The three fatal findings and the
-refuted mechanism are fixed in the body (Appendix R r4): retirement is derived from what the
-publication removed, the locator is snapshot-bounded, the seam has four gaps rather than three, the
-memory claim is a checked budget, and the pre-swap refresh is withdrawn for the post-swap floor.
+**Status:** **Provisional — r8; the seam and the three passes are built.** Two adversarial rounds
+have run (r3, three lenses; r5, two lenses on the sections that changed shape) and both are
+dispositioned in the body. r4's three fatal findings and its refuted mechanism are fixed there:
+retirement is derived from what the publication removed, the locator is snapshot-bounded, the seam
+has four gaps rather than three, the memory claim is a checked budget, and the pre-swap refresh is
+withdrawn for the post-swap floor.
 **D5 is ruled: the row-space fold is primary** (owner, 2026-08-05), with a standing budget that a
 slower fold is an acceptable price for a gentler one (spec §6.1). **The two owner rulings this
 document owed against documents it defers to have landed** (2026-08-06): `architecture.md` §11.3 is
@@ -14,9 +16,13 @@ extents (r21, decision 0051). **The §5/§6 re-review ran at r5 and is
 dispositioned**, and its findings changed both sections: §5's retirement rule tests the whole
 carry-forward set, §6.1's throttle was refuted and replaced (decision 0052), and §6.2's refusal
 window is gone — a fold's aftermath is a cache miss, not a refusal (decision 0053), which also
-retires §6.3. **What remains before it becomes normative:** the invariants lens on the staging list
-of §6.2, if it is built, and on D5's rows-frozen safety claim, which has never had one. Code may be
-written against this document meanwhile; neither gates implementation of the fold itself.
+retires §6.3. **The publication seam (§4) and Rule F's retirement route (§5) are built**, ahead of
+the fold everything else in this document describes, because they are the change write-path §5.4
+requires be made in the same change as the first fold and because every other part of the fold
+publishes through them. **What remains before it becomes normative:** the invariants lens on the
+staging list of §6.2, if it is built, and on D5's rows-frozen safety claim, which has never had one.
+Code may be written against this document meanwhile; neither gates implementation of the fold
+itself.
 **Owns:** the fold — what it executes, what it carries forward, how it is published, what retires
 at it, and what a viewer pays at the flip. The prefix rewrite, the `CURRENT` flip, and
 reclamation.
@@ -31,15 +37,17 @@ lifecycle §2; decisions 0013, 0040, 0041, 0042, 0043, 0044, 0046, 0047, 0048.
 and are cited from elsewhere as `compaction §n`.
 
 **⊘ No fold exists**, and everything this document says about one is obligation rather than
-description. What *is* built are the primitives its passes compose, marked ✔ where they appear —
-the streaming segment writer and its k-way merge producer (spec §3 pass 1), the mapped
-`permutation.bin` scatter (pass 1), the streaming external-id run merge (pass 3), the refresh's
-prefix carry and its MRU ordering (spec §6.2), and probes **P2** and **P3** (spec §14). Each landed
-as merge's or the refresh's own work and is under test there; what none of them has is a caller
-that folds. **The publication seam (spec §4), the term sweep (pass 2), retirement (spec §5) and the
-operator surface (spec §9) are unbuilt**, and the seam is the one carrying the risk. Where a figure
-is quoted it is marked measured, modelled or assumed; claims about the tree were verified against
-branch `geometry/cell-plus-residual` and re-verified for each ✔.
+description. What *is* built are the primitives its passes compose and **the publication seam they
+publish through**, marked ✔ where they appear — the streaming segment writer and its k-way merge
+producer (spec §3 pass 1), the mapped `permutation.bin` scatter (pass 1), the streaming external-id
+run merge (pass 3), the refresh's prefix carry and its MRU ordering (spec §6.2), the seam's four
+gaps and Rule F's retirement route (spec §4, spec §5), and probes **P2** and **P3** (spec §14).
+**Passes 1, 2 and 3 are built too** (spec §3), and what none of them has is a caller that folds.
+**The plan, the dedicated thread that runs the passes, passes 4 and 5, retirement's *derivation*
+(spec §5's `executed` rule), reclamation (spec §8) and the operator surface (spec §9) are
+unbuilt.** Where a figure is quoted it is marked measured, modelled
+or assumed; claims about the tree were verified against branch `geometry/cell-plus-residual` and
+re-verified for each ✔.
 
 ---
 
@@ -113,7 +121,7 @@ plan-time-clone hazard applies here identically and at greater cost.
 | **delta tiers** | folded into the new base postings | post-snapshot tiers carried forward, listed |
 | **external-id runs + locator extents** | folded into one run 0 and one locator **bounded at the snapshot's entity space** (spec §3, pass 3) | post-snapshot runs carried forward, recency order preserved |
 | **dictionary extents** | — | carried forward **verbatim** (spec §3, pass 4) |
-| `deleted` | **executed**: rows dropped, postings dropped, entries retired | `live deleted − executed` published as `tombstones` |
+| `deleted` | `D₀` **executed**: its rows dropped, its postings dropped, its keys dropped | `executed ⊆ D₀` retires; `live deleted − executed` published as `tombstones` |
 | `suppressed` | untouched — rows and postings stay (Rule S) | the **live** set, serialised fresh, copied forward whole |
 | ingest buffer, WAL | untouched | untouched |
 
@@ -191,11 +199,17 @@ a corpus-sized `Vec`.
 ### Pass 1 — row space
 
 A k-way merge over every live segment's `morton.u32` and `columns.arrow`, ordered by
-`(morton, tessera_id)`, **skipping any row whose entity is in the executed tombstone set**. It
-emits `morton.u32` and `columns.arrow` for one new segment per (partition, slice), and scatters
-`perm[entity] = row` into a memory-mapped `permutation.bin`.
+`(morton, tessera_id)`, **skipping any row whose entity is in `D₀`** — the plan's tombstone clone,
+never `executed`, which does not exist until publication (spec §5). It emits `morton.u32` and
+`columns.arrow` for one new segment per (partition, slice), and scatters `perm[entity] = row` into a
+memory-mapped `permutation.bin`.
 
-**The primitive is built** (decision 0049 sequenced it here, since a streaming merge is also what
+✔ **The pass is built** — `tessera_store::fold_row_space`. Its cursor and its scalar adapter are
+shared with `execute_merge` (`segment_cursor.rs`) rather than copied: the writer being shared is
+what makes the *bytes* agree, and one definition of "a column the input lacks fails the operation"
+is what stops the two producers disagreeing about which segments they will accept.
+
+**The primitive it composes was built first** (decision 0049 sequenced it here, since a streaming merge is also what
 decouples merge's memory from `max_merged_segment_bytes`). `SegmentWriter` takes rows one at a time
 in `(morton, tessera_id)` order, spools each column to a file beside the output, and assembles the
 one record batch contracts §2.6 requires with the spools mapped as its values buffers. Its two
@@ -238,6 +252,11 @@ Two things make it bounded and correct:
   O(containers touched), and the deleted set is entity-space and sparse, so the term sweep's cost
   is the re-encode rather than the fold.
 
+✔ **The sweep is built** — `tessera_authz::sweep_term_postings`. It takes `dict_len` rather than a
+`Dict`, because with no descriptor resolution and no dictionary write the only thing it needs from
+one is how many ordinals to emit records for; a term with no data anywhere still gets an empty
+record, never a dropped ordinal, which is how `dict.len()` stays monotone across a fold.
+
 This is where the postings side of the tombstone rule is discharged, and architecture §11.3's r33
 ruling is why it is not optional: a post-fold fragment that still contained a deleted entity would
 make Rule F's retirement re-expose it. Both halves, or neither.
@@ -254,9 +273,9 @@ suite is the deliverable.
 ### Pass 3 — external ids
 
 A k-way merge of the live runs by caller key, keeping the **newest** binding on a collision
-(decision 0047; the rule `coalesce` already implements), dropping the keys of executed tombstones,
-into one run 0; and a scatter of `entity → ordinal` into a memory-mapped `ext-locator.u32` with
-`0xFFFFFFFF` for entities that never had a key.
+(decision 0047; the rule `coalesce` already implements), dropping the keys of `D₀`'s entities —
+again the plan's set, not `executed` — into one run 0; and a scatter of `entity → ordinal` into a
+memory-mapped `ext-locator.u32` with `0xFFFFFFFF` for entities that never had a key.
 
 ✔ **The merge half is built** — `tessera_store::coalesce::merge_runs`, landed with pass 1's writer
 because a merge's own run coalescence needed the same streaming shape. It holds *k* cursors over
@@ -264,10 +283,17 @@ runs already sorted by key, emits through the one `external-ids.arrow` writer
 (`tessera_store::write::RunWriter`, whose other producer is the flush), and its keep-newest
 tie-break is pinned by `coalesce_runs::a_key_in_two_runs_keeps_the_newest_binding` — a rule that had
 no direct test before, and whose reversal serves a *deleted* holder under a live caller's key with
-the right row count and no error. **What the fold still owes here is two things**: dropping the
-executed tombstones' keys, which is a filter this merge does not apply; and the **mapped** locator
-— `merge_runs` writes an in-memory `Vec` over the caller's span, which is right at a merge's span
-and is 4 GB of resident `Vec` at the fold's.
+the right row count and no error.
+
+✔ **Both halves the fold owed here are built** — `tessera_store::fold_external_id_runs`. It shares
+one keep-newest core with the coalesce, so no second implementation of the tie-break exists, and
+adds the two things a merge's span never needs: `D₀`'s keys are dropped (a tombstoned *newest*
+binding drops the key outright rather than falling back to an older one — under decision 0047 an
+older binding is already a forgotten holder, so there is nothing to fall back *to*), and the locator
+is written through a mapping (`locator.rs`, a sibling of `PermutationWriter` rather than a
+generalisation of it, because `ext-locator.u32` is headerless where `permutation.bin` is not).
+**Which storage the locator uses is a parameter, not inferred from whether the caller filters**: a
+fold with an empty `D₀` is an ordinary round and still needs the mapped one.
 
 **The locator is sized to the *snapshot's* entity space, not the live one** (r3, fidelity F1 —
 this was fatal as first written). `ExternalIdSidecar::external_id_of_checked` gives the base
@@ -321,7 +347,10 @@ On the executor, in this order.
    from the executor's counter (continuing across the prefix — contracts §2.3) and refuse-to-replace
    standing. `watermark` and `entity_id_high_water` are the **live** values passed through
    untouched, for merge's reason: deriving either from the fold's inputs moves the watermark
-   backwards past every post-snapshot entity.
+   backwards past every post-snapshot entity, and composition treats an entity at or above the
+   watermark as buffered rather than rowed, so the gap goes invisible to every principal with no
+   error. ✔ The seam refuses a regression rather than trusting the rule
+   (`geometry::check_publishable`).
 3. **Check the merge-size relation against the fold's own output.** `max_merged_segment_bytes` must
    stay strictly below the base segment's bytes or the *next startup* refuses the configuration
    (write-path §10) — and a fold *grows* the base, folding every extent into it, so the relation
@@ -344,46 +373,66 @@ On the executor, in this order.
    entity.
 7. **Rotate the WAL** (spec §5).
 
-**`publish_geometry` cannot express this today, and its own doc says so.** It calls itself
-*"compaction-shaped"* — correct when the new prefix's term index and dictionary are the same
-ones — which is precisely the premise the fold breaks. **Four** gaps must close in this change —
-write-path §5.4 found three, and this document inherited its count instead of checking (r3):
+✔ **The seam expresses this.** `publish_geometry` used to call itself *"compaction-shaped"* —
+correct only while the new prefix's term index and dictionary are the same ones, which is precisely
+the premise the fold breaks. **Four** gaps had to close, and did in one change; write-path §5.4
+found three and this document inherited its count instead of checking (r3). What each is now:
 
-- **`bundle_identity` moves onto the generation**, with the `FragmentCache` it keys. It is bound at
-  `Engine::open` for the process lifetime today, so nothing can rotate the fragment identity
-  in-process at all — and a fold published through the current seam would leave every pre-fold
-  fragment reachable by key, including the *persisted* `.frag` files, across a restart.
-- **A session's cached fragment is valid only when that identity matches the generation's.** The
-  watermark test alone cannot see a fold, which advances no watermark.
-- **The signature widens** to carry base postings, the identity and its cache, the external-id
-  index, and the retirement set.
-- **`prefix_dir` must rotate with the prefix, and today it cannot** — the fourth gap, and the one
-  with a data-loss path. It is a plain `PathBuf` captured once on both `Engine` and the write
-  executor, and `write_segments_manifest` uses it on the **deny-publication** path. Unrotated, the
-  first deny published after a flip writes its side-manifest into the prefix spec §8 is about to
-  delete: acked deny state, gone from the restore path, with no error anywhere.
+- **`bundle_identity` is on the generation**, with the `FragmentCache` it keys — `Generation::
+  fragments`, and `FragmentCache::rotate` is the only thing that changes it. It was bound at
+  `Engine::open` for the process lifetime, so nothing could rotate the fragment identity in-process
+  at all, and a fold published through that seam would have left every pre-fold fragment reachable
+  by key, including the *persisted* `.frag` files, across a restart.
+- **A session's cached fragment is valid only when that identity matches the generation's** —
+  `Engine::fragment_for` tests both identity and watermark. The watermark alone cannot see a fold,
+  which advances none.
+- **The signature is a value** — `GeometryPublication`, carrying an optional `PrefixRotation`: base
+  postings, the identity and its cache, the external-id index, and the retirement set, which travel
+  together because separating any of them is a fail-open. Retirement rides *inside* the rotation
+  rather than beside it, so retiring without rotating the identity — Rule F's fail-open in its pure
+  form — is unexpressible.
+- **`prefix_dir` is derived, not stored** — the fourth gap, and the one with a data-loss path. It
+  was a plain `PathBuf` captured once on both `Engine` and the write executor, and
+  `write_segments_manifest` uses it on the **deny-publication** path: unrotated, the first deny
+  published after a flip writes its side-manifest into the prefix spec §8 is about to delete —
+  acked deny state, gone from the restore path, with no error anywhere. The executor holds the
+  bundle *root* and joins the publishing generation's own `prefix`, so the value cannot go stale at
+  any of its eight call sites.
 
 Putting the identity and its cache **on the generation** rather than beside it is what makes the
 rule structural: a request loads one pointer and gets postings, identity and fragment cache that
-agree, exactly as I11's within-request rule already requires for geometry.
+agree, exactly as I11's within-request rule already requires for geometry. The external-id sidecar
+moved the same way and for the same reason — it was an `ArcSwap` stored one statement after the
+generation, which was sound only because a coalesce is content-preserving and a fold is not.
 
 **Swapping the cache is necessary and is not sufficient, and r1 claimed otherwise** (r3, invariants
-F2). "Unreachable by construction" is false: `RowProjectionCache::freshest_fragment` takes the
-max by `segments_version` and **ignores `prefix`**, and `SessionGeometry` holds an
+F2). "Unreachable by construction" is false: `RowProjectionCache::freshest_fragment` took the
+max by `segments_version` and **ignored `prefix`**, and `SessionGeometry` holds an
 `Arc<FrozenFragment>` outside `FragmentCache` altogether. Both are pre-fold fragment holders that a
-cache swap does not reach, so the identity comparison has to be made *at composition*, not merely
-arranged for by replacing a container.
+cache swap does not reach, so the identity comparison is made *at composition* — the fragment
+carries the identity it was built under, `fragment_for` compares it, and `freshest_fragment` is
+scoped to the live prefix.
 
 **And there is no cheap in-process open of a second prefix** (r3, fidelity F2). `Bundle`'s
 incremental constructors all work within one prefix, and `open_bundle` — the only whole-bundle
-route — digests every byte both `files` maps name and re-pays `Permutation::validate_rows`. Step 5
-above therefore owes a **fourth store constructor** that opens a prefix whose files this process
-just wrote and digested, skipping re-verification, and spec §10 must assign it.
+route — digests every byte both `files` maps name and re-pays `Permutation::validate_rows`. ✔ Step
+5 is `tessera_store::open_written_prefix`, the **fourth store constructor**: it skips those two
+checks and nothing else, on the premise that the caller wrote and digested these bytes moments ago,
+and it keeps every check on the manifest's self-consistency. `Engine::publish_rotated_prefix` is
+its one holder of that obligation, and refuses a prefix `CURRENT` does not name — the bundle
+identity *is* the digest `CURRENT` carries, so publishing an uncommitted prefix would serve geometry
+a restart could not find.
 
 ## 5. Retirement, and how far its durability reaches
 
 The executed entries leave `deleted` **in the fold's own swap** — Rule F, whose
 safety is the identity match spec §4 builds, not a stamp ordering.
+
+✔ **The route is built and the rule is not.** `Overlay::retire` is the one thing that removes from
+`deleted`, it takes only deletions and has no sibling for `suppressed`, and it is reachable only
+through a publication carrying a `PrefixRotation` — so the identity match and the retirement are
+one swap by construction. What is unbuilt is the set: `executed` below is the fold's to derive, and
+an empty one is what every caller passes today.
 
 **What "executed" means is the whole of this section, and the obvious definition is fail-open**
 (r3, invariants F1). Retiring the plan's tombstone clone `D₀` serves an acknowledged deletion,
@@ -724,15 +773,36 @@ until then they are marked as assumed in spec §14 and a deployment may set eith
 
 | | |
 |---|---|
-| `tessera-store` | ✔ the sorted-stream entry point on the segment writer — `SegmentWriter`, with `write_segment` and `execute_merge`'s k-way merge as its two producers and byte-identity between them under test; ✔ the external-id run merger — `coalesce::merge_runs`, through `RunWriter`, keep-newest pinned by test; ✔ the mapped permutation scatter — `PermutationWriter`. Still owed: the **mapped** locator scatter, which is a `Vec` sized to the caller's span today |
-| `tessera-authz` | the bitmap-shaped `encode_posting` sibling and the term sweep (pass 2) — this crate owns postings, tiers and the dictionary |
-| `tessera-build` | the `pairs.parquet` writer, reused as pass 2's side output rather than reimplemented — it is the only Parquet writer in the tree and there must not be a second |
+| `tessera-store` | ✔ `SegmentWriter`, with `write_segment`, `execute_merge`'s k-way merge and now `fold_row_space` as its three producers and byte-identity under test; ✔ the shared cursor and scalar adapter the last two merge through (`segment_cursor`); ✔ pass 1 — `fold_row_space`; ✔ pass 3 — `fold_external_id_runs`, sharing one keep-newest core with the coalesce; ✔ the mapped permutation and locator scatters — `PermutationWriter`, `locator::LocatorWriter`; ✔ `pairs.parquet`'s writer, moved here from `tessera-build` when pass 2 became its second producer; ✔ the fourth constructor — `open_written_prefix` (spec §4 step 5) |
+| `tessera-authz` | ✔ the bitmap-shaped `encode_posting` sibling; ✔ pass 2 — `sweep_term_postings`, which hands `pairs.parquet`'s relation to a callback because this crate cannot reach the Parquet writer (see below); ✔ `FragmentCache::rotate` and the identity a `FrozenFragment` carries (spec §4) |
+| `tessera-build` | a consumer of `PairsParquetWriter` now rather than its owner (see the rule below) — still the only crate that *builds* a bundle from source, and still the only Parquet reader |
+| `tessera-lifecycle` | ✔ `Overlay::retire` — Rule F's one route out of `deleted`, with no sibling for `suppressed` (spec §5) |
 | `tessera-engine::compact` | plan, execute, publish — the shape `flush.rs` / `merge.rs` / `coalesce.rs` already establish, and the fourth caller of the same publication discipline |
-| `tessera-engine::session` | the seam: `bundle_identity` and the fragment cache onto `Generation`, and the widened publication |
+| `tessera-engine::session` | ✔ the seam: `bundle_identity`, the fragment cache and the external-id index onto `Generation`; `GeometryPublication` and its `PrefixRotation`; `publish_rotated_prefix`; the bundle root in place of a captured prefix directory |
 | `tessera-server` | `POST /control/compact`, the three gauges, the free-space precondition |
 
 `scripts/check-layers.sh` is unaffected: the engine already depends on both store and authz, and
 the fold adds no publisher — it goes through the executor like everything else.
+
+**The rule this table follows: a writer for a bundle artefact lives in `tessera-store`** (owner
+ruling, 2026-08-06). Six of the seven already did — `SegmentWriter`, `PermutationWriter`,
+`RunWriter`, `LocatorWriter`, `write_segments_manifest` — and `PairsParquetWriter` did not, for the
+single reason that a build was its only producer until pass 2 became its second. It is in
+`tessera-store` now, and `tessera-build` imports it.
+
+That was forced rather than chosen. Pass 2's postings half must live in `tessera-authz`, which
+cannot reach `tessera-build` — that crate already depends on `tessera-authz`, so the reverse edge is
+a cycle cargo refuses — and the fold's driver in `tessera-engine` has no edge to it either. The two
+alternatives were an `engine → build` dependency, which links the whole offline build pipeline into
+the serving binary to reach one writer and inverts the layering, and driving pass 2 from the CLI,
+which is not on the path `POST /control/compact` or the automatic trigger take at all and so would
+mean a second pass over the corpus. **Skipping the file was never among them** — contracts §2.4
+makes it optional to *read*, and pass 2's own argument is that a fold which omits it leaves a bundle
+the conformance suite cannot run against.
+
+**Pass 5 inherits the rule.** `MANIFEST.json`'s only writer is `tessera-build`'s `write_manifests`
+today, and the fold must write one for its new prefix — the same wall, reached from the same place,
+and the same answer.
 
 ## 11. Invariants and the register
 
@@ -925,6 +995,43 @@ P2 dropped its pre-swap arm: D2 was withdrawn at r3 (spec §13), so there is no 
 compare against and what the probe measures is the post-swap pass alone.
 
 ## Appendix R — Review record
+
+**r8 (2026-08-06) — the three passes are built, and §3 was contradicting §5 in four places.** Not a
+review round. Passes 1, 2 and 3 landed (`fold_row_space`, `sweep_term_postings`,
+`fold_external_id_runs`); §3 and §10 become description for them and obligation for the rest.
+
+**The correction that mattered more than the code.** §2's carry-forward table and §3's descriptions
+of passes 1 and 3 all said those passes skip rows in the **`executed`** tombstone set. §5 rules the
+opposite — *"passes 1–3 execute over `D₀`; only retirement uses `executed ⊆ D₀`"* — and r5 is where
+that was settled; §3's prose was never updated to match, so the document has been carrying the
+fail-open the r3 review removed, in the sections an implementer reads first. Corrected at all four
+sites. The lesson is the one this corpus already states: a ruling recorded only in Appendix R and
+not written back into the body is a ruling the next reader will not find.
+
+**A placement this round surfaced and the owner ruled the same day.** Pass 2's postings half must
+live in `tessera-authz`, which cannot reach the only Parquet writer — `tessera-build` already
+depends on `tessera-authz`, so the reverse edge is a cycle — and the fold's driver in
+`tessera-engine` has no edge to it either, so nothing could write `pairs.parquet` at all. Ruled: **a
+bundle artefact's writer lives in `tessera-store`**, which six of the seven already did;
+`PairsParquetWriter` moved there and `tessera-build` imports it. Pass 5 inherits the rule for
+`MANIFEST.json` (§10).
+
+**r7 (2026-08-06) — the seam is built, ahead of the fold, and §4 becomes description.** Not a
+review round: the four gaps §4 enumerated are closed, so the section that stated them as obligation
+now states them as mechanism. `bundle_identity` and the `FragmentCache` it keys are on the
+generation, as is the external-id sidecar; a `GeometryPublication` carries an optional
+`PrefixRotation` holding the base postings, that cache, the sidecar and the retirement set together,
+because separating any of them is a fail-open and retirement without the identity rotation is Rule
+F's in its purest form; the identity comparison is made at composition, where the two holders
+outside `FragmentCache` are (`Engine::fragment_for`, and `freshest_fragment`, which took the max by
+`segments_version` and ignored the prefix); the prefix directory is derived from the publishing
+generation, closing the deny-publication data-loss path; and §4 step 5's fourth store constructor is
+`open_written_prefix`, which skips the digest sweep and `validate_rows` and nothing else. Two things
+this round added that §4 did not ask for and both are guards on rules it states: a publication whose
+watermark regresses is refused rather than trusted, and `publish_rotated_prefix` refuses a prefix
+`CURRENT` does not name. **What is still obligation**: everything else — the plan, the five passes,
+retirement's `executed` derivation, reclamation, the operator surface. §5's route is built; its rule
+is not.
 
 **r6 (2026-08-06) — the flip stops refusing, and §6.3 is declined rather than deferred.** Two owner
 rulings taken on the r5 findings. **Decision 0052**: §6.1's IO rate had no site — every fold input

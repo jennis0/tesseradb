@@ -82,4 +82,4 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `slices-and-multi-table.md` | Provisional — under review | 8 |
 | `system-architecture.md` | Normative — r14 | 26 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `write-path.md` | Normative for the write path. Owner sign | 24 |
+| `write-path.md` | Normative for the write path. Owner sign | 25 |

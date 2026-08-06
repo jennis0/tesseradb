@@ -398,7 +398,13 @@ impl Engine {
         // two enforcement representations drifting under stale-serve. Falls back to a build only
         // when this session has no resident entry at all, which is establishment. **No projection
         // is constructed either way**: this is a read of the cache, never a claim on it.
-        let fragment = match self.row_projection_cache.freshest_fragment(session.token_id) {
+        // **Scoped to this generation's prefix**, so a fold's flip cannot answer an
+        // entity-space question from a fragment built against the term index it replaced — see
+        // `RowProjectionCache::freshest_fragment`.
+        let fragment = match self
+            .row_projection_cache
+            .freshest_fragment(session.token_id, &generation.prefix)
+        {
             Some(fragment) => fragment,
             None => self.fragment_for(session, &generation)?,
         };
@@ -433,7 +439,11 @@ impl Engine {
                     scalars: row_to_point(segment, row.raw() - row_base, declared_scalars).scalars,
                     // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
                     // every other store-backed call in this crate uses (see `Engine::open`).
-                    external_id: self.external_id_of(entity).map_err(EngineError::Store)?,
+                    // Against the generation this request loaded, never a second `load()`: the
+                    // sidecar is per-generation now, and a fold rewrites it.
+                    external_id: self
+                        .external_id_of_in(&generation, entity)
+                        .map_err(EngineError::Store)?,
                 }));
             }
         }
