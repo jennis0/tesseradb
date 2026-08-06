@@ -856,6 +856,10 @@ fn list_segments_manifests(partition_dir: &Path) -> Result<Vec<u64>> {
     Ok(found)
 }
 
+/// **The one path-escape rule in this crate**, shared with [`crate::reclaim`] rather than copied:
+/// a second implementation of what counts as a safe manifest path is a second thing to get right,
+/// on the boundary where getting it wrong walks outside the bundle root.
+///
 /// Join a manifest-supplied, forward-slash `files`-map key onto `base` one component at a
 /// time, rejecting anything that could escape `base`: a leading `/` (absolute), a backslash
 /// (not R1's convention and a Windows path-separator ambiguity), or any `.`/`..`/empty
@@ -863,7 +867,7 @@ fn list_segments_manifests(partition_dir: &Path) -> Result<Vec<u64>> {
 /// instead of erroring, and a naive `.replace('/', separator)` would happily turn
 /// `"../../etc/passwd"` into a working traversal — this walks the split path so no single
 /// string ever reaches `PathBuf::join` unchecked.
-fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
+pub(crate) fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
     if rel.is_empty() || rel.starts_with('/') || rel.contains('\\') {
         return Err(StoreError::UnsafePath {
             what: "files map path".to_string(),

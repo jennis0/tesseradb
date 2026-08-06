@@ -3141,7 +3141,7 @@ impl Executor {
         write_deny_state(&mut manifest, &live.overlay);
 
         let manifest_n = self.allocate_manifest_n();
-        if let Err(e) = crate::flush::write_segments_manifest(
+        if let Err(e) = tessera_store::write_segments_manifest(
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
@@ -3284,7 +3284,7 @@ impl Executor {
         write_deny_state(&mut manifest, &live.overlay);
 
         let manifest_n = self.allocate_manifest_n();
-        if let Err(e) = crate::flush::write_segments_manifest(
+        if let Err(e) = tessera_store::write_segments_manifest(
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
@@ -4899,7 +4899,7 @@ impl Executor {
             write_deny_state(&mut manifest, &live.overlay);
             let n = self.allocate_manifest_n();
             if let Err(e) =
-                crate::flush::write_segments_manifest(
+                tessera_store::write_segments_manifest(
                     &self.prefix_dir(&live),
                     partition,
                     n,
@@ -4999,7 +4999,7 @@ impl Executor {
         // here discards the flush: its files become orphans nothing references, the buffer is
         // retained, the next tick re-plans. The same posture as every other flush failure, and
         // the reason the write precedes the swap.
-        if let Err(e) = crate::flush::write_segments_manifest(
+        if let Err(e) = tessera_store::write_segments_manifest(
             &self.prefix_dir(&live),
             &completed.partition,
             manifest_n,

@@ -2,9 +2,9 @@
 //! against (contracts §2.4).
 //!
 //! **A bundle artefact, so its writer lives with the others.** `SegmentWriter`, `PermutationWriter`,
-//! `RunWriter`, `LocatorWriter` and `write_segments_manifest` all sit in this crate because they
-//! write files contracts §2 defines; this one wrote from `tessera-build` alone for as long as a
-//! build was the only thing that produced it. Compaction's pass 2 is the second producer, and it
+//! `RunWriter`, `LocatorWriter`, `write_segments_manifest` and `write_manifest_json` all sit in this
+//! crate because they write files contracts §2 defines; this one wrote from `tessera-build` alone
+//! for as long as a build was the only thing that produced it. Compaction's pass 2 is the second producer, and it
 //! cannot reach `tessera-build` — that crate already depends on `tessera-authz`, so the edge only
 //! runs one way, and the fold's driver in `tessera-engine` has no edge to it either. Moving the
 //! writer down to the crate both already depend on is the placement the other six artefacts already

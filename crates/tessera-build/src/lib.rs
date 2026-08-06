@@ -46,7 +46,7 @@ use tessera_store::manifest::{
     PartitionDescriptor, Quantisation, SegmentDescriptor, SegmentsManifest, SliceDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
-use tessera_store::PairsParquetWriter;
+use tessera_store::{write_current, write_manifest_json, PairsParquetWriter};
 use tessera_types::{
     EntityId, IdentityKey, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
     SMALL_TERM_THRESHOLD_DEFAULT,
@@ -613,24 +613,15 @@ fn write_manifests(
         },
         files: manifest_files,
     };
-    let manifest_path = prefix_dir.join("MANIFEST.json");
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|e| BuildError::Invalid(format!("serialising MANIFEST.json: {e}")))?;
-    write_bytes(&manifest_path, &manifest_bytes)?;
+    // Both bundle artefacts, not written here: MANIFEST.json and CURRENT are pass 5's writers
+    // too (compaction §10's rule paragraph — a bundle artefact's writer lives in
+    // `tessera-store`), so this build and a fold cannot serialise the same shape two different
+    // ways and disagree about what a manifest digests to.
+    let manifest_digest = write_manifest_json(&prefix_dir, &manifest)?;
 
     // Everything the bundle names is now durable; `CURRENT` is written last and by rename, so
     // a reader either sees the previous bundle or this complete one, never a half-built prefix.
-    let current = CurrentPointer {
-        prefix: PREFIX.to_string(),
-        manifest_digest: hex_sha256(&manifest_bytes),
-    };
-    let current_bytes = serde_json::to_vec_pretty(&current)
-        .map_err(|e| BuildError::Invalid(format!("serialising CURRENT: {e}")))?;
-    let current_tmp = args.out.join("CURRENT.tmp");
-    write_bytes(&current_tmp, &current_bytes)?;
-    let current_path = args.out.join("CURRENT");
-    fs::rename(&current_tmp, &current_path).map_err(|e| BuildError::io(&current_path, e))?;
-    fsync_dir(&args.out)?;
+    write_current(&args.out, PREFIX, &manifest_digest)?;
 
     Ok(BuildReport {
         prefix: PREFIX.to_string(),
@@ -982,10 +973,6 @@ fn digest_file(path: &Path) -> Result<FileDigest> {
         size,
         sha256: hex_digest(hasher.finalize().as_slice()),
     })
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    hex_digest(Sha256::digest(bytes).as_slice())
 }
 
 fn hex_digest(digest: &[u8]) -> String {

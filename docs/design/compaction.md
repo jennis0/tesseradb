@@ -785,10 +785,12 @@ until then they are marked as assumed in spec §14 and a deployment may set eith
 the fold adds no publisher — it goes through the executor like everything else.
 
 **The rule this table follows: a writer for a bundle artefact lives in `tessera-store`** (owner
-ruling, 2026-08-06). Six of the seven already did — `SegmentWriter`, `PermutationWriter`,
-`RunWriter`, `LocatorWriter`, `write_segments_manifest` — and `PairsParquetWriter` did not, for the
-single reason that a build was its only producer until pass 2 became its second. It is in
-`tessera-store` now, and `tessera-build` imports it.
+ruling, 2026-08-06), and it is now true of all of them rather than most. `SegmentWriter`,
+`PermutationWriter`, `RunWriter` and `LocatorWriter` were already there. Three were not, each for
+its own accident of history: `PairsParquetWriter` because a build was its only producer until pass 2
+became its second; `MANIFEST.json` and `CURRENT` for the same reason; and `write_segments_manifest`
+because flush, merge, coalesce and the deny lane all call it and it grew where they live. All three
+moved.
 
 That was forced rather than chosen. Pass 2's postings half must live in `tessera-authz`, which
 cannot reach `tessera-build` — that crate already depends on `tessera-authz`, so the reverse edge is
@@ -800,9 +802,10 @@ mean a second pass over the corpus. **Skipping the file was never among them** �
 makes it optional to *read*, and pass 2's own argument is that a fold which omits it leaves a bundle
 the conformance suite cannot run against.
 
-**Pass 5 inherits the rule.** `MANIFEST.json`'s only writer is `tessera-build`'s `write_manifests`
-today, and the fold must write one for its new prefix — the same wall, reached from the same place,
-and the same answer.
+**Pass 5 spends it.** `write_manifest_json` returns the hex digest of the exact bytes it wrote,
+which is what `CURRENT` must carry *and* what the bundle identity is (spec §4), so the fold gets its
+new identity from the same call that commits the manifest rather than re-reading the file to derive
+it.
 
 ## 11. Invariants and the register
 
