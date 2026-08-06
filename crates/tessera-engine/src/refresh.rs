@@ -222,6 +222,16 @@ pub(crate) struct RefreshDeps {
     pub(crate) pool: Arc<rayon::ThreadPool>,
     /// The `segments_version` whose refresh pass is in flight, or [`NO_REFRESH`].
     ///
+    /// **⊘ A fold's publication must not arm this** (decision 0053). The rule, so a future
+    /// publication kind does not have to re-litigate it: *shed only while the refresh pass is
+    /// shorter than the rebuild it would save.* Flush and merge satisfy it — a ~0.7 s pass against a
+    /// measured 4 550 ms rebuild, so shedding turns a 4.5 s inline build into a 1 s retry. A fold
+    /// inverts it by two orders (a ~180 s pass against a 10.7 s build), so arming this would refuse
+    /// every session for minutes to avoid a burst that clears in seconds — and the burst is already
+    /// bounded by `ComputeGate`, by `single_flight`, and by `RowProjection::new` fanning out across
+    /// the whole pool so concurrent rebuilds contend rather than multiply. After a fold, a missing
+    /// projection is an ordinary cache miss.
+    ///
     /// **A generation, not a boolean, and the difference only became reachable at compaction.**
     /// A flush's pass is ~0.7 s against a 90 s tick, so two never overlapped; a fold's is 76 s–3
     /// minutes against that same tick (compaction §6.2), so one or two flushes publish *inside*

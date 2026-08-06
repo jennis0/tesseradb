@@ -10,9 +10,13 @@ slower fold is an acceptable price for a gentler one (spec §6.1). **The two own
 document owed against documents it defers to have landed** (2026-08-06): `architecture.md` §11.3 is
 corrected — a fold *does* invalidate the term index and every mask fragment (r34, decision 0050) —
 and contracts §2.1 is narrowed to one *base* segment per partition-slice plus the fold's in-flight
-extents (r21, decision 0051). **What remains before it becomes normative:** a re-review of spec §5
-and §6 only, both of which changed shape at r4. Code may be written against it meanwhile; that
-re-review gates promotion, not implementation.
+extents (r21, decision 0051). **The §5/§6 re-review ran at r5 and is
+dispositioned**, and its findings changed both sections: §5's retirement rule tests the whole
+carry-forward set, §6.1's throttle was refuted and replaced (decision 0052), and §6.2's refusal
+window is gone — a fold's aftermath is a cache miss, not a refusal (decision 0053), which also
+retires §6.3. **What remains before it becomes normative:** the invariants lens on the staging list
+of §6.2, if it is built, and on D5's rows-frozen safety claim, which has never had one. Code may be
+written against this document meanwhile; neither gates implementation of the fold itself.
 **Owns:** the fold — what it executes, what it carries forward, how it is published, what retires
 at it, and what a viewer pays at the flip. The prefix rewrite, the `CURRENT` flip, and
 reclamation.
@@ -529,112 +533,76 @@ fold rewrote. Every resident session needs a **full** projection build: a measur
 primitive at 10⁹, 10.7 s end to end. Fragments must be rebuilt too, because the identity rotates:
 a measured ~200 ms per credential, flat in tier count (P2).
 
-**The refresh runs after the swap, and the window is stated rather than engineered away.** *(r1
-specified a pre-swap warm and D2 ruled for it; the r3 round refuted it on four independent
-mechanisms and it is withdrawn — spec §13.)* Decision 0044's refresh is post-swap: the generation
-pointer moves, `refresh_in_flight` is armed, and a pool task rebuilds resident entries while
-requests for a key it has not reached are shed 429 `Retry-After: 1`.
+**The flip does not refuse anything** (decision 0053). The generation pointer moves, and a session
+whose projection is missing afterwards takes an **ordinary cache miss** and rebuilds — exactly as a
+cold session does. The fold's publication does not arm the shed.
 
-**The window, measured rather than asserted.** `refresh_resident` is a serial loop; at the ~16
-wide-grant entries a 2 GiB projection-cache bound holds at 10⁹, and a full rebuild per entry
-(4 550 ms synthetic primitive / 10.7 s end-to-end, plus ~200 ms of fragment), the pass runs **~76 s
-to ~3 minutes**. That is the *last* session's wait; the mean is about half. Entry size and rebuild
-time both scale with fragment cardinality, so the two cancel and the window is
-**≲ the cache byte budget × 37–85 ms/MB**, tunable by a dial the operator already sets — but read
-that as an **upper bound taken at a dense grant, not a cancellation**. Rebuild time is O(fragment
-cardinality); an entry's charged size is its Roaring *serialised* size, which is ~2 B per element in
-array containers and ~0.125 B in bitmap containers, so ms/MB swings by an order with grant sparsity
-rather than staying constant. Two further wedges between the dial and the window are in the cache
-itself: a per-entry floor over-charges small entries, and the weight function under-estimates
-array-container footprint.
+The rule that decides it, so the next publication kind need not re-litigate: **shed only while the
+refresh pass is shorter than the rebuild it would save.** Flush and merge satisfy it — a ~0.7 s pass
+against a measured 4 550 ms rebuild, so shedding turns a 4.5 s inline build into a 1 s retry, and
+they keep the gate unchanged. A fold inverts it by two orders (a ~180 s pass against a 10.7 s
+build), so shedding would refuse everyone for minutes to avoid a burst that clears in seconds.
+Decision 0044's F5 finding established the gate against a *merge*; this document inherited it for a
+fold without re-checking, and §6.2 previously claimed to satisfy 0044 *verbatim* when 0044's word is
+*only* and it scopes to same-key racers.
 
-**New sessions are shed too, and they pay more than the tail, not less.** Establishment reaches the
-same rung and reads the same claim. But a new session has no resident entry, so the refresh — which
-iterates residents — will never produce its key: it is shed for the *whole* window and then pays a
-full inline build. Its wait is `window + 10.7 s`. The "mean is about half" above holds over the
-resident population only.
+**The total work is the same or less.** A refresh pass rebuilds every resident entry; the
+miss-driven path rebuilds only what someone asks for, so idle sessions never pay. And the herd F5
+named is already bounded three times over — `ComputeGate` bounds requests inside the engine,
+`single_flight` stops two requests building one key, and `RowProjection::new` already fans out
+across the whole pool, so concurrent rebuilds contend rather than multiply.
 
-Three things make that the right trade rather than a capitulation:
+**What a viewer therefore pays at the flip is latency, not errors**: the first request per session
+after a fold rebuilds inline (a measured 10.7 s end to end at 10⁹, contending), and every request
+after it is served normally. That is 0043's *"not observable in a viewer's latency or in a viewer's
+errors"* traded down to the first of the two, which is the direction the rule permits.
 
-- **⊘ It is a widening of decision 0044's 429 arm, and needs an owner ruling this document does not
-  have.** 0044 rules *"a bounded 429 residual **only** for same-key racers during a merge's refresh
-  window"*, and says nothing about compaction; 0043's rule is stronger still — maintenance *"must
-  not be observable in a viewer's latency **or in a viewer's errors**"*. This turns a same-key racer
-  residual into a population-wide refusal window of up to three minutes, new sessions included. The
-  rarity argument is sound — a daily-class fold against a 90 s tick is three orders of separation,
-  and the budget was never a promise of zero — but soundness is not the same as being ruled, and
-  r5 was right that the earlier text claimed satisfaction it does not have.
-- **`refresh_resident` carries a superseded prefix forward rather than skipping it**, which it did
-  not until this was built: the guard skipped every key whose `prefix` differed, so a fold's
-  refresh would have produced *nothing*, cleared the flag, and left every session taking an inline
-  rebuild instead of a 429 — the stampede decision 0043 forbids, arriving through the mechanism
-  written to honour it. The rule is now `Carry::{Skip, Rebuild, Derive}`, and **`Rebuild` rather
-  than simply deleting the guard** is the other half of it: neither `extends_to` nor
-  `can_rebase_extents` can see a prefix, and the first answers `true` unconditionally for a
-  projection covering no extents, so a bare deletion would union a new prefix's extents onto rows
-  projected through the old prefix's `permutation.bin`. The published key takes the generation's
-  prefix too, or the pass would insert where no request will look.
-- **Refresh in most-recently-used order.** Built: `ready_entries` walks the recency index in
-  reverse rather than yielding map order. The tail still exists and lands on the sessions that
-  asked least recently.
+**A staging list is licensed as an optimisation and is not required** (decision 0053, and it is not
+built). Because a miss is merely a miss, the fold may precompute the new row space's entries into a
+**second projection cache with its own byte budget** — populated most-recently-used and filtered to
+recently-active sessions, which is what bounds its memory to a fraction of the serving cache rather
+than a copy of it — and swap it in at the flip, dropping the old list. Dropping the old list is what
+makes stale-serve's unsoundness across a fold structural: there is no superseded entry left for
+rung 2 to find.
 
-Ordering the refresh does not make the window disappear, and this document does not pretend
-otherwise: at 10⁹ with a large projection cache a fold is a **minutes-long degraded read window**,
-and that is the price of moving rows.
+> **The trap, if it is built.** `session_geometry`'s rung 1 returns a `Peek::Ready` entry **without**
+> checking `extends_to` — an entry under the live key is assumed to be over the live row space. A
+> precomputed entry built before a flush landed does not cover the extents carried forward at the
+> flip, so serving it answers an **incomplete mask**: items missing, no error. The coverage check
+> belongs at the flip, on the executor, which is the same thread that publishes flushes and so sees
+> a fixed extent set — extend the short ones (a measured 44.6 ms) or drop them to a miss.
 
-### 6.3 What would shorten the flip, and what it would cost
+**The window that remains is the rebuild, not a refusal.** `refresh_resident` still runs after the
+swap to fill entries proactively, most-recently-used first; what changed is that it is no longer
+load-bearing, so its duration bounds how many sessions pay a rebuild rather than how long anyone is
+refused.
 
-Recorded because the ruling at spec §6.1 invites it and because the options differ by an order of
-magnitude in risk. In ascending order of what they put at stake:
+### 6.3 Retained-row-space migration — declined
 
-- **Slice-scoped folds.** A row projection is keyed per *(token, slice)*, so folding one slice at a
-  time divides the flip by the slice count. ⊘ No build emits a second slice today, so this buys
-  nothing yet — but it is a reason for the fold to be written slice-at-a-time from the start rather
-  than retrofitted when slices land.
-- **A smaller projection cache before a fold.** The window is ≈ the cache byte budget ×
-  37–85 ms/MB, so draining the cache shortens it proportionally. **Declined**: the sessions it
-  drops still pay, as inline rebuilds on their next request, which is worse per session and merely
-  moves the cost off the gauge that measures it.
-- **Retained-row-space migration** — the one that removes the window rather than shortening it.
-  Keep the superseded row space alive for the refresh pass, serve an unmigrated session from it,
-  and defer retirement until the last session has moved.
+**Declined at decision 0053, not deferred.** It existed to remove a refusal window that §6.2 now
+removes more cheaply. Keeping the superseded row space alive for the refresh pass, serving an
+unmigrated session from it and deferring retirement until the last session moved, was the largest
+structural change anything in this document proposed: two live row spaces, and — the real cost —
+**every row-space read path taking its row space from the one the request selected rather than from
+"the bundle"**, which is a discipline across a dozen call sites rather than a mechanism, and where a
+fail-open would hide.
 
-  *An earlier drafting of this bullet rejected it on the ground that a retained generation's
-  overlay would freeze at the swap, so a deny accepted during the window would miss the geometry
-  still serving. That objection is wrong and the correction is the owner's:* **the overlay is
-  entity-space, and a fold does not renumber the entity axis** (spec §0), so one `Overlay` is valid
-  for both row spaces and is simply shared. What is genuinely per-geometry is the *row-space* deny
-  mask, and the answer is to derive it twice — `derive_denied` already takes `(overlay, bundle)`,
-  so a deny window calls it once per live row space, at O(denied) each and with its existing
-  debug-time equality assertion intact per mask.
+Two further obstacles the r5 review found, recorded because they would have been discovered late:
+`session_geometry` is *handed* a `slice_data` its caller already resolved from the bundle, so
+knowing which row space a session is on before picking the bundle is a signature change through it
+and everything beneath; and `KEEP_SUPERSEDED_GENERATIONS = 1` prunes an old-row-space entry one
+publication later — ~90 s at a default tick — so the retained row space would outlive the entries
+that select it.
 
-  The right shape is then **one generation carrying two row spaces**, not two generation pointers:
-  a request still loads exactly one pointer and gets old rows, new rows, the one overlay and both
-  masks as a consistent snapshot, so I11's within-request rule is preserved rather than
-  negotiated. Retirement and the removal of the old row space happen in the **same** swap, which
-  dissolves the drain problem by the Arc-snapshot argument generations already rest on: a request
-  holding the previous generation sees old rows *and* standing entries, one holding the next sees
-  neither, and no ordering produces a mix.
+What survives from it is the observation that made it seem necessary and is still true: **the
+overlay is entity-space, and a fold does not renumber the entity axis** (spec §0), so one `Overlay`
+is valid for both row spaces. Nothing now needs that, but it is why the idea looked cheap.
 
-  **What it actually costs**, stated so the trade is visible: two mask derivations per deny window;
-  `freshest_fragment` must respect `prefix`, which spec §4 already requires; both bundles mapped
-  and the old prefix unreclaimable for the window; **the selection happens in the wrong order
-  today** — `session_geometry` is handed a `slice_data` its caller already resolved from the bundle,
-  so knowing which row space a session is on before picking the bundle is a signature change through
-  it and everything beneath; **`KEEP_SUPERSEDED_GENERATIONS = 1` prunes an old-row-space entry one
-  publication later**, i.e. ~90 s into a window §6.2 sizes at up to three minutes, so the retained
-  row space would outlive the entries that select it; and — the real one — **every row-space read
-  path must take its row space from the one the request selected rather than from "the bundle"**. That
-  last is not a mechanism but a discipline across the read path, and it is where a fail-open would
-  hide. Sessions on the old row space also do not see items flushed during the window, which is
-  fail-closed staleness of the same class as rung 2's and bounded by the same pass.
-
-  **Not built, and gated on measurement rather than on doubt** (spec §14, P2). The post-swap
-  window is proportional to resident entries, so at a handful of sessions it is seconds and this
-  buys little; at 10⁹ with a full projection cache it is minutes and this is the only thing that
-  removes it. Measure the flip against a realistic session population first. If it is built, it
-  goes to the invariants lens before a line of it is written — two live row spaces is the largest
-  structural change anything in this document proposes.
+Two smaller options are also declined, and for the record: **slice-scoped folds** buy nothing yet
+(⊘ no build emits a second slice), though they remain a reason to write the fold slice-at-a-time
+from the start rather than retrofit it when slices land; and **draining the projection cache before
+a fold** shortens the rebuild population proportionally but merely moves the cost onto the sessions
+it drops, which now pay a miss either way.
 
 The rest of what a viewer observes:
 
@@ -957,6 +925,19 @@ P2 dropped its pre-swap arm: D2 was withdrawn at r3 (spec §13), so there is no 
 compare against and what the probe measures is the post-swap pass alone.
 
 ## Appendix R — Review record
+
+**r6 (2026-08-06) — the flip stops refusing, and §6.3 is declined rather than deferred.** Two owner
+rulings taken on the r5 findings. **Decision 0052**: §6.1's IO rate had no site — every fold input
+is an `Mmap::map` — so the mitigation is `madvise(MADV_SEQUENTIAL)`, a hint with no rate and no
+device constant; the write side is named as a separate, still-open mechanism. **Decision 0053**: a
+fold's publication does not arm the shed, so a missing projection after the flip is an ordinary
+cache miss rather than a 429. The rule generalises — *shed only while the refresh pass is shorter
+than the rebuild it would save* — and flush and merge, which satisfy it, are unchanged; 0044's F5
+finding had been measured against a merge and inherited by a fold without re-checking. That removes
+the 76 s–3 min refusal window §6.2 previously stated as the floor, and with it the reason §6.3
+existed, so retained-row-space migration is **declined**. A best-effort staging list is licensed in
+its place and is not required; the trap that rung 1 does not check `extends_to` is recorded at the
+claim, because serving a short precomputed entry answers an incomplete mask with no error.
 
 **r5 (2026-08-06) — the two owed rulings landed, and the §5/§6 re-review found five things that
 change what gets built.** Two adversarial lenses (invariants-and-fail-open on §5,

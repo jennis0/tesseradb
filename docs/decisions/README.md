@@ -70,3 +70,4 @@ prevent.
 | [0050](0050-a-fold-invalidates-the-term-index-and-every-fragment.md) | 2026-08-06 | A fold invalidates the term index and every mask fragment |
 | [0051](0051-a-compaction-emits-one-base-segment-plus-its-flight.md) | 2026-08-06 | A compaction emits one base segment, plus whatever its flight published |
 | [0052](0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md) | 2026-08-06 | The fold's page-cache mitigation is `MADV_SEQUENTIAL`, not a read throttle |
+| [0053](0053-a-folds-aftermath-is-a-cache-miss-not-a-refusal.md) | 2026-08-06 | A fold's aftermath is a cache miss, not a refusal |

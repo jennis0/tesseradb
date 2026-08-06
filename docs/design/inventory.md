@@ -68,7 +68,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `architecture.md` | Normative — r34 | 16 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
-| `compaction.md` | Provisional — under review | 7 |
+| `compaction.md` | Provisional — under review | 6 |
 | `concurrency-lifecycle.md` | Normative — r8 | 14 |
 | `conformance.md` | Normative — r8 | 15 |
 | `contracts.md` | Normative — r21 | 15 |
