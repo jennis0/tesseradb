@@ -1,6 +1,6 @@
 # The write path — design
 
-**Date:** 2026-08-03 · **Promoted:** 2026-08-04
+**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r7, 2026-08-05
 **Status:** **Normative** for the write path. Owner sign-off 2026-08-04; the adversarial review
 ran the same day across three lenses with every finding dispositioned (Appendix R); §13.4's
 rulings landed as decisions 0044 and 0045; §13.3's corrections and §13.1's supersession edits are
@@ -986,7 +986,22 @@ day. **Three of the four are bounded; segments are not**, which is exactly the s
 segments of equal power-of-two size class over `max(size, segment_floor_bytes)` (16 MiB), total
 within `max_merged_segment_bytes`, first window wins (predictable from the manifest beats
 marginally better); adjacency is `hi < lo`, deliberately not `hi + 1 == lo`, because
-deleted-at-flush entities leave legitimate gaps. Execution — row-count preserving (no later
+deleted-at-flush entities leave legitimate gaps.
+
+**The ladder saturates, and what it saturates at is a read-path constant** (decision 0049;
+`merge_selection.rs` pins it). The cap is on the *total of the inputs* and a merge preserves row
+count, so the ladder climbs in ×`tier_width` steps from the floor and stops at the last step within
+the cap — 16 → 64 → 256 MiB at the defaults, after which four 256 MiB segments total 1 GiB and
+nothing further ever qualifies. **Live segment count then settles at corpus bytes ÷ the saturation
+size and grows linearly with the corpus**: ~152 at 10⁹, which is ~73 ms on a 300-tile viewport
+against a 135–164 ms baseline. Immaterial at 10⁷ — which is why the soak, settling at 6, cannot
+show it. This is the price of §11.3's bounded-rewrite rule rather than a defect, but the bound is
+*corpus-proportional*, not constant, and §11.3's "the operation that bounds it is a merge" must be
+read that way. **Raising the cap is declined until merge streams** (0049): it trades linearly
+against the measured 4.4–4.9× memory multiplier, so ~20 segments at 10⁹ would model to a 9–10 GB
+transient. **And `tier_width` moves the fixpoint in the counter-intuitive direction** — width 8
+reaches 128 MiB, overshoots one rung earlier and leaves *twice* as many segments, so widening the
+tier to merge less often raises what every viewport pays. Execution — row-count preserving (no later
 extent's `row_base` moves; dropping a row is a fold and folds are compaction's), **byte-exact
 through the code**: `unsplit32` recovers axes as a bit permutation so merged codes are identical
 to their inputs' (dequantise-requantise would move every point up to a quantisation step per
@@ -1089,6 +1104,9 @@ is not thereby unsafe, only refused.
 
 ⊘ **Compaction does not exist.** No fold, no prefix rewrite, no `CURRENT` flip, no
 re-ranking, no batch-grid change. Everything in this section is obligation, not description.
+A **provisional** design answering this section's obligation list is drafted at
+[`compaction.md`](compaction.md) (2026-08-05, under review, nothing built); this section stays the
+boundary statement and wins until that document is promoted.
 
 Compaction is the **invariant-bearing** half flush and merge are defined by contrast with: it
 folds — snapshot-covered delta tiers into base postings, tombstoned rows out of row space **and
@@ -1165,9 +1183,9 @@ fold's asymmetry, the diverged-node publication gate, and the reader's honour-be
 | `ingest_max_batch_rows` / `_bytes` | 10,000 / 16 MiB | 422 / route-level refusal (decision 0036) |
 | `overlay_soft_limit` | 500,000 | the pressure gauge; alarms, does not act (⊘ no fold to schedule) |
 | `wal_hard_limit_bytes` | 8 GiB | a **startup relation** on the command queue's worst case (+1 GiB deny headroom); ⊘ not a runtime ceiling — nothing measures the live log (ruled nice-to-have) |
-| `segment_floor_bytes` | 16 MiB | below this, segments compare equal for merge selection |
-| `tier_width` | 4 | segments per size class before a merge is selected |
-| `max_merged_segment_bytes` | unset | cap on one merge; **must be strictly below the base segment's bytes** — refused at startup otherwise |
+| `segment_floor_bytes` | 16 MiB | below this, segments compare equal for merge selection. With `tier_width`, sets where the size ladder saturates — a read-path constant (§7, decision 0049) |
+| `tier_width` | 4 | segments per size class before a merge is selected. **Widening it leaves *more* live segments**, not fewer (§7) |
+| `max_merged_segment_bytes` | unset (256 MiB in the engine) | cap on one merge; **must be strictly below the base segment's bytes** — refused at startup otherwise. Also the saturation size, hence live segment count ≈ corpus ÷ this. **Not raised until merge streams** — it bounds selection-time file bytes, and peak memory is a measured 4.4–4.9× those (decision 0049) |
 | `DENY_WINDOW_MAX_ENTRIES` (const) | 1,000 | the deny window, and the handler's chunk size |
 | `OVERLAY_PUBLICATION_MAX_WINDOWS` (const) | 64 | the deny-publication liveness floor |
 | `KEEP_SUPERSEDED_GENERATIONS` (const) | 1 | row-projection retention — exactly what the patch needs |
@@ -1339,6 +1357,15 @@ item, moves no point and keeps every binding (exists — `merge.rs`); 43 a merge
 with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`).
 
 ## Appendix R — Review record
+
+**r7 (2026-08-05) — a measured correction to §7, not a design change** (decision 0049). The merge
+size ladder **saturates**: live segment count settles at corpus bytes ÷ the saturation size and
+grows linearly with the corpus — ~152 at 10⁹ — where this document previously implied merge bounded
+the axis outright. Pinned by test. §7 and §10 gain the constant, the reason the cap is not raised
+(the measured memory multiplier, not the cap, is the binding constraint), and the warning that
+widening `tier_width` raises the count. The gauge that would make it observable is ⊘ unbuilt. No
+mechanism changed and no invariant is affected; §8's compaction boundary gains segment count as a
+fold trigger by reference to [`compaction.md`](compaction.md) §9.
 
 **r6 (2026-08-04) — promoted to normative, and the mechanism it was gated on is built.** Owner
 sign-off; §13.1's supersession edits **performed** (`flush-and-merge.md` deleted; the lifecycle

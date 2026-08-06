@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 33
+**Status:** Draft for review — revision 34
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 **Specified versus implemented.** This document specifies a target, and parts of that target are not built. Every such claim carries a **⊘ Specified, not implemented** marker at the point it is made, saying what exists instead and what a reader must not assume meanwhile; the full set is tabulated in the generated `docs/design/inventory.md`. A marker's absence is a claim that the machinery exists.
@@ -745,7 +745,7 @@ Two properties of the row-space layout, stated because that literature offers ea
 
 *(As built, at write-path §7: `tier_width` 4, a 16 MiB floor, a 256 MiB cap. The reference points this policy was drawn from — ten segments per tier, a 5 GB maximum merged segment, a 2 MB floor — size a different deployment and are not this one's.)*
 
-A compaction rewrites the permutation and the columns, publishes them under a new segment-set version, and lets in-flight requests drain (**I11**). At single-node scale it does **not** invalidate the term index, masks or generating sets.
+A compaction rewrites the permutation and the columns, publishes them under a new segment-set version, and lets in-flight requests drain (**I11**). **It also rewrites the term index and invalidates every mask fragment**, and both are what make it a compaction rather than a large merge *(r34, correcting r33 and earlier: this sentence read "at single-node scale it does **not** invalidate the term index, masks or generating sets", which was true only of a rows-only compaction that no longer exists — and which r33's own deletion clause below already contradicted)*. The fold subtracts the tombstone bitmap from every term, so a retired entity's postings go with its row; and the new prefix rotates the bundle identity every cached fragment is keyed by, so no pre-fold fragment survives it. **Both halves, or neither** — a fold that dropped the row and left the postings would let the overlay entry retire while the entity was still in the term index, which is retirement re-exposing the item it retired. Generating sets are untouched. See `compaction.md` §4 for the publication seam this requires, and decision 0050.
 
 Deletions are tombstones: add the entity to the overlay with *deny* disposition, notify the caller of affected labels (§2.5), and at the next compaction drop its row and fold its postings out of the term index. Never recycle the ID (**I9**).
 
@@ -1147,6 +1147,17 @@ Both were checked exhaustively against explicit quantification over all well-for
 
 ## Appendix G — Revision history
 
+- **r34** — **§11.3's compaction sentence is corrected: a fold *does* invalidate the term index
+  and every mask fragment** (2026-08-06, owner ruling; decision 0050). The sentence denying it
+  described a rows-only compaction that no longer exists, and r33's own deletion clause — *"at
+  the next compaction drop its row **and fold its postings out of the term index**"* — already
+  contradicted it two paragraphs later. The contradiction was found by `compaction.md`'s r3
+  adversarial round, which could not resolve it because this document outranks that one. Nothing
+  about the mechanism changes; what changes is that the specification now says what the mechanism
+  has to do, and why doing only half of it is fail-open. The cost of the correction is the
+  publication seam `compaction.md` §4 enumerates — four gaps, of which rotating `bundle_identity`
+  in-process is the largest — and that cost is now the specification's, not a mechanism
+  document's to absorb quietly.
 - **r33** — **§11.3's two owner rulings, taken** (2026-08-05; r32 raised both and settled
   neither). **The section does not shrink to a pointer.** Three things in it are the
   specification's and cannot live only in a document that defers to it: the requirement that

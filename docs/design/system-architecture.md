@@ -1,6 +1,6 @@
 # Tessera — System Architecture: Storage, Serving and Lifecycle
 
-**Status:** Draft r12 — r11 plus [`write-path.md`](write-path.md)'s §13.1 supersession, performed at its promotion (2026-08-04): §6.2, §6.4 and §6.5 are reduced to their security and architectural statements plus pointers, and §6.7's merge-scheduler paragraph is deleted in favour of write-path §7. Both halves of merge now publish. §6.6's retirement rule is restated as Rule S / Rule F, the stamp ledger and its floor being deleted from the spec rather than deferred
+**Status:** Draft r13 — r12 plus §6.6's refuted deletion sentence corrected (Appendix R). r12 was r11 plus [`write-path.md`](write-path.md)'s §13.1 supersession, performed at its promotion (2026-08-04): §6.2, §6.4 and §6.5 are reduced to their security and architectural statements plus pointers, and §6.7's merge-scheduler paragraph is deleted in favour of write-path §7. Both halves of merge now publish. §6.6's retirement rule is restated as Rule S / Rule F, the stamp ledger and its floor being deleted from the spec rather than deferred
 
 **Companion to** `architecture.md` (the specification, which owns the invariants and the *why*) and the capability epics in this repository's issues (which own sequencing — the phase model they replaced is archived). This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the architecture design; `contracts §n` to `contracts.md`; `lifecycle §n` to `concurrency-lifecycle.md`. Where this document and the design disagree, the design is right; where this document and `contracts.md` disagree, contracts §0.3's recorded deviations govern.
 
@@ -454,7 +454,7 @@ visibility promise.**
 
 ### 6.6 The overlay and the deny-retirement rule
 
-Predicate changes, deletions and suppressions become overlay entries with *evaluate* or *deny* dispositions, term sets inline, owned per partition because they carry entity IDs. Overlay size is a first-class metric: I1's composition cost is linear in it, and its configured bound triggers fragment-refresh scheduling rather than refusal — the same asymmetry as §4.2's backpressure. Deletion additionally removes the entity from postings, enqueues affected labels for invalidation, and leaves a row tombstone for compaction. IDs are never reused (I9), and the allocator is fuzzed for exactly that.
+Predicate changes, deletions and suppressions become overlay entries with *evaluate* or *deny* dispositions, term sets inline, owned per partition because they carry entity IDs. Overlay size is a first-class metric: I1's composition cost is linear in it, and its configured bound triggers fragment-refresh scheduling rather than refusal — the same asymmetry as §4.2's backpressure. Deletion additionally enqueues affected labels for invalidation. **What hides a deleted item is its overlay entry and nothing else** — there is no second marker: `tombstones` in the side-manifest is that entry's durable serialisation, not a separate row-space object, and a deleted entity's postings and row both stand until the compaction fold removes them together *(r13, correcting a sentence that read as an immediate postings subtraction and invented a "row tombstone" — architecture §11.3's r33 ruling makes the order load-bearing in both directions, and contracts §2.4 and write-path §5.3 both contradict the subtraction as load-bearing: base postings are frozen and delta tiers append-only, so subtracting one **is** the fold)*. IDs are never reused (I9), and the allocator is fuzzed for exactly that.
 
 Overlay precedence between the dispositions is stated once, in write-path §5.3, and is not restated here. The sequence `delete → suppress → unsuppress` must not re-expose a deleted item, and three independent **stores** make that structurally impossible rather than merely tested.
 
@@ -625,6 +625,16 @@ Recorded in the design's own style, because each will otherwise be re-proposed.
 **Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across slices (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity [index-ordinal split](deferred-index-ordinal-split.md), which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
 
 ## Appendix R — Review record
+
+**r13** (2026-08-05) — **one refuted sentence removed from §6.6, found by a reader's question
+rather than by a review.** It said deletion *"removes the entity from postings … and leaves a row
+tombstone for compaction"*. Both halves were wrong and both had already been corrected elsewhere:
+architecture §11.3's r33 ruled that removing postings at deny time is the fail-open reading
+(base postings are frozen, delta tiers append-only, so subtracting one **is** the fold), and there
+is no row-space tombstone — `tombstones` in the side-manifest is the durable serialisation of the
+overlay's `deleted` bitmap, which is the same fact in a second home rather than a second
+mechanism. The stale sentence was the likeliest source of the belief that deletion has two markers.
+No mechanism changed; §6.6's retirement rules and the three-stores argument are untouched.
 
 **r11** (2026-08-04) is a §6 marker refresh applied with the write-path consolidation, not a
 design change: §6.4's "flush does not exist" comes out (built — epic #3; `flush_max_items`

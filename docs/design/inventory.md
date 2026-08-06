@@ -65,12 +65,13 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `architecture.md` | Normative — r33 | 16 |
+| `architecture.md` | Normative — r34 | 16 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
+| `compaction.md` | Provisional — under review | 6 |
 | `concurrency-lifecycle.md` | Normative — r7 | 14 |
 | `conformance.md` | Normative — r7 | 15 |
-| `contracts.md` | Normative — r19 | 15 |
+| `contracts.md` | Normative — r20 | 15 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |
@@ -79,6 +80,6 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `measurement.md` | Provisional — under review | 4 |
 | `per-point-attributes.md` | Provisional — under review | 6 |
 | `slices-and-multi-table.md` | Provisional — under review | 7 |
-| `system-architecture.md` | Normative — r12 | 26 |
+| `system-architecture.md` | Normative — r13 | 26 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `write-path.md` | Normative for the write path. Owner sign | 24 |
+| `write-path.md` | Normative for the write path. Owner sign | 25 |

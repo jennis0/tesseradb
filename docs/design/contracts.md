@@ -1,6 +1,6 @@
 # Tessera — Contracts Specification
 
-**Status:** Draft r19 — r18 plus the rest of what the two maintenance publications put on disc: the coalesced directory, merged segments, the flush's own dictionary extent, and recency as list position for external-ID runs. No field is added, removed or retyped (Appendix R)
+**Status:** Draft r20 — r19 plus one narrowing: §2.1's "exactly one segment per partition-slice" becomes "one **base** segment, plus a compaction's in-flight extents", because a fold that never blocks flush cannot emit one. No field is added, removed or retyped (Appendix R)
 **Owns:** the byte- and schema-level definition of the boundaries named in the system architecture §4: the bundle format, the service API, the plugin ABI and the wire format. `§n` refers to the design (r30); `SA §n` to the system architecture (r10). **Precedence:** the design is the specification and this document defers to it; the eleven recorded deviations in §0.3 govern where this document and the *system architecture* differ, and are proposed back to it. Deviations 6 and 8 have a design companion already applied at the design's r21, so they record an alignment rather than an outstanding proposal.
 
 ---
@@ -122,7 +122,9 @@ reconstructing canonically is the combination that hides it.
 
 
 
-**One segment per (partition, slice) at build.** `tessera build` and every compaction emit exactly one segment per partition-slice — a build *is* a full compaction. Additional segments exist only between compactions: appended by streaming flushes, and collapsed by **merge**, which replaces a window of them with one merged segment through the same segment writer (write-path §7). This is what makes the slice-level `permutation.bin`'s single-segment addressing (2.6) sufficient. *(r16, correcting r6: a **streamed** segment carries **no permutation file**. r6 specified one; the built flush deliberately writes none — the extent's bounds ride the side-manifest's `segments` entry, and its row map is rebuilt at open from the segment's own `tessera_id` column by inverting the identity key, a per-segment permutation file sized to the bundle's entity space being the wrong shape for a few thousand ids at the top of it. Compaction still folds everything back into one segment and one fresh slice-level permutation.)*
+**One base segment per (partition, slice) at build.** `tessera build` and every compaction emit exactly one **base** segment per partition-slice — a build *is* a full compaction — plus, for a compaction, whatever extents were published during its flight. Additional segments exist only between compactions: appended by streaming flushes, and collapsed by **merge**, which replaces a window of them with one merged segment through the same segment writer (write-path §7). This is what makes the slice-level `permutation.bin`'s single-segment addressing (2.6) sufficient: it addresses the base, and every other segment is an extent carrying its own.
+
+*(r20, narrowing r16 and earlier, which said "exactly one segment per partition-slice" flat. **A compaction that never blocks flush cannot emit one.** A fold runs for minutes to hours over the whole corpus, flushes publish into the old prefix throughout, and those segments are carried forward at the flip — so a fold ends with one base segment plus a tick's worth of extents, and the only way to make the old sentence true would be to block ingest for the fold's duration, which `compaction.md` §1 and decision 0043 both forbid. The property the sentence protected is unharmed: carried-forward segments are extents addressed exactly as flush segments already are between compactions, so nothing about the permutation's sufficiency changes. Owner ruling, 2026-08-06; decision 0051.)* *(r16, correcting r6: a **streamed** segment carries **no permutation file**. r6 specified one; the built flush deliberately writes none — the extent's bounds ride the side-manifest's `segments` entry, and its row map is rebuilt at open from the segment's own `tessera_id` column by inverting the identity key, a per-segment permutation file sized to the bundle's entity space being the wrong shape for a few thousand ids at the top of it. Compaction still folds everything back into one **base** segment and one fresh slice-level permutation — everything, that is, except the extents its own flight published, which stay extents; see the r20 note above.)*
 
 ### 2.2 MANIFEST.json
 
@@ -468,6 +470,18 @@ The WAL; frozen mirrors, derived tile tables and candidate lists (deviation 3); 
 - **The reader must refuse a non-canonical `SEGMENTS-<n>.json` name** (§2.1). The grammar is ruled — unpadded — and the writer already conforms; the reader still parses a padded name leniently and then fails to open it, which is the silent path the ruling exists to close.
 
 ## Appendix R — Review record
+
+**r20** narrows one sentence in §2.1 and changes nothing on disc (2026-08-06, owner ruling;
+decision 0051). *"Every compaction emit[s] exactly one segment per partition-slice"* becomes *one
+**base** segment, plus whatever extents the compaction's flight published*. The finding is
+`compaction.md`'s r3 adversarial round: a fold that never blocks flush **cannot** satisfy the old
+sentence, because flushes publish into the old prefix for its whole minutes-to-hours duration and
+are carried forward at the flip — so the alternatives were to narrow this or to make a compaction
+a write outage, which `compaction.md` §1 and decision 0043 both forbid. **No format consequence,
+which is why this is a narrowing and not a `bundle_format` bump**: carried-forward segments are
+extents addressed exactly as flush segments already are between compactions, and the slice-level
+permutation's single-segment addressing was always addressing the *base*. Readers, writers and
+the oracle are unaffected.
 
 **r19** finishes r18 on layout rather than on fields, from the write-path promotion's audit
 (2026-08-04). **No field is added, removed or retyped, and no reader behaviour changes.**

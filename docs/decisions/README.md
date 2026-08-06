@@ -61,3 +61,12 @@ prevent.
 | [0041](0041-pins-become-a-staleness-stamp.md) | 2026-08-03 | A pin becomes a staleness stamp, not retained geometry |
 | [0042](0042-a-dictionary-extent-never-repeats-a-descriptor.md) | 2026-08-03 | A dictionary extent never repeats a descriptor, and the loader enforces it |
 | [0043](0043-geometry-maintenance-never-blocks-a-request.md) | 2026-08-03 | Flush, merge and compaction never block a request; their effects are invisible to the viewer |
+| [0044](0044-invisible-means-stale-serve-plus-background-refresh.md) | 2026-08-04 | "Invisible" means stale-serve plus background refresh; merge splits, and publishes as its own swap |
+| [0045](0045-inert-config-keys-are-deleted.md) | 2026-08-04 | Inert configuration keys are deleted, not kept parsed |
+| [0046](0046-the-priority-column-is-cut.md) | 2026-08-04 | The `priority` column is cut from `columns.arrow` |
+| [0047](0047-edit-is-delete-plus-reingest.md) | 2026-08-04 | Edit is delete + re-ingest, and a deleted entity is forgotten at the boundary |
+| [0048](0048-no-deployments-exist-so-delete-rather-than-support.md) | 2026-08-05 | No deployments exist, so delete rather than support |
+| [0049](0049-the-merge-ladder-saturates-and-the-cap-stays.md) | 2026-08-05 | The merge ladder saturates at the cap, and the cap stays until the merge streams |
+| [0050](0050-a-fold-invalidates-the-term-index-and-every-fragment.md) | 2026-08-06 | A fold invalidates the term index and every mask fragment |
+| [0051](0051-a-compaction-emits-one-base-segment-plus-its-flight.md) | 2026-08-06 | A compaction emits one base segment, plus whatever its flight published |
+| [0052](0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md) | 2026-08-06 | The fold's page-cache mitigation is `MADV_SEQUENTIAL`, not a read throttle |
