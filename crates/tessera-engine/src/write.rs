@@ -67,7 +67,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use tessera_authz::{DeltaTier, Dict};
+use tessera_authz::{DeltaTier, Dict, FragmentCache};
 use tessera_lifecycle::alloc::{high_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
@@ -5297,7 +5297,28 @@ impl Executor {
             buffer: Arc::clone(&previous.buffer),
             denied,
         };
+        // **Listed before the swap, deleted after it** (compaction §8). At this instant every
+        // persisted fragment is under the identity about to be superseded, so the listing *is* the
+        // set §8 names — which is not selectable by name, since a cache entry is a SHA-256 over the
+        // identity and a hash does not invert. Taking it here and deleting below closes both
+        // hazards at once: a listing taken before the swap can never name an entry a request wrote
+        // after it, and nothing is deleted at all if the swap does not happen.
+        let superseded = rotation
+            .as_ref()
+            .map(|_| previous.fragments.superseded_entries())
+            .unwrap_or_default();
+
         let _published = self.publish(next, started);
+
+        if !superseded.is_empty() {
+            let swept = FragmentCache::sweep(&superseded);
+            tracing::info!(
+                swept,
+                named = superseded.len(),
+                "the fold's identity rotated; the persisted fragments under the superseded one are \
+                 unreachable and have been reclaimed"
+            );
+        }
 
         // The retention pass, at the swap rather than at a reclaim — see
         // `RowProjectionCache::prune_generations_below` for why depth 1 rather than depth 0, which

@@ -592,6 +592,64 @@ impl FragmentCache {
         }
     }
 
+    /// Every persisted entry present now — the set a rotation supersedes.
+    ///
+    /// # Why the sweep is "everything", and why it is two calls rather than one
+    ///
+    /// Compaction §8 asks a fold to sweep the persisted cache "of entries under superseded
+    /// identities", and that set is **not selectable by name**: an entry is `<canonical key>.frag`,
+    /// the key is a SHA-256 over the bundle identity among other things, and a hash does not
+    /// invert. Nothing beside the file carries the identity either — the `.meta` sidecar holds a
+    /// watermark, a length and a digest.
+    ///
+    /// It does not need to be selectable. **At the instant the identity rotates, every existing
+    /// entry is under the superseded one**, so "everything present now" *is* the set §8 names,
+    /// exactly rather than approximately. That is what makes this correct without the format change
+    /// the alternative would need (owner ruling, 2026-08-06).
+    ///
+    /// **List before the swap, delete after it**, which is why this is separate from
+    /// [`Self::sweep`]. Deleting before the swap discards a cache that is still the live one if the
+    /// publication then fails; deleting after it, by re-listing, would race a request that
+    /// authorised in between and wrote a *new* entry under the *new* identity. A listing taken
+    /// before the swap names only superseded entries and can never name a later one, so the two
+    /// hazards close together.
+    ///
+    /// A directory that cannot be read yields an empty list rather than an error: the sweep is
+    /// reclamation of derived data, and a fold must not fail because a cache directory was
+    /// unreadable.
+    pub fn superseded_entries(&self) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext == "frag" || ext == "meta")
+            })
+            .collect()
+    }
+
+    /// Delete the entries [`Self::superseded_entries`] named. Returns how many were removed.
+    ///
+    /// **An associated function, not a method**, because by the time it runs the cache it belongs
+    /// to has been replaced: the live one is the rotated cache, and sweeping through *it* would
+    /// read as sweeping its own entries. The paths are the whole of what this needs.
+    ///
+    /// **Unlinking an entry a live request still holds is safe.** A `FrozenFragment` is a mapping,
+    /// and on POSIX a mapping outlives the directory entry; a `Session` or an in-memory slot
+    /// holding one keeps reading the same bytes. What the unlink removes is the name, which nothing
+    /// will compute again.
+    ///
+    /// Failures are counted out rather than propagated, for [`Self::superseded_entries`]' reason.
+    pub fn sweep(entries: &[PathBuf]) -> usize {
+        entries
+            .iter()
+            .filter(|path| std::fs::remove_file(path).is_ok())
+            .count()
+    }
+
     /// The bundle identity every key in this cache is computed under — the MANIFEST digest of the
     /// prefix whose postings its fragments were unioned from. Compared against
     /// [`FrozenFragment::identity`] wherever a fragment a caller already holds is composed.

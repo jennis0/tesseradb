@@ -711,6 +711,19 @@ Two other reclamations belong to the same pass and would otherwise be forgotten:
 fragment-cache directory is swept of entries under superseded identities (nothing else will ever
 name them), and the fold's own spool files go on every exit path.
 
+✔ **The fragment sweep is built, and the set it names is not selectable the way this sentence
+implies.** A cache entry is `<canonical key>.frag`, and the key is a SHA-256 over the bundle
+identity among other things — a hash does not invert, and nothing beside the file carries the
+identity, so "the entries under superseded identities" cannot be picked out by name. It does not
+need to be: **at the instant the identity rotates, every existing entry is under the superseded
+one**, so *everything present* is that set exactly rather than approximately (owner ruling,
+2026-08-06 — the alternative, putting the identity in the filename, is a format change that buys
+only the ability to sweep later). The listing is taken **before** the swap and deleted **after**
+it, which closes both hazards at once: a listing taken earlier can never name an entry a request
+wrote after the swap under the *new* identity, and a publication that fails deletes nothing.
+Unlinking an entry a live request still holds is safe — a `FrozenFragment` is a mapping, and on
+POSIX the mapping outlives the directory entry.
+
 **Peak disc is old prefix + new prefix — roughly 2× live bytes — on top of whatever orphans already
 stand.** The fold refuses to start when free space is below its estimated output plus a margin. An
 operation that fills the device takes the write path down with it: a deny's append fails, the

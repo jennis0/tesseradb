@@ -343,10 +343,11 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
         "and it persists under the new identity's key"
     );
     assert!(
-        frag_before.exists(),
-        "the old file is left on disc — sweeping superseded identities is reclamation's \
-         (compaction §8), not the rotation's. It is unreachable because nothing computes its \
-         name again, which is the property this test is about"
+        !frag_before.exists(),
+        "the pre-rotation entry is swept at the flip (compaction §8): at that instant every \
+         persisted entry is under the superseded identity, which is what makes 'everything \
+         present' the exact set — a cache entry is a SHA-256 over the identity, so the set is not \
+         selectable by name"
     );
 
     // Across a restart: the identity comes from `CURRENT`, so a fresh process over the same cache
