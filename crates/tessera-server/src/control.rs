@@ -1594,6 +1594,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let fragment_cache: tessera_engine::FragmentCacheStats = state.engine.fragment_cache_stats();
     let ingest = state.ingest_admission.status();
     let sessions = state.sessions.lock().stats();
+    // **`tessera_engine::SliceSegments`, for `FragmentCacheStats`' reason** — the server may not
+    // depend on `tessera-store`, where the segment set actually lives.
+    let segments: Vec<tessera_engine::SliceSegments> = state.engine.live_segment_counts();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
         "compute": {
@@ -1659,6 +1662,29 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "max_batch_rows": state.ingest_max_batch_rows,
             "max_batch_bytes": state.ingest_max_batch_bytes,
         },
+        // **A read-path constant, not a maintenance counter** (decision 0049). Merge's size ladder
+        // saturates at `max_merged_segment_bytes`, so this settles at corpus bytes ÷ the saturation
+        // size and then tracks the corpus — ~152 segments at 10⁹, which a 300-tile viewport pays
+        // ~73 ms for against a 135–164 ms baseline. It is immaterial at 10⁷ and a ~50% regression by
+        // 10⁹, so it is invisible to a soak and needs a gauge. Rising past the low hundreds means
+        // merge has stopped bounding it and only a fold will reset it.
+        //
+        // ⊘ **And no fold exists**, so today this gauge has no lever: an operator watching it climb
+        // has nothing to act with except `max_merged_segment_bytes`, which decision 0049 declines to
+        // raise until merge streams. It is published anyway, because the constant being
+        // unobservable is how it went unnoticed to 10⁹ in the first place.
+        //
+        // A list rather than a scalar because the trigger compaction §9 specifies is per
+        // (partition, slice); this build emits one of each, so the list has one element and will not
+        // always.
+        "segments": segments
+            .iter()
+            .map(|s| serde_json::json!({
+                "partition": s.partition,
+                "slice": s.slice,
+                "count": s.segments,
+            }))
+            .collect::<Vec<_>>(),
         // **It alarms; it does not act.** ⊘ Specified, not implemented: no compaction fold brings
         // an over-limit overlay back down, so `soft_limit_alarms` rising is a signal that the
         // overlay is deep and never a mechanism that makes it shallower. `depth` is read off the

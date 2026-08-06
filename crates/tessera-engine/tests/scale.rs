@@ -81,6 +81,23 @@
 //! of these is asserted — a latency or size bound in a test that runs on developer machines is a
 //! flake generator, and the useful form is a number a reader compares against the memo. They are
 //! printed because the alternative is a separate harness that would drift from this one.
+//!
+//! ## The two compaction probes
+//!
+//! [`the_flip_costs_what_the_resident_population_costs`] (**P2**) and
+//! [`a_streaming_read_of_the_whole_bundle_against_a_live_viewport`] (**P3**) live here rather than
+//! as standalone binaries so their figures re-run from the tree. Neither needs a compaction fold —
+//! **there is none** — and each measures the term the fold's cost is made of rather than the fold:
+//!
+//! * **P2** gates whether retained-row-space migration is built at all (`compaction.md` §6.3). The
+//!   fold's flip is `N` resident entries × a **full** projection rebuild, because a fold permutes
+//!   row space globally and neither of the refresh's cheaper rungs survives it. Both per-entry
+//!   costs and the population term are measurable today.
+//! * **P3** measures what a concurrent viewport pays while the whole bundle is streamed past the
+//!   page cache (`compaction.md` §6.1) — the design's weakest assumption, now measured. **It does
+//!   not set a throttle rate, and an earlier reading of it that did was refuted:** the fold's
+//!   inputs are all mappings, so there are no reads to sleep between. See `stream_bundle` for what
+//!   the rate arms do and do not license.
 mod common;
 
 use std::collections::BTreeMap;
@@ -785,4 +802,564 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
     );
 
     eprintln!("scale: {total} items, {:?} end to end", started.elapsed());
+}
+
+// =============================================================================================
+// P2 — the flip's cost against a resident-session population (compaction §14)
+// =============================================================================================
+
+/// **P2 — what a compaction's flip costs, as a function of resident sessions.**
+///
+/// This is the measurement `compaction.md` §6.3 gates **retained-row-space migration** on — the
+/// one option that removes the flip's degraded window rather than shortening it, and the largest
+/// structural change anything in that document proposes (two live row spaces, and a discipline
+/// across every row-space read path). §6.3's own words: *"at a handful of sessions it is seconds
+/// and this buys little; at 10⁹ with a full projection cache it is minutes and this is the only
+/// thing that removes it. Measure the flip against a realistic session population first."*
+///
+/// # There is no fold, and this does not need one
+///
+/// A flip's window is `N` resident entries × the per-entry refresh, run by a **serial** loop
+/// (`refresh_resident`), with every request for a key the pass has not reached shed 429 for its
+/// duration. Two of those three terms are measurable against an ordinary publication today, and
+/// the third — which rung a fold forces — is settled by construction rather than by measurement:
+/// a fold permutes row space globally and rewrites `permutation.bin`, so `extends_to` and
+/// `can_rebase_extents` both refuse and every entry takes the full rebuild. So the probe measures
+/// **both** per-entry costs against the same population and the same corpus:
+///
+/// | | what it is | which publication pays it |
+/// |---|---|---|
+/// | `derive` | the refresh pass over `N` resident entries, per entry | every flush and merge |
+/// | `cold` | a fresh session's first whole-extent viewport | **a fold**, per resident entry |
+///
+/// `N × cold` is the flip. The point of measuring `derive` beside it is that it is the number a
+/// reader already has intuitions about — if the two are within an order of magnitude the fold's
+/// window is unremarkable, and if `cold` dominates then §6.3 is a live question.
+///
+/// # What it asserts, which is not the figures
+///
+/// A latency bound here would be a flake generator on a developer machine (see this module's doc).
+/// What it asserts is that the mechanism under measurement actually ran: every resident entry was
+/// refreshed, and the requests fired into the refresh window were **shed and then satisfied**
+/// rather than failing — which is decision 0043's bounded 429 rather than the stampede it forbids.
+///
+/// ```text
+/// cargo test -p tessera-engine --release --test scale -- --ignored --nocapture \
+///     the_flip_costs_what_the_resident_population_costs
+/// ```
+///
+/// | variable | default | what it is |
+/// |---|---|---|
+/// | `TESSERA_P2_BASE` | 1,000,000 | items in the base build |
+/// | `TESSERA_P2_BATCH` | 250,000 | items ingested to force a publication |
+/// | `TESSERA_P2_SESSIONS` | 16 | resident sessions — the count a 2 GiB projection bound holds at 10⁹ |
+#[test]
+#[ignore = "minutes, and wants a release build — see the module doc"]
+fn the_flip_costs_what_the_resident_population_costs() {
+    let base = env_usize("TESSERA_P2_BASE", 1_000_000) as u64;
+    let batch = env_usize("TESSERA_P2_BATCH", 250_000);
+    let sessions = env_usize("TESSERA_P2_SESSIONS", 16);
+    // Sized for the retry loop below rather than for one round: this figure only sets θ's target
+    // high enough to saturate it, so over-provisioning it costs nothing and under-provisioning it
+    // would turn the assertions into statements about selection.
+    let total = base + (8 * batch) as u64;
+    eprintln!("P2: base={base} batch={batch} sessions={sessions}");
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (points, pairs) = (tmp.path().join("points.parquet"), tmp.path().join("pairs.parquet"));
+    build_fixture_n(&root, &points, &pairs, base);
+    let _ = std::fs::remove_file(&points);
+    let _ = std::fs::remove_file(&pairs);
+
+    let engine = engine_at(tmp.path(), &root, total);
+
+    // **A resident population, not merely a session population.** The refresh is O(cache
+    // residency) by construction (decision 0035's shape), so a session that has never asked for a
+    // viewport contributes nothing to the flip. Each of these is authorised separately — a token
+    // id is per-session, so each gets its own projection key — and then warmed with one
+    // whole-extent request, which is what puts an entry in the cache.
+    let resident: Vec<Session> = (0..sessions)
+        .map(|_| engine.authorise(&full_coverage_credential()).unwrap())
+        .collect();
+    for session in &resident {
+        viewport_k(&engine, session, [0.0, 0.0, 1000.0, 1000.0], 2, SWEEP_K);
+    }
+    eprintln!("  {} resident entries warmed", resident.len());
+
+    // ---- `derive`: the refresh pass over the whole population -------------------------------
+    //
+    // Timed from the publication rather than from the flush request, so what is measured is the
+    // pass and not the flush that preceded it.
+    //
+    // **The buffer must be non-empty at the instant the flush is requested**, or the flush is
+    // skipped, nothing publishes, no refresh pass runs, and the wait below simply never returns.
+    // A tick that flushed these rows mid-ingest is not an error — it means this round is already
+    // published — so another round is ingested and the timing taken over that one. Bounded, so a
+    // configuration where this never holds fails with a diagnosis rather than a ten-minute hang.
+    let mut rounds_used = 0usize;
+    let (flushes, refreshes_before) = (0..5)
+        .find_map(|round| {
+            ingest_rows(&engine, round, batch);
+            rounds_used = round + 1;
+            let stats = engine.write_executor_stats();
+            (stats.buffered_items > 0).then(|| (stats.flushes, engine.refreshes()))
+        })
+        .expect("five rounds all flushed themselves mid-ingest — nothing is left to time");
+    engine.request_flush();
+    wait_until("the flush to publish", || {
+        engine.write_executor_stats().flushes > flushes
+    });
+    let t_refresh = Instant::now();
+
+    // **Fired into the window, from the established sessions, while the pass is running.** This is
+    // the observable decision 0043 is about: a request for a key the serial loop has not reached
+    // is shed 429 rather than starting a second build of the same projection. Retried until it
+    // succeeds, and both the count of refusals and the longest wait are reported.
+    let shed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let waits: Vec<Duration> = std::thread::scope(|scope| {
+        let handles: Vec<_> = resident
+            .iter()
+            .map(|session| {
+                let engine = &engine;
+                let shed = std::sync::Arc::clone(&shed);
+                scope.spawn(move || {
+                    let start = Instant::now();
+                    let deadline = start + Duration::from_secs(600);
+                    loop {
+                        match engine
+                            .viewport(session, ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], SWEEP_K))
+                        {
+                            Ok(_) => return start.elapsed(),
+                            Err(tessera_engine::EngineError::ProjectionBuilding)
+                            | Err(tessera_engine::EngineError::FragmentBuilding) => {
+                                shed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                assert!(Instant::now() < deadline, "shed for ten minutes");
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(e) => panic!("a request in the refresh window failed: {e}"),
+                        }
+                    }
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    wait_until("the refresh pass to produce every resident entry", || {
+        engine.refreshes() >= refreshes_before + sessions as u64
+    });
+    let derive_pass = t_refresh.elapsed();
+
+    // ---- `cold`: what a fold makes every entry pay ------------------------------------------
+    //
+    // A fresh session's first whole-extent viewport is a fragment build plus `RowProjection::new`
+    // over the live row space — exactly the work a fold's refresh does per resident entry, since a
+    // prefix change refuses both of the cheaper rungs. Sampled rather than taken once: the first
+    // one warms mapped pages the rest reuse, which is also true inside a real refresh pass.
+    let cold_samples = 4.min(sessions).max(1);
+    let mut cold_total = Duration::ZERO;
+    for _ in 0..cold_samples {
+        let fresh = engine.authorise(&full_coverage_credential()).unwrap();
+        let t = Instant::now();
+        viewport_k(&engine, &fresh, [0.0, 0.0, 1000.0, 1000.0], 2, SWEEP_K);
+        cold_total += t.elapsed();
+    }
+    let cold = cold_total / cold_samples as u32;
+    let derive = derive_pass / sessions as u32;
+
+    let longest = waits.iter().copied().max().unwrap_or(Duration::ZERO);
+    let mean_wait = waits.iter().sum::<Duration>() / waits.len().max(1) as u32;
+    eprintln!(
+        "  derive: {derive_pass:?} over {sessions} entries = {derive:?}/entry \
+         (the flush and merge path)"
+    );
+    eprintln!(
+        "  cold:   {cold:?}/entry over {cold_samples} samples (what a fold forces, every entry)"
+    );
+    eprintln!(
+        "  observed window: {} shed, longest wait {longest:?}, mean {mean_wait:?}",
+        shed.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    // **The figure §6.3 is gated on.** The refresh loop is serial, so the flip is the sum and the
+    // *last* session's wait is the whole of it; the mean is about half.
+    eprintln!(
+        "  ⇒ projected flip at {sessions} resident entries: {:?} (last session), {:?} (mean)",
+        cold * sessions as u32,
+        cold * sessions as u32 / 2
+    );
+
+    // The mechanism ran, which is what makes the figures above about anything.
+    assert!(
+        engine.refreshes() >= refreshes_before + sessions as u64,
+        "the refresh pass must reach every resident entry — a pass that skipped them would report \
+         a flip cost of zero and leave every session rebuilding inline"
+    );
+    assert_eq!(
+        masked_total(&engine, &resident[0]),
+        base + (rounds_used * batch) as u64,
+        "and every established session sees the flushed batch once the pass has landed"
+    );
+}
+
+/// Ingest `batch` rows and publish them — [`ingest_round`] without its probes and, crucially,
+/// **without its wait on the background refresh**.
+///
+/// The two probes need geometry on disc, not a refreshed session, and waiting for the refresh
+/// couples them to a race `ingest_round` lives with because the scale test drives a viewport
+/// between every round: an *unrequested* flush (the buffer-occupancy trigger, which a
+/// million-row round crosses mid-ingest) can leave `refresh_in_flight` set across the requested
+/// one, so that round publishes with no refresh pass of its own and `refreshes()` never advances.
+/// Observed here as a ten-minute `wait_until` timeout at a 20M base. A probe that measures
+/// publication cost has no business depending on it, so this waits on the publication and nothing
+/// else.
+fn ingest_and_publish(engine: &Engine, round: usize, batch: usize) {
+    ingest_rows(engine, round, batch);
+    let flushes = engine.write_executor_stats().flushes;
+    engine.request_flush();
+    wait_until("the round's flush to publish", || {
+        engine.write_executor_stats().flushes > flushes
+    });
+}
+
+/// [`ingest_and_publish`] without the publication — rows into the buffer and nothing else.
+fn ingest_rows(engine: &Engine, round: usize, batch: usize) {
+    let mut ingested = 0usize;
+    while ingested < batch {
+        let n = SUB_BATCH.min(batch - ingested);
+        let mut rows = Vec::with_capacity(n);
+        for k in 0..n {
+            let i = ingested + k;
+            let (x, y) = position_of(round, i);
+            let descriptors = vec![b"0".to_vec()];
+            rows.push(UnallocatedRow {
+                external_id: Some(format!("p{round}-i{i}").into_bytes()),
+                slice: "s0".to_string(),
+                x,
+                y,
+                scalars: Vec::new(),
+                terms: engine.resolve_terms(&descriptors),
+                descriptors,
+            });
+        }
+        // A body hash distinct from `ingest_round`'s, so a probe reusing this helper alongside the
+        // scale test could never collide with its batch-id replay check.
+        let mut key = [0u8; 32];
+        key[0] = 0xB2;
+        key[1] = round as u8;
+        key[2..10].copy_from_slice(&(ingested as u64).to_le_bytes());
+        engine
+            .accept_ingest(rows, format!("p{round}-b{ingested}"), key)
+            .expect("ingest is accepted");
+        ingested += n;
+    }
+}
+
+// =============================================================================================
+// P3 — a corpus-scale streaming read against a live viewport (compaction §14)
+// =============================================================================================
+
+/// Read rates the sweep is taken at, in MiB/s. `None` is unthrottled — what a fold does if nothing
+/// limits it, and the upper bound on the harm.
+///
+/// **Descending, and the interesting number is where the ratio stops moving.** The fold's budget
+/// (`compaction.md` §6.1) is *"a slower fold is an acceptable price for a gentler one"*, so the
+/// rate to set is the **largest** one whose viewport ratio is acceptable — a slower one buys
+/// nothing further and only lengthens the fold. Two rates sit between the unthrottled reading and
+/// the candidate so the *knee* is located rather than assumed: a rate chosen just under a cliff is
+/// a rate that moves when the device does.
+const P3_RATES: [Option<u64>; 6] = [
+    None,
+    Some(2048),
+    Some(1024),
+    Some(512),
+    Some(128),
+    Some(32),
+];
+
+/// How much page cache this process can actually hold, and where the number came from.
+///
+/// **P3's whole meaning is this number against the bundle's size**, so the probe reports it rather
+/// than leaving a reader to reconstruct it from a host they do not have. With a bundle smaller than
+/// the cache nothing is ever evicted, the streaming read costs only bandwidth, and the resulting
+/// ratios understate the fold by the larger of its two terms.
+///
+/// Two sources, and the smaller wins: the process's cgroup v2 `memory.max` — which charges page
+/// cache and reclaims against it, so a `systemd-run --scope -p MemoryMax=…` is the cheap way to
+/// reach the eviction regime without a bundle larger than the machine — and `MemAvailable`, which
+/// is the bound when no cgroup limit is set.
+fn page_cache_bound() -> (u64, &'static str) {
+    let available = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|meminfo| {
+            meminfo
+                .lines()
+                .find(|line| line.starts_with("MemAvailable:"))
+                .and_then(|line| line.split_whitespace().nth(1)?.parse::<u64>().ok())
+                .map(|kib| kib * 1024)
+        })
+        .unwrap_or(u64::MAX);
+
+    let cgroup_max = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|cgroup| {
+            let path = cgroup.lines().next()?.split(':').nth(2)?.trim_start_matches('/');
+            std::fs::read_to_string(format!("/sys/fs/cgroup/{path}/memory.max")).ok()
+        })
+        .and_then(|max| max.trim().parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
+
+    if cgroup_max < available {
+        (cgroup_max, "cgroup memory.max")
+    } else {
+        (available, "MemAvailable")
+    }
+}
+
+/// Read every file under `root`, once, at `rate_mib_s` (or as fast as the device allows when
+/// `None`), returning the bytes read. Stops early if `stop` is set.
+///
+/// **A plain buffered read, and it models the fold's *harm* rather than the fold's *mechanism*.**
+/// What a concurrent viewport feels is the page cache filling with bytes it does not want, evicting
+/// the mapped hot pages `tile_ranges` binary-searches and `columns.arrow` gathers from, and reading
+/// through the same page cache produces that faithfully.
+///
+/// **What it does NOT model is a throttle the fold could apply.** Every one of the fold's inputs is
+/// an `Mmap::map` (`MortonSlice::load`, `ColumnsRef::load`, `Permutation::load`, the postings reader,
+/// every delta tier), so its byte movement is page faults inside load instructions — there are no
+/// `read(2)` calls to sleep between. The rate arms below bound the *instantaneous contention* each
+/// rate produces; they are not evidence that a fold can be run at one. See compaction §6.1, where an
+/// earlier reading of this probe set a rate the design has no site for.
+///
+/// **And a throttled arm displaces very little.** At 128 MiB/s a ~3.5 s sweep moves ~0.44 GiB — under
+/// 1% of a 45.6 GiB bundle — where a real fold at that rate displaces all of it over ~13 minutes. A
+/// quiet arm here means "not enough bytes had moved yet", not "a gentle fold is harmless".
+fn stream_bundle(
+    root: &std::path::Path,
+    rate_mib_s: Option<u64>,
+    stop: &std::sync::atomic::AtomicBool,
+) -> u64 {
+    use std::io::Read;
+
+    fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    files(root, &mut paths);
+    paths.sort();
+
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut read_total: u64 = 0;
+    let started = Instant::now();
+    for path in paths {
+        let Ok(mut file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        loop {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return read_total;
+            }
+            match file.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => read_total += n as u64,
+            }
+            // The throttle: sleep until the running average is back under the rate. A token bucket
+            // would smooth it further; the fold's own limiter can, and what this probe needs is
+            // only that the *mean* rate is the one being reported.
+            if let Some(rate) = rate_mib_s {
+                let allowed = started.elapsed().as_secs_f64() * (rate * (1 << 20)) as f64;
+                if read_total as f64 > allowed {
+                    let over = read_total as f64 - allowed;
+                    std::thread::sleep(Duration::from_secs_f64(
+                        over / (rate * (1 << 20)) as f64,
+                    ));
+                }
+            }
+        }
+    }
+    read_total
+}
+
+/// **P3 — what a concurrent viewport pays while the whole bundle streams past the page cache.**
+///
+/// `compaction.md` §14 calls this *"assumed benign, and that assumption is the weakest in this
+/// document"*, and §6.1 makes the fold's IO rate limit the direct answer while refusing to pick a
+/// number without this: *"a limit chosen without the measurement is a number pretending to be a
+/// mitigation"*. This is that measurement, and its output is the rate.
+///
+/// # How to read it
+///
+/// The sweep is [`ZOOM_SWEEP`], taken first with nothing else running and then again at each of
+/// [`P3_RATES`]. What matters is the **ratio** at each rate, not the absolute latency: the fold
+/// runs for minutes to hours, so whatever the ratio is, a viewer pays it for the whole duration.
+/// The rate to set is the largest one whose ratio a deployment will accept.
+///
+/// # The caveat that decides whether the number transfers
+///
+/// **A bundle that fits in the host's page cache understates this, and it understates the term the
+/// probe exists to measure.** With everything resident there is no eviction, so what is left is
+/// device and memory bandwidth contention alone — the *smaller* half. `TESSERA_P3_BASE` therefore
+/// wants a bundle comfortably larger than free RAM before the figure is quoted as the fold's, and
+/// a run that does not reach that must say so rather than report a reassuring ratio. The probe
+/// prints the bundle's size so the reader can tell which regime it ran in.
+///
+/// ```text
+/// TESSERA_P3_BASE=50000000 cargo test -p tessera-engine --release --test scale -- \
+///     --ignored --nocapture a_streaming_read_of_the_whole_bundle_against_a_live_viewport
+/// ```
+#[test]
+#[ignore = "minutes, and wants a release build — see the module doc"]
+fn a_streaming_read_of_the_whole_bundle_against_a_live_viewport() {
+    let base = env_usize("TESSERA_P3_BASE", 2_000_000) as u64;
+    let batch = env_usize("TESSERA_P3_BATCH", 250_000);
+    let rounds = env_usize("TESSERA_P3_ROUNDS", 4);
+    let total = base + (rounds * batch) as u64;
+    eprintln!("P3: base={base} rounds={rounds} batch={batch}");
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (points, pairs) = (tmp.path().join("points.parquet"), tmp.path().join("pairs.parquet"));
+    build_fixture_n(&root, &points, &pairs, base);
+    let _ = std::fs::remove_file(&points);
+    let _ = std::fs::remove_file(&pairs);
+
+    let engine = engine_at(tmp.path(), &root, total);
+
+    // Several flushes, so the sweep is over a realistic segment count rather than a single base
+    // segment — the per-(tile × segment) term is what the streaming read contends with.
+    for round in 0..rounds {
+        ingest_and_publish(&engine, round, batch);
+    }
+    // **Authorised after every publication**, so it serves the live geometry from its first
+    // request and this probe never waits on a background refresh. What it measures is read
+    // latency under IO contention; a session's update path is P2's subject, not this one's.
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    let on_disc = bundle_bytes(&root);
+    let segments = engine.generation().bundle.partitions["default"].slices["s0"]
+        .segments
+        .len();
+    // **The regime, stated before the figures, because the figures mean nothing without it.**
+    let (cache, source) = page_cache_bound();
+    let resident = on_disc <= cache;
+    eprintln!(
+        "  bundle {:.2} GiB across {segments} segments | page cache {:.2} GiB ({source}) \
+         ⇒ {}",
+        on_disc as f64 / (1u64 << 30) as f64,
+        cache as f64 / (1u64 << 30) as f64,
+        if resident {
+            "RESIDENT — nothing is ever evicted, so these ratios are the bandwidth term ONLY and \
+             understate a fold"
+        } else {
+            "EVICTING — the regime a fold actually creates"
+        }
+    );
+
+    // **Discarded, and it is what makes the baseline a baseline.** `zoom_sweep` warms each zoom
+    // once before timing it, but that is per zoom within one sweep; the first sweep of a run also
+    // pays the first touch of every freshly published segment's mapped pages and whatever the
+    // CPU's frequency governor is doing on a machine that has just spent a minute building a
+    // fixture. Measured, and it is not small: without this the quiet baseline came out *slower*
+    // than every contended sweep — every ratio below 1.0, which reads as "streaming makes
+    // viewports faster" and is really "the first sweep is slower than the fifth".
+    zoom_sweep(&engine, &full);
+    let quiet = zoom_sweep(&engine, &full);
+    eprintln!(
+        "  quiet (before):   {}",
+        quiet
+            .iter()
+            .map(|(z, d, t)| format!("z{z}({t}t) {d:.1?}"))
+            .collect::<Vec<_>>()
+            .join("  ")
+    );
+
+    let mut streamed_any = false;
+    for rate in P3_RATES {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let read = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let handle = {
+            let root = root.clone();
+            let stop = std::sync::Arc::clone(&stop);
+            let read = std::sync::Arc::clone(&read);
+            std::thread::spawn(move || {
+                // Looped, because the sweep outlasts one pass over a small bundle and the fold's
+                // read is continuous for its whole duration.
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let n = stream_bundle(&root, rate, &stop);
+                    read.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+        };
+
+        let started = Instant::now();
+        let contended = zoom_sweep(&engine, &full);
+        let elapsed = started.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        handle.join().unwrap();
+
+        let bytes = read.load(std::sync::atomic::Ordering::Relaxed);
+        streamed_any |= bytes > 0;
+        eprintln!(
+            "  {:<17} {}",
+            match rate {
+                None => "unthrottled:".to_string(),
+                Some(r) => format!("{r} MiB/s:"),
+            },
+            contended
+                .iter()
+                .zip(&quiet)
+                .map(|((z, d, t), (_, q, _))| format!(
+                    "z{z}({t}t) {d:.1?} [{:.2}x]",
+                    d.as_secs_f64() / q.as_secs_f64().max(f64::MIN_POSITIVE)
+                ))
+                .collect::<Vec<_>>()
+                .join("  ")
+        );
+        eprintln!(
+            "                    read {:.2} GiB in {elapsed:.1?} ({:.0} MiB/s achieved)",
+            bytes as f64 / (1u64 << 30) as f64,
+            bytes as f64 / (1 << 20) as f64 / elapsed.as_secs_f64().max(f64::MIN_POSITIVE)
+        );
+    }
+
+    // **The baseline, again, with everything quiet.** The drift between the two quiet sweeps is
+    // the probe's own noise floor, and a ratio above is only believable to the extent that it
+    // exceeds it. Printed rather than folded into the ratios, because a reader deciding a throttle
+    // rate needs to see the error bar rather than have it silently subtracted.
+    let quiet_after = zoom_sweep(&engine, &full);
+    eprintln!(
+        "  quiet (after):    {}",
+        quiet_after
+            .iter()
+            .zip(&quiet)
+            .map(|((z, d, t), (_, q, _))| format!(
+                "z{z}({t}t) {d:.1?} [{:.2}x]",
+                d.as_secs_f64() / q.as_secs_f64().max(f64::MIN_POSITIVE)
+            ))
+            .collect::<Vec<_>>()
+            .join("  ")
+    );
+
+    // **What is asserted is that the probe measured something**, not what it measured — a latency
+    // ratio bound here would be a flake generator on a developer machine (see this module's doc),
+    // and the figure's home is a memo. A run where the reader never read is a run whose ratios are
+    // all 1.0 for the wrong reason.
+    assert!(
+        streamed_any,
+        "the streaming reader read nothing, so every ratio above is meaningless"
+    );
+    assert_eq!(
+        masked_total(&engine, &full),
+        total,
+        "and the corpus is intact after all of it — a streaming reader must not disturb a mapping"
+    );
 }

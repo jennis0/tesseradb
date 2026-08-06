@@ -3228,7 +3228,11 @@ impl Executor {
             buffer: Arc::clone(&live.buffer),
             denied,
         });
-        self.refresh.in_flight.store(true, Ordering::SeqCst);
+        // The claim names the generation it is for, so a pass that is superseded mid-flight
+        // releases nothing when it ends — see `refresh::clear_if_current`.
+        self.refresh
+            .in_flight
+            .store(segments_version, Ordering::SeqCst);
         let _published = self.publish_arc(Arc::clone(&next), started);
         self.refresh.spawn(next);
 
@@ -5108,7 +5112,11 @@ impl Executor {
         // find the flag set, or it takes rung 3 of the ladder as a *build* — the measured 4 550 ms
         // rebuild after a merge — where the whole design is that it be shed with a 429 for the
         // bounded duration of the refresh instead.
-        self.refresh.in_flight.store(true, Ordering::SeqCst);
+        // The claim names the generation it is for, so a pass that is superseded mid-flight
+        // releases nothing when it ends — see `refresh::clear_if_current`.
+        self.refresh
+            .in_flight
+            .store(segments_version, Ordering::SeqCst);
         let _published = self.publish_arc(Arc::clone(&next), started);
         self.refresh.spawn(next);
 

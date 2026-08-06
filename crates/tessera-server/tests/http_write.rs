@@ -3573,6 +3573,110 @@ async fn control_status_publishes_tier_scope_fragmentation_once_a_flush_publishe
     );
 }
 
+/// **The live segment-count gauge moves with the segment set** (decision 0049's stated obligation).
+///
+/// Segment count is a read-path constant — a measured 1.4–1.6 µs per (tile × segment), and merge's
+/// size ladder saturates, so it settles at corpus bytes ÷ the saturation size and thereafter tracks
+/// the corpus. That constant went unnoticed until a 10⁹ measurement precisely because nothing in a
+/// running deployment published it; this is what makes it observable.
+///
+/// The property under test is that the number is **read off the live generation**, not maintained
+/// as a counter. A counter incremented by flush would pass a "does it go up" assertion equally well
+/// and then drift the first time a merge or a discarded publication moved the set without telling
+/// it. So the assertion is against the generation's own segment set, taken through the engine at the
+/// same instant, rather than against an expected literal alone.
+///
+/// **Mutations this kills:** publishing a constant or a stale snapshot (leg 2 stays at 1); keying
+/// the gauge on the manifest's `segments` array rather than the mapped set; dropping the
+/// `(partition, slice)` identity, which is what compaction §9's per-slice trigger reads.
+#[tokio::test]
+async fn control_status_publishes_the_live_segment_count_per_slice() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    // A build writes exactly one segment per (partition, slice) — contracts §2.1.
+    let before = control_status(&server).await;
+    let segments = before["segments"].as_array().unwrap().clone();
+    assert_eq!(
+        segments.len(),
+        1,
+        "this build emits one (partition, slice); the gauge is a list because compaction §9's \
+         trigger is per-slice and will not always be. Got {}",
+        before["segments"]
+    );
+    assert_eq!(segments[0]["partition"], "default");
+    assert_eq!(segments[0]["slice"], "s0");
+    assert_eq!(segments[0]["count"], 1, "one segment straight out of a build");
+
+    let body = build_ingest_batch(&[
+        (N_ITEMS + 1, 10.0, 10.0, "0"),
+        (N_ITEMS + 2, 11.0, 11.0, "0"),
+    ]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "seg-1")
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        control_status(&server).await["segments"][0]["count"],
+        1,
+        "an ingest buffers; it publishes no segment. A gauge that moved here would be counting \
+         something other than the set a viewport sweeps"
+    );
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let after = loop {
+        let now = control_status(&server).await;
+        if now["segments"][0]["count"].as_u64().unwrap() > 1 {
+            break now;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the requested flush to publish a segment; last: {}",
+            now["segments"]
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(after["segments"][0]["count"], 2);
+
+    // The gauge is the generation's own set, not a counter that happens to agree with it today.
+    let generation = server.state.engine.generation();
+    let live: usize = generation.bundle.partitions["default"].slices["s0"]
+        .segments
+        .len();
+    assert_eq!(
+        after["segments"][0]["count"].as_u64().unwrap() as usize,
+        live,
+        "the gauge must be read off the live generation — the same set `tile_ranges_all` iterates"
+    );
+}
+
 /// A batch column the manifest does not declare is **422 naming the column**, never a silent drop.
 ///
 /// Scalars are stored positionally against `MANIFEST.declared_scalars`, so a column that is not in

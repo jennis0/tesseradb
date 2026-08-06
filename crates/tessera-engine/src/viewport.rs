@@ -517,8 +517,11 @@ impl Engine {
             }
         }
 
-        // Rung 3.
-        if self.refresh_in_flight.load(Ordering::SeqCst) {
+        // Rung 3. **Compared against this request's own generation**, not read as a boolean: the
+        // claim names the `segments_version` whose refresh is running, so a pass still finishing
+        // for a *superseded* generation does not shed a request whose key nothing is coming to
+        // produce — which would be a 429 with no end.
+        if self.refresh_in_flight.load(Ordering::SeqCst) == key.segments_version {
             return Err(EngineError::ProjectionBuilding);
         }
 

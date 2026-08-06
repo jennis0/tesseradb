@@ -35,7 +35,9 @@ pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProject
 // `check_publishable` itself stays private: whether a geometry may be published is this crate's
 // judgement, and a caller that could ask separately could also act on a stale answer.
 pub use geometry::{GeometryRefused, GeometryRefusedReason};
-pub use session::{default_compute_threads, Engine, EngineConfig, EngineError, Session};
+pub use session::{
+    default_compute_threads, Engine, EngineConfig, EngineError, Session, SliceSegments,
+};
 // The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
 // state machine and its four eviction rules are engine-internal — but the numbers
 // `/control/status` publishes have to cross the crate boundary.

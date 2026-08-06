@@ -165,18 +165,28 @@ impl std::fmt::Display for MergeFailed {
 
 /// Turn a plan into durable files. **Runs on the background pool, over immutable inputs.**
 ///
-/// **Memory peaks at a measured 4.4–4.9× the inputs' on-disk bytes**
-/// (`probes/2026-08-04-maintenance-memory/`; the modelled ≈5–7× was conservative, which is the
-/// right direction for a figure a limit is set from). Every input is decoded to items at once and
-/// doubled at the sort, and the inputs' mapped pages stay resident — so
-/// `max_merged_segment_bytes`, which bounds the *selection-time file bytes* rather than the
-/// decoded set, is a memory budget only through this multiplier: **the 256 MiB default models to
-/// a ~1.1–1.3 GB pool transient**, and this function enforces nothing itself. The figure holds
-/// its shape across input count, so it is a function of the bytes rather than of the segments.
+/// # Memory: the row-space half streams, the entity-space half does not
 ///
-/// **What is still unmeasured**, and must not be inferred from the above: tier coalescence
-/// (postings rather than rows — the probe's shape does not transfer) and the **sum** when a
-/// flush, a merge and a coalesce overlap on this pool, which nothing bounds.
+/// The **measured 4.4–4.9× peak over the inputs' on-disk bytes**
+/// (`probes/2026-08-04-maintenance-memory/`) was taken against a merge that decoded every input
+/// into `TilerItem`s at once and doubled again at the sort. That multiplier — not the policy — is
+/// why decision 0049 ruled `max_merged_segment_bytes` may not be raised: a cap that bounds
+/// selection-time *file* bytes is a memory bound only through it, and 256 MiB modelled to a
+/// ~1.1–1.3 GB pool transient.
+///
+/// `execute_merge` now k-way merges its inputs' mapped bytes into a streaming segment writer
+/// (`tessera_store::write::SegmentWriter`), so the columns no longer materialise at all. **The
+/// figure above is therefore stale rather than wrong, and nothing here has re-measured it** —
+/// which is why the cap is unchanged. What still materialises is the **external-id runs**:
+/// `read_runs` collects every consumed run's `(key, entity)` pairs before the coalesce sorts them,
+/// and that term now dominates a merge's peak. Streaming it is compaction's pass 3.
+///
+/// Re-measuring is the precondition for raising the cap, and decision 0049 already makes that a
+/// separate ruling rather than a consequence of this one.
+///
+/// **What remains unmeasured on any version**: tier coalescence (postings rather than rows — the
+/// probe's shape does not transfer) and the **sum** when a flush, a merge and a coalesce overlap on
+/// this pool, which nothing bounds.
 pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMerge, MergeFailed> {
     let output = execute_merge(
         &ctx.prefix_dir,

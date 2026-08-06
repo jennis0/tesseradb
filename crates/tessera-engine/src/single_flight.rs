@@ -817,7 +817,19 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
         Peek::Ready(value)
     }
 
-    /// Every `Ready` entry as `(key, value)` — the background refresh's input.
+    /// Every `Ready` entry as `(key, value)`, **most recently used first** — the background
+    /// refresh's input.
+    ///
+    /// **The order is the refresh's, and it is load-bearing.** `refresh_resident` is a serial loop
+    /// and a full rebuild is a *measured* 4 550 ms at 10⁹, so across a compaction the pass runs for
+    /// minutes and every key it has not reached is shed 429 (compaction §6.2). In map order the
+    /// session that waits longest is arbitrary; in this order the tail lands on the sessions that
+    /// asked least recently, which are the ones least likely to ask during it. It does not shorten
+    /// the window — nothing but doing less work does — it decides who pays for it.
+    ///
+    /// Taken from [`Slots::recency`] rather than by sorting `map`: that index already holds exactly
+    /// the `Ready` slots in oldest-use order (rule 1), so this is a reversed walk of it rather than
+    /// an O(n log n) pass under the request-path lock.
     ///
     /// **Not a recency touch.** The refresh is not a use: counting it as one would keep an entry
     /// whose session has gone away young for ever, since the refresh would touch it at every
@@ -829,11 +841,15 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
     {
         let slots = self.lock_slots();
         slots
-            .map
-            .iter()
-            .filter_map(|(key, slot)| match slot {
-                Slot::Ready { value, .. } => Some(((**key).clone(), Arc::clone(value))),
-                Slot::Building { .. } => None,
+            .recency
+            .values()
+            .rev()
+            .filter_map(|key| match slots.map.get(key) {
+                Some(Slot::Ready { value, .. }) => Some(((**key).clone(), Arc::clone(value))),
+                // Unreachable: `recency` indexes `Ready` slots only. Skipping is the fail-safe
+                // direction — a key the refresh does not see rebuilds on its session's next
+                // request.
+                _ => None,
             })
             .collect()
     }
@@ -1482,5 +1498,39 @@ mod tests {
             "a bound below the working set must cost rebuilds, never refusals (rule 3)"
         );
         assert!(cache.stats().bytes <= BIG * 2, "the bound held throughout");
+    }
+
+    /// **`ready_entries` is most-recently-used first, and reading it is not a use.**
+    ///
+    /// The refresh is a serial loop over a rebuild that costs a *measured* 4 550 ms at 10⁹, so
+    /// across a compaction it runs for minutes and every key it has not reached is shed 429
+    /// (compaction §6.2). Ordering does not shorten that window; it decides who waits in it, and
+    /// the answer must be the sessions that asked least recently. In `map` order — which is what
+    /// this replaced — the tail was whatever `FxHashMap` happened to yield.
+    ///
+    /// **Mutations this kills:** iterating `map` instead of `recency` (leg 1 fails on order, or
+    /// flakes, which is itself the point); dropping the `.rev()` (leg 1 reverses); touching
+    /// recency inside `ready_entries` (leg 2 sees the order change under a read).
+    #[test]
+    fn ready_entries_are_most_recently_used_first_and_reading_them_is_not_a_use() {
+        let cache = unbounded();
+        for key in 0..4u32 {
+            cache.get_or_build(key, || Weighed(key, BIG)).unwrap();
+        }
+        // Re-touch 1, so use order is 2, 3, 0, 1 oldest-first.
+        cache.get_or_build(0, || panic!("warm")).unwrap();
+        cache.get_or_build(1, || panic!("warm")).unwrap();
+
+        let order: Vec<u32> = cache.ready_entries().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            order,
+            vec![1, 0, 3, 2],
+            "the refresh must reach the most recently used session first"
+        );
+
+        // Leg 2: a second read sees the same order. A recency touch here would make the entry the
+        // refresh visits at every publication immortal, since the LRU would never reach it.
+        let again: Vec<u32> = cache.ready_entries().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(again, order, "reading the list must not reorder it");
     }
 }

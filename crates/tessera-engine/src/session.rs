@@ -266,6 +266,23 @@ impl Session {
     }
 }
 
+/// One (partition, slice)'s live segment count — [`Engine::live_segment_counts`]'s element, and
+/// what `/control/status` publishes under `segments`.
+///
+/// **Plain `String`s and a `usize`, defined here rather than re-exported from `tessera-store`.**
+/// `check-layers.sh` denies a `tessera-server → tessera-store` edge (SA §3), so a gauge the server
+/// publishes must be nameable from this crate — the discipline `FragmentCacheStats` and
+/// `DeclaredScalar` already establish at the crate root. This one owns nothing of the store's
+/// vocabulary, so it is a definition here rather than a re-export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SliceSegments {
+    pub partition: String,
+    pub slice: String,
+    /// Segments this slice's viewport sweep would iterate — base plus every flush extent merge has
+    /// not yet collapsed.
+    pub segments: usize,
+}
+
 /// Engine-level failures. Every variant here is fail-closed (Global Constraint 3): none of them
 /// hand back a partial or best-effort result.
 #[derive(Debug)]
@@ -512,7 +529,7 @@ pub struct Engine {
     /// the swap and the pool task's first insert must see `true`, or after a merge it takes the
     /// measured 4.55 s rebuild inline (review finding F5). Shared with the executor, which is the
     /// only writer.
-    pub(crate) refresh_in_flight: Arc<AtomicBool>,
+    pub(crate) refresh_in_flight: Arc<AtomicU64>,
     /// Whether the background refresh runs — see [`crate::refresh::RefreshDeps::enabled`].
     pub(crate) refresh_enabled: Arc<AtomicBool>,
     /// Whether the background refresh **holds** — see [`crate::refresh::RefreshDeps::paused`].
@@ -764,7 +781,7 @@ impl Engine {
         // after `open`, having validated the figure; every other embedder (tests, benches,
         // examples) gets unbounded caches, which is what a read-only embedder wants.
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
-        let refresh_in_flight = Arc::new(AtomicBool::new(false));
+        let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));
         let refresh_enabled = Arc::new(AtomicBool::new(true));
         let refresh_paused = Arc::new(AtomicBool::new(false));
         let coalesce_enabled = Arc::new(AtomicBool::new(true));
@@ -1172,6 +1189,44 @@ impl Engine {
     /// its own and cannot drift from what a request would compose against.
     pub fn overlay_depth(&self) -> usize {
         self.generation.load().overlay.len()
+    }
+
+    /// Live segments per (partition, slice), read straight off the current generation — the gauge
+    /// decision 0049 obliges and `/control/status` publishes as `segments`.
+    ///
+    /// **This is a read-path constant made observable, not a maintenance counter.** A viewport pays
+    /// a measured 1.4–1.6 µs per (tile × segment), and `MergePolicy::select`'s ladder saturates at
+    /// `max_merged_segment_bytes` — so live segment count settles at corpus bytes ÷ the saturation
+    /// size and thereafter tracks the corpus rather than being bounded by merge (decision 0049,
+    /// pinned by `merge_selection.rs`'s
+    /// `the_size_ladder_saturates_at_the_cap_and_segment_count_then_tracks_the_corpus`). At 10⁹ rows
+    /// that is ~152 segments and ~73 ms on a 300-tile viewport against a 135–164 ms baseline. It is
+    /// invisible at 10⁷, which is why nothing measured it until the corpus was large enough, and why
+    /// it needs a gauge rather than a soak.
+    ///
+    /// **Off the live generation, with no counter of its own**, for `overlay_depth`'s reason: a
+    /// separate counter maintained by flush and merge is a second definition that can drift from the
+    /// segment set a request actually sweeps. What a reader gets here is exactly what
+    /// `viewport::tile_ranges_all` would iterate at the same instant.
+    ///
+    /// Sorted by `(partition, slice)` because the generation holds them in `HashMap`s: an operator
+    /// diffing two status responses must not see a reordering that means nothing.
+    pub fn live_segment_counts(&self) -> Vec<SliceSegments> {
+        let generation = self.generation.load();
+        let mut counts: Vec<SliceSegments> = generation
+            .bundle
+            .partitions
+            .iter()
+            .flat_map(|(partition, data)| {
+                data.slices.iter().map(move |(slice, slice_data)| SliceSegments {
+                    partition: partition.clone(),
+                    slice: slice.clone(),
+                    segments: slice_data.segments.len(),
+                })
+            })
+            .collect();
+        counts.sort_by(|a, b| (&a.partition, &a.slice).cmp(&(&b.partition, &b.slice)));
+        counts
     }
 
     /// The row-projection cache's operator gauges — what `/control/status` publishes as
