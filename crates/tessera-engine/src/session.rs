@@ -24,7 +24,6 @@ use tessera_authz::{
 };
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::{ChangeOp, WalError};
-use tessera_lifecycle::OverlayError;
 use tessera_plugin::{Descriptor, Plugin, PluginError};
 use tessera_store::manifest::CurrentPointer;
 use tessera_store::read::open_bundle;
@@ -272,7 +271,6 @@ impl Session {
 pub enum EngineError {
     Store(StoreError),
     Wal(WalError),
-    Overlay(OverlayError<StoreError>),
     Plugin(PluginError),
     Io(io::Error),
     /// A viewport request named a slice this bundle doesn't have.
@@ -389,7 +387,6 @@ impl std::fmt::Display for EngineError {
         match self {
             EngineError::Store(e) => write!(f, "store error: {e}"),
             EngineError::Wal(e) => write!(f, "wal error: {e}"),
-            EngineError::Overlay(e) => write!(f, "overlay error: {e}"),
             EngineError::Plugin(e) => write!(f, "plugin error: {e}"),
             EngineError::Io(e) => write!(f, "io error: {e}"),
             EngineError::UnknownSlice(slice) => write!(f, "unknown slice '{slice}'"),
@@ -701,7 +698,6 @@ impl Engine {
                 .max(side_manifest_high_water),
             &dict,
             &initial_deny,
-            |external_id| external_index.load().resolve(external_id),
             // An entity belongs to exactly one slice, so "any slice's row space holds it" is the
             // same question as "its slice's does" — and asking it this way needs no slice lookup,
             // which the buffer would otherwise have to supply before it has been filtered.
@@ -1701,10 +1697,8 @@ impl Engine {
         &self,
         entity: EntityId,
         op: ChangeOp,
-        raw_descriptors: Option<Vec<Vec<u8>>>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.write
-            .accept_change(entity, op, raw_descriptors)
+        self.write.accept_change(entity, op)
     }
 
     /// Enqueue one `/control/changes` entry **without waiting for its receipt**, so that a caller
@@ -1718,10 +1712,8 @@ impl Engine {
         &self,
         entity: EntityId,
         op: ChangeOp,
-        raw_descriptors: Option<Vec<Vec<u8>>>,
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
-        self.write
-            .submit_change(entity, op, raw_descriptors)
+        self.write.submit_change(entity, op)
     }
 }
 

@@ -1,19 +1,18 @@
 //! The overlay snapshot: what rotation must carry forward before it deletes anything.
 //!
-//! The overlay's only durable home is the WAL, so a rotation that reclaimed a file holding
-//! `Change` records without first re-stating them would silently un-deny. These tests pin the
-//! three things that make the snapshot a faithful re-statement rather than an approximation of
-//! one: that it is keyed by entity rather than by external id, that it carries raw descriptors
-//! rather than resolved ids, and that it reproduces the overlay exactly — including entries whose
-//! facts are all currently inactive.
+//! The overlay's only durable home is the WAL, so a rotation that reclaimed a file holding change
+//! records without first re-stating them would silently un-deny. These tests pin the things that
+//! make the snapshot a faithful re-statement rather than an approximation of one: that it is keyed
+//! by entity rather than by external id, that it reproduces the overlay exactly, and that it
+//! replays in the position it occupies.
 
 use tempfile::TempDir;
 
 use tessera_authz::Dict;
-use tessera_lifecycle::overlay::{replay, PredicateChange};
+use tessera_lifecycle::overlay::replay;
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
-use tessera_lifecycle::{DescriptorResolver, Overlay};
-use tessera_types::{EntityId, TermId};
+use tessera_lifecycle::Overlay;
+use tessera_types::EntityId;
 
 fn empty_dict() -> (Dict, TempDir) {
     let temp = TempDir::new().unwrap();
@@ -23,127 +22,29 @@ fn empty_dict() -> (Dict, TempDir) {
     (Dict::load(&paths).unwrap(), temp)
 }
 
-fn dict_with(descriptors: &[&[u8]]) -> (Dict, TempDir) {
-    let temp = TempDir::new().unwrap();
-    let mut writer = tessera_authz::DictWriter::new(temp.path());
-    for d in descriptors {
-        writer.intern(d);
-    }
-    let paths = writer.finish().unwrap();
-    (Dict::load(&paths).unwrap(), temp)
-}
-
-fn round_trip(overlay: &Overlay, dict: &Dict) -> Overlay {
+fn round_trip(overlay: &Overlay) -> Overlay {
     let entries = overlay.snapshot();
     let mut restored = Overlay::new();
-    restored.apply_snapshot(&entries, &mut DescriptorResolver::new(dict));
+    restored.apply_snapshot(&entries);
     restored
 }
 
 /// **Keyed by entity, never by external id.** An entity deleted before it was ever flushed has no
-/// row and may have no external-id extent entry, so a `Change`-shaped snapshot would answer
-/// `UnknownExternalId` at replay and the node would refuse to open — a benign rotation turned into
-/// a permanently unopenable node.
+/// row and may have no external-id extent entry, so an external-id-keyed snapshot could not be
+/// resolved at replay and the node would refuse to open — a benign rotation turned into a
+/// permanently unopenable node.
 #[test]
 fn a_deleted_entity_with_no_row_round_trips_the_snapshot() {
-    let (dict, _temp) = empty_dict();
     let mut overlay = Overlay::new();
-    overlay.apply(EntityId::new(99), ChangeOp::Delete, None);
+    overlay.apply(EntityId::new(99), ChangeOp::Delete);
 
     let entries = overlay.snapshot();
     assert_eq!(entries[0].entity_id, EntityId::new(99));
 
-    let restored = round_trip(&overlay, &dict);
+    let restored = round_trip(&overlay);
     assert!(
         restored.is_deleted(EntityId::new(99)),
         "a deletion must survive a rotation with nothing but the snapshot to carry it"
-    );
-}
-
-/// **Raw descriptors, never `TermId`s.** Extension ids are assigned in replay order, and rotation
-/// changes replay order — so a persisted extension id would dangle, pointing at whatever descriptor
-/// interns next.
-#[test]
-fn an_evaluate_entry_snapshots_raw_descriptors_never_term_ids() {
-    let (dict, _temp) = empty_dict();
-    let mut resolver = DescriptorResolver::new(&dict);
-    let mut overlay = Overlay::new();
-    overlay.apply(
-        EntityId::new(1),
-        ChangeOp::Predicate,
-        Some(tessera_lifecycle::overlay::resolve(
-            &[b"novel".to_vec()],
-            &mut resolver,
-        )),
-    );
-
-    let entries = overlay.snapshot();
-    assert_eq!(
-        entries[0].descriptors.as_deref(),
-        Some(&[b"novel".to_vec()][..]),
-    );
-}
-
-/// The hazard the previous test's shape exists to prevent, demonstrated end to end.
-///
-/// The descriptor is novel, so it resolves into the extension range — and the *second* resolver
-/// interns an unrelated descriptor first, exactly as a rotation reordering replay would. A snapshot
-/// carrying the id would restore `u32::MAX` and the entity would evaluate against `"unrelated"`.
-/// Carrying the descriptor, it re-resolves to the id this process now uses for it.
-#[test]
-fn a_re_resolved_extension_id_follows_the_descriptor_not_the_ordinal() {
-    let (dict, _temp) = empty_dict();
-    let mut overlay = Overlay::new();
-    overlay.apply(
-        EntityId::new(1),
-        ChangeOp::Predicate,
-        Some(tessera_lifecycle::overlay::resolve(
-            &[b"novel".to_vec()],
-            &mut DescriptorResolver::new(&dict),
-        )),
-    );
-    assert_eq!(
-        overlay
-            .evaluate_of(EntityId::new(1))
-            .map(|p| p.terms.as_slice()),
-        Some(&[TermId::new(u32::MAX)][..]),
-    );
-
-    let mut later = DescriptorResolver::new(&dict);
-    assert_eq!(later.resolve(b"unrelated"), TermId::new(u32::MAX));
-    let mut restored = Overlay::new();
-    restored.apply_snapshot(&overlay.snapshot(), &mut later);
-
-    assert_eq!(
-        restored
-            .evaluate_of(EntityId::new(1))
-            .map(|p| p.terms.as_slice()),
-        Some(&[TermId::new(u32::MAX - 1)][..]),
-        "the restored entry must name whatever id \"novel\" holds now, not the one it held then"
-    );
-}
-
-/// A descriptor the dictionary *does* know keeps its durable ordinal across the round trip — the
-/// snapshot must not push a real term into the extension range either.
-#[test]
-fn a_dictionary_term_keeps_its_durable_ordinal_across_the_snapshot() {
-    let (dict, _temp) = dict_with(&[b"dept:eng", b"clearance:secret"]);
-    let mut overlay = Overlay::new();
-    overlay.apply(
-        EntityId::new(5),
-        ChangeOp::Predicate,
-        Some(tessera_lifecycle::overlay::resolve(
-            &[b"clearance:secret".to_vec()],
-            &mut DescriptorResolver::new(&dict),
-        )),
-    );
-
-    let restored = round_trip(&overlay, &dict);
-    assert_eq!(
-        restored
-            .evaluate_of(EntityId::new(5))
-            .map(|p| p.terms.as_slice()),
-        Some(&[TermId::new(1)][..]),
     );
 }
 
@@ -151,15 +52,14 @@ fn a_dictionary_term_keeps_its_durable_ordinal_across_the_snapshot() {
 ///
 /// Under a single map, `suppress → unsuppress` left a husk whose every fact was inactive, and the
 /// snapshot had to preserve it because `compose`'s verdict rule gave any entry precedence over the
-/// ingest buffer. Three stores make the husk unrepresentable: an unsuppress removes the id from the
-/// suppression bitmap and nothing else ever held it. This is what lifecycle §3.1 always said —
+/// ingest buffer. Separate stores make the husk unrepresentable: an unsuppress removes the id from
+/// the suppression bitmap and nothing else ever held it. This is what lifecycle §3.1 always said —
 /// "unsuppress removes the entry" — and what the previous representation did not do.
 #[test]
 fn an_unsuppressed_entity_is_untouched_and_absent_from_the_snapshot() {
-    let (dict, _temp) = empty_dict();
     let mut overlay = Overlay::new();
-    overlay.apply(EntityId::new(3), ChangeOp::Suppress, None);
-    overlay.apply(EntityId::new(3), ChangeOp::Unsuppress, None);
+    overlay.apply(EntityId::new(3), ChangeOp::Suppress);
+    overlay.apply(EntityId::new(3), ChangeOp::Unsuppress);
 
     assert!(!overlay.touches(EntityId::new(3)));
     assert!(
@@ -167,45 +67,34 @@ fn an_unsuppressed_entity_is_untouched_and_absent_from_the_snapshot() {
         "nothing is in force, so there is nothing to carry forward"
     );
 
-    let restored = round_trip(&overlay, &dict);
+    let restored = round_trip(&overlay);
     assert!(!restored.touches(EntityId::new(3)));
     assert!(!restored.is_suppressed(EntityId::new(3)));
 }
 
-/// The three facts are independent, so a snapshot has to carry all of them — a `delete` folded into
-/// a single "current disposition" would drop the suppression, and `suppress → unsuppress` on a
-/// deleted entity would then re-expose it.
+/// The two facts are independent, so a snapshot has to carry both — a `delete` folded into a single
+/// "current disposition" would drop the suppression, and `suppress → unsuppress` on a deleted
+/// entity would then re-expose it.
 #[test]
-fn all_three_facts_survive_together() {
-    let (dict, _temp) = empty_dict();
-    let mut resolver = DescriptorResolver::new(&dict);
+fn both_facts_survive_together() {
     let mut overlay = Overlay::new();
     let e = EntityId::new(11);
-    overlay.apply(e, ChangeOp::Delete, None);
-    overlay.apply(e, ChangeOp::Suppress, None);
-    overlay.apply(
-        e,
-        ChangeOp::Predicate,
-        Some(tessera_lifecycle::overlay::resolve(
-            &[b"a".to_vec(), b"b".to_vec()],
-            &mut resolver,
-        )),
-    );
+    overlay.apply(e, ChangeOp::Delete);
+    overlay.apply(e, ChangeOp::Suppress);
 
-    let restored = round_trip(&overlay, &dict);
+    let restored = round_trip(&overlay);
     assert!(restored.is_deleted(e));
     assert!(restored.is_suppressed(e));
-    assert_eq!(restored.evaluate_of(e).unwrap().descriptors.len(), 2);
 }
 
-/// The same overlay must encode to the same bytes, whatever order its hash map happens to iterate
-/// in — a record whose bytes depend on allocation history cannot be compared or re-encoded by
-/// `Wal::retry_durability` with any confidence.
+/// The same overlay must encode to the same bytes, whatever order its backing store happens to
+/// iterate in — a record whose bytes depend on allocation history cannot be compared or re-encoded
+/// by `Wal::retry_durability` with any confidence.
 #[test]
 fn a_snapshot_is_ordered_by_entity_id() {
     let mut overlay = Overlay::new();
     for id in [900u64, 3, 47, 1, 12] {
-        overlay.apply(EntityId::new(id), ChangeOp::Suppress, None);
+        overlay.apply(EntityId::new(id), ChangeOp::Suppress);
     }
     let ids: Vec<u64> = overlay
         .snapshot()
@@ -216,12 +105,12 @@ fn a_snapshot_is_ordered_by_entity_id() {
 }
 
 /// The record survives the log, and — the part rotation actually depends on — replay applies it
-/// **at the position it occupies**, so a `Change` earlier in the same file still lands first.
+/// **at the position it occupies**, so a change record earlier in the same file still lands first.
 ///
 /// Here that ordering is what keeps the deletion: the snapshot was taken before entity 8 was
 /// deleted, so a recovery that treated the snapshot as its starting state and resumed *after* it
 /// would be correct, while one that used it as a starting state and skipped what precedes it would
-/// silently un-delete. The `Change` below the snapshot is the case that distinguishes them.
+/// silently un-delete. The change record below the snapshot is the case that distinguishes them.
 #[test]
 fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     let (dict, _temp) = empty_dict();
@@ -229,14 +118,13 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     let path = dir.path().join("wal.log");
 
     let mut before = Overlay::new();
-    before.apply(EntityId::new(7), ChangeOp::Suppress, None);
+    before.apply(EntityId::new(7), ChangeOp::Suppress);
 
     {
         let (mut wal, _) = Wal::open(&path).unwrap();
-        wal.append(&WalRecord::Change {
-            external_id: b"ext-8".to_vec(),
+        wal.append(&WalRecord::ChangeByEntity {
+            entity_id: EntityId::new(8),
             op: ChangeOp::Delete,
-            descriptors: None,
         })
         .unwrap();
         wal.append(&WalRecord::OverlaySnapshot {
@@ -247,14 +135,7 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     }
 
     let (_wal, records) = Wal::open(&path).unwrap();
-    let (overlay, _buffer, _established, _resolver) = replay(&records, &dict, Overlay::new(), |ext| {
-        Ok::<_, std::convert::Infallible>(if ext == b"ext-8" {
-            Some(EntityId::new(8))
-        } else {
-            None
-        })
-    })
-    .unwrap();
+    let (overlay, _buffer, _established, _resolver) = replay(&records, &dict, Overlay::new());
 
     assert!(
         overlay.is_suppressed(EntityId::new(7)),
@@ -262,7 +143,7 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     );
     assert!(
         overlay.is_deleted(EntityId::new(8)),
-        "a Change below the snapshot must not be displaced by it"
+        "a change record below the snapshot must not be displaced by it"
     );
 }
 
@@ -270,40 +151,16 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
 /// one left-to-right pass and the snapshot is a record in it.
 #[test]
 fn a_snapshot_unions_with_state_already_applied() {
-    let (dict, _temp) = empty_dict();
     let mut snapshotted = Overlay::new();
-    snapshotted.apply(EntityId::new(1), ChangeOp::Delete, None);
+    snapshotted.apply(EntityId::new(1), ChangeOp::Delete);
 
     let mut live = Overlay::new();
-    live.apply(EntityId::new(2), ChangeOp::Suppress, None);
-    live.apply_snapshot(&snapshotted.snapshot(), &mut DescriptorResolver::new(&dict));
+    live.apply(EntityId::new(2), ChangeOp::Suppress);
+    live.apply_snapshot(&snapshotted.snapshot());
 
     assert!(live.is_deleted(EntityId::new(1)));
     assert!(
         live.is_suppressed(EntityId::new(2)),
         "applying a snapshot must not discard what was already there"
-    );
-}
-
-/// A descriptor-less `Predicate` (`access` is optional on `/control/changes`) survives as the
-/// empty, always-unsatisfiable term set it was folded to — never as "no predicate at all", which
-/// would fall back to the fragment's original verdict and could re-expose the entity.
-#[test]
-fn a_descriptor_less_predicate_stays_fail_closed_across_the_snapshot() {
-    let (dict, _temp) = empty_dict();
-    let mut overlay = Overlay::new();
-    overlay.apply(EntityId::new(4), ChangeOp::Predicate, None);
-    assert_eq!(
-        overlay.evaluate_of(EntityId::new(4)).cloned(),
-        Some(PredicateChange::default()),
-    );
-
-    let restored = round_trip(&overlay, &dict);
-    assert_eq!(
-        restored
-            .evaluate_of(EntityId::new(4))
-            .map(|p| p.terms.as_slice()),
-        Some(&[][..]),
-        "an empty term set intersects nothing; an absent one falls back to the fragment"
     );
 }

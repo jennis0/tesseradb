@@ -1,6 +1,6 @@
 # Tessera — Concurrency and Lifecycle Design
 
-**Status:** Draft r7 — r6 plus the write-path supersession performed at [`write-path.md`](write-path.md)'s promotion (2026-08-04): the write-side sections named in its §13.1 are reduced to pointers, and what is left here is the read path's and the infrastructure's (Appendix R)
+**Status:** Draft r8 — r7 plus decision 0048's deletion sweep: the overlay is two stores, not three, and §3.4's evaluate-entry fold is deleted rather than pending. r7's supersession stands — the write-side sections named in [`write-path.md`](write-path.md) §13.1 are pointers, and what is left here is the read path's and the infrastructure's (Appendix R)
 
 **Owns:** the mechanism level of the lifecycle **on the read side and in the infrastructure** — thread and state ownership, the generation lifecycle and its retention, geometry-versus-authorisation, WAL *recovery*, caching and single-flight, the router/worker protocol, and the crash matrix. Everything here is engine-internal — none of it is contract (contracts §6) — but it is *invariant-bearing* internal, so it gets design-and-review treatment.
 
@@ -8,7 +8,7 @@
 
 **The simplicity rule applied here:** one mutation discipline — **immutable artifacts, atomic pointer swaps, refcounted generations, and a single writer thread per partition** — with every surviving subtlety given a named ledger and an explicit rule.
 
-**How to read the markers.** This document specifies a target; parts of it are not built. Wherever that is true it is marked **⊘** at the claim, with what happens instead. The two that matter most, because a reader could otherwise take them as assurances about a security property, are **Rule F's retirement** (§3.2) and the **evaluate-entry fold** (§3.4) — both waiting on compaction, which does not exist, so nothing but an unsuppress retires anything.
+**How to read the markers.** This document specifies a target; parts of it are not built. Wherever that is true it is marked **⊘** at the claim, with what happens instead. The one that matters most, because a reader could otherwise take it as an assurance about a security property, is **Rule F's retirement** (§3.2) — waiting on compaction, which does not exist, so nothing but an unsuppress retires anything.
 
 `§n` alone refers to the architecture design; sections of this document are named "this document's §n" or given by number in context. `M_auth` is a viewer's authorised visible set as a Roaring bitmap; `I1`, `I9`, `I11`, `I13` are invariants from design §4.
 
@@ -25,7 +25,7 @@ Generation {
   prefix, segments_version: n, watermark: W,
   bundle: Arc<Bundle>,           // the loaded bundle: segments, permutation, postings, dictionary
   overlay_version: v,
-  overlay: Arc<Overlay>,         // deny + evaluate entries (§3)
+  overlay: Arc<Overlay>,         // deny entries (§3)
   buffer: Arc<IngestBuffer>,     // WAL-durable rows not yet in any segment (§5.1)
 }
 ```
@@ -124,22 +124,23 @@ The effective watermark in composition is always the fragment's own. Design §11
 
 ### 3.1 Overlay entries — see write-path §5.3
 
-The overlay is **three independent stores, never one overwritable disposition**: `deleted`,
-`suppressed` and `evaluate`, each written by exactly one op and cleared by nothing but its own
+The overlay is **two independent stores, never one overwritable disposition**: `deleted` and
+`suppressed`, each written by exactly one op and cleared by nothing but its own
 opposite. That is what makes `delete → suppress → unsuppress` structurally incapable of
 re-exposing a deleted item, rather than merely tested against it; collapsing them into one
-last-write-wins enum was caught fail-open in review twice. The precedence over them is
-`deleted > suppressed > evaluate`, single-sourced in one function, because two transcriptions of
-a precedence rule is how a suppression stops suppressing.
+last-write-wins enum was caught fail-open in review twice. The precedence over them, and over the
+ingest buffer, is `deleted > suppressed > buffered`, single-sourced in one function, because two
+transcriptions of a precedence rule is how a suppression stops suppressing.
 
-**[write-path §5.3](write-path.md#53-the-overlay-three-stores-and-the-row-space-mask) owns the
+**[write-path §5.3](write-path.md#53-the-overlay-two-stores-and-the-row-space-mask) owns the
 mechanism**, including the derived row-space mask (`deleted ∪ suppressed` per slice, subtracted
 with one `andnot`, so per-request work does not grow with denies ever accepted) and its
 derivation rule — additions may be incremental, **any removal re-derives**, since subtracting a
 row on unsuppress would re-expose an item `deleted` still holds.
 
-*(Decision 0047, 2026-08-04: the predicate op is **withdrawn** — edit is delete + re-ingest — so
-`evaluate` takes no new entries and exists only to replay pre-0047 WALs.)*
+*(Decision 0047, 2026-08-04: the predicate op is **withdrawn** — edit is delete + re-ingest.
+Decision 0048, 2026-08-06: its third store, `evaluate`, is **deleted** — no deployment exists, so
+no WAL carries an entry to replay. Deleting it is not a licence to collapse the two above.)*
 
 ### 3.2 Retirement — Rule S and Rule F, at write-path §5.4
 
@@ -149,13 +150,12 @@ deferred** (owner-ruled 2026-08-03; the deny-lifecycle design pass,
 [write-path §5.4](write-path.md#54-what-removes-each-fact--the-retirement-position) states them:
 
 - **Rule S** — an entry leaves `suppressed` only by its unsuppress.
-- **Rule F** — entries leave `deleted` and `evaluate` only at the compaction fold that *executes*
-  them, the safety property being an **identity match** rather than a stamp ordering: a fold
+- **Rule F** — an entry leaves `deleted` only at the compaction fold that *executes*
+  it, the safety property being an **identity match** rather than a stamp ordering: a fold
   publishes a new prefix, whose manifest digest rotates the fragment identity, so no pre-fold
   fragment is reachable by key afterwards.
 
-Three stores against two rules: the store boundary is what makes the fail-open collapse
-unexpressible, and it is not a claim that each store owns a rule.
+The store boundary is what makes the fail-open collapse unexpressible.
 
 > **⊘ Only the unsuppress rule exists.** There is no compaction fold (§5.3), so **nothing else
 > retires at all** — fail-closed, and not the mechanism. An overlay soft limit alarms on depth
@@ -167,17 +167,17 @@ Fragments are built on miss (single-flight per key, §7.2) **from the current ge
 
 **Who builds it moved** (decision 0044, 2026-08-04): a geometry publication refreshes every resident session's fragment on a background pool task, and a request builds one only at session establishment. The rule above is unchanged — the refresh reads the same current-postings view — and write-path §4.6 owns the mechanism.
 
-### 3.4 Evaluate entries retire at the fold — see write-path §5.4
+### 3.4 Evaluate entries — deleted, not deferred
 
-A predicate change is invisible to postings until compaction folds it, and the entry retires in
-that fold's own publication. The reason the fold and nothing else may retire it: **a fragment
-predating the fold misreads the entity in both directions** — a revoked term still present is
-fail-open, a granted term absent is wrong counts — which is why "retire when they look stale" can
-never be retrofitted, staleness in the second direction having no fail-safe symptom.
+This section specified an evaluate entry retiring at its compaction fold. **The machinery is
+deleted** (decision 0047 withdrew the `predicate` op; decision 0048 deleted what was kept dormant
+for pre-0047 WALs, there being no deployment that could have written one), so there is nothing
+here to build and nothing to wait for. The argument it rested on is preserved at write-path §5.4's
+Rule F, which still governs deletions: a fragment predating the fold still contains the entity, so
+"retire when they look stale" can never be retrofitted.
 
-> **⊘ Specified, not implemented, and now legacy-scoped.** Compaction does not exist, so evaluate
-> entries are immortal and composition consults the entry on every request. Decision 0047
-> withdrew the op that creates them, so the set is closed at whatever pre-0047 WALs carry.
+A future predicate mechanism would be designed, not resurrected — architecture §11.2's *evaluate*
+disposition is the specification's and stands unamended.
 
 ## 4. The WAL — recovery. The write half is write-path §1.3 / §4.5
 
@@ -278,7 +278,7 @@ tombstoned row is a fold, and folds are compaction's).
 
 ### 5.3 Compaction, with the full carry-forward rule
 
-Compaction snapshots a generation, emits the partition-slice's single segment, folds **snapshot-covered** posting deltas, tombstones and evaluate entries into base postings, rewrites the permutation, and publishes a new prefix.
+Compaction snapshots a generation, emits the partition-slice's single segment, folds **snapshot-covered** posting deltas and tombstones into base postings, rewrites the permutation, and publishes a new prefix.
 
 **Carried forward verbatim, not folded:** segments and deltas flushed after the snapshot, **tombstones accepted after the snapshot** — folding away a post-snapshot tombstone while the entity survives in the folded base is fail-open — the active suppression set, and all unfolded overlay entries. The new prefix's first side-manifest lists all of it; `n` continues; old prefix retention per §2.2.
 
@@ -354,7 +354,7 @@ Two pause sites, not one, because one cannot discriminate the ordering it exists
 2. **Generations immutable and Arc-shared; drain-list reclaim is remove → verify → reclaim.** A drain entry is slimmed geometry, never an `Arc<Generation>` — §2.1.
 3. **Geometry identity never fixes authorisation.** The effective watermark in composition is the fragment's own, and a request composes against the same generation's overlay whatever stamp it presented.
 4. **Two version axes** matching design §8.5.
-5. **Two removal rules, never conflated** *(amended by the 2026-08-03 ruling — was "three rules", with deletions on a stamp ledger)*: suppressions retire only on unsuppress (Rule S); deletions and evaluate entries at the compaction fold that executes them (Rule F). Giving a suppression any other retirement route is fail-open. *The fold is unbuilt, so today nothing retires — §3.2, §3.4.*
+5. **Two removal rules, never conflated** *(amended by the 2026-08-03 ruling — was "three rules", with deletions on a stamp ledger)*: suppressions retire only on unsuppress (Rule S); deletions at the compaction fold that executes them (Rule F). Giving a suppression any other retirement route is fail-open. *The fold is unbuilt, so today nothing retires — §3.2.*
 6. **Fragments build from current postings only.** *Built. The retirement-floor backstop is superseded with the stamp ledger — Rule F's safety is the fold's prefix rotating the fragment identity — §3.2.*
 7. **Protocol postcard over socketpairs; worker WAL wins lease arbitration.** *Unbuilt — §6.*
 8. **Single-flight waiters do not block**; a concurrent arrival on a building key is refused with a 429 rather than parked. A caching decision with a client-visible outcome — §7.2.
@@ -362,6 +362,16 @@ Two pause sites, not one, because one cannot discriminate the ordering it exists
 10. **Injected failures are indistinguishable from real ones in variant and order**, and the conformance harness extends this mechanism rather than adding a second — §7.3.
 
 ## Appendix R — Review record
+
+**r8** (2026-08-06) applies decision
+[0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md): the evaluate
+machinery is deleted, not carried, there being no deployment whose WAL could replay an entry.
+§3.1's overlay becomes **two** stores rather than three and its precedence loses the `evaluate`
+term; §3.2's Rule F governs deletions alone; **§3.4 stops being a ⊘ and becomes a deletion
+record** — it specified a fold for entries that can no longer exist, so there is nothing left to
+build there, and the argument it rested on survives at Rule F. §1's marker note and §5.3's
+compaction summary follow. **This removes an obligation and adds none**: one of the two markers a
+reader was warned to take seriously is gone because its subject is gone, not because it was built.
 
 **r7** (2026-08-04) performs [`write-path.md`](write-path.md)'s §13.1 supersession at its
 promotion. The write-side sections named there are reduced to **pointers**, keeping only the rule

@@ -1,5 +1,4 @@
-//! **The `/control/changes` write path** — deletes, suppressions, unsuppressions and predicate
-//! changes.
+//! **The `/control/changes` write path** — deletes, suppressions and unsuppressions.
 //!
 //! # Why this path gets its own arm
 //!
@@ -28,8 +27,8 @@
 //! `sigma_visible` by **exactly** `K`. That is an exact arithmetic relationship, and this arm
 //! reports whether it held. A benchmark of a suppression path that never checks the suppression
 //! took effect would happily report throughput for a no-op — and fail-open is precisely the
-//! failure mode this path exists to prevent (design: "deny handling is fail-closed with three
-//! distinct retirement rules ... conflating them is fail-open — caught in review twice").
+//! failure mode this path exists to prevent (write-path §5.4: deny handling is fail-closed with
+//! two distinct retirement rules — conflating them is fail-open, caught in review twice).
 //!
 //! # Measured, 2026-07-30, 2.42M `categories-subclass`, 5% coverage, zoom 0
 //!
@@ -42,6 +41,9 @@
 //! | delete | 20,000 | 2528 | 3981 | 9079 | 512 | 367.8 | 18.4 | 73.2% |
 //! | predicate | 20,000 | 2509 | 7057 | **172627** | 509 | 373.6 | 18.7 | 73.6% |
 //!
+//! The `predicate` row is kept because it was measured; **the op no longer exists** (decisions
+//! 0047 and 0048) and this arm cannot produce that row again.
+//!
 //! **Visibility arithmetic held in all twelve cells** — every deny denied, exactly once per
 //! entity.
 //!
@@ -52,8 +54,8 @@
 //! architectural sits in that path, so the excursion is the fsync itself; it is worth a look
 //! before anyone quotes the floor as the deny latency.
 //!
-//! **The three ops are indistinguishable in cost** at equal overlay depth (18.4–18.7 ns/entry,
-//! ~2.5 ms ack). They differ in retirement rule, not in price.
+//! **The ops measured were indistinguishable in cost** at equal overlay depth (18.4–18.7
+//! ns/entry, ~2.5 ms ack). They differ in retirement rule, not in price.
 //!
 //! **F2, upper bound: ~18.5 ns per overlay entry**, converging from above as fixed overhead is
 //! amortised (50.1 → 23.6 → 19.6 → 18.7). Against `arms::ingest`'s ~10 ns per *buffer* entry, an
@@ -83,10 +85,8 @@ use crate::report::{Stages, Work};
 pub enum Op {
     /// The security-critical one: retires *only* on unsuppress, never touches postings.
     Suppress,
-    /// Retires by the stamp ledger.
+    /// Retires at the compaction fold that executes it.
     Delete,
-    /// Retires at its compaction fold.
-    Predicate,
 }
 
 impl Op {
@@ -94,7 +94,6 @@ impl Op {
         match s {
             "suppress" => Some(Op::Suppress),
             "delete" => Some(Op::Delete),
-            "predicate" => Some(Op::Predicate),
             _ => None,
         }
     }
@@ -102,32 +101,25 @@ impl Op {
         match self {
             Op::Suppress => "suppress",
             Op::Delete => "delete",
-            Op::Predicate => "predicate",
         }
     }
     fn change_op(&self) -> ChangeOp {
         match self {
             Op::Suppress => ChangeOp::Suppress,
             Op::Delete => ChangeOp::Delete,
-            Op::Predicate => ChangeOp::Predicate,
         }
     }
     /// Whether this op, **as this arm invokes it**, should reduce the masked count by one per
     /// entity.
     ///
-    /// True for all three, but for different reasons, and the distinction matters. `Suppress` and
-    /// `Delete` deny outright. `Predicate` re-evaluates the item's terms — and this arm supplies
-    /// an *empty* descriptor set, so the item ends up satisfying nothing and drops out of every
-    /// principal's mask. A predicate change carrying real descriptors would move the count by an
-    /// amount that depends on those descriptors, which is why this is a property of how the arm
-    /// calls the op rather than of the op alone.
+    /// True for both: `Suppress` and `Delete` deny outright.
     ///
-    /// The three ops still differ in their **retirement rules** (lifecycle §3: deletes retire by
-    /// the stamp ledger, suppressions only on unsuppress, predicate changes at their compaction
-    /// fold). Conflating those is fail-open and was caught twice in review — but it is a
+    /// The two still differ in their **retirement rules** (write-path §5.4: a suppression retires
+    /// only on unsuppress — Rule S; a deletion only at the compaction fold that executes it —
+    /// Rule F). Conflating those is fail-open and was caught twice in review — but it is a
     /// correctness property for the conformance suite, not something this arm measures.
     fn removes_from_mask(&self) -> bool {
-        matches!(self, Op::Suppress | Op::Delete | Op::Predicate)
+        matches!(self, Op::Suppress | Op::Delete)
     }
 }
 
@@ -244,15 +236,8 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                 let mut acks = Vec::new();
                 while applied < limit {
                     let entity = targets[applied as usize];
-                    let descriptors = if op == Op::Predicate {
-                        // Re-evaluate against an empty descriptor set: the item satisfies nothing,
-                        // so a predicate change is observable rather than a no-op.
-                        Some(Vec::new())
-                    } else {
-                        None
-                    };
                     let start = std::time::Instant::now();
-                    engine.accept_change(entity, op.change_op(), descriptors)?;
+                    engine.accept_change(entity, op.change_op())?;
                     acks.push(start.elapsed().as_nanos() as u64);
                     applied += 1;
                 }
@@ -506,7 +491,7 @@ pub fn run_deny_ack(
                     let Some(entity) = targets.next() else { break };
                     let before = engine.write_executor_stats();
                     let start = std::time::Instant::now();
-                    engine.accept_change(entity, op.change_op(), None)?;
+                    engine.accept_change(entity, op.change_op())?;
                     let ack = start.elapsed().as_nanos() as u64;
                     let after = engine.write_executor_stats();
                     quiet_ack.push(ack);
@@ -567,7 +552,7 @@ pub fn run_deny_ack(
                     for _ in 0..denies {
                         let Some(entity) = targets.next() else { break };
                         let start = std::time::Instant::now();
-                        let r = engine.accept_change(entity, op.change_op(), None);
+                        let r = engine.accept_change(entity, op.change_op());
                         busy_ack.push(start.elapsed().as_nanos() as u64);
                         if matches!(r, Err(tessera_engine::AcceptError::Submit(_))) {
                             // The failure this whole arm exists to detect: a security operation

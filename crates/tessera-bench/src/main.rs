@@ -141,13 +141,13 @@ enum Command {
         theta_target: Vec<u64>,
     },
 
-    /// The `/control/changes` write path: deletes, suppressions, predicate changes.
+    /// The `/control/changes` write path: deletes and suppressions.
     ///
     /// The one write path where a latency regression is a security regression (lifecycle §1.3
     /// bounds deny visibility by queue-front + fsync). Also checks that a deny actually denies —
     /// at zoom 0 the masked count must drop by exactly one per suppressed entity.
     Changes {
-        #[arg(long, value_delimiter = ',', default_values_t = ["suppress".to_string(), "delete".to_string(), "predicate".to_string()])]
+        #[arg(long, value_delimiter = ',', default_values_t = ["suppress".to_string(), "delete".to_string()])]
         op: Vec<String>,
         /// Overlay-depth checkpoints.
         #[arg(long, value_delimiter = ',', default_values_t = [100u64, 1_000, 5_000, 20_000])]
@@ -163,8 +163,6 @@ enum Command {
     /// what `ExecutorHealth::apply_nanos_*` is O(), and what a deny can be queued behind
     /// (lifecycle §1.3: a deny's wait is bounded by the work item currently executing).
     DenyAck {
-        /// Only the two deny dispositions by default — `predicate` retires at its compaction fold
-        /// and is not the security-critical latency.
         #[arg(long, value_delimiter = ',', default_values_t = ["suppress".to_string(), "delete".to_string()])]
         op: Vec<String>,
         /// Buffered-item depths to measure at. Brackets `overlay_soft_limit` (500,000) and reaches

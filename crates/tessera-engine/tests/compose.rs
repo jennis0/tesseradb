@@ -19,20 +19,10 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, FrozenFragment, PostingsReader};
 use tessera_engine::compose::{compose, visible_to, EffectiveMask, RowProjection};
-use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay, PredicateChange};
+use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_store::write::write_permutation;
 use tessera_store::{Permutation, RowSpace};
 use tessera_types::{EntityId, TermId};
-
-/// A predicate change over already-resolved term ids. Its descriptors are stand-ins — nothing here
-/// resolves them — but they are stated anyway, because `PredicateChange` exists precisely so the
-/// two halves cannot be set independently.
-fn evaluate(terms: &[u32]) -> PredicateChange {
-    PredicateChange {
-        descriptors: terms.iter().map(|t| t.to_string().into_bytes()).collect(),
-        terms: terms.iter().map(|t| TermId::new(*t)).collect(),
-    }
-}
 
 const UNIVERSE: u32 = 10_000;
 const BUFFER_EXT: u32 = 5;
@@ -42,18 +32,15 @@ const SMALL_TERM_THRESHOLD: u32 = 32;
 
 // Fixture entity ids (documented at point of use below in each test).
 const SUPPRESS_IN: u64 = 5;
-const EVAL_NARROW: u64 = 6;
-const EVAL_KEEP: u64 = 7;
-const DELETE_BEATS_EVAL: u64 = 8;
+const DELETED_IN: u64 = 8;
 const CROSS1_DSU: u64 = 10; // delete -> suppress -> unsuppress
 const CROSS2_SDU: u64 = 11; // suppress -> delete -> unsuppress
 const SUPPRESS_OUT: u64 = 9000; // outside the fragment
-const EVAL_WIDEN: u64 = 9001; // outside the fragment
+const OUT_OF_FRAGMENT: u64 = 9001; // outside the fragment
 const BUFFERED_PASS: u64 = 10_000;
 const BUFFERED_FAIL: u64 = 10_001;
 
 const SATISFIED_TERM_A: u32 = 0; // a real granted/postings term
-const SATISFIED_TERM_MARKER: u32 = 99; // satisfied but carries no postings — pure evaluate marker
 const UNSATISFIED_TERM: u32 = 77;
 
 struct Fixture {
@@ -98,16 +85,9 @@ fn build_fixture() -> Fixture {
         fragment_entities.extend(t);
     }
 
-    // `satisfied` includes the granted postings terms plus a marker term used only by
-    // `evaluate_terms` entries in the tests below — evaluate never touches postings, so this
-    // term need not (and does not) appear in any posting.
-    let satisfied: FxHashSet<TermId> = [
-        TermId::new(SATISFIED_TERM_A),
-        TermId::new(1),
-        TermId::new(SATISFIED_TERM_MARKER),
-    ]
-    .into_iter()
-    .collect();
+    let satisfied: FxHashSet<TermId> = [TermId::new(SATISFIED_TERM_A), TermId::new(1)]
+        .into_iter()
+        .collect();
 
     Fixture {
         _temp: temp,
@@ -185,7 +165,7 @@ fn b_suppress_visible_entity_drops_count_and_visibility() {
     assert!(fx.fragment_entities.contains(&(SUPPRESS_IN as u32)));
 
     let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress, None);
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
     let buffer = IngestBuffer::new();
 
     let mask = compose_with(&fx, &overlay, &buffer);
@@ -216,24 +196,24 @@ fn b_suppress_visible_entity_drops_count_and_visibility() {
 #[test]
 fn an_unsuppress_restores_the_buffered_items_own_verdict_rather_than_leaving_a_husk() {
     let fx = build_fixture();
-    let entity = e(EVAL_WIDEN);
-    assert!(!fx.fragment_entities.contains(&(EVAL_WIDEN as u32)));
+    let entity = e(OUT_OF_FRAGMENT);
+    assert!(!fx.fragment_entities.contains(&(OUT_OF_FRAGMENT as u32)));
 
     let mut buffer = IngestBuffer::new();
     insert_buffered(
         &mut buffer,
-        EVAL_WIDEN,
-        vec![TermId::new(SATISFIED_TERM_MARKER)],
+        OUT_OF_FRAGMENT,
+        vec![TermId::new(SATISFIED_TERM_A)],
     );
 
     let mut overlay = Overlay::new();
-    overlay.apply(entity, ChangeOp::Suppress, None);
+    overlay.apply(entity, ChangeOp::Suppress);
     assert!(
         !visible_to(&fragment_for(&fx), &fx.satisfied, &overlay, &buffer, entity),
         "suppressed, so hidden whatever the buffer says"
     );
 
-    overlay.apply(entity, ChangeOp::Unsuppress, None);
+    overlay.apply(entity, ChangeOp::Unsuppress);
     assert!(
         !overlay.touches(entity),
         "the unsuppress leaves no trace at all — there is no husk to outrank the buffer"
@@ -249,8 +229,8 @@ fn c_unsuppress_restores_it() {
     let fx = build_fixture();
 
     let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress, None);
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Unsuppress, None);
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Unsuppress);
     let buffer = IngestBuffer::new();
 
     let mask = compose_with(&fx, &overlay, &buffer);
@@ -260,65 +240,6 @@ fn c_unsuppress_restores_it() {
         fx.base.bitmap().cardinality()
     );
     assert!(mask.contains_row(SUPPRESS_IN as u32));
-    assert!(mask.check_structural_invariants());
-}
-
-#[test]
-fn d_evaluate_excludes_when_terms_no_longer_intersect() {
-    let fx = build_fixture();
-    assert!(fx.fragment_entities.contains(&(EVAL_NARROW as u32)));
-
-    let mut overlay = Overlay::new();
-    overlay.apply(
-        e(EVAL_NARROW),
-        ChangeOp::Predicate,
-        Some(evaluate(&[UNSATISFIED_TERM])),
-    );
-    let buffer = IngestBuffer::new();
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-    assert!(!mask.contains_row(EVAL_NARROW as u32));
-    assert!(mask.check_structural_invariants());
-}
-
-#[test]
-fn d_evaluate_keeps_when_terms_still_intersect() {
-    let fx = build_fixture();
-    assert!(fx.fragment_entities.contains(&(EVAL_KEEP as u32)));
-
-    let mut overlay = Overlay::new();
-    overlay.apply(
-        e(EVAL_KEEP),
-        ChangeOp::Predicate,
-        Some(evaluate(&[SATISFIED_TERM_MARKER])),
-    );
-    let buffer = IngestBuffer::new();
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-    assert!(mask.contains_row(EVAL_KEEP as u32));
-    assert!(mask.check_structural_invariants());
-}
-
-#[test]
-fn d2_evaluate_widening_includes_entity_outside_fragment() {
-    let fx = build_fixture();
-    assert!(!fx.fragment_entities.contains(&(EVAL_WIDEN as u32)));
-    assert!(!fx.base.bitmap().contains(EVAL_WIDEN as u32));
-
-    let mut overlay = Overlay::new();
-    overlay.apply(
-        e(EVAL_WIDEN),
-        ChangeOp::Predicate,
-        Some(evaluate(&[SATISFIED_TERM_MARKER])),
-    );
-    let buffer = IngestBuffer::new();
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-    assert!(mask.contains_row(EVAL_WIDEN as u32));
-    assert_eq!(
-        mask.count_range(full_range()),
-        fx.base.bitmap().cardinality() + 1
-    );
     assert!(mask.check_structural_invariants());
 }
 
@@ -347,32 +268,13 @@ fn e_buffered_entity_included_iff_terms_intersect() {
 }
 
 #[test]
-fn f_deny_beats_evaluate() {
-    let fx = build_fixture();
-    assert!(fx.fragment_entities.contains(&(DELETE_BEATS_EVAL as u32)));
-
-    let mut overlay = Overlay::new();
-    overlay.apply(e(DELETE_BEATS_EVAL), ChangeOp::Delete, None);
-    overlay.apply(
-        e(DELETE_BEATS_EVAL),
-        ChangeOp::Predicate,
-        Some(evaluate(&[SATISFIED_TERM_MARKER])),
-    );
-    let buffer = IngestBuffer::new();
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-    assert!(!mask.contains_row(DELETE_BEATS_EVAL as u32));
-    assert!(mask.check_structural_invariants());
-}
-
-#[test]
 fn f2_out_of_fragment_deny_is_a_byte_for_byte_no_op() {
     let fx = build_fixture();
     assert!(!fx.fragment_entities.contains(&(SUPPRESS_OUT as u32)));
     assert!(!fx.base.bitmap().contains(SUPPRESS_OUT as u32));
 
     let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress, None);
+    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress);
     let buffer = IngestBuffer::new();
 
     let mask = compose_with(&fx, &overlay, &buffer);
@@ -395,9 +297,9 @@ fn f3_cross_cause_delete_suppress_unsuppress_stays_excluded() {
     assert!(fx.fragment_entities.contains(&(CROSS1_DSU as u32)));
 
     let mut overlay = Overlay::new();
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Delete, None);
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress, None);
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Unsuppress, None);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Delete);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Unsuppress);
     let buffer = IngestBuffer::new();
 
     let mask = compose_with(&fx, &overlay, &buffer);
@@ -411,9 +313,9 @@ fn f3_cross_cause_suppress_delete_unsuppress_stays_excluded() {
     assert!(fx.fragment_entities.contains(&(CROSS2_SDU as u32)));
 
     let mut overlay = Overlay::new();
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Suppress, None);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Delete, None);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Unsuppress, None);
+    overlay.apply(e(CROSS2_SDU), ChangeOp::Suppress);
+    overlay.apply(e(CROSS2_SDU), ChangeOp::Delete);
+    overlay.apply(e(CROSS2_SDU), ChangeOp::Unsuppress);
     let buffer = IngestBuffer::new();
 
     let mask = compose_with(&fx, &overlay, &buffer);
@@ -427,21 +329,11 @@ fn g_count_range_matches_brute_force_rows_in_range() {
 
     // A composite scenario exercising every rule at once.
     let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress, None);
-    overlay.apply(
-        e(EVAL_NARROW),
-        ChangeOp::Predicate,
-        Some(evaluate(&[UNSATISFIED_TERM])),
-    );
-    overlay.apply(
-        e(EVAL_WIDEN),
-        ChangeOp::Predicate,
-        Some(evaluate(&[SATISFIED_TERM_MARKER])),
-    );
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Delete, None);
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress, None);
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Unsuppress, None);
-    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress, None);
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Delete);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Unsuppress);
+    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress);
 
     let mut buffer = IngestBuffer::new();
     insert_buffered(
@@ -482,15 +374,19 @@ fn g2_visible_runs_flatten_to_rows_in_range_on_both_routes() {
     assert!(empty_mask.diffs_are_empty(), "route predicate: base walk");
 
     // Route 2: the same composite scenario as `g_...` — non-empty minus AND plus, so the
-    // fallback must include `plus` rows the base cursor could never see.
+    // fallback must include `plus` rows the base cursor could never see. The suppression supplies
+    // `minus`; the buffered pass supplies `plus`, which is the only source of one now that the
+    // evaluate store is gone (decision 0048) — this fixture's synthetic permutation gives a
+    // buffered entity a row, which a real one does not have.
     let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress, None);
-    overlay.apply(
-        e(EVAL_WIDEN),
-        ChangeOp::Predicate,
-        Some(evaluate(&[SATISFIED_TERM_MARKER])),
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_PASS,
+        vec![TermId::new(SATISFIED_TERM_A)],
     );
-    let diff_mask = compose_with(&fx, &overlay, &IngestBuffer::new());
+    let diff_mask = compose_with(&fx, &overlay, &buffer);
     assert!(!diff_mask.diffs_are_empty(), "route predicate: fallback");
 
     let mut rng = StdRng::seed_from_u64(0xB9);
@@ -518,14 +414,14 @@ fn g2_visible_runs_flatten_to_rows_in_range_on_both_routes() {
 
     // The plus row is genuinely reachable only through the fallback: prove the scenario keeps
     // exercising the property the fallback exists for.
-    let widen_row = EVAL_WIDEN as u32;
-    let mut saw_widen = false;
-    diff_mask.for_each_visible_run(widen_row..widen_row + 1, |run| {
-        saw_widen = saw_widen || (run.start..run.end).contains(&widen_row);
+    let plus_row = BUFFERED_PASS as u32;
+    let mut saw_plus = false;
+    diff_mask.for_each_visible_run(plus_row..plus_row + 1, |run| {
+        saw_plus = saw_plus || (run.start..run.end).contains(&plus_row);
     });
     assert!(
-        saw_widen,
-        "the widened (plus) row must be yielded by the fallback route"
+        saw_plus,
+        "the buffered (plus) row must be yielded by the fallback route"
     );
 }
 
@@ -534,16 +430,11 @@ fn h_structural_invariants_hold_pervasively() {
     let fx = build_fixture();
 
     let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress, None);
-    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress, None);
-    overlay.apply(
-        e(EVAL_WIDEN),
-        ChangeOp::Predicate,
-        Some(evaluate(&[SATISFIED_TERM_MARKER])),
-    );
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Suppress, None);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Delete, None);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Unsuppress, None);
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress);
+    overlay.apply(e(CROSS2_SDU), ChangeOp::Suppress);
+    overlay.apply(e(CROSS2_SDU), ChangeOp::Delete);
+    overlay.apply(e(CROSS2_SDU), ChangeOp::Unsuppress);
 
     let mut buffer = IngestBuffer::new();
     insert_buffered(
@@ -576,7 +467,7 @@ fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
 /// Restart-replay. Two entities are established purely through the WAL (ids
 /// `10_002`/`10_003`, inside the synthetic permutation's buffered-with-a-row range), then driven
 /// through the two cross-cause sequences that matter — `delete → suppress →
-/// unsuppress` and `delete → predicate` (with a term the session satisfies) — all *through the
+/// unsuppress` and `suppress → delete` — all *through the
 /// WAL*, not by calling `Overlay::apply` directly. The WAL handle is dropped and reopened (the
 /// "restart"), so the `Overlay`/`IngestBuffer` this test composes against are rebuilt from a
 /// fresh replay of on-disk bytes, exactly as a real process restart would rebuild them.
@@ -622,37 +513,32 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
         .unwrap();
 
         // delete X -> suppress X -> unsuppress X (must stay excluded: delete is terminal).
-        wal.append(&WalRecord::Change {
-            external_id: ext_x.clone(),
+        wal.append(&WalRecord::ChangeByEntity {
+            entity_id: e(ENTITY_X),
             op: ChangeOp::Delete,
-            descriptors: None,
         })
         .unwrap();
-        wal.append(&WalRecord::Change {
-            external_id: ext_x.clone(),
+        wal.append(&WalRecord::ChangeByEntity {
+            entity_id: e(ENTITY_X),
             op: ChangeOp::Suppress,
-            descriptors: None,
         })
         .unwrap();
-        wal.append(&WalRecord::Change {
-            external_id: ext_x.clone(),
+        wal.append(&WalRecord::ChangeByEntity {
+            entity_id: e(ENTITY_X),
             op: ChangeOp::Unsuppress,
-            descriptors: None,
         })
         .unwrap();
 
-        // delete Y -> predicate Y granting a term the session satisfies (must stay excluded:
-        // predicate never clears deny flags).
-        wal.append(&WalRecord::Change {
-            external_id: ext_y.clone(),
-            op: ChangeOp::Delete,
-            descriptors: None,
+        // suppress Y -> delete Y: the other order, and the deletion must outlive an unsuppress
+        // that never comes.
+        wal.append(&WalRecord::ChangeByEntity {
+            entity_id: e(ENTITY_Y),
+            op: ChangeOp::Suppress,
         })
         .unwrap();
-        wal.append(&WalRecord::Change {
-            external_id: ext_y.clone(),
-            op: ChangeOp::Predicate,
-            descriptors: Some(vec![b"satisfied-term".to_vec()]),
+        wal.append(&WalRecord::ChangeByEntity {
+            entity_id: e(ENTITY_Y),
+            op: ChangeOp::Delete,
         })
         .unwrap();
 
@@ -661,8 +547,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     }
 
     // A one-descriptor dictionary: `b"satisfied-term"` resolves to `TermId(0)`, which is exactly
-    // `SATISFIED_TERM_A` in the fixture's `satisfied` set below — so if the deny didn't hold,
-    // Y's predicate change would otherwise rescue it.
+    // `SATISFIED_TERM_A` in the fixture's `satisfied` set below.
     let dict_dir = TempDir::new().unwrap();
     let mut dict_writer = tessera_authz::DictWriter::new(dict_dir.path());
     dict_writer.intern(b"satisfied-term");
@@ -671,10 +556,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
 
     // Reopen: fresh replay from disk, not the in-memory `Overlay`/`IngestBuffer` above.
     let (_wal, records) = Wal::open(&wal_path).unwrap();
-    let (overlay, buffer, _established, _resolver) = replay(&records, &dict, Overlay::new(), |_external_id| {
-        Ok::<_, std::convert::Infallible>(None)
-    })
-    .unwrap();
+    let (overlay, buffer, _established, _resolver) = replay(&records, &dict, Overlay::new());
 
     assert!(
         overlay.is_deleted(e(ENTITY_X)),
@@ -687,12 +569,11 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
 
     assert!(
         overlay.is_deleted(e(ENTITY_Y)),
-        "delete must survive replay"
+        "delete must survive replay in either order"
     );
-    assert_eq!(
-        overlay.evaluate_of(e(ENTITY_Y)).map(|p| p.terms.as_slice()),
-        Some(&[TermId::new(0)][..]),
-        "predicate's granted term must also survive replay"
+    assert!(
+        overlay.is_suppressed(e(ENTITY_Y)),
+        "and the suppression that preceded it is a separate fact, still in force"
     );
     // **Neither is buffered any more, and the exclusions above are what makes that safe.** A
     // deleted row acquires no geometry, so no flush would ever consume it and it would pin the
@@ -710,87 +591,9 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     assert!(mask.check_structural_invariants());
 }
 
-/// Review finding #1, end to end: an unsatisfied `predicate` excludes an in-fragment entity; a
-/// later `predicate` change carrying no descriptors (`terms: None`, representable per R5's
-/// optional `access`) must not fall back to the fragment's original (included) verdict.
-#[test]
-fn predicate_with_no_terms_does_not_reopen_a_prior_evaluate_exclusion() {
-    let fx = build_fixture();
-    assert!(fx.fragment_entities.contains(&(EVAL_NARROW as u32)));
-    assert!(fx.base.bitmap().contains(EVAL_NARROW as u32));
-
-    let mut overlay = Overlay::new();
-    overlay.apply(
-        e(EVAL_NARROW),
-        ChangeOp::Predicate,
-        Some(evaluate(&[UNSATISFIED_TERM])),
-    );
-    let buffer = IngestBuffer::new();
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-    assert!(
-        !mask.contains_row(EVAL_NARROW as u32),
-        "first predicate must exclude the entity"
-    );
-
-    // A second, descriptor-less predicate change must not restore visibility.
-    overlay.apply(e(EVAL_NARROW), ChangeOp::Predicate, None);
-    let mask = compose_with(&fx, &overlay, &buffer);
-    assert!(
-        !mask.contains_row(EVAL_NARROW as u32),
-        "a descriptor-less predicate must not re-expose an entity a prior predicate excluded"
-    );
-    assert!(mask.check_structural_invariants());
-}
-
-/// Review finding #2, end to end: a term id from `DescriptorResolver`'s in-memory extension
-/// (top-of-`u32`-range, per the fix in `tessera_lifecycle::buffer`) must never satisfy a
-/// session's `satisfied` set built the ordinary way (from real, small dictionary ordinals) — the
-/// "unsatisfiable until the next build" property is exercised here, not just asserted in prose.
-#[test]
-fn extension_only_term_never_passes_compose() {
-    let fx = build_fixture();
-
-    // A genuinely novel descriptor, resolved against an otherwise-empty dictionary, lands at
-    // `u32::MAX` (top of the extension range) — nowhere near any id in `fx.satisfied`.
-    let dict_dir = TempDir::new().unwrap();
-    let dict_writer = tessera_authz::DictWriter::new(dict_dir.path());
-    let dict_paths = dict_writer.finish().unwrap();
-    let dict = tessera_authz::Dict::load(&dict_paths).unwrap();
-    let mut resolver = tessera_lifecycle::DescriptorResolver::new(&dict);
-    let extension_term = resolver.resolve(b"never-built-yet");
-    assert!(!fx.satisfied.contains(&extension_term));
-
-    // Outside the fragment, so any pass would show up as `plus`.
-    assert!(!fx.fragment_entities.contains(&(EVAL_WIDEN as u32)));
-
-    let mut overlay = Overlay::new();
-    overlay.apply(
-        e(EVAL_WIDEN),
-        ChangeOp::Predicate,
-        Some(tessera_lifecycle::overlay::resolve(
-            &[b"never-built-yet".to_vec()],
-            &mut resolver,
-        )),
-    );
-    let buffer = IngestBuffer::new();
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-    assert!(
-        !mask.contains_row(EVAL_WIDEN as u32),
-        "an extension-only term must never intersect a session's satisfied set"
-    );
-    assert_eq!(
-        mask.count_range(full_range()),
-        fx.base.bitmap().cardinality()
-    );
-    assert!(mask.check_structural_invariants());
-}
-
 /// The equivalence `visible_to` rests on, asserted rather than argued. For a
-/// fixture exercising every precedence branch — deleted, suppressed, evaluate pass, evaluate
-/// fail, a neutral overlay entry (delete → suppress → unsuppress leaves an entry present but not
-/// currently suppressed), a deny outside the fragment (no-op), buffered pass/fail, and plain
+/// fixture exercising every precedence branch — deleted, suppressed, a delete → suppress →
+/// unsuppress sequence, a deny outside the fragment (no-op), buffered pass/fail, and plain
 /// fragment membership — `visible_to` must agree with `compose(...).contains_row(row_of(entity))`
 /// for every entity that has a row. If `verdict` was correctly factored out of `compose` (rather
 /// than transcribed a second time), this is what proves the factoring did not change `compose`'s
@@ -801,32 +604,12 @@ fn visible_to_agrees_with_compose_over_every_precedence_case() {
     let fx = build_fixture();
 
     let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress, None);
-    overlay.apply(
-        e(EVAL_NARROW),
-        ChangeOp::Predicate,
-        Some(evaluate(&[UNSATISFIED_TERM])),
-    );
-    overlay.apply(
-        e(EVAL_KEEP),
-        ChangeOp::Predicate,
-        Some(evaluate(&[SATISFIED_TERM_MARKER])),
-    );
-    overlay.apply(
-        e(EVAL_WIDEN),
-        ChangeOp::Predicate,
-        Some(evaluate(&[SATISFIED_TERM_MARKER])),
-    );
-    overlay.apply(e(DELETE_BEATS_EVAL), ChangeOp::Delete, None);
-    overlay.apply(
-        e(DELETE_BEATS_EVAL),
-        ChangeOp::Predicate,
-        Some(evaluate(&[SATISFIED_TERM_MARKER])),
-    );
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Delete, None);
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress, None);
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Unsuppress, None);
-    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress, None);
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    overlay.apply(e(DELETED_IN), ChangeOp::Delete);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Delete);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Unsuppress);
+    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress);
 
     let mut buffer = IngestBuffer::new();
     insert_buffered(

@@ -71,7 +71,7 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
 
     // Delete it. The binding is now a dead one and must not block a user's write.
     engine
-        .accept_change(first, ChangeOp::Delete, None)
+        .accept_change(first, ChangeOp::Delete)
         .expect("delete accepted");
 
     // Second life: same external id, accepted — the executor's own backstop check is the one
@@ -106,7 +106,7 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
 
     // And the live binding is fully operable: a suppress by external id lands on the second life.
     reopened
-        .accept_change(resolved, ChangeOp::Suppress, None)
+        .accept_change(resolved, ChangeOp::Suppress)
         .expect("suppress accepted");
     assert!(
         reopened.generation().overlay.is_suppressed(second),
@@ -145,7 +145,7 @@ fn a_suppressed_holder_still_blocks_reingest() {
         .accept_ingest(vec![row(&engine, b"doc-2")], "s-1".to_string(), [3u8; 32])
         .expect("ingest accepted")[0];
     engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect("suppress accepted");
 
     // Suppression is temporary hiding, not deletion: re-ingesting a byte-identical copy past it

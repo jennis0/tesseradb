@@ -1,93 +1,60 @@
-//! The overlay: per-entity deny/evaluate state accumulated from `/control/changes`
+//! The overlay: per-entity deny state accumulated from `/control/changes`
 //! (`write-path.md` §5.4's two removal rules).
 //!
-//! The overlay is **three independent stores**, never one overwritable disposition: deletions,
-//! suppressions and predicate changes are separate facts that leave on different triggers.
-//! **Rule S** — an entry leaves `suppressed` only by its unsuppress. **Rule F** — entries leave
-//! `deleted` and `evaluate` only at the compaction fold that *executes* them. Three stores against
-//! two rules: the store boundary is what makes the fail-open collapse below unexpressible, and it
-//! is not a claim that each store owns a rule.
+//! The overlay is **two independent stores**, never one overwritable disposition: deletions and
+//! suppressions are separate facts that leave on different triggers. **Rule S** — an entry leaves
+//! `suppressed` only by its unsuppress. **Rule F** — an entry leaves `deleted` only at the
+//! compaction fold that *executes* it.
 //!
 //! *(Owner-ruled 2026-08-03, replacing lifecycle §3.2's stamp ledger. That document is not yet
 //! rewritten — a reader who finds it describing per-deny retirement stamps has found the stale
 //! text, not a second mechanism.)*
 //!
 //! **⊘ Only the unsuppress rule exists.** There is no compaction fold, so nothing retires a
-//! deletion or an evaluate entry — safe today precisely because nothing retires at all, and
-//! fail-open the moment a fold is built without Rule F's identity match (`write-path.md` §5.4).
+//! deletion — safe today precisely because nothing retires at all, and fail-open the moment a fold
+//! is built without Rule F's identity match (`write-path.md` §5.4).
 //!
-//! **`evaluate` is being removed, and holds nothing anywhere.** Decision 0047 withdrew the
-//! `predicate` op — an edit is a delete plus a re-ingest, and `/control/changes` refuses
-//! `op: "predicate"` with a 422 naming the flow. 0047 kept the machinery dormant rather than
-//! deleting it, for pre-0047 WALs to replay; **that set is empty, because the system has never been
-//! deployed**, so the follow-on ruling 0047 anticipated is made: the store, the WAL variant,
-//! `ChangeOp::Predicate`, [`PredicateChange`] and `verdict`'s branch are all to be cut. Until that
-//! lands, nothing may be built against this store and nothing new can enter it.
-//!
-//! Collapsing them into a single enum ("last write wins") is fail-open, and has been caught twice:
-//! the sequence `delete → suppress → unsuppress` must not re-expose a deleted item. Three separate
-//! containers, each written by exactly one op, make that impossible for any refactor that still
-//! type-checks — where three fields in one struct left it a rule a reader had to keep in mind.
+//! Collapsing the two into a single enum ("last write wins") is fail-open, and has been caught
+//! twice: the sequence `delete → suppress → unsuppress` must not re-expose a deleted item. Two
+//! separate containers, each written by exactly one op, make that impossible for any refactor that
+//! still type-checks — where two fields in one struct left it a rule a reader had to keep in mind.
+//! There were three stores until decision 0048; deleting the `evaluate` one is not a licence to
+//! collapse the two that remain, whose separation carries the whole argument above.
 
 use croaring::Bitmap;
 use rustc_hash::FxHashMap;
 
 use tessera_authz::Dict;
-use tessera_types::{EntityId, TermId};
+use tessera_types::EntityId;
 
 use crate::buffer::{DescriptorResolver, IngestBuffer};
 use crate::wal::{ChangeOp, OverlaySnapshotEntry, WalRecord};
 
-/// A predicate change's term set, carried in **both** the form composition needs and the form
-/// durability needs.
+/// Per-entity deny state, held as **two independent stores**.
 ///
-/// The two are one value rather than two fields because they must never drift: `terms` is
-/// process-local (a novel descriptor resolves to an extension id that exists only in this
-/// process's [`DescriptorResolver`]), so it is unwritable, while `descriptors` is what
-/// [`Overlay::snapshot`] must emit and is meaningless to composition. An overlay that stored only
-/// the resolved ids could not be snapshotted at all; one that stored them separately could be set
-/// with a mismatched pair. See [`OverlaySnapshotEntry`] for why a persisted `TermId` dangles.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PredicateChange {
-    /// Raw term descriptors, exactly as `/control/changes` supplied them.
-    pub descriptors: Vec<Vec<u8>>,
-    /// Those descriptors resolved against this process's dictionary plus extension.
-    pub terms: Vec<TermId>,
-}
-
-/// Per-entity deny/evaluate state, held as **three independent stores**.
+/// The two facts leave on different triggers — a suppression *only* by its unsuppress (Rule S), a
+/// deletion only at the compaction fold that executes it (Rule F, `write-path.md` §5.4) — and the
+/// rejected single rule (r1: one retirement stamp for every deny) is fail-open precisely for
+/// suppression, because any stamp eventually retires the entry and re-exposes the item.
 ///
-/// The three facts leave on different triggers — a suppression *only* by its unsuppress (Rule S), a
-/// deletion or an evaluate entry only at the compaction fold that executes it (Rule F,
-/// `write-path.md` §5.4) — and the rejected single rule (r1: one retirement stamp for every deny)
-/// is fail-open precisely for suppression, because any stamp eventually retires the entry and
-/// re-exposes the item.
-///
-/// **Three stores rather than three fields in one struct, and the difference is not cosmetic.**
+/// **Two stores rather than two fields in one struct, and the difference is not cosmetic.**
 /// Collapsing the facts into one last-write-wins disposition was caught fail-open twice in review;
-/// the counterexample is `delete → suppress → unsuppress`. Three fields made that a rule a refactor
-/// could still break while compiling. Three containers of three different types, mutated in three
-/// places, cannot be collapsed by any refactor that still type-checks. It also makes r1
-/// *unexpressible* rather than merely rejected: [`Overlay::suppressed`] is a bitmap of entity ids
-/// and carries no stamp field for a retirement rule to act on at all. Its only removal path is an
-/// `Unsuppress`.
+/// the counterexample is `delete → suppress → unsuppress`. Two fields made that a rule a refactor
+/// could still break while compiling. Two containers, mutated in two places, cannot be collapsed by
+/// any refactor that still type-checks. It also makes r1 *unexpressible* rather than merely
+/// rejected: [`Overlay::suppressed`] is a bitmap of entity ids and carries no stamp field for a
+/// retirement rule to act on at all. Its only removal path is an `Unsuppress`.
 ///
-/// The suppression and deletion sets are Roaring bitmaps because that is what they are — sets of
-/// entity ids, in entity space, where a set is the whole content. Predicate changes carry a term
-/// set per entity and stay a map.
+/// Both sets are Roaring bitmaps because that is what they are — sets of entity ids, in entity
+/// space, where a set is the whole content.
 #[derive(Debug, Default, Clone)]
 pub struct Overlay {
     /// Set by `Delete`. **Terminal: nothing removes from it**, because Rule F's compaction fold —
     /// the only thing that may execute a deletion — does not exist (⊘).
     deleted: Bitmap,
-    /// Set by `Suppress`, cleared **only** by `Unsuppress`. Never touched by `Delete` or
-    /// `Predicate`, which is now true by construction rather than by discipline.
+    /// Set by `Suppress`, cleared **only** by `Unsuppress`. Never touched by `Delete`, which is
+    /// true by construction rather than by discipline.
     suppressed: Bitmap,
-    /// Set by `Predicate`, which `/control/changes` no longer accepts (decision 0047), and which no
-    /// WAL anywhere carries — **this store is empty in every deployment that exists, and is being
-    /// cut**. Replaces the fragment's verdict for this entity in both directions once present;
-    /// never cleared by the other ops (⊘ — Rule F's compaction fold does not exist).
-    evaluate: FxHashMap<EntityId, PredicateChange>,
 }
 
 impl Overlay {
@@ -103,11 +70,7 @@ impl Overlay {
         self.suppressed.contains(as_u32(entity))
     }
 
-    pub fn evaluate_of(&self, entity: EntityId) -> Option<&PredicateChange> {
-        self.evaluate.get(&entity)
-    }
-
-    /// Whether any of the three stores holds an opinion about `entity`.
+    /// Whether either store holds an opinion about `entity`.
     ///
     /// **There is no "present but neutral" state any more.** Under a single map, `suppress →
     /// unsuppress` left an entry whose every fact was inactive, and its mere *presence* outranked
@@ -115,7 +78,7 @@ impl Overlay {
     /// suppression bitmap, so the entity is untouched again and the buffer decides — which is what
     /// lifecycle §3.1 always said ("unsuppress removes the entry") and what the code did not do.
     pub fn touches(&self, entity: EntityId) -> bool {
-        self.is_deleted(entity) || self.is_suppressed(entity) || self.evaluate.contains_key(&entity)
+        self.is_deleted(entity) || self.is_suppressed(entity)
     }
 
     /// `deleted ∪ suppressed` — every entity denied outright, in entity space.
@@ -124,9 +87,6 @@ impl Overlay {
     /// union rather than two accessors: the mask's derivation rule turns on the union, so an
     /// unsuppress may not subtract a row while `deleted` still holds the entity. Handing callers
     /// the union makes the rule the only expressible thing.
-    ///
-    /// The `evaluate` store is deliberately absent: an entry there is not a deny, it replaces a
-    /// verdict in both directions, and it stays in `compose`'s per-entity walk.
     pub fn denied(&self) -> Bitmap {
         self.deleted.or(&self.suppressed)
     }
@@ -150,52 +110,36 @@ impl Overlay {
         self.deleted.iter().map(u64::from).collect()
     }
 
-    /// The entities carrying a predicate change — with the buffer, the whole of what `compose`
-    /// still walks per request once the deny mask covers the rest.
-    pub fn evaluate_keys(&self) -> impl Iterator<Item = EntityId> + '_ {
-        self.evaluate.keys().copied()
-    }
-
-    /// Every entity any store has an opinion on, ascending, without duplicates.
+    /// Every entity either store has an opinion on, ascending, without duplicates.
+    ///
+    /// The same set as [`Self::denied`], in the form [`Self::snapshot`] iterates: with the evaluate
+    /// store gone (decision 0048), every entity the overlay touches is one it denies. The two are
+    /// kept apart because they answer different questions — `denied` is the row mask's input and is
+    /// documented as a union rule, this is an enumeration — and a future non-deny disposition would
+    /// separate them again.
     pub fn touched(&self) -> Vec<EntityId> {
-        let mut ids = self.deleted.or(&self.suppressed);
-        for entity in self.evaluate.keys() {
-            ids.add(as_u32(*entity));
-        }
-        ids.iter().map(|id| EntityId::new(id as u64)).collect()
+        self.denied()
+            .iter()
+            .map(|id| EntityId::new(id as u64))
+            .collect()
     }
 
     /// How many entities this overlay has an opinion on — the depth the soft-limit alarm gauges.
     ///
     /// **This can now go down.** An unsuppress genuinely removes an id, so the one disposition with
-    /// a retirement rule that exists is the one the gauge can reflect. The other two never shrink
-    /// (⊘), so the depth's floor is the deletion and predicate sets.
+    /// a retirement rule that exists is the one the gauge can reflect. Deletions never shrink (⊘),
+    /// so the depth's floor is the deletion set.
     pub fn len(&self) -> usize {
-        let mut ids = self.deleted.or(&self.suppressed);
-        for entity in self.evaluate.keys() {
-            ids.add(as_u32(*entity));
-        }
-        ids.cardinality() as usize
+        self.denied().cardinality() as usize
     }
 
     pub fn is_empty(&self) -> bool {
-        self.deleted.is_empty() && self.suppressed.is_empty() && self.evaluate.is_empty()
+        self.deleted.is_empty() && self.suppressed.is_empty()
     }
 
     /// Apply one disposition change to `entity`. Each op touches exactly one store — see this
     /// type's doc for why that is the whole safety argument.
-    ///
-    /// **The `Predicate` arm is unreachable and is being cut** (decision 0047, plus the follow-on
-    /// ruling in this module's doc): `/control/changes` refuses the op, and no WAL that could replay
-    /// one exists. Do not extend it.
-    ///
-    /// **`Predicate` always *sets* a term set, never unsets one.** `access` is optional on
-    /// `/control/changes` (contracts §3.4), so a predicate change with no descriptors is a
-    /// representable, reachable request; treating it as "leave the entry alone" would be fail-open
-    /// in the dangerous direction — a prior predicate that excluded this entity would be silently
-    /// undone, falling back to the fragment's original verdict. `None` therefore folds to an empty
-    /// term set, which intersects no session's `satisfied` and so keeps the entity excluded.
-    pub fn apply(&mut self, entity: EntityId, op: ChangeOp, predicate: Option<PredicateChange>) {
+    pub fn apply(&mut self, entity: EntityId, op: ChangeOp) {
         match op {
             ChangeOp::Delete => {
                 self.deleted.add(as_u32(entity));
@@ -206,22 +150,19 @@ impl Overlay {
             ChangeOp::Unsuppress => {
                 self.suppressed.remove(as_u32(entity));
             }
-            ChangeOp::Predicate => {
-                self.evaluate.insert(entity, predicate.unwrap_or_default());
-            }
         }
     }
 
-    /// Re-state this overlay as WAL records, so the `Change` records it was accumulated from can be
-    /// deleted (lifecycle §4's rotation; [`WalRecord::OverlaySnapshot`]).
+    /// Re-state this overlay as WAL records, so the `ChangeByEntity` records it was accumulated
+    /// from can be deleted (lifecycle §4's rotation; [`WalRecord::OverlaySnapshot`]).
     ///
     /// **Entries are ordered by entity id**, so the same overlay always encodes to the same bytes.
-    /// A record whose bytes depend on a hash map's iteration order is one that cannot be compared,
+    /// A record whose bytes depend on a set's iteration order is one that cannot be compared,
     /// re-derived, or re-encoded by [`crate::Wal::retry_durability`] with any confidence.
     ///
     /// There is no neutral-entry rule here any more, and its absence is the point: under one map a
     /// `suppress → unsuppress` left a husk whose presence was load-bearing, so the snapshot had to
-    /// emit an `Unsuppress` to preserve it. Three stores make the husk unrepresentable.
+    /// emit an `Unsuppress` to preserve it. Separate stores make the husk unrepresentable.
     pub fn snapshot(&self) -> Vec<OverlaySnapshotEntry> {
         let mut out = Vec::with_capacity(self.len());
         for entity in self.touched() {
@@ -229,43 +170,25 @@ impl Overlay {
                 out.push(OverlaySnapshotEntry {
                     entity_id: entity,
                     op: ChangeOp::Delete,
-                    descriptors: None,
                 });
             }
             if self.is_suppressed(entity) {
                 out.push(OverlaySnapshotEntry {
                     entity_id: entity,
                     op: ChangeOp::Suppress,
-                    descriptors: None,
-                });
-            }
-            if let Some(predicate) = self.evaluate_of(entity) {
-                out.push(OverlaySnapshotEntry {
-                    entity_id: entity,
-                    op: ChangeOp::Predicate,
-                    descriptors: Some(predicate.descriptors.clone()),
                 });
             }
         }
         out
     }
 
-    /// Fold a snapshot back in, resolving each predicate's descriptors through `resolver` exactly
-    /// as a live `Change` would.
+    /// Fold a snapshot back in.
     ///
-    /// Applied, never assigned: the snapshot is a record in a position, and a `Change` earlier in
-    /// the same file has already been applied when this runs.
-    pub fn apply_snapshot(
-        &mut self,
-        entries: &[OverlaySnapshotEntry],
-        resolver: &mut DescriptorResolver<'_>,
-    ) {
+    /// Applied, never assigned: the snapshot is a record in a position, and a `ChangeByEntity`
+    /// earlier in the same file has already been applied when this runs.
+    pub fn apply_snapshot(&mut self, entries: &[OverlaySnapshotEntry]) {
         for entry in entries {
-            self.apply(
-                entry.entity_id,
-                entry.op,
-                entry.descriptors.as_ref().map(|ds| resolve(ds, resolver)),
-            );
+            self.apply(entry.entity_id, entry.op);
         }
     }
 }
@@ -277,70 +200,24 @@ fn as_u32(entity: EntityId) -> u32 {
         .expect("entity ids are capped at u32::MAX by the I9 allocator (contracts §2.6 r6)")
 }
 
-/// Resolve a change's raw descriptors, keeping both forms together — see [`PredicateChange`].
-pub fn resolve(descriptors: &[Vec<u8>], resolver: &mut DescriptorResolver<'_>) -> PredicateChange {
-    PredicateChange {
-        terms: descriptors.iter().map(|d| resolver.resolve(d)).collect(),
-        descriptors: descriptors.to_vec(),
-    }
-}
-
-/// Replay failures. Fail-closed: a change naming an external id this
-/// replay has never seen — neither via an `IngestBatch` row replayed so far, nor via
-/// `resolve_from_bundle` (the bundle's `entities/external-ids-0.arrow` extent, wired in by the
-/// caller) — must not be silently dropped or silently applied to the wrong entity.
-///
-/// Generic over `E`, the caller's `resolve_from_bundle` error type.
-/// `tessera-lifecycle` does not depend on `tessera-store`, so this cannot name
-/// `StoreError` directly — `tessera-engine`'s caller instantiates `E = StoreError` and gets a
-/// real propagated error instead of the closure panicking on a corrupt sidecar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OverlayError<E> {
-    /// `404 unknown`: a `Change` record named an external id no known
-    /// entity (bundle or WAL-established) has ever claimed.
-    UnknownExternalId(Vec<u8>),
-    /// `resolve_from_bundle` itself failed — a real error, not "not found". Fail-closed: WAL
-    /// replay (and any live resolution reusing the same closure) must propagate this rather than
-    /// read it as `UnknownExternalId`, which would let a WAL-resident suppression silently fail
-    /// to apply.
-    ResolveFailed(E),
-}
-
-impl<E: std::fmt::Display> std::fmt::Display for OverlayError<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OverlayError::UnknownExternalId(id) => {
-                write!(f, "unknown external id: {id:02x?}")
-            }
-            OverlayError::ResolveFailed(e) => {
-                write!(f, "resolve_from_bundle failed: {e}")
-            }
-        }
-    }
-}
-
-impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for OverlayError<E> {}
-
 /// Replay a WAL's records into an `Overlay` and an `IngestBuffer`.
 ///
 /// Single left-to-right pass over `records`, in on-disk order (the order changes and ingests
 /// were accepted in — WAL append order is causal order):
 /// - `IngestBatch` rows populate `IngestBuffer` (term descriptors resolved via `dict` plus a
 ///   deterministic, replay-order in-memory extension — see [`DescriptorResolver`]) and register
-///   `external_id → entity_id` in this replay's own external-id map, so a later `Change` record
-///   in the *same* WAL naming that external id resolves without touching the bundle.
-/// - `Change` records resolve their `external_id` first against this replay's own map, then
-///   against `resolve_from_bundle` (entities established before this WAL — i.e. present in the
-///   bundle's `entities/external-ids-0.arrow` extent, contracts §2.1); an id found in neither is
-///   `OverlayError::UnknownExternalId` (`404 unknown`) — fail-closed, never silently ignored.
-///   `Predicate`'s descriptors are resolved through the same `DescriptorResolver` as ingest rows.
+///   `external_id → entity_id` in this replay's own external-id map, which the caller keeps for
+///   live `/control/changes` admission.
+/// - `ChangeByEntity` records apply their disposition directly. **No resolution happens here at
+///   all**: the entity was fixed at admission, which is what makes the record replay to the same
+///   entity under a rotated identity key and lets it address an item that never had an external
+///   id. The external-id-keyed `Change` record this replay once also had to resolve was deleted
+///   with `WAL_VERSION` 5 (decision 0048), and replay became infallible with it.
 /// - `OverlaySnapshot` records are applied **at the position they occupy**, never used as a
 ///   starting state the walk then resumes from. Those are different algorithms: recovery walks
 ///   every surviving file in sequence order, and a file older than the one holding the snapshot may
-///   still carry `Change` records above the point the snapshot was taken at. Starting *at* the
+///   still carry change records above the point the snapshot was taken at. Starting *at* the
 ///   snapshot would skip them — which looks like an optimisation and is a silent un-deny.
-/// - `Lease` and `Flush` records carry no overlay/buffer information — I9 allocator bookkeeping
-///   and a reclamation authority respectively — and are skipped here.
 ///
 /// Returns, alongside the overlay and buffer, the `external_id -> entity_id` map this replay
 /// established from `IngestBatch` rows, and the `DescriptorResolver` in its final state — both
@@ -351,20 +228,16 @@ impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for OverlayError<
 /// [`DescriptorResolver::resume`]'s doc for why restarting descriptor extension ids would be
 /// fail-open).
 #[allow(clippy::type_complexity)]
-pub fn replay<'a, E>(
+pub fn replay<'a>(
     records: &[WalRecord],
     dict: &'a Dict,
     seed: Overlay,
-    resolve_from_bundle: impl Fn(&[u8]) -> std::result::Result<Option<EntityId>, E>,
-) -> Result<
-    (
-        Overlay,
-        IngestBuffer,
-        FxHashMap<Vec<u8>, EntityId>,
-        DescriptorResolver<'a>,
-    ),
-    OverlayError<E>,
-> {
+) -> (
+    Overlay,
+    IngestBuffer,
+    FxHashMap<Vec<u8>, EntityId>,
+    DescriptorResolver<'a>,
+) {
     // **The seed is the starting state, and replay runs over it — that order is load-bearing.**
     // `seed` is what the partition manifests carry (`initial_deny_of`); every WAL record postdates
     // it, because a manifest is only ever written above WAL durability and a member is only
@@ -396,46 +269,20 @@ pub fn replay<'a, E>(
                     buffer.insert_row(row, &mut resolver);
                 }
             }
-            WalRecord::Change {
-                external_id,
-                op,
-                descriptors,
-            } => {
-                let entity = match established.get(external_id.as_slice()).copied() {
-                    Some(entity) => entity,
-                    None => match resolve_from_bundle(external_id)
-                        .map_err(OverlayError::ResolveFailed)?
-                    {
-                        Some(entity) => entity,
-                        None => return Err(OverlayError::UnknownExternalId(external_id.clone())),
-                    },
-                };
-
-                let predicate = descriptors.as_ref().map(|ds| resolve(ds, &mut resolver));
-                overlay.apply(entity, *op, predicate);
-            }
-            WalRecord::ChangeByEntity {
-                entity_id,
-                op,
-                descriptors,
-            } => {
+            WalRecord::ChangeByEntity { entity_id, op } => {
                 // No resolution at all: the entity was fixed at admission, which is what makes
                 // this record replay to the same entity under a rotated identity key, and what
                 // lets it address an item that never had an external id.
-                let predicate = descriptors.as_ref().map(|ds| resolve(ds, &mut resolver));
-                overlay.apply(*entity_id, *op, predicate);
+                overlay.apply(*entity_id, *op);
             }
             WalRecord::OverlaySnapshot { entries } => {
-                overlay.apply_snapshot(entries, &mut resolver);
+                overlay.apply_snapshot(entries);
             }
-            // Neither carries overlay or buffer information: `Lease` is I9 allocator bookkeeping
-            // and `Flush` is a reclamation authority read by the WAL sequence, not by this walk.
-
         }
     }
 
     drop_deleted(&overlay, &mut buffer);
-    Ok((overlay, buffer, established, resolver))
+    (overlay, buffer, established, resolver)
 }
 
 /// Drop every buffered row whose entity the overlay has deleted — **the buffer never holds a
@@ -473,24 +320,14 @@ mod tests {
     use super::*;
     use crate::wal::ChangeOp;
 
-    /// A predicate change stated the way [`Overlay::apply`] requires: descriptors and the terms
-    /// they resolve to, together. These tests never resolve, so the correspondence is nominal —
-    /// what matters is that a `PredicateChange` cannot be built with one half missing.
-    fn predicate(pairs: &[(&[u8], u32)]) -> PredicateChange {
-        PredicateChange {
-            descriptors: pairs.iter().map(|(d, _)| d.to_vec()).collect(),
-            terms: pairs.iter().map(|(_, t)| TermId::new(*t)).collect(),
-        }
-    }
-
     #[test]
-    fn three_facts_are_independent() {
+    fn two_facts_are_independent() {
         let mut overlay = Overlay::new();
         let e = EntityId::new(1);
 
-        overlay.apply(e, ChangeOp::Delete, None);
-        overlay.apply(e, ChangeOp::Suppress, None);
-        overlay.apply(e, ChangeOp::Unsuppress, None);
+        overlay.apply(e, ChangeOp::Delete);
+        overlay.apply(e, ChangeOp::Suppress);
+        overlay.apply(e, ChangeOp::Unsuppress);
 
         assert!(
             overlay.is_deleted(e),
@@ -498,8 +335,8 @@ mod tests {
         );
         assert!(
             !overlay.is_suppressed(e),
-            "unsuppress clears the suppression and nothing else — it cannot reach the other two \
-             stores at all"
+            "unsuppress clears the suppression and nothing else — it cannot reach the other \
+             store at all"
         );
     }
 
@@ -508,82 +345,12 @@ mod tests {
         let mut overlay = Overlay::new();
         let e = EntityId::new(2);
 
-        overlay.apply(e, ChangeOp::Suppress, None);
-        overlay.apply(e, ChangeOp::Delete, None);
-        overlay.apply(e, ChangeOp::Unsuppress, None);
+        overlay.apply(e, ChangeOp::Suppress);
+        overlay.apply(e, ChangeOp::Delete);
+        overlay.apply(e, ChangeOp::Unsuppress);
 
         assert!(overlay.is_deleted(e));
         assert!(!overlay.is_suppressed(e));
-    }
-
-    #[test]
-    fn predicate_never_clears_deny_flags() {
-        let mut overlay = Overlay::new();
-        let e = EntityId::new(3);
-
-        overlay.apply(e, ChangeOp::Delete, None);
-        overlay.apply(e, ChangeOp::Predicate, Some(predicate(&[(b"nine", 9)])));
-
-        assert!(overlay.is_deleted(e));
-        assert_eq!(
-            overlay.evaluate_of(e).map(|p| p.terms.as_slice()),
-            Some(&[TermId::new(9)][..])
-        );
-    }
-
-    /// A `predicate` change with no descriptors (`access` is optional)
-    /// must not silently clear a prior evaluate verdict — that would be fail-open (an entity
-    /// excluded by an earlier unsatisfied predicate re-exposed by a later, descriptor-less one).
-    #[test]
-    fn predicate_with_no_terms_does_not_clear_a_prior_evaluate_verdict() {
-        let mut overlay = Overlay::new();
-        let e = EntityId::new(4);
-
-        // First predicate: an unsatisfied term set (excludes the entity).
-        overlay.apply(
-            e,
-            ChangeOp::Predicate,
-            Some(predicate(&[(b"seventy-seven", 77)])),
-        );
-        assert_eq!(
-            overlay.evaluate_of(e).map(|p| p.terms.as_slice()),
-            Some(&[TermId::new(77)][..])
-        );
-
-        // A later predicate change with no descriptors at all (`terms: None`) must not unset
-        // `evaluate_terms` back to `None` — that would fall back to the fragment's original
-        // verdict, which may have included this entity.
-        overlay.apply(e, ChangeOp::Predicate, None);
-        assert_eq!(
-            overlay.evaluate_of(e).map(|p| p.terms.as_slice()),
-            Some(&[][..]),
-            "a descriptor-less predicate must still set evaluate_terms, to an empty (always \
-             fail-closed) set — never leave it unset"
-        );
-    }
-
-    #[test]
-    fn replay_reports_unknown_external_id_as_404() {
-        use tempfile::TempDir;
-
-        let temp = TempDir::new().unwrap();
-        let writer = tessera_authz::DictWriter::new(temp.path());
-        let paths = writer.finish().unwrap();
-        let dict = Dict::load(&paths).unwrap();
-
-        let records = vec![WalRecord::Change {
-            external_id: b"never-ingested".to_vec(),
-            op: ChangeOp::Suppress,
-            descriptors: None,
-        }];
-
-        let result = replay(&records, &dict, Overlay::new(), |_external_id| {
-            Ok::<_, std::convert::Infallible>(None)
-        });
-        assert_eq!(
-            result.unwrap_err(),
-            OverlayError::UnknownExternalId(b"never-ingested".to_vec())
-        );
     }
 
     /// **A disposition is idempotent under replay, and this is where that is established rather
@@ -597,9 +364,9 @@ mod tests {
     ///
     /// Three pieces of replayed state could have carried the difference, and each is checked here or
     /// named: the **overlay** (below, by comparing against the single-copy replay), the
-    /// **external-id map** (below — `Change` records never write to it; only `IngestBatch` rows do),
-    /// and the **allocator seed**, which `high_water_from` derives from `IngestBatch` and `Lease`
-    /// records alone — pinned by `alloc.rs`'s `high_water_from_takes_the_max_of_rows_and_leases`.
+    /// **external-id map** (below — change records never write to it; only `IngestBatch` rows do),
+    /// and the **allocator seed**, which `high_water_from` derives from `IngestBatch` rows alone —
+    /// pinned by `alloc.rs`'s own tests.
     #[test]
     fn a_disposition_replayed_twice_is_the_same_as_replayed_once() {
         use tempfile::TempDir;
@@ -610,33 +377,15 @@ mod tests {
         let dict = Dict::load(&paths).unwrap();
 
         let entity = EntityId::new(7);
-        let suppress = WalRecord::Change {
-            external_id: b"twice".to_vec(),
+        let suppress = WalRecord::ChangeByEntity {
+            entity_id: entity,
             op: ChangeOp::Suppress,
-            descriptors: None,
-        };
-        let resolve = |external_id: &[u8]| {
-            Ok::<_, std::convert::Infallible>(if external_id == b"twice" {
-                Some(entity)
-            } else {
-                None
-            })
         };
 
-        let (once, _, established_once, _) = replay(
-            std::slice::from_ref(&suppress),
-            &dict,
-            Overlay::new(),
-            resolve,
-        )
-        .unwrap();
-        let (twice, _, established_twice, _) = replay(
-            &[suppress.clone(), suppress],
-            &dict,
-            Overlay::new(),
-            resolve,
-        )
-        .unwrap();
+        let (once, _, established_once, _) =
+            replay(std::slice::from_ref(&suppress), &dict, Overlay::new());
+        let (twice, _, established_twice, _) =
+            replay(&[suppress.clone(), suppress], &dict, Overlay::new());
 
         assert_eq!(
             once.is_suppressed(entity),
@@ -651,37 +400,8 @@ mod tests {
         assert_eq!(
             (established_once.len(), established_twice.len()),
             (0, 0),
-            "a Change record establishes no external id, so a second copy cannot double-register one"
+            "a change record establishes no external id, so a second copy cannot double-register one"
         );
-    }
-
-    #[test]
-    fn replay_resolves_change_against_bundle_when_not_established_by_this_wal() {
-        use tempfile::TempDir;
-
-        let temp = TempDir::new().unwrap();
-        let writer = tessera_authz::DictWriter::new(temp.path());
-        let paths = writer.finish().unwrap();
-        let dict = Dict::load(&paths).unwrap();
-
-        let bundle_entity = EntityId::new(42);
-        let records = vec![WalRecord::Change {
-            external_id: b"from-a-previous-build".to_vec(),
-            op: ChangeOp::Delete,
-            descriptors: None,
-        }];
-
-        let (overlay, _buffer, _established, _resolver) =
-            replay(&records, &dict, Overlay::new(), |external_id| {
-                Ok::<_, std::convert::Infallible>(if external_id == b"from-a-previous-build" {
-                    Some(bundle_entity)
-                } else {
-                    None
-                })
-            })
-            .unwrap();
-
-        assert!(overlay.is_deleted(bundle_entity));
     }
 
     /// Contracts §3.4 r6: an ingested item with no external id gets no `established` entry at
@@ -722,11 +442,7 @@ mod tests {
             ],
         }];
 
-        let (_overlay, buffer, established, _resolver) =
-            replay(&records, &dict, Overlay::new(), |_external_id| {
-                Ok::<_, std::convert::Infallible>(None)
-            })
-            .unwrap();
+        let (_overlay, buffer, established, _resolver) = replay(&records, &dict, Overlay::new());
 
         assert!(
             established.is_empty(),

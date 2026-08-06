@@ -5,13 +5,13 @@
 //! computed once — seconds at 10⁹ rows — and reused across every
 //! viewport and every `compose` call in that session, never recomputed on a per-viewport path.
 //!
-//! [`compose`] walks `L = keys(evaluate) ∪ keys(buffer)` exactly once per entity, resolving each
-//! with the fixed precedence `deleted > suppressed > evaluate_terms > buffered`, and turns the
+//! [`compose`] walks `L = keys(buffer)` exactly once per entity, resolving each with the fixed
+//! precedence `deleted > suppressed > buffered`, and turns the
 //! result into two row-space bitmaps against `base`:
 //! `minus = {row(e) : e fails} ∩ base` and `plus = {row(e) : e passes} ∖ base`. The `∩ base` /
 //! `∖ base` clamps are load-bearing, not cosmetic: without them, denying an entity the session's
 //! fragment never contained would corrupt every count over its tile (a spurious −1, possibly
-//! driving a count negative), and an evaluate-pass already inside the fragment would double-count
+//! driving a count negative), and a pass already inside the fragment would double-count
 //! its tile by the same mechanism in the other direction.
 //!
 //! **Deletions and suppressions are not in that walk.** They arrive as `Generation::denied` — the
@@ -430,7 +430,7 @@ impl DecodeSource<'_> {
     }
 }
 
-/// The per-entity verdict, `deleted > suppressed > evaluate_terms > buffered`, or `None` when
+/// The per-entity verdict, `deleted > suppressed > buffered`, or `None` when
 /// the overlay and the buffer have no opinion and the frozen fragment already carries the
 /// answer. **The single source of this precedence** — [`compose`] turns it into row-space diffs
 /// for range arithmetic, [`visible_to`] reads it directly for a single entity. Two transcriptions
@@ -440,7 +440,7 @@ impl DecodeSource<'_> {
 /// **There is no neutral entry any more.** Under a single map, `suppress → unsuppress` left an entry
 /// whose every fact was inactive, and its bare presence outranked the ingest buffer here. An
 /// unsuppress now removes the id from the suppression bitmap, so a still-buffered entity falls
-/// through to rule 4 and its own terms decide — which is what lifecycle §3.1 always said
+/// through to the buffer rule and its own terms decide — which is what lifecycle §3.1 always said
 /// ("unsuppress removes the entry") and what the previous representation did not do.
 fn verdict(
     overlay: &Overlay,
@@ -451,11 +451,8 @@ fn verdict(
     if overlay.is_deleted(entity) || overlay.is_suppressed(entity) {
         return Some(false);
     }
-    if let Some(predicate) = overlay.evaluate_of(entity) {
-        return Some(predicate.terms.iter().any(|t| satisfied.contains(t)));
-    }
 
-    // Rule 4: buffered entities the overlay has no opinion on (anything it does have an opinion on
+    // Buffered entities the overlay has no opinion on (anything it does have an opinion on
     // was resolved above).
     //
     // **No watermark gate.** There used to be one, `entity < watermark → None`, guarding against a
@@ -542,32 +539,17 @@ pub fn compose(
     let mut fail_rows: Vec<u32> = Vec::new();
     let mut pass_rows: Vec<u32> = Vec::new();
 
-    // **Rules 1–3, over the predicate changes only.** Deletions and suppressions are not walked
-    // here any more: they are `denied`, folded in below as one `andnot`, which is what stops
-    // per-request work growing with denies ever accepted. An entity carrying *both* an evaluate
-    // entry and a deny is walked here and may be resolved `pass` — and the fold then removes its
-    // row regardless, so the precedence `deleted > suppressed > evaluate` holds without this loop
-    // transcribing it. A deny cannot lose an ordering argument it never enters.
+    // **The buffer is the whole of the walk.** Deletions and suppressions are not walked here: they
+    // are `denied`, folded in below as one `andnot`, which is what stops per-request work growing
+    // with denies ever accepted. A deny cannot lose an ordering argument it never enters. With the
+    // evaluate store gone (decision 0048), nothing else in the overlay contributes a row-space diff
+    // at all, so `L` is now `keys(buffer)` alone.
     //
-    // `verdict` is still the single expression of that precedence and is called unchanged, so the
+    // `verdict` is still the single expression of the precedence and is called unchanged, so the
     // entity-space verbs and this walk cannot drift apart.
-    for entity in overlay.evaluate_keys() {
-        if let Some(pass) = verdict(overlay, buffer, satisfied, entity) {
-            if let Some(row) = row_space.row_of(entity) {
-                if pass {
-                    pass_rows.push(row.raw());
-                } else {
-                    fail_rows.push(row.raw());
-                }
-            }
-            // No row in this segment: there is no cross-segment geometry, so this entity
-            // simply cannot contribute to this segment's diff either way.
-        }
-    }
-
-    // Rule 4: buffered entities with no overlay entry (an overlay entry — even a neutral one —
-    // takes precedence per the rule ordering above, and was already resolved, or deliberately given
-    // no verdict, in the loop above).
+    //
+    // Buffered entities with no overlay entry: an overlay entry is a deny, which the fold below
+    // covers, so skipping it here loses nothing.
     for (&entity, _) in buffer.iter() {
         if overlay.touches(entity) {
             continue;

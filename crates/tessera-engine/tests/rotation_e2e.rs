@@ -161,7 +161,7 @@ fn a_suppression_accepted_before_a_rotation_is_still_in_force_after_a_restart() 
         let engine = engine_at(tmp.path(), &root, 1);
         let id = ingest(&engine, "ext-1");
         engine
-            .accept_change(id, ChangeOp::Suppress, None)
+            .accept_change(id, ChangeOp::Suppress)
             .expect("the suppression is accepted");
 
         wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
@@ -199,7 +199,7 @@ fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
         let id = ingest(&engine, "ext-1");
         assert!(engine.generation().buffer.contains(id));
         engine
-            .accept_change(id, ChangeOp::Delete, None)
+            .accept_change(id, ChangeOp::Delete)
             .expect("the delete is accepted");
         assert!(
             !engine.generation().buffer.contains(id),

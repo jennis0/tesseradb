@@ -147,17 +147,19 @@ pub struct WalRow {
     pub scalars: Vec<WalScalar>,
 }
 
-/// The disposition change carried by a `Change` record. The two removal rules (write-path §5.4;
-/// ruled 2026-08-03) are distinct and must not be conflated: suppressions retire only on
-/// `Unsuppress` (never touching postings — Rule S); deletions and predicate changes retire at the
-/// compaction fold that executes them (Rule F). `Predicate` is **withdrawn at the boundary**
-/// (decision 0047 — edit is delete + re-ingest): no new record carries it, and the variant stays
-/// for pre-0047 logs, which replay unchanged.
+/// The disposition change carried by a [`WalRecord::ChangeByEntity`] record. The two removal rules
+/// (write-path §5.4; ruled 2026-08-03) are distinct and must not be conflated: suppressions retire
+/// only on `Unsuppress` (never touching postings — Rule S); deletions retire at the compaction fold
+/// that executes them (Rule F).
+///
+/// A fourth variant, `Predicate`, was deleted with `WAL_VERSION` 5: decision 0047 withdrew the op
+/// at the boundary (an edit is a delete plus a re-ingest) and decision 0048 deleted the machinery
+/// that had been kept dormant for pre-0047 logs, there being none. A future predicate mechanism
+/// would be designed, not resurrected.
 ///
 /// On-disk format: variant order is frozen and append-only — see [`WalScalar`]'s note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChangeOp {
-    Predicate,
     Delete,
     Suppress,
     Unsuppress,
@@ -167,26 +169,17 @@ pub enum ChangeOp {
 ///
 /// Two shape decisions here are not free choices, and both are load-bearing for rotation.
 ///
-/// **Keyed by [`EntityId`], never by external id.** A `Change`-shaped snapshot would re-resolve
-/// each external id at replay, and an entity deleted before it was ever flushed has no row and may
-/// have no extent entry — so `replay` would answer `UnknownExternalId` and the node would refuse to
-/// open. A snapshot is state that was already resolved once; resolving it again can only lose.
-///
-/// **`descriptors` are raw bytes, never `TermId`s.** Extension ids are assigned in replay order by
-/// [`crate::buffer::DescriptorResolver`], and rotation *changes* replay order — the records that
-/// interned an extension id may be the ones being deleted. A persisted extension `TermId` would
-/// therefore dangle, pointing at whatever descriptor happens to intern next. This is the same
-/// hazard `buffer.rs` counts extension ids downward from `u32::MAX` to avoid, arriving by a
-/// different route.
+/// **Keyed by [`EntityId`], never by external id.** An external-id-keyed snapshot would re-resolve
+/// each id at replay, and an entity deleted before it was ever flushed has no row and may have no
+/// extent entry — so replay could not resolve it and the node would refuse to open. A snapshot is
+/// state that was already resolved once; resolving it again can only lose. It is the same reason
+/// [`WalRecord::ChangeByEntity`] is keyed by entity, arrived at from the other end.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OverlaySnapshotEntry {
     pub entity_id: EntityId,
     pub op: ChangeOp,
-    /// The predicate's raw term descriptors for [`ChangeOp::Predicate`]; `None` for the three
-    /// dispositions that do not touch terms.
-    pub descriptors: Option<Vec<Vec<u8>>>,
 }
 
 /// One framed WAL record.
@@ -202,15 +195,7 @@ pub enum WalRecord {
         body_hash: [u8; 32],
         rows: Vec<WalRow>,
     },
-    /// An accepted `/control/changes` entry. `descriptors` carries the new predicate's term
-    /// descriptors for `Predicate` changes; `None` for `Delete`/`Suppress`/`Unsuppress`, which
-    /// change disposition without touching terms.
-    Change {
-        external_id: Vec<u8>,
-        op: ChangeOp,
-        descriptors: Option<Vec<Vec<u8>>>,
-    },
-    /// The whole live overlay, written so that the `Change` records it was accumulated from can be
+    /// The whole live overlay, written so that the change records it was accumulated from can be
     /// deleted.
     ///
     /// **The overlay's only durable home is the WAL.** Nothing else on disk carries a suppression:
@@ -225,12 +210,9 @@ pub enum WalRecord {
     /// fails closed only if every earlier link survives.
     ///
     /// Under replay it is an ordinary record in position: it is applied where it occurs, and a
-    /// `Change` earlier in the same file still applies before it. See [`crate::replay`].
+    /// `ChangeByEntity` earlier in the same file still applies before it. See [`crate::replay`].
     OverlaySnapshot { entries: Vec<OverlaySnapshotEntry> },
-    /// An accepted `/control/changes` entry addressed by **entity id** rather than by external id.
-    ///
-    /// **Appended as a new variant, never by widening `Change`**: postcard encodes an enum by
-    /// positional variant index, so the existing order is frozen and only the tail is free.
+    /// An accepted `/control/changes` entry, addressed by **entity id**.
     ///
     /// **Why the entity and not the identifier the caller supplied.** A `tessera_id` is a keyed
     /// permutation of entity space, so a record carrying one would resolve under whatever key the
@@ -239,14 +221,13 @@ pub enum WalRecord {
     /// identical across a rotation. It is the same reason [`OverlaySnapshotEntry`] is keyed by
     /// entity, arrived at from the other end.
     ///
-    /// It also closes a hole the external-id form cannot: contracts §3.4 r6 makes an external id
-    /// optional at ingest, and an item that arrived without one is addressable by nothing on that
-    /// endpoint — not deletable, not suppressible, at all.
-    ChangeByEntity {
-        entity_id: EntityId,
-        op: ChangeOp,
-        descriptors: Option<Vec<Vec<u8>>>,
-    },
+    /// It also closes a hole an external-id-keyed record cannot: contracts §3.4 r6 makes an
+    /// external id optional at ingest, and an item that arrived without one would be addressable by
+    /// nothing — not deletable, not suppressible, at all. The external-id-keyed `Change` variant
+    /// this one was added alongside was deleted with `WAL_VERSION` 5 (decision 0048), and replay
+    /// stopped resolving external ids at all: the resolution now happens once, in the handler, at
+    /// admission.
+    ChangeByEntity { entity_id: EntityId, op: ChangeOp },
 }
 
 /// WAL-level failures. [`WalError::WalCorruption`], [`WalError::BadHeader`] and
@@ -318,8 +299,13 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// written by nothing (allocation rides `IngestBatch` rows), the second was written and read by
 /// nothing (recovery reconstructs the buffer by the has-a-row predicate and rotation computes its
 /// own reclaim bound), and deleting them shifts every later discriminant, which is exactly what
-/// this version check exists to refuse.
-const WAL_VERSION: u16 = 4;
+/// this version check exists to refuse. Version 5 deleted the `Change` variant, `ChangeOp`'s
+/// `Predicate` and the `descriptors` field of `ChangeByEntity` and `OverlaySnapshotEntry`
+/// (decision 0048): `Change` was written by nothing — every accepted change is admitted against an
+/// entity — and the descriptors had no consumer once the evaluate store went. That shifts a variant
+/// index, drops an enum discriminant and drops a struct field, each of which postcard would decode
+/// as whatever bytes follow it.
+const WAL_VERSION: u16 = 5;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1463,10 +1449,9 @@ mod tests {
     use super::*;
 
     fn record(tag: u8) -> WalRecord {
-        WalRecord::Change {
-            external_id: vec![tag; 3],
+        WalRecord::ChangeByEntity {
+            entity_id: EntityId::new(tag as u64),
             op: ChangeOp::Delete,
-            descriptors: None,
         }
     }
 

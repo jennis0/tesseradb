@@ -633,7 +633,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use tessera_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
-    use tessera_lifecycle::{IngestBuffer, PredicateChange};
+    use tessera_lifecycle::IngestBuffer;
     use tessera_store::manifest::{IdentityDescriptor, Manifest, Quantisation};
     use tessera_store::Bundle;
     use tessera_types::{TermId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
@@ -679,7 +679,7 @@ mod tests {
     ) -> Generation {
         let mut overlay = Overlay::new();
         for (entity, op) in changes {
-            overlay.apply(EntityId::new(*entity), *op, None);
+            overlay.apply(EntityId::new(*entity), *op);
         }
         generation_of(overlay, buffer_with(buffered))
     }
@@ -780,30 +780,6 @@ mod tests {
             plan.items[0].0,
             EntityId::new(8),
             "the deleted entity contributes no row"
-        );
-    }
-
-    /// **Writing the evaluate entry's current terms would be the fold**, which is
-    /// invariant-bearing and compaction's. The buffered row's terms are what the tier carries, and
-    /// the entry stands.
-    #[test]
-    fn an_evaluate_entry_leaves_the_buffered_rows_terms_alone() {
-        let mut overlay = Overlay::new();
-        overlay.apply(
-            EntityId::new(7),
-            ChangeOp::Predicate,
-            Some(PredicateChange {
-                descriptors: vec![b"ninety-nine".to_vec()],
-                terms: vec![TermId::new(99)],
-            }),
-        );
-        let generation = generation_of(overlay, buffer_with(&[(7, item(&[1]))]));
-
-        let plan = plan(&generation).expect("an evaluate entry does not stop a flush");
-        assert_eq!(
-            plan.items[0].1.terms,
-            vec![TermId::new(1)],
-            "the WAL row's terms, never the entry's — writing the entry's is the fold"
         );
     }
 

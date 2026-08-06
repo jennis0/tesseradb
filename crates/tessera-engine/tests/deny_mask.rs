@@ -78,7 +78,7 @@ fn ingest(engine: &Engine, external_id: &str) -> EntityId {
 
 fn change(engine: &Engine, entity: EntityId, op: ChangeOp) {
     engine
-        .accept_change(entity, op, None)
+        .accept_change(entity, op)
         .expect("the change is accepted");
 }
 
@@ -243,28 +243,19 @@ fn visible_to_agrees_with_contains_row_for_every_disposition() {
     let deleted = EntityId::new(11);
     let suppressed = EntityId::new(12);
     let unsuppressed = EntityId::new(13);
-    let predicated = EntityId::new(14);
     let untouched = EntityId::new(15);
 
     change(&engine, deleted, ChangeOp::Delete);
     change(&engine, suppressed, ChangeOp::Suppress);
     change(&engine, unsuppressed, ChangeOp::Suppress);
     change(&engine, unsuppressed, ChangeOp::Unsuppress);
-    engine
-        .accept_change(predicated,
-            ChangeOp::Predicate,
-            // A term this session does not hold, so the predicate flips it invisible.
-            Some(vec![b"1".to_vec()]),
-        )
-        .expect("the predicate change is accepted");
-
     // Both routes as a client reaches them: `/v1/items` answers in entity space (`visible_to`
     // over the overlay and the buffer), and a drawn mark is the row-space mask's answer — caps are
     // raised and θ is saturated in this fixture, so selection serves every visible row and
     // "is it drawn" is exactly `contains_row`.
     let drawn = drawn_marks(&engine, &session);
 
-    for entity in [deleted, suppressed, unsuppressed, predicated, untouched] {
+    for entity in [deleted, suppressed, unsuppressed, untouched] {
         let row = row_of(&engine, entity);
         let by_entity = visible_in_entity_space(&engine, &session, entity);
         let by_row = drawn.contains(&engine.tessera_id_of(entity).unwrap().raw());
@@ -299,7 +290,7 @@ fn a_deep_deny_set_changes_no_answer() {
         .iter()
         .map(|entity| {
             engine
-                .submit_change(*entity, ChangeOp::Suppress, None)
+                .submit_change(*entity, ChangeOp::Suppress)
                 .expect("the change is submitted")
         })
         .collect();

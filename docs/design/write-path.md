@@ -36,7 +36,7 @@ is marked **⊘ at the claim**, with what happens instead (decision 0013).
 ## 0. The path whole
 
 Two kinds of write exist and they never share a queue. An **ingest** adds items; it may be
-refused for load. A **change** — delete, suppress, unsuppress, predicate change — alters what a
+refused for load. A **change** — delete, suppress, unsuppress — alters what a
 viewer may see; it is **never refused for load**, because refusing a security operation is
 fail-open (§3, lifecycle §1.3). One thread per partition — the **write executor** — owns every
 mutation: it drains the deny lane to empty before touching ingest work, performs
@@ -73,9 +73,9 @@ The temporal shape to keep in mind, because everything else hangs from it:
   entry is fsync'd *and* the generation carrying it is swapped in, so no window ever exists
   between "accepted" and "in force". Everything after the ack — manifest publication, storage
   enforcement — is cleanup, not a precondition.
-- **Nothing retires.** ⊘ Compaction does not exist, so deletion denies and predicate-change
-  entries are immortal and the overlay grows monotonically. Fail-closed — an entry that never
-  retires can never re-expose — but it is not the specified mechanism (spec §8).
+- **Nothing retires.** ⊘ Compaction does not exist, so deletion denies are immortal and the
+  overlay grows monotonically. Fail-closed — an entry that never retires can never re-expose —
+  but it is not the specified mechanism (spec §8).
 
 Each of the four journeys below states, per step: what happens, what it is for, what the
 **writer** observes (latency, what the acknowledgement asserts, what each error means and whether
@@ -413,10 +413,6 @@ struck or where a commit window interleaved slices; merge's adjacency test is `h
   entry stands.
 - **Suppressed → flushed normally.** A suppression never touches postings and retires only on
   unsuppress; a flush that skipped it would leave a later unsuppress with nothing to reveal.
-- **Carrying an evaluate entry → the WAL row's terms are written and the entry stands.** Writing
-  the entry's *current* terms instead would be the fold — invariant-bearing, compaction's. This
-  sentence is what stops the fold arriving as a simplification.
-
 A delete accepted *after* the snapshot produces a deleted entity that does have a row, hidden by
 its standing overlay entry alone — safe while nothing retires, and an obligation the compaction
 spec inherits (spec §8).
@@ -551,9 +547,10 @@ durable prefix. (The `Flush{n, wal_pos}` record that used to announce this bound
 deleted — nothing ever read it back; spec §1.3.) Steady-state retention is two members. The snapshot's two shape
 rules are not free choices: entries are keyed by **entity id** (an external-id-shaped snapshot
 would re-resolve at replay, and a deleted-never-flushed entity resolves to nothing — the node
-would refuse to open), and evaluate entries carry **raw descriptors, never `TermId`s**
-(extension ids are assigned in replay order, and rotation changes replay order — a persisted
-extension id would dangle onto whatever descriptor interns next).
+would refuse to open). A snapshot entry carries an entity and an op and nothing else; the raw
+descriptors it used to carry for an evaluate entry went with that store (decision 0048), and with
+them the hazard that made them raw — extension ids are assigned in replay order, rotation changes
+replay order, and a persisted extension id would dangle onto whatever descriptor interns next.
 
 The overlay's only durable homes are the WAL and the side-manifest; segments carry rows and
 postings and no disposition. That is why the snapshot precedes any deletion — reclaiming a
@@ -656,10 +653,12 @@ are published in `/control/status`'s `write_executor.flush` block (out of contra
 
 One write path for the three ops — `delete`, `suppress`, `unsuppress` — with one lane, one
 window shape, one swap; the ops differ *only* in what each does to the overlay's stores and in
-what later removes each fact. **The fourth op, `predicate`, is withdrawn** (decision 0047,
+what later removes each fact. **A fourth op, `predicate`, is withdrawn** (decision 0047,
 2026-08-04): edit is delete + re-ingest — delete the item, re-ingest it under the same
 `external_id` with its new labels, and a deleted holder does not block the re-ingest. The
-evaluate machinery below stays, dormant, for records already in WALs.
+endpoint still refuses `op: "predicate"` with a 422 naming that flow, so the withdrawal is a
+message rather than an "unknown op"; the machinery behind it is **deleted** (decision 0048 — no
+deployment exists, so there is no pre-0047 WAL to replay).
 
 ### 5.1 Addressing and admission
 
@@ -682,8 +681,8 @@ chunk). Each element names its item by **exactly one** of:
   without one is otherwise unaddressable here.
 
 **Validation is wholesale and resolution is all-or-nothing**: ops parsed, addresses decoded,
-`access` run through `terms_of_label` (422 on failure), both address forms resolved in single
-batched calls — any failure refuses the **whole batch** with 404/409 naming the offender, and
+both address forms resolved in single batched calls — any failure refuses the **whole batch**
+with 404/409 naming the offender, and
 **nothing is enqueued**. Past resolution, re-applies are no-ops by bitmap semantics (delete of
 deleted, suppress of suppressed, unsuppress of never-suppressed), so a retried batch is
 idempotent without bookkeeping.
@@ -705,14 +704,15 @@ decision 0033).
 
 The executor gathers up to 1,000 queued entries per window, FIFO, so `suppress X` then
 `unsuppress X` in one window resolve exactly as two commands would. Then:
-**append ×k → one fsync → resolve descriptors → apply → one swap → 200 ×k.**
+**append ×k → one fsync → apply → one swap → 200 ×k.**
 
-- Descriptor resolution (legacy predicate records only — the op is withdrawn, decision 0047)
-  is deferred until after durability, against the **current** generation's dictionary. The
+- **No descriptor resolution happens in this window at all.** There used to be a deferred pass
+  here, resolving a predicate's raw descriptors against the current generation's dictionary after
+  durability; its only consumer was an evaluate entry, and both are deleted (decision 0048). The
   review's novel-descriptor finding — an evaluate entry minting an extension id nothing ever
-  promotes, hiding the item from everyone behind a 200 — is **dissolved rather than patched**
-  by the withdrawal: a re-label now travels the ingest path, and flush promotion (the one
-  promotion path there is) handles a novel descriptor exactly as for any new item.
+  promotes, hiding the item from everyone behind a 200 — is **dissolved rather than patched**: a
+  re-label now travels the ingest path, and flush promotion (the one promotion path there is)
+  handles a novel descriptor exactly as for any new item.
 - Apply is one overlay clone and one `denied[slice]` update for the whole window; the swap is
   one pointer store. Every waiter is then acknowledged against the same proof — the ack type
   cannot be constructed without the token minted at the swap (or by proof of idempotent replay),
@@ -731,19 +731,20 @@ ingest, and cost a per-entry durability fold over ops the failure rules scope di
 (spec §5.5), an ordering hazard the separate lanes cannot have, and an entry type that stops
 saying what is true.
 
-### 5.3 The overlay: three stores, and the row-space mask
+### 5.3 The overlay: two stores, and the row-space mask
 
-The overlay is three independent stores, one per removal rule — not one map with a disposition
+The overlay is two independent stores, one per removal rule — not one map with a disposition
 field, and not an enum (a last-write-wins collapse was caught fail-open twice in review;
-three stores of three types cannot be collapsed by a refactor that still compiles):
+two stores mutated in two places cannot be collapsed by a refactor that still compiles). A third,
+`evaluate`, was deleted with the predicate op (decision 0048); deleting it is not a licence to
+collapse the two that remain, whose separation carries the whole argument:
 
 | store | holds | removed by | durable home |
 |---|---|---|---|
 | `deleted: Bitmap` (entity space) | accepted deletes, fold pending | ⊘ **its compaction fold** — nothing today | WAL (`ChangeByEntity`/snapshot); manifest `tombstones` |
 | `suppressed: Bitmap` (entity space) | active suppressions | **unsuppress only** — nothing else touches it, and the bitmap carries no stamp any retirement machinery could ever act on | WAL/snapshot; manifest `deny` |
-| `evaluate: Map<EntityId, PredicateChange>` (terms + raw descriptors inline) | **legacy** predicate changes (the op is withdrawn — decision 0047; entries arise only from pre-0047 WALs), fold pending | ⊘ **its compaction fold** | WAL/snapshot (descriptors, replay-resolved) |
 
-Precedence over the three is `deleted > suppressed > evaluate > buffered`, single-sourced in one
+Precedence over the two, plus the ingest buffer, is `deleted > suppressed > buffered`, single-sourced in one
 function (`verdict`) — two transcriptions of a precedence rule is how a suppression stops
 suppressing. The sequence `delete → suppress → unsuppress` is **structurally incapable** of
 re-exposing: the unsuppress mutates a store that does not hold the deletion.
@@ -752,9 +753,8 @@ re-exposing: the unsuppress mutates a store that does not hold the deletion.
 `{row_of(e) : e ∈ deleted ∪ suppressed}` is materialised per slice on the generation, and
 composition subtracts it last with one `andnot` — self-clamping, so the deny half cannot get the
 `∩ base` clamp wrong (an I2 concern; a count that does not describe `M_auth` is not cosmetic).
-Per-request work therefore does not grow with denies ever accepted — it is O(evaluate entries +
-buffer depth) — which matters because two of the three removal events do not exist and the deny
-set only grows. The entity-space stores stay authoritative: `visible_to` (drill-down's one bit),
+Per-request work therefore does not grow with denies ever accepted — it is O(buffer depth) —
+which matters because one of the two removal events does not exist and the deny set only grows. The entity-space stores stay authoritative: `visible_to` (drill-down's one bit),
 label gating and cluster visibility answer from `verdict` and never touch the row mask.
 
 **The derivation rule is the fail-open to watch.** The mask is only ever equal to a fresh
@@ -776,13 +776,11 @@ either way.)*
   by construction: no fragment rebuild ever excludes a suppressed entity, so its invisibility
   rests on the overlay entry for as long as the suppression stands. Assigning suppressions any
   retirement stamp is fail-open — any stamp eventually retires the entry and re-exposes the item.
-- **Rule F** — entries leave `deleted` and `evaluate` only at the compaction fold that
-  **executes** them, in the fold's own publication (spec §8). Rule F is safe iff no pre-fold
+- **Rule F** — an entry leaves `deleted` only at the compaction fold that
+  **executes** it, in the fold's own publication (spec §8). Rule F is safe iff no pre-fold
   fragment is ever composed after the fold — a pre-fold fragment still contains the deleted
-  entity, and misreads the evaluate entity in both directions (a revoked term still present is
-  fail-open; a granted term absent is wrong counts, which produces no fail-safe symptom — the
-  reason no staleness-based early retirement is ever acceptable for evaluate entries). The
-  safety property is an **identity match**: a fold publishes a new prefix, whose manifest digest
+  entity, so retiring the tombstone early re-exposes it, and no staleness-based early retirement
+  is ever acceptable. The safety property is an **identity match**: a fold publishes a new prefix, whose manifest digest
   rotates the fragment identity, so no pre-fold fragment is reachable by key afterwards; a
   request is entirely pre-fold or entirely post-fold because it loads one generation pointer.
   **Three gaps must close in the same change as the first fold**, and the third is the one this
@@ -805,8 +803,8 @@ either way.)*
   it bought incremental early retirement that no requirement asks for, now that the read path's
   deny term is a mask rather than a walk. It was not wrong; it was precision nothing pays for.
 
-⊘ **Today nothing retires at all** — no fold exists. Deletion denies and evaluate entries are
-immortal; the overlay grows monotonically under deletion and predicate churn;
+⊘ **Today nothing retires at all** — no fold exists. Deletion denies are
+immortal; the overlay grows monotonically under deletion churn;
 `overlay_soft_limit` (500,000) alarms on depth and nothing acts, because the lever its response
 should pull — *schedule a compaction* — does not exist. Fail-closed, and not the mechanism.
 
@@ -822,7 +820,7 @@ Exhausted — or on an append failure, where there was never anything to repair 
 
 - every `Delete` and `Suppress` in the window is **applied anyway** — the items are hidden
   immediately — and every waiter still gets an error;
-- every `Unsuppress` and `Predicate` applies **nothing** (an unsuppress applied without
+- every `Unsuppress` applies **nothing** (an unsuppress applied without
   durability would re-expose an item that replay still hides, behind a response that says
   nothing was applied).
 
@@ -847,8 +845,9 @@ holds a durable, in-force suppression.
 
 ### 5.6 Publication of deny state — the side-manifest
 
-An accepted delete, suppress or unsuppress marks the overlay **dirty** (predicate changes do
-not: no manifest field carries one; their durable home is the WAL alone). The executor publishes
+An accepted change marks the overlay **dirty** — every remaining op moves state a manifest
+carries, so the test that used to exclude a window of pure predicate changes (whose durable home
+was the WAL alone) is gone with them. The executor publishes
 at **the close of the deny drain** — off the ack path, one write covering a burst of consecutive
 windows — with a liveness floor of one publication every **64 windows** under sustained arrival
 (a drain that never closes must still publish). Batching is forced by bytes, not latency: a
@@ -929,8 +928,7 @@ the residual is recorded at contracts §2.3, not closed.
   delete's ack, the new one appears at its flush — invisible for at most one tick, inside §3's
   budget — under the same `external_id` and a fresh `tessera_id` (consumers persist
   `external_id` by contract, so nothing a conforming client holds breaks). Novel descriptors
-  ride the ingest path's promotion. *(Legacy evaluate entries from pre-0047 WALs still compose
-  as they always did: the entry overrides the fragment in both directions until its fold.)*
+  ride the ingest path's promotion.
 - **A deletion's label consequence** (⊘ labels are Phase 3): a deleted item leaves every mask,
   so a label whose generating set held it fails containment for *every* principal — one deletion
   can dark-ship a node's whole nested chain (I8's availability half, §7.6) — and the service
@@ -993,7 +991,7 @@ to their inputs' (dequantise-requantise would move every point up to a quantisat
 merge); concatenate-and-re-sort through the one segment writer rather than a k-way merge (a
 second writer that knows the layout is how two come to disagree; the policy cap bounds the
 sort). Delta tiers coalesce as a content-preserving re-encode — same `(term, entity)` pairs,
-deduplicated, re-sorted, nothing dropped, no tombstone applied, no evaluate entry consulted.
+deduplicated, re-sorted, nothing dropped, no tombstone applied.
 External-id runs coalesce by merge-sorting caller keys, keeping the **newest** binding on a
 collision — decision 0047's re-ingest re-binds a key, so an older holder is a forgotten, deleted
 entity, and the reader resolving newest-run-first is what a coalesced run must answer as. Watermark and high-water pass through as the caller's live values —
@@ -1093,9 +1091,9 @@ re-ranking, no batch-grid change. Everything in this section is obligation, not 
 Compaction is the **invariant-bearing** half flush and merge are defined by contrast with: it
 folds — snapshot-covered delta tiers into base postings, tombstoned rows out of row space **and
 their entities' postings out of the term index** (architecture §11.3, ruled r33: both halves, because
-a post-fold fragment that still contained the entity would make Rule F's retirement re-expose it),
-evaluate entries' term sets into postings — and **the fold is the retirement event** (Rule F):
-executed entries leave `deleted` and `evaluate` in the fold's own publication, `suppressed` is
+a post-fold fragment that still contained the entity would make Rule F's retirement re-expose it)
+— and **the fold is the retirement event** (Rule F):
+executed entries leave `deleted` in the fold's own publication, `suppressed` is
 copied forward verbatim, and everything accepted after the snapshot — segments, deltas,
 tombstones, unfolded entries — is **carried forward verbatim** (three of the four carried
 categories were added after the rule as first written proved fail-open on each; do not
@@ -1109,10 +1107,7 @@ re-quantisation (decision 0040: bounds are immutable per slice; a wrong extent i
 Obligations already accumulated against it, from this document alone: **Rule F's three gaps**
 (spec §5.4 — above all, a publication path that can carry the fold's rewritten postings and
 rotate the fragment identity, which today's compaction-shaped seam cannot; or a ruled offline
-fold); **the evaluate-entry descriptor rule, now legacy-scoped** (decision 0047 withdrew the op) —
-§4.3's "no extension id ever reaches a durable file" binds the fold too, so a pre-0047 evaluate
-entry whose terms are still extension ids must be folded from its *raw descriptors*, never its
-resolved ids; the deletion accepted
+fold); the deletion accepted
 after a flush snapshot whose row exists (spec §4.2); the immortal overlay (spec §5.4);
 `overlay_soft_limit`'s response becoming *schedule a compaction*; the dictionary's monotone
 length (the staleness hint's counter — a renumbering compaction must not reduce it); the
@@ -1304,8 +1299,7 @@ maintenance pass (exists — `soak.rs`; measured 40 flushes → 2 segments, 5 ti
 6 dict extents, **1 full projection build**); 11 ack→visibility ≤ `slices × flush_max_age_secs`;
 12 ingest refused by buffer occupancy, not only queue depth; 13 a flush patches rather than
 rebuilds the projection, and the superseded entry survives to be patched; 14 the allocator floor
-survives rotation and restart; 15 an evaluate entry round-trips rotation with descriptors
-intact, and a deleted-never-flushed entity recovers from the snapshot; 16 a flushed item answers
+survives rotation and restart; 15 a deleted-never-flushed entity recovers from the snapshot; 16 a flushed item answers
 `/v1/items` after rotation; 17 `seg_id` never reused; `SEGMENTS-<n>` monotone, unpadded,
 never replaced; 18 a superseded stamp is answered normally with the staleness signal set and
 reflects a post-flush deny; 19 the merge-size relation refuses at startup; 20 one publisher
@@ -1339,6 +1333,22 @@ item, moves no point and keeps every binding (exists — `merge.rs`); 43 a merge
 with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`).
 
 ## Appendix R — Review record
+
+**r7 (2026-08-06) — decision 0048: the evaluate machinery is deleted, not carried.** Tessera has
+no deployment, so "entries arise only from pre-0047 WALs" (r5's reason for keeping the machinery
+dormant) names an empty set. Deleted: the `evaluate` store and its `PredicateChange`; the WAL's
+external-id-keyed `Change` variant, `ChangeOp::Predicate` and the `descriptors` field of
+`ChangeByEntity` and `OverlaySnapshotEntry`, at `WAL_VERSION` 5; the deny window's deferred
+descriptor resolution (§5.2), whose only consumer was an evaluate entry; and the evaluate arm of
+`verdict` and of composition. The fold's evaluate pass was never written, so §12's D4 dissolves
+rather than being answered. Consequences through this document: §5's op list, §5.1 (`access`
+leaves the request shape — it had no remaining consumer), §5.2, §5.3 (three stores → two), §5.4's
+Rule F, §5.5's fold, §5.6, §7 and §12. **What survives is the point**: the overlay stays two
+independent stores of two types, not one map with a disposition field — deleting a store is not
+collapsing the remaining ones — and the `predicate` op keeps its typed 422 at the boundary
+(conformance script 35), so the withdrawal still names the flow. Script 15 loses its evaluate
+half. Replay became infallible with the `Change` variant: it no longer resolves external ids at
+all, that resolution happening once, in the handler, at admission.
 
 **r6 (2026-08-04) — promoted to normative, and the mechanism it was gated on is built.** Owner
 sign-off; §13.1's supersession edits **performed** (`flush-and-merge.md` deleted; the lifecycle

@@ -850,31 +850,33 @@ mod tests {
         );
     }
 
-    /// Half one of the op-blind fold. A batch whose only failures are *non-deny* ops must not claim
-    /// anything may be in force: `Executor::commit_denies` refuses a `Predicate`/`Unsuppress` whose
-    /// WAL append failed **without** applying it (lifecycle §4's apply-anyway rule is scoped to
+    /// Half one of the op-blind fold. A batch whose only failure is a *non-deny* op must not claim
+    /// anything may be in force: `Executor::commit_denies` refuses an `Unsuppress` whose WAL append
+    /// failed **without** applying it (lifecycle §4's apply-anyway rule is scoped to
     /// `Delete`/`Suppress`), so the honest body says only that nothing took hold and the operator
     /// must re-submit.
+    ///
+    /// `Unsuppress` is the whole non-deny class now that `Predicate` is deleted (decision 0048);
+    /// a new op that neither denies nor is applied-anyway belongs in this test.
     ///
     /// The mutation this kills is `exec_failure_may_be_in_force` returning `true` for every
     /// `ExecError::Wal` regardless of op.
     #[test]
     fn a_batch_of_only_refused_non_deny_changes_claims_nothing_is_in_force() {
-        for op in [ChangeOp::Predicate, ChangeOp::Unsuppress] {
-            let failures = vec![(op, wal_failure())];
-            let (status, code, detail) = map_change_batch_error(&failures, 0).unwrap().parts();
-            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(code, "fail-closed");
-            assert!(
-                !detail.contains("may be in force"),
-                "a refused-not-applied {op:?} leaves no effect; asserting one invites the operator \
-                 to hunt for a deny that is not there. Got: {detail}"
-            );
-            assert!(
-                detail.contains("NOT applied"),
-                "the operator must be told to re-submit; got: {detail}"
-            );
-        }
+        let op = ChangeOp::Unsuppress;
+        let failures = vec![(op, wal_failure())];
+        let (status, code, detail) = map_change_batch_error(&failures, 0).unwrap().parts();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(code, "fail-closed");
+        assert!(
+            !detail.contains("may be in force"),
+            "a refused-not-applied {op:?} leaves no effect; asserting one invites the operator \
+             to hunt for a deny that is not there. Got: {detail}"
+        );
+        assert!(
+            detail.contains("NOT applied"),
+            "the operator must be told to re-submit; got: {detail}"
+        );
     }
 
     /// Half two, the mirror error on the same fold: an applied-anyway `Suppress` beside a refused
@@ -911,22 +913,13 @@ mod tests {
         assert!(exec_failure_may_be_in_force(ChangeOp::Delete, &wal));
         assert!(exec_failure_may_be_in_force(ChangeOp::Suppress, &wal));
         assert!(
-            !exec_failure_may_be_in_force(ChangeOp::Predicate, &wal),
-            "a predicate change whose append failed is refused without applying"
-        );
-        assert!(
             !exec_failure_may_be_in_force(ChangeOp::Unsuppress, &wal),
             "an unsuppress applied without durability would re-expose an item replay still hides, \
              so the executor refuses it — it is never in force"
         );
 
         // The 409-class and allocation failures are op-independent: no effect, by definition.
-        for op in [
-            ChangeOp::Delete,
-            ChangeOp::Suppress,
-            ChangeOp::Predicate,
-            ChangeOp::Unsuppress,
-        ] {
+        for op in [ChangeOp::Delete, ChangeOp::Suppress, ChangeOp::Unsuppress] {
             assert!(!exec_failure_may_be_in_force(
                 op,
                 &ExecError::DuplicateExternalId { count: 1 }

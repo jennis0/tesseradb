@@ -317,7 +317,7 @@ fn ack_follows_fsync_then_swap() {
 
     let e = Arc::clone(&engine);
     let suppress = std::thread::spawn(move || {
-        e.accept_change(entity, ChangeOp::Suppress, None)
+        e.accept_change(entity, ChangeOp::Suppress)
     });
 
     // Wait for the executor to be *demonstrably* parked. Not a sleep: this returns only once the
@@ -363,7 +363,7 @@ fn ack_follows_fsync_then_swap() {
 
     let e = Arc::clone(&engine);
     let suppress = std::thread::spawn(move || {
-        e.accept_change(second, ChangeOp::Suppress, None)
+        e.accept_change(second, ChangeOp::Suppress)
     });
 
     faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
@@ -474,7 +474,7 @@ fn deny_priority_survives_the_window(window_max_rows: Option<usize>) {
     let e = Arc::clone(&engine);
     let order_d = Arc::clone(&order);
     let deny = std::thread::spawn(move || {
-        let _ = e.accept_change(entity, ChangeOp::Suppress, None);
+        let _ = e.accept_change(entity, ChangeOp::Suppress);
         order_d.lock().unwrap().push("deny");
     });
     while engine.write_executor_stats().deny_submitted == 0 {
@@ -592,7 +592,7 @@ fn a_deny_is_never_queued_behind_a_conflict_forced_window_split() {
     let e = Arc::clone(&engine);
     let order_d = Arc::clone(&order);
     let deny = std::thread::spawn(move || {
-        let _ = e.accept_change(entity, ChangeOp::Suppress, None);
+        let _ = e.accept_change(entity, ChangeOp::Suppress);
         order_d.lock().unwrap().push("deny");
     });
     while engine.write_executor_stats().deny_submitted == 0 {
@@ -656,7 +656,7 @@ fn deny_append_failure_still_applies() {
 
     faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
     let err = engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect_err("a failed durability write must be reported, never silently swallowed");
 
     assert_eq!(
@@ -712,7 +712,7 @@ fn a_deny_whose_first_sync_fails_is_retried_into_durability() {
 
     faults.fail_next_fsyncs(1);
     engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect("the retry reached durability, so the honest answer is a success, not a 500");
 
     assert_eq!(visible(&engine), before - 1, "and the item is hidden");
@@ -759,7 +759,7 @@ fn a_deny_whose_retries_are_exhausted_is_hidden_now_and_visible_after_a_restart(
 
     faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
     engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect_err("every attempt failed, so durability is owed and the answer is an error");
     assert_eq!(
         visible(&engine),
@@ -895,7 +895,7 @@ fn an_unsuppress_append_failure_applies_nothing() {
     );
 
     engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect("the suppression is durable: no fault is armed yet");
     let suppressed = visible(&engine);
     assert_eq!(
@@ -906,7 +906,7 @@ fn an_unsuppress_append_failure_applies_nothing() {
 
     faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
     let err = engine
-        .accept_change(entity, ChangeOp::Unsuppress, None)
+        .accept_change(entity, ChangeOp::Unsuppress)
         .expect_err("a failed durability write must be reported, never silently swallowed");
 
     assert_eq!(
@@ -950,7 +950,7 @@ fn a_torn_wal_stays_poisoned_and_still_applies_denies() {
 
     let doomed = entity_of(&engine, 3);
     faults.fail_next_appends(1);
-    let _ = engine.accept_change(doomed, ChangeOp::Suppress, None);
+    let _ = engine.accept_change(doomed, ChangeOp::Suppress);
     assert_eq!(
         engine.write_executor_posture(),
         ExecutorPosture::WalPoisoned
@@ -968,7 +968,7 @@ fn a_torn_wal_stays_poisoned_and_still_applies_denies() {
     // But a deny after the poison is still APPLIED, and still reported as failed.
     let before = visible(&engine);
     let second = entity_of(&engine, 6);
-    let err = engine.accept_change(second, ChangeOp::Suppress, None);
+    let err = engine.accept_change(second, ChangeOp::Suppress);
     assert!(
         err.is_err(),
         "durability is still owed, so this is still a 500"
@@ -1012,7 +1012,7 @@ fn a_recovered_wal_returns_to_ready_without_a_restart() {
     let entity = entity_of(&engine, 3);
     faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
     engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect_err("every attempt failed, so durability is owed");
 
     wait_until("the executor recovered", || {
@@ -1028,7 +1028,7 @@ fn a_recovered_wal_returns_to_ready_without_a_restart() {
     let second = entity_of(&engine, 6);
     let before = visible(&engine);
     engine
-        .accept_change(second, ChangeOp::Suppress, None)
+        .accept_change(second, ChangeOp::Suppress)
         .expect("a recovered executor accepts writes again");
     assert_eq!(visible(&engine), before - 1);
 }
@@ -1055,7 +1055,7 @@ fn recovery_discards_the_undurable_region_rather_than_publishing_it() {
     let entity = entity_of(&engine, 3);
     let before = visible(&engine);
     engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect("the suppression is durable: no fault is armed yet");
     let suppressed = visible(&engine);
     assert_eq!(
@@ -1066,7 +1066,7 @@ fn recovery_discards_the_undurable_region_rather_than_publishing_it() {
 
     faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
     engine
-        .accept_change(entity, ChangeOp::Unsuppress, None)
+        .accept_change(entity, ChangeOp::Unsuppress)
         .expect_err("the unsuppress never became durable");
     wait_until("the executor recovered", || {
         engine.write_executor_stats().wal_recoveries == 1
@@ -1148,7 +1148,7 @@ fn an_executor_panic_is_reported_dead() {
     // And every subsequent submit reports it rather than answering a hopeful 202.
     faults.release();
     let err = engine
-        .accept_change(EntityId::new(1), ChangeOp::Suppress, None)
+        .accept_change(EntityId::new(1), ChangeOp::Suppress)
         .expect_err("a dead executor must be reported, never swallowed");
     assert!(format!("{err}").contains("not running"), "got: {err}");
 
@@ -1703,7 +1703,7 @@ fn an_idle_work_pass_arms_nothing() {
     // A deny wakes the executor; its work pass then finds an empty queue.
     let entity = entity_of(&engine, 3);
     engine
-        .accept_change(entity, ChangeOp::Suppress, None)
+        .accept_change(entity, ChangeOp::Suppress)
         .expect("the suppression is applied");
 
     let stats = engine.write_executor_stats();
@@ -2213,7 +2213,7 @@ fn the_deny_window_closes_at_its_bound() {
     let pending: Vec<_> = (0..bound + 1)
         .map(|_| {
             engine
-                .submit_change(entity, ChangeOp::Suppress, None)
+                .submit_change(entity, ChangeOp::Suppress)
                 .expect("the deny lane is unbounded and never refuses for load")
         })
         .collect();
@@ -2381,7 +2381,7 @@ fn a_poisoned_node_writes_no_side_manifest_for_its_denies() {
     let before = manifests();
     faults.fail_next_appends(1);
     let doomed = entity_of(&engine, 3);
-    let _ = engine.accept_change(doomed, ChangeOp::Suppress, None);
+    let _ = engine.accept_change(doomed, ChangeOp::Suppress);
     assert_eq!(
         engine.write_executor_posture(),
         ExecutorPosture::WalPoisoned
@@ -2389,7 +2389,7 @@ fn a_poisoned_node_writes_no_side_manifest_for_its_denies() {
 
     // A second deny, applied in memory under the same rule, with every chance to publish.
     let second = entity_of(&engine, 6);
-    let _ = engine.accept_change(second, ChangeOp::Suppress, None);
+    let _ = engine.accept_change(second, ChangeOp::Suppress);
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     assert_eq!(

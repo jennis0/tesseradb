@@ -26,10 +26,9 @@ fn sidecar(base: &Path, n: u64) -> PathBuf {
 }
 
 fn change(tag: u8) -> WalRecord {
-    WalRecord::Change {
-        external_id: vec![tag; 4],
+    WalRecord::ChangeByEntity {
+        entity_id: EntityId::new(tag as u64),
         op: ChangeOp::Suppress,
-        descriptors: None,
     }
 }
 
@@ -37,11 +36,10 @@ fn suppression_of(entity: u64) -> OverlaySnapshotEntry {
     OverlaySnapshotEntry {
         entity_id: EntityId::new(entity),
         op: ChangeOp::Suppress,
-        descriptors: None,
     }
 }
 
-/// A sequence with `files` members, each holding one `Change`, rotated between them and never
+/// A sequence with `files` members, each holding one change record, rotated between them and never
 /// reclaiming. Returns the handle and the position each member ends at.
 fn wal_with_files(base: &Path, files: u64) -> (Wal, Vec<u64>) {
     let (mut wal, _) = Wal::open(base).unwrap();
@@ -160,25 +158,23 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
     let entity = EntityId::new(42);
     {
         let (mut wal, _) = Wal::open(&base).unwrap();
-        wal.append(&WalRecord::Change {
-            external_id: b"ext-42".to_vec(),
+        wal.append(&WalRecord::ChangeByEntity {
+            entity_id: entity,
             op: ChangeOp::Suppress,
-            descriptors: None,
         })
         .unwrap();
         wal.fsync().unwrap();
 
         let mut overlay = Overlay::new();
-        overlay.apply(entity, ChangeOp::Suppress, None);
+        overlay.apply(entity, ChangeOp::Suppress);
         // Rotate with everything below the current position reclaimable: the member holding the
-        // `Change` goes, and only the snapshot carries the suppression forward.
+        // change record goes, and only the snapshot carries the suppression forward.
         let deleted = wal.rotate(&overlay.snapshot(), wal.position()).unwrap();
         assert_eq!(deleted, vec![1], "the record's own member must actually go");
     }
 
     let (_wal, records) = Wal::open(&base).unwrap();
-    let (overlay, _buffer, _established, _resolver) =
-        replay(&records, &dict, Overlay::new(), |_| Ok::<_, std::convert::Infallible>(None)).unwrap();
+    let (overlay, _buffer, _established, _resolver) = replay(&records, &dict, Overlay::new());
     assert!(
         overlay.is_suppressed(entity),
         "a suppression retires only on unsuppress — reclaiming its record must not retire it"

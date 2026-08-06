@@ -1097,8 +1097,6 @@ struct ChangeItem {
     #[serde(default)]
     idset: Option<u32>,
     op: String,
-    #[serde(default)]
-    access: Option<String>,
 }
 
 /// How one item names its entity: the two address forms, already shape-validated.
@@ -1116,17 +1114,12 @@ enum Address {
 struct DecodedChange {
     address: Address,
     op: ChangeOp,
-    raw_descriptors: Option<Vec<Vec<u8>>>,
 }
 
 /// One `/control/changes` item, fully validated but not yet applied — see [`changes`]'s doc.
 struct ValidatedChange {
     entity: EntityId,
     op: ChangeOp,
-    /// Raw descriptor bytes (never `TermId`s — see `Engine::accept_change`'s doc for why
-    /// resolution is deferred past this validation pass, until after this item's own WAL
-    /// append/fsync succeeds).
-    raw_descriptors: Option<Vec<Vec<u8>>>,
 }
 
 /// The validate-then-apply body of `/control/changes`: external-id resolution (sidecar IO) and
@@ -1163,7 +1156,8 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     for item in &items {
         let op = match item.op.as_str() {
             // **Withdrawn** (decision 0047, owner-ruled 2026-08-04): edit is delete + re-ingest.
-            // The evaluate machinery stays for records already in WALs; no new one is accepted.
+            // The arm stays so the refusal names the flow rather than answering "unknown op"; the
+            // machinery behind it was deleted by decision 0048.
             "predicate" => {
                 return Err(ApiError::Contract(
                     "the predicate op is withdrawn: edit is delete + re-ingest (decision 0047) — \
@@ -1236,26 +1230,7 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
             }
         };
 
-        // `terms_of_label` only maps `access` bytes to descriptor *bytes* (deterministic, no
-        // persistent state touched) — validating this here is safe and does not pre-empt the
-        // executor's deferred `resolve_terms`, which is the step that actually interns novel
-        // descriptors into the process-lifetime extension state.
-        let raw_descriptors: Option<Vec<Vec<u8>>> = match &item.access {
-            Some(access) => Some(
-                state
-                    .engine
-                    .plugin()
-                    .terms_of_label(access.as_bytes())
-                    .map_err(|e| ApiError::Contract(format!("access field: {e}")))?,
-            ),
-            None => None,
-        };
-
-        decoded.push(DecodedChange {
-            address,
-            op,
-            raw_descriptors,
-        });
+        decoded.push(DecodedChange { address, op });
     }
 
     // **Each address form resolved in one batched call, both before anything is enqueued.** The
@@ -1324,11 +1299,7 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
                     .flatten()
                     .ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?,
             };
-            validated.push(ValidatedChange {
-                entity,
-                op: d.op,
-                raw_descriptors: d.raw_descriptors,
-            });
+            validated.push(ValidatedChange { entity, op: d.op });
         }
         return apply_validated(state, validated);
     }
@@ -1347,11 +1318,7 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     let mut validated = Vec::with_capacity(decoded.len());
     for (d, entity) in decoded.into_iter().zip(resolved) {
         let entity = entity.ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
-        validated.push(ValidatedChange {
-            entity,
-            op: d.op,
-            raw_descriptors: d.raw_descriptors,
-        });
+        validated.push(ValidatedChange { entity, op: d.op });
     }
 
     apply_validated(state, validated)
@@ -1412,20 +1379,17 @@ fn apply_validated(state: &AppState, mut validated: Vec<ValidatedChange>) -> Res
     //
     // **Each failure is collected WITH ITS OP.** Lifecycle §4's apply-anyway rule is scoped to
     // `Delete`/`Suppress` and the executor applies exactly that scope, so "did this failure leave an
-    // effect in force?" cannot be answered from the error alone — a `Predicate` whose append failed
-    // was refused without applying, and an op-blind fold would report it as possibly in force *and*
-    // omit it from the "not applied" half. The op is already in hand at the enqueue, so it is
-    // carried rather than re-derived at the fold.
+    // effect in force?" cannot be answered from the error alone — an `Unsuppress` whose append
+    // failed was refused without applying, and an op-blind fold would report it as possibly in
+    // force *and* omit it from the "not applied" half. The op is already in hand at the enqueue, so
+    // it is carried rather than re-derived at the fold.
     let mut failures: Vec<(ChangeOp, AcceptError)> = Vec::new();
     let mut applied = 0usize;
     for chunk in validated.chunks_mut(DENY_WINDOW_MAX_ENTRIES) {
         let mut pending = Vec::with_capacity(chunk.len());
         for change in chunk.iter_mut() {
             let op = change.op;
-            match state.engine.submit_change(change.entity,
-                op,
-                change.raw_descriptors.take(),
-            ) {
+            match state.engine.submit_change(change.entity, op) {
                 Ok(p) => pending.push((op, p)),
                 Err(e) => {
                     alarm_change_failure(op, &e);
@@ -1514,7 +1478,7 @@ async fn changes(
             ))
         } else {
             ApiError::Contract(
-                "the change request body is not a valid JSON array of {external_id, op, access?} \
+                "the change request body is not a valid JSON array of {external_id, op} \
                  items; nothing in it was applied"
                     .to_string(),
             )

@@ -139,8 +139,8 @@ safe discriminator, and spec §9 is why it stays one.
 
 ## 5. Compaction is the real hazard, and it is prefix-scoped
 
-Compaction rewrites row space: it applies tombstones, reclaims deleted rows' space, folds evaluate
-entries into postings, and may re-quantise. Row ids move. §I11's *"selects arbitrary rows"* is
+Compaction rewrites row space: it applies tombstones, reclaims deleted rows' space, folds
+snapshot-covered posting deltas into base postings, and may re-quantise. Row ids move. §I11's *"selects arbitrary rows"* is
 about exactly this boundary.
 
 **Compaction publishes a new prefix and flips `CURRENT`** (§12.5, write-path §8). So the hazard is
