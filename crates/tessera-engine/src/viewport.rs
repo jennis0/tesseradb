@@ -45,6 +45,7 @@ use rayon::prelude::*;
 use tessera_authz::FrozenFragment;
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
+use tessera_spatial::tiler::ScalarType;
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::vocabulary::Vocabularies;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
@@ -104,22 +105,164 @@ pub struct TileCount {
     pub served: u64,
 }
 
-/// One sampled point.
+/// The sampled points, column-major: one buffer per field, all of the same length.
+///
+/// **Column-major because that is what the wire wants and what the read is cheapest as.** The
+/// row-major shape this replaced built one `Vec<ScalarOut>` per point and the server then
+/// transposed it, which at 10⁶ points across nineteen columns was a million small heap
+/// allocations and a second full pass over every value. Measured
+/// (`tessera-bench --bin gather_shape`, 10⁶ rows in 62-row tiles, nineteen columns): 944 ms
+/// row-major-then-transpose against 51 ms gathered column-major.
 ///
 /// **I10, strengthened (contracts r6):** no entity ID leaves the engine on this path, because
 /// none is stored. `columns.arrow` carries `tessera_id` at the row, so the gather reads the
 /// identity it is allowed to show and cannot read the one it is not. Entity IDs survive only in
 /// entity-space structures and as `permutation.bin`'s index — never as a value on any path
 /// reaching `tessera-wire`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PointOut {
-    pub tessera_id: TesseraId,
-    /// The point's position as the 64-bit Morton interleave of its two 32-bit fixed-point axes:
+///
+/// **The three vectors are parallel and must stay so.** Index *i* of `tessera_ids`, of `codes`
+/// and of every buffer in `scalars` is one point. Nothing enforces that in the type, so every
+/// producer here appends to all of them for every gathered row, and [`Self::len`] is the
+/// cross-check the wire layer asserts against.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PointColumns {
+    pub tessera_ids: Vec<u64>,
+    /// Each point's position as the 64-bit Morton interleave of its two 32-bit fixed-point axes:
     /// the row's cell code in the high half, its stored residual in the low. Deinterleaving and
     /// scaling against the extent `/v1/meta` publishes recovers the coordinates; shifting right
     /// by `32 - 2·zoom` gives the containing tile without recomputing anything (contracts §3.2).
-    pub code: u64,
-    pub scalars: Vec<ScalarOut>,
+    pub codes: Vec<u64>,
+    /// One buffer per declared scalar, **in `MANIFEST.declared_scalars` order and always of that
+    /// length** — see [`ViewportOut::scalar_names`], which is the parallel name list.
+    pub scalars: Vec<ColumnBuf>,
+}
+
+impl PointColumns {
+    pub fn len(&self) -> usize {
+        self.tessera_ids.len()
+    }
+
+    /// `(tessera_id, code)` per point, in served order — the identity half of the response,
+    /// without the scalar tail.
+    ///
+    /// The two vectors are parallel by construction (see this type's doc), so zipping them is the
+    /// row view; anything wanting a *scalar* alongside indexes the column at the same position.
+    pub fn iter(&self) -> impl Iterator<Item = (TesseraId, u64)> + '_ {
+        self.tessera_ids
+            .iter()
+            .zip(&self.codes)
+            .map(|(&id, &code)| (TesseraId::new(id), code))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tessera_ids.is_empty()
+    }
+}
+
+/// A same-typed column of gathered scalar values.
+///
+/// Owned rather than borrowed: it outlives the segment mappings any one tile read, because a
+/// response concatenates tiles that may come from different segments.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColumnBuf {
+    Bool(Vec<bool>),
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+    U32(Vec<u32>),
+    U64(Vec<u64>),
+    I8(Vec<i8>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+    TimestampUs(Vec<i64>),
+    Utf8(Vec<String>),
+}
+
+/// Every scalar family paired with its element type, so the four places this module builds,
+/// empties, appends and measures a column cannot drift apart. `Bool` and `Utf8` are hand-written
+/// at each site: neither is stored as a flat slice of itself.
+macro_rules! flat_families {
+    ($mac:ident) => {
+        $mac! {
+            (U8, u8), (U16, u16), (U32, u32), (U64, u64),
+            (I8, i8), (I16, i16), (I32, i32), (I64, i64),
+            (F32, f32), (F64, f64), (TimestampUs, i64),
+        }
+    };
+}
+
+impl ColumnBuf {
+    /// An empty buffer of the declared type.
+    ///
+    /// **Typed from the manifest's declaration, never from the first value seen.** Deriving the
+    /// column set from the first gathered point is how a request whose first tile came from a
+    /// narrower segment silently drops a column, or shifts every later one left; the declaration
+    /// is the same for every tile by construction.
+    fn empty(ty: ScalarType) -> Self {
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match ty {
+                    $(ScalarType::$v => ColumnBuf::$v(Vec::new()),)*
+                    ScalarType::Bool => ColumnBuf::Bool(Vec::new()),
+                    ScalarType::Utf8 => ColumnBuf::Utf8(Vec::new()),
+                }
+            };
+        }
+        flat_families!(arms)
+    }
+
+    pub fn len(&self) -> usize {
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match self {
+                    $(ColumnBuf::$v(x) => x.len(),)*
+                    ColumnBuf::Bool(x) => x.len(),
+                    ColumnBuf::Utf8(x) => x.len(),
+                }
+            };
+        }
+        flat_families!(arms)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Concatenate `other` onto this buffer — the per-column half of the response's in-order fold.
+    ///
+    /// A type disagreement means two tiles read the same declared column at different types, which
+    /// no well-formed bundle produces (the write end's `gather_scalars` refuses it) and which
+    /// would otherwise append values under a name that does not describe them. Refused rather
+    /// than dropped: a short column is caught downstream by the wire layer's length assertion,
+    /// but a *wrong* one is not caught anywhere.
+    fn append(&mut self, other: ColumnBuf) -> std::result::Result<(), (&'static str, &'static str)> {
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match (self, other) {
+                    $((ColumnBuf::$v(dst), ColumnBuf::$v(src)) => { dst.extend(src); Ok(()) })*
+                    (ColumnBuf::Bool(dst), ColumnBuf::Bool(src)) => { dst.extend(src); Ok(()) }
+                    (ColumnBuf::Utf8(dst), ColumnBuf::Utf8(src)) => { dst.extend(src); Ok(()) }
+                    (dst, src) => Err((dst.type_name(), src.type_name())),
+                }
+            };
+        }
+        flat_families!(arms)
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match self {
+                    $(ColumnBuf::$v(_) => stringify!($v),)*
+                    ColumnBuf::Bool(_) => "Bool",
+                    ColumnBuf::Utf8(_) => "Utf8",
+                }
+            };
+        }
+        flat_families!(arms)
+    }
 }
 
 /// One §3.3 underlay sub-cell: a Morton prefix at depth `zoom + offset`, and the exact number of
@@ -234,7 +377,8 @@ pub struct ViewportOut {
     /// whose view did not change), not a security one.
     pub stale: bool,
     pub tiles: Vec<TileCount>,
-    pub points: Vec<PointOut>,
+    /// The served points, column-major — see [`PointColumns`].
+    pub points: PointColumns,
     /// The §3.3 density underlay, when requested — empty otherwise. Only non-empty cells appear.
     pub sub_cells: Vec<SubCellCount>,
     /// The declared-scalar names, in manifest order, from the SAME generation this response's
@@ -455,12 +599,12 @@ impl Engine {
                 else {
                     continue;
                 };
-                // One row, so the hoist buys nothing here — but it costs nothing either, and
-                // sharing `row_to_point` with the viewport gather is what keeps the two read
-                // paths' value decoding from drifting apart.
+                // One row, so this resolves for one row — the same `resolve_scalars` the
+                // viewport gather uses, so the two read paths cannot disagree about what a
+                // stored type decodes to.
                 let resolved = resolve_scalars(segment, declared_scalars);
                 return Ok(Some(ItemOut {
-                    scalars: row_to_point(segment, row.raw() - row_base, &resolved).scalars,
+                    scalars: row_scalars(row.raw() - row_base, &resolved),
                     // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
                     // every other store-backed call in this crate uses (see `Engine::open`).
                     // Against the generation this request loaded, never a second `load()`: the
@@ -814,7 +958,17 @@ impl Engine {
         };
 
         let mut tile_counts = Vec::new();
-        let mut points = Vec::new();
+        // Seeded from the declaration rather than from whichever tile arrives first: an empty
+        // request must still carry one buffer per declared column, and a request whose first tile
+        // is narrower than a later one must not fix the column set from it.
+        let mut points = PointColumns {
+            tessera_ids: Vec::new(),
+            codes: Vec::new(),
+            scalars: declared_scalars
+                .iter()
+                .map(|d| ColumnBuf::empty(d.arrow_type))
+                .collect(),
+        };
         let mut sub_cells = Vec::new();
 
         // Resolve every tile's row range in ONE monotone sweep rather than two full-column binary
@@ -985,7 +1139,19 @@ impl Engine {
             };
             tr.stats.fold_into(&mut probe.t);
             tile_counts.push(tr.count);
-            points.extend(tr.points);
+            points.tessera_ids.extend(tr.points.tessera_ids);
+            points.codes.extend(tr.points.codes);
+            // Positional against `declared_scalars`, which both sides were built from, so the
+            // zip cannot pair two different columns. A type disagreement is refused rather than
+            // appended — see `ColumnBuf::append`.
+            for (dst, src) in points.scalars.iter_mut().zip(tr.points.scalars) {
+                if let Err((want, got)) = dst.append(src) {
+                    return Err(EngineError::Malformed(format!(
+                        "two tiles of one response hold the same declared column at different \
+                         types ({want} and {got}); the bundle's segments disagree about it"
+                    )));
+                }
+            }
             sub_cells.extend(tr.sub_cells);
         }
 
@@ -1322,22 +1488,7 @@ fn tile_result(
 
     // Each selected row is a **slice-space** row; `resolve` gives back the segment holding it and
     // its index within that segment, which is what indexes `morton.u32` and `columns.arrow`.
-    // Resolved ONCE PER PART, not once per row — see `ResolvedScalars`. A tile's rows are ordered
-    // by `tessera_id`, not by segment, so consecutive rows can alternate parts; keying the
-    // resolved sets by part index rather than memoising the last one is what makes that free.
-    let resolved: Vec<ResolvedScalars<'_>> = parts
-        .as_slice()
-        .iter()
-        .map(|part| resolve_scalars(part.segment, declared_scalars))
-        .collect();
-    let points: Vec<PointOut> = selected
-        .rows
-        .into_iter()
-        .map(|row| {
-            let (part, segment, local) = parts.resolve_indexed(row);
-            row_to_point(segment, local, &resolved[part])
-        })
-        .collect();
+    let points = gather_tile_columns(&parts, &selected.rows, declared_scalars)?;
     stats.lap(|t| &mut t.gather_ns);
     stats.count(|t| &mut t.points_gathered, points.len() as u64);
 
@@ -1396,7 +1547,7 @@ fn tile_result(
 /// crate's public API — `ViewportOut` is what callers see.
 struct TileResult {
     count: TileCount,
-    points: Vec<PointOut>,
+    points: PointColumns,
     sub_cells: Vec<SubCellCount>,
     stats: TileStats,
 }
@@ -1491,12 +1642,130 @@ fn resolve_scalars<'a>(
         .collect()
 }
 
-fn row_to_point(segment: &SegmentData, row: u32, scalars_of: &ResolvedScalars<'_>) -> PointOut {
-    let idx = row as usize;
-    let cols = &segment.columns;
-    let tessera_id = TesseraId::new(cols.tessera_id()[idx]);
-    let code = ((segment.morton.u32()[idx] as u64) << 32) | cols.residual()[idx] as u64;
+/// Gather one tile's selected rows **column-major**.
+///
+/// `rows` are slice-space rows ascending by `tessera_id` — not by segment — so consecutive rows
+/// can land in different parts. They are therefore resolved to `(part, local)` **once**, in one
+/// pass, and every column then walks that placement rather than re-resolving per value. Together
+/// with the per-part slice resolution this leaves the inner loop a bounds-checked index into a
+/// typed slice, with no name lookup, no downcast and no per-value type dispatch.
+///
+/// The column set comes from `declared` and is always its length, so a request cannot end up with
+/// a column set derived from whichever tile happened to be first.
+///
+/// A declared column a segment does not hold, or holds at another type, is a **malformed bundle**
+/// rather than a silently skipped column. That cannot arise from a bundle this codebase wrote —
+/// `gather_scalars` refuses it at the write end for every producer — and the alternative is to
+/// append a short or wrongly-typed buffer under a name that does not describe it.
+fn gather_tile_columns(
+    parts: &SelectionParts<'_>,
+    rows: &[u32],
+    declared: &[DeclaredScalar],
+) -> Result<PointColumns> {
+    let placed: Vec<(u32, u32)> = rows
+        .iter()
+        .map(|&row| {
+            let (part, _, local) = parts.resolve_indexed(row);
+            (part as u32, local)
+        })
+        .collect();
 
+    let mut tessera_ids = Vec::with_capacity(rows.len());
+    let mut codes = Vec::with_capacity(rows.len());
+    for &(part, local) in &placed {
+        let segment = parts.as_slice()[part as usize].segment;
+        let idx = local as usize;
+        tessera_ids.push(segment.columns.tessera_id()[idx]);
+        codes.push(((segment.morton.u32()[idx] as u64) << 32) | segment.columns.residual()[idx] as u64);
+    }
+
+    let resolved: Vec<ResolvedScalars<'_>> = parts
+        .as_slice()
+        .iter()
+        .map(|part| resolve_scalars(part.segment, declared))
+        .collect();
+
+    let malformed = |d: &DeclaredScalar| {
+        EngineError::Malformed(format!(
+            "a segment of this slice has no scalar column '{}' at the declared type {}, which \
+             MANIFEST.declared_scalars requires; serving it would put values under another \
+             column's name",
+            d.name,
+            d.arrow_type.arrow_type_name()
+        ))
+    };
+
+    let mut scalars = Vec::with_capacity(declared.len());
+    for (ci, d) in declared.iter().enumerate() {
+        // The typed slice per part is resolved BEFORE the row loop, so the loop below carries no
+        // `match` at all — that hoist is the whole reason this shape is cheaper than the
+        // row-major one it replaced.
+        macro_rules! build {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match d.arrow_type {
+                    $(ScalarType::$v => {
+                        let mut per_part: Vec<&[$t]> = Vec::with_capacity(resolved.len());
+                        for r in &resolved {
+                            match r[ci] {
+                                Some(ScalarSlice::$v(s)) => per_part.push(s),
+                                _ => return Err(malformed(d)),
+                            }
+                        }
+                        let mut out = Vec::with_capacity(rows.len());
+                        for &(part, local) in &placed {
+                            out.push(per_part[part as usize][local as usize]);
+                        }
+                        ColumnBuf::$v(out)
+                    })*
+                    ScalarType::Bool => {
+                        let mut per_part = Vec::with_capacity(resolved.len());
+                        for r in &resolved {
+                            match r[ci] {
+                                Some(ScalarSlice::Bool(a)) => per_part.push(a),
+                                _ => return Err(malformed(d)),
+                            }
+                        }
+                        let mut out = Vec::with_capacity(rows.len());
+                        for &(part, local) in &placed {
+                            out.push(per_part[part as usize].value(local as usize));
+                        }
+                        ColumnBuf::Bool(out)
+                    }
+                    ScalarType::Utf8 => {
+                        let mut per_part = Vec::with_capacity(resolved.len());
+                        for r in &resolved {
+                            match r[ci] {
+                                Some(ScalarSlice::Utf8(a)) => per_part.push(a),
+                                _ => return Err(malformed(d)),
+                            }
+                        }
+                        let mut out = Vec::with_capacity(rows.len());
+                        for &(part, local) in &placed {
+                            out.push(per_part[part as usize].value(local as usize).to_string());
+                        }
+                        ColumnBuf::Utf8(out)
+                    }
+                }
+            };
+        }
+        scalars.push(flat_families!(build));
+    }
+
+    Ok(PointColumns {
+        tessera_ids,
+        codes,
+        scalars,
+    })
+}
+
+/// One row's scalars, row-major — `POST /v1/items`' shape, which is a single item by nature.
+///
+/// Kept beside [`gather_tile_columns`] rather than merged with it: the drill-down wants one row's
+/// values as a list, and the viewport wants every row's values as columns. Both decode a
+/// [`ScalarSlice`] into the same thirteen families, and both generate that decode from
+/// [`flat_families!`], so the two cannot drift on what a stored type means.
+fn row_scalars(row: u32, scalars_of: &ResolvedScalars<'_>) -> Vec<ScalarOut> {
+    let idx = row as usize;
     let mut scalars = Vec::with_capacity(scalars_of.len());
     // `flatten` skips the columns this segment does not hold, exactly as the per-row
     // `cols.scalar(..)` lookup used to.
@@ -1504,7 +1773,7 @@ fn row_to_point(segment: &SegmentData, row: u32, scalars_of: &ResolvedScalars<'_
         // Generated for the flat members; `Bool` and `Utf8` read through their arrays
         // because neither is stored as a flat slice of itself.
         macro_rules! out {
-            ($($v:ident),* $(,)?) => {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
                 match value {
                     $(ScalarSlice::$v(s) => ScalarOut::$v(s[idx]),)*
                     ScalarSlice::Bool(a) => ScalarOut::Bool(a.value(idx)),
@@ -1512,26 +1781,10 @@ fn row_to_point(segment: &SegmentData, row: u32, scalars_of: &ResolvedScalars<'_
                 }
             };
         }
-        scalars.push(out!(
-            U8,
-            U16,
-            U32,
-            U64,
-            I8,
-            I16,
-            I32,
-            I64,
-            F32,
-            F64,
-            TimestampUs
-        ));
+        scalars.push(flat_families!(out));
     }
 
-    PointOut {
-        tessera_id,
-        code,
-        scalars,
-    }
+    scalars
 }
 
 #[cfg(test)]

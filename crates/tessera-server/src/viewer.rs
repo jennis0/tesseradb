@@ -378,29 +378,29 @@ fn run_viewport(
         )
         .map_err(map_engine_error)?;
 
-    let n = out.points.len();
-    let mut point_ids = Vec::with_capacity(n);
-    let mut codes = Vec::with_capacity(n);
-    for point in &out.points {
-        // I10 (entity ids never cross the trust boundary) is upheld structurally: no entity id is
-        // available to leak here, because the engine never gathers one on this path (see
-        // `tessera_engine::viewport::PointOut`'s doc). The wire identity is `tessera_id` directly,
-        // carried through unchanged; there is no per-session translation left to do
-        // (`tessera-wire`'s `HandleTable` is retained for node handles, which are not on this path
-        // — docs/decisions/0032-delete-the-dead-handle-table.md).
-        point_ids.push(point.tessera_id.raw());
-        codes.push(point.code);
-    }
-
+    // **Nothing is reshaped here any more.** The engine gathers column-major, so the wire's
+    // buffers are the engine's buffers borrowed — no transpose, and no second row-major pass to
+    // pull out the identities and positions.
+    //
+    // I10 (entity ids never cross the trust boundary) is upheld structurally: no entity id is
+    // available to leak here, because the engine never gathers one on this path (see
+    // `tessera_engine::PointColumns`' doc). The wire identity is `tessera_id` directly, carried
+    // through unchanged; there is no per-session translation left to do (`tessera-wire`'s
+    // `HandleTable` is retained for node handles, which are not on this path —
+    // docs/decisions/0032-delete-the-dead-handle-table.md).
+    //
     // Names come from `out.scalar_names`, populated by `Engine::viewport` from the SAME
     // generation it already loaded for this request — not a second `state.engine.meta()` call.
     // That second call would `load_full()` the generation pointer again, against lifecycle
     // §1.1's "exactly once, at request start"; the names are identical either way (same
     // manifest, same order), so this changes no response byte.
-    let scalar_cols = build_scalar_columns(&out.points, &out.scalar_names);
-    let scalar_refs: Vec<(&str, ScalarColumn)> = scalar_cols
+    let point_ids = &out.points.tessera_ids;
+    let codes = &out.points.codes;
+    let scalar_refs: Vec<(&str, ScalarColumn)> = out
+        .scalar_names
         .iter()
-        .map(|(name, col)| (name.as_str(), col.as_ref()))
+        .zip(&out.points.scalars)
+        .map(|(name, col)| (name.as_str(), column_ref(col)))
         .collect();
 
     let tiles: Vec<u64> = out.tiles.iter().map(|t| t.tile).collect();
@@ -427,8 +427,8 @@ fn run_viewport(
         visible: &visible,
         matched: &matched,
         served: &served,
-        points_tessera_ids: &point_ids,
-        codes: &codes,
+        points_tessera_ids: point_ids,
+        codes,
         scalars: &scalar_refs,
         sub_cells: sub_cells
             .as_ref()
@@ -623,26 +623,9 @@ fn stage_header(_t: &tessera_engine::StageTimings, _arrow_serialise_ns: u64) -> 
     None
 }
 
-/// A same-typed column of scalar values, owned so it outlives the borrow `viewport_ipc` needs.
-enum ColumnBuf {
-    Bool(Vec<bool>),
-    U8(Vec<u8>),
-    U16(Vec<u16>),
-    U32(Vec<u32>),
-    U64(Vec<u64>),
-    I8(Vec<i8>),
-    I16(Vec<i16>),
-    I32(Vec<i32>),
-    I64(Vec<i64>),
-    F32(Vec<f32>),
-    F64(Vec<f64>),
-    TimestampUs(Vec<i64>),
-    Utf8(Vec<String>),
-}
-
-/// The scalar families, once, for the three places this module walks them: the owned buffer's
-/// borrow, the row-to-column transpose, and the drill-down's JSON. Three separate matches over
-/// thirteen variants is three chances for a type to appear in two of them.
+/// The scalar families, once, for the two places this module walks them: the borrow handed to
+/// `viewport_ipc`, and the drill-down's JSON. Two separate matches over thirteen variants is two
+/// chances for a type to appear in one of them and not the other.
 macro_rules! scalar_families {
     ($mac:ident) => {
         $mac! {
@@ -651,77 +634,23 @@ macro_rules! scalar_families {
     };
 }
 
-impl ColumnBuf {
-    fn as_ref(&self) -> ScalarColumn<'_> {
-        macro_rules! arms {
-            ($($v:ident),* $(,)?) => {
-                match self {
-                    $(ColumnBuf::$v(x) => ScalarColumn::$v(x),)*
-                    ColumnBuf::Utf8(x) => ScalarColumn::Utf8(x),
-                }
-            };
-        }
-        scalar_families!(arms)
-    }
-}
-
-/// Transpose each point's `Vec<ScalarOut>` (row-major, per `tessera_engine::viewport`'s doc) into
-/// column-major buffers named from the bundle's declared-scalar schema. The build always writes
-/// every declared scalar for every row, so this alignment-by-position holds; if it didn't, there is
-/// nothing authorisation-relevant at stake in getting a name wrong here (scalars are disclosed to a
-/// viewer only after the mask has already admitted the row).
-fn build_scalar_columns(
-    points: &[tessera_engine::PointOut],
-    declared_names: &[String],
-) -> Vec<(String, ColumnBuf)> {
-    let Some(first) = points.first() else {
-        return Vec::new();
-    };
-    let n_scalars = first.scalars.len();
-    let mut columns = Vec::with_capacity(n_scalars);
-    for i in 0..n_scalars {
-        let name = declared_names
-            .get(i)
-            .cloned()
-            .unwrap_or_else(|| format!("scalar_{i}"));
-        // One arm per type, generated: the hand-written form was three near-identical blocks and
-        // is thirteen now, which is the shape a type added to twelve of them hides in.
-        //
-        // The `_ => default` fallback is unreachable — a column is one type for every row, the
-        // segment schema having fixed it — and stays a default rather than a panic because a
-        // response is not the place to discover a bundle defect, and nothing here is
-        // authorisation-relevant: the mask admitted the row before its scalars were read.
-        macro_rules! column_of {
-            ($variant:ident, $default:expr) => {
-                ColumnBuf::$variant(
-                    points
-                        .iter()
-                        .map(|p| match &p.scalars[i] {
-                            tessera_engine::ScalarOut::$variant(v) => v.clone(),
-                            _ => $default,
-                        })
-                        .collect(),
-                )
-            };
-        }
-        let buf = match &first.scalars[i] {
-            tessera_engine::ScalarOut::Bool(_) => column_of!(Bool, false),
-            tessera_engine::ScalarOut::U8(_) => column_of!(U8, 0),
-            tessera_engine::ScalarOut::U16(_) => column_of!(U16, 0),
-            tessera_engine::ScalarOut::U32(_) => column_of!(U32, 0),
-            tessera_engine::ScalarOut::U64(_) => column_of!(U64, 0),
-            tessera_engine::ScalarOut::I8(_) => column_of!(I8, 0),
-            tessera_engine::ScalarOut::I16(_) => column_of!(I16, 0),
-            tessera_engine::ScalarOut::I32(_) => column_of!(I32, 0),
-            tessera_engine::ScalarOut::I64(_) => column_of!(I64, 0),
-            tessera_engine::ScalarOut::F32(_) => column_of!(F32, 0.0),
-            tessera_engine::ScalarOut::F64(_) => column_of!(F64, 0.0),
-            tessera_engine::ScalarOut::TimestampUs(_) => column_of!(TimestampUs, 0),
-            tessera_engine::ScalarOut::Utf8(_) => column_of!(Utf8, String::new()),
+/// Borrow one of the engine's gathered columns as the wire's view of it.
+///
+/// **The whole of what response assembly now does to the scalar tail.** The engine gathers
+/// column-major, so this is a borrow rather than a transpose: what used to be a second full pass
+/// over every value — and a `Vec<ScalarOut>` per point to walk it from — is thirteen pointer
+/// copies.
+fn column_ref(buf: &tessera_engine::ColumnBuf) -> ScalarColumn<'_> {
+    use tessera_engine::ColumnBuf;
+    macro_rules! arms {
+        ($($v:ident),* $(,)?) => {
+            match buf {
+                $(ColumnBuf::$v(x) => ScalarColumn::$v(x),)*
+                ColumnBuf::Utf8(x) => ScalarColumn::Utf8(x),
+            }
         };
-        columns.push((name, buf));
     }
-    columns
+    scalar_families!(arms)
 }
 
 #[derive(Debug, Deserialize)]

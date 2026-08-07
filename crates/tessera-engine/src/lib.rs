@@ -61,7 +61,8 @@ pub use single_flight::CacheStats;
 pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
-    EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,
+    ColumnBuf, EngineMeta, ItemOut, PointColumns, ScalarOut, SubCellCount, TileCount, ViewportOut,
+    ViewportRequest,
 };
 // `EngineMeta::declared_scalars`' element type, re-exported for the same layering reason
 // `FragmentCacheStats` is: `check-layers.sh` denies a `tessera-server → tessera-store` edge

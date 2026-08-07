@@ -135,8 +135,8 @@ fn b_subset_session_sees_exactly_its_terms_items() {
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let new_to_source: BTreeMap<u64, u64> = source_to_new.iter().map(|(&s, &n)| (n, s)).collect();
     let key = test_key();
-    for point in &out.points {
-        let (shard, entity) = key.invert(point.tessera_id);
+    for (tessera_id, _) in out.points.iter() {
+        let (shard, entity) = key.invert(tessera_id);
         assert_eq!(shard, 0, "fixture uses shard 0 only");
         let source = new_to_source[&entity.raw()];
         assert_eq!(
@@ -308,13 +308,13 @@ fn f_selection_returns_the_lowest_tessera_ids_not_the_first_rows() {
         "the tile row must report what it served"
     );
 
-    let got: Vec<u64> = out.points.iter().map(|p| p.tessera_id.raw()).collect();
+    let got: Vec<u64> = out.points.iter().map(|(id, _)| id.raw()).collect();
     assert_eq!(
         got, expected,
         "served set must be the three lowest identities"
     );
-    for (i, point) in out.points.iter().enumerate() {
-        assert_eq!(point.code, expected_codes[i], "point {i} geometry");
+    for (i, (_, code)) in out.points.iter().enumerate() {
+        assert_eq!(code, expected_codes[i], "point {i} geometry");
     }
 
     // The discriminating assertion. If the fixture ever changed such that these coincided, the
@@ -641,7 +641,7 @@ fn response_tile_order_and_point_concatenation_follow_tiles_for_bbox_not_morton_
         "tiles must be reported in `tiles_for_bbox` enumeration order, with empty tiles skipped"
     );
 
-    let got_points: Vec<u64> = out.points.iter().map(|p| p.tessera_id.raw()).collect();
+    let got_points: Vec<u64> = out.points.iter().map(|(id, _)| id.raw()).collect();
     assert_eq!(
         got_points, expected_points,
         "points must be a flat concatenation in the reported tile order"

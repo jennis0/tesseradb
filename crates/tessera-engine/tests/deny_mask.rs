@@ -136,7 +136,7 @@ fn drawn_marks(
         .expect("a viewport")
         .points
         .iter()
-        .map(|p| p.tessera_id.raw())
+        .map(|(id, _)| id.raw())
         .collect()
 }
 

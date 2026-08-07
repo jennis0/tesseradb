@@ -491,14 +491,14 @@ fn probe_codes(
         let found = served
             .points
             .iter()
-            .find(|p| p.tessera_id == tessera_id)
+            .find(|(id, _)| *id == tessera_id)
             .unwrap_or_else(|| {
                 panic!(
                     "{} is not served in a viewport around its own coordinates ({}, {})",
                     probe.external_id, probe.x, probe.y
                 )
             });
-        out.insert(probe.external_id.clone(), (tessera_id, found.code));
+        out.insert(probe.external_id.clone(), (tessera_id, found.1));
     }
     out
 }
@@ -786,7 +786,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
         !viewport(&engine, &full, bbox, PROBE_ZOOM)
             .points
             .iter()
-            .any(|p| p.tessera_id == tessera_id),
+            .any(|(id, _)| id == tessera_id),
         "and it is the suppressed entity that is gone, not merely one item"
     );
 
