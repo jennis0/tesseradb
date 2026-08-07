@@ -1175,7 +1175,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // item's attributes, coherently and with no error anywhere. Caught at 2.4M against the source
     // corpus; the geometry pass three statements above resolves through the same two structures
     // for the same reason.
-    let attributes_by_entity = read_attributes_by_entity(args, n, &source_ids, &entity_of_ordinal)?;
+    //
+    // `minters` seeds one live minter per discovered vocabulary from what the schema already
+    // pins; the scan mints into it for every novel key, and its final state — carried past this
+    // call — is what step 11 below records into `MANIFEST.vocabularies`.
+    let mut minters = args.schema.discovered_minters();
+    let attributes_by_entity =
+        read_attributes_by_entity(args, n, &source_ids, &entity_of_ordinal, &mut minters)?;
 
     drop(source_ids);
     drop(entity_of_ordinal);
@@ -1298,6 +1304,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         term_count,
         pair_count,
         plan.recorded_batch_items,
+        &minters,
     )?;
     // Reported in bytes, not rows: this stage re-reads and SHA-256s every byte the build wrote,
     // so it scales with bundle size rather than with item count.
@@ -1326,6 +1333,7 @@ fn read_attributes_by_entity(
     n: u64,
     source_ids: &[u64],
     entity_of_ordinal: &[u32],
+    minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
 ) -> Result<Vec<Vec<ScalarValue>>> {
     if args.schema.is_empty() {
         return Ok(Vec::new());
@@ -1343,6 +1351,7 @@ fn read_attributes_by_entity(
     input::scan_attributes(
         &args.points,
         &args.schema,
+        minters,
         args.limit,
         |source_id, values| {
             // Binary search rather than `join_chunk`'s merge sweep: this pass is per-row work over a

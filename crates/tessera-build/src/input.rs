@@ -30,6 +30,7 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_spatial::{fixed32, Bounds};
+use tessera_store::vocabulary::VocabularyMinter;
 
 use crate::error::{BuildError, Result};
 
@@ -725,12 +726,25 @@ pub fn read_vocabulary_file(path: &Path, attribute: &str) -> Result<crate::schem
 /// an attribute column is 1–8 bytes against geometry's decode cost — the parallel decode
 /// [`scan_points`] needs buys nothing here.
 ///
-/// Category keys are mapped to codes through `vocabularies`; a key the vocabulary does not
-/// declare is a **build failure** naming the column and the key, per §5's declare-then-use rule.
-/// A row whose category column is null carries [`crate::schema::ABSENT_CODE`].
+/// Category keys are mapped to codes against `schema_decl`'s compiled vocabularies. Under a
+/// **declared** vocabulary an unknown key is a **build failure** naming the column and the key,
+/// per §5's declare-then-use rule. Under a **discovered** one, `minters` supplies a live
+/// [`VocabularyMinter`] per vocabulary — seeded from whatever the schema already pins — and this
+/// function mints a code for every key the batch introduces that the minter does not yet carry
+/// (§3.4). Minting is a **batch-level pre-pass, not per row**: [`BatchColumn::decode`] collects
+/// the distinct keys of one Arrow batch, mints any novel ones once each, and only then maps every
+/// row through the now-complete lookup — never once per row, which is both the performance point
+/// and the reason [`BatchColumn::value`] stays a pure positional lookup over already-resolved
+/// data. A row whose category column is null carries [`crate::schema::ABSENT_CODE`], for either
+/// kind.
+///
+/// `minters` is threaded through rather than owned here so the caller can hand its final state —
+/// every binding this scan minted, on top of whatever the schema seeded it with — to the manifest
+/// writer once the whole scan (there is exactly one, per build) has completed.
 pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
     path: &Path,
     schema_decl: &crate::schema::Schema,
+    minters: &mut HashMap<String, VocabularyMinter>,
     limit: Option<u64>,
     mut visit: F,
 ) -> Result<()> {
@@ -782,13 +796,17 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
         // **Decoded once per batch, not once per row.** An earlier revision called a
         // whole-column converter from inside the row loop, so a 65,536-row batch decoded its
         // integer columns 65,536 times — quadratic in the batch size, and invisible at the scale
-        // a test uses.
-        let decoded: Vec<BatchColumn> = schema_decl
-            .attributes
-            .iter()
-            .zip(&attribute_idx)
-            .map(|(attribute, &idx)| BatchColumn::decode(path, batch.column(idx), attribute))
-            .collect::<Result<_>>()?;
+        // a test uses. A discovered category's mint pre-pass rides the same discipline: minting
+        // is per distinct key in the batch, decided here, not per row.
+        let mut decoded: Vec<BatchColumn> = Vec::with_capacity(schema_decl.attributes.len());
+        for (attribute, &idx) in schema_decl.attributes.iter().zip(&attribute_idx) {
+            decoded.push(BatchColumn::decode(
+                path,
+                batch.column(idx),
+                attribute,
+                minters,
+            )?);
+        }
 
         for (row, &entity_id) in ids.iter().enumerate() {
             if limit.is_some_and(|l| entity_id >= l) {
@@ -810,8 +828,13 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
 /// one shape (every integer width from `Ints`), and the declaration decides what a row's value
 /// becomes, not what the file holds.
 enum BatchColumn {
-    /// Category keys, resolved per row against the vocabulary.
+    /// Category keys under a **declared** vocabulary, resolved per row: `value` looks each key up
+    /// against `schema_decl` and refuses an unknown one (§5's declare-then-use).
     Keys(arrow::array::StringArray),
+    /// Category codes under a **discovered** vocabulary, already resolved by the batch-level mint
+    /// pre-pass in `decode` — every key this batch carries was minted or found bound before this
+    /// variant exists, so `value` is a pure index, exactly as every other variant's is.
+    Discovered(Vec<u32>),
     Bool(arrow::array::BooleanArray),
     /// Every integer column, widened to `i64` once. `narrow` puts each value back inside its
     /// declared width, refusing rather than truncating.
@@ -833,6 +856,7 @@ impl BatchColumn {
         path: &Path,
         column: &arrow::array::ArrayRef,
         attribute: &crate::schema::Attribute,
+        minters: &mut HashMap<String, VocabularyMinter>,
     ) -> Result<Self> {
         let mismatch = || BuildError::Schema {
             path: path.to_path_buf(),
@@ -857,13 +881,12 @@ impl BatchColumn {
             ),
         };
         let any = column.as_any();
-        if attribute.vocabulary.is_some() {
+        if let Some(vocabulary) = &attribute.vocabulary {
             // A category arrives as its *key*, never as a code: §3.1 — the key in the row is not
             // the display name, and the code is assigned once and pinned, so a data file
             // supplying codes directly would be a second place codes are decided.
-            return any
+            let keys = any
                 .downcast_ref::<arrow::array::StringArray>()
-                .map(|a| BatchColumn::Keys(a.clone()))
                 .ok_or_else(|| BuildError::Schema {
                     path: path.to_path_buf(),
                     detail: format!(
@@ -873,7 +896,23 @@ impl BatchColumn {
                         attribute.name,
                         column.data_type()
                     ),
-                });
+                })?;
+            return match attribute.vocabulary_kind {
+                Some(crate::schema::VocabularyKind::Discovered) => {
+                    let minter = minters.get_mut(vocabulary).unwrap_or_else(|| {
+                        panic!(
+                            "'{vocabulary}' is discovered, so `Schema::discovered_minters` must \
+                             have seeded it before this scan began"
+                        )
+                    });
+                    Ok(BatchColumn::Discovered(mint_batch(
+                        keys, minter, attribute,
+                    )?))
+                }
+                // Declared (or a `values_of` share of one): resolved per row in `value`,
+                // unchanged from the declare-then-use rule.
+                _ => Ok(BatchColumn::Keys(keys.clone())),
+            };
         }
         Ok(match attribute.ty {
             ScalarType::Bool => BatchColumn::Bool(
@@ -952,6 +991,9 @@ impl BatchColumn {
                 };
                 code_as(attribute.ty, code)
             }
+            // Already resolved by `decode`'s mint pre-pass — a pure index, like every other
+            // variant here, and no lookup against `schema_decl` at all.
+            BatchColumn::Discovered(codes) => code_as(attribute.ty, codes[row]),
             BatchColumn::Bool(values) => ScalarValue::Bool(values.value(row)),
             BatchColumn::U64(values) => ScalarValue::U64(values[row]),
             BatchColumn::F32(values) => ScalarValue::F32(values[row]),
@@ -986,8 +1028,11 @@ impl BatchColumn {
     }
 }
 
-/// A vocabulary code at the column's declared width. Every code reaching here was checked
-/// against [`ScalarType::max_code`] at parse, so the narrowing cannot lose a value.
+/// A vocabulary code at the column's declared width. A declared vocabulary's codes were checked
+/// against [`ScalarType::max_code`] at parse; a discovered one's are drawn by
+/// [`VocabularyMinter::mint`] from that same width's usable space (`vocabulary::usable_max` in
+/// `tessera-store`) and so are in range by construction. Either way the narrowing here cannot
+/// lose a value.
 fn code_as(ty: ScalarType, code: u32) -> ScalarValue {
     match ty {
         ScalarType::U8 => ScalarValue::U8(code as u8),
@@ -996,6 +1041,55 @@ fn code_as(ty: ScalarType, code: u32) -> ScalarValue {
         // silent home for a width that should never have reached here.
         _ => ScalarValue::U32(code),
     }
+}
+
+/// The batch-level mint pre-pass for a discovered vocabulary (§3.4): collect the distinct,
+/// non-null keys this Arrow batch introduces, mint each **once**, then map every row through the
+/// now-complete lookup.
+///
+/// Not once per row: `VocabularyMinter::mint` is view-first (a bound key returns its pinned code
+/// without a draw), so calling it per row would still be *correct*, but it would also be the
+/// literal per-row mutation this module's callers are built to avoid, and it is what would make
+/// [`BatchColumn::value`] need mutable access to a minter — which it must never have, being the
+/// one place every other variant's resolution is a pure index. Collecting first and minting the
+/// distinct set keeps the mutation entirely inside `decode`, before any row is read back.
+///
+/// An empty key is refused, never minted as [`crate::schema::ABSENT_CODE`] — the same typo trap
+/// [`VocabularyMinter::mint`] itself enforces for a declared vocabulary's row-time lookup.
+fn mint_batch(
+    keys: &arrow::array::StringArray,
+    minter: &mut VocabularyMinter,
+    attribute: &crate::schema::Attribute,
+) -> Result<Vec<u32>> {
+    use std::collections::BTreeSet;
+
+    let mut novel: BTreeSet<&str> = BTreeSet::new();
+    for i in 0..keys.len() {
+        if keys.is_null(i) {
+            continue;
+        }
+        let key = keys.value(i);
+        if minter.code_of(key).is_none() {
+            novel.insert(key);
+        }
+    }
+    for key in novel {
+        minter.mint(key).map_err(|e| {
+            crate::schema::schema_error(format!("attribute '{}': {e}", attribute.name))
+        })?;
+    }
+
+    Ok((0..keys.len())
+        .map(|i| {
+            if keys.is_null(i) {
+                crate::schema::ABSENT_CODE
+            } else {
+                minter
+                    .code_of(keys.value(i))
+                    .expect("every key in this batch was just minted or was already bound")
+            }
+        })
+        .collect())
 }
 
 /// Any integer parquet column as `i64` — one conversion per batch, never per row.

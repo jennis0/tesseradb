@@ -471,6 +471,13 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // empty `scalars` vector, and the segment writer refuses that by name rather than padding it
     // — padding would put every later row's value under the wrong identity in a column whose
     // width says nothing is wrong.
+    //
+    // `minters` seeds one live `VocabularyMinter` per discovered vocabulary from whatever the
+    // schema already pins, and the scan mints into it for every novel key the corpus supplies.
+    // Its final state — carried past this block — is what `write_manifests` records into
+    // `MANIFEST.vocabularies` below, so a rebuild and the serving path see exactly what this
+    // build minted.
+    let mut minters = args.schema.discovered_minters();
     if !args.schema.is_empty() {
         let position_of_source: HashMap<u64, usize> = staged
             .iter()
@@ -481,6 +488,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         input::scan_attributes(
             &args.points,
             &args.schema,
+            &mut minters,
             args.limit,
             |source_id, values| {
                 if let Some(&position) = position_of_source.get(&source_id) {
@@ -534,6 +542,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         term_count,
         pair_count,
         args.batch_items.filter(|&b| b < n),
+        &minters,
     )
 }
 
@@ -563,6 +572,7 @@ struct BundleFiles {
 /// Write `SEGMENTS-0.json`, `MANIFEST.json` and `CURRENT` over the files a build produced.
 /// Shared by both build implementations so the two cannot drift in the one place where a
 /// difference would be invisible until a digest failed.
+#[allow(clippy::too_many_arguments)]
 fn write_manifests(
     args: &BuildArgs,
     files: &BundleFiles,
@@ -571,6 +581,7 @@ fn write_manifests(
     term_count: u64,
     pair_count: u64,
     batch_items_recorded: Option<u64>,
+    minters: &HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
 ) -> Result<BuildReport> {
     let bounds = plugin.declared_bounds();
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
@@ -661,24 +672,43 @@ fn write_manifests(
         // Sorted by name, unlike the columns: nothing indexes a vocabulary positionally, and a
         // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes
         // — which are under a digest.
+        //
+        // A **declared** vocabulary's values are exactly what the schema pinned (`v.codes`,
+        // unchanged). A **discovered** one's values come from `minters[&v.name]` instead — the
+        // schema's pinned seed *plus* every code this build minted for a key the seed lacked —
+        // because `v.codes` alone would silently omit everything minted during the scan. Either
+        // way the values are read back sorted by key ([`tessera_store::vocabulary::values_of`]),
+        // so the bytes here do not depend on a `BTreeMap`'s or a minter's internal order.
         vocabularies: {
             let mut compiled: Vec<ManifestVocabulary> = args
                 .schema
                 .vocabularies
                 .values()
-                .map(|v| ManifestVocabulary {
-                    name: v.name.clone(),
-                    listing: v.listing.as_str().to_string(),
-                    values: v
-                        .codes
-                        .iter()
-                        .map(|(key, &code)| ManifestVocabularyValue {
-                            key: key.clone(),
-                            code,
-                            label: v.labels.get(key).cloned(),
-                        })
-                        .collect(),
-                    reserved: v.reserved.clone(),
+                .map(|v| {
+                    let values = match minters.get(&v.name) {
+                        Some(minter) => tessera_store::vocabulary::values_of(minter)
+                            .into_iter()
+                            .map(|value| ManifestVocabularyValue {
+                                label: v.labels.get(&value.key).cloned(),
+                                ..value
+                            })
+                            .collect(),
+                        None => v
+                            .codes
+                            .iter()
+                            .map(|(key, &code)| ManifestVocabularyValue {
+                                key: key.clone(),
+                                code,
+                                label: v.labels.get(key).cloned(),
+                            })
+                            .collect(),
+                    };
+                    ManifestVocabulary {
+                        name: v.name.clone(),
+                        listing: v.listing.as_str().to_string(),
+                        values,
+                        reserved: v.reserved.clone(),
+                    }
                 })
                 .collect();
             compiled.sort_by(|a, b| a.name.cmp(&b.name));

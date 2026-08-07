@@ -24,9 +24,11 @@
 //! - **A key in both `reserved` and the live set.** `reserved` is Protobuf's mechanism and carries
 //!   its reasoning: a retired code is never reassigned, because reusing one silently recolours
 //!   history.
-//! - **`listing = "public"` with `vocabulary = "discovered"`** (§3.8). A discovered vocabulary's
-//!   values are inferred from whatever is in the corpus, so publishing them discloses
-//!   data-derived names on nobody's authority.
+//! - **`listing = "public"` with `vocabulary = "discovered"`** (§3.8) is *warned about, not
+//!   refused* (owner ruling, 2026-08-07, relaxing §3.8's original refusal): a discovered
+//!   vocabulary's values are inferred from whatever is in the corpus, so publishing them
+//!   discloses data-derived names on nobody's authority, but the operator may have a reason and
+//!   there is still no `/v1/categories` for it to reach.
 //! - **Disagreement with a `values_of` referent** on `listing`, `vocabulary` or `width` (§3.9),
 //!   or the weaker setting governs both and the gated column's value set publishes through the
 //!   published one.
@@ -36,6 +38,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use tessera_spatial::tiler::ScalarType;
+use tessera_store::vocabulary::VocabularyMinter;
 
 use crate::error::{BuildError, Result};
 
@@ -119,17 +122,43 @@ pub struct Attribute {
     /// The vocabulary this column's values are drawn from, for a category; `None` for a plain
     /// numeric attribute. Names a key in [`Schema::vocabularies`].
     pub vocabulary: Option<String>,
+    /// The named vocabulary's [`VocabularyKind`], cached beside its name so the batch build can
+    /// decide whether to mint without a second lookup into [`Schema::vocabularies`]. `None` iff
+    /// `vocabulary` is `None`.
+    pub vocabulary_kind: Option<VocabularyKind>,
+}
+
+/// Whether a vocabulary's value set is authored in full before the corpus exists, or grows as the
+/// corpus is discovered (§3.4).
+///
+/// **Declared**: an unknown key at build (or ingest) is refused — declare-then-use, because a
+/// category carries properties and, through its postings, a visibility consequence, so a typo
+/// must not create one.
+///
+/// **Discovered**: an unknown key is minted a fresh code, drawn at random from the declared
+/// width's unused space by [`tessera_store::vocabulary::VocabularyMinter`] — the same routine
+/// ingest uses, so exhaustion is one predicate. A `values_key` seed or an inline
+/// `[attribute.values]` block still pins codes exactly as a declared vocabulary's are (§4.4); the
+/// build mints only for keys the seed does not carry, and a discovered vocabulary given no value
+/// source at all is legal and starts empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VocabularyKind {
+    Declared,
+    Discovered,
 }
 
 /// A named value set: keys, their pinned codes, and per-value presentation.
 #[derive(Debug, Clone)]
 pub struct Vocabulary {
     pub name: String,
+    pub kind: VocabularyKind,
     /// `per_viewer` or `public` (§3.8). Recorded and published; **not yet enforced anywhere**,
     /// there being no `/v1/categories` to filter — see [`Schema::parse`]'s ⊘ note.
     pub listing: Listing,
-    /// Value key → code. Codes are pinned by the author and never minted here: minting is for
-    /// `vocabulary = "discovered"`, which is refused (⊘).
+    /// Value key → code. For a declared vocabulary, every code the author pinned. For a
+    /// discovered one, whatever a `values_key` seed or inline block pinned *before* the build —
+    /// the codes the build mints during the run live in the minter [`Schema::discovered_minters`]
+    /// returns, not here, since this struct is the schema's compiled, static state.
     pub codes: BTreeMap<String, u32>,
     /// Per-value presentation, keyed as `codes` is. Absent for a value the author gave no
     /// properties.
@@ -190,8 +219,12 @@ impl Schema {
     ///
     /// **⊘ Specified, not implemented**, each refused at parse rather than accepted and ignored:
     /// `filter` and `inspect` in `used_for` (§1 — there is no attribute dictionary or postings
-    /// file, and no `inspect` sidecar); `multi = true` (§3.7); and `vocabulary = "discovered"`,
-    /// which needs the mint-and-record path §3.4 specifies and ingest's auto-mint arm.
+    /// file, and no `inspect` sidecar); and `multi = true` (§3.7).
+    ///
+    /// **`vocabulary = "discovered"` is built** (§3.4, §5): an attribute may declare it, and the
+    /// batch build mints a code for every key its value set (if any) does not already pin, through
+    /// [`tessera_store::vocabulary::VocabularyMinter`] — see [`Schema::discovered_minters`] and
+    /// `input::scan_attributes`.
     ///
     /// **⊘ `listing` is recorded and not enforced.** It is required, parsed and written to the
     /// manifest, but no endpoint publishes a vocabulary yet, so `per_viewer` currently gates
@@ -264,11 +297,13 @@ impl Schema {
                     settings_of_attribute.insert(decl.name.clone(), (vocab.listing, ty));
                     vocabulary_of_attribute.insert(decl.name.clone(), vocab.name.clone());
                     let vocab_name = vocab.name.clone();
+                    let vocab_kind = vocab.kind;
                     vocabularies.entry(vocab_name.clone()).or_insert(vocab);
                     Attribute {
                         name: decl.name.clone(),
                         ty,
                         vocabulary: Some(vocab_name),
+                        vocabulary_kind: Some(vocab_kind),
                     }
                 }
                 other => {
@@ -314,6 +349,7 @@ impl Schema {
                         name: decl.name.clone(),
                         ty,
                         vocabulary: None,
+                        vocabulary_kind: None,
                     }
                 }
             };
@@ -357,6 +393,42 @@ impl Schema {
     /// before `--schema` existed, which must stay buildable and byte-identical.
     pub fn is_empty(&self) -> bool {
         self.attributes.is_empty()
+    }
+
+    /// One live [`VocabularyMinter`] per discovered vocabulary this schema declares, seeded from
+    /// whatever it already pins — a `values_key` seed's or inline block's codes, plus `reserved`
+    /// (§4.4: seeding pins codes exactly as a declared vocabulary's are, and the build mints only
+    /// for keys the seed does not carry). A declared vocabulary mints nothing and has no entry
+    /// here at all, so `input::scan_attributes`'s batch-level mint pre-pass can never reach one.
+    ///
+    /// The width bounding a vocabulary's draw is taken from the **column** that declares it, not
+    /// from the vocabulary itself — the same rule
+    /// `tessera_store::vocabulary::Vocabularies::seed` states for the served bundle: a value set
+    /// is keys and codes, and what bounds the code space is what stores it.
+    pub fn discovered_minters(&self) -> HashMap<String, VocabularyMinter> {
+        let mut minters = HashMap::new();
+        for vocabulary in self.vocabularies.values() {
+            if vocabulary.kind != VocabularyKind::Discovered {
+                continue;
+            }
+            let width = self
+                .attributes
+                .iter()
+                .find(|a| a.vocabulary.as_deref() == Some(vocabulary.name.as_str()))
+                .map(|a| a.ty)
+                .expect("a compiled vocabulary is named by at least one attribute");
+            let mut minter = VocabularyMinter::new(vocabulary.name.clone(), width);
+            for (key, &code) in &vocabulary.codes {
+                minter
+                    .seed_value(key, code)
+                    .expect("check_codes already proved this vocabulary's codes are consistent");
+            }
+            for &code in &vocabulary.reserved {
+                minter.seed_reserved(code);
+            }
+            minters.insert(vocabulary.name.clone(), minter);
+        }
+        minters
     }
 }
 
@@ -508,18 +580,9 @@ fn compile_category(
             decl.name
         ))
     })?;
-    match vocabulary_kind {
-        "declared" => {}
-        "discovered" => {
-            return Err(schema_error(format!(
-                "attribute '{}': `vocabulary = \"discovered\"` is specified and not built \
-                 (per-point-attributes §3.4, §5). It needs codes minted at random from the \
-                 unused space and recorded in the manifest — dense first-seen codes make a \
-                 visible code a lower bound on vocabulary cardinality — and ingest's auto-mint \
-                 arm. Declare the value set instead",
-                decl.name
-            )));
-        }
+    let kind = match vocabulary_kind {
+        "declared" => VocabularyKind::Declared,
+        "discovered" => VocabularyKind::Discovered,
         other => {
             return Err(schema_error(format!(
                 "attribute '{}': `vocabulary = \"{other}\"` is neither \"declared\" nor \
@@ -527,7 +590,7 @@ fn compile_category(
                 decl.name
             )));
         }
-    }
+    };
 
     let listing_name = decl.listing.as_deref().ok_or_else(|| {
         schema_error(format!(
@@ -539,17 +602,21 @@ fn compile_category(
         ))
     })?;
     let listing = parse_listing(listing_name, &decl.name)?;
-    // §3.8's one incoherent combination, and it is a rule rather than a warning. Unreachable
-    // while `discovered` is refused above; stated here so lifting that refusal cannot quietly
-    // lift this one too.
-    if listing == Listing::Public && vocabulary_kind == "discovered" {
-        return Err(schema_error(format!(
-            "attribute '{}': `listing = \"public\"` requires `vocabulary = \"declared\"` \
-             (per-point-attributes §3.8). A discovered vocabulary's values are inferred from \
-             whatever is in the corpus, so publishing them discloses data-derived names on \
-             nobody's authority",
+    // §3.8's original refusal, relaxed to a warning by owner ruling (2026-08-07): a discovered
+    // vocabulary's values are inferred from whatever is in the corpus, so publishing them
+    // discloses data-derived names on nobody's authority — but the operator may have a reason,
+    // and there is still no `/v1/categories` for the disclosure to reach. Surfaced through the
+    // same `eprintln!("warning: ...")` channel the batch build already uses for its other
+    // build-time warnings (see `lib.rs`/`pipeline.rs`'s `over_bound_items`), rather than a new
+    // mechanism.
+    if listing == Listing::Public && kind == VocabularyKind::Discovered {
+        eprintln!(
+            "warning: attribute '{}': `listing = \"public\"` with `vocabulary = \"discovered\"` \
+             publishes data-derived value names on nobody's authority (per-point-attributes \
+             §3.8, relaxed from a refusal to a warning by owner ruling 2026-08-07). Confirm this \
+             is intended",
             decl.name
-        )));
+        );
     }
 
     let ValueSet {
@@ -569,22 +636,27 @@ fn compile_category(
             ))
         })?;
         crate::input::read_vocabulary_file(path, &decl.name)?
-    } else {
+    } else if kind == VocabularyKind::Declared {
         return Err(schema_error(format!(
             "attribute '{}': `vocabulary = \"declared\"` needs its value set — one of an inline \
              `[attribute.values]` block, a `values_key` bound at build, or a `values_of` \
              reference (per-point-attributes §4.4)",
             decl.name
         )));
+    } else {
+        // Discovered, and no `values`/`values_key` given (§4.4): starts empty rather than
+        // closing the set, and the build mints every code it will ever carry.
+        ValueSet::default()
     };
 
-    check_codes(&codes, &reserved, ty, &decl.name)?;
+    check_codes(&codes, &reserved, ty, &decl.name, kind)?;
 
     Ok((
         Vocabulary {
             // A vocabulary declared inline is named for its attribute; one from a file keeps the
             // logical key, so two attributes binding the same key share one compiled vocabulary.
             name: decl.values_key.clone().unwrap_or_else(|| decl.name.clone()),
+            kind,
             listing,
             codes,
             labels,
@@ -655,8 +727,12 @@ fn check_codes(
     reserved: &[u32],
     ty: ScalarType,
     attribute: &str,
+    kind: VocabularyKind,
 ) -> Result<()> {
-    if codes.is_empty() {
+    // A *declared* vocabulary with no values would cost its width for nothing (every row carries
+    // the absent sentinel forever). A *discovered* one starting empty is the documented default
+    // (§4.4) — the build mints its first code the moment the corpus supplies one.
+    if codes.is_empty() && kind == VocabularyKind::Declared {
         return Err(schema_error(format!(
             "attribute '{attribute}': a declared vocabulary with no values. Every row would \
              carry the absent sentinel and the column would cost its width for nothing"
@@ -841,21 +917,84 @@ listing = "public"
 
     /// Decision 0013: absent machinery names itself rather than refusing generically.
     #[test]
-    fn the_unbuilt_placements_and_discovered_vocabularies_name_themselves() {
+    fn the_unbuilt_placements_name_themselves() {
         let filter = SEVERITY.replace("[\"render\"]", "[\"render\", \"filter\"]");
         assert!(err(&filter).contains("§3.5"), "{}", err(&filter));
 
         let inspect = SEVERITY.replace("[\"render\"]", "[\"render\", \"inspect\"]");
         assert!(err(&inspect).contains("sidecar"), "{}", err(&inspect));
 
-        let discovered = SEVERITY.replace("\"declared\"", "\"discovered\"");
-        assert!(err(&discovered).contains("minted at random"));
-
         let multi = SEVERITY.replace(
             "used_for = [\"render\"]",
             "used_for = [\"render\"]\nmulti = true",
         );
         assert!(err(&multi).contains("§3.7"), "{}", err(&multi));
+    }
+
+    /// The refusal is lifted: `vocabulary = "discovered"` compiles, with its own pinned inline
+    /// value set intact (seeding still pins codes exactly as a declared vocabulary's are, §4.4).
+    #[test]
+    fn a_discovered_category_compiles_with_its_kind_recorded() {
+        let discovered = SEVERITY.replace("\"declared\"", "\"discovered\"");
+        let schema = parse_str(&discovered).unwrap();
+        assert_eq!(
+            schema.attributes[0].vocabulary_kind,
+            Some(VocabularyKind::Discovered)
+        );
+        let vocab = &schema.vocabularies["severity"];
+        assert_eq!(vocab.kind, VocabularyKind::Discovered);
+        // The inline block still pins "low"/"high" exactly as it would for a declared vocabulary.
+        assert_eq!(vocab.code_of("low"), Some(1));
+    }
+
+    /// §4.4: unlike a declared vocabulary, a discovered one with no value source at all is legal
+    /// and starts empty — the build mints its first code once the corpus supplies a key.
+    #[test]
+    fn a_discovered_category_with_no_value_source_starts_empty() {
+        let text = r#"
+[[attribute]]
+name = "department"
+type = "category"
+width = "u16"
+used_for = ["render"]
+vocabulary = "discovered"
+listing = "per_viewer"
+"#;
+        let schema = parse_str(text).unwrap();
+        let vocab = &schema.vocabularies["department"];
+        assert_eq!(vocab.kind, VocabularyKind::Discovered);
+        assert!(vocab.codes.is_empty());
+    }
+
+    /// A *declared* vocabulary with no value source is still a parse error — only a discovered
+    /// one is allowed to start empty.
+    #[test]
+    fn a_declared_category_with_no_value_source_still_refuses() {
+        let text = r#"
+[[attribute]]
+name = "department"
+type = "category"
+width = "u16"
+used_for = ["render"]
+vocabulary = "declared"
+listing = "per_viewer"
+"#;
+        assert!(err(text).contains("needs its value set"), "{}", err(text));
+    }
+
+    /// §3.8's original refusal is relaxed to a warning (owner ruling 2026-08-07): the combination
+    /// now builds. Asserting the exact warning text would mean capturing stderr, which is
+    /// disproportionate here — this test's job is to prove the refusal is gone.
+    #[test]
+    fn public_listing_with_a_discovered_vocabulary_builds_rather_than_refuses() {
+        // SEVERITY already declares `listing = "public"`; only the vocabulary kind changes.
+        let text = SEVERITY.replace("\"declared\"", "\"discovered\"");
+        let schema = parse_str(&text).unwrap();
+        assert_eq!(schema.vocabularies["severity"].listing, Listing::Public);
+        assert_eq!(
+            schema.vocabularies["severity"].kind,
+            VocabularyKind::Discovered
+        );
     }
 
     /// **`render_in` is refused rather than recorded and ignored** (§3.9, decision 0013).

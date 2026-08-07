@@ -502,18 +502,48 @@ which — and seeded-but-open is still open, so §3.8's rule still forbids `publ
 for a declared vocabulary come from the schema or the file; for a discovered one they are minted by
 random assignment (§3.4) and recorded in the manifest.
 
-**Streaming ingest.** `/control/ingest`'s scalar-tail validation already exists and is strict — a
-column the manifest does not declare, a declared column the batch omits, and a declared column at the
-wrong type are each a `422` naming the column, with the tail built in declared order. It extends to
-attributes unchanged, having only ever run against an empty declaration.
+**Streaming ingest.** `/control/ingest`'s scalar-tail validation is strict — a column the manifest
+does not declare, a declared column the batch omits, and a declared column at the wrong **expected**
+type are each a `422` naming the column, with the tail built in declared order. It extends to plain
+scalars unchanged; for a category the *expected type is not the storage type*.
+
+**A category column carries `utf8` value keys, never codes at the declared width**, for declared and
+discovered vocabularies alike. Three arguments, any one sufficient. §3.1's table already rules it:
+the code is *derived*, the key is *supplied*. Declare-then-use below needs the key — a code can only
+be range-checked, and the membership check is the rule. And §3.6's exhaustion-at-ingest is only
+reachable if ingest allocates. A caller supplying codes for a discovered vocabulary would be the
+minting authority, and the server could then guarantee neither the scatter nor the never-reuse §3.4
+exists for.
+
+The declared width remains the **storage** type: the row, the WAL scalar, the segment column and the
+viewer wire all carry the code. Only the wire form changes. A **null** key is *absent*, stored as the
+reserved code 0; the **empty string** is refused, being what an unset field and a client bug both
+produce — folding it into absence would accept the same defect silently, and minting for it would
+make a typo a category.
+
+The positional-safety argument is untouched, because it never rested on wire equalling storage: every
+column must arrive at its **expected** type, where expected is a function of the manifest declaration
+alone. That function has one definition, reached from every layer that needs it — two copies is how a
+`u16` category comes to be validated as a plain `u16`, which accepts raw codes and reopens the hole
+keys close.
 
 **Runtime vocabulary amendment** is a control-plane operation: properties are upserted without a
 rebuild, so recolouring a legend never touches the build path.
 
 **Declare-then-use.** An ingest row naming an undeclared value under `vocabulary = "declared"` is a
-`422`, following slices §80 — *"no same-batch creation, no auto-create on first reference"* — for the
-same reason: a category carries properties and, through its postings, a visibility consequence, so a
-typo must not create one.
+`422` naming the column and the key, the whole batch without effect, following slices §80 — *"no
+same-batch creation, no auto-create on first reference"* — for the same reason: a category carries
+properties and, through its postings, a visibility consequence, so a typo must not create one. A
+retired key is an unknown key: retirement removes it from `values` and moves its code to `reserved`,
+so no separate rule is needed.
+
+**Minting happens on the write executor, at the commit-window close, and nowhere else.** A request
+handler resolves keys the generation already binds and forwards novel ones as keys; two handlers
+racing one novel key would each draw, and that key would end up with two codes and its rows split
+between them, whichever binding survived recolouring the other's. Windows close serially, so the
+second close consults the live bindings, finds the key bound, and reuses the code — the view-first
+rule. The assignment becomes durable in the same fsync as the batch that caused it, so a code and
+the rows it colours are both durable or neither is.
 
 ---
 
