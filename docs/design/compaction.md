@@ -1448,9 +1448,10 @@ without opening one. What it and the others did find:
   dispatched. Four such assertions now wait.
 
 The fold also did not sync its own output before flipping `CURRENT` — and then deleted the only
-other copy seconds later. Its own files are synced now; ⊘ the wider question, that the segment,
-postings and run writers do not sync for *any* producer, is a ruling about those writers rather
-than about this pass.
+other copy seconds later. Its own files are synced now. This round left the wider question — that
+the segment, postings and run writers do not sync for *any* producer — as a ruling about those
+writers; **r11 narrowed it and answered it** (spec §8): the fold syncs what it *links*, because it
+is the only operation that destroys the fallback the other producers rely on.
 
 **r9 (2026-08-07) — the fold is built, and §1–§5 and §8 become description.** Not a review round.
 The plan, the dedicated thread, all five passes, §4's publication in order, retirement's `executed`
