@@ -819,6 +819,14 @@ enum BatchColumn {
     /// Every integer column, widened to `i64` once. `narrow` puts each value back inside its
     /// declared width, refusing rather than truncating.
     Ints(Vec<i64>),
+    /// A `u64` column read from a `u64` source, kept unwidened.
+    ///
+    /// **The one integer that cannot go through `Ints`.** Widening to `i64` is lossless for every
+    /// other width, but a `u64` above `i64::MAX` — an ordinary hash, which is what a stable
+    /// per-item identifier usually is — reads as negative and is then refused as out of range.
+    /// Caught by the packed fixture on its first build, where `id_hash` is a blake2b digest and
+    /// half of them have the high bit set.
+    U64(Vec<u64>),
     F32(Vec<f32>),
     F64(Vec<f64>),
 }
@@ -902,6 +910,14 @@ impl BatchColumn {
                 // an `unreachable!` so that lifting that refusal cannot land on a panic.
                 return Err(mismatch());
             }
+            // A `u64` declaration over a `u64` source keeps the full range; every other
+            // combination widens, which is lossless for it.
+            ScalarType::U64 if any.is::<UInt64Array>() => BatchColumn::U64(
+                any.downcast_ref::<UInt64Array>()
+                    .expect("checked by is::<>")
+                    .values()
+                    .to_vec(),
+            ),
             _ => BatchColumn::Ints(read_integer(any, column.data_type()).ok_or_else(mismatch)?),
         })
     }
@@ -938,6 +954,7 @@ impl BatchColumn {
                 code_as(attribute.ty, code)
             }
             BatchColumn::Bool(values) => ScalarValue::Bool(values.value(row)),
+            BatchColumn::U64(values) => ScalarValue::U64(values[row]),
             BatchColumn::F32(values) => ScalarValue::F32(values[row]),
             BatchColumn::F64(values) => ScalarValue::F64(values[row]),
             BatchColumn::Ints(values) => {
