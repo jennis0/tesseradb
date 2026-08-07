@@ -34,7 +34,7 @@ use parquet::arrow::ArrowWriter;
 use common::*;
 use tessera_build::schema::Schema;
 use tessera_build::{build, BuildArgs};
-use tessera_engine::{Engine, EngineConfig};
+use tessera_engine::{ColumnBuf, Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::WalScalar;
 use tessera_store::read::{open_bundle, ColumnsRef, ScalarSlice};
@@ -310,7 +310,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
         .iter()
         .find(|v| v.name == "band")
         .expect("the declared vocabulary reaches the manifest");
-    assert_eq!(vocabulary.listing, "public");
+    assert_eq!(vocabulary.listing, tessera_store::manifest::Listing::Public);
     let codes: BTreeMap<&str, u32> = vocabulary
         .values
         .iter()
@@ -624,5 +624,119 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             .collect::<Vec<_>>(),
         vec!["band", "ingested_at", "score"],
         "the tail's declared order survives the fold — it is what every reader reads by position"
+    );
+}
+
+/// **The read path binds a served point's scalars to that point's identity.**
+///
+/// Everything above this test asserts the four *producers* of `columns.arrow` — it reads the file
+/// off disk and never calls `Engine::viewport`. That left the gather itself, which is what turns
+/// stored columns into a response, covered by nothing: no Rust test in the workspace read a served
+/// point's scalars at all, and the TypeScript decoder test asserts only that each column has the
+/// right length and type. A gather that returned every value permuted, or that paired column *i*'s
+/// values with column *j*'s name, passed the entire suite.
+///
+/// That gap is why this exists, and it is why the assertion is **per identity**: `tail_by_identity`
+/// gives the truth from the segment files, and this checks the served tail against it point by
+/// point. A row-indexed assertion would pass on a gather that carried values forward unpermuted.
+///
+/// **Two segments and a multi-tile viewport**, because the interesting failures need both. The
+/// flush gives the slice a second segment, so a tile's rows resolve to different parts and any
+/// per-part hoisting has to key correctly; `zoom = 3` spans many tiles, so the per-tile results
+/// have to concatenate in tile order. The schema's three widths are what make a positional slip a
+/// type error rather than a plausible value (see this file's header).
+#[test]
+fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_with_attributes(&root, tmp.path(), N_ITEMS);
+    let engine = engine_over(tmp.path(), &root, config_uncapped());
+
+    let ingested = engine
+        .accept_ingest(
+            vec![UnallocatedRow {
+                external_id: Some(b"ingested-read-path".to_vec()),
+                slice: "s0".to_string(),
+                descriptors: vec![b"0".to_vec()],
+                x: 5.0,
+                y: 5.0,
+                scalars: vec![
+                    WalScalar::U8(2),
+                    WalScalar::I64(1_900_000_000_000_000),
+                    WalScalar::F32(99.5),
+                ],
+                terms: engine.resolve_terms(&[b"0".to_vec()]),
+            }],
+            "batch-read-path".to_string(),
+            [0u8; 32],
+        )
+        .expect("the ingest is accepted")[0];
+    flush(&engine);
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let out = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], u32::MAX as usize),
+        )
+        .expect("a viewport over both segments");
+
+    assert!(
+        out.tiles.len() > 1,
+        "the point of this case is a MULTI-tile response: {} tile(s)",
+        out.tiles.len()
+    );
+    assert_eq!(
+        out.scalar_names,
+        vec!["band", "ingested_at", "score"],
+        "the names are the declaration's, in its order"
+    );
+    assert_eq!(
+        out.points.scalars.len(),
+        3,
+        "one buffer per declared column, whatever any tile happened to hold"
+    );
+    for (i, column) in out.points.scalars.iter().enumerate() {
+        assert_eq!(
+            column.len(),
+            out.points.len(),
+            "column {i} is short — the tile concatenation dropped values"
+        );
+    }
+
+    let truth = tail_by_identity(&root);
+    let (band, ingested_at, score) = match (
+        &out.points.scalars[0],
+        &out.points.scalars[1],
+        &out.points.scalars[2],
+    ) {
+        (ColumnBuf::U8(b), ColumnBuf::I64(t), ColumnBuf::F32(s)) => (b, t, s),
+        other => panic!("the tail came back at the wrong types: {other:?}"),
+    };
+
+    assert!(!out.points.is_empty(), "the viewport served nothing");
+    for (i, (tessera_id, _code)) in out.points.iter().enumerate() {
+        let expected = truth
+            .get(&tessera_id.raw())
+            .unwrap_or_else(|| panic!("served a point ({tessera_id:?}) the segments do not hold"));
+        assert_eq!(
+            (band[i], ingested_at[i], score[i]),
+            *expected,
+            "point {i} ({tessera_id:?}) carries another point's tail"
+        );
+    }
+
+    // The flushed row is in a different segment from every other point, so its presence is what
+    // proves the per-part resolution is keyed rather than assumed.
+    let flushed = test_key().forward(0, ingested).unwrap();
+    let position = out
+        .points
+        .iter()
+        .position(|(id, _)| id == flushed)
+        .expect("the flushed item is served, not merely counted");
+    assert_eq!(
+        (band[position], ingested_at[position], score[position]),
+        (2u8, 1_900_000_000_000_000i64, 99.5f32),
+        "the flushed row's tail is what was ingested"
     );
 }

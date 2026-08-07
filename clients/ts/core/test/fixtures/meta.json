@@ -1,7 +1,119 @@
 {
   "api_version": 1,
   "bundle_format": 1,
-  "declared_scalars": [],
+  "declared_scalars": [
+    {
+      "arrow_type": "u8",
+      "category": {
+        "kind": "declared",
+        "listing": "public",
+        "vocabulary": "archive"
+      },
+      "name": "archive"
+    },
+    {
+      "arrow_type": "u16",
+      "category": {
+        "kind": "declared",
+        "listing": "public",
+        "vocabulary": "primary_category"
+      },
+      "name": "primary_category"
+    },
+    {
+      "arrow_type": "u16",
+      "category": {
+        "kind": "declared",
+        "listing": "public",
+        "vocabulary": "primary_category"
+      },
+      "name": "secondary_category"
+    },
+    {
+      "arrow_type": "u16",
+      "category": {
+        "kind": "discovered",
+        "listing": "per_viewer",
+        "vocabulary": "category_suffix"
+      },
+      "name": "category_suffix"
+    },
+    {
+      "arrow_type": "bool",
+      "category": null,
+      "name": "is_cross_listed"
+    },
+    {
+      "arrow_type": "bool",
+      "category": null,
+      "name": "is_single_author"
+    },
+    {
+      "arrow_type": "u8",
+      "category": null,
+      "name": "author_count"
+    },
+    {
+      "arrow_type": "u8",
+      "category": null,
+      "name": "category_count"
+    },
+    {
+      "arrow_type": "u8",
+      "category": null,
+      "name": "submitted_month"
+    },
+    {
+      "arrow_type": "u16",
+      "category": null,
+      "name": "submitted_year"
+    },
+    {
+      "arrow_type": "u32",
+      "category": null,
+      "name": "entity_rank"
+    },
+    {
+      "arrow_type": "u64",
+      "category": null,
+      "name": "id_hash"
+    },
+    {
+      "arrow_type": "i8",
+      "category": null,
+      "name": "decade_offset"
+    },
+    {
+      "arrow_type": "i16",
+      "category": null,
+      "name": "years_from_median"
+    },
+    {
+      "arrow_type": "i32",
+      "category": null,
+      "name": "days_from_median"
+    },
+    {
+      "arrow_type": "i64",
+      "category": null,
+      "name": "submitted_offset_us"
+    },
+    {
+      "arrow_type": "timestamp_us",
+      "category": null,
+      "name": "submitted_at"
+    },
+    {
+      "arrow_type": "f32",
+      "category": null,
+      "name": "recency"
+    },
+    {
+      "arrow_type": "f64",
+      "category": null,
+      "name": "exact_offset_days"
+    }
+  ],
   "filter_operands": [],
   "idset": 1,
   "quantisation": {
@@ -13,6 +125,7 @@
   "selection": {
     "k_max_marks": 500,
     "k_min": 2,
+    "max_category_values": 1000,
     "max_k": 5000,
     "max_tiles_per_request": 262144,
     "max_underlay_offset": 4,

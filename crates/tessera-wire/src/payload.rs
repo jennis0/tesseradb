@@ -195,27 +195,85 @@ pub fn viewport_ipc(cols: &ViewportColumns<'_>) -> Vec<u8> {
         assert_eq!(cells.len(), counts.len(), "sub-cell length mismatch");
     }
 
+    // **The point stream is written straight into the response buffer**, rather than built into a
+    // `Vec` of its own and copied in afterwards. At a saturated viewport that stream is tens of
+    // megabytes, so the copy it replaces was the largest single memmove in the request — and the
+    // `Vec` it copied from had itself grown from zero by doubling, reallocating and copying its
+    // whole contents roughly `log2(bytes)` times on the way up.
+    //
+    // The tile stream still materialises first, because its **length prefixes the body** and is
+    // not knowable until it is written. It is bounded by the tile count rather than the point
+    // count, so it is small.
     let tile_stream = encode_tile_batch(cols.tile, cols.visible, cols.matched, cols.served);
-    let points_stream = encode_points_batch(cols.points_tessera_ids, cols.codes, cols.scalars);
-    let subcell_stream = cols
-        .sub_cells
-        .map(|(cells, counts)| encode_subcell_batch(cells, counts));
 
     let mut out = Vec::with_capacity(
-        4 + tile_stream.len()
-            + points_stream.len()
-            + subcell_stream.as_ref().map_or(0, |s| s.len()),
+        4 + tile_stream.len() + estimated_points_bytes(points, cols.scalars) + subcell_bytes(cols),
     );
     out.extend_from_slice(&(tile_stream.len() as u32).to_le_bytes());
     out.extend_from_slice(&tile_stream);
-    out.extend_from_slice(&points_stream);
+    encode_points_batch(
+        cols.points_tessera_ids,
+        cols.codes,
+        cols.scalars,
+        &mut out,
+    );
     // Absent means zero bytes, not an empty stream — that is what keeps a no-underlay payload
     // byte-identical to the pre-underlay format.
-    if let Some(subcells) = subcell_stream {
-        out.extend_from_slice(&subcells);
+    if let Some((cells, counts)) = cols.sub_cells {
+        encode_subcell_batch(cells, counts, &mut out);
     }
     out
 }
+
+/// How large the points stream will be, near enough to size the response buffer once.
+///
+/// **A hint, never a contract.** A short estimate costs a reallocation and a long one costs
+/// transient memory; neither changes a byte of output, which is why this is allowed to approximate
+/// `utf8` rather than walk it twice. The fixed-width columns — which are all of them on every
+/// bundle measured — are exact.
+fn estimated_points_bytes(points: usize, scalars: &[(&str, ScalarColumn)]) -> usize {
+    // `tessera_id` and `code`, both u64.
+    let mut bytes = points * 16;
+    for (_, col) in scalars {
+        bytes += match col {
+            ScalarColumn::Bool(_) => points.div_ceil(8),
+            // Offsets plus data. The data length is the one thing here worth a walk: it is exact
+            // and `utf8` columns are the only ones that can dwarf the estimate if guessed.
+            ScalarColumn::Utf8(s) => 4 * (points + 1) + s.iter().map(|v| v.len()).sum::<usize>(),
+            other => points * wire_column_width(other),
+        };
+        // Arrow pads every buffer to an 8-byte boundary and prefixes each with its own metadata.
+        bytes += 64;
+    }
+    // Schema and record-batch metadata: a few hundred bytes, plus a field descriptor apiece.
+    bytes + 1024 + 128 * scalars.len()
+}
+
+fn subcell_bytes(cols: &ViewportColumns<'_>) -> usize {
+    cols.sub_cells.map_or(0, |(cells, _)| cells.len() * 16 + 1024)
+}
+
+/// Element width in bytes for the fixed-width families. `Bool` and `Utf8` are not fixed-width and
+/// are handled by their own arms in [`estimated_points_bytes`]; both return 0 here.
+fn wire_column_width(col: &ScalarColumn) -> usize {
+    macro_rules! arms {
+        ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+            match col {
+                $(ScalarColumn::$v(_) => std::mem::size_of::<wire_elem!($v)>(),)*
+                ScalarColumn::Bool(_) | ScalarColumn::Utf8(_) => 0,
+            }
+        };
+    }
+    wire_columns!(arms)
+}
+
+/// The element type behind each `ScalarColumn` variant, for `size_of`.
+macro_rules! wire_elem {
+    (U8) => { u8 }; (U16) => { u16 }; (U32) => { u32 }; (U64) => { u64 };
+    (I8) => { i8 }; (I16) => { i16 }; (I32) => { i32 }; (I64) => { i64 };
+    (F32) => { f32 }; (F64) => { f64 }; (TimestampUs) => { i64 };
+}
+use wire_elem;
 
 fn encode_tile_batch(tile: &[u64], visible: &[u64], matched: &[u64], served: &[u64]) -> Vec<u8> {
     // `served` is APPENDED. Decoders that index this batch positionally exist, so inserting it
@@ -244,7 +302,7 @@ fn encode_tile_batch(tile: &[u64], visible: &[u64], matched: &[u64], served: &[u
 /// The depth is **not** carried here: it is `zoom + offset` from the caller's own request, and the
 /// server rejects rather than clamps an out-of-range offset, so the client always knows it. A Morton
 /// prefix does not encode its own depth, so the alternative would have been to echo it.
-fn encode_subcell_batch(cells: &[u64], counts: &[u64]) -> Vec<u8> {
+fn encode_subcell_batch(cells: &[u64], counts: &[u64], out: &mut Vec<u8>) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("cell", DataType::UInt64, false),
         Field::new("count", DataType::UInt64, false),
@@ -255,7 +313,7 @@ fn encode_subcell_batch(cells: &[u64], counts: &[u64]) -> Vec<u8> {
         .collect();
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .expect("viewport_ipc: sub-cell batch construction");
-    write_stream(&schema, &batch)
+    write_stream_into(&schema, &batch, out);
 }
 
 /// The points batch: one `tessera_id` and one 64-bit position `code` per point.
@@ -268,7 +326,8 @@ fn encode_points_batch(
     points_tessera_ids: &[u64],
     codes: &[u64],
     scalars: &[(&str, ScalarColumn)],
-) -> Vec<u8> {
+    out: &mut Vec<u8>,
+) {
     let mut fields = vec![
         Field::new("tessera_id", DataType::UInt64, false),
         Field::new("code", DataType::UInt64, false),
@@ -293,12 +352,26 @@ fn encode_points_batch(
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .expect("viewport_ipc: points batch construction");
 
-    write_stream(&schema, &batch)
+    write_stream_into(&schema, &batch, out);
 }
 
+/// Serialise `batch` and return the bytes. Only the tile stream uses this: its length prefixes
+/// the body, so it has to exist before anything else is written.
 fn write_stream(schema: &Schema, batch: &RecordBatch) -> Vec<u8> {
-    let mut writer = StreamWriter::try_new(Vec::new(), schema)
-        .expect("viewport_ipc: stream writer construction");
+    let mut out = Vec::new();
+    write_stream_into(schema, batch, &mut out);
+    out
+}
+
+/// Serialise `batch` by **appending** to `out`.
+///
+/// `&mut Vec<u8>` is a `Write`, so the writer emits straight into the response buffer — no
+/// intermediate allocation, and no copy of the finished stream. Appending rather than replacing is
+/// what lets the three streams share one buffer, which is the whole framing (see this module's
+/// header).
+fn write_stream_into(schema: &Schema, batch: &RecordBatch, out: &mut Vec<u8>) {
+    let mut writer =
+        StreamWriter::try_new(out, schema).expect("viewport_ipc: stream writer construction");
     writer.write(batch).expect("viewport_ipc: stream write");
-    writer.into_inner().expect("viewport_ipc: stream finish")
+    writer.finish().expect("viewport_ipc: stream finish");
 }

@@ -386,6 +386,9 @@ async fn mount_server_with(
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         max_k,
+        // Small enough that the fixtures' vocabularies page rather than arriving whole, so the
+        // cursor is exercised by an ordinary request rather than only by a contrived one.
+        max_category_values: 4,
         compute_gate,
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         ingest_max_batch_rows: ingest_limits.max_batch_rows,

@@ -1,0 +1,351 @@
+//! **`GET /v1/categories/{column}`: what a code stands for, and who may be told.**
+//!
+//! The hot path ships codes, so a client holding a viewport response has integers. These cases
+//! cover the route that turns them into keys, and the three rules that make it safe to expose:
+//!
+//! - **One gate, both request forms.** Bulk lookup and enumeration run the same `listing` check.
+//!   A gate reached by one door and not the other is an existence oracle by another route, and
+//!   the two forms are separate code paths, so nothing but a test keeps them agreeing.
+//! - **An unresolvable code is omitted, never refused.** "No such code" and "a value you cannot
+//!   see" must be one outcome (per-point-attributes §3.8).
+//! - **A `per_viewer` column is refused, not served.** ⊘ The §3.3 predicate is unbuilt; serving
+//!   the set unfiltered is the C11 disclosure, and serving it *empty* would be indistinguishable
+//!   from a correctly-computed empty answer.
+
+mod common;
+
+use std::path::Path;
+use std::sync::Arc;
+
+use arrow::array::{Float64Array, StringArray, UInt64Array};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
+use tempfile::TempDir;
+
+use common::*;
+use tessera_build::{build, BuildArgs};
+
+const N: u64 = 64;
+
+/// One `public` category and one `per_viewer` one, so a single fixture exercises both sides of the
+/// gate. `archive`'s five values exceed the test server's page size of 4, which is what puts the
+/// cursor on the ordinary path rather than only on a contrived one.
+const SCHEMA_TOML: &str = r#"
+[[attribute]]
+name       = "archive"
+type       = "category"
+width      = "u8"
+used_for   = ["render"]
+vocabulary = "declared"
+listing    = "public"
+  [attribute.values]
+  astro = 11
+  cond = 22
+  hep = 33
+  math = 44
+  quant = 55
+
+[[attribute]]
+name       = "department"
+type       = "category"
+width      = "u8"
+used_for   = ["render"]
+vocabulary = "declared"
+listing    = "per_viewer"
+  [attribute.values]
+  finance = 7
+
+[[attribute]]
+name     = "score"
+type     = "f32"
+used_for = ["render"]
+"#;
+
+/// Five archives, so several codes are live and no code is the only one present.
+fn archive_of(entity: u64) -> &'static str {
+    ["astro", "cond", "hep", "math", "quant"][(entity % 5) as usize]
+}
+
+fn write_points(path: &Path, n: u64) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("archive", DataType::Utf8, false),
+        Field::new("department", DataType::Utf8, false),
+        Field::new("score", DataType::Float32, false),
+    ]));
+    let ids: Vec<u64> = (0..n).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let archives: Vec<&str> = ids.iter().map(|&e| archive_of(e)).collect();
+    let departments: Vec<&str> = ids.iter().map(|_| "finance").collect();
+    let scores: Vec<f32> = ids.iter().map(|e| (e % 97) as f32 * 0.5).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(archives)),
+            Arc::new(StringArray::from(departments)),
+            Arc::new(arrow::array::Float32Array::from(scores)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
+    write_points(points, N);
+    write_pairs_n(pairs, N);
+    let schema_path = points.with_file_name("schema.toml");
+    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
+    let args = BuildArgs {
+        points: points.to_path_buf(),
+        pairs: pairs.to_path_buf(),
+        out: out.to_path_buf(),
+        extent: extent(),
+        slice_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: FIXTURE_IDSET,
+        shard_id: 0,
+        mint_external_ids: true,
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: tessera_build::schema::Schema::parse(&schema_path, &Default::default()).unwrap(),
+    };
+    build(&args).expect("fixture build should succeed");
+}
+
+/// A server over the categories fixture, plus a session token for a fully-granted principal.
+async fn serve(tmp: &TempDir) -> (TestServer, String) {
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_with_categories(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+    (server, token)
+}
+
+async fn get(server: &TestServer, token: &str, path: &str) -> (u16, serde_json::Value) {
+    let resp = server
+        .client
+        .get(server.viewer_url(path))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// `/v1/meta` must say which columns are categories, or a client cannot tell a `u8` category from
+/// a `u8` integer — the hot path ships the code and nothing else.
+#[tokio::test]
+async fn meta_publishes_the_category_descriptor_and_no_values() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    let (status, body) = get(&server, &token, "/v1/meta").await;
+    assert_eq!(status, 200);
+    let scalars = body["declared_scalars"].as_array().unwrap();
+
+    let archive = scalars.iter().find(|s| s["name"] == "archive").unwrap();
+    assert_eq!(archive["arrow_type"], "u8");
+    assert_eq!(archive["category"]["vocabulary"], "archive");
+    assert_eq!(archive["category"]["kind"], "declared");
+    assert_eq!(archive["category"]["listing"], "public");
+
+    // A plain column carries no descriptor at all: its *absence* is the signal.
+    let score = scalars.iter().find(|s| s["name"] == "score").unwrap();
+    assert!(
+        score["category"].is_null(),
+        "a plain scalar must carry no category descriptor: {score}"
+    );
+
+    // Values live behind `/v1/categories`, so that a large vocabulary cannot dominate the one
+    // document every client fetches at startup.
+    let raw = body.to_string();
+    assert!(
+        !raw.contains("astro"),
+        "/v1/meta must not carry vocabulary values: {raw}"
+    );
+}
+
+/// The viewer's normal path: it knows which codes it drew, so it resolves exactly those.
+#[tokio::test]
+async fn bulk_lookup_returns_the_named_codes_and_omits_the_rest() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    let (status, body) = get(&server, &token, "/v1/categories/archive?codes=11,44").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["column"], "archive");
+    let values = body["values"].as_array().unwrap();
+    let keys: Vec<&str> = values.iter().map(|v| v["key"].as_str().unwrap()).collect();
+    assert_eq!(keys, vec!["astro", "math"], "{body}");
+    assert!(
+        body["next"].is_null(),
+        "bulk lookup is bounded by the request, so it never pages: {body}"
+    );
+}
+
+/// **The existence-oracle rule** (§3.8). A code that is unbound, that is the *absent* sentinel, or
+/// that a principal may not see must all be one outcome: omitted from `values`, with a 200. A 404
+/// or a 422 for any of them would let a caller enumerate the vocabulary by probing.
+#[tokio::test]
+async fn an_unresolvable_code_is_omitted_rather_than_refused() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    // 0 is the absent sentinel, 99 is bound to nothing, 11 is real.
+    let (status, body) = get(&server, &token, "/v1/categories/archive?codes=0,99,11").await;
+    assert_eq!(status, 200, "an unknown code is not a refusal: {body}");
+    let values = body["values"].as_array().unwrap();
+    assert_eq!(values.len(), 1, "{body}");
+    assert_eq!(values[0]["key"], "astro");
+
+    // Asking for nothing but unknown codes is an empty answer, still a 200 — indistinguishable
+    // from a principal who may see none of them, which is the point.
+    let (status, body) = get(&server, &token, "/v1/categories/archive?codes=99").await;
+    assert_eq!(status, 200);
+    assert!(body["values"].as_array().unwrap().is_empty(), "{body}");
+}
+
+/// Enumeration pages in **key** order, and the cursor resumes exactly where the page stopped.
+/// The test server's page size is 4 against five values, so this is the ordinary path.
+#[tokio::test]
+async fn enumeration_pages_in_key_order_and_the_cursor_resumes() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    let (status, first) = get(&server, &token, "/v1/categories/archive").await;
+    assert_eq!(status, 200);
+    let keys: Vec<&str> = first["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, vec!["astro", "cond", "hep", "math"], "{first}");
+    let cursor = first["next"].as_str().expect("a fifth value remains");
+    assert_eq!(cursor, "math", "the cursor is the last key returned");
+
+    let (status, second) = get(
+        &server,
+        &token,
+        &format!("/v1/categories/archive?after={cursor}"),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let keys: Vec<&str> = second["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, vec!["quant"], "{second}");
+    assert!(
+        second["next"].is_null(),
+        "the set is complete, so there is no next cursor: {second}"
+    );
+}
+
+/// **⊘ Specified, not implemented** (per-point-attributes §3.3). Until the per-`(column, code)`
+/// membership set exists, a `per_viewer` column is refused.
+///
+/// **Both request forms**, because they are separate code paths in the handler and a gate applied
+/// to one is the disclosure reached through the other.
+#[tokio::test]
+async fn a_per_viewer_column_is_refused_by_both_request_forms() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    for path in [
+        "/v1/categories/department",
+        "/v1/categories/department?codes=7",
+    ] {
+        let (status, body) = get(&server, &token, path).await;
+        assert_eq!(status, 500, "{path}: {body}");
+        assert_eq!(body["error"], "fail-closed", "{path}: {body}");
+        assert!(
+            body["detail"].as_str().unwrap().contains("per_viewer"),
+            "the refusal must name why: {body}"
+        );
+        // The refusal must not leak what it declined to gate.
+        assert!(
+            !body.to_string().contains("finance"),
+            "a refused per_viewer column must not carry its values: {body}"
+        );
+    }
+}
+
+/// 404 covers "no such column" and "a column that is not a category" identically. `/v1/meta` is
+/// where a client learns which columns exist; this route must not become a second, finer answer.
+#[tokio::test]
+async fn a_plain_scalar_and_an_unknown_name_are_the_same_404() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    let (plain_status, plain) = get(&server, &token, "/v1/categories/score").await;
+    let (missing_status, missing) = get(&server, &token, "/v1/categories/no_such_column").await;
+    assert_eq!(plain_status, 404, "{plain}");
+    assert_eq!(missing_status, 404, "{missing}");
+    assert_eq!(
+        plain["detail"], missing["detail"],
+        "a plain column and an absent one must be indistinguishable: {plain} vs {missing}"
+    );
+}
+
+/// Authenticated like every other route on this plane: a vocabulary is corpus shape, and an
+/// unauthenticated route would hand it to anyone who can reach the listener.
+#[tokio::test]
+async fn the_route_requires_a_session_token() {
+    let tmp = TempDir::new().unwrap();
+    let (server, _token) = serve(&tmp).await;
+
+    let resp = server
+        .client
+        .get(server.viewer_url("/v1/categories/archive"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+/// The page ceiling clamps rather than refuses — it bounds a response, not a disclosure — but a
+/// zero-length page is refused, since a cursor that cannot advance is an infinite loop.
+#[tokio::test]
+async fn the_page_limit_clamps_and_zero_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    let (status, body) = get(&server, &token, "/v1/categories/archive?limit=10000").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["values"].as_array().unwrap().len(),
+        4,
+        "a limit above the deployment's ceiling is clamped to it: {body}"
+    );
+
+    let (status, body) = get(&server, &token, "/v1/categories/archive?limit=0").await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract");
+}

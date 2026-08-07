@@ -39,7 +39,7 @@ revises that.
 
 ## Running it
 
-Write `clients/ts/dev-server.toml` (untracked):
+Write a `dev-server.toml` in this directory (untracked):
 
 ```toml
 [bundle]

@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 35
+**Status:** Draft for review — revision 36
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 **Specified versus implemented.** This document specifies a target, and parts of that target are not built. Every such claim carries a **⊘ Specified, not implemented** marker at the point it is made, saying what exists instead and what a reader must not assume meanwhile; the full set is tabulated in the generated `docs/design/inventory.md`. A marker's absence is a claim that the machinery exists.
@@ -1020,7 +1020,7 @@ I2 requires displayed quantities to derive from visible data only. These are the
 | C8 | Pre-intersection filter cardinality | A raw match count is a corpus-wide count over unauthorised records | High if exposed | Not exposed on un-intersected intermediates (§8.2). **Category counts are this row, not a new one** *(r35)*: a legend with counts is `and_cardinality` against `M_auth`, computed per request and **never precomputed** — a stored per-value total would be a corpus-wide count over unauthorised records, which is exactly what this row forbids. Nothing computes one today; per-viewport breakdowns are deferred to the filter contract (§8.2) and arrive under this constraint | Closed by construction |
 | C9 | Text relevance scores and ranks | Corpus-global statistics allow inference of unreadable content | High if ranking added | Boolean filtering only (§8.3) | Closed by scope |
 | C10 | Vector similarity results and thresholds | Post-filtered neighbours vary observably with invisible items | High if post-filtered | Threshold filters with candidate push-down (§8.2) | Closed by construction |
-| C11 | Label filter vocabulary | Offering a filterable label reveals a label the principal cannot see | Medium | Vocabulary containment-filtered against `M_auth` (§8.3). **A category vocabulary is the same channel** *(r35)*: a value is visible iff at least one of its members is — exact, derived per request from inside `M_auth`, and never a maintained set, since a maintained one is non-monotone under deletion and would keep listing a value whose last visible member was suppressed. **⊘ Nothing publishes a category vocabulary yet**, so this is currently upheld by there being no channel: the only route by which a viewer learns a value exists is the code attached to a point the mask already admitted, which is membership-derivation holding structurally. A legend endpoint must implement the predicate before it ships | Closed |
+| C11 | Label filter vocabulary | Offering a filterable label reveals a label the principal cannot see | Medium | Vocabulary containment-filtered against `M_auth` (§8.3). **A category vocabulary is the same channel** *(r35)*: a value is visible iff at least one of its members is — exact, derived per request from inside `M_auth`, and never a maintained set, since a maintained one is non-monotone under deletion and would keep listing a value whose last visible member was suppressed. `/v1/categories` publishes one *(r36)*, and upholds this **by refusing what it cannot derive**: a `public` vocabulary is an authored assertion that its value names disclose nothing and is served as written, while a `per_viewer` one is refused outright — `500`, naming the column — because the predicate above needs a per-`(column, code)` membership set that **⊘ no build emits**. Refused rather than served empty: an empty value set is what a principal who may see none of these values is told, so returning it for an unbuilt predicate would make an underived answer indistinguishable from a derived one. The remaining channel is what it was — a code attached to a point the mask already admitted, which is membership-derivation holding structurally. **The predicate must be built before `per_viewer` serves anything** | Closed |
 | C12 | Caller-declared generating sets | A label supplied with an optimistic generating set is a disclosure the service will faithfully serve | High | Contract requirement (§2.4); provenance is unverifiable by the service | Accepted — caller's control |
 | C13 | Cross-partition node metadata | A node whose members lie wholly inside a compartment reveals, by existing and having a bounding box, that something is there | Medium | Node metadata held per partition (§12.3); C1 crossing a physical boundary | Closed |
 | C14 | Partition fan-out width | Query latency correlates with how many compartments a token reaches | Low | Unmitigated; the principal already knows their own clearances, so this reveals nothing about data | Accepted |
@@ -1149,6 +1149,16 @@ Both were checked exhaustively against explicit quantification over all well-for
 **One consequence of the default to watch.** Under *possible*, an item with very wide uncertainty matches almost every query and becomes noise. Consider styling marks by uncertainty width, or offering the definite form as a secondary control.
 
 ## Appendix G — Revision history
+
+- **r36** — **C11 acquires the channel it was written for** (2026-08-07). `/v1/categories`
+  publishes a category vocabulary, so the row's *"upheld by there being no channel"* is no longer
+  what holds it. What holds it now is a refusal: a `public` vocabulary is an authored assertion and
+  is served as written, and a `per_viewer` one is refused outright, because deriving its visibility
+  needs a per-`(column, code)` membership set that ⊘ no build emits. **Refused rather than served
+  empty** — an empty value set is a real answer, the one a principal who may see none of these
+  values is given, so returning it for an unbuilt predicate would make an underived answer
+  indistinguishable from a derived one. Nothing else in the register moves: C8's no-counts rule is
+  what keeps the new endpoint countless, and C22 and C23 are unchanged.
 
 - **r35** — **the leak register gains the per-item attribute channels** (2026-08-07), the
   `render` placement having been built. **C22** records that a category code discloses vocabulary

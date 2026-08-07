@@ -1989,7 +1989,7 @@ mod tests {
                 &[tessera_engine::ManifestVocabulary {
                     name: "departments".to_string(),
                     kind,
-                    listing: "per_viewer".to_string(),
+                    listing: tessera_engine::Listing::PerViewer,
                     values: vec![tessera_engine::ManifestVocabularyValue {
                         key: "ops".to_string(),
                         code: CODE_OPS,

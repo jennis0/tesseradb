@@ -2,21 +2,92 @@ export type Session = {token: string; tokenId: number; expiresAt: number};
 
 export type Quantisation = {xMin: number; xMax: number; yMin: number; yMax: number};
 
+/**
+ * Every Arrow type a declared scalar may have (contracts §2.2). `timestamp_us` is stored as an
+ * `i64` of microseconds and named separately so the unit is a fact rather than a convention.
+ */
+export type ArrowType =
+  | 'bool'
+  | 'u8'
+  | 'u16'
+  | 'u32'
+  | 'u64'
+  | 'i8'
+  | 'i16'
+  | 'i32'
+  | 'i64'
+  | 'f32'
+  | 'f64'
+  | 'timestamp_us'
+  | 'utf8';
+
+/**
+ * What makes a column a category rather than a plain integer.
+ *
+ * The hot path ships a category as a bare integer of the declared width, so **this block's absence
+ * is the only thing that distinguishes the two**. A client that ignores it will render category
+ * codes as numbers on a continuous ramp, which is wrong rather than merely ugly: the codes are
+ * drawn at random from the width (contracts §2.2), so their numeric order means nothing.
+ */
+export type CategoryDescriptor = {
+  /**
+   * The value set this column's codes index. Two columns may share one — keys, codes and labels
+   * are shared with it, so a resolved palette may be reused across them.
+   *
+   * **Visibility may not be reused across them.** Member sets are per column, so a value visible
+   * under one column may be invisible under another that shares this vocabulary.
+   */
+  vocabulary: string;
+  /** Whether the value set is closed at build (`declared`) or grows from the corpus. */
+  kind: 'declared' | 'discovered';
+  /**
+   * Whether the *existence* of a value is sensitive. `per_viewer` means `/v1/categories` filters
+   * the set per principal — and today refuses it, the predicate being unbuilt.
+   */
+  listing: 'per_viewer' | 'public';
+};
+
+/** One declared per-item column. `category` is present only for a category column. */
+export type DeclaredScalar = {
+  /**
+   * The column's name, which is also its **identifier**: it addresses the column in
+   * `/v1/categories/{column}`. Unique bundle-wide, and not slice-qualified.
+   */
+  name: string;
+  arrowType: ArrowType;
+  category: CategoryDescriptor | null;
+};
+
 export type Meta = {
   apiVersion: number;
   idset: number;
   slices: {id: string; displayName: string}[];
   quantisation: Quantisation;
-  declaredScalars: {name: string; arrowType: string}[];
+  /** The column schema in full — see {@link DeclaredScalar}. Order is the declaration order. */
+  declaredScalars: DeclaredScalar[];
   selection: {
     kMin: number;
     kMaxMarks: number;
     maxK: number;
     thetaTargetMarks: number;
     maxUnderlayOffset: number;
+    /**
+     * `/v1/categories`' page ceiling and default. A client that pages needs it to tell a short
+     * page that means "the set ended" from one that means "the deployment truncated".
+     */
+    maxCategoryValues: number;
   };
   /** `serve.max_tiles_per_request` — the client's own bound when it chooses a request depth. */
   maxTilesPerRequest: number;
+};
+
+/** One category value: what a code stands for, and how to show it. */
+export type CategoryValue = {
+  code: number;
+  /** The stable key the code is bound to. The display fallback when there is no label. */
+  key: string;
+  /** Presentation, amendable without a build. Absent for every value a discovered vocabulary mints. */
+  label: string | null;
 };
 
 export type ViewportRequest = {
@@ -69,9 +140,42 @@ export type ViewportResult = {
    * emulation would later recover it.
    */
   positions: Float64Array;
-  scalars: Record<string, unknown[]>;
+  /**
+   * The declared-scalar tail, one entry per column, keyed by column name.
+   *
+   * See {@link ScalarColumn} for why these are typed arrays rather than `unknown[]`.
+   */
+  scalars: Record<string, ScalarColumn>;
   subCells: SubCell[] | null;
 };
+
+/**
+ * One decoded attribute column: its declared type, and its values in point order.
+ *
+ * **Typed arrays, not boxed `unknown[]`.** Arrow's own child arrays are already typed, and
+ * spreading them into a JS array allocates one heap object per value per column — at 5 × 10⁴ marks
+ * and eighteen columns that is nearly a million objects per response, thrown away on the next pan.
+ * Handing back the underlying buffer costs nothing and is the form a GPU attribute wants.
+ *
+ * **The type travels with the values** rather than being looked up in `Meta`. A consumer that had
+ * to re-derive it would be joining two documents on every frame, and the one that matters —
+ * whether a `u16` is a category or an integer — is a mistake that renders silently wrong.
+ * `arrowType` here is the *storage* type; whether it is a category is `Meta`'s answer.
+ */
+export type ScalarColumn =
+  | {arrowType: 'bool'; values: boolean[]}
+  | {arrowType: 'utf8'; values: string[]}
+  | {arrowType: 'u8'; values: Uint8Array}
+  | {arrowType: 'u16'; values: Uint16Array}
+  | {arrowType: 'u32'; values: Uint32Array}
+  | {arrowType: 'u64'; values: BigUint64Array}
+  | {arrowType: 'i8'; values: Int8Array}
+  | {arrowType: 'i16'; values: Int16Array}
+  | {arrowType: 'i32'; values: Int32Array}
+  | {arrowType: 'i64'; values: BigInt64Array}
+  | {arrowType: 'f32'; values: Float32Array}
+  | {arrowType: 'f64'; values: Float64Array}
+  | {arrowType: 'timestamp_us'; values: BigInt64Array};
 
 export type Timings = {
   serverUs: number;

@@ -55,6 +55,30 @@ body {
   color: #ff8f7a;
 }
 
+/* A legend swatch. Squared off rather than round so that two adjacent hues meet along an edge,
+   which is where a small colour difference is easiest to see. */
+.swatch {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  margin-top: 3px;
+  border-radius: 2px;
+  border: 1px solid #0006;
+}
+
+/* The legend's rows are swatch-then-label, so they read left-aligned rather than justified the
+   way a label/value row does. */
+.row .swatch + .v {
+  margin-right: auto;
+}
+
+.ramp {
+  height: 12px;
+  margin-bottom: 6px;
+  border-radius: 2px;
+  border: 1px solid #2a2f36;
+}
+
 .headline {
   margin-top: 6px;
   padding-top: 6px;

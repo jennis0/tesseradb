@@ -345,6 +345,21 @@ pub enum EngineError {
     MultiPartitionSlice(String),
     /// A bundle-level file (`CURRENT`, a plugin hash) was not the shape this engine expects.
     Malformed(String),
+    /// `/v1/categories` was asked for a column whose vocabulary is `listing = "per_viewer"`.
+    ///
+    /// **⊘ Specified, not implemented** (per-point-attributes §3.3; decision 0013). Filtering a
+    /// value set per principal needs a per-`(column, code)` entity-space membership set, which no
+    /// build emits yet. Until it does, this is a refusal.
+    ///
+    /// **Refused rather than served empty**, which is the fail-closed choice that is also the
+    /// honest one. An empty value set is a real answer — it is what a principal who may see none
+    /// of these values is told — so returning it here would make an unbuilt predicate
+    /// indistinguishable from a correctly-applied one, and a viewer would render a blank legend as
+    /// though it had been computed. Serving the set *unfiltered* is the other direction and is the
+    /// C11 disclosure itself.
+    VocabularyVisibilityUnbuilt {
+        column: String,
+    },
     /// A `/v1/viewport` request's `(zoom, bbox)` spans more tiles than this engine will serve.
     ///
     /// **This is an availability bound on the base path, not a tuning knob.** `zoom` and `bbox` are
@@ -435,6 +450,13 @@ impl std::fmt::Display for EngineError {
                  EngineError::MultiPartitionSlice's doc)"
             ),
             EngineError::Malformed(detail) => write!(f, "malformed: {detail}"),
+            EngineError::VocabularyVisibilityUnbuilt { column } => write!(
+                f,
+                "column '{column}' declares `listing = \"per_viewer\"`, and per-viewer vocabulary \
+                 visibility is specified and not implemented (per-point-attributes §3.3): \
+                 deriving it needs a per-(column, code) membership set that no build emits yet. \
+                 This column's values are refused rather than published unfiltered"
+            ),
             EngineError::TooManyTiles { demanded, limit } => write!(
                 f,
                 "this (zoom, bbox) spans {demanded} tiles, above the configured limit of {limit}; \

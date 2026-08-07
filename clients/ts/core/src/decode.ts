@@ -1,11 +1,69 @@
-import {tableFromIPC, type Table} from 'apache-arrow';
+import {tableFromIPC, Type, type DataType, type Table, type Vector} from 'apache-arrow';
 import {splitFramedStreams} from './frame.js';
-import type {SubCell, TileCounts, ViewportResult} from './types.js';
+import type {ScalarColumn, SubCell, TileCounts, ViewportResult} from './types.js';
 
 function u64Column(table: Table, name: string): BigUint64Array {
   const col = table.getChild(name);
   if (!col) throw new Error(`viewport payload has no column "${name}"`);
   return col.toArray() as BigUint64Array;
+}
+
+/**
+ * One declared-scalar column, as the type the manifest declared plus the buffer Arrow already
+ * holds.
+ *
+ * **`toArray()`, not a spread.** Arrow's numeric children are typed arrays already; `[...child]`
+ * boxes every element, which at 5 × 10⁴ marks across the wide fixture's eighteen columns is close
+ * to a million throwaway heap objects per response. `bool` and `utf8` have no typed form — a
+ * bitmap and an offset table respectively — so those two, and only those two, materialise.
+ *
+ * **A type the manifest cannot declare is a decoder bug, not a column to skip.** Silently dropping
+ * it would shift nothing (the map is keyed by name) but would make the column vanish from the
+ * legend with no error, so it throws instead. The thirteen arms mirror
+ * `tessera_wire::payload::ScalarColumn`; the two must be changed together.
+ */
+function scalarColumn(name: string, vector: Vector<DataType>): ScalarColumn {
+  const type = vector.type;
+  switch (type.typeId) {
+    case Type.Bool:
+      return {arrowType: 'bool', values: [...vector] as boolean[]};
+    case Type.Utf8:
+      return {arrowType: 'utf8', values: [...vector] as string[]};
+    case Type.Timestamp:
+      return {arrowType: 'timestamp_us', values: vector.toArray() as BigInt64Array};
+    case Type.Int: {
+      // `Int` covers all eight widths; the bit width and signedness are on the type, not the id.
+      const {bitWidth, isSigned} = type as unknown as {bitWidth: number; isSigned: boolean};
+      const key = `${isSigned ? 'i' : 'u'}${bitWidth}`;
+      switch (key) {
+        case 'u8':
+          return {arrowType: 'u8', values: vector.toArray() as Uint8Array};
+        case 'u16':
+          return {arrowType: 'u16', values: vector.toArray() as Uint16Array};
+        case 'u32':
+          return {arrowType: 'u32', values: vector.toArray() as Uint32Array};
+        case 'u64':
+          return {arrowType: 'u64', values: vector.toArray() as BigUint64Array};
+        case 'i8':
+          return {arrowType: 'i8', values: vector.toArray() as Int8Array};
+        case 'i16':
+          return {arrowType: 'i16', values: vector.toArray() as Int16Array};
+        case 'i32':
+          return {arrowType: 'i32', values: vector.toArray() as Int32Array};
+        case 'i64':
+          return {arrowType: 'i64', values: vector.toArray() as BigInt64Array};
+      }
+      break;
+    }
+    case Type.Float: {
+      const {precision} = type as unknown as {precision: number};
+      // Arrow `Precision`: 0 = HALF, 1 = SINGLE, 2 = DOUBLE. Only the latter two are declarable.
+      if (precision === 1) return {arrowType: 'f32', values: vector.toArray() as Float32Array};
+      if (precision === 2) return {arrowType: 'f64', values: vector.toArray() as Float64Array};
+      break;
+    }
+  }
+  throw new Error(`viewport column "${name}" has a type this decoder cannot read: ${type}`);
 }
 
 /**
@@ -72,10 +130,10 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     positions[i * 2 + 1] = qy / 65536;
   }
 
-  const scalars: Record<string, unknown[]> = {};
+  const scalars: Record<string, ScalarColumn> = {};
   for (const field of pointTable.schema.fields) {
     if (field.name === 'tessera_id' || field.name === 'code') continue;
-    scalars[field.name] = [...pointTable.getChild(field.name)!];
+    scalars[field.name] = scalarColumn(field.name, pointTable.getChild(field.name)!);
   }
 
   let subCells: SubCell[] | null = null;

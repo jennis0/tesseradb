@@ -126,10 +126,9 @@ pub struct ManifestVocabulary {
     /// code for a typo and gives it a place in the corpus. No bundle predates the field (decision
     /// 0048), so tolerating its absence buys a reader that does not exist.
     pub kind: VocabularyKind,
-    /// `per_viewer` or `public` (§3.8). **⊘ Recorded, not enforced**: no endpoint publishes a
-    /// vocabulary yet, so `per_viewer` currently gates nothing. It is carried now because a
-    /// bundle built without it would have to be rebuilt to acquire it.
-    pub listing: String,
+    /// Whether the *existence* of a value is sensitive (§3.8) — the disclosure control
+    /// `/v1/categories` gates on.
+    pub listing: Listing,
     pub values: Vec<ManifestVocabularyValue>,
     /// Retired codes, never reassigned (§3.4). Carried into the manifest rather than left in the
     /// schema file so that a later build reading this bundle's lineage can see which codes are
@@ -151,6 +150,34 @@ pub enum VocabularyKind {
     /// The value set grows: a key nothing has bound acquires a scattered code at the commit-window
     /// close, recorded beside it and pinned forever (§3.4).
     Discovered,
+}
+
+/// Whether the *existence* of a value is sensitive — the disclosure control of §3.8, orthogonal to
+/// [`VocabularyKind`]'s operational question.
+///
+/// **Typed rather than a string, because it is now load-bearing.** It decides whether
+/// `/v1/categories` filters a value set per principal, so a spelling no reader recognises must
+/// refuse the manifest at the parse rather than fall through to a default — and both defaults are
+/// wrong in a direction that matters: `public` publishes a gated value set, `per_viewer` withholds
+/// a published one and looks like a permission bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Listing {
+    /// The value set is filtered per principal: a value appears only if the principal can see at
+    /// least one item carrying it (per-point-attributes §3.3).
+    PerViewer,
+    /// The value set is published as authored, to every principal with a session. Legal only for a
+    /// `declared` vocabulary, where an accountable party wrote the names down (§3.8).
+    Public,
+}
+
+impl Listing {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Listing::PerViewer => "per_viewer",
+            Listing::Public => "public",
+        }
+    }
 }
 
 /// One value of a vocabulary: its stable opaque key, its pinned code, and its presentation.

@@ -123,7 +123,7 @@ fn served_ids(
     viewport(engine, session)
         .points
         .iter()
-        .map(|p| p.tessera_id)
+        .map(|(id, _)| id)
         .collect()
 }
 

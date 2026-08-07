@@ -184,20 +184,11 @@ pub struct ValueSet {
 }
 
 /// Is the *existence* of a value sensitive (§3.8)? A disclosure control, so it never defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Listing {
-    PerViewer,
-    Public,
-}
-
-impl Listing {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Listing::PerViewer => "per_viewer",
-            Listing::Public => "public",
-        }
-    }
-}
+///
+/// The manifest's own type, re-exported rather than mirrored: the schema compiles straight into
+/// `MANIFEST.vocabularies`, and a second spelling of a two-variant disclosure control is a second
+/// place for `per_viewer` to become `public` in translation.
+pub use tessera_store::manifest::Listing;
 
 impl Vocabulary {
     /// The code for `key`, or `None` if this vocabulary does not declare it.
@@ -226,11 +217,11 @@ impl Schema {
     /// [`tessera_store::vocabulary::VocabularyMinter`] — see [`Schema::discovered_minters`] and
     /// `input::scan_attributes`.
     ///
-    /// **⊘ `listing` is recorded and not enforced.** It is required, parsed and written to the
-    /// manifest, but no endpoint publishes a vocabulary yet, so `per_viewer` currently gates
-    /// nothing. It is required now rather than later because §4.3 makes absence a build error for
-    /// a disclosure control, and because a bundle built without one would have to be rebuilt to
-    /// acquire it.
+    /// **`listing` reaches `/v1/categories`, which is what enforces it** (contracts §3.2):
+    /// `public` publishes the value set, and `per_viewer` is refused there pending §3.3's
+    /// membership sets. It is required rather than defaulted because §4.3 makes absence a build
+    /// error for a disclosure control, and because a bundle built without one would have to be
+    /// rebuilt to acquire it.
     pub fn parse(path: &Path, values: &HashMap<String, PathBuf>) -> Result<Schema> {
         let text = std::fs::read_to_string(path).map_err(|e| BuildError::io(path, e))?;
         let file: SchemaFile =
@@ -420,6 +411,7 @@ impl Schema {
             let mut minter = VocabularyMinter::new(
                 vocabulary.name.clone(),
                 tessera_store::manifest::VocabularyKind::Discovered,
+                vocabulary.listing,
                 width,
             );
             for (key, &code) in &vocabulary.codes {
@@ -794,6 +786,21 @@ fn check_column_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(schema_error("an attribute with an empty name"));
     }
+    // The name is the column's **identifier**, not merely its display label: it addresses the
+    // column in `/v1/categories/{column}` (contracts §3.2), and the duplicate check above is what
+    // makes it unique bundle-wide. A path segment is therefore what it has to survive, so the
+    // character set is closed here rather than escaped at every use site — one refusal at build
+    // beats a percent-encoding convention that two readers can spell differently.
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(schema_error(format!(
+            "attribute '{name}': a column name is its identifier on the wire \
+             (`/v1/categories/{{column}}`, contracts §3.2), so it is limited to ASCII letters, \
+             digits, `_` and `-`"
+        )));
+    }
     if FIXED.contains(&name) {
         return Err(schema_error(format!(
             "attribute '{name}' shadows a fixed column of `columns.arrow` (contracts §2.6). The \
@@ -1121,6 +1128,22 @@ listing = "per_viewer"
     fn one_name_may_not_be_declared_twice() {
         let text = format!("{SEVERITY}{SEVERITY}");
         assert!(err(&text).contains("declared twice"));
+    }
+
+    /// The name addresses the column in `/v1/categories/{column}`, so it must survive a path
+    /// segment. `.` is included because it is path-legal but is the one character that makes a
+    /// segment ambiguous with the traversal forms a router normalises away.
+    #[test]
+    fn a_column_name_must_survive_a_path_segment() {
+        for name in ["a/b", "a b", "a.b", "a%2Fb", "caté"] {
+            let text = SEVERITY.replace("\"severity\"", &format!("\"{name}\""));
+            assert!(err(&text).contains("its identifier on the wire"), "{name}");
+        }
+        // The ordinary shapes stay legal — the rule is a character set, not a style guide.
+        for name in ["severity_2", "severity-2", "Severity2"] {
+            let text = SEVERITY.replace("\"severity\"", &format!("\"{name}\""));
+            assert!(parse_str(&text).is_ok(), "{name}");
+        }
     }
 
     /// §4.4: the two spellings of one thing, and the binding that names nothing.

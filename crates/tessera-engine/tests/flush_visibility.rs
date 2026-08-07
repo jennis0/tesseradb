@@ -326,14 +326,14 @@ fn a_flushed_item_is_visible_in_a_viewport() {
     let point = out
         .points
         .iter()
-        .find(|p| p.tessera_id == tessera_id)
+        .find(|(id, _)| *id == tessera_id)
         .expect("the flushed item is drawn, not merely counted");
     // Round-trips through the flush's own quantisation: the Morton code deinterleaves back to the
     // cell the coordinates were quantised into, so a point gathered from the wrong segment's row
     // would land somewhere else in the tile.
     // `code` is the 64-bit interleave: the depth-16 cell in the high half, the residual in the
     // low. The depth-`z` tile is the cell's top `2z` bits — `code >> (64 - 2z)`.
-    let containing_tile = point.code >> (64 - 2 * 10);
+    let containing_tile = point.1 >> (64 - 2 * 10);
     assert!(
         out.tiles.iter().any(|t| t.tile == containing_tile),
         "the drawn point lies in one of the tiles this response reported"

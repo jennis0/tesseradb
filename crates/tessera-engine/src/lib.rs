@@ -8,6 +8,7 @@
 
 mod cache;
 pub mod cancel;
+mod categories;
 mod coalesce;
 mod compact;
 pub mod compose;
@@ -31,6 +32,7 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
 pub use cancel::CancelToken;
+pub use categories::{CategoryColumn, CategoryPage, CategoryQuery, CategoryValue};
 // The fold's automatic trigger, as a value an operator's configuration builds. `tessera-server`
 // parses `ingest.compaction_*` into one of these and hands it over in `EngineConfig`; the executor
 // is the only reader. The rest of `compact` stays private — what a fold *is* is this crate's
@@ -59,7 +61,8 @@ pub use single_flight::CacheStats;
 pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
-    EngineMeta, ItemOut, PointOut, ScalarOut, SubCellCount, TileCount, ViewportOut, ViewportRequest,
+    ColumnBuf, EngineMeta, ItemOut, PointColumns, ScalarOut, SubCellCount, TileCount, ViewportOut,
+    ViewportRequest,
 };
 // `EngineMeta::declared_scalars`' element type, re-exported for the same layering reason
 // `FragmentCacheStats` is: `check-layers.sh` denies a `tessera-server → tessera-store` edge
@@ -69,7 +72,9 @@ pub use viewport::{
 pub use tessera_store::manifest::DeclaredScalar;
 // The ingest handler resolves category keys to codes and must name the reserved *absent* code and
 // the binding view to do it. Re-exported for the same layering reason as `DeclaredScalar`.
-pub use tessera_store::manifest::{ManifestVocabulary, ManifestVocabularyValue, VocabularyKind};
+pub use tessera_store::manifest::{
+    Listing, ManifestVocabulary, ManifestVocabularyValue, VocabularyKind,
+};
 pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE};
 // `DeclaredScalar::arrow_type`'s type, and `wire_type`'s. The server names it to widen a code to
 // its column's storage width, and reaches it here rather than transcribing the table again.

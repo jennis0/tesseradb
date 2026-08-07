@@ -248,6 +248,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         max_k: config.max_k,
+        max_category_values: config.max_category_values,
         // Gates only /v1/viewport, /v1/items and /session/authorise (each handler wraps its own
         // closure); never the control plane, and never /healthz, /readyz, /meta or /revoke — the
         // probes are deliberately off the control plane and outside every gate

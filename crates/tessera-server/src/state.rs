@@ -474,6 +474,8 @@ pub struct AppState {
     pub engine: Engine,
     pub sessions: Mutex<SessionRegistry>,
     pub max_k: usize,
+    /// `/v1/categories`' page-size ceiling and its default. See `Config::max_category_values`.
+    pub max_category_values: usize,
     /// The viewer/session admission gate. Never touched by the control plane.
     pub compute_gate: ComputeGate,
     /// The control plane's own admission bound. Deliberately **not** `compute_gate`: an ingest
