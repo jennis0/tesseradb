@@ -522,12 +522,20 @@ fn parse_values_binding(raw: &str) -> Result<(String, PathBuf), String> {
 /// per-attribute table lets each one look affordable on its own. §10.5 prices a hot column at
 /// 0.93 GiB per byte per row per 10⁹ items, which is what the projection below reproduces.
 ///
-/// Warns on what §2.3 names as breaking in practice. Two of its three combinations are currently
-/// unreachable and are therefore not warned about: `discovered` + `u8` needs a discovered
-/// vocabulary, and dense codes under `listing = "per_viewer"` needs a minting path — both refused
-/// at parse. The third, `render_in` left at its default, is now the *only* behaviour (`render_in`
-/// is refused too), so it is stated once rather than per attribute: a note repeated against every
-/// column is a note nobody reads.
+/// Warns on what §2.3 names as breaking in practice — which is now one thing, not three.
+///
+/// `discovered` + `u8` is unreachable while discovered vocabularies are refused at parse, and
+/// `render_in` is refused outright, so its every-slice consequence is stated once rather than per
+/// column.
+///
+/// **Dense codes under `listing = "per_viewer"` is deliberately not warned about** (owner ruling,
+/// 2026-08-07), and this is worth recording because §2.3 asks for the warning and a reader will
+/// otherwise add it. That warning guards vocabulary *cardinality* — a visible code being a lower
+/// bound on how many values exist. The owner does not hold cardinality as a threat. What must be
+/// enforced is the other half: **a principal may see a category value only if it belongs to data
+/// they can see** — §3.3's membership-derived visibility, which is a property of the read path,
+/// not of how an author numbered their codes. A cardinality warning here would be mechanism that
+/// looks like access control and is not.
 fn report_residency(schema: &tessera_build::schema::Schema, limit: Option<u64>) {
     let columns = schema.attributes.len();
     match schema.row_bytes() {
