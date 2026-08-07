@@ -94,6 +94,37 @@ if (options > 0) {
   }
 }
 
+// **Colour is presentation, not selection.** Switching the encoding must repaint the canvas and
+// must NOT change the mark count — and must issue no `/v1/viewport` at all, since every declared
+// column is already in the held response. The count is the I7 property, observable from outside;
+// the request count is what proves the switch is a layer rebuild rather than a refetch.
+const colourSeries = [];
+const colourOptions = await page.locator('#colour-by option').count().catch(() => 0);
+for (let i = 0; i < colourOptions; i++) {
+  const value = await page.locator('#colour-by option').nth(i).getAttribute('value');
+  const viewportsBefore = requests.filter((r) => r.path === '/v1/viewport').length;
+  await page.selectOption('#colour-by', value);
+  await page.waitForTimeout(2000);
+  colourSeries.push({
+    column: value === '' ? '(uniform)' : value,
+    counts: await counts(),
+    lit: await litPixels(),
+    viewportRequests: requests.filter((r) => r.path === '/v1/viewport').length - viewportsBefore,
+    legend: (await page.locator('#panels').innerText())
+      .split('\n')
+      .filter((l) => l.trim())
+      .slice(-3)
+      .join(' | ')
+      .slice(0, 110)
+  });
+}
+// Leave a category encoding on for the screenshot: a uniform map proves nothing about colour.
+const categoryOption = colourSeries.find((c) => c.column === 'primary_category');
+if (categoryOption) {
+  await page.selectOption('#colour-by', 'primary_category');
+  await page.waitForTimeout(2500);
+}
+
 const panelText = await page.locator('#panels').innerText().catch(() => '(no panels)');
 const canvasPixels = await page.evaluate(() => {
   const canvas = document.querySelector('canvas');
@@ -140,10 +171,46 @@ for (const z of zoomSeries) {
     } litPixels=${z.lit}`
   );
 }
+console.log('--- colour encodings (presentation, never selection) ---');
+for (const c of colourSeries) {
+  console.log(
+    `  ${c.column.padEnd(20)} served=${c.counts?.served ?? '?'} lit=${String(c.lit).padStart(6)} ` +
+      `viewportReqs=${c.viewportRequests}  ${c.legend}`
+  );
+}
+{
+  const served = new Set(colourSeries.map((c) => c.counts?.served));
+  const refetched = colourSeries.filter((c) => c.viewportRequests > 0).map((c) => c.column);
+  console.log(
+    `  => served counts across encodings: ${[...served].join(', ')} ` +
+      `${served.size === 1 ? '(unchanged — I7 holds)' : '*** CHANGED: colour altered selection ***'}`
+  );
+  console.log(
+    `  => encodings that refetched: ${refetched.length ? refetched.join(', ') : 'none (layer rebuild only)'}`
+  );
+}
 console.log('--- panels ---');
 console.log(panelText.split('\n').map((l) => `  ${l}`).join('\n'));
 console.log('--- canvas ---');
 console.log(' ', JSON.stringify(canvasPixels));
+// A refusal the contract *requires* still makes the browser log "Failed to load resource", so the
+// two are separated rather than one hiding the other. `/v1/categories` answers 500 for a
+// `per_viewer` column by design (contracts §3.2: the visibility predicate is ⊘ unbuilt, and
+// serving the set empty would be indistinguishable from a computed empty answer), so the viewer
+// exercising that column is the instrument working, not breaking. Only the *unexplained* ones fail
+// the run — and the explained ones are still printed, or this becomes a place to hide a real 500.
+const expectedRefusals = requests.filter(
+  (r) => r.path.startsWith('/v1/categories/') && r.status === 500
+);
+const unexplained = consoleErrors.filter(
+  (e) => !(/Failed to load resource/.test(e) && expectedRefusals.length > 0)
+);
+console.log('--- expected refusals (contract, not breakage) ---');
+console.log(
+  expectedRefusals.length
+    ? expectedRefusals.map((r) => `  ${r.status} ${r.path}`).join('\n')
+    : '  none'
+);
 console.log('--- console errors ---');
 console.log(consoleErrors.length ? consoleErrors.map((e) => `  ${e}`).join('\n') : '  none');
 console.log(`--- screenshot: ${shot}`);
@@ -158,7 +225,11 @@ const failures = [];
 if (!viewportOk) failures.push('no successful /v1/viewport');
 if (!drewSomething) failures.push('nothing drawn on the canvas');
 if (!maskingVisible) failures.push('every principal reported the same visible count');
-if (consoleErrors.length) failures.push(`${consoleErrors.length} console error(s)`);
+if (unexplained.length) failures.push(`${unexplained.length} unexplained console error(s)`);
+// Colour is presentation. If either of these moves, the encoding has become a selection rule.
+const servedAcrossEncodings = new Set(colourSeries.map((c) => c.counts?.served));
+if (servedAcrossEncodings.size > 1) failures.push('changing the colour column changed the mark count');
+if (colourSeries.some((c) => c.viewportRequests > 0)) failures.push('a colour change refetched');
 
 if (failures.length) {
   console.error(`SMOKE FAILED: ${failures.join('; ')}`);
