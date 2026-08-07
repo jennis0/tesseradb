@@ -34,9 +34,9 @@ never had one — **and both were scoped out** (decision 0057): rows-frozen is d
 the staging list is deferred with 0053's review condition attached to it rather than to this
 document. Both were obligations on *unbuilt* machinery, which is what made "run the lens" the wrong
 question. **Promoted on that basis** (owner, 2026-08-07). §9's four gauges are all built; what
-remains unbuilt of this design is the deferred staging list, the write-side `POSIX_FADV_DONTNEED`
-of §6.1, and a re-run of P3 against the `MADV_SEQUENTIAL` hint that is now applied. All three are
-marked at their sites.
+remains unbuilt of this design is the deferred staging list and the write-side
+`POSIX_FADV_DONTNEED` of §6.1, both marked at their sites. **P4 has measured the read-side hint**
+and what a real fold costs a live viewport (§6.1, §14).
 **Owns:** the fold — what it executes, what it carries forward, how it is published, what retires
 at it, and what a viewer pays at the flip. The prefix rewrite, the `CURRENT` flip, and
 reclamation.
@@ -57,8 +57,7 @@ derivation and the reclamation; and all four trigger routes spec §9's schedule 
 `Engine::request_fold` for a caller that wants one now, which `POST /control/compact` calls. Both
 pre-flight refusals are built (spec §3, §8), and so is the startup sweep that reclaims a discarded
 fold's orphan prefix (spec §7). ⊘ **What is obligation rather than description**: the staging list
-(spec §6.2), the *measurement* of §6.1's `MADV_SEQUENTIAL` hint — which is applied but whose effect
-nothing has re-run P3 against — and the write-side `POSIX_FADV_DONTNEED`, which still has no site. Where a figure is quoted it is marked measured, modelled or assumed; claims about the
+(spec §6.2) and the write-side `POSIX_FADV_DONTNEED` (spec §6.1), which still has no site. Where a figure is quoted it is marked measured, modelled or assumed; claims about the
 tree were verified against branch `geometry/cell-plus-residual`.
 
 ---
@@ -655,9 +654,26 @@ fold's wall clock at 10⁷ (P1) — so what goes unadvised is a small share of a
 **The same two cursors serve merge and coalesce**, which stream over bounded inputs for the same
 reason, so the hint is theirs as well rather than a fold-only special case.
 
-⊘ **Unmeasured.** P3 must be re-run with it applied, over a sweep long enough to displace a real
-fraction of the bundle. `MADV_COLD` behind the cursor is the escalation if it proves insufficient;
-decision 0052 records why the windowed-unmap and producer-pacing routes were declined.
+**Measured, and the effect is not resolved** — probe **P4**, which is a new probe rather than the
+re-run this paragraph used to ask for. P3 cannot be re-run with the hint applied: it models the harm
+with a buffered reader, and the hint lives on the two cursors only a fold or a merge constructs.
+P4 runs a real fold with a session sweeping throughout, one arm per setting, in separate processes
+over separate copies of one bundle.
+
+What it found first is not about the hint at all: **a real fold costs a concurrent viewport
+1.05–1.18× at the deepest zoom**, about a fifth of P3's 2.03×. A fold is not a streaming reader — it
+interleaves five passes, writes as much as it reads, and spends real time in Roaring and Arrow. P3's
+figure is the upper bound it was always described as; this is the operation.
+
+On the hint itself the two pairs disagree about sign at 12–26%, against a `quiet-after` drift that
+reached 23% inside a single run, and fold wall clock varied 4.7× at one configuration. **It does no
+measured harm and the clean pair puts it slightly ahead, so it stays** — what would settle it is
+repetition at n ≥ 5 interleaved on a quiet device, or a deployment-realistic bundle:cache ratio
+(this ran at 1.27:1 where a 47 GB bundle on a 16 GB machine is ~3:1).
+
+⊘ **`MADV_COLD` behind the cursor stays the escalation and is not taken**: nothing here shows the
+hint is insufficient, because nothing here shows a viewport suffering much. Decision 0052 records
+why the windowed-unmap and producer-pacing routes were declined.
 
 **The write side is a separate mechanism and is still open.** The fold spools column bytes, maps
 them back, writes assembled batches, and dirties a 4 GB `permutation.bin` mapping —
@@ -1304,6 +1320,8 @@ are.
 | the flip at 10⁹ ≈ 12.8 s per resident entry, ≈3 minutes at the ~16 a 2 GiB bound holds | **modelled** from the row above, and corroborated by the independently measured 10.7 s end-to-end — spec §6.2's stated window is confirmed rather than revised | same memo; `probes/2026-08-04-refresh-ladder/` |
 | that a read-side **throttle** can be applied at all | **refuted at r5** — every fold input is an `Mmap::map`, so the byte movement is page faults; P3 measured a buffered reader. Spec §6.1 now carries two candidate mechanisms and no ruling | same memo |
 | what a *completed* fold leaves in the page cache | **not measured** — P3's 128 MiB/s arm displaced under 1% of the bundle in a 3.5 s sweep; a fold displaces all of it. The arms bound instantaneous contention, not cache composition | `probes/2026-08-05-compaction-flip-and-io/results.md` |
+| **what a concurrent viewport pays for a real fold** | **measured** — **P4 run**, four runs in the evicting regime: **1.05–1.18×** at the deepest zoom and at or inside the drift at shallower ones. About a fifth of the row below, which is an unthrottled *reader* and the upper bound rather than the operation | `docs/evidence/memos/2026-08-07-fold-against-a-live-viewport.md` |
+| `MADV_SEQUENTIAL`'s effect on that, and on the fold's duration | **measured and not resolved** — the two pairs disagree about sign at 12–26% against a within-run drift reaching 23%, and fold wall clock varied 4.7× at one configuration. It does no measured harm; §6.1 says what would settle it | same memo |
 | page-cache pollution during a fold, and what a concurrent viewport pays for it | **measured** — **P3 run**, four times in the evicting regime, twice at a real 45.57 GiB bundle against 36.9–38.2 GiB of RAM. Unthrottled costs up to **2.03×**; **128 MiB/s is inside every run's noise floor**. *This was the weakest assumption in this document; it was wrong, and less wrong than §6.1 guessed* | `docs/evidence/memos/2026-08-05-compaction-flip-and-io.md` |
 | the 15.7× excursion | **measured and discounted** — cgroup-capped runs only, where direct reclaim stalls the allocating task; neither real run reproduced it. Not a fold's expected cost | same memo |
 | that 128 MiB/s is the right rate on **another** device, or at a deployment's bundle:cache ratio | **not measured.** The knee follows device bandwidth, and both runs sat at 1.24:1 and 1.96:1 where a 47 GB bundle on a 16 GB machine is ~3:1. Both are why spec §6.1 makes this a key rather than a constant | same memo |
@@ -1312,11 +1330,12 @@ are.
 | the free-space pre-flight's 150% | **assumed**. The output half is bounded by construction (a fold writes at most the live bytes and links the rest); the 50% margin is a judgement about what lands beside it during a flight, which is a rate × a duration the planner does not know | spec §8 |
 | the schedule's three — 4 h wide, 8 segments, 64 segments | **assumed**. The width is bounded by two operational statements rather than a measurement (a node restarting inside the quiet period should still fold; one down all night should not start at breakfast). Both segment thresholds interpolate from one measurement rather than sitting on one: decision 0049 measured ~73 ms on a 300-tile viewport at ~152 segments against a 135–164 ms baseline, and where between 8 and 152 "gradual" becomes "now" is a judgement | spec §9, decision 0056 |
 
-Three probes were named because three claims cannot be believed without them. All three are built on
-the `scale.rs` harness so they re-run from the tree
-(`a_fold_over_a_multi_segment_corpus_at_two_sizes`,
+Three probes were named because three claims cannot be believed without them, and a fourth was added
+once the fold existed to run. All four are built on the `scale.rs` harness so they re-run from the
+tree (`a_fold_over_a_multi_segment_corpus_at_two_sizes`,
 `the_flip_costs_what_the_resident_population_costs`,
-`a_streaming_read_of_the_whole_bundle_against_a_live_viewport`), and all three have been run. P3
+`a_streaming_read_of_the_whole_bundle_against_a_live_viewport`,
+`a_live_viewport_against_a_real_fold_with_and_without_the_advice`), and all four have been run. P3
 settled spec §6.1's rate at 128 MiB/s; P2 carries a recommendation against a decision this document
 does not make — that retained-row-space migration (spec §6.3) stay unbuilt, on the ground that P2
 confirms the window it removes is proportional to a dial the operator already sets.
@@ -1384,6 +1403,12 @@ places.** Not a review: a measurement, and the disposition of what it turned up.
   this mapping": passes 1 and 3 open their own and are advised; pass 2's are the live readers and
   are not. Reopening those to advise them is declined — page-cache pages are per inode, so it would
   pay a second reader's construction to free the viewport's pages anyway.
+- **P4 ran, and its first finding is not about the mitigation it was built for.** A real fold costs
+  a concurrent viewport **1.05–1.18×** at the deepest zoom — about a fifth of P3's 2.03×, which is
+  an unthrottled *reader* and the upper bound rather than the operation. `MADV_SEQUENTIAL`'s own
+  effect is below the probe's noise and stays on that basis. A first pair of runs appeared to show
+  it making things worse and was contaminated by a concurrent test suite; the reversed pair, on an
+  idle machine, puts it slightly ahead. Both are in `probes/` and the contaminated one is labelled.
 - **The two promotion blockers are scoped out** (decision 0057): rows-frozen is declined and the
   staging list is deferred with its review condition intact. Both were obligations on *unbuilt*
   machinery, which is what made "run the lens" the wrong question.
