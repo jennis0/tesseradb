@@ -1146,8 +1146,11 @@ it.
 read "fifteen" for as long as 2b was an addition rather than an entry. Numbers 1–4 are the fold's
 reason for existing and none of them can be inferred from the others passing.
 
-**Thirteen of the sixteen are covered; three are not, and are named at their own entries** — 2b,
-10 and 6/12-at-scale. Coverage lives in `tessera-engine/tests/fold.rs` against a real fold, in
+**All sixteen are covered — and three of them in a form the entry itself has to state.** 2b and 10
+are each established by **two** tests that assert different kinds of claim, neither sufficient
+alone; 12 is a probe that is `#[ignore]`d by design and is therefore covered when someone runs it,
+never by the per-PR gate. Read those three entries rather than the count.
+Coverage lives in `tessera-engine/tests/fold.rs` against a real fold, in
 `compact.rs`'s unit cases for the retirement rule itself, in `tessera-store/tests/fold_row_space.rs`
 and `fold_external_ids.rs` at the pass level, in `prefix_rotation.rs` for the rotation the fold
 publishes through, and — for 12, which is a probe and not a unit test — in `scale.rs`'s
@@ -1192,15 +1195,19 @@ establishes, and a section like this one is read as though it had checked.
    carried-forward segment holds its row; a carried-forward run holds its external-id binding while
    **no tier names it at all** (a zero-term item). In every shape the row and postings are gone from
    the fold's own output, the overlay entry stands, and a re-ingest of the external id **succeeds**
-   rather than 409-ing. **⊘ Partly covered.** Only the *segment* shape runs end to end
-   (`a_deletion_a_carried_forward_segment_still_names_does_not_retire`), and even it never attempts
-   the re-ingest its own text requires. The tier and zero-term-run shapes exist only in
-   `compact.rs`'s `none_of_obligation_2bs_three_shapes_retires`, against hand-built descriptors and
-   a synthetic bitmap — no real postings, no real row space, no re-ingest. That is not an oversight
-   to tidy: a real flush publishes its segment, tier, run and locator extent **together** over one
-   entity range, so isolating a carry-forward set that names only a tier, or only a run, needs a
-   fixture that decouples them. Recorded rather than waved at, because the zero-term-run shape is
-   precisely the one this obligation was added for.
+   rather than 409-ing. ✔ Covered in **two layers, and it takes both** —
+   `a_deletion_a_carried_forward_segment_still_names_does_not_retire` runs the composite through a
+   real fold: a rowed deletion and a **zero-term** one, both in `D₀`, both protected, a third
+   deletion nothing carries forward retiring beside them so the rule is not vacuous, and the
+   re-ingest this obligation's own text requires — which is a distinct rule from the retired case
+   (`a_retired_entitys_external_id_is_re_ingestible` passes unmoved when a still-deleted holder is
+   made to collide). What that fixture cannot separate is the artefacts: a real flush publishes its
+   segment, tier, run and locator extent **together** over one entity range, so end to end the
+   segment adder and the locator adder each cover the same entity and dropping either leaves it
+   green. Per-artefact independence is therefore asserted where a fixture can decouple it, in
+   `compact.rs`'s `none_of_obligation_2bs_three_shapes_retires` and
+   `a_locator_extent_alone_protects_its_range`. Neither layer alone establishes 2b; read them
+   together.
 3. **A pre-fold fragment is unreachable after the fold** — in the in-memory memo, in the persisted
    `.frag` files, and across a restart. The test that matters holds a session's fragment across the
    flip and asserts it is rebuilt rather than reused.
@@ -1234,10 +1241,19 @@ establishes, and a section like this one is read as though it had checked.
     `the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot` asserts the
     published `SEGMENTS-<n>.json` carries the values live at the flip rather than the fold's
     pre-flight snapshot — the field `publish_fold` calls load-bearing, whose failure is a gap
-    invisible to every principal with no error. **⊘ The fuzz is not done.** No-reissue is asserted
-    once, in one scenario; `alloc_props.rs` fuzzes the bare allocator across simulated crashes and
-    never across a fold. A fold per iteration is real IO over a real bundle, so this wants a
-    cheaper harness or a deliberately small iteration budget, and is the reason it is still open.
+    invisible to every principal with no error. The no-reissue half is
+    `alloc_props.rs`'s `no_reuse_across_a_fold_that_lowers_the_bundles_high_water`, fuzzed over
+    interleavings of ingest, flush, fold and crash. **Split deliberately, because the two halves
+    are different kinds of claim.** A fold makes the three durable homes disagree on purpose — the
+    bundle manifest is *lowered* to the snapshot's bound for the base locator's sake, the WAL is
+    reclaimed by the rotation behind the fold — so after one, each home alone is wrong and only
+    `alloc::allocator_floor`'s `max` recovers the floor. That rule is arithmetic over durable
+    state and is fuzzed at the function itself, not restated: making it return the bundle value
+    alone fails the property and leaves `no_reuse_across_simulated_crashes` passing. That the fold
+    *writes* those two values the right way round is a fact about IO, and it is pinned end to end
+    by the two tests above — publishing the snapshot's bound to both homes fails both and nothing
+    else. Neither half establishes the obligation alone; a fold per fuzz iteration would be real
+    IO over a real bundle and would buy neither.
 11. **`dict.len()` never decreases** across a fold and every ordinal is stable — the staleness
     hint's counter and every session's granted terms depend on it. ✔ `term_ordinals_are_stable_across_a_fold`,
     and it must **reopen the bundle from disc** to mean anything: `publish_fold` carries the live
@@ -1253,8 +1269,11 @@ establishes, and a section like this one is read as though it had checked.
     asserts on the anonymous half for that reason: the two corpus-sized heap allocations it found
     moved the total by 0.04× and the anonymous term by two thirds. **It is `#[ignore]`d and takes
     environment variables**, so "covered" here means covered when someone runs it, never covered by
-    the per-PR gate — which is right for a probe of this cost and is stated so that nobody reads the
-    tick as CI.
+    the per-PR gate. That standing is **deliberate and settled**, not a gap awaiting work: a
+    memory probe over a corpus-sized bundle does not belong in a per-PR gate, and the alternative
+    — a cheap proxy that runs every time — would tick this line while measuring something other
+    than the claim. Stated here so nobody reads the tick as CI, and so nobody reopens it as an
+    omission.
 13. **The old prefix is reclaimed whole and nothing live is unlinked** — the hard-link property,
     asserted by inode rather than by absence.
 14. **The fold's output cannot reach response data** — I2's forward obligation (SA §6.7),

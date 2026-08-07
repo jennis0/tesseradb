@@ -673,7 +673,10 @@ fn main() -> ExitCode {
                     match (carried, passed) {
                         (Some(recorded), Some(given)) if recorded != given => {
                             eprintln!(
-                                "build refused: --carry-id-key-from {}: that bundle was built                                  with --batch-items {recorded}, but {given} was given; an                                  identity-preserving rebuild must replay the recorded value                                  (drop --batch-items to do so)",
+                                "build refused: --carry-id-key-from {}: that bundle was built \
+                                 with --batch-items {recorded}, but {given} was given; an \
+                                 identity-preserving rebuild must replay the recorded value \
+                                 (drop --batch-items to do so)",
                                 root.display()
                             );
                             return ExitCode::FAILURE;
@@ -681,7 +684,9 @@ fn main() -> ExitCode {
                         (Some(recorded), _) => Some(recorded),
                         (None, Some(given)) => {
                             eprintln!(
-                                "note: the carried bundle was built as a single batch;                                  --batch-items {given} makes this build a DIFFERENT permanent                                  assignment under the same identity key"
+                                "note: the carried bundle was built as a single batch; \
+                                 --batch-items {given} makes this build a DIFFERENT permanent \
+                                 assignment under the same identity key"
                             );
                             Some(given)
                         }

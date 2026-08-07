@@ -270,14 +270,26 @@ fn ingest(
     external_id: Vec<u8>,
     batch: &str,
 ) -> Result<EntityId, tessera_engine::AcceptError> {
+    ingest_with_descriptors(engine, external_id, batch, &[b"0".to_vec()])
+}
+
+/// [`ingest`] with the descriptor set spelled out — `&[]` for a **zero-term item**, which no tier
+/// names at all and which is therefore reachable only through the run its locator extent covers
+/// (compaction §12's obligation 2b).
+fn ingest_with_descriptors(
+    engine: &Engine,
+    external_id: Vec<u8>,
+    batch: &str,
+    descriptors: &[Vec<u8>],
+) -> Result<EntityId, tessera_engine::AcceptError> {
     let row = UnallocatedRow {
         external_id: Some(external_id),
         slice: "s0".to_string(),
-        descriptors: vec![b"0".to_vec()],
+        descriptors: descriptors.to_vec(),
         x: 5.0,
         y: 5.0,
         scalars: Vec::new(),
-        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        terms: engine.resolve_terms(descriptors),
     };
     engine
         .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
@@ -627,7 +639,8 @@ fn a_fold_discards_when_a_merge_published_under_it_and_the_state_is_re_plannable
     let before = engine.write_executor_stats();
     assert_eq!(
         before.merges, 0,
-        "nothing has merged yet — the base segment is not selectable at this size, so three flush          segments are one short of `tier_width`"
+        "nothing has merged yet — the base segment is not selectable at this size, so three flush \
+         segments are one short of `tier_width`"
     );
 
     // Both hooks, and each opens a different half of the window. `fold_paused` holds the thread
@@ -1412,8 +1425,12 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     let bundle = open_bundle(&root).expect("the folded bundle opens");
     let partition = &bundle.partitions["default"];
     assert!(
-        partition.slices["s0"].row_space.row_of(mid_flight).is_some(),
-        "the post-snapshot deletion keeps its row: the fold's passes ran over `D₀`, which did not          name it"
+        partition.slices["s0"]
+            .row_space
+            .row_of(mid_flight)
+            .is_some(),
+        "the post-snapshot deletion keeps its row: the fold's passes ran over `D₀`, which did not \
+         name it"
     );
     assert!(
         partition.slices["s0"].row_space.row_of(folded).is_none(),
@@ -1421,7 +1438,8 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     );
     assert!(
         partition.manifest.tombstones.contains(&mid_flight.raw()),
-        "its id is in the new manifest's tombstones — the seed a restart reads, and the only thing          still hiding it: tombstones is `live deleted − executed`, never the plan's set"
+        "its id is in the new manifest's tombstones — the seed a restart reads, and the only thing \
+         still hiding it: tombstones is `live deleted − executed`, never the plan's set"
     );
     assert!(
         !partition.manifest.tombstones.contains(&folded.raw()),
@@ -1436,7 +1454,8 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     assert_eq!(
         visible(&engine, &after),
         baseline - 2,
-        "and it is still invisible after the flip — throughout, with no window in which the fold's          own publication re-exposed it"
+        "and it is still invisible after the flip — throughout, with no window in which the fold's \
+         own publication re-exposed it"
     );
 }
 
@@ -1457,19 +1476,31 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
 /// is `CarriedForward::add_segment`'s documented over-approximation doing the work it exists for:
 /// naming more is fail-closed, naming fewer is the fail-open.
 ///
-/// **Mutations this kills:** retiring `D₀` wholesale (both retire, which is the r3 fail-open);
-/// leaving the carry-forward set empty; building it from the plan rather than from the live
-/// manifest at publication (the flush's four artefacts are not in the plan, so nothing is carried
-/// and both retire).
+/// **A zero-term item runs beside it**, deleted the same way. It has no postings, so no tier could
+/// name it; what the carry-forward set covers is its *entity*, through the run and locator extent
+/// the same flush publishes. That is the shape 2b was added for.
+///
+/// **And the re-ingest the obligation's own text requires**, which this case omitted until it was
+/// recounted. A protected entity keeps its tombstone, and a tombstone must not become a
+/// reservation on the external id: decision 0047 makes an edit a delete plus a re-ingest, so a
+/// deleted holder that blocked one would fail every edit of a mid-fold deletion until some later
+/// fold happened to run. This is a **different rule** from the retired case that
+/// `a_retired_entitys_external_id_is_re_ingestible` covers — that one passes unmoved when
+/// `established_collisions` is made to collide on a still-deleted holder, and this one does not.
+///
+/// **Mutations this kills:** retiring `D₀` wholesale (all three retire, which is the r3
+/// fail-open); leaving the carry-forward set empty; building it from the plan rather than from the
+/// live manifest at publication (the flush's four artefacts are not in the plan, so nothing is
+/// carried and all retire); and colliding a re-ingest against a deleted holder.
 ///
 /// **What it does *not* kill, verified rather than assumed: dropping either single artefact kind.**
 /// A flush publishes a segment, a tier, a run and a locator extent *together, over one entity
-/// range*, so end to end the segment adder and the locator adder each cover `doomed` on their own
-/// and removing either leaves this case green — checked by running both mutations. That is not a
-/// hole in the rule, it is the reason the rule is stated over the whole carry-forward set; the
-/// per-artefact independence is where a fixture can actually separate them, in `compact.rs`'s
-/// `none_of_obligation_2bs_three_shapes_retires`, which gives one flush only a segment and another
-/// only a locator extent. Read the two together.
+/// range*, so end to end the segment adder and the locator adder each cover both protected
+/// entities on their own and removing either leaves this case green — checked by running both
+/// mutations. That is not a hole in the rule, it is the reason the rule is stated over the whole
+/// carry-forward set; the per-artefact independence is where a fixture can actually separate them,
+/// in `compact.rs`'s `none_of_obligation_2bs_three_shapes_retires`, which gives one flush only a
+/// segment and another only a locator extent. Read the two together.
 #[test]
 fn a_deletion_a_carried_forward_segment_still_names_does_not_retire() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1481,11 +1512,21 @@ fn a_deletion_a_carried_forward_segment_still_names_does_not_retire() {
     // buffer at its own deny apply, so no flush will ever write a row for it.
     let a = ingest(&engine, b"a".to_vec(), "a").expect("ingest is accepted");
     let doomed = ingest(&engine, b"doomed".to_vec(), "doomed").expect("ingest is accepted");
+    // **A zero-term item, deleted the same way.** No tier names it — it has no postings to hold —
+    // so what stands between it and a fail-open retirement is the carry-forward set's coverage of
+    // its *entity*, through the run and locator extent the same flush publishes. This is the shape
+    // obligation 2b was added for, and it never ran end to end before.
+    let zero_term = ingest_with_descriptors(&engine, b"zero-term".to_vec(), "zero-term", &[])
+        .expect("accepted");
     let c = ingest(&engine, b"c".to_vec(), "c").expect("ingest is accepted");
     assert_eq!(doomed.raw(), a.raw() + 1);
-    assert_eq!(c.raw(), doomed.raw() + 1);
+    assert_eq!(zero_term.raw(), doomed.raw() + 1);
+    assert_eq!(c.raw(), zero_term.raw() + 1);
     engine
         .accept_change(doomed, ChangeOp::Delete)
+        .expect("a delete is accepted");
+    engine
+        .accept_change(zero_term, ChangeOp::Delete)
         .expect("a delete is accepted");
 
     // A second deletion, of an entity the base holds and nothing carries forward: the fold removes
@@ -1495,7 +1536,7 @@ fn a_deletion_a_carried_forward_segment_still_names_does_not_retire() {
     engine
         .accept_change(folded, ChangeOp::Delete)
         .expect("a delete is accepted");
-    assert_eq!(engine.overlay_depth(), 2);
+    assert_eq!(engine.overlay_depth(), 3);
 
     // One tick dispatches the flush of `[a, c]` and then the fold, in that order — so the fold's
     // snapshot predates the flush's publication and the two overlap for real. The hold is only
@@ -1532,14 +1573,19 @@ fn a_deletion_a_carried_forward_segment_still_names_does_not_retire() {
 
     assert_eq!(
         engine.overlay_depth(),
-        1,
-        "one deletion retired and one did not: `executed = {{ e ∈ D₀ : no carried-forward \
-         artefact names e }}`"
+        2,
+        "two deletions were carried forward and one was not: `executed = {{ e ∈ D₀ : no \
+         carried-forward artefact names e }}`"
     );
     assert!(
         engine.generation().overlay.is_deleted(doomed),
         "the entity a carried-forward segment's declared range names keeps its tombstone for \
          another round — fail-closed, and the next fold takes it"
+    );
+    assert!(
+        engine.generation().overlay.is_deleted(zero_term),
+        "and so does the zero-term one, which no tier could have named: the rule is stated over \
+         the carry-forward set, not over the postings"
     );
     assert!(
         !engine.generation().overlay.is_deleted(folded),
@@ -1551,6 +1597,36 @@ fn a_deletion_a_carried_forward_segment_still_names_does_not_retire() {
     assert_eq!(visible(&engine, &session), N_ITEMS + 1);
     assert_eq!(engine.resolve_external_id(b"a").unwrap(), Some(a));
     assert_eq!(engine.resolve_external_id(b"c").unwrap(), Some(c));
+
+    // **And the re-ingest 2b's own text requires, which this case never attempted.** A protected
+    // entity keeps its tombstone, and a tombstone must not become a reservation on the external
+    // id: decision 0047 makes an edit a delete followed by a re-ingest, so a deleted holder
+    // blocking the re-ingest would make every edit of a mid-fold deletion fail with a 409 until
+    // some later fold happened to run. The new item is a *different* entity — the id is not
+    // recycled (I9) — and the old one stays deleted.
+    for (external_id, deleted) in [
+        (b"doomed".to_vec(), doomed),
+        (b"zero-term".to_vec(), zero_term),
+    ] {
+        // A distinct batch label per re-ingest: the two calls share an idempotency digest, so one
+        // label would make the second a *replay* of the first and return its ids unchanged.
+        let batch = format!("re-ingest-{}", String::from_utf8_lossy(&external_id));
+        let reborn = ingest(&engine, external_id.clone(), &batch)
+            .expect("a re-ingest of a protected entity's external id succeeds, never 409s");
+        assert_ne!(
+            reborn, deleted,
+            "the re-ingest takes a fresh entity id; I9 never reissues the deleted one"
+        );
+        assert!(
+            engine.generation().overlay.is_deleted(deleted),
+            "and the re-ingest does not resurrect the entity that was deleted"
+        );
+        assert_eq!(
+            engine.resolve_external_id(&external_id).unwrap(),
+            Some(reborn),
+            "the external id now resolves to the new entity"
+        );
+    }
 }
 
 /// **The new `MANIFEST.json`'s `entity_id_high_water` is the *snapshot's* entity space, not the

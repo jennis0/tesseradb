@@ -2284,7 +2284,8 @@ impl std::fmt::Display for PublishGeometryError {
         match self {
             PublishGeometryError::Refused(refused) => write!(f, "{refused}"),
             PublishGeometryError::NoExecutor => f.write_str(
-                "this engine has no write executor, and a geometry publication is a swap on that                  thread (lifecycle §1.3)",
+                "this engine has no write executor, and a geometry publication is a swap on that \
+                 thread (lifecycle §1.3)",
             ),
             PublishGeometryError::PrefixNotCommitted { offered, current } => write!(
                 f,
@@ -6750,7 +6751,9 @@ impl Executor {
         }
         if self.wal.is_poisoned() || !self.may_publish() {
             tracing::warn!(
-                "ALARM: deny state is unpublished and this node is poisoned or diverged, so it                  will not write a side-manifest. The dispositions are in force and WAL-durable;                  what is degraded is the restore path, until the node recovers or restarts"
+                "ALARM: deny state is unpublished and this node is poisoned or diverged, so it \
+                 will not write a side-manifest. The dispositions are in force and WAL-durable; \
+                 what is degraded is the restore path, until the node recovers or restarts"
             );
             return;
         }
@@ -6886,7 +6889,8 @@ impl Executor {
             self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
                 error = %e,
-                "ALARM: a completed flush's side-manifest could not be committed; its files are                  orphans, the buffer is retained, and the next tick will re-plan"
+                "ALARM: a completed flush's side-manifest could not be committed; its files are \
+                 orphans, the buffer is retained, and the next tick will re-plan"
             );
             return;
         }
@@ -7010,7 +7014,8 @@ impl Executor {
         }
         if !self.may_publish() {
             tracing::warn!(
-                "this node's overlay has diverged from its durable WAL, so it rotates nothing;                  the log grows until an operator restarts it"
+                "this node's overlay has diverged from its durable WAL, so it rotates nothing; \
+                 the log grows until an operator restarts it"
             );
             return;
         }
