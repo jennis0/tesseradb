@@ -27,6 +27,7 @@ use tessera_lifecycle::wal::{ChangeOp, WalError};
 use tessera_plugin::{Descriptor, Plugin, PluginError};
 use tessera_store::manifest::CurrentPointer;
 use tessera_store::read::open_bundle;
+use tessera_store::vocabulary::Vocabularies;
 use tessera_store::{Bundle, StoreError};
 use tessera_types::{EntityId, IdentityError, IdentityKey, TermId, TesseraId};
 
@@ -590,6 +591,29 @@ fn initial_deny_of(bundle: &Bundle) -> Vec<(EntityId, ChangeOp)> {
     out
 }
 
+/// The live category bindings, seeded from every durable home the bundle carries
+/// (per-point-attributes §3.4).
+///
+/// **`MANIFEST.vocabularies` plus every partition's `vocabulary_extensions`, before WAL replay.**
+/// The seed's completeness is the never-reuse invariant: a draw that misses a home lands on a code
+/// that already colours rows, and every functional test over fresh state still passes. This is the
+/// loader half of honouring `vocabulary_extensions` — a manifest that opened and whose bindings
+/// went nowhere would serve rows whose codes no key explains, and would re-mint those codes for
+/// other keys.
+fn initial_vocabularies_of(bundle: &Bundle) -> Result<Vocabularies> {
+    let extensions: Vec<_> = bundle
+        .partitions
+        .values()
+        .flat_map(|partition| partition.manifest.vocabulary_extensions.iter().cloned())
+        .collect();
+    Vocabularies::seed(
+        &bundle.manifest.vocabularies,
+        &bundle.manifest.declared_scalars,
+        &extensions,
+    )
+    .map_err(|e| EngineError::Malformed(e.to_string()))
+}
+
 impl Engine {
     /// This engine's resolved configuration.
     ///
@@ -714,6 +738,7 @@ impl Engine {
         // `deny` and `tombstones` (`HONOURED_STATE`), which means acting on them here. A manifest
         // that opened and whose deny state went nowhere would serve every entity it names.
         let initial_deny = initial_deny_of(&bundle);
+        let vocabularies = Arc::new(initial_vocabularies_of(&bundle)?);
         // **The allocator floor comes from the side-manifest, never from the build manifest
         // alone.** Every flush raises `SegmentsManifest::entity_id_high_water` past the ids it
         // consumed, while `MANIFEST.json`'s value is frozen at build. Seeding from the build value
@@ -792,6 +817,7 @@ impl Engine {
             overlay_version: 0,
             overlay: Arc::new(overlay),
             buffer: Arc::new(buffer),
+            vocabularies,
             denied,
         })));
 

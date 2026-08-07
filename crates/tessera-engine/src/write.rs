@@ -3738,6 +3738,7 @@ impl Executor {
 
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
+            vocabularies: Arc::clone(&live.vocabularies),
             segments_version,
             // A merge moves neither, and both are the live values — see `MergeSpec::watermark`.
             watermark: live.watermark,
@@ -4844,6 +4845,7 @@ impl Executor {
 
         let next = Generation {
             prefix: live.prefix.clone(),
+            vocabularies: Arc::clone(&live.vocabularies),
             // **Unchanged, and this is the whole of D2.** Row space did not move, so no
             // projection is stale and no cache key may rotate.
             segments_version: live.segments_version,
@@ -6188,6 +6190,7 @@ impl Executor {
             overlay_version: generation.overlay_version + 1,
             buffer: Arc::new(buffer),
             prefix: generation.prefix.clone(),
+            vocabularies: Arc::clone(&generation.vocabularies),
             segments_version: generation.segments_version,
             watermark: generation.watermark,
             bundle: Arc::clone(&generation.bundle),
@@ -6330,6 +6333,7 @@ impl Executor {
             overlay_version: generation.overlay_version + 1,
             overlay: Arc::new(overlay),
             prefix: generation.prefix.clone(),
+            vocabularies: Arc::clone(&generation.vocabularies),
             segments_version: generation.segments_version,
             watermark: generation.watermark,
             bundle: Arc::clone(&generation.bundle),
@@ -6547,6 +6551,7 @@ impl Executor {
 
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
+            vocabularies: Arc::clone(&live.vocabularies),
             segments_version,
             watermark,
             bundle: next_bundle,
@@ -6771,6 +6776,7 @@ impl Executor {
 
         let next = Generation {
             prefix,
+            vocabularies: Arc::clone(&previous.vocabularies),
             segments_version,
             watermark,
             bundle,

@@ -28,6 +28,7 @@ use arc_swap::ArcSwap;
 
 use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use tessera_lifecycle::{IngestBuffer, Overlay};
+use tessera_store::vocabulary::Vocabularies;
 use tessera_store::Bundle;
 
 pub use cancel::CancelToken;
@@ -171,6 +172,21 @@ pub struct Generation {
     pub overlay_version: u64,
     pub overlay: Arc<Overlay>,
     pub buffer: Arc<IngestBuffer>,
+    /// The live category bindings: key → code per vocabulary, plus the assigned-code set that makes
+    /// never-reuse hold (per-point-attributes §3.4).
+    ///
+    /// **On the generation, because a mint publishes.** A novel key acquires its code at a commit
+    /// window's close and becomes durable in the same fsync as the rows that use it, so the
+    /// bindings grow exactly when the buffer does and have to be republished alongside it — the
+    /// same reason `dict` lives here. A request that loads one generation pointer gets the buffer,
+    /// the geometry and the bindings that agree.
+    ///
+    /// **Read-only here; the executor owns the authoritative copy.** Minting is serial by
+    /// construction (write-path §1.1) and this is a published snapshot of it, exactly as `overlay`
+    /// is of the live overlay. A handler resolving a key through this may find it bound or not; it
+    /// must never mint, because two handlers racing one novel key would draw two codes for it and
+    /// split its rows between them.
+    pub vocabularies: Arc<Vocabularies>,
     /// **The deny mask**: per slice, the row-space image of `deleted ∪ suppressed`, subtracted
     /// from every composed mask (I1).
     ///

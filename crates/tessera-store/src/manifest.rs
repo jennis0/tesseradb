@@ -368,11 +368,12 @@ pub struct DenyEntry {
 /// set (§3.3) — verbatim being the whole rule, since a fold that re-derived, re-sorted or
 /// re-numbered would recolour the corpus with nothing to notice.
 ///
-/// **⊘ Defined and not yet written or honoured** ([#82](https://github.com/jennis0/tessera-index/issues/82)).
-/// Nothing mints between builds yet, so every manifest carries this empty and no reader needs to
-/// act on it. The name joins [`HONOURED_STATE`] in the same change as the loader that seeds
-/// [`crate::vocabulary::VocabularyMinter`] from it — naming it earlier would make every manifest
-/// carrying a binding unready, and naming it later would serve rows whose codes have no key.
+/// Honoured: the loader seeds [`crate::vocabulary::Vocabularies`] from this before WAL replay, so a
+/// binding minted between builds survives a restart and stays out of the next draw.
+///
+/// **⊘ Written by nobody yet** ([#82](https://github.com/jennis0/tessera-index/issues/82)): nothing
+/// mints between builds until the commit window does, so every manifest currently carries this
+/// empty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VocabularyExtension {
     /// The [`ManifestVocabulary::name`] these values extend.
@@ -486,7 +487,7 @@ pub struct SegmentsManifest {
 /// correctness. Note the deliberate asymmetry with this module's `#[derive(Deserialize)]`
 /// without `deny_unknown_fields`: an unknown *JSON* field is ignored so a newer writer can add
 /// one, but a **known** field carrying state this reader cannot act on is not.
-pub const HONOURED_STATE: &[&str] = &["deltas", "deny", "tombstones"];
+pub const HONOURED_STATE: &[&str] = &["deltas", "deny", "tombstones", "vocabulary_extensions"];
 
 /// The subset of state fields a manifest carries **because a deny was accepted** (contracts
 /// §2.3's publication rule: "any accepted deny-disposition change (delete, suppress) triggers
@@ -569,6 +570,10 @@ impl SegmentsManifest {
             ("tombstones", !self.tombstones.is_empty()),
             ("deny", !self.deny.is_empty()),
             ("deltas", !self.deltas.is_empty()),
+            (
+                "vocabulary_extensions",
+                !self.vocabulary_extensions.is_empty(),
+            ),
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
@@ -801,10 +806,12 @@ mod tests {
     fn every_honoured_field_names_code_that_acts_on_it() {
         assert_eq!(
             HONOURED_STATE,
-            ["deltas", "deny", "tombstones"],
+            ["deltas", "deny", "tombstones", "vocabulary_extensions"],
             "deltas: `build_fragment_with_deltas` unions every live tier into a fragment. \
              deny/tombstones: the loader seeds the initial overlay from them and WAL replay \
-             unions on top"
+             unions on top. vocabulary_extensions: the loader seeds the live \
+             `vocabulary::Vocabularies` from them before replay, which is what makes a minted \
+             code survive a restart and what keeps it out of the next draw"
         );
     }
 

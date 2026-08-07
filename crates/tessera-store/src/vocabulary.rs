@@ -31,7 +31,9 @@ use rand::RngCore;
 
 use tessera_spatial::tiler::ScalarType;
 
-use crate::manifest::{ManifestVocabulary, ManifestVocabularyValue};
+use crate::manifest::{
+    DeclaredScalar, ManifestVocabulary, ManifestVocabularyValue, VocabularyExtension,
+};
 
 /// The reserved *absent* code (§3.6). Never drawn and never in a value block, so a row carrying no
 /// value for a column is distinguishable from one carrying the first value.
@@ -341,6 +343,199 @@ impl VocabularyMinter {
     }
 }
 
+/// Why a bundle's bindings could not be assembled into a live view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeedError {
+    /// Two durable homes disagree about a binding. Corruption of acked state — see
+    /// [`BindingConflict`].
+    Conflict(BindingConflict),
+    /// A column names a vocabulary the manifest does not carry. Its codes would decode to nothing,
+    /// so the bundle does not open rather than serving marks of unknowable colour.
+    UndeclaredVocabulary { column: String, vocabulary: String },
+    /// Two columns share a vocabulary at different widths. One code space, and one of the columns
+    /// cannot hold the other's codes (§3.9) — caught at build, so reaching it means a hand-edited
+    /// or corrupt manifest.
+    WidthDisagreement {
+        vocabulary: String,
+        column: String,
+        width: ScalarType,
+        other_width: ScalarType,
+    },
+    /// An extension names a vocabulary `MANIFEST.vocabularies` does not carry. The fold folds
+    /// extensions into that table by name, so a name with no home would be dropped at the next
+    /// fold and every row carrying its codes would lose its key.
+    ExtensionWithoutVocabulary { vocabulary: String },
+}
+
+impl std::fmt::Display for SeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SeedError::Conflict(c) => write!(f, "{c}"),
+            SeedError::UndeclaredVocabulary { column, vocabulary } => write!(
+                f,
+                "column '{column}' names vocabulary '{vocabulary}', which MANIFEST.vocabularies \
+                 does not carry. Its codes decode to nothing, so this bundle does not open"
+            ),
+            SeedError::WidthDisagreement {
+                vocabulary,
+                column,
+                width,
+                other_width,
+            } => write!(
+                f,
+                "vocabulary '{vocabulary}' is shared by columns declared {} and {} (at '{column}'). \
+                 A shared vocabulary is one code space, and one column cannot hold the other's \
+                 codes (per-point-attributes §3.9)",
+                other_width.arrow_type_name(),
+                width.arrow_type_name()
+            ),
+            SeedError::ExtensionWithoutVocabulary { vocabulary } => write!(
+                f,
+                "SEGMENTS vocabulary_extensions carries '{vocabulary}', which \
+                 MANIFEST.vocabularies does not declare. The fold folds extensions in by name, so \
+                 these bindings have no home to be folded into"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SeedError {}
+
+impl From<BindingConflict> for SeedError {
+    fn from(c: BindingConflict) -> Self {
+        SeedError::Conflict(c)
+    }
+}
+
+/// Every vocabulary the bundle declares, seeded from its durable homes.
+///
+/// **Seeded before WAL replay, and replay's mints apply over the seed** — the established
+/// seed-before-replay order (contracts §2.3, and the deny seeding beside it). Bindings are
+/// append-only and never rebound, so seed-then-replay is order-insensitive except for conflicts,
+/// which refuse.
+///
+/// **Its completeness *is* the never-reuse invariant.** Every home must be represented before the
+/// first draw; see this module's header.
+#[derive(Debug, Clone, Default)]
+pub struct Vocabularies {
+    by_name: BTreeMap<String, VocabularyMinter>,
+}
+
+impl Vocabularies {
+    /// Assemble the live view from a bundle's `MANIFEST.json` and the served
+    /// `SEGMENTS-<n>.json`'s extensions.
+    ///
+    /// The width comes from the `declared_scalars` entry that names the vocabulary, not from the
+    /// vocabulary itself: a value set is a set of keys and codes, and what bounds the code space is
+    /// the column that stores them.
+    pub fn seed(
+        vocabularies: &[ManifestVocabulary],
+        declared_scalars: &[DeclaredScalar],
+        extensions: &[VocabularyExtension],
+    ) -> std::result::Result<Self, SeedError> {
+        let mut widths: BTreeMap<&str, (ScalarType, &str)> = BTreeMap::new();
+        for scalar in declared_scalars {
+            let Some(name) = scalar.vocabulary.as_deref() else {
+                continue;
+            };
+            if !vocabularies.iter().any(|v| v.name == name) {
+                return Err(SeedError::UndeclaredVocabulary {
+                    column: scalar.name.clone(),
+                    vocabulary: name.to_string(),
+                });
+            }
+            match widths.get(name) {
+                Some(&(width, _)) if width != scalar.arrow_type => {
+                    return Err(SeedError::WidthDisagreement {
+                        vocabulary: name.to_string(),
+                        column: scalar.name.clone(),
+                        width: scalar.arrow_type,
+                        other_width: width,
+                    });
+                }
+                _ => {
+                    widths.insert(name, (scalar.arrow_type, scalar.name.as_str()));
+                }
+            }
+        }
+
+        let mut by_name = BTreeMap::new();
+        for vocabulary in vocabularies {
+            // A vocabulary no column names is carried but unusable; `u32` is the widest domain, so
+            // a width that is never consulted can only fail to exhaust, never to collide.
+            let width = widths
+                .get(vocabulary.name.as_str())
+                .map(|&(w, _)| w)
+                .unwrap_or(ScalarType::U32);
+            let mut minter = VocabularyMinter::new(vocabulary.name.clone(), width);
+            minter.seed_manifest(vocabulary)?;
+            by_name.insert(vocabulary.name.clone(), minter);
+        }
+
+        for extension in extensions {
+            let minter = by_name.get_mut(&extension.name).ok_or_else(|| {
+                SeedError::ExtensionWithoutVocabulary {
+                    vocabulary: extension.name.clone(),
+                }
+            })?;
+            for value in &extension.values {
+                minter.seed_value(&value.key, value.code)?;
+            }
+        }
+        Ok(Vocabularies { by_name })
+    }
+
+    pub fn get(&self, name: &str) -> Option<&VocabularyMinter> {
+        self.by_name.get(name)
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut VocabularyMinter> {
+        self.by_name.get_mut(name)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+
+    /// The extension set to write into the next `SEGMENTS-<n>.json`: every live binding that
+    /// `MANIFEST.vocabularies` does not already carry.
+    ///
+    /// **Append, never restate.** The caller starts from the manifest it is extending and unions
+    /// this in, so a gap in this derivation can only fail to *add* a binding — never delete one
+    /// the previous manifest held. That asymmetry is the whole reason `vocabulary_extensions` is
+    /// carried forward where `deny` is restated: `deny` must be able to shrink and a binding must
+    /// not.
+    pub fn extensions_beyond(
+        &self,
+        vocabularies: &[ManifestVocabulary],
+    ) -> Vec<VocabularyExtension> {
+        let mut out = Vec::new();
+        for (name, minter) in &self.by_name {
+            let built: BTreeSet<&str> = vocabularies
+                .iter()
+                .find(|v| &v.name == name)
+                .map(|v| v.values.iter().map(|value| value.key.as_str()).collect())
+                .unwrap_or_default();
+            let values: Vec<ManifestVocabularyValue> = minter
+                .bindings()
+                .filter(|(key, _)| !built.contains(key))
+                .map(|(key, code)| ManifestVocabularyValue {
+                    key: key.to_string(),
+                    code,
+                    label: None,
+                })
+                .collect();
+            if !values.is_empty() {
+                out.push(VocabularyExtension {
+                    name: name.clone(),
+                    values,
+                });
+            }
+        }
+        out
+    }
+}
+
 /// The highest usable code at `width` — also the mask that makes a raw `u32` draw uniform over the
 /// width's domain. Code 0 is reserved, so the count of usable codes equals this value.
 fn usable_max(width: ScalarType) -> u32 {
@@ -530,6 +725,145 @@ mod tests {
                 code: 4711,
                 held: HeldBinding::CodeUnder("k9-unit".to_string()),
             })
+        );
+    }
+
+    fn declared(name: &str, width: ScalarType, vocabulary: Option<&str>) -> DeclaredScalar {
+        DeclaredScalar {
+            name: name.to_string(),
+            arrow_type: width,
+            vocabulary: vocabulary.map(str::to_string),
+        }
+    }
+
+    fn vocabulary(name: &str, values: &[(&str, u32)]) -> ManifestVocabulary {
+        ManifestVocabulary {
+            name: name.to_string(),
+            listing: "per_viewer".to_string(),
+            values: values
+                .iter()
+                .map(|(key, code)| ManifestVocabularyValue {
+                    key: key.to_string(),
+                    code: *code,
+                    label: None,
+                })
+                .collect(),
+            reserved: Vec::new(),
+        }
+    }
+
+    /// The width bounding a vocabulary's code space is the *column's*, not the vocabulary's — a
+    /// value set is keys and codes, and what bounds the space is what stores it.
+    #[test]
+    fn a_vocabularys_width_comes_from_the_column_that_stores_it() {
+        let v = Vocabularies::seed(
+            &[vocabulary("departments", &[("ops", 9)])],
+            &[declared("department", ScalarType::U8, Some("departments"))],
+            &[],
+        )
+        .expect("a consistent bundle seeds");
+        assert_eq!(v.get("departments").unwrap().width(), ScalarType::U8);
+        assert_eq!(v.get("departments").unwrap().code_of("ops"), Some(9));
+    }
+
+    /// §3.9: a shared vocabulary is one code space, so two widths over it is one column unable to
+    /// hold the other's codes. Caught at build; reaching it means a hand-edited manifest.
+    #[test]
+    fn two_widths_over_one_vocabulary_refuse_to_open() {
+        let err = Vocabularies::seed(
+            &[vocabulary("shared", &[])],
+            &[
+                declared("a", ScalarType::U8, Some("shared")),
+                declared("b", ScalarType::U16, Some("shared")),
+            ],
+            &[],
+        )
+        .expect_err("one code space cannot have two widths");
+        assert!(matches!(err, SeedError::WidthDisagreement { .. }), "{err}");
+    }
+
+    /// A column whose vocabulary is missing would store codes that decode to nothing. The bundle
+    /// does not open, rather than serving marks of unknowable colour.
+    #[test]
+    fn a_column_naming_no_vocabulary_refuses_to_open() {
+        let err = Vocabularies::seed(
+            &[],
+            &[declared("department", ScalarType::U8, Some("departments"))],
+            &[],
+        )
+        .expect_err("a category with no value set is not openable");
+        assert!(
+            matches!(err, SeedError::UndeclaredVocabulary { .. }),
+            "{err}"
+        );
+    }
+
+    /// The extension set written to the next manifest is what the build does *not* already carry.
+    /// It is unioned into the manifest being extended, never used to replace it — so a gap here can
+    /// only fail to add a binding, never delete one.
+    #[test]
+    fn extensions_carry_only_what_the_build_does_not() {
+        let built = vec![vocabulary("departments", &[("ops", 9)])];
+        let mut v = Vocabularies::seed(
+            &built,
+            &[declared("department", ScalarType::U16, Some("departments"))],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            v.extensions_beyond(&built).is_empty(),
+            "a bundle straight out of the build extends nothing"
+        );
+
+        let minted = v.get_mut("departments").unwrap().mint("k9-unit").unwrap();
+        let extensions = v.extensions_beyond(&built);
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions[0].name, "departments");
+        assert_eq!(
+            extensions[0]
+                .values
+                .iter()
+                .map(|value| (value.key.as_str(), value.code))
+                .collect::<Vec<_>>(),
+            vec![("k9-unit", minted.code())],
+            "only the minted binding — the built one already lives in MANIFEST.vocabularies"
+        );
+
+        // Seeding a fresh view from the manifest plus those extensions recovers the same state,
+        // which is what makes a restart lossless.
+        let reopened = Vocabularies::seed(
+            &built,
+            &[declared("department", ScalarType::U16, Some("departments"))],
+            &extensions,
+        )
+        .expect("the two homes agree");
+        assert_eq!(reopened.get("departments").unwrap().code_of("ops"), Some(9));
+        assert_eq!(
+            reopened.get("departments").unwrap().code_of("k9-unit"),
+            Some(minted.code())
+        );
+    }
+
+    /// An extension whose vocabulary the build does not declare has no home to be folded into, so
+    /// the next fold would drop it and every row carrying its codes would lose its key.
+    #[test]
+    fn an_extension_with_no_vocabulary_refuses_to_open() {
+        let err = Vocabularies::seed(
+            &[vocabulary("departments", &[])],
+            &[declared("department", ScalarType::U8, Some("departments"))],
+            &[VocabularyExtension {
+                name: "ghosts".to_string(),
+                values: vec![ManifestVocabularyValue {
+                    key: "k".to_string(),
+                    code: 4,
+                    label: None,
+                }],
+            }],
+        )
+        .expect_err("an extension needs a vocabulary to extend");
+        assert!(
+            matches!(err, SeedError::ExtensionWithoutVocabulary { .. }),
+            "{err}"
         );
     }
 

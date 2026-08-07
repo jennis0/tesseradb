@@ -684,6 +684,7 @@ mod tests {
         let (fragments, external_index) = crate::synthetic_generation_parts();
         Generation {
             prefix: "v00000".to_string(),
+            vocabularies: Arc::new(tessera_store::vocabulary::Vocabularies::default()),
             segments_version: 0,
             watermark: 0,
             bundle: Arc::new(Bundle {
