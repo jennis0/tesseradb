@@ -772,7 +772,8 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
     assert_eq!(
         masked_total(&engine, &sparse),
         expected_sparse,
-        "and it moves the sparse principal's total by nothing — the suppressed row was never in          its set, so a deny that reached a different entity shows up here"
+        "and it moves the sparse principal's total by nothing — the suppressed row was never in \
+         its set, so a deny that reached a different entity shows up here"
     );
     let (sx, sy) = (suppressed.x as f64, suppressed.y as f64);
     let bbox = [

@@ -627,7 +627,8 @@ fn a_fold_discards_when_a_merge_published_under_it_and_the_state_is_re_plannable
     let before = engine.write_executor_stats();
     assert_eq!(
         before.merges, 0,
-        "nothing has merged yet — the base segment is not selectable at this size, so three flush          segments are one short of `tier_width`"
+        "nothing has merged yet — the base segment is not selectable at this size, so three flush \
+         segments are one short of `tier_width`"
     );
 
     // Both hooks, and each opens a different half of the window. `fold_paused` holds the thread
@@ -1412,8 +1413,12 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     let bundle = open_bundle(&root).expect("the folded bundle opens");
     let partition = &bundle.partitions["default"];
     assert!(
-        partition.slices["s0"].row_space.row_of(mid_flight).is_some(),
-        "the post-snapshot deletion keeps its row: the fold's passes ran over `D₀`, which did not          name it"
+        partition.slices["s0"]
+            .row_space
+            .row_of(mid_flight)
+            .is_some(),
+        "the post-snapshot deletion keeps its row: the fold's passes ran over `D₀`, which did not \
+         name it"
     );
     assert!(
         partition.slices["s0"].row_space.row_of(folded).is_none(),
@@ -1421,7 +1426,8 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     );
     assert!(
         partition.manifest.tombstones.contains(&mid_flight.raw()),
-        "its id is in the new manifest's tombstones — the seed a restart reads, and the only thing          still hiding it: tombstones is `live deleted − executed`, never the plan's set"
+        "its id is in the new manifest's tombstones — the seed a restart reads, and the only thing \
+         still hiding it: tombstones is `live deleted − executed`, never the plan's set"
     );
     assert!(
         !partition.manifest.tombstones.contains(&folded.raw()),
@@ -1436,7 +1442,8 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     assert_eq!(
         visible(&engine, &after),
         baseline - 2,
-        "and it is still invisible after the flip — throughout, with no window in which the fold's          own publication re-exposed it"
+        "and it is still invisible after the flip — throughout, with no window in which the fold's \
+         own publication re-exposed it"
     );
 }
 

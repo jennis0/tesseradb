@@ -192,7 +192,11 @@ impl fmt::Display for StoreError {
                 detail,
             } => write!(
                 f,
-                "SEGMENTS-{n}.json for partition '{partition}' carries deny-disposition state                  ({}) and its files did not verify: {detail}. The partition is unready. It is                  NOT stepped past to an older manifest, deliberately: that would re-expose every                  entity denied since the older one was written. Repair or re-sync the files this                  manifest names",
+                "SEGMENTS-{n}.json for partition '{partition}' carries deny-disposition state \
+                 ({}) and its files did not verify: {detail}. The partition is unready. It is \
+                 NOT stepped past to an older manifest, deliberately: that would re-expose every \
+                 entity denied since the older one was written. Repair or re-sync the files this \
+                 manifest names",
                 fields.join(", ")
             ),
             StoreError::MalformedBundle { detail } => write!(f, "malformed bundle: {detail}"),
