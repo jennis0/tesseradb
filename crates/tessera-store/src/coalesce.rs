@@ -39,16 +39,20 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
+use std::sync::Arc;
 
 use arrow::array::{Array, BinaryArray, UInt32Array};
-use arrow::ipc::reader::FileReader;
+use arrow::buffer::Buffer;
 use croaring::Bitmap;
+use memmap2::Mmap;
 
 use tessera_types::ROW_ABSENT;
 
 use crate::error::{Result, StoreError};
 use crate::flush::write_u32_array;
 use crate::locator::LocatorWriter;
+use crate::read::decode_single_batch;
 use crate::write::RunWriter;
 
 /// Coalesce `runs` — prefix-relative order, **oldest first** — into one run and one locator
@@ -115,63 +119,76 @@ pub(crate) fn open_runs(paths: &[PathBuf]) -> Result<Vec<RunCursor>> {
 /// bytes, which is the order [`crate::flush::write_external_id_run`] writes and the sidecar
 /// verifies at open.
 pub(crate) struct RunCursor {
-    batches: Vec<(BinaryArray, UInt32Array)>,
-    batch: usize,
+    ids: BinaryArray,
+    entities: UInt32Array,
     row: usize,
 }
 
 impl RunCursor {
+    /// **Mapped, not decoded**, which is compaction §3's *"every input is mmapped and uncompressed
+    /// by contract"* holding for this input as it already does for the others.
+    ///
+    /// This read the run through `arrow::ipc::reader::FileReader` and collected every batch into
+    /// the heap. For a coalesce that is bounded — the inputs are one round's runs — and for a
+    /// **fold** it is the whole corpus's external ids in one anonymous allocation, which probe P1
+    /// measured as the fold's peak: a resident set tracking its own output bytes, peaking inside
+    /// this pass and nowhere else. The read path never had the problem; `sidecar::load_validated`
+    /// has always mapped the same file and decoded it zero-copy, so this is the maintenance path
+    /// adopting the reader the query path already uses rather than a new construction.
+    ///
+    /// A run is **one** record batch by construction ([`crate::write::RunWriter::finish`] assembles
+    /// exactly one, over spools mapped as its values buffers), which is why a single-batch decoder
+    /// is sufficient rather than a simplification — the sidecar relies on the same property.
     fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-        let malformed = |e: arrow::error::ArrowError| StoreError::MalformedBundle {
-            detail: format!("external-ids.arrow at {}: {e}", path.display()),
-        };
-        let reader = FileReader::try_new(file, None).map_err(malformed)?;
-        let mut batches = Vec::new();
-        for batch in reader {
-            let batch = batch.map_err(malformed)?;
-            let ids = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .ok_or_else(|| StoreError::MalformedBundle {
-                    detail: "external-ids.arrow: column 0 is not binary".to_string(),
-                })?
-                .clone();
-            let entities = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| StoreError::MalformedBundle {
-                    detail: "external-ids.arrow: column 1 is not uint32".to_string(),
-                })?
-                .clone();
-            batches.push((ids, entities));
-        }
+        // SAFETY: identical justification to `ColumnsRef::load`'s mmap branch — `arc` outlives
+        // every `Buffer` built from it (captured as the buffer's `Allocation`), the mapping is
+        // valid for `len` bytes for its whole lifetime, and `memmap2::Mmap` never returns a null
+        // base pointer.
+        let mapping = unsafe { Mmap::map(&file) }.map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let len = mapping.len();
+        let arc: Arc<Mmap> = Arc::new(mapping);
+        let ptr = NonNull::new(arc.as_ptr() as *mut u8)
+            .expect("memmap2::Mmap never returns a null base pointer");
+        let buffer = unsafe { Buffer::from_custom_allocation(ptr, len, arc) };
+        let batch = decode_single_batch(&buffer, path)?;
+
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .ok_or_else(|| StoreError::MalformedBundle {
+                detail: "external-ids.arrow: column 0 is not binary".to_string(),
+            })?
+            .clone();
+        let entities = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .ok_or_else(|| StoreError::MalformedBundle {
+                detail: "external-ids.arrow: column 1 is not uint32".to_string(),
+            })?
+            .clone();
         Ok(RunCursor {
-            batches,
-            batch: 0,
+            ids,
+            entities,
             row: 0,
         })
     }
 
     fn peek(&self) -> Option<(&[u8], u32)> {
-        let (ids, entities) = self.batches.get(self.batch)?;
-        Some((ids.value(self.row), entities.value(self.row)))
+        (self.row < self.ids.len())
+            .then(|| (self.ids.value(self.row), self.entities.value(self.row)))
     }
 
     fn advance(&mut self) {
         self.row += 1;
-        while let Some((ids, _)) = self.batches.get(self.batch) {
-            if self.row < ids.len() {
-                return;
-            }
-            self.batch += 1;
-            self.row = 0;
-        }
     }
 }
 
@@ -185,7 +202,14 @@ pub(crate) fn merge_runs(
     entity_hi: u64,
     out_dir: &Path,
 ) -> Result<usize> {
-    merge_runs_core(cursors, entity_lo, entity_hi, out_dir, None, LocatorStorage::Buffered)
+    merge_runs_core(
+        cursors,
+        entity_lo,
+        entity_hi,
+        out_dir,
+        None,
+        LocatorStorage::Buffered,
+    )
 }
 
 /// The one keep-newest k-way merge, shared by [`merge_runs`] and [`fold_external_id_runs`] — **no
@@ -235,11 +259,13 @@ fn merge_runs_core(
             detail: format!("coalesce: entity span {entity_lo}..={entity_hi} is too wide"),
         })?;
 
+    // Cloned so the caller's cursors keep their positions. Both arrays are views over the run's
+    // mapping, so a clone is two refcount bumps and no bytes.
     let mut cursors: Vec<RunCursor> = cursors
         .iter()
         .map(|c| RunCursor {
-            batches: c.batches.clone(),
-            batch: c.batch,
+            ids: c.ids.clone(),
+            entities: c.entities.clone(),
             row: c.row,
         })
         .collect();

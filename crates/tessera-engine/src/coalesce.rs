@@ -47,7 +47,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tessera_authz::{coalesce_dict_extents, coalesce_delta_tiers, DeltaTier};
+use tessera_authz::{coalesce_delta_tiers, coalesce_dict_extents, DeltaTier};
 use tessera_store::coalesce_external_id_runs;
 use tessera_store::manifest::{DictExtent, FileDigest, LocatorExtent, SegmentsManifest};
 use tessera_store::merge::size_tier;
@@ -441,19 +441,11 @@ fn window_of<'a, T, K: PartialEq + 'a>(
         .map(|start| start..start + needle.len())
 }
 
+/// `tessera_store::digest_of` with this pass's error type — see `crate::flush::digest_of` for why
+/// there is one definition rather than the three there were.
 fn digest_of(path: &std::path::Path) -> Result<FileDigest, CoalesceFailed> {
-    use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path)
-        .map_err(|e| CoalesceFailed(format!("digest {}: {e}", path.display())))?;
-    let digest = Sha256::digest(&bytes);
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    Ok(FileDigest {
-        size: bytes.len() as u64,
-        sha256: hex,
-    })
+    tessera_store::digest_of(path)
+        .map_err(|e| CoalesceFailed(format!("digest {}: {e}", path.display())))
 }
 
 #[cfg(test)]
@@ -517,7 +509,12 @@ mod tests {
         };
         for i in 0..flushes {
             let seg = format!("partitions/{PARTITION}/slices/s0/segments/flush-{i}-1");
-            for name in ["delta.arrow", "external-ids.arrow", "ext-locator.u32", "terms-0.dict"] {
+            for name in [
+                "delta.arrow",
+                "external-ids.arrow",
+                "ext-locator.u32",
+                "terms-0.dict",
+            ] {
                 manifest.files.insert(format!("{seg}/{name}"), digest(1024));
             }
             manifest.deltas.push(format!("{seg}/delta.arrow"));
@@ -549,7 +546,9 @@ mod tests {
         let (manifest, build_files) = manifest_with(3);
         let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
         assert!(
-            !plan.runs.contains(&"entities/external-ids-0.arrow".to_string()),
+            !plan
+                .runs
+                .contains(&"entities/external-ids-0.arrow".to_string()),
             "the build's run: {:?}",
             plan.runs
         );

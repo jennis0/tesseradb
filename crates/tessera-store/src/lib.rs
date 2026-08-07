@@ -21,8 +21,8 @@ pub mod write;
 pub use coalesce::coalesce_external_id_runs;
 pub use coalesce::fold_external_id_runs;
 pub use error::{Result, StoreError};
+pub use flush::{digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRow};
 pub use fold::{fold_row_space, FoldRowSpaceOutput, FoldRowSpaceSpec, FoldSegmentInput};
-pub use flush::{write_flush_segment, FlushInput, FlushOutput, FlushRow};
 pub use manifest_write::{
     fsync_dirs, fsync_written, write_current, write_manifest_json, write_segments_manifest,
 };
