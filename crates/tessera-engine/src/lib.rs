@@ -8,8 +8,8 @@
 
 mod cache;
 pub mod cancel;
-mod compact;
 mod coalesce;
+mod compact;
 pub mod compose;
 mod flush;
 mod geometry;
@@ -35,7 +35,7 @@ pub use cancel::CancelToken;
 // parses `ingest.compaction_*` into one of these and hands it over in `EngineConfig`; the executor
 // is the only reader. The rest of `compact` stays private — what a fold *is* is this crate's
 // business, and when it runs is the deployment's.
-pub use compact::CompactionSchedule;
+pub use compact::{CompactionSchedule, PassCost};
 pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProjection};
 // The publication guard's refusal, which a publisher outside this crate must handle.
 // `check_publishable` itself stays private: whether a geometry may be published is this crate's

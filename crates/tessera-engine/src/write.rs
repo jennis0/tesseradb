@@ -298,6 +298,30 @@ pub struct ExecutorHealth {
     /// half of the same completion handshake a flush has, and set before the send for the same
     /// reason.
     pub(crate) fold_completed_pending: AtomicBool,
+    /// When the last fold **ended**, however it ended, as a unix second — 0 before the first one.
+    ///
+    /// **Written by the fold's own thread on both of its exits**, because the executor never sees
+    /// one of them: a failure inside `execute` reaches no `publish_fold` and would otherwise leave
+    /// the schedule believing the attempt was still the one that started. It exists for the
+    /// interval floor's second half — see [`Executor::fold_floor_from`], where the rule it serves
+    /// is stated.
+    pub(crate) fold_ended_unix: AtomicU64,
+    /// The last fold's wall clock in seconds, and the highest resident set its own staircase saw
+    /// (`compact::PassCost`) — the two gauges `/control/status` publishes for the most expensive
+    /// operation in the system. Both are 0 before the first fold.
+    ///
+    /// **The RSS figure is a staircase maximum, not a peak**, and the difference is not pedantry:
+    /// it is sampled at five pass boundaries, so a spike inside a pass is invisible to it. It is
+    /// what a deployment has, and probe P1 is what says how far under the true peak it sits.
+    pub(crate) last_fold_secs: AtomicU64,
+    pub(crate) last_fold_rss: AtomicU64,
+    /// The last fold's staircase, pass by pass — what the two gauges above are a reduction of.
+    ///
+    /// **The gauges alarm and this diagnoses**, which is why both exist: `last_fold_rss` says the
+    /// fold reached 9 GiB and this says which pass it reached it on, and only the second is
+    /// actionable. A `Mutex` rather than a fifth atomic because it is written once per fold, hours
+    /// apart, and read only by `/control/status`.
+    pub(crate) last_fold_passes: Mutex<Vec<crate::compact::PassCost>>,
     /// A fold has finished its passes and is **holding** at the test hook
     /// (`Engine::set_fold_paused_for_test`). Always `false` in a shipped build, where nothing ever
     /// sets the flag it waits on; it exists so a test can wait on the hold as a condition rather
@@ -615,6 +639,13 @@ pub struct ExecutorStats {
     /// retire, orphans are reclaimed, and the bundle returns to one segment per partition-slice".
     pub folds: u64,
     pub fold_failures: u64,
+    /// Whether a `POST /control/compact` is awaiting the next tick.
+    pub fold_requested: bool,
+    /// The last fold's wall clock in seconds and the highest resident set its pass staircase saw,
+    /// in bytes — see [`ExecutorHealth::last_fold_secs`] for what the second number is and is not.
+    /// Both 0 before the first fold.
+    pub last_fold_secs: u64,
+    pub last_fold_rss: u64,
     /// Whether a `POST /control/flush` is awaiting the next tick.
     pub flush_requested: bool,
     /// Whether this node's overlay has diverged from its durable WAL (§7.2). **Latching**: it
@@ -778,6 +809,10 @@ impl ExecutorHealth {
             fold_failures: AtomicU64::new(0),
             fold_requested: AtomicBool::new(false),
             fold_completed_pending: AtomicBool::new(false),
+            fold_ended_unix: AtomicU64::new(0),
+            last_fold_secs: AtomicU64::new(0),
+            last_fold_rss: AtomicU64::new(0),
+            last_fold_passes: Mutex::new(Vec::new()),
             fold_holding: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
             stage_nanos: Default::default(),
@@ -850,6 +885,15 @@ impl ExecutorHealth {
         self.wal_recoveries.load(Ordering::Relaxed)
     }
 
+    /// The last fold's staircase, pass by pass — empty before the first fold.
+    ///
+    /// **Separate from [`ExecutorStats`] rather than a field on it.** That struct is `Copy` and is
+    /// read on paths that take it per request; a `Vec` in it would make every one of those an
+    /// allocation for a figure only the operator plane wants, hours apart.
+    pub fn last_fold_passes(&self) -> Vec<crate::compact::PassCost> {
+        lock_recover(&self.last_fold_passes).clone()
+    }
+
     pub fn stats(&self) -> ExecutorStats {
         let work_submitted = self.work_submitted.load(Ordering::Relaxed);
         let work_completed = self.work_completed.load(Ordering::Relaxed);
@@ -886,6 +930,9 @@ impl ExecutorHealth {
             merge_failures: self.merge_failures.load(Ordering::Relaxed),
             folds: self.folds.load(Ordering::Relaxed),
             fold_failures: self.fold_failures.load(Ordering::Relaxed),
+            fold_requested: self.fold_requested.load(Ordering::SeqCst),
+            last_fold_secs: self.last_fold_secs.load(Ordering::Relaxed),
+            last_fold_rss: self.last_fold_rss.load(Ordering::Relaxed),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
         }
@@ -942,8 +989,10 @@ impl ExecutorHealth {
         #[cfg(feature = "bench-timing")]
         {
             let now = std::time::Instant::now();
-            self.stage_nanos[stage as usize]
-                .fetch_add(now.duration_since(mark.0).as_nanos() as u64, Ordering::Relaxed);
+            self.stage_nanos[stage as usize].fetch_add(
+                now.duration_since(mark.0).as_nanos() as u64,
+                Ordering::Relaxed,
+            );
             StageMark(now)
         }
         #[cfg(not(feature = "bench-timing"))]
@@ -1801,6 +1850,11 @@ impl WritePath {
         let wal = self.wal.take().ok_or(ExecutorStartError::AlreadyStarted)?;
         let wal_position_at_start = wal.position();
 
+        // **Compaction §7's startup sweep, before anything else and before the thread** — see
+        // `sweep_orphan_prefixes` for why both halves of that matter. `AlreadyStarted` is checked
+        // first, so a second `start_executor` on the same path cannot sweep a second time.
+        sweep_orphan_prefixes(&flush.bundle_root, &generation.load().prefix);
+
         let (work_tx, work_rx) = std::sync::mpsc::sync_channel(queue_bound);
         let (deny_tx, deny_rx) = std::sync::mpsc::channel();
         // Capacity one, and `try_send` that discards `Full`: a token means "something may be
@@ -1882,8 +1936,9 @@ impl WritePath {
                     fold_submit: fold_tx,
                     configured_merge_bytes: flush.configured_merge_bytes,
                     fold_paused: flush.fold_paused,
+                    fold_publication_paused: flush.fold_publication_paused,
                     compaction: flush.compaction,
-                    last_fold_attempt_unix: None,
+                    last_fold_start_unix: None,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
                     // Seeded from the opened WAL's position so a freshly started node does not
@@ -2656,6 +2711,22 @@ pub(crate) struct MaintenanceDeps {
     /// `Engine::set_fold_paused_for_test`, which is what lets a test land a flush inside a fold's
     /// flight. Always `false` in a shipped build.
     pub(crate) fold_paused: Arc<AtomicBool>,
+    /// Whether a **completed** fold is left undrained in its channel —
+    /// `Engine::set_fold_publication_paused_for_test`. Always `false` in a shipped build.
+    ///
+    /// **The other half of [`Self::fold_paused`], and it opens a different window.** That one holds
+    /// the fold thread *before* it clears `fold_in_flight`, so merge and coalesce are still
+    /// suspended and nothing can publish under it. This one lets the thread finish — the flag
+    /// clears, the suspension lifts — and stops the executor draining the result, which is the one
+    /// state in which a merge or coalesce can dispatch, publish, and leave the fold planned against
+    /// artefacts the live manifest no longer lists.
+    ///
+    /// That state is reachable in production and is not a contrivance: the fold thread clears
+    /// `fold_in_flight` after its send, and an executor already inside `tick_if_due` reads the
+    /// cleared flag and dispatches. The window is microseconds wide there and every outcome is
+    /// fail-closed; what this makes is that same window deterministic, so compaction §12's
+    /// obligation 9 is a test rather than an argument.
+    pub(crate) fold_publication_paused: Arc<AtomicBool>,
     /// When a fold is dispatched with nobody asking for one — see
     /// [`crate::compact::CompactionSchedule`].
     pub(crate) compaction: crate::compact::CompactionSchedule,
@@ -2757,6 +2828,157 @@ fn unix_now() -> Option<u64> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .map(|elapsed| elapsed.as_secs())
+}
+
+/// Memory this process could take without reclaiming anything it needs, in bytes — the figure
+/// compaction §3's pre-flight compares its estimate against. `None` where unknowable.
+///
+/// **Two sources and the smaller wins**, because either can be the real bound: `MemAvailable` is
+/// the kernel's own estimate of what an allocation could get without swapping, already net of the
+/// page cache it would evict; a cgroup v2 `memory.max` is the ceiling a container is killed at, and
+/// it charges page cache against itself, so a node with 400 GiB of host RAM and a 16 GiB cgroup is
+/// bounded by the cgroup. Reading only the first is how a fold passes its pre-flight and is then
+/// OOM-killed by the container that always owned the answer.
+fn available_memory() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let available = meminfo
+        .lines()
+        .find(|line| line.starts_with("MemAvailable:"))
+        .and_then(|line| line.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map(|kib| kib * 1024)?;
+
+    // `memory.max` is "max" when unlimited, which parses to `None` and leaves `MemAvailable` as the
+    // answer — the same result as no cgroup at all.
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|cgroup| {
+            let path = cgroup
+                .lines()
+                .next()?
+                .split(':')
+                .nth(2)?
+                .trim_start_matches('/');
+            std::fs::read_to_string(format!("/sys/fs/cgroup/{path}/memory.max")).ok()
+        })
+        .and_then(|max| max.trim().parse::<u64>().ok());
+
+    Some(cgroup.map_or(available, |limit| limit.min(available)))
+}
+
+/// **Compaction §7's startup sweep**: delete every `v#####` tree under the bundle root that
+/// `CURRENT` does not name, once, before the executor thread is spawned.
+///
+/// # What it is cleaning up, and why nothing else could
+///
+/// Two residues, and neither has any other route out. A **discarded fold** leaves a complete
+/// prefix — five passes' worth of output, up to a bundle in size — under a name `CURRENT` never
+/// took; `next_prefix_name` steps *past* it by construction and the reclamation at a fold's tail
+/// takes only the prefix that fold itself superseded, so no later fold ever comes back for it. A
+/// **process that exits mid-fold, or between the `CURRENT` flip and the swap, or while a
+/// superseded prefix is still waiting on its last reader**, leaves the same thing. Without this
+/// each occurrence costs a bundle of disc until an operator notices, which is what made the
+/// interval floor on a *discarded* fold the only thing between one bad configuration value and a
+/// full device (compaction §8, §9).
+///
+/// # Why startup is the only safe time, and the executor the only safe caller
+///
+/// Mid-life, a prefix `CURRENT` does not name may still be one this process is serving: the live
+/// generation holds mappings into it until the last request finishes, which is exactly what
+/// [`Executor::pending_reclaim`] waits on. At the moment the write executor starts there is no such
+/// generation — nothing has been served, and the only prefix any mapping can name is the one
+/// `Engine::open` read from `CURRENT`. So "not live" and "not in use" coincide here and nowhere
+/// else.
+///
+/// **Called synchronously from `start_executor`, before the thread is spawned, and that is not a
+/// detail.** A directory that exists but is not yet committed is indistinguishable from an orphan —
+/// which is correct for a fold's output, since a fold cannot run before this does, and wrong for a
+/// prefix a *caller* is staging through `Engine::publish_rotated_prefix`. Running on the spawned
+/// thread leaves exactly that race: `start_write_executor` returns, the caller begins staging, and
+/// the sweep reads the directory between its creation and the `CURRENT` flip. Running here makes
+/// "the sweep has finished" something the caller can observe, by `start_write_executor` having
+/// returned.
+///
+/// **A writer's act, which is why it is not in `Engine::open`.** A node that has not started a write
+/// executor has not declared itself the bundle's writer, and deleting another process's superseded
+/// prefix from a read-only replica is not this crate's judgement to make. (It would in fact be safe
+/// — a POSIX mapping outlives its directory entry, the same argument compaction §8 makes for the
+/// fragment sweep, and a fresh open resolves through `CURRENT`, which is never swept — but "safe"
+/// is not "ours to do".)
+///
+/// # A swept name can be issued again, and that is not contracts §2.1's id reuse
+///
+/// `next_prefix_name` counts from the directory listing, so once an orphan `v00003` is gone the
+/// next fold may be `v00003`. A `seg_id` may never be reused because a rebase check compares them
+/// to decide whether a mid-flight unit still applies; a prefix name is a directory name nothing
+/// holds across the sweep. What identifies a bundle is its `MANIFEST.json` digest, which `CURRENT`
+/// carries beside the prefix and which the fragment cache keys on — two prefixes sharing a name
+/// across a proven-complete deletion of the first are still distinguishable by every mechanism that
+/// has to tell them apart.
+///
+/// **Every failure is a warning and nothing else.** `reclaim_prefix` refuses the live prefix itself
+/// (a second guard behind this one's own filter), and a tree that cannot be deleted is a tree that
+/// stays — the same residual as before this existed, and never a reason to refuse to start.
+fn sweep_orphan_prefixes(bundle_root: &Path, live: &str) {
+    let Ok(entries) = std::fs::read_dir(bundle_root) else {
+        return;
+    };
+    let (mut swept, mut refused) = (0usize, 0usize);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        // A prefix is `v` + five-or-more digits (`next_prefix_name`'s own shape). Anything else
+        // under the root — `CURRENT`, the WAL, a directory an operator put there — is not this
+        // sweep's business and must not be guessed at.
+        let is_prefix = name.strip_prefix('v').is_some_and(|digits| {
+            digits.len() >= 5 && digits.bytes().all(|b| b.is_ascii_digit())
+        });
+        if !is_prefix || name == live || !entry.path().is_dir() {
+            continue;
+        }
+        match tessera_store::reclaim_prefix(&entry.path()) {
+            Ok(()) => {
+                swept += 1;
+                tracing::info!(
+                    prefix = %name,
+                    "startup sweep: reclaimed an orphaned prefix left by a discarded fold or an \
+                     exit mid-publication"
+                );
+            }
+            Err(e) => {
+                refused += 1;
+                tracing::warn!(
+                    prefix = %name,
+                    error = %e,
+                    "startup sweep: could not reclaim an orphaned prefix; it stands, and its disc \
+                     with it"
+                );
+            }
+        }
+    }
+    if swept > 0 || refused > 0 {
+        tracing::info!(live = %live, swept, refused, "startup sweep complete");
+    }
+}
+
+/// Free bytes on the filesystem holding `path`, or `None` where unknowable — compaction §8's
+/// pre-flight then does not run, on `tessera-build`'s precedent rather than refusing on a guess.
+///
+/// `f_bavail`, not `f_bfree`: the reserved blocks a filesystem keeps for root are not space a fold
+/// may plan to use.
+#[cfg(unix)]
+fn free_disc(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stats) } != 0 {
+        return None;
+    }
+    Some(stats.f_bavail as u64 * stats.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+fn free_disc(_path: &Path) -> Option<u64> {
+    None
 }
 
 /// The largest live segment count across this generation's slices — compaction §9's segment gauge.
@@ -2927,28 +3149,26 @@ struct Executor {
     configured_merge_bytes: Option<u64>,
     /// See [`MaintenanceDeps::fold_paused`].
     fold_paused: Arc<AtomicBool>,
+    /// See [`MaintenanceDeps::fold_publication_paused`].
+    fold_publication_paused: Arc<AtomicBool>,
     /// See [`crate::compact::CompactionSchedule`]. Consulted at the tick, beside the flush's own.
     compaction: crate::compact::CompactionSchedule,
-    /// When the last fold **attempt ended**, as a Unix timestamp — the operand
-    /// `compaction_min_interval_secs` is measured from.
+    /// When the last fold attempt **started**, as a Unix timestamp — half of the operand
+    /// `compaction_min_interval_secs` is measured from. See [`Executor::fold_floor_from`] for the
+    /// rule and [`ExecutorHealth::fold_ended_unix`] for the other half.
     ///
-    /// **Every terminal outcome stamps this, not only a publication**, and that is what makes the
+    /// **Stamped by every dispatch, whatever the attempt then does**, and that is what makes the
     /// interval a rate limit rather than a success-rate limit. Several discard causes are
     /// *persistent* — the merge-size relation against a small corpus, a carried file with no digest
     /// — and a discard leaves the gauge that dispatched the fold exactly where it was. Stamped only
     /// on success, the next tick would redispatch, rewrite the whole corpus, discard again, and
     /// repeat for ever, each iteration leaving a complete prefix `CURRENT` never named and which
-    /// no sweep reclaims (compaction §7's startup sweep is ⊘). One bad configuration value would
-    /// fill the device and take the write path down with it.
-    ///
-    /// Stamped at dispatch as well, so a fold that fails inside `execute` — on the fold thread,
-    /// which cannot reach this field — backs off too. That stamp is a lower bound on when the
-    /// attempt ended rather than the instant itself, which is the safe direction: it defers the
-    /// next attempt, never hastens it.
+    /// no sweep reclaims. One bad configuration value would fill the device and take the write
+    /// path down with it.
     ///
     /// Process-local, and `crate::compact::due` argues why that is harmless for the *success*
     /// case: both gauges are read against the bundle a fold itself produced.
-    last_fold_attempt_unix: Option<u64>,
+    last_fold_start_unix: Option<u64>,
     /// Superseded prefixes awaiting reclamation, each held by the generation that named it.
     ///
     /// **The `Arc` is the wait.** Compaction §8 reclaims the old prefix whole, and lifecycle §2
@@ -3127,7 +3347,9 @@ impl Executor {
                     .iter()
                     .filter(|(entity, _)| !generation.overlay.is_deleted(**entity))
                     .count();
-                self.health.flushable_items.store(flushable, Ordering::SeqCst);
+                self.health
+                    .flushable_items
+                    .store(flushable, Ordering::SeqCst);
                 if flushable > 0 {
                     self.health.flush_skips.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
@@ -3319,10 +3541,7 @@ impl Executor {
             // The same never-reused shape a flush's `seg_id` has, and for the same reason: two
             // attempts at one `n` would otherwise write one path, and the second `File::create`
             // truncates files the first has memory-mapped.
-            seg_id: format!(
-                "merge-{}-{}",
-                partition_data.segments_n, self.merge_attempt
-            ),
+            seg_id: format!("merge-{}-{}", partition_data.segments_n, self.merge_attempt),
             identity_key: self.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
@@ -3500,10 +3719,40 @@ impl Executor {
         crate::compact::due(
             &self.compaction,
             now,
-            self.last_fold_attempt_unix,
+            self.fold_floor_from(),
             live_segments_of(generation),
             generation.overlay.deleted_len(),
         )
+    }
+
+    /// The instant `compaction_min_interval_secs` is measured from, and it is neither the last
+    /// fold's start nor its end alone.
+    ///
+    /// **The rule: a fold may start no sooner than the interval after the previous one *started*,
+    /// and never before the previous one has *ended*.** Both halves are load-bearing and each
+    /// breaks a different way on its own.
+    ///
+    /// Measuring from the **end** — which is what a naive "stamp on completion" gives — makes the
+    /// floor a function of the fold's own duration, and that drifts the window off its schedule. A
+    /// fold that starts at 00:10 and takes three hours ends at 03:10; tomorrow's window opens at
+    /// 00:00, which is inside a 24 h floor measured from 03:10, so it folds on alternate nights and
+    /// the deployment's segment count sawtooths at twice the amplitude the operator configured.
+    /// That is the whole knob's purpose defeated by an accident of duration.
+    ///
+    /// Measuring from the **start** alone is fail-open in the other direction. A fold that runs
+    /// *longer* than the interval and then discards clears the floor the instant it ends, leaving
+    /// the gauge that dispatched it exactly where it was — the redispatch-for-ever loop
+    /// [`Executor::last_fold_start_unix`] describes, reached by the one case a start stamp cannot
+    /// see. Taking `end − interval` when that is the later origin costs a long fold one further
+    /// interval of quiet and costs a short one nothing, since `end − interval` is then behind its
+    /// own start.
+    ///
+    /// `fold_ended_unix` is the end of the fold's *passes*, written by its own thread; the
+    /// publication that follows is executor work of seconds and is deliberately not counted.
+    fn fold_floor_from(&self) -> Option<u64> {
+        let started = self.last_fold_start_unix?;
+        let ended = self.health.fold_ended_unix.load(Ordering::SeqCst);
+        Some(started.max(ended.saturating_sub(self.compaction.min_interval_secs)))
     }
 
     /// Plan a fold and start it **on its own thread**, if one is requested and nothing blocks it.
@@ -3558,7 +3807,8 @@ impl Executor {
         // **At most one fold, and none while a merge or a coalesce is running.** Their outputs
         // would be orphaned by the flip and their inputs are the fold's, so starting now would
         // mean re-reading the corpus to discard it at the rebase check.
-        if self.merge_in_flight.load(Ordering::SeqCst) || self.coalesce_in_flight.load(Ordering::SeqCst)
+        if self.merge_in_flight.load(Ordering::SeqCst)
+            || self.coalesce_in_flight.load(Ordering::SeqCst)
         {
             return;
         }
@@ -3567,6 +3817,10 @@ impl Executor {
             generation,
             self.wal.is_poisoned(),
             self.health.overlay_diverged.load(Ordering::SeqCst),
+            crate::compact::FoldResources {
+                available_memory: available_memory(),
+                free_disc: free_disc(&self.bundle_root),
+            },
         ) {
             Ok(plan) => plan,
             Err(reason) => {
@@ -3657,13 +3911,17 @@ impl Executor {
                         );
                     }
                 }
+                // **The attempt's end, recorded on the thread because one of its two exits never
+                // reaches the executor.** See `fold_floor_from`. Written before the in-flight flag
+                // clears, so a tick that observes the fold finished also observes when.
+                health
+                    .fold_ended_unix
+                    .store(unix_now().unwrap_or(0), Ordering::SeqCst);
                 in_flight.store(false, Ordering::SeqCst);
             });
         if spawned.is_ok() {
-            // The lower bound on this attempt's end — see the field's doc. A failure inside
-            // `execute` never reaches `publish_fold`, so without this a fold that cannot even write
-            // its passes would redispatch at every tick.
-            self.last_fold_attempt_unix = unix_now();
+            // This attempt's start — see `fold_floor_from`.
+            self.last_fold_start_unix = unix_now();
         }
         if let Err(e) = spawned {
             // The closure — and with it the in-flight clone — was dropped, so the flag is cleared
@@ -3676,6 +3934,11 @@ impl Executor {
 
     /// Apply every completed fold waiting from its thread, and report whether any did.
     fn publish_completed_folds(&mut self) -> bool {
+        // Left in the channel rather than dropped — see `MaintenanceDeps::fold_publication_paused`.
+        // Always false in a shipped build.
+        if self.fold_publication_paused.load(Ordering::SeqCst) {
+            return false;
+        }
         let mut any = false;
         while let Ok(completed) = self.fold_done.try_recv() {
             self.publish_fold(completed);
@@ -3725,11 +3988,6 @@ impl Executor {
         if !self.may_publish() {
             return;
         }
-        // **The attempt ends here however it ends**, so the interval floors a discard exactly as it
-        // floors a publication — see `last_fold_attempt_unix`. Stamped before the first `return` so
-        // no discard path can be added that forgets it.
-        self.last_fold_attempt_unix = unix_now();
-
         // Every discard below is the same posture — nothing happened, the files are orphans, the
         // next trigger re-plans — so it is one closure rather than a shape repeated eleven times.
         // It owns what it reports so that it borrows nothing from `self` or from `completed`, both
@@ -3760,8 +4018,10 @@ impl Executor {
         //
         // The divergence half is already asked by `may_publish` above; this is the WAL's own.
         if self.wal.is_poisoned() {
-            discard("the WAL poisoned during its flight, so its manifest would publish deny state \
-                     no durable record backs");
+            discard(
+                "the WAL poisoned during its flight, so its manifest would publish deny state \
+                     no durable record backs",
+            );
             return;
         }
 
@@ -4016,11 +4276,9 @@ impl Executor {
         let from_prefix_dir = self.prefix_dir(&live);
         let to_prefix_dir = self.bundle_root.join(&completed.prefix);
         let carried_rels: Vec<String> = carried_rels.into_iter().collect();
-        if let Err(e) = tessera_store::hard_link_forward(
-            &from_prefix_dir,
-            &to_prefix_dir,
-            &carried_rels,
-        ) {
+        if let Err(e) =
+            tessera_store::hard_link_forward(&from_prefix_dir, &to_prefix_dir, &carried_rels)
+        {
             discard(&format!("its carry-forwards would not link ({e})"));
             return;
         }
@@ -4035,14 +4293,14 @@ impl Executor {
             discard(&format!("its carry-forward links would not sync ({e})"));
             return;
         }
-        let manifest_digest = match tessera_store::write_manifest_json(&to_prefix_dir, &bundle_manifest)
-        {
-            Ok(digest) => digest,
-            Err(e) => {
-                discard(&format!("its MANIFEST.json would not commit ({e})"));
-                return;
-            }
-        };
+        let manifest_digest =
+            match tessera_store::write_manifest_json(&to_prefix_dir, &bundle_manifest) {
+                Ok(digest) => digest,
+                Err(e) => {
+                    discard(&format!("its MANIFEST.json would not commit ({e})"));
+                    return;
+                }
+            };
         let manifest_n = self.allocate_manifest_n();
         if let Err(e) = tessera_store::write_segments_manifest(
             &to_prefix_dir,
@@ -4050,15 +4308,15 @@ impl Executor {
             manifest_n,
             &segments_manifest,
         ) {
-            discard(&format!("its SEGMENTS-{manifest_n}.json would not commit ({e})"));
+            discard(&format!(
+                "its SEGMENTS-{manifest_n}.json would not commit ({e})"
+            ));
             return;
         }
         // **The commit point.** Everything above is reversible; nothing below is.
-        if let Err(e) = tessera_store::write_current(
-            &self.bundle_root,
-            &completed.prefix,
-            &manifest_digest,
-        ) {
+        if let Err(e) =
+            tessera_store::write_current(&self.bundle_root, &completed.prefix, &manifest_digest)
+        {
             discard(&format!("CURRENT would not flip ({e})"));
             return;
         }
@@ -4156,12 +4414,47 @@ impl Executor {
         self.reclaim_superseded_prefixes();
 
         self.health.folds.fetch_add(1, Ordering::Relaxed);
+        // **The fold's own account of what it spent, at the one severity an operator reads.** The
+        // most expensive operation in the system had no cost record at all until it had one here:
+        // its counters said a fold happened, and nothing said what it took. The staircase is the
+        // diagnostic half — a resident set that climbs on one pass names that pass — and the two
+        // gauges below are the alarming half, on `/control/status`.
+        let passes = completed
+            .cost
+            .iter()
+            .map(|c| {
+                // Total and anonymous, because §3's budget is a claim about the split: a fold
+                // whose total climbs because its mapped inputs became resident is behaving as
+                // designed, and one whose *anonymous* half climbs with the corpus has a term
+                // nobody budgeted. One number cannot distinguish them.
+                format!(
+                    "{}={:?}/{:.2}GiB({:.2} anon)",
+                    c.pass,
+                    c.elapsed,
+                    c.rss as f64 / (1u64 << 30) as f64,
+                    c.anon as f64 / (1u64 << 30) as f64,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let fold_secs: u64 = completed.cost.iter().map(|c| c.elapsed.as_secs()).sum();
+        let staircase_rss = completed.cost.iter().map(|c| c.rss).max().unwrap_or(0);
+        self.health
+            .last_fold_secs
+            .store(fold_secs, Ordering::Relaxed);
+        self.health
+            .last_fold_rss
+            .store(staircase_rss, Ordering::Relaxed);
+        *lock_recover(&self.health.last_fold_passes) = completed.cost.clone();
         tracing::info!(
             prefix = %completed.prefix,
             segments_version,
             retired = retired_count,
             carried_entities = carried.len(),
             elapsed_ms = started.elapsed().as_millis() as u64,
+            passes = %passes,
+            fold_secs,
+            staircase_rss,
             "a compaction fold published: the bundle is one base segment per partition-slice, one \
              base postings tier, one external-id run and one locator, plus whatever landed during \
              its flight"
@@ -4336,7 +4629,9 @@ impl Executor {
             manifest_n,
             &manifest,
         ) {
-            self.health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+            self.health
+                .coalesce_failures
+                .fetch_add(1, Ordering::Relaxed);
             tracing::error!(
                 error = %e,
                 "ALARM: a completed coalesce's side-manifest could not be committed; its files \
@@ -4355,7 +4650,9 @@ impl Executor {
         ) {
             Ok(index) => index,
             Err(e) => {
-                self.health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                self.health
+                    .coalesce_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     error = %e,
                     "ALARM: a coalesce's manifest committed but its external-id sidecar would not \
@@ -4597,9 +4894,7 @@ impl Executor {
                     Ok(completed) => {
                         // **Pending is set before the send** — the completion handshake's whole
                         // ordering; see `ExecutorHealth::flush_completed_pending`.
-                        health
-                            .flush_completed_pending
-                            .store(true, Ordering::SeqCst);
+                        health.flush_completed_pending.store(true, Ordering::SeqCst);
                         // A send failure means the executor is gone, which is a shutdown and not a
                         // fault: the files are orphans nothing references, and replay re-flushes.
                         let _ = submit.send(completed);
@@ -4715,7 +5010,10 @@ impl Executor {
         } else if self.flush_in_flight.load(Ordering::SeqCst)
             || self.health.flush_completed_pending.load(Ordering::SeqCst)
             || self.coalesce_in_flight.load(Ordering::SeqCst)
-            || self.health.coalesce_completed_pending.load(Ordering::SeqCst)
+            || self
+                .health
+                .coalesce_completed_pending
+                .load(Ordering::SeqCst)
             || self.merge_in_flight.load(Ordering::SeqCst)
             || self.health.merge_completed_pending.load(Ordering::SeqCst)
             || self.health.fold_completed_pending.load(Ordering::SeqCst)
@@ -4954,8 +5252,7 @@ impl Executor {
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
 
-        let applied: Vec<(EntityId, ChangeOp)> =
-            entries.iter().map(|e| (e.entity, e.op)).collect();
+        let applied: Vec<(EntityId, ChangeOp)> = entries.iter().map(|e| (e.entity, e.op)).collect();
 
         // One overlay clone, one generation, **one swap** for every entry in the window.
         //
@@ -5794,10 +6091,7 @@ impl Executor {
     /// Pins are never invalidated by this (I11): a pin fixes `(prefix, segments_version)`, and this
     /// bumps `overlay_version`. That is lifecycle §2.3's rule that a suppression applies to a
     /// pinned request the moment it is accepted, without expiring the pin.
-    fn apply_changes(
-        &self,
-        changes: Vec<(EntityId, ChangeOp)>,
-    ) -> Published {
+    fn apply_changes(&self, changes: Vec<(EntityId, ChangeOp)>) -> Published {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let mut overlay: Overlay = (*generation.overlay).clone();
@@ -5955,14 +6249,12 @@ impl Executor {
             let mut manifest = partition_data.manifest.clone();
             write_deny_state(&mut manifest, &live.overlay);
             let n = self.allocate_manifest_n();
-            if let Err(e) =
-                tessera_store::write_segments_manifest(
-                    &self.prefix_dir(&live),
-                    partition,
-                    n,
-                    &manifest,
-                )
-            {
+            if let Err(e) = tessera_store::write_segments_manifest(
+                &self.prefix_dir(&live),
+                partition,
+                n,
+                &manifest,
+            ) {
                 tracing::error!(
                     error = %e,
                     partition = %partition,
@@ -5974,7 +6266,9 @@ impl Executor {
 
         self.deny_dirty = false;
         self.windows_since_publication = 0;
-        self.health.overlay_publications.fetch_add(1, Ordering::Relaxed);
+        self.health
+            .overlay_publications
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// **Publication by rebase** (§1.2): apply a completed flush to the **then-current**
@@ -6349,9 +6643,10 @@ impl Executor {
             watermark,
             bundle,
             dict,
-            postings: rotation
-                .as_ref()
-                .map_or_else(|| Arc::clone(&previous.postings), |r| Arc::clone(&r.postings)),
+            postings: rotation.as_ref().map_or_else(
+                || Arc::clone(&previous.postings),
+                |r| Arc::clone(&r.postings),
+            ),
             fragments: rotation.as_ref().map_or_else(
                 || Arc::clone(&previous.fragments),
                 |r| Arc::clone(&r.fragments),

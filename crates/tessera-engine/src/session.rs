@@ -554,6 +554,8 @@ pub struct Engine {
     /// Whether a fold **holds** between finishing its passes and submitting the result — see
     /// [`Engine::set_fold_paused_for_test`]. Always `false` in a shipped build.
     pub(crate) fold_paused: Arc<AtomicBool>,
+    /// See [`Engine::set_fold_publication_paused_for_test`]. Always `false` in a shipped build.
+    pub(crate) fold_publication_paused: Arc<AtomicBool>,
     /// How many row projections were built from the whole fragment rather than derived from the
     /// preceding generation's — the observable behind [`Engine::full_projection_builds`].
     ///
@@ -671,7 +673,8 @@ impl Engine {
         // the manifest names but no map covers would be served unverified.
         let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
         for rel in &partition.manifest.deltas {
-            if !partition.manifest.files.contains_key(rel) && !bundle.manifest.files.contains_key(rel)
+            if !partition.manifest.files.contains_key(rel)
+                && !bundle.manifest.files.contains_key(rel)
             {
                 return Err(EngineError::Malformed(format!(
                     "the side-manifest lists delta tier '{rel}' which no files map digests, so \
@@ -802,6 +805,7 @@ impl Engine {
         let coalesce_enabled = Arc::new(AtomicBool::new(true));
         let merge_enabled = Arc::new(AtomicBool::new(true));
         let fold_paused = Arc::new(AtomicBool::new(false));
+        let fold_publication_paused = Arc::new(AtomicBool::new(false));
 
         Ok(Engine {
             generation: Arc::clone(&generation),
@@ -825,6 +829,7 @@ impl Engine {
             coalesce_enabled: Arc::clone(&coalesce_enabled),
             merge_enabled: Arc::clone(&merge_enabled),
             fold_paused: Arc::clone(&fold_paused),
+            fold_publication_paused: Arc::clone(&fold_publication_paused),
             full_projection_builds: AtomicU64::new(0),
         })
     }
@@ -900,6 +905,20 @@ impl Engine {
     /// so is one the publication must carry forward — which is the same state this produces.
     pub fn set_fold_paused_for_test(&self, paused: bool) {
         self.fold_paused.store(paused, Ordering::SeqCst);
+    }
+
+    /// Hold a **completed** fold in its channel, undrained, so a merge or coalesce can publish
+    /// under it — see [`crate::write::MaintenanceDeps::fold_publication_paused`] for which window
+    /// this is and why it is a real one.
+    ///
+    /// Unpausing wakes the executor, because the loop that would drain the fold may already have
+    /// parked: the pause makes `publish_completed_folds` report that nothing happened, which is
+    /// exactly what sends an otherwise-idle executor to `wait_for_work`.
+    pub fn set_fold_publication_paused_for_test(&self, paused: bool) {
+        self.fold_publication_paused.store(paused, Ordering::SeqCst);
+        if !paused {
+            self.write.wake();
+        }
     }
 
     /// Whether a fold has finished its passes and is holding at [`Self::set_fold_paused_for_test`].
@@ -1214,7 +1233,10 @@ impl Engine {
     pub fn set_cache_bounds(&self, row_projection_bytes: u64, fragment_bytes: u64) {
         self.row_projection_cache
             .set_bound_bytes(row_projection_bytes);
-        self.generation.load().fragments.set_memory_bound(fragment_bytes);
+        self.generation
+            .load()
+            .fragments
+            .set_memory_bound(fragment_bytes);
     }
 
     /// The row count at which a commit window closes (`ingest.commit_window_max_items`,
@@ -1301,11 +1323,13 @@ impl Engine {
             .partitions
             .iter()
             .flat_map(|(partition, data)| {
-                data.slices.iter().map(move |(slice, slice_data)| SliceSegments {
-                    partition: partition.clone(),
-                    slice: slice.clone(),
-                    segments: slice_data.segments.len(),
-                })
+                data.slices
+                    .iter()
+                    .map(move |(slice, slice_data)| SliceSegments {
+                        partition: partition.clone(),
+                        slice: slice.clone(),
+                        segments: slice_data.segments.len(),
+                    })
             })
             .collect();
         counts.sort_by(|a, b| (&a.partition, &a.slice).cmp(&(&b.partition, &b.slice)));
@@ -1707,6 +1731,7 @@ impl Engine {
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 fold_paused: Arc::clone(&self.fold_paused),
+                fold_publication_paused: Arc::clone(&self.fold_publication_paused),
                 refresh: crate::refresh::RefreshDeps {
                     cache: Arc::clone(&self.row_projection_cache),
                     pool: Arc::clone(&self.pool),
@@ -1760,6 +1785,7 @@ impl Engine {
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 fold_paused: Arc::clone(&self.fold_paused),
+                fold_publication_paused: Arc::clone(&self.fold_publication_paused),
                 refresh: crate::refresh::RefreshDeps {
                     cache: Arc::clone(&self.row_projection_cache),
                     pool: Arc::clone(&self.pool),
@@ -1802,6 +1828,12 @@ impl Engine {
     /// unauthenticated surface).
     pub fn write_executor_stats(&self) -> crate::write::ExecutorStats {
         self.write.health().stats()
+    }
+
+    /// The last compaction fold's per-pass wall clock and resident set — empty before the first
+    /// fold. Operator plane only, beside [`Engine::write_executor_stats`].
+    pub fn last_fold_passes(&self) -> Vec<crate::compact::PassCost> {
+        self.write.health().last_fold_passes()
     }
 
     /// Items in the ingest buffer as of the executor's last apply — what `/control/ingest`'s
