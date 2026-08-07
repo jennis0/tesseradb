@@ -101,23 +101,38 @@ pub(crate) fn gather_scalars(
             // refuses: a narrowing or widening coercion here would let a merge rewrite a column
             // at a width the manifest does not declare, which the next reader opens as garbage
             // rather than as an error.
-            match (slice, declared) {
-                (ScalarSlice::U8(v), ScalarType::U8) => Ok(ScalarValue::U8(v[row])),
-                (ScalarSlice::U16(v), ScalarType::U16) => Ok(ScalarValue::U16(v[row])),
-                (ScalarSlice::U32(v), ScalarType::U32) => Ok(ScalarValue::U32(v[row])),
-                (ScalarSlice::U64(v), ScalarType::U64) => Ok(ScalarValue::U64(v[row])),
-                (ScalarSlice::I64(v), ScalarType::I64) => Ok(ScalarValue::I64(v[row])),
-                (ScalarSlice::F32(v), ScalarType::F32) => Ok(ScalarValue::F32(v[row])),
-                (ScalarSlice::Utf8(v), ScalarType::Utf8) => {
-                    Ok(ScalarValue::Utf8(v.value(row).to_string()))
-                }
-                (ScalarSlice::U8(_), declared) => Err(mismatch(*declared, "u8")),
-                (ScalarSlice::U16(_), declared) => Err(mismatch(*declared, "u16")),
-                (ScalarSlice::U32(_), declared) => Err(mismatch(*declared, "u32")),
-                (ScalarSlice::U64(_), declared) => Err(mismatch(*declared, "u64")),
-                (ScalarSlice::I64(_), declared) => Err(mismatch(*declared, "i64")),
-                (ScalarSlice::F32(_), declared) => Err(mismatch(*declared, "f32")),
-                (ScalarSlice::Utf8(_), declared) => Err(mismatch(*declared, "utf8")),
+            //
+            // Generated for the flat members, because there are eleven and the failure mode of
+            // hand-writing them is one pair transposed — which reads every row of two columns
+            // into each other, with the row count and every type still agreeing.
+            macro_rules! pairs {
+                ($(($variant:ident, $value:ident)),* $(,)?) => {
+                    match (slice, declared) {
+                        $((ScalarSlice::$variant(v), ScalarType::$variant) => {
+                            Ok(ScalarValue::$value(v[row]))
+                        })*
+                        (ScalarSlice::Bool(v), ScalarType::Bool) => {
+                            Ok(ScalarValue::Bool(v.value(row)))
+                        }
+                        (ScalarSlice::Utf8(v), ScalarType::Utf8) => {
+                            Ok(ScalarValue::Utf8(v.value(row).to_string()))
+                        }
+                        (stored, declared) => Err(mismatch(*declared, stored.type_name())),
+                    }
+                };
+            }
+            pairs! {
+                (U8, U8),
+                (U16, U16),
+                (U32, U32),
+                (U64, U64),
+                (I8, I8),
+                (I16, I16),
+                (I32, I32),
+                (I64, I64),
+                (F32, F32),
+                (F64, F64),
+                (TimestampUs, TimestampUs),
             }
         })
         .collect()

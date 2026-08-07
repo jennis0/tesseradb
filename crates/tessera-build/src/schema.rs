@@ -281,7 +281,8 @@ impl Schema {
                     let ty = ScalarType::parse(other).ok_or_else(|| {
                         schema_error(format!(
                             "attribute '{}': unknown type '{other}'. Declarable types are \
-                             u8, u16, u32, u64, i64, f32, utf8 and category",
+                             bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, \
+                             timestamp_us, utf8 and category",
                             decl.name
                         ))
                     })?;
@@ -344,13 +345,14 @@ impl Schema {
         })
     }
 
-    /// Bytes this schema adds to every row, and `None` if any column is variable-width.
+    /// **Bits** this schema adds to every row, and `None` if any column is variable-width.
     ///
     /// §2.3's residency figure, **totalled across attributes rather than reported per column** —
     /// several categories are what makes the cost bite, and a per-column table lets each one look
-    /// affordable.
-    pub fn row_bytes(&self) -> Option<u64> {
-        self.attributes.iter().map(|a| a.ty.row_bytes()).sum()
+    /// affordable. Bits rather than bytes because a `bool` costs one: rounding it to a byte would
+    /// erase the whole reason to declare one.
+    pub fn row_bits(&self) -> Option<u64> {
+        self.attributes.iter().map(|a| a.ty.row_bits()).sum()
     }
 
     /// Whether this schema declares any column at all — the empty case being every bundle built
@@ -790,7 +792,7 @@ listing = "public"
         let schema = parse_str(SEVERITY).unwrap();
         assert_eq!(schema.attributes.len(), 1);
         assert_eq!(schema.attributes[0].ty, ScalarType::U8);
-        assert_eq!(schema.row_bytes(), Some(1));
+        assert_eq!(schema.row_bits(), Some(8));
         let vocab = &schema.vocabularies["severity"];
         assert_eq!(vocab.code_of("low"), Some(1));
         assert_eq!(vocab.code_of("nonesuch"), None);
@@ -907,7 +909,7 @@ used_for = ["render"]
         assert_eq!(schema.attributes[0].ty, ScalarType::I64);
         assert_eq!(schema.attributes[1].ty, ScalarType::F32);
         assert!(schema.attributes[0].vocabulary.is_none());
-        assert_eq!(schema.row_bytes(), Some(12));
+        assert_eq!(schema.row_bits(), Some(96));
     }
 
     /// A `listing` on a non-category is a disclosure control its author believes is set, so it is
@@ -952,7 +954,7 @@ listing = "per_viewer"
         assert_eq!(schema.attributes.len(), 2);
         // One compiled vocabulary, shared: two attributes, one code space.
         assert_eq!(schema.vocabularies.len(), 1);
-        assert_eq!(schema.row_bytes(), Some(4));
+        assert_eq!(schema.row_bits(), Some(32));
 
         let listing = base.replacen("listing = \"per_viewer\"\n", "listing = \"public\"\n", 1);
         // The *second* occurrence is the sharer's; replacing the first makes the referent public.

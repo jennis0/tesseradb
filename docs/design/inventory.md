@@ -73,7 +73,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `compaction.md` | Provisional — under review | 14 |
 | `concurrency-lifecycle.md` | Normative — r8 | 14 |
 | `conformance.md` | Normative — r8 | 15 |
-| `contracts.md` | Normative — r22 | 16 |
+| `contracts.md` | Normative — r23 | 16 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `derived-artifact-gating.md` | Provisional — under review |  |

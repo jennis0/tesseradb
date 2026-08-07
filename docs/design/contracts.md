@@ -1,6 +1,6 @@
 # Tessera — Contracts Specification
 
-**Status:** Draft r22 — the per-item column tail becomes real: §2.2's `declared_scalars` gains `vocabulary` and is joined by a required `vocabularies` table, and §2.6 states the tail's accepted types. **This revision adds fields** (Appendix R), unlike r20 and r21, which added none
+**Status:** Draft r23 — the per-item column tail becomes real (r22) and complete (r23): §2.2's `declared_scalars` gains `vocabulary` and a required `vocabularies` table, and §2.6's tail admits the full core type set — boolean, the four unsigned and four signed integer widths, both floats, microsecond timestamps and utf8. **Both revisions add fields** (Appendix R), unlike r20 and r21, which added none
 **Owns:** the byte- and schema-level definition of the boundaries named in the system architecture §4: the bundle format, the service API, the plugin ABI and the wire format. `§n` refers to the design (r30); `SA §n` to the system architecture (r10). **Precedence:** the design is the specification and this document defers to it; the eleven recorded deviations in §0.3 govern where this document and the *system architecture* differ, and are proposed back to it. Deviations 6 and 8 have a design companion already applied at the design's r21, so they record an alignment rather than an outstanding proposal.
 
 ---
@@ -134,7 +134,7 @@ reconstructing canonically is the combination that hides it.
 | `created_at` | RFC 3339 | provenance |
 | `data_plugin_hash` | hex | hash of the **data module** (4.1); serving refuses on mismatch |
 | `declared_bounds` | object | plugin bounds, verbatim (§6.1) |
-| `declared_scalars` | array | `[{name, arrow_type, vocabulary?}]` — the caller's per-item columns, compiled from the build's `schema.toml` *(r22)*. **Order is significant and is the schema's declaration order**: the tail is stored and read back positionally, so reordering this array reorders the columns of every segment built after it. `arrow_type` is one of `u8`, `u16`, `u32`, `u64`, `i64`, `f32`, `utf8`; `vocabulary` names a `vocabularies` entry for a category column and is absent for a plain one. Ingest validates against it — a batch column this array does not declare, a declared column the batch omits, and a declared column at the wrong arrow type are each `422` naming the column, refusals rather than the silent drop that shifted every later scalar by one — and the read path widens the points schema from it. **Residual:** a category column is validated at its *width*, so an unassigned or `reserved` code is an ordinary integer and is stored unremarked; the row then carries a code no key explains. Checking meaning needs the key rather than the code ([#82](https://github.com/jennis0/tessera-index/issues/82)). A hand-written manifest declaring a scalar the columns do not carry remains unguarded |
+| `declared_scalars` | array | `[{name, arrow_type, vocabulary?}]` — the caller's per-item columns, compiled from the build's `schema.toml` *(r22)*. **Order is significant and is the schema's declaration order**: the tail is stored and read back positionally, so reordering this array reorders the columns of every segment built after it. `arrow_type` is one of `bool`, `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`, `timestamp_us`, `utf8` *(r23)*; `timestamp_us` stores as an `i64` of microseconds since the epoch and exists so the unit is a fact a reader can check rather than a convention; `vocabulary` names a `vocabularies` entry for a category column and is absent for a plain one. Ingest validates against it — a batch column this array does not declare, a declared column the batch omits, and a declared column at the wrong arrow type are each `422` naming the column, refusals rather than the silent drop that shifted every later scalar by one — and the read path widens the points schema from it. **Residual:** a category column is validated at its *width*, so an unassigned or `reserved` code is an ordinary integer and is stored unremarked; the row then carries a code no key explains. Checking meaning needs the key rather than the code ([#82](https://github.com/jennis0/tessera-index/issues/82)). A hand-written manifest declaring a scalar the columns do not carry remains unguarded |
 | `vocabularies` | array | `[{name, listing, values: [{key, code, label?}], reserved: [int]}]` — the value sets `declared_scalars`' category columns draw their codes from *(r22)*. **Required**, empty when no category is declared; a manifest omitting it is malformed rather than category-free, and the case that matters — rows carrying codes whose bindings went missing — would otherwise open and serve marks that decode to nothing. **This is the durable mapping, and nothing re-derives it**: `columns.arrow` stores the code, not the key, so a build that re-derived codes from a re-supplied vocabulary file would recolour the whole corpus with no error and no digest mismatch. Code `0` is the reserved *absent* sentinel and is never assigned. `reserved` holds retired codes, never reassigned. `listing` is `per_viewer` or `public`; **⊘ recorded, not enforced** — no endpoint publishes a vocabulary, so it currently gates nothing |
 | `small_term_threshold` | int | cardinality at or below which a posting is stored as a sorted array rather than Roaring (2.4); default 32 pending Phase 1 calibration |
 | `quantisation` | object | `{x_min, x_max, y_min, y_max}` (f64) — see 2.5 |
@@ -250,7 +250,7 @@ Interleaving the two 32-bit axes gives a 64-bit **position code**, of which the 
 |---|---|---|
 | `tessera_id` | uint64 | the row→wire-identity direction (deviations 2, 6) |
 | `residual` | uint32 | the **low half of this row's 64-bit position code** (§2.5); the high half is the row's entry in `morton.u32`. **Not a sort key** — it varies arbitrarily within a cell |
-| *declared scalars* | per MANIFEST | the tail, in `MANIFEST.declared_scalars` order — `uint8`, `uint16`, `uint32`, `uint64`, `int64`, `float32` or `utf8` *(r22)*. Non-nullable like every column here (R4): a category's *absent* is code `0`, not a null, which is what lets the reader hand back flat slices with no validity bitmap. A column the manifest does not declare, or at a type it does not declare, is a typed error at open |
+| *declared scalars* | per MANIFEST | the tail, in `MANIFEST.declared_scalars` order — `boolean`, `uint8`, `uint16`, `uint32`, `uint64`, `int8`, `int16`, `int32`, `int64`, `float32`, `float64`, `timestamp[us]` or `utf8` *(r23)*. `boolean` is Arrow's bit-packed form, one bit per row, so it is the one column whose buffer is not `row_count` elements wide. Non-nullable like every column here (R4): a category's *absent* is code `0`, not a null, which is what lets the reader hand back flat slices with no validity bitmap. A column the manifest does not declare, or at a type it does not declare, is a typed error at open |
 
 There is **no `priority` column** *(r16; decision 0046 — cut, having been written and unread at
 query time since r7)*. The quantity survives as the high 16 bits of `tessera_id`, derived at one
@@ -471,6 +471,27 @@ The WAL; frozen mirrors, derived tile tables and candidate lists (deviation 3); 
 - **The reader must refuse a non-canonical `SEGMENTS-<n>.json` name** (§2.1). The grammar is ruled — unpadded — and the writer already conforms; the reader still parses a padded name leniently and then fails to open it, which is the silent path the ruling exists to close.
 
 ## Appendix R — Review record
+
+**r23** completes the tail's type set (2026-08-07), r22 having shipped seven of them. Added:
+`bool`, the three narrow signed widths (`i8`, `i16`, `i32`), `f64`, and `timestamp_us`.
+
+Each closes a gap that made a declaration lie about its cost or its meaning. A signed value in
+−128..127 had to be declared `i64` — eight bytes where one would do, which undercuts the residency
+argument the narrow widths exist for. `f64` did not exist at all, so a caller with a value an
+`f32` cannot hold had no way to say so, and — most parquet writers emitting `double` by default —
+was rounded without being told. And a time was an `i64` whose unit lived in a convention between
+the schema author and their client; `timestamp_us` puts it in the manifest. **Microseconds are the
+only admitted unit**, in the type and at the reader: nothing records a unit per column beyond the
+type name, so admitting milliseconds too would let two builds store incomparable numbers under one
+declaration.
+
+`bool` is Arrow's bit-packed form — one bit per row, eight times cheaper than the `u8` a flag
+otherwise costs — and is the one column whose buffer is not `row_count` elements wide. That is
+`columns.arrow`'s first non-flat fixed-width column, so a reader indexing the tail by element
+width must special-case it; `ScalarSlice::Bool` carries the array rather than a slice for exactly
+that reason.
+
+No `bundle_format` bump, under decision 0048: the fields are added and the artifacts recreated.
 
 **r22** makes the per-item column tail real (2026-08-07). §2.2's `declared_scalars` is no longer
 marked ⊘: the build compiles it from a `schema.toml`, both build implementations emit the columns,

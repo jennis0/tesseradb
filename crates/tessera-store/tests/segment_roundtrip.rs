@@ -18,6 +18,7 @@ use tessera_spatial::tiler::{sort_batch, ScalarType, TilerItem};
 use tessera_spatial::split32;
 use tessera_store::manifest::Manifest;
 use tessera_store::write::{write_permutation, write_segment};
+use tessera_store::read::ScalarSlice;
 use tessera_store::{ColumnsRef, StoreError};
 use tessera_types::{EntityId, TesseraId};
 
@@ -643,5 +644,119 @@ fn a_scattered_duplicate_entity_is_refused() {
     assert!(
         err.to_string().contains('4'),
         "the refusal must name the entity: {err}"
+    );
+}
+
+
+/// **Every declarable width survives a write and a read, including the two that are not flat.**
+///
+/// The tail is stored and read back positionally, so a type handled in the writer and missed in
+/// the reader — or handled in both at different widths — puts every later column's values under
+/// the wrong name with the row count still agreeing. Thirteen types is past the number anyone
+/// checks by eye, which is why this asserts each one's value rather than only the schema.
+///
+/// **`bool` is the case worth having.** It is the one member Arrow packs — a bit per row, so the
+/// segment writer accumulates a partial byte and flushes it at eight — and the row count here is
+/// deliberately **not** a multiple of eight, because a writer that dropped its trailing partial
+/// byte would lose up to seven rows' values while `row_count` still matched.
+#[test]
+fn every_declared_width_round_trips_including_a_packed_bool() {
+    use tessera_spatial::tiler::ScalarValue;
+
+    let schema: Vec<(String, ScalarType)> = vec![
+        ("flag".into(), ScalarType::Bool),
+        ("u8c".into(), ScalarType::U8),
+        ("u16c".into(), ScalarType::U16),
+        ("u32c".into(), ScalarType::U32),
+        ("u64c".into(), ScalarType::U64),
+        ("i8c".into(), ScalarType::I8),
+        ("i16c".into(), ScalarType::I16),
+        ("i32c".into(), ScalarType::I32),
+        ("i64c".into(), ScalarType::I64),
+        ("f32c".into(), ScalarType::F32),
+        ("f64c".into(), ScalarType::F64),
+        ("when".into(), ScalarType::TimestampUs),
+        ("name".into(), ScalarType::Utf8),
+    ];
+
+    // 13 rows: not a multiple of 8, so the bool column ends mid-byte.
+    let n = 13u64;
+    let scalars_for = |i: u64| {
+        vec![
+            ScalarValue::Bool(i.is_multiple_of(3)),
+            ScalarValue::U8(i as u8),
+            ScalarValue::U16(1000 + i as u16),
+            ScalarValue::U32(100_000 + i as u32),
+            ScalarValue::U64(10_000_000_000 + i),
+            // Signed, and negative — the whole reason the narrow signed widths exist.
+            ScalarValue::I8(-(i as i8)),
+            ScalarValue::I16(-1000 + i as i16),
+            ScalarValue::I32(-100_000 + i as i32),
+            ScalarValue::I64(-10_000_000_000 + i as i64),
+            ScalarValue::F32(i as f32 * 0.5),
+            // A value no `f32` holds, so a column that silently narrowed would fail here.
+            ScalarValue::F64(1.0 / 3.0 + i as f64),
+            ScalarValue::TimestampUs(1_700_000_000_000_000 + i as i64),
+            ScalarValue::Utf8(format!("row-{i}")),
+        ]
+    };
+
+    let mut items: Vec<TilerItem> = (0..n)
+        .map(|i| TilerItem {
+            tessera_id: synthetic_tessera_id(i),
+            qx: q(i as f64 / n as f64),
+            qy: q((n - i) as f64 / n as f64),
+            scalars: scalars_for(i),
+        })
+        .collect();
+    let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
+    let codes = sort_batch(&mut items, &mut entity_ids);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_segment(dir.path(), &items, &codes, &schema).expect("write_segment");
+
+    let cols = ColumnsRef::load(&dir.path().join("columns.arrow")).expect("columns.arrow loads");
+    assert_eq!(cols.row_count() as u64, n);
+
+    // Compared against each item's *own* scalars at its post-sort row, because `sort_batch`
+    // reorders: asserting against `scalars_for(row)` would pass on a writer that carried values
+    // forward unpermuted.
+    for (row, item) in items.iter().enumerate() {
+        for ((name, ty), expected) in schema.iter().zip(&item.scalars) {
+            let slice = cols.scalar(name).unwrap_or_else(|| panic!("column '{name}'"));
+            let got = match (slice, ty) {
+                (ScalarSlice::Bool(v), ScalarType::Bool) => ScalarValue::Bool(v.value(row)),
+                (ScalarSlice::U8(v), ScalarType::U8) => ScalarValue::U8(v[row]),
+                (ScalarSlice::U16(v), ScalarType::U16) => ScalarValue::U16(v[row]),
+                (ScalarSlice::U32(v), ScalarType::U32) => ScalarValue::U32(v[row]),
+                (ScalarSlice::U64(v), ScalarType::U64) => ScalarValue::U64(v[row]),
+                (ScalarSlice::I8(v), ScalarType::I8) => ScalarValue::I8(v[row]),
+                (ScalarSlice::I16(v), ScalarType::I16) => ScalarValue::I16(v[row]),
+                (ScalarSlice::I32(v), ScalarType::I32) => ScalarValue::I32(v[row]),
+                (ScalarSlice::I64(v), ScalarType::I64) => ScalarValue::I64(v[row]),
+                (ScalarSlice::F32(v), ScalarType::F32) => ScalarValue::F32(v[row]),
+                (ScalarSlice::F64(v), ScalarType::F64) => ScalarValue::F64(v[row]),
+                (ScalarSlice::TimestampUs(v), ScalarType::TimestampUs) => {
+                    ScalarValue::TimestampUs(v[row])
+                }
+                (ScalarSlice::Utf8(v), ScalarType::Utf8) => {
+                    ScalarValue::Utf8(v.value(row).to_string())
+                }
+                (other, ty) => {
+                    panic!("column '{name}' declared {ty:?} read back as {}", other.type_name())
+                }
+            };
+            assert_eq!(&got, expected, "column '{name}' at row {row}");
+        }
+    }
+
+    // Genuinely packed, not a byte per row: 13 bits is two bytes.
+    let packed = match cols.scalar("flag").unwrap() {
+        ScalarSlice::Bool(a) => a.values().inner().len(),
+        other => panic!("flag read back as {}", other.type_name()),
+    };
+    assert!(
+        packed <= 2,
+        "13 packed bools should occupy 2 bytes, found {packed} — the column is not bit-packed"
     );
 }

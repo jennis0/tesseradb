@@ -34,11 +34,12 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryArray, Float32Array, Int64Array, StringArray, UInt16Array, UInt32Array,
+    ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
+    Int64Array, Int8Array, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array,
     UInt64Array, UInt8Array,
 };
 use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
-use arrow::datatypes::{ArrowNativeType, DataType, Field, Schema};
+use arrow::datatypes::{ArrowNativeType, DataType, Field, Schema, TimeUnit};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 
@@ -357,12 +358,18 @@ const FIXED_COLUMN_COUNT: usize = 2;
 /// [`arrow_type_of`] between them can produce.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ColumnKind {
+    Bool,
     U8,
     U16,
     U32,
     U64,
+    I8,
+    I16,
+    I32,
     I64,
     F32,
+    F64,
+    TimestampUs,
     Utf8,
     /// `external-ids.arrow`'s key column (contracts §2.4). Same shape as [`ColumnKind::Utf8`] —
     /// `i32` offsets over a values buffer — but external ids are arbitrary bytes, not UTF-8.
@@ -372,12 +379,18 @@ pub(crate) enum ColumnKind {
 impl ColumnKind {
     fn of(ty: &DataType, name: &str) -> io::Result<Self> {
         match ty {
+            DataType::Boolean => Ok(ColumnKind::Bool),
             DataType::UInt8 => Ok(ColumnKind::U8),
             DataType::UInt16 => Ok(ColumnKind::U16),
             DataType::UInt32 => Ok(ColumnKind::U32),
             DataType::UInt64 => Ok(ColumnKind::U64),
+            DataType::Int8 => Ok(ColumnKind::I8),
+            DataType::Int16 => Ok(ColumnKind::I16),
+            DataType::Int32 => Ok(ColumnKind::I32),
             DataType::Int64 => Ok(ColumnKind::I64),
             DataType::Float32 => Ok(ColumnKind::F32),
+            DataType::Float64 => Ok(ColumnKind::F64),
+            DataType::Timestamp(TimeUnit::Microsecond, None) => Ok(ColumnKind::TimestampUs),
             DataType::Utf8 => Ok(ColumnKind::Utf8),
             DataType::Binary => Ok(ColumnKind::Binary),
             other => Err(io::Error::new(
@@ -400,6 +413,11 @@ impl ColumnKind {
 pub(crate) struct ColumnSpool {
     kind: ColumnKind,
     writer: BufWriter<File>,
+    /// [`ColumnKind::Bool`] only: the partial byte being packed, and how many of its bits are
+    /// live. Flushed at eight, and padded at `into_array` — a trailing partial byte is real, and
+    /// dropping it would lose up to seven rows' values with the row count still agreeing.
+    bit_buf: u8,
+    bit_len: u8,
     /// Var-width kinds only: Arrow's `i32` offset table, which has no file-backed form — a
     /// `LargeBinary`'s `i64` twin is what `PostingsSpool` holds for the same reason.
     offsets: Vec<i32>,
@@ -418,6 +436,8 @@ impl ColumnSpool {
         Ok(ColumnSpool {
             kind,
             writer: BufWriter::new(file),
+            bit_buf: 0,
+            bit_len: 0,
             offsets: if kind.is_var_width() {
                 vec![0]
             } else {
@@ -473,12 +493,34 @@ impl ColumnSpool {
     /// every value against the wrong identity, and no error anywhere.
     fn append(&mut self, value: &ScalarValue, name: &str, tessera_id: TesseraId) -> io::Result<()> {
         match (self.kind, value) {
+            // Packed into the spool a bit at a time, so the spool *is* the Arrow values buffer
+            // and `into_array` can map it like every other column. Buffering a byte and flushing
+            // it when full is the whole mechanism; `finish` pads the last partial byte.
+            (ColumnKind::Bool, ScalarValue::Bool(v)) => {
+                if *v {
+                    self.bit_buf |= 1 << self.bit_len;
+                }
+                self.bit_len += 1;
+                if self.bit_len == 8 {
+                    self.writer.write_all(&[self.bit_buf])?;
+                    self.bit_buf = 0;
+                    self.bit_len = 0;
+                }
+                Ok(())
+            }
             (ColumnKind::U8, ScalarValue::U8(v)) => self.writer.write_all(&v.to_ne_bytes()),
             (ColumnKind::U16, ScalarValue::U16(v)) => self.writer.write_all(&v.to_ne_bytes()),
             (ColumnKind::U32, ScalarValue::U32(v)) => self.writer.write_all(&v.to_ne_bytes()),
             (ColumnKind::U64, ScalarValue::U64(v)) => self.writer.write_all(&v.to_ne_bytes()),
+            (ColumnKind::I8, ScalarValue::I8(v)) => self.writer.write_all(&v.to_ne_bytes()),
+            (ColumnKind::I16, ScalarValue::I16(v)) => self.writer.write_all(&v.to_ne_bytes()),
+            (ColumnKind::I32, ScalarValue::I32(v)) => self.writer.write_all(&v.to_ne_bytes()),
             (ColumnKind::I64, ScalarValue::I64(v)) => self.writer.write_all(&v.to_ne_bytes()),
+            (ColumnKind::TimestampUs, ScalarValue::TimestampUs(v)) => {
+                self.writer.write_all(&v.to_ne_bytes())
+            }
             (ColumnKind::F32, ScalarValue::F32(v)) => self.writer.write_all(&v.to_ne_bytes()),
+            (ColumnKind::F64, ScalarValue::F64(v)) => self.writer.write_all(&v.to_ne_bytes()),
             (ColumnKind::Utf8, ScalarValue::Utf8(v)) => {
                 let next = self.next_offset(v.len(), name)?;
                 self.writer.write_all(v.as_bytes())?;
@@ -499,9 +541,17 @@ impl ColumnSpool {
     pub(crate) fn into_array(self, rows: usize, name: &str) -> io::Result<ArrayRef> {
         let ColumnSpool {
             kind,
-            writer,
+            mut writer,
             offsets,
+            bit_buf,
+            bit_len,
         } = self;
+        // The trailing partial byte, if any. Without it a column whose row count is not a
+        // multiple of eight loses up to seven values while `rows` still agrees — a short buffer
+        // arrow would either refuse or read past, and neither says what happened.
+        if bit_len > 0 {
+            writer.write_all(&[bit_buf])?;
+        }
         let file = writer.into_inner().map_err(io::IntoInnerError::into_error)?;
         // The bytes are about to be read back through a memory map; they must be durable and
         // visible before the map is taken. Same rule as `PostingsSpool::finish`.
@@ -513,12 +563,20 @@ impl ColumnSpool {
         // producers can legitimately write no rows, so this is the ordinary empty case.
         if len == 0 {
             return Ok(match kind {
-                ColumnKind::U8 => Arc::new(UInt8Array::from(Vec::<u8>::new())) as ArrayRef,
+                ColumnKind::Bool => Arc::new(BooleanArray::from(Vec::<bool>::new())) as ArrayRef,
+                ColumnKind::U8 => Arc::new(UInt8Array::from(Vec::<u8>::new())),
                 ColumnKind::U16 => Arc::new(UInt16Array::from(Vec::<u16>::new())),
                 ColumnKind::U32 => Arc::new(UInt32Array::from(Vec::<u32>::new())),
                 ColumnKind::U64 => Arc::new(UInt64Array::from(Vec::<u64>::new())),
+                ColumnKind::I8 => Arc::new(Int8Array::from(Vec::<i8>::new())),
+                ColumnKind::I16 => Arc::new(Int16Array::from(Vec::<i16>::new())),
+                ColumnKind::I32 => Arc::new(Int32Array::from(Vec::<i32>::new())),
                 ColumnKind::I64 => Arc::new(Int64Array::from(Vec::<i64>::new())),
+                ColumnKind::TimestampUs => {
+                    Arc::new(TimestampMicrosecondArray::from(Vec::<i64>::new()))
+                }
                 ColumnKind::F32 => Arc::new(Float32Array::from(Vec::<f32>::new())),
+                ColumnKind::F64 => Arc::new(Float64Array::from(Vec::<f64>::new())),
                 ColumnKind::Utf8 => Arc::new(
                     StringArray::try_new(
                         OffsetBuffer::new(ScalarBuffer::from(offsets)),
@@ -549,14 +607,38 @@ impl ColumnSpool {
         let buffer = unsafe { Buffer::from_custom_allocation(ptr, len, arc) };
 
         Ok(match kind {
-            ColumnKind::U8 => {
-                Arc::new(UInt8Array::new(typed_column(name, buffer, rows)?, None)) as ArrayRef
+            // The one column whose buffer is not `rows` elements wide: a bit each, so
+            // `ceil(rows / 8)` bytes, which `BooleanBuffer` slices to `rows` itself.
+            ColumnKind::Bool => {
+                let needed = rows.div_ceil(8);
+                if buffer.len() < needed {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "column '{name}' has {} bytes, {rows} packed bits need {needed}",
+                            buffer.len()
+                        ),
+                    ));
+                }
+                Arc::new(BooleanArray::new(
+                    arrow::buffer::BooleanBuffer::new(buffer, 0, rows),
+                    None,
+                )) as ArrayRef
             }
+            ColumnKind::U8 => Arc::new(UInt8Array::new(typed_column(name, buffer, rows)?, None)),
             ColumnKind::U16 => Arc::new(UInt16Array::new(typed_column(name, buffer, rows)?, None)),
             ColumnKind::U32 => Arc::new(UInt32Array::new(typed_column(name, buffer, rows)?, None)),
             ColumnKind::U64 => Arc::new(UInt64Array::new(typed_column(name, buffer, rows)?, None)),
+            ColumnKind::I8 => Arc::new(Int8Array::new(typed_column(name, buffer, rows)?, None)),
+            ColumnKind::I16 => Arc::new(Int16Array::new(typed_column(name, buffer, rows)?, None)),
+            ColumnKind::I32 => Arc::new(Int32Array::new(typed_column(name, buffer, rows)?, None)),
             ColumnKind::I64 => Arc::new(Int64Array::new(typed_column(name, buffer, rows)?, None)),
+            ColumnKind::TimestampUs => Arc::new(TimestampMicrosecondArray::new(
+                typed_column(name, buffer, rows)?,
+                None,
+            )),
             ColumnKind::F32 => Arc::new(Float32Array::new(typed_column(name, buffer, rows)?, None)),
+            ColumnKind::F64 => Arc::new(Float64Array::new(typed_column(name, buffer, rows)?, None)),
             ColumnKind::Utf8 => Arc::new(
                 StringArray::try_new(OffsetBuffer::new(ScalarBuffer::from(offsets)), buffer, None)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?,
@@ -614,12 +696,20 @@ fn write_single_batch(path: &Path, schema: &Arc<Schema>, batch: &RecordBatch) ->
 /// others is a segment one writer emits and the reader refuses.
 fn arrow_type_of(ty: ScalarType) -> DataType {
     match ty {
+        ScalarType::Bool => DataType::Boolean,
         ScalarType::U8 => DataType::UInt8,
         ScalarType::U16 => DataType::UInt16,
         ScalarType::U32 => DataType::UInt32,
         ScalarType::U64 => DataType::UInt64,
+        ScalarType::I8 => DataType::Int8,
+        ScalarType::I16 => DataType::Int16,
+        ScalarType::I32 => DataType::Int32,
         ScalarType::I64 => DataType::Int64,
         ScalarType::F32 => DataType::Float32,
+        ScalarType::F64 => DataType::Float64,
+        // `None` for the timezone: these are instants, and a per-column zone would be a second
+        // place a time's meaning is decided.
+        ScalarType::TimestampUs => DataType::Timestamp(TimeUnit::Microsecond, None),
         ScalarType::Utf8 => DataType::Utf8,
     }
 }
@@ -721,39 +811,73 @@ pub fn write_columns(
 /// *becomes* the Arrow values buffer with no copy.
 #[derive(Debug)]
 pub enum ScalarColumnData {
+    Bool(Vec<bool>),
     U8(Vec<u8>),
     U16(Vec<u16>),
     U32(Vec<u32>),
     U64(Vec<u64>),
+    I8(Vec<i8>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
     I64(Vec<i64>),
     F32(Vec<f32>),
+    F64(Vec<f64>),
+    TimestampUs(Vec<i64>),
     Utf8(Vec<String>),
+}
+
+/// The fixed-width members, each with its variant, Arrow array type and Arrow type.
+///
+/// **Generated rather than written out, because there are eleven of them and five methods.** The
+/// hand-written form was fifty near-identical arms whose only failure mode is a type appearing in
+/// ten of them — a column silently taking another's width or another's values, which is a defect
+/// no aggregate check sees. `Bool` and `Utf8` are excluded and written by hand: neither is a flat
+/// slice of itself, which is exactly what the uniform arms assume.
+macro_rules! fixed_width_columns {
+    ($mac:ident) => {
+        $mac! {
+            (U8, UInt8Array, DataType::UInt8),
+            (U16, UInt16Array, DataType::UInt16),
+            (U32, UInt32Array, DataType::UInt32),
+            (U64, UInt64Array, DataType::UInt64),
+            (I8, Int8Array, DataType::Int8),
+            (I16, Int16Array, DataType::Int16),
+            (I32, Int32Array, DataType::Int32),
+            (I64, Int64Array, DataType::Int64),
+            (F32, Float32Array, DataType::Float32),
+            (F64, Float64Array, DataType::Float64),
+            (TimestampUs, TimestampMicrosecondArray,
+             DataType::Timestamp(TimeUnit::Microsecond, None)),
+        }
+    };
 }
 
 impl ScalarColumnData {
     /// An empty column of the given type — what a build allocates before filling it.
     pub fn of(ty: ScalarType, capacity: usize) -> Self {
-        match ty {
-            ScalarType::U8 => ScalarColumnData::U8(Vec::with_capacity(capacity)),
-            ScalarType::U16 => ScalarColumnData::U16(Vec::with_capacity(capacity)),
-            ScalarType::U32 => ScalarColumnData::U32(Vec::with_capacity(capacity)),
-            ScalarType::U64 => ScalarColumnData::U64(Vec::with_capacity(capacity)),
-            ScalarType::I64 => ScalarColumnData::I64(Vec::with_capacity(capacity)),
-            ScalarType::F32 => ScalarColumnData::F32(Vec::with_capacity(capacity)),
-            ScalarType::Utf8 => ScalarColumnData::Utf8(Vec::with_capacity(capacity)),
+        macro_rules! arms {
+            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+                match ty {
+                    $(ScalarType::$v => ScalarColumnData::$v(Vec::with_capacity(capacity)),)*
+                    ScalarType::Bool => ScalarColumnData::Bool(Vec::with_capacity(capacity)),
+                    ScalarType::Utf8 => ScalarColumnData::Utf8(Vec::with_capacity(capacity)),
+                }
+            };
         }
+        fixed_width_columns!(arms)
     }
 
     pub fn len(&self) -> usize {
-        match self {
-            ScalarColumnData::U8(v) => v.len(),
-            ScalarColumnData::U16(v) => v.len(),
-            ScalarColumnData::U32(v) => v.len(),
-            ScalarColumnData::U64(v) => v.len(),
-            ScalarColumnData::I64(v) => v.len(),
-            ScalarColumnData::F32(v) => v.len(),
-            ScalarColumnData::Utf8(v) => v.len(),
+        macro_rules! arms {
+            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+                match self {
+                    $(ScalarColumnData::$v(v) => v.len(),)*
+                    ScalarColumnData::Bool(v) => v.len(),
+                    ScalarColumnData::Utf8(v) => v.len(),
+                }
+            };
         }
+        fixed_width_columns!(arms)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -765,68 +889,54 @@ impl ScalarColumnData {
     /// into another row's place, with every value present and none against its own identity.
     pub fn push(&mut self, value: ScalarValue, name: &str) -> io::Result<()> {
         let expected = self.arrow_type();
-        match (self, value) {
-            (ScalarColumnData::U8(v), ScalarValue::U8(x)) => v.push(x),
-            (ScalarColumnData::U16(v), ScalarValue::U16(x)) => v.push(x),
-            (ScalarColumnData::U32(v), ScalarValue::U32(x)) => v.push(x),
-            (ScalarColumnData::U64(v), ScalarValue::U64(x)) => v.push(x),
-            (ScalarColumnData::I64(v), ScalarValue::I64(x)) => v.push(x),
-            (ScalarColumnData::F32(v), ScalarValue::F32(x)) => v.push(x),
-            (ScalarColumnData::Utf8(v), ScalarValue::Utf8(x)) => v.push(x),
-            (_, got) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "write_columns: scalar '{name}' is {expected:?}, got {got:?}"
-                    ),
-                ))
-            }
+        macro_rules! arms {
+            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+                match (self, value) {
+                    $((ScalarColumnData::$v(col), ScalarValue::$v(x)) => col.push(x),)*
+                    (ScalarColumnData::Bool(col), ScalarValue::Bool(x)) => col.push(x),
+                    (ScalarColumnData::Utf8(col), ScalarValue::Utf8(x)) => col.push(x),
+                    (_, got) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("write_columns: scalar '{name}' is {expected:?}, got {got:?}"),
+                        ))
+                    }
+                }
+            };
         }
+        fixed_width_columns!(arms);
         Ok(())
     }
 
     fn arrow_type(&self) -> DataType {
-        match self {
-            ScalarColumnData::U8(_) => DataType::UInt8,
-            ScalarColumnData::U16(_) => DataType::UInt16,
-            ScalarColumnData::U32(_) => DataType::UInt32,
-            ScalarColumnData::U64(_) => DataType::UInt64,
-            ScalarColumnData::I64(_) => DataType::Int64,
-            ScalarColumnData::F32(_) => DataType::Float32,
-            ScalarColumnData::Utf8(_) => DataType::Utf8,
+        macro_rules! arms {
+            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+                match self {
+                    $(ScalarColumnData::$v(_) => $dt,)*
+                    ScalarColumnData::Bool(_) => DataType::Boolean,
+                    ScalarColumnData::Utf8(_) => DataType::Utf8,
+                }
+            };
         }
+        fixed_width_columns!(arms)
     }
 
     fn into_array(self, rows: usize, name: &str) -> io::Result<ArrayRef> {
-        Ok(match self {
-            ScalarColumnData::U8(v) => Arc::new(UInt8Array::new(
-                typed_column(name, Buffer::from_vec(v), rows)?,
-                None,
-            )) as ArrayRef,
-            ScalarColumnData::U16(v) => Arc::new(UInt16Array::new(
-                typed_column(name, Buffer::from_vec(v), rows)?,
-                None,
-            )),
-            ScalarColumnData::U32(v) => Arc::new(UInt32Array::new(
-                typed_column(name, Buffer::from_vec(v), rows)?,
-                None,
-            )),
-            ScalarColumnData::U64(v) => Arc::new(UInt64Array::new(
-                typed_column(name, Buffer::from_vec(v), rows)?,
-                None,
-            )),
-            ScalarColumnData::I64(v) => Arc::new(Int64Array::new(
-                typed_column(name, Buffer::from_vec(v), rows)?,
-                None,
-            )),
-            ScalarColumnData::F32(v) => Arc::new(Float32Array::new(
-                typed_column(name, Buffer::from_vec(v), rows)?,
-                None,
-            )),
-            // The one type with no reusable allocation: `StringArray` owns an offset table this
-            // shape does not carry, so it is built rather than adopted.
-            ScalarColumnData::Utf8(v) => Arc::new(StringArray::from_iter_values(v.iter())),
-        })
+        macro_rules! arms {
+            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+                match self {
+                    $(ScalarColumnData::$v(v) => Arc::new($arr::new(
+                        typed_column(name, Buffer::from_vec(v), rows)?,
+                        None,
+                    )) as ArrayRef,)*
+                    // The two that own an allocation this shape does not carry — a bitmap and an
+                    // offset table — so both are built rather than adopted.
+                    ScalarColumnData::Bool(v) => Arc::new(BooleanArray::from(v)),
+                    ScalarColumnData::Utf8(v) => Arc::new(StringArray::from_iter_values(v.iter())),
+                }
+            };
+        }
+        Ok(fixed_width_columns!(arms))
     }
 }
 

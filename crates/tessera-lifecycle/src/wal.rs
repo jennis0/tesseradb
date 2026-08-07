@@ -114,12 +114,19 @@ use tessera_types::EntityId;
 /// noticing that.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WalScalar {
+    Bool(bool),
     U8(u8),
     U16(u16),
     U32(u32),
     U64(u64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
     I64(i64),
     F32(f32),
+    F64(f64),
+    /// Microseconds since the Unix epoch — an `i64` whose unit the declaration fixes.
+    TimestampUs(i64),
     Utf8(String),
 }
 
@@ -319,8 +326,9 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// as whatever bytes follow it. Version 6 gave [`WalScalar`] the four narrow widths and put the
 /// enum in width order, which renumbers `F32` and `Utf8`; appending them instead would have kept
 /// the discriminants stable for a reader that does not exist (decision 0048), at the price of two
-/// mirrored enums whose orders disagree.
-const WAL_VERSION: u16 = 6;
+/// mirrored enums whose orders disagree. Version 7 completed the set — `bool`, the three narrow
+/// signed widths, `f64` and `timestamp_us` — renumbering it again, for the same reason.
+const WAL_VERSION: u16 = 7;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

@@ -538,20 +538,24 @@ fn parse_values_binding(raw: &str) -> Result<(String, PathBuf), String> {
 /// looks like access control and is not.
 fn report_residency(schema: &tessera_build::schema::Schema, limit: Option<u64>) {
     let columns = schema.attributes.len();
-    match schema.row_bytes() {
-        Some(per_row) => {
+    match schema.row_bits() {
+        Some(per_row_bits) => {
+            // Reported in bytes because that is the unit §10.5 prices a column in, but computed
+            // from bits and shown to two places: a schema of `bool`s costs a real fraction of a
+            // byte per row, and rounding it to zero would report the cheap case as free.
+            let per_row = per_row_bits as f64 / 8.0;
             eprintln!(
-                "schema: {columns} column(s), {per_row} B/row against the 12 B fixed row \
+                "schema: {columns} column(s), {per_row:.2} B/row against the 12 B fixed row \
                  (+{:.0}%)",
-                per_row as f64 / 12.0 * 100.0
+                per_row / 12.0 * 100.0
             );
             if let Some(rows) = limit {
-                let gib = (per_row * rows) as f64 / (1024.0 * 1024.0 * 1024.0);
+                let gib = per_row * rows as f64 / (1024.0 * 1024.0 * 1024.0);
                 eprintln!("        {gib:.2} GiB resident at {rows} items");
             }
             eprintln!(
                 "        {:.2} GiB per 10^9 items — unalterable without rewriting the corpus",
-                per_row as f64 * 0.93
+                per_row * 0.93
             );
         }
         None => eprintln!("schema: {columns} column(s), variable width per row"),

@@ -17,11 +17,11 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, Float32Array, Int64Array, StringArray, UInt16Array, UInt32Array, UInt64Array,
-    UInt8Array,
+    Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+    StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow::buffer::Buffer;
-use arrow::datatypes::{DataType, SchemaRef};
+use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use arrow::ipc::convert::fb_to_schema;
 use arrow::ipc::reader::{read_footer_length, FileDecoder};
 use arrow::ipc::{root_as_footer, root_as_message, Block, MetadataVersion};
@@ -1077,15 +1077,47 @@ impl MortonSlice {
 /// One declared-scalar column's typed, zero-copy value slice.
 #[derive(Debug)]
 pub enum ScalarSlice<'a> {
+    /// Bit-packed by Arrow, so this is the array rather than a `&[bool]` — the one fixed-width
+    /// member that is not a flat slice of itself, for the same reason `Utf8` is not.
+    Bool(&'a BooleanArray),
     U8(&'a [u8]),
     U16(&'a [u16]),
     U32(&'a [u32]),
     U64(&'a [u64]),
+    I8(&'a [i8]),
+    I16(&'a [i16]),
+    I32(&'a [i32]),
     I64(&'a [i64]),
     F32(&'a [f32]),
+    F64(&'a [f64]),
+    /// Microseconds since the Unix epoch — an `i64` slice whose *unit* the declaration fixes.
+    TimestampUs(&'a [i64]),
     /// Variable-length; `StringArray` itself is a zero-copy view over the mapped buffers, so
     /// this is still zero-copy even though it isn't a flat `&[&str]`.
     Utf8(&'a StringArray),
+}
+
+impl ScalarSlice<'_> {
+    /// The stored type's name, for a diagnostic that has to say what it found. Deliberately the
+    /// same spelling `ScalarType::arrow_type_name` uses, so a mismatch message names the two sides
+    /// in one vocabulary rather than making a reader translate between them.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            ScalarSlice::Bool(_) => "bool",
+            ScalarSlice::U8(_) => "u8",
+            ScalarSlice::U16(_) => "u16",
+            ScalarSlice::U32(_) => "u32",
+            ScalarSlice::U64(_) => "u64",
+            ScalarSlice::I8(_) => "i8",
+            ScalarSlice::I16(_) => "i16",
+            ScalarSlice::I32(_) => "i32",
+            ScalarSlice::I64(_) => "i64",
+            ScalarSlice::F32(_) => "f32",
+            ScalarSlice::F64(_) => "f64",
+            ScalarSlice::TimestampUs(_) => "timestamp_us",
+            ScalarSlice::Utf8(_) => "utf8",
+        }
+    }
 }
 
 /// A zero-copy, mmap-backed view of `columns.arrow`. Validated once at [`ColumnsRef::load`]:
@@ -1173,61 +1205,53 @@ impl ColumnsRef {
     pub fn scalar(&self, name: &str) -> Option<ScalarSlice<'_>> {
         let idx = *self.scalar_index.get(name)?;
         let column = self.batch.column(idx);
-        Some(match column.data_type() {
-            DataType::UInt8 => ScalarSlice::U8(
-                column
-                    .as_any()
-                    .downcast_ref::<UInt8Array>()
-                    .expect("data_type checked")
-                    .values(),
-            ),
-            DataType::UInt16 => ScalarSlice::U16(
-                column
-                    .as_any()
-                    .downcast_ref::<UInt16Array>()
-                    .expect("data_type checked")
-                    .values(),
-            ),
-            DataType::UInt32 => ScalarSlice::U32(
-                column
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .expect("data_type checked")
-                    .values(),
-            ),
-            DataType::UInt64 => ScalarSlice::U64(
-                column
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .expect("data_type checked")
-                    .values(),
-            ),
-            DataType::Int64 => ScalarSlice::I64(
-                column
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .expect("data_type checked")
-                    .values(),
-            ),
-            DataType::Float32 => ScalarSlice::F32(
-                column
-                    .as_any()
-                    .downcast_ref::<Float32Array>()
-                    .expect("data_type checked")
-                    .values(),
-            ),
-            DataType::Utf8 => ScalarSlice::Utf8(
-                column
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("data_type checked"),
-            ),
-            other => panic!(
-                "columns.arrow: scalar '{name}' has an unsupported type {other:?} that \
-                 should have been rejected at load"
-            ),
+        // One arm per stored type. Generated for the flat ones (`downcast().values()` differs only
+        // in the array type), hand-written for the two that are not flat.
+        macro_rules! flat {
+            ($($dt:pat => ($variant:ident, $arr:ident)),* $(,)?) => {
+                match column.data_type() {
+                    $($dt => ScalarSlice::$variant(
+                        column
+                            .as_any()
+                            .downcast_ref::<$arr>()
+                            .expect("data_type checked")
+                            .values(),
+                    ),)*
+                    DataType::Boolean => ScalarSlice::Bool(
+                        column
+                            .as_any()
+                            .downcast_ref::<BooleanArray>()
+                            .expect("data_type checked"),
+                    ),
+                    DataType::Utf8 => ScalarSlice::Utf8(
+                        column
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .expect("data_type checked"),
+                    ),
+                    other => panic!(
+                        "columns.arrow: scalar '{name}' has an unsupported type {other:?} that \
+                         should have been rejected at load"
+                    ),
+                }
+            };
+        }
+        Some(flat! {
+            DataType::UInt8 => (U8, UInt8Array),
+            DataType::UInt16 => (U16, UInt16Array),
+            DataType::UInt32 => (U32, UInt32Array),
+            DataType::UInt64 => (U64, UInt64Array),
+            DataType::Int8 => (I8, Int8Array),
+            DataType::Int16 => (I16, Int16Array),
+            DataType::Int32 => (I32, Int32Array),
+            DataType::Int64 => (I64, Int64Array),
+            DataType::Float32 => (F32, Float32Array),
+            DataType::Float64 => (F64, Float64Array),
+            DataType::Timestamp(TimeUnit::Microsecond, None) =>
+                (TimestampUs, TimestampMicrosecondArray),
         })
     }
+
 }
 
 /// Downcast column `idx` of `batch` to `T` (one of the fixed-column array types), panicking on
@@ -1283,12 +1307,18 @@ fn validate_schema(batch: &RecordBatch, path: &Path) -> Result<()> {
         // a type this refuses is a segment the writer can produce and no reader can open.
         if !matches!(
             field.data_type(),
-            DataType::UInt8
+            DataType::Boolean
+                | DataType::UInt8
                 | DataType::UInt16
                 | DataType::UInt32
                 | DataType::UInt64
+                | DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
                 | DataType::Int64
                 | DataType::Float32
+                | DataType::Float64
+                | DataType::Timestamp(TimeUnit::Microsecond, None)
                 | DataType::Utf8
         ) {
             return Err(StoreError::InvalidColumns {

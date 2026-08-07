@@ -40,7 +40,8 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, Float32Array, Int64Array, StringArray, UInt16Array, UInt32Array, UInt64Array,
+    ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+    Int8Array, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array,
     UInt8Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
@@ -52,12 +53,20 @@ use arrow::record_batch::RecordBatch;
 /// Plain data only — no engine or store type. Each variant's slice must be the same length as
 /// `points_tessera_ids`/`codes` in the corresponding [`viewport_ipc`] call.
 pub enum ScalarColumn<'a> {
+    Bool(&'a [bool]),
     U8(&'a [u8]),
     U16(&'a [u16]),
     U32(&'a [u32]),
     U64(&'a [u64]),
+    I8(&'a [i8]),
+    I16(&'a [i16]),
+    I32(&'a [i32]),
     I64(&'a [i64]),
     F32(&'a [f32]),
+    F64(&'a [f64]),
+    /// Microseconds since the Unix epoch; encoded as Arrow `Timestamp(Microsecond, None)` so a
+    /// client reads a time rather than an integer it has to be told about out of band.
+    TimestampUs(&'a [i64]),
     Utf8(&'a [String]),
 }
 
@@ -88,6 +97,74 @@ pub struct ViewportColumns<'a> {
     pub sub_cells: Option<(&'a [u64], &'a [u64])>,
 }
 
+/// The three per-variant facts `viewport_ipc` needs from a [`ScalarColumn`]: its length, its Arrow
+/// type and its array.
+///
+/// **One table, three functions**, because the three were three separate `match`es over the same
+/// thirteen variants — and a type present in two of them and missing from the third is a column
+/// that validates, types correctly and encodes as something else.
+///
+/// `Bool` and `Utf8` are hand-written in each: Arrow builds both from an owned collection rather
+/// than `from_iter_values`, because neither target is a flat copy of the input — a bitmap and an
+/// offset table respectively.
+macro_rules! wire_columns {
+    ($mac:ident) => {
+        $mac! {
+            (U8, UInt8Array, DataType::UInt8),
+            (U16, UInt16Array, DataType::UInt16),
+            (U32, UInt32Array, DataType::UInt32),
+            (U64, UInt64Array, DataType::UInt64),
+            (I8, Int8Array, DataType::Int8),
+            (I16, Int16Array, DataType::Int16),
+            (I32, Int32Array, DataType::Int32),
+            (I64, Int64Array, DataType::Int64),
+            (F32, Float32Array, DataType::Float32),
+            (F64, Float64Array, DataType::Float64),
+            (TimestampUs, TimestampMicrosecondArray,
+             DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)),
+        }
+    };
+}
+
+fn wire_column_len(col: &ScalarColumn) -> usize {
+    macro_rules! arms {
+        ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+            match col {
+                $(ScalarColumn::$v(s) => s.len(),)*
+                ScalarColumn::Bool(s) => s.len(),
+                ScalarColumn::Utf8(s) => s.len(),
+            }
+        };
+    }
+    wire_columns!(arms)
+}
+
+fn wire_column_type(col: &ScalarColumn) -> DataType {
+    macro_rules! arms {
+        ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+            match col {
+                $(ScalarColumn::$v(_) => $dt,)*
+                ScalarColumn::Bool(_) => DataType::Boolean,
+                ScalarColumn::Utf8(_) => DataType::Utf8,
+            }
+        };
+    }
+    wire_columns!(arms)
+}
+
+fn wire_column_array(col: &ScalarColumn) -> ArrayRef {
+    macro_rules! arms {
+        ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
+            match col {
+                $(ScalarColumn::$v(s) => Arc::new($arr::from_iter_values(s.iter().copied())),)*
+                ScalarColumn::Bool(s) => Arc::new(BooleanArray::from(s.to_vec())),
+                ScalarColumn::Utf8(s) => Arc::new(StringArray::from_iter_values(s.iter())),
+            }
+        };
+    }
+    wire_columns!(arms)
+}
+
 /// Build the framed Arrow IPC payload for one `/v1/viewport` response.
 ///
 /// # Panics
@@ -111,15 +188,7 @@ pub fn viewport_ipc(cols: &ViewportColumns<'_>) -> Vec<u8> {
         "sum of served ({served_total}) != number of points ({points})"
     );
     for (name, col) in cols.scalars {
-        let len = match col {
-            ScalarColumn::U8(s) => s.len(),
-            ScalarColumn::U16(s) => s.len(),
-            ScalarColumn::U32(s) => s.len(),
-            ScalarColumn::U64(s) => s.len(),
-            ScalarColumn::I64(s) => s.len(),
-            ScalarColumn::F32(s) => s.len(),
-            ScalarColumn::Utf8(s) => s.len(),
-        };
+        let len = wire_column_len(col);
         assert_eq!(points, len, "scalar column {name:?} length mismatch");
     }
     if let Some((cells, counts)) = cols.sub_cells {
@@ -205,15 +274,7 @@ fn encode_points_batch(
         Field::new("code", DataType::UInt64, false),
     ];
     for (name, col) in scalars {
-        let ty = match col {
-            ScalarColumn::U8(_) => DataType::UInt8,
-            ScalarColumn::U16(_) => DataType::UInt16,
-            ScalarColumn::U32(_) => DataType::UInt32,
-            ScalarColumn::U64(_) => DataType::UInt64,
-            ScalarColumn::I64(_) => DataType::Int64,
-            ScalarColumn::F32(_) => DataType::Float32,
-            ScalarColumn::Utf8(_) => DataType::Utf8,
-        };
+        let ty = wire_column_type(col);
         fields.push(Field::new(*name, ty, false));
     }
     let schema = Arc::new(Schema::new(fields));
@@ -225,15 +286,7 @@ fn encode_points_batch(
 
     let mut columns: Vec<ArrayRef> = vec![id_col, code_col];
     for (_, col) in scalars {
-        let array: ArrayRef = match col {
-            ScalarColumn::U8(s) => Arc::new(UInt8Array::from_iter_values(s.iter().copied())),
-            ScalarColumn::U16(s) => Arc::new(UInt16Array::from_iter_values(s.iter().copied())),
-            ScalarColumn::U32(s) => Arc::new(UInt32Array::from_iter_values(s.iter().copied())),
-            ScalarColumn::U64(s) => Arc::new(UInt64Array::from_iter_values(s.iter().copied())),
-            ScalarColumn::I64(s) => Arc::new(Int64Array::from_iter_values(s.iter().copied())),
-            ScalarColumn::F32(s) => Arc::new(Float32Array::from_iter_values(s.iter().copied())),
-            ScalarColumn::Utf8(s) => Arc::new(StringArray::from_iter_values(s.iter())),
-        };
+        let array: ArrayRef = wire_column_array(col);
         columns.push(array);
     }
 

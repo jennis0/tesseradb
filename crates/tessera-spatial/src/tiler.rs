@@ -13,12 +13,20 @@ use crate::morton::split32;
 /// The kinds below are the whole set (contracts §2.2).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarValue {
+    Bool(bool),
     U8(u8),
     U16(u16),
     U32(u32),
     U64(u64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
     I64(i64),
     F32(f32),
+    F64(f64),
+    /// Microseconds since the Unix epoch. Stored as an `i64`; the *type* exists so the unit is in
+    /// the manifest rather than a convention between a schema author and their client.
+    TimestampUs(i64),
     Utf8(String),
 }
 
@@ -35,14 +43,30 @@ pub enum ScalarValue {
 /// for. It predates the fixed-width set and is kept, but per-point-attributes §3.6 is explicit
 /// that a category belongs in a fixed-width column: a string repeated per row is the vocabulary
 /// stored a hundred million times.
+/// **`Bool` is the only member that is not a flat slice of itself.** Arrow packs it to one bit per
+/// row, so it is eight times cheaper than the `u8` a flag would otherwise cost — and every reader
+/// of it needs the array rather than a `&[bool]`, which is why `ScalarSlice` carries a
+/// `&BooleanArray` for it as it does for `Utf8`.
+///
+/// **`TimestampUs` stores as an `i64` and exists for the declaration, not the storage.** Without
+/// it a time is an `i64` in the manifest and its unit is a convention between the schema author
+/// and whoever reads the column; with it the unit is a fact a reader can check. It is deliberately
+/// the *only* time type: nothing records a unit per column beyond the type name, so admitting
+/// milliseconds too would let two builds store incomparable numbers under one declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarType {
+    Bool,
     U8,
     U16,
     U32,
     U64,
+    I8,
+    I16,
+    I32,
     I64,
     F32,
+    F64,
+    TimestampUs,
     Utf8,
 }
 
@@ -57,12 +81,18 @@ impl ScalarType {
     /// `u16`, `u32`) and what a schema author therefore types.
     pub fn arrow_type_name(self) -> &'static str {
         match self {
+            ScalarType::Bool => "bool",
             ScalarType::U8 => "u8",
             ScalarType::U16 => "u16",
             ScalarType::U32 => "u32",
             ScalarType::U64 => "u64",
+            ScalarType::I8 => "i8",
+            ScalarType::I16 => "i16",
+            ScalarType::I32 => "i32",
             ScalarType::I64 => "i64",
             ScalarType::F32 => "f32",
+            ScalarType::F64 => "f64",
+            ScalarType::TimestampUs => "timestamp_us",
             ScalarType::Utf8 => "utf8",
         }
     }
@@ -71,25 +101,39 @@ impl ScalarType {
     /// write, which every caller must treat as fail-closed rather than as an absent column.
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
+            "bool" => ScalarType::Bool,
             "u8" => ScalarType::U8,
             "u16" => ScalarType::U16,
             "u32" => ScalarType::U32,
             "u64" => ScalarType::U64,
+            "i8" => ScalarType::I8,
+            "i16" => ScalarType::I16,
+            "i32" => ScalarType::I32,
             "i64" => ScalarType::I64,
             "f32" => ScalarType::F32,
+            "f64" => ScalarType::F64,
+            "timestamp_us" => ScalarType::TimestampUs,
             "utf8" => ScalarType::Utf8,
             _ => return None,
         })
     }
 
-    /// Bytes this column adds to every row, or `None` for [`ScalarType::Utf8`], whose cost
-    /// depends on the data. The figure a residency report multiplies by the row count.
-    pub fn row_bytes(self) -> Option<u64> {
+    /// **Bits**, not bytes, this column adds to every row — `None` for [`ScalarType::Utf8`],
+    /// whose cost depends on the data.
+    ///
+    /// Bits because [`ScalarType::Bool`] costs one, and a byte-denominated figure would have to
+    /// round it to either 0 or 1 — the first hiding the cost, the second reporting eight times it
+    /// and erasing the reason to declare a `bool` at all.
+    pub fn row_bits(self) -> Option<u64> {
         Some(match self {
-            ScalarType::U8 => 1,
-            ScalarType::U16 => 2,
-            ScalarType::U32 | ScalarType::F32 => 4,
-            ScalarType::U64 | ScalarType::I64 => 8,
+            ScalarType::Bool => 1,
+            ScalarType::U8 | ScalarType::I8 => 8,
+            ScalarType::U16 | ScalarType::I16 => 16,
+            ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 32,
+            ScalarType::U64
+            | ScalarType::I64
+            | ScalarType::F64
+            | ScalarType::TimestampUs => 64,
             ScalarType::Utf8 => return None,
         })
     }

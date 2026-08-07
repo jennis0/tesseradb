@@ -539,15 +539,15 @@ fn segment_dir(ctx: &FlushContext) -> PathBuf {
 /// a variant-for-variant transcription and a missing arm is a compile error rather than a value
 /// silently taking another type's place.
 fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
-    match scalar {
-        WalScalar::U8(v) => ScalarValue::U8(*v),
-        WalScalar::U16(v) => ScalarValue::U16(*v),
-        WalScalar::U32(v) => ScalarValue::U32(*v),
-        WalScalar::U64(v) => ScalarValue::U64(*v),
-        WalScalar::I64(v) => ScalarValue::I64(*v),
-        WalScalar::F32(v) => ScalarValue::F32(*v),
-        WalScalar::Utf8(v) => ScalarValue::Utf8(v.clone()),
+    macro_rules! same {
+        ($($v:ident),* $(,)?) => {
+            match scalar {
+                $(WalScalar::$v(x) => ScalarValue::$v(*x),)*
+                WalScalar::Utf8(x) => ScalarValue::Utf8(x.clone()),
+            }
+        };
     }
+    same!(Bool, U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, TimestampUs)
 }
 
 /// One file's size and hex SHA-256, by reading it back.

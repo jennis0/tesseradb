@@ -61,12 +61,19 @@ use crate::Generation;
 /// but on the *output* side — read from `ColumnsRef`, not staged for write).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarOut {
+    Bool(bool),
     U8(u8),
     U16(u16),
     U32(u32),
     U64(u64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
     I64(i64),
     F32(f32),
+    F64(f64),
+    /// Microseconds since the Unix epoch.
+    TimestampUs(i64),
     Utf8(String),
 }
 
@@ -1444,15 +1451,18 @@ fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) ->
         // write end: `gather_scalars` refuses a segment missing a declared column, so a merge or
         // fold cannot propagate one. What reaches here is a read of a segment already published.
         if let Some(value) = cols.scalar(&declared_scalar.name) {
-            scalars.push(match value {
-                ScalarSlice::U8(s) => ScalarOut::U8(s[idx]),
-                ScalarSlice::U16(s) => ScalarOut::U16(s[idx]),
-                ScalarSlice::U32(s) => ScalarOut::U32(s[idx]),
-                ScalarSlice::U64(s) => ScalarOut::U64(s[idx]),
-                ScalarSlice::I64(s) => ScalarOut::I64(s[idx]),
-                ScalarSlice::F32(s) => ScalarOut::F32(s[idx]),
-                ScalarSlice::Utf8(arr) => ScalarOut::Utf8(arr.value(idx).to_string()),
-            });
+            // Generated for the flat members; `Bool` and `Utf8` read through their arrays
+            // because neither is stored as a flat slice of itself.
+            macro_rules! out {
+                ($($v:ident),* $(,)?) => {
+                    match value {
+                        $(ScalarSlice::$v(s) => ScalarOut::$v(s[idx]),)*
+                        ScalarSlice::Bool(a) => ScalarOut::Bool(a.value(idx)),
+                        ScalarSlice::Utf8(a) => ScalarOut::Utf8(a.value(idx).to_string()),
+                    }
+                };
+            }
+            scalars.push(out!(U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, TimestampUs));
         }
     }
 
