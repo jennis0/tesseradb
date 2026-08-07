@@ -119,9 +119,14 @@ pub struct SegmentRow<'a> {
 /// `(morton, tessera_id)` order, holding no row and no column.
 ///
 /// See the module doc for why this is the only thing that knows the layout. Memory is the offset
-/// table of any `Utf8` declared scalar (4 B/row — the one term that is not O(1) in rows, and zero
-/// in every bundle that exists, since `tessera-build` writes `declared_scalars` empty
-/// unconditionally, contracts §2.2) plus two `BufWriter`s.
+/// table of any `Utf8` declared scalar (4 B/row — the one term that is not O(1) in rows) plus two
+/// `BufWriter`s.
+///
+/// **That term is zero in every bundle a schema can currently produce**, and by refusal rather
+/// than by accident: `render` is the only built placement and `render` on `utf8` is refused at
+/// parse (per-point-attributes §4.3 — a per-row string is the vocabulary stored once per row). The
+/// writer keeps the capability because the *format* admits it and a hand-written manifest may
+/// declare one; what no schema can do is ask for it.
 ///
 /// **The spools are native-endian; the artefacts are not.** A spool becomes an Arrow values buffer
 /// in memory, where arrow reads it at the host's own endianness, so writing it little-endian would

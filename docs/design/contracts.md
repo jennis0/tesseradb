@@ -1,6 +1,6 @@
 # Tessera — Contracts Specification
 
-**Status:** Draft r21 — r20 (decision 0048: the evaluate machinery is deleted, not carried) plus one narrowing: §2.1's "exactly one segment per partition-slice" becomes "one **base** segment, plus a compaction's in-flight extents", because a fold that never blocks flush cannot emit one. Neither revision adds, removes or retypes a field (Appendix R)
+**Status:** Draft r22 — the per-item column tail becomes real: §2.2's `declared_scalars` gains `vocabulary` and is joined by a required `vocabularies` table, and §2.6 states the tail's accepted types. **This revision adds fields** (Appendix R), unlike r20 and r21, which added none
 **Owns:** the byte- and schema-level definition of the boundaries named in the system architecture §4: the bundle format, the service API, the plugin ABI and the wire format. `§n` refers to the design (r30); `SA §n` to the system architecture (r10). **Precedence:** the design is the specification and this document defers to it; the eleven recorded deviations in §0.3 govern where this document and the *system architecture* differ, and are proposed back to it. Deviations 6 and 8 have a design companion already applied at the design's r21, so they record an alignment rather than an outstanding proposal.
 
 ---
@@ -134,7 +134,8 @@ reconstructing canonically is the combination that hides it.
 | `created_at` | RFC 3339 | provenance |
 | `data_plugin_hash` | hex | hash of the **data module** (4.1); serving refuses on mismatch |
 | `declared_bounds` | object | plugin bounds, verbatim (§6.1) |
-| `declared_scalars` | array | `[{name, arrow_type}]` — the caller's per-item columns; ingest validates against this before any segment exists. **⊘ Partially implemented.** The build writes an empty array unconditionally and no build path emits a scalar column, so the points-batch schema's declared-scalar tail (§3.2) has never been non-empty. Ingest **does** validate against it: a batch column this array does not declare, a declared column the batch omits, and a declared column at the wrong arrow type are each `422` naming the column, and the scalar tail is built in declared order — refusals rather than the silent drop that shifted every later scalar by one. That validation has therefore only ever run against an empty declaration. The read path also honours the field — it widens the points schema from it — so a hand-written manifest declaring a scalar the columns do not carry is unguarded |
+| `declared_scalars` | array | `[{name, arrow_type, vocabulary?}]` — the caller's per-item columns, compiled from the build's `schema.toml` *(r22)*. **Order is significant and is the schema's declaration order**: the tail is stored and read back positionally, so reordering this array reorders the columns of every segment built after it. `arrow_type` is one of `u8`, `u16`, `u32`, `u64`, `i64`, `f32`, `utf8`; `vocabulary` names a `vocabularies` entry for a category column and is absent for a plain one. Ingest validates against it — a batch column this array does not declare, a declared column the batch omits, and a declared column at the wrong arrow type are each `422` naming the column, refusals rather than the silent drop that shifted every later scalar by one — and the read path widens the points schema from it. **Residual:** a category column is validated at its *width*, so an unassigned or `reserved` code is an ordinary integer and is stored unremarked; the row then carries a code no key explains. Checking meaning needs the key rather than the code ([#82](https://github.com/jennis0/tessera-index/issues/82)). A hand-written manifest declaring a scalar the columns do not carry remains unguarded |
+| `vocabularies` | array | `[{name, listing, values: [{key, code, label?}], reserved: [int]}]` — the value sets `declared_scalars`' category columns draw their codes from *(r22)*. **Required**, empty when no category is declared; a manifest omitting it is malformed rather than category-free, and the case that matters — rows carrying codes whose bindings went missing — would otherwise open and serve marks that decode to nothing. **This is the durable mapping, and nothing re-derives it**: `columns.arrow` stores the code, not the key, so a build that re-derived codes from a re-supplied vocabulary file would recolour the whole corpus with no error and no digest mismatch. Code `0` is the reserved *absent* sentinel and is never assigned. `reserved` holds retired codes, never reassigned. `listing` is `per_viewer` or `public`; **⊘ recorded, not enforced** — no endpoint publishes a vocabulary, so it currently gates nothing |
 | `small_term_threshold` | int | cardinality at or below which a posting is stored as a sorted array rather than Roaring (2.4); default 32 pending Phase 1 calibration |
 | `quantisation` | object | `{x_min, x_max, y_min, y_max}` (f64) — see 2.5 |
 | `entity_id_high_water` | u64 | first unallocated entity ID at build; seeds the allocator. A JSON counter value, not an entity-space array, so §1's `u32` narrowing does not apply to its declared width; the allocator nonetheless refuses a seed at or above `u32::MAX` (§2.6) |
@@ -249,7 +250,7 @@ Interleaving the two 32-bit axes gives a 64-bit **position code**, of which the 
 |---|---|---|
 | `tessera_id` | uint64 | the row→wire-identity direction (deviations 2, 6) |
 | `residual` | uint32 | the **low half of this row's 64-bit position code** (§2.5); the high half is the row's entry in `morton.u32`. **Not a sort key** — it varies arbitrarily within a cell |
-| *declared scalars* | per MANIFEST | |
+| *declared scalars* | per MANIFEST | the tail, in `MANIFEST.declared_scalars` order — `uint8`, `uint16`, `uint32`, `uint64`, `int64`, `float32` or `utf8` *(r22)*. Non-nullable like every column here (R4): a category's *absent* is code `0`, not a null, which is what lets the reader hand back flat slices with no validity bitmap. A column the manifest does not declare, or at a type it does not declare, is a typed error at open |
 
 There is **no `priority` column** *(r16; decision 0046 — cut, having been written and unread at
 query time since r7)*. The quantity survives as the high 16 bits of `tessera_id`, derived at one
@@ -471,6 +472,27 @@ The WAL; frozen mirrors, derived tile tables and candidate lists (deviation 3); 
 
 ## Appendix R — Review record
 
+**r22** makes the per-item column tail real (2026-08-07). §2.2's `declared_scalars` is no longer
+marked ⊘: the build compiles it from a `schema.toml`, both build implementations emit the columns,
+and flush, merge and the fold carry them — so the entry that said *"the build writes an empty array
+unconditionally… that validation has therefore only ever run against an empty declaration"* was
+describing a system that no longer exists. **Two fields are added**: `declared_scalars` entries gain
+an optional `vocabulary`, and a required `vocabularies` table carries the value sets category codes
+index. §2.6 states the tail's accepted types and its non-nullability.
+
+The correction is not only a marking. The old entry's implicit reassurance — that a declared
+scalar is validated end to end — is **narrowed** at the claim: ingest checks a category column's
+*width*, not its meaning, so an unassigned or `reserved` code is stored unremarked and the row
+carries a code no key explains. Checking meaning needs the key rather than the code, which is
+[#82](https://github.com/jennis0/tessera-index/issues/82). `listing` is likewise recorded and
+enforced by nothing, there being no endpoint that publishes a vocabulary.
+
+**No `bundle_format` bump** — and under decision 0048 that is not a compatibility statement but the
+absence of one: no bundle exists outside this repository, so the fields are simply added and the
+artifacts recreated. The §6 amendments per-point-attributes lists for §2.4, §3.2 and §3.4 are
+**not** in this revision: they describe the attribute dictionary, `/v1/categories` and the ingest
+key form, none of which is built.
+
 **r21** narrows one sentence in §2.1 and changes nothing on disc (2026-08-06, owner ruling;
 decision 0051). *"Every compaction emit[s] exactly one segment per partition-slice"* becomes *one
 **base** segment, plus whatever extents the compaction's flight published*. The finding is
@@ -586,7 +608,7 @@ The exception, recorded here because r12's first draft claimed otherwise and an 
 
 The other three kinds of edit:
 
-*Marked as specified-not-implemented, at the claim.* §2.3's `readyz` **freshness gate** — step-down is built, including the deny/delta disposition split, but its time bound is not, so a stepped-down replica serves its older manifest indefinitely; §2.3's `deltas`, `tombstones` and `deny`, parsed and acted on by nothing; §2.2's `declared_scalars`, always written empty, so the points batch's declared-scalar tail has never been exercised; §2.4's dictionary **extents**, of which exactly one has ever existed and whose per-extent `records` field is written as the corpus total — correct only while the vector has length 1; §3.1's `x-tessera-api` header, which nothing emits and nothing validates; §3.4's `fragmentation`, emitted over commit-window allocation rather than over base plus delta tiers; and §3.4's per-partition status block, which is not emitted.
+*Marked as specified-not-implemented, at the claim.* §2.3's `readyz` **freshness gate** — step-down is built, including the deny/delta disposition split, but its time bound is not, so a stepped-down replica serves its older manifest indefinitely; §2.3's `deltas`, `tombstones` and `deny`, parsed and acted on by nothing; §2.2's `declared_scalars`, always written empty, so the points batch's declared-scalar tail has never been exercised *(no longer true — superseded at r22, annotated here 2026-08-07 because a reader meeting this entry first would take a stale one)*; §2.4's dictionary **extents**, of which exactly one has ever existed and whose per-extent `records` field is written as the corpus total — correct only while the vector has length 1; §3.1's `x-tessera-api` header, which nothing emits and nothing validates; §3.4's `fragmentation`, emitted over commit-window allocation rather than over base plus delta tiers; and §3.4's per-partition status block, which is not emitted.
 
 *Corrected, because a conforming client fails on the old text.* Arrow bodies are sent as `application/octet-stream`, not `application/vnd.apache.arrow.stream`. `/v1/meta`'s `selection` block has **six** keys: `max_tiles_per_request` joins it, having been emitted by the server and consumed by the shipped client while this document named five — **the r9 `max_k` defect recurring exactly**, an unspecified field with a second reader already depending on it, which is why §3.2 now says so rather than adding the key quietly. §2.2's `identity.key` validation is scoped to the reader that performs it: the engine's open and `tessera build`'s verify parse the key, and the **store's** `open_bundle` — the entry point §2.3's protocol names — does not, so an uppercase or degenerate key opens through it. And §2.6's key-encoding sentence, which said "most-significant byte first" one clause before saying the decoded bytes are read little-endian, now says **byte 0 first**, matching the construction memo; nothing else in that block changes and the known-answer vectors are unaffected.
 

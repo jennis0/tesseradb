@@ -469,10 +469,13 @@ fn scalar_of(col: &dyn Array, row: usize) -> Option<(WalScalar, &'static str)> {
 /// positional read safe. Silently dropping a column would shorten the vector and shift every later
 /// scalar by one: positional misalignment wearing a success's clothes, acknowledged with a 200.
 ///
-/// **⊘ Partially implemented at the other end.** `tessera-build` writes `declared_scalars` as an
-/// empty array unconditionally (contracts §2.2), so in every bundle that exists this rule reads
-/// "an ingest batch may carry no scalar column at all". The validation is real and runs on every
-/// batch; what has never been exercised is a non-empty declaration.
+/// **The residual is what a *code* means, not whether one arrives.** A category column is
+/// validated at its declared width, so an unassigned code, a `reserved` code or a typo is an
+/// ordinary `u16` and is stored with no error anywhere — the row then carries a code no key
+/// explains. A code can only be range-checked; the membership check the rule wants needs the
+/// *key*, which is why [#82](https://github.com/jennis0/tessera-index/issues/82) moves category
+/// columns to `utf8` keys on the wire and puts declare-then-use here. Until then this path
+/// enforces shape and type, and not meaning.
 fn parse_ingest_batch(
     body: &[u8],
     declared: &[DeclaredScalar],
