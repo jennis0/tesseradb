@@ -141,6 +141,28 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
     hw
 }
 
+/// The floor a restart seeds its allocator from: the highest of everything durable that could
+/// name an allocated id.
+///
+/// **This exists as a function because the fold makes the two manifest values disagree on
+/// purpose, and the safety of that is a property of this expression rather than of either
+/// writer.** `publish_fold` lowers `MANIFEST.json`'s `entity_id_high_water` to the *snapshot's*
+/// entity bound — it has a second reader, the base locator's declared length, for which a live
+/// value would claim every post-snapshot entity — and writes the live value into
+/// `SEGMENTS-<n>.json` instead. Either field read alone therefore reissues ids: the bundle's
+/// because the fold lowered it, the side-manifest's because a build writes none. Only the `max`
+/// is correct, and a change on either side has to re-check it here (compaction §12's obligation
+/// 10, and `write.rs`'s note at the fold's manifest assembly).
+///
+/// The WAL term is the third home and the one rotation reclaims, which is why it cannot stand
+/// alone either: see [`high_water_from`].
+pub fn allocator_floor(bundle_high_water: u64, side_manifest_high_waters: &[u64]) -> u64 {
+    side_manifest_high_waters
+        .iter()
+        .copied()
+        .fold(bundle_high_water, u64::max)
+}
+
 /// One item awaiting entity-ID assignment at serve time (append ingest).
 ///
 /// `terms` are already-**resolved** `TermId`s — bundle-relative ordinals for descriptors the

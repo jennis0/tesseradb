@@ -70,7 +70,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `architecture.md` | Normative — r35 | 20 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
-| `compaction.md` | Normative — r11 | 9 |
+| `compaction.md` | Normative — r11 | 11 |
 | `concurrency-lifecycle.md` | Normative — r8 | 14 |
 | `conformance.md` | Normative — r8 | 15 |
 | `contracts.md` | Normative — r24 | 16 |

@@ -455,7 +455,8 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
             // 503, the same class as an unready worker — the node, not the request, is wrong,
             // and retrying later (after the damaged newest manifest is repaired) is correct.
             tracing::error!(
-                "ALARM: ingest refused — a partition is serving a stepped-down side-manifest;                  repair or restore the damaged newest manifest's files"
+                "ALARM: ingest refused — a partition is serving a stepped-down side-manifest; \
+                 repair or restore the damaged newest manifest's files"
             );
             ApiError::NotReady
         }

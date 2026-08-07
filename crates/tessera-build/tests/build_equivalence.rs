@@ -14,14 +14,30 @@
 //! wall-clock `created_at`, and `CURRENT` carries that manifest's digest. Everything else,
 //! including every digest `MANIFEST.json` records for every other file, is compared verbatim —
 //! so a single differing byte anywhere in the bundle still fails here.
+//!
+//! **Where byte equality stops, and why.** Most fixtures here declare no attributes, and the
+//! attributed pair (`attributed_*`) exists because a bundle carrying a scalar tail is a different
+//! object to compare: `columns.arrow`, its `MANIFEST.declared_scalars` and its
+//! `MANIFEST.vocabularies` are all derived files the two implementations could disagree on and
+//! nothing else here would notice. Every vocabulary in that fixture is **fully seeded**, so no
+//! code is minted and the bundle is reproducible. A *freshly minting* vocabulary is deliberately
+//! out of scope: its codes are drawn from OS entropy at first build and are pinned rather than
+//! reproduced (`tessera_store::vocabulary`), so two independent builds must differ and byte
+//! equality is the wrong instrument. The equivalence that does hold there — the same key set, and
+//! the same key per row — is asserted in `discovered_vocabulary.rs`'s
+//! `both_implementations_agree_on_keys_though_fresh_codes_differ`. Threading a seeded RNG in to
+//! close that gap is the thing that module's header exists to refuse.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, UInt32Array, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{
+    BooleanArray, Float64Array, StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
+    UInt8Array,
+};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
@@ -77,18 +93,25 @@ fn synth_terms(e: u64) -> Vec<u64> {
     }
 }
 
+/// The geometry every fixture in this file shares: `(source_id, x, y)`.
+///
+/// Source ids are deliberately neither dense nor in file order — the build must not depend on
+/// either, and the ordinal space it derives has to be the sorted one — and coordinates repeat on
+/// purpose, so the tiler's priority tiebreak is exercised.
+fn synth_geometry() -> (Vec<u64>, Vec<f64>, Vec<f64>) {
+    let ids: Vec<u64> = (0..N_ITEMS).map(|e| (e * 7919) % 1_000_003).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e % 40) * 25) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e % 37) * 27) as f64).collect();
+    (ids, xs, ys)
+}
+
 fn write_points(path: &Path) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
     ]));
-    // Source ids are deliberately neither dense nor in file order: the build must not depend on
-    // either, and the ordinal space it derives has to be the sorted one.
-    let ids: Vec<u64> = (0..N_ITEMS).map(|e| (e * 7919) % 1_000_003).collect();
-    // Repeated coordinates on purpose, so the tiler's priority tiebreak is exercised.
-    let xs: Vec<f64> = ids.iter().map(|e| ((e % 40) * 25) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e % 37) * 27) as f64).collect();
+    let (ids, xs, ys) = synth_geometry();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -128,6 +151,183 @@ fn write_pairs(path: &Path) {
         vec![
             Arc::new(UInt64Array::from(entities)),
             Arc::new(UInt32Array::from(terms)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+// ---- the attributed fixture --------------------------------------------------------------------
+//
+// The same geometry and the same terms, plus a scalar tail: one column per shape the two build
+// implementations could encode differently, and two categories whose codes are pinned rather than
+// drawn. See this file's header for why fresh minting is not compared here.
+
+/// Every declared column, at every shape that costs a distinct branch. `department` is
+/// `discovered` and `archive` is `declared`: the two kinds reach the column by different routes
+/// (`BatchColumn::Discovered`, minted through a seeded `VocabularyMinter`, versus
+/// `BatchColumn::Keys`, resolved per row), and only the declared one refuses an unknown key —
+/// so a build that confused them would still produce a column, with different bytes in it.
+const ATTRIBUTED_SCHEMA: &str = r#"
+[[attribute]]
+name       = "archive"
+type       = "category"
+width      = "u8"
+used_for   = ["render"]
+vocabulary = "declared"
+values_key = "archive"
+# `public` is only reachable with `declared` (§3.8), so this fixture covers both listings.
+listing    = "public"
+
+[[attribute]]
+name       = "department"
+type       = "category"
+width      = "u16"
+used_for   = ["render"]
+vocabulary = "discovered"
+listing    = "per_viewer"
+values_key = "department"
+
+[[attribute]]
+name     = "author_count"
+type     = "u8"
+used_for = ["render"]
+
+[[attribute]]
+name     = "score"
+type     = "f64"
+used_for = ["render"]
+
+[[attribute]]
+name     = "submitted_at"
+type     = "timestamp_us"
+used_for = ["render"]
+
+[[attribute]]
+name     = "active"
+type     = "bool"
+used_for = ["render"]
+"#;
+
+/// The keys the attributed fixture uses, with **scattered** codes — a seed file is the one place
+/// a test can pin codes, and pinning them densely would model something the minter never
+/// produces (`tessera_store::vocabulary`: a dense code is a lower bound on cardinality).
+const ARCHIVE_VALUES: &[(&str, u32)] = &[("astro-ph", 211), ("cs", 37), ("math", 149)];
+const DEPARTMENT_VALUES: &[(&str, u32)] = &[
+    ("eng", 40_351),
+    ("finance", 8_803),
+    ("legal", 61_129),
+    ("ops", 22_477),
+    ("sales", 1_559),
+];
+
+/// A `values_key` seed file: `key`/`code`, no `label` (per-point-attributes §4.4).
+fn write_values(path: &Path, values: &[(&str, u32)]) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("code", DataType::UInt32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(
+                values.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt32Array::from(
+                values.iter().map(|(_, c)| *c).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// Parse `ATTRIBUTED_SCHEMA` with both seed files written under `dir`.
+///
+/// **Both vocabularies are seeded with every key the data uses**, which is what keeps this
+/// fixture byte-reproducible: a seeded key returns its pinned code without touching the draw, so
+/// nothing here consumes entropy.
+fn attributed_schema(dir: &Path) -> tessera_build::schema::Schema {
+    let archive = dir.join("archive-values.parquet");
+    let department = dir.join("department-values.parquet");
+    write_values(&archive, ARCHIVE_VALUES);
+    write_values(&department, DEPARTMENT_VALUES);
+    let schema_path = dir.join("schema.toml");
+    std::fs::write(&schema_path, ATTRIBUTED_SCHEMA).unwrap();
+    let values = HashMap::from([
+        ("archive".to_string(), archive),
+        ("department".to_string(), department),
+    ]);
+    tessera_build::schema::Schema::parse(&schema_path, &values).expect("the fixture schema parses")
+}
+
+/// `write_points`'s geometry with `ATTRIBUTED_SCHEMA`'s six columns beside it.
+///
+/// Every column is nullable and every column has nulls, on a **different** stride per column, so
+/// an implementation that lost the null mask, or applied one column's mask to another, produces
+/// different bytes. For a category, absent is `ABSENT_CODE` rather than a value; for the rest it
+/// is the scalar tail's own absent encoding — the two are separate paths and both are on the line
+/// here.
+fn write_attributed_points(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("archive", DataType::Utf8, true),
+        Field::new("department", DataType::Utf8, true),
+        Field::new("author_count", DataType::UInt8, true),
+        Field::new("score", DataType::Float64, true),
+        Field::new(
+            "submitted_at",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+        Field::new("active", DataType::Boolean, true),
+    ]));
+    let (ids, xs, ys) = synth_geometry();
+    let pick = |values: &[(&str, u32)], e: u64, absent_every: u64| -> Option<String> {
+        (!e.is_multiple_of(absent_every))
+            .then(|| values[(e % values.len() as u64) as usize].0.to_string())
+    };
+    let archives: Vec<Option<String>> = ids.iter().map(|&e| pick(ARCHIVE_VALUES, e, 7)).collect();
+    let departments: Vec<Option<String>> = ids
+        .iter()
+        .map(|&e| pick(DEPARTMENT_VALUES, e, 11))
+        .collect();
+    let author_counts: Vec<Option<u8>> = ids
+        .iter()
+        .map(|&e| (!e.is_multiple_of(13)).then_some((e % 251) as u8))
+        .collect();
+    // Values a naive f32 round-trip would not return: the declaration is `f64` and the bytes must
+    // be the caller's.
+    let scores: Vec<Option<f64>> = ids
+        .iter()
+        .map(|&e| (!e.is_multiple_of(17)).then_some((e as f64) / 3.0))
+        .collect();
+    let submitted: Vec<Option<i64>> = ids
+        .iter()
+        .map(|&e| (!e.is_multiple_of(19)).then_some(1_600_000_000_000_000 + (e as i64) * 997))
+        .collect();
+    let active: Vec<Option<bool>> = ids
+        .iter()
+        .map(|&e| (!e.is_multiple_of(23)).then_some(e.is_multiple_of(3)))
+        .collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(archives)),
+            Arc::new(StringArray::from(departments)),
+            Arc::new(UInt8Array::from(author_counts)),
+            Arc::new(Float64Array::from(scores)),
+            Arc::new(TimestampMicrosecondArray::from(submitted)),
+            Arc::new(BooleanArray::from(active)),
         ],
     )
     .unwrap();
@@ -244,6 +444,83 @@ fn streaming_build_is_byte_identical_to_the_reference_build() {
     assert_eq!(reference.pairs, streaming.pairs);
     assert_eq!(reference.bundle_bytes, streaming.bundle_bytes);
     assert_bundles_identical(&reference_out, &streaming_out, "streaming vs reference");
+}
+
+/// **The same byte identity over a bundle that carries a scalar tail**, which no other fixture
+/// here does — every other one builds with no attributes at all, so `columns.arrow`,
+/// `declared_scalars` and `vocabularies` were never on the line between the two implementations.
+///
+/// The single-batch and batched cases run together because the batch seam is where the two are
+/// most likely to part: a batch boundary splits the points file mid-corpus, and a scalar tail
+/// assembled per batch has to reach the same column as one assembled in a single pass.
+///
+/// **What a differential cannot see.** The two implementations share `input::scan_attributes`,
+/// so a decode both inherit — a null read as a value, a width taken from the data rather than the
+/// declaration — produces the same wrong bytes twice and passes here. This test bounds the
+/// *divergence* between the two assemblies (`pipeline::read_attributes_by_entity` against
+/// `lib`'s staging pass), which is the part no other test covers; the shared decode is covered by
+/// `input.rs`'s own cases and by the refusals in `schema.rs`.
+#[test]
+fn attributed_build_is_byte_identical_to_the_reference_build() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let points = temp.path().join("points.parquet");
+    let pairs = temp.path().join("pairs.parquet");
+    write_attributed_points(&points);
+    write_pairs(&pairs);
+
+    let make_args = |out: PathBuf, batch: Option<u64>| {
+        let mut args = args_for(&points, &pairs, out);
+        args.schema = attributed_schema(temp.path());
+        args.batch_items = batch;
+        args
+    };
+
+    let reference_out = temp.path().join("reference");
+    let streaming_out = temp.path().join("streaming");
+    build_in_memory(&make_args(reference_out.clone(), None)).unwrap();
+    build(&make_args(streaming_out.clone(), None)).unwrap();
+    assert_bundles_identical(&reference_out, &streaming_out, "attributed, single batch");
+
+    let batched_reference = temp.path().join("batched-reference");
+    let batched_streaming = temp.path().join("batched-streaming");
+    build_in_memory(&make_args(batched_reference.clone(), Some(2_100))).unwrap();
+    build(&make_args(batched_streaming.clone(), Some(2_100))).unwrap();
+    assert_bundles_identical(
+        &batched_reference,
+        &batched_streaming,
+        "attributed, batched",
+    );
+
+    // The tail is genuinely present, read from the built artefact rather than from the fixture
+    // that produced it: a schema silently dropped would leave every assertion above comparing two
+    // bundles that agree because neither has any columns.
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(streaming_out.join("v00000/MANIFEST.json")).unwrap())
+            .unwrap();
+    let declared = manifest["declared_scalars"].as_array().unwrap();
+    assert_eq!(
+        declared.len(),
+        6,
+        "all six declared columns must reach the manifest, got {declared:?}"
+    );
+    let vocabularies = manifest["vocabularies"].as_array().unwrap();
+    assert_eq!(vocabularies.len(), 2, "both vocabularies must be recorded");
+    let files = collect(&streaming_out);
+    let columns: Vec<_> = files
+        .iter()
+        .filter(|(path, _)| path.ends_with("columns.arrow"))
+        .collect();
+    assert!(
+        !columns.is_empty(),
+        "a declared scalar tail must produce a columns.arrow to compare; bundle holds {:?}",
+        files.keys().collect::<Vec<_>>()
+    );
+    // Non-trivial: an empty column file would compare equal between the two builds while carrying
+    // none of the six declarations.
+    assert!(
+        columns.iter().all(|(_, bytes)| bytes.len() > 1_024),
+        "each columns.arrow must carry the tail, not just an Arrow IPC header"
+    );
 }
 
 #[test]

@@ -1146,18 +1146,42 @@ it.
 read "fifteen" for as long as 2b was an addition rather than an entry. Numbers 1–4 are the fold's
 reason for existing and none of them can be inferred from the others passing.
 
-✔ **All sixteen are covered**, in `tessera-engine/tests/fold.rs` against a real fold, in
-`compact.rs`'s unit cases for the retirement rule itself, and — for 12 alone, which is a probe and
-not a unit test — in `scale.rs`'s `a_fold_over_a_multi_segment_corpus_at_two_sizes`, run and written
-up (`docs/evidence/memos/2026-08-07-compaction-fold-memory.md`).
+**All sixteen are covered — and three of them in a form the entry itself has to state.** 2b and 10
+are each established by **two** tests that assert different kinds of claim, neither sufficient
+alone; 12 is a probe that is `#[ignore]`d by design and is therefore covered when someone runs it,
+never by the per-PR gate. Read those three entries rather than the count.
+Coverage lives in `tessera-engine/tests/fold.rs` against a real fold, in
+`compact.rs`'s unit cases for the retirement rule itself, in `tessera-store/tests/fold_row_space.rs`
+and `fold_external_ids.rs` at the pass level, in `prefix_rotation.rs` for the rotation the fold
+publishes through, and — for 12, which is a probe and not a unit test — in `scale.rs`'s
+`a_fold_over_a_multi_segment_corpus_at_two_sizes`
+(`docs/evidence/memos/2026-08-07-compaction-fold-memory.md`).
 
 *(Obligation **2** was uncovered while this section claimed thirteen of fifteen, and the arithmetic
 balanced because 2 had fallen out of both the count and the audit — an audit that counts its own
 subject is worth exactly one recount. It is covered now:
-`a_delete_accepted_after_the_snapshot_survives_the_fold`.)* Obligation 2b's *end-to-end* case pins the rule over the
-whole carry-forward set; the per-artefact independence it also claims is only separable in the unit
-fixture, because a flush publishes its segment, tier, run and locator extent together over one
-entity range, and that is recorded at both tests rather than assumed.
+`a_delete_accepted_after_the_snapshot_survives_the_fold`.)*
+
+**The recount happened, and it found the same failure mode a second time** (2026-08-07). This
+section read "✔ All sixteen are covered" while four obligations rested on tests that did not
+establish them, and the gap was in the *attribution* rather than in the tests: each cited test was
+honest about what it asserted, and this section credited it with more.
+
+- **14** was attributed to `masked_counts_are_identical_across_the_flip_for_every_principal`, whose
+  body called one verb. There were no `.item()` calls anywhere in `fold.rs`. This is exactly what
+  the entry itself predicts — "the one most easily satisfied by inspection rather than by test" —
+  and it was, by this paragraph.
+- **10**'s watermark half was asserted nowhere: the word did not appear in `fold.rs`, against a
+  `publish_fold` whose own comment calls the field load-bearing and names the consequence of
+  getting it wrong as a gap invisible to every principal, with no error.
+- **11** rested on emergent correctness of unrelated tests rather than on a direct assertion.
+- **5** ran three principals over one fixture, none of them sparse — and the sparse principal is
+  the one the entry asks for, because it is the case that discriminates.
+
+All four are now covered by assertions, each pinned by a mutation that breaks it. The lesson worth
+keeping is narrower than "audit again": **a coverage claim must name the assertion, not the test.**
+A test's name and its doc comment describe what its author meant; only its body decides what it
+establishes, and a section like this one is read as though it had checked.
 
 1. **All three halves of one deletion, in one test:** a folded entity's row is absent from the new
    base, its postings are absent from the new term index, and its overlay entry is retired. Two of
@@ -1171,14 +1195,29 @@ entity range, and that is recorded at both tests rather than assumed.
    carried-forward segment holds its row; a carried-forward run holds its external-id binding while
    **no tier names it at all** (a zero-term item). In every shape the row and postings are gone from
    the fold's own output, the overlay entry stands, and a re-ingest of the external id **succeeds**
-   rather than 409-ing.
+   rather than 409-ing. ✔ Covered in **two layers, and it takes both** —
+   `a_deletion_a_carried_forward_segment_still_names_does_not_retire` runs the composite through a
+   real fold: a rowed deletion and a **zero-term** one, both in `D₀`, both protected, a third
+   deletion nothing carries forward retiring beside them so the rule is not vacuous, and the
+   re-ingest this obligation's own text requires — which is a distinct rule from the retired case
+   (`a_retired_entitys_external_id_is_re_ingestible` passes unmoved when a still-deleted holder is
+   made to collide). What that fixture cannot separate is the artefacts: a real flush publishes its
+   segment, tier, run and locator extent **together** over one entity range, so end to end the
+   segment adder and the locator adder each cover the same entity and dropping either leaves it
+   green. Per-artefact independence is therefore asserted where a fixture can decouple it, in
+   `compact.rs`'s `none_of_obligation_2bs_three_shapes_retires` and
+   `a_locator_extent_alone_protects_its_range`. Neither layer alone establishes 2b; read them
+   together.
 3. **A pre-fold fragment is unreachable after the fold** — in the in-memory memo, in the persisted
    `.frag` files, and across a restart. The test that matters holds a session's fragment across the
    flip and asserts it is rebuilt rather than reused.
 4. **A suppression survives verbatim** and its item stays invisible; an unsuppress after the fold
    reveals it. Rule S is untouched by Rule F firing beside it.
 5. **Masked counts are identical across the flip**, for a session established before it, up to
-   exactly the folded deletions — over several principals including a sparse one.
+   exactly the folded deletions — over several principals including a sparse one. ✔ Four
+   principals: full, subset, zero and a **sparse** one at ~1% of the corpus, which the fixture
+   grew a third term to express. The sparse one is not decoration — a sweep that drops the highest
+   ordinal is caught by it alone, while full and subset pass unmoved.
 6. **Geometry is byte-exact**: every surviving point's Morton code is identical pre- and post-fold,
    row ids are dense, and the segment is `(morton, tessera_id)`-ordered. ✔ Covered, but **not in the
    form this line first named** — `scale.rs` has no fold case — by `fold_row_space.rs`'s byte-exact
@@ -1198,9 +1237,29 @@ entity range, and that is recorded at both tests rather than assumed.
    beneath it, and the locator's entity span, and publication checks all three — disabling any one
    of them still discards, at the next. Only all three together let the fold through.
 10. **The watermark and `entity_id_high_water` pass through**, and no entity id is reissued after a
-    fold (I9, fuzzed as the allocator already is).
+    fold (I9, fuzzed as the allocator already is). ✔ The pass-through half:
+    `the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot` asserts the
+    published `SEGMENTS-<n>.json` carries the values live at the flip rather than the fold's
+    pre-flight snapshot — the field `publish_fold` calls load-bearing, whose failure is a gap
+    invisible to every principal with no error. The no-reissue half is
+    `alloc_props.rs`'s `no_reuse_across_a_fold_that_lowers_the_bundles_high_water`, fuzzed over
+    interleavings of ingest, flush, fold and crash. **Split deliberately, because the two halves
+    are different kinds of claim.** A fold makes the three durable homes disagree on purpose — the
+    bundle manifest is *lowered* to the snapshot's bound for the base locator's sake, the WAL is
+    reclaimed by the rotation behind the fold — so after one, each home alone is wrong and only
+    `alloc::allocator_floor`'s `max` recovers the floor. That rule is arithmetic over durable
+    state and is fuzzed at the function itself, not restated: making it return the bundle value
+    alone fails the property and leaves `no_reuse_across_simulated_crashes` passing. That the fold
+    *writes* those two values the right way round is a fact about IO, and it is pinned end to end
+    by the two tests above — publishing the snapshot's bound to both homes fails both and nothing
+    else. Neither half establishes the obligation alone; a fold per fuzz iteration would be real
+    IO over a real bundle and would buy neither.
 11. **`dict.len()` never decreases** across a fold and every ordinal is stable — the staleness
-    hint's counter and every session's granted terms depend on it.
+    hint's counter and every session's granted terms depend on it. ✔ `term_ordinals_are_stable_across_a_fold`,
+    and it must **reopen the bundle from disc** to mean anything: `publish_fold` carries the live
+    `Arc<Dict>` forward by `Arc::clone`, so an assertion against the published generation compares
+    a pointer with itself and passes under any corruption of `dict_extents`. Only a fresh open
+    exercises `Dict::load`'s reconstruction, which is what the on-disc ordinals actually rest on.
 12. **The fold's peak memory is spec §3's budget** — a probe (P1), not a unit test, and the design's
     central memory claim. **Not "flat in corpus size", which this line used to say and §3's own
     table always contradicted**: the terms scale with entity space and with the widest term's
@@ -1208,12 +1267,22 @@ entity range, and that is recorded at both tests rather than assumed.
     of the corpus. Measured at 5–8 B/entity anonymous — the half a node cannot reclaim — against
     ~1× the bundle's live bytes resident, which is the mappings and is not a budget. The probe
     asserts on the anonymous half for that reason: the two corpus-sized heap allocations it found
-    moved the total by 0.04× and the anonymous term by two thirds.
+    moved the total by 0.04× and the anonymous term by two thirds. **It is `#[ignore]`d and takes
+    environment variables**, so "covered" here means covered when someone runs it, never covered by
+    the per-PR gate. That standing is **deliberate and settled**, not a gap awaiting work: a
+    memory probe over a corpus-sized bundle does not belong in a per-PR gate, and the alternative
+    — a cheap proxy that runs every time — would tick this line while measuring something other
+    than the claim. Stated here so nobody reads the tick as CI, and so nobody reopens it as an
+    omission.
 13. **The old prefix is reclaimed whole and nothing live is unlinked** — the hard-link property,
     asserted by inode rather than by absence.
 14. **The fold's output cannot reach response data** — I2's forward obligation (SA §6.7),
     discharged by an end-to-end test in which a principal's unauthorised items are folded and every
-    verb still answers exactly `M_auth`, not by a comment.
+    *mounted* verb still answers exactly `M_auth`, not by a comment. ✔ Two tests, because the
+    obligation is plural and one verb is not "every":
+    `masked_counts_are_identical_across_the_flip_for_every_principal` for the viewport and
+    `item_lookup_answers_exactly_m_auth_across_a_fold` for the detail lookup, the latter including
+    that a folded-away entity's identifier resurrects it for nobody.
 15. **A restart between the `CURRENT` flip and the swap converges** on the same state, and
     retirement is durable once the WAL members holding the original delete records are reclaimed —
     with the pre-rotation restart asserted to resurrect the entries *harmlessly and permanently*,
