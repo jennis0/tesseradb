@@ -307,7 +307,7 @@ produces can be normalised the way every other arm's can.
 
 ## 6. The published figures
 
-Six, and the constraint on them matters more than the list.
+Nine, and the constraint on them matters more than the list.
 
 1. **Ack→visible — three intervals, not one.** "Visible" has three answers depending on who asks,
    and `scale.rs` has measured all three at 5M and 10M: `ack` (durable and invisible) 1.8–4.6 s for
@@ -336,6 +336,29 @@ Six, and the constraint on them matters more than the list.
    left to take a cache miss, and the latency each class saw. A deployment needs to know what its
    worst-served session experiences during the most expensive operation in the system, and decision
    0053 makes that a latency rather than an error count.
+8. **Build wall-clock, source to `CURRENT`.** End to end — source parquet to a bundle a server has
+   *opened*, so "queryable" is demonstrated rather than assumed — never a stage sum, and never
+   without the label set named: the signature sort is the stage that bends (2.8 s → 53.4 s for 10×
+   the items, 45% of the 25M build —
+   [`ingest.rs`](../../crates/tessera-bench/src/arms/ingest.rs)'s module doc), so build time is a
+   property of the policy shape, not of the row count alone. Measured at 2.4M and 25M; ⊘ **the 10⁹
+   point must be run, not extrapolated** — a 19× stage under 10× of items forbids the straight
+   line. The claim this figure exists to carry is comparative and pipeline-vs-pipeline: one build
+   emits the whole serving artifact — geometry, permutation, postings, dictionary, tile structure —
+   where the alternative assembles an indexer, a tile generator and ACL wiring as separate builds.
+   Its honest unit is *time from raw data to the first correctly-masked map*, and a tuned bulk
+   indexer's rows/s may match or beat this build's — so the comparison is measured like-for-like on
+   this hardware, or it is not made.
+9. **A rotation under load — ops guidance, never a headline.** Scheduled rotation is a maintenance
+   window; the unscheduled one is the incident path, and it arrives under whatever load exists.
+   Decision [0025](../decisions/0025-rotation-is-a-session-invalidation-event.md) makes a rotation
+   a session-invalidation event, so its shape is figure 7's worst case: the whole population rather
+   than a minority, and a re-authorisation each — a rotation drops the session, not only its
+   projection. One distribution-mode campaign per release, not a per-regression arm: rotate at
+   c=N mid-run and report the interval to the population re-established, per class as figure 7
+   does. The published form is the operations guide's — "a rotation at c=N clears in X s" — sizing
+   the maintenance window and the incident runbook. (Today's rotation is revoke; if roll and
+   revoke later split, the figure follows revoke.)
 
 Figure 5 has a standing caveat now that merge is built: **on-disc bytes are 2.0–2.6× the live
 working set and only grow** until a fold reclaims, so a scale figure quoted without saying whether a
@@ -407,12 +430,18 @@ publishing half of C4.
   may move the frontier up, never down.
 - **`ingest-wire`** — `load`'s generator pointed at `/control/ingest`, open and closed loop, reusing
   its `/healthz` ceiling calibration and `generator_bound` flag.
+- **`rotation`** (spec §6 figure 9) — the load arm's population with a key rotation fired mid-run.
+  Shares `load`'s generator and ceiling calibration; distribution mode by construction. A
+  per-release campaign rather than a standing arm — the event is rare and its figure is ops
+  guidance, so it earns a run when the session machinery moves, not per regression.
 
 **Extended.**
 
 - `gather`, `viewport` — attribute-tail column axis; bytes per served mark split geometry ÷ tail;
   varying the **number** of category columns, not only their width.
-- `ingest-build` — an attribute-column stage in the eleven-stage decomposition.
+- `ingest-build` — an attribute-column stage in the eleven-stage decomposition; a verify-open
+  close, so figure 8 ends at a bundle demonstrated queryable rather than merely written; and the
+  10⁹ cell, which figure 8 needs and extrapolation cannot supply.
 - `ingest-rate` — **exists** (density × `B/W` × submitters), and is the arm to quote a throughput
   from. What it lacks is the wire: it drives `accept_ingest`, not `/control/ingest`.
 - `ingest-batch` — a ramp, not a rate; keep it and stop reading throughput off it (spec §3).
@@ -485,11 +514,13 @@ gives: putting an hours-long cell beside a two-microsecond one makes the default
 - **No claim that the residency sweep is representative.** A cgroup limit reclaims by the kernel's
   LRU, not by a deployment's access pattern, and the ratio *r* is chosen rather than observed. It
   establishes a curve's **shape**; it does not predict a given deployment's point on it.
-- **No published figure for anything unbuilt.** ⊘ Of the seven spec §6 figures, three now have
+- **No published figure for anything unbuilt.** ⊘ Of the nine spec §6 figures, four now have
   measurements behind them — ack→visible's three intervals and the scale figure from `scale.rs`,
-  and the ingest rate from `ingest-rate` — but none over the wire, and none under a session mix.
-  The soak curve needs the soak arm; the flip figure needs it too, with a forced fold; the attribute
-  split needs the tail; the wire ingest number needs `ingest-wire`.
+  the ingest rate from `ingest-rate`, and the build figure at 2.4M and 25M — but none over the
+  wire, and none under a session mix. The soak curve needs the soak arm; the flip figure needs it
+  too, with a forced fold; the attribute split needs the tail; the wire ingest number needs
+  `ingest-wire`; the 10⁹ build needs its run; the rotation figure needs its campaign; and the build
+  figure's like-for-like comparison has never been run.
 - **No fold throttle, and no figure that implies one.** Decision 0052 refuted the mechanism; P3's
   rate arms measure something that cannot be set. The harm they establish is real, the lever is not.
 - **No replacement for the correctness gate.** A soak that stays fast while leaking passes every
@@ -530,3 +561,12 @@ multiplier on the bulk-loader figure); and that ack→visible is one number (it 
 is new — the fold is a third publication kind whose cost is per resident session rather than per
 byte, and the three rulings that shape what an arm may assert about it (decisions 0052, 0053, 0056)
 all post-date the original draft.
+
+**Extended 2026-08-07, from the audience review** (developers, deployments, publication). Two
+figures added to spec §6. Build wall-clock: the arm and its stage decomposition already existed and
+carried the finding — the signature sort is superlinear — but no published figure was defined over
+it; the 10⁹ point is a run, not an extrapolation, and the comparative claim waits on a
+like-for-like pipeline measurement. Rotation under load: rare and mostly scheduled, but the
+unscheduled rotation is the incident path and cannot choose its load — published as operations
+guidance, never as a headline. The §6 count read "Six" while listing seven; it now says nine and
+matches.

@@ -77,7 +77,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `derived-artifact-gating.md` | Provisional — under review |  |
 | `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
 | `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 2 |
-| `measurement.md` | Provisional — under review | 4 |
+| `measurement.md` | Provisional — under review | 5 |
 | `per-point-attributes.md` | Provisional — under review | 6 |
 | `slices-and-multi-table.md` | Provisional — under review | 8 |
 | `system-architecture.md` | Normative — r14 | 26 |
