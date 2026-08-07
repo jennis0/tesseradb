@@ -33,6 +33,7 @@ use tessera_spatial::tiler::ScalarType;
 
 use crate::manifest::{
     DeclaredScalar, ManifestVocabulary, ManifestVocabularyValue, VocabularyExtension,
+    VocabularyKind,
 };
 
 /// The reserved *absent* code (§3.6). Never drawn and never in a value block, so a row carrying no
@@ -174,6 +175,7 @@ impl Minted {
 #[derive(Debug, Clone)]
 pub struct VocabularyMinter {
     name: String,
+    kind: VocabularyKind,
     width: ScalarType,
     codes: BTreeMap<String, u32>,
     /// Every code that must never be drawn: bound values and authored `reserved` retirements
@@ -188,9 +190,10 @@ impl VocabularyMinter {
     /// `width` must be a category width (§3.6); anything else is a schema defect caught at parse,
     /// and is treated here as `u32` rather than panicking — the widest domain, so a wrong width can
     /// only fail to exhaust, never to collide.
-    pub fn new(name: impl Into<String>, width: ScalarType) -> Self {
+    pub fn new(name: impl Into<String>, kind: VocabularyKind, width: ScalarType) -> Self {
         VocabularyMinter {
             name: name.into(),
+            kind,
             width,
             codes: BTreeMap::new(),
             assigned: BTreeSet::new(),
@@ -258,6 +261,16 @@ impl VocabularyMinter {
 
     pub fn width(&self) -> ScalarType {
         self.width
+    }
+
+    /// Whether a key this minter does not carry is a typo or a value waiting for a code.
+    ///
+    /// **Consulted at the boundary, not here.** The refusal for a declared vocabulary belongs in
+    /// the ingest handler, where the whole batch can be rejected without effect and the caller
+    /// gets a 422 naming the key; by the time a novel key reaches [`Self::mint`] the decision that
+    /// it *may* be minted has already been made.
+    pub fn kind(&self) -> VocabularyKind {
+        self.kind
     }
 
     /// The code bound to `key`, or `None`. **A caller mapping ingest or build data through this
@@ -467,7 +480,7 @@ impl Vocabularies {
                 .get(vocabulary.name.as_str())
                 .map(|&(w, _)| w)
                 .unwrap_or(ScalarType::U32);
-            let mut minter = VocabularyMinter::new(vocabulary.name.clone(), width);
+            let mut minter = VocabularyMinter::new(vocabulary.name.clone(), vocabulary.kind, width);
             minter.seed_manifest(vocabulary)?;
             by_name.insert(vocabulary.name.clone(), minter);
         }
@@ -605,7 +618,7 @@ mod tests {
     use super::*;
 
     fn minter(width: ScalarType) -> VocabularyMinter {
-        VocabularyMinter::new("departments", width)
+        VocabularyMinter::new("departments", VocabularyKind::Discovered, width)
     }
 
     /// **Never-reuse holds only if the assigned set is seeded from every home a binding lives in.**
@@ -617,6 +630,7 @@ mod tests {
         // MANIFEST.vocabularies, including a `reserved` retirement.
         m.seed_manifest(&ManifestVocabulary {
             name: "departments".to_string(),
+            kind: VocabularyKind::Declared,
             listing: "per_viewer".to_string(),
             values: (1..=100)
                 .map(|c| ManifestVocabularyValue {
@@ -768,6 +782,7 @@ mod tests {
     fn vocabulary(name: &str, values: &[(&str, u32)]) -> ManifestVocabulary {
         ManifestVocabulary {
             name: name.to_string(),
+            kind: VocabularyKind::Declared,
             listing: "per_viewer".to_string(),
             values: values
                 .iter()
@@ -903,6 +918,7 @@ mod tests {
     fn the_fold_moves_bindings_verbatim() {
         let mut built = vec![ManifestVocabulary {
             name: "departments".to_string(),
+            kind: VocabularyKind::Declared,
             listing: "per_viewer".to_string(),
             values: vec![ManifestVocabularyValue {
                 key: "ops".to_string(),

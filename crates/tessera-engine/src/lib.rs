@@ -69,7 +69,7 @@ pub use viewport::{
 pub use tessera_store::manifest::DeclaredScalar;
 // The ingest handler resolves category keys to codes and must name the reserved *absent* code and
 // the binding view to do it. Re-exported for the same layering reason as `DeclaredScalar`.
-pub use tessera_store::manifest::{ManifestVocabulary, ManifestVocabularyValue};
+pub use tessera_store::manifest::{ManifestVocabulary, ManifestVocabularyValue, VocabularyKind};
 pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE};
 // `DeclaredScalar::arrow_type`'s type, and `wire_type`'s. The server names it to widen a code to
 // its column's storage width, and reaches it here rather than transcribing the table again.

@@ -118,6 +118,14 @@ mod scalar_type_name {
 pub struct ManifestVocabulary {
     /// The name a [`DeclaredScalar::vocabulary`] refers to.
     pub name: String,
+    /// Whether the value set is closed at build or grows as the corpus supplies keys (§3.4).
+    ///
+    /// **Required, not defaulted, because both defaults are wrong in a direction that matters.**
+    /// This is what ingest consults to decide whether a key it has never seen is a typo or a new
+    /// value: defaulting to `declared` refuses valid data, and defaulting to `discovered` mints a
+    /// code for a typo and gives it a place in the corpus. No bundle predates the field (decision
+    /// 0048), so tolerating its absence buys a reader that does not exist.
+    pub kind: VocabularyKind,
     /// `per_viewer` or `public` (§3.8). **⊘ Recorded, not enforced**: no endpoint publishes a
     /// vocabulary yet, so `per_viewer` currently gates nothing. It is carried now because a
     /// bundle built without it would have to be rebuilt to acquire it.
@@ -128,6 +136,21 @@ pub struct ManifestVocabulary {
     /// spent without needing the artifact that retired them.
     #[serde(default)]
     pub reserved: Vec<u32>,
+}
+
+/// Whether a vocabulary's value set is closed at build or grows as the corpus supplies keys.
+///
+/// The distinction is only ever consulted at a *write*: it decides what happens to a key nothing
+/// has bound yet. Every read path treats the two identically, because a bound key is a bound key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VocabularyKind {
+    /// The value set is closed: every key is authored, and an unknown one is refused
+    /// (declare-then-use, §5). A typo must not create a category.
+    Declared,
+    /// The value set grows: a key nothing has bound acquires a scattered code at the commit-window
+    /// close, recorded beside it and pinned forever (§3.4).
+    Discovered,
 }
 
 /// One value of a vocabulary: its stable opaque key, its pinned code, and its presentation.

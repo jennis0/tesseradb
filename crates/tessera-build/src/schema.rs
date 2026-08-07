@@ -417,7 +417,11 @@ impl Schema {
                 .find(|a| a.vocabulary.as_deref() == Some(vocabulary.name.as_str()))
                 .map(|a| a.ty)
                 .expect("a compiled vocabulary is named by at least one attribute");
-            let mut minter = VocabularyMinter::new(vocabulary.name.clone(), width);
+            let mut minter = VocabularyMinter::new(
+                vocabulary.name.clone(),
+                tessera_store::manifest::VocabularyKind::Discovered,
+                width,
+            );
             for (key, &code) in &vocabulary.codes {
                 minter
                     .seed_value(key, code)

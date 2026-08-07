@@ -705,6 +705,16 @@ fn write_manifests(
                     };
                     ManifestVocabulary {
                         name: v.name.clone(),
+                        // The schema's kind, carried verbatim: it is what ingest consults to
+                        // decide whether a key nothing has bound is a typo or a new value.
+                        kind: match v.kind {
+                            crate::schema::VocabularyKind::Declared => {
+                                tessera_store::manifest::VocabularyKind::Declared
+                            }
+                            crate::schema::VocabularyKind::Discovered => {
+                                tessera_store::manifest::VocabularyKind::Discovered
+                            }
+                        },
                         listing: v.listing.as_str().to_string(),
                         values,
                         reserved: v.reserved.clone(),

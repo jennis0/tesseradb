@@ -29,7 +29,8 @@ use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
 use tessera_engine::{
-    AcceptError, DeclaredScalar, ScalarType, Vocabularies, ABSENT_CODE, DENY_WINDOW_MAX_ENTRIES,
+    AcceptError, DeclaredScalar, ScalarType, Vocabularies, VocabularyKind, ABSENT_CODE,
+    DENY_WINDOW_MAX_ENTRIES,
 };
 use tessera_lifecycle::{ChangeOp, UnallocatedRow, WalScalar};
 
@@ -477,23 +478,41 @@ fn category_code(
     let key = keys.value(row);
     if key.is_empty() {
         return Err(ApiError::Contract(format!(
-            "ingest body: column '{}' carries the empty string, which is not a value key. An              item with no value for this column carries null, which is stored as *absent*;              minting a code for the empty string would make a typo a category              (per-point-attributes §3.4)",
+            "ingest body: column '{}' carries the empty string, which is not a value key. An \
+             item with no value for this column carries null, which is stored as *absent*; \
+             minting a code for the empty string would make a typo a category \
+             (per-point-attributes §3.4)",
             declared.name
         )));
     }
     let minter = vocabularies.get(vocabulary).ok_or_else(|| {
         ApiError::Contract(format!(
-            "ingest body: column '{}' names vocabulary '{vocabulary}', which this bundle does not              carry",
+            "ingest body: column '{}' names vocabulary '{vocabulary}', which this bundle does \
+             not carry",
             declared.name
         ))
     })?;
-    let code = minter.code_of(key).ok_or_else(|| {
-        ApiError::Contract(format!(
-            "ingest body: column '{}' carries value '{key}', which vocabulary '{vocabulary}' does              not list. Under `vocabulary = \"declared\"` there is no auto-mint: a category carries              properties and, through its postings, a visibility consequence, so a typo must not              create one (per-point-attributes §5)",
+    if let Some(code) = minter.code_of(key) {
+        return Ok(code_at(declared.arrow_type, code));
+    }
+    match minter.kind() {
+        // Declare-then-use: the value set is closed, so a key nothing binds is a typo — and a
+        // category carries properties and, through its postings, a visibility consequence. The
+        // refusal is here rather than on the executor because the whole batch can still be
+        // rejected without effect at this point, which is what a 422 promises.
+        VocabularyKind::Declared => Err(ApiError::Contract(format!(
+            "ingest body: column '{}' carries value '{key}', which vocabulary '{vocabulary}' \
+             does not list. Under `vocabulary = \"declared\"` there is no auto-mint: a category \
+             carries properties and, through its postings, a visibility consequence, so a typo \
+             must not create one (per-point-attributes §5)",
             declared.name
-        ))
-    })?;
-    Ok(code_at(declared.arrow_type, code))
+        ))),
+        // **The key travels as a key.** This handler must not mint: two requests racing one novel
+        // key would each draw, and that key would end up with two codes and its rows split
+        // between them. The commit-window close resolves it — serially, against the live bindings
+        // — and the row's scalar becomes the code there, before the WAL append.
+        VocabularyKind::Discovered => Ok(WalScalar::Utf8(key.to_string())),
+    }
 }
 
 /// A code at its column's declared width. `is_category_width` admits `u8`/`u16`/`u32` only, so the
@@ -1962,9 +1981,14 @@ mod tests {
         }
 
         fn vocabularies() -> Vocabularies {
+            vocabularies_of(VocabularyKind::Declared)
+        }
+
+        fn vocabularies_of(kind: VocabularyKind) -> Vocabularies {
             Vocabularies::seed(
                 &[tessera_engine::ManifestVocabulary {
                     name: "departments".to_string(),
+                    kind,
                     listing: "per_viewer".to_string(),
                     values: vec![tessera_engine::ManifestVocabularyValue {
                         key: "ops".to_string(),
@@ -2078,6 +2102,41 @@ mod tests {
                 panic!("an empty key is a contract violation");
             };
             assert!(detail.contains("department"), "{detail}");
+        }
+
+        /// **Under a discovered vocabulary a novel key travels as a key**, for the write executor
+        /// to mint against the live bindings.
+        ///
+        /// The handler must not mint it here. Two requests racing one novel key would each draw,
+        /// and that key would end up with two codes with its rows split between them — whichever
+        /// binding survived would recolour the other's rows, silently. Windows close serially, so
+        /// resolving there is what makes the two agree.
+        #[test]
+        fn a_novel_key_under_a_discovered_vocabulary_travels_unresolved() {
+            let items = parse_ingest_batch(
+                &body(Arc::new(StringArray::from(vec!["k9-unit"])), false),
+                &declared(),
+                &vocabularies_of(VocabularyKind::Discovered),
+            )
+            .expect("a discovered vocabulary accepts a key it has not seen");
+            assert_eq!(
+                items[0].scalars[0],
+                WalScalar::Utf8("k9-unit".to_string()),
+                "the key reaches the executor as a key; a code here would be a handler that mints"
+            );
+        }
+
+        /// A key the discovered vocabulary already binds resolves in the handler like any other —
+        /// only the *novel* case needs the executor, so the common path costs no extra work.
+        #[test]
+        fn a_bound_key_under_a_discovered_vocabulary_still_resolves_here() {
+            let items = parse_ingest_batch(
+                &body(Arc::new(StringArray::from(vec!["ops"])), false),
+                &declared(),
+                &vocabularies_of(VocabularyKind::Discovered),
+            )
+            .expect("a bound key is bound whatever the kind");
+            assert_eq!(items[0].scalars[0], WalScalar::U16(CODE_OPS as u16));
         }
 
         /// A plain scalar of the same width is unchanged and still arrives as an integer — so a
