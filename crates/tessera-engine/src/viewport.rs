@@ -455,8 +455,12 @@ impl Engine {
                 else {
                     continue;
                 };
+                // One row, so the hoist buys nothing here — but it costs nothing either, and
+                // sharing `row_to_point` with the viewport gather is what keeps the two read
+                // paths' value decoding from drifting apart.
+                let resolved = resolve_scalars(segment, declared_scalars);
                 return Ok(Some(ItemOut {
-                    scalars: row_to_point(segment, row.raw() - row_base, declared_scalars).scalars,
+                    scalars: row_to_point(segment, row.raw() - row_base, &resolved).scalars,
                     // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
                     // every other store-backed call in this crate uses (see `Engine::open`).
                     // Against the generation this request loaded, never a second `load()`: the
@@ -1318,12 +1322,20 @@ fn tile_result(
 
     // Each selected row is a **slice-space** row; `resolve` gives back the segment holding it and
     // its index within that segment, which is what indexes `morton.u32` and `columns.arrow`.
+    // Resolved ONCE PER PART, not once per row — see `ResolvedScalars`. A tile's rows are ordered
+    // by `tessera_id`, not by segment, so consecutive rows can alternate parts; keying the
+    // resolved sets by part index rather than memoising the last one is what makes that free.
+    let resolved: Vec<ResolvedScalars<'_>> = parts
+        .as_slice()
+        .iter()
+        .map(|part| resolve_scalars(part.segment, declared_scalars))
+        .collect();
     let points: Vec<PointOut> = selected
         .rows
         .into_iter()
         .map(|row| {
-            let (segment, local) = parts.resolve(row);
-            row_to_point(segment, local, declared_scalars)
+            let (part, segment, local) = parts.resolve_indexed(row);
+            row_to_point(segment, local, &resolved[part])
         })
         .collect();
     stats.lap(|t| &mut t.gather_ns);
@@ -1449,44 +1461,70 @@ fn segments_with_row_bases<'a>(
 /// The position takes one load from each of the two files that hold it, `morton.u32` for the
 /// cell and `columns.arrow` for the residual, over the same row span the old `x`/`y` pair swept:
 /// the same two loads, and the concatenation is a shift and an or.
-fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) -> PointOut {
+/// One segment's declared columns, resolved once, in declaration order.
+///
+/// **Hoisted out of the row loop, and that is the whole point.** `ColumnsRef::scalar` is a hash
+/// lookup on the column name plus an Arrow downcast; calling it per column *per row* made it 19
+/// lookups per point on the wide fixture — 1.9e7 for a 10^6-mark viewport. Measured
+/// (`tessera-bench --bin gather_shape`, 10^6 rows in 62-row tiles, 19 columns): resolving per row
+/// costs **944 ms** against **136 ms** resolved per segment, ~86% of a gather whose shape is
+/// otherwise unchanged.
+///
+/// `None` is a declared column this segment does not hold, kept **positionally** so the entry
+/// order still matches `declared_scalars` — collapsing the absent ones here would silently shift
+/// every later column left, which is the failure `gather_scalars` refuses at the write end.
+type ResolvedScalars<'a> = Vec<Option<ScalarSlice<'a>>>;
+
+/// Resolve `declared` against one segment's columns, once.
+fn resolve_scalars<'a>(
+    segment: &'a SegmentData,
+    declared: &[DeclaredScalar],
+) -> ResolvedScalars<'a> {
+    declared
+        .iter()
+        // A declared scalar absent from this segment's schema resolves to `None` rather than
+        // being an error — nothing here is authorisation-relevant, and the fail-closed check is at
+        // the write end: `gather_scalars` refuses a segment missing a declared column, so a merge
+        // or fold cannot propagate one. What reaches here is a read of a segment already
+        // published.
+        .map(|d| segment.columns.scalar(&d.name))
+        .collect()
+}
+
+fn row_to_point(segment: &SegmentData, row: u32, scalars_of: &ResolvedScalars<'_>) -> PointOut {
     let idx = row as usize;
     let cols = &segment.columns;
     let tessera_id = TesseraId::new(cols.tessera_id()[idx]);
     let code = ((segment.morton.u32()[idx] as u64) << 32) | cols.residual()[idx] as u64;
 
-    let mut scalars = Vec::with_capacity(declared.len());
-    for declared_scalar in declared {
-        // A declared scalar absent from this segment's schema is skipped rather than treated as
-        // an error — nothing here is authorisation-relevant, and the fail-closed check is at the
-        // write end: `gather_scalars` refuses a segment missing a declared column, so a merge or
-        // fold cannot propagate one. What reaches here is a read of a segment already published.
-        if let Some(value) = cols.scalar(&declared_scalar.name) {
-            // Generated for the flat members; `Bool` and `Utf8` read through their arrays
-            // because neither is stored as a flat slice of itself.
-            macro_rules! out {
-                ($($v:ident),* $(,)?) => {
-                    match value {
-                        $(ScalarSlice::$v(s) => ScalarOut::$v(s[idx]),)*
-                        ScalarSlice::Bool(a) => ScalarOut::Bool(a.value(idx)),
-                        ScalarSlice::Utf8(a) => ScalarOut::Utf8(a.value(idx).to_string()),
-                    }
-                };
-            }
-            scalars.push(out!(
-                U8,
-                U16,
-                U32,
-                U64,
-                I8,
-                I16,
-                I32,
-                I64,
-                F32,
-                F64,
-                TimestampUs
-            ));
+    let mut scalars = Vec::with_capacity(scalars_of.len());
+    // `flatten` skips the columns this segment does not hold, exactly as the per-row
+    // `cols.scalar(..)` lookup used to.
+    for value in scalars_of.iter().flatten() {
+        // Generated for the flat members; `Bool` and `Utf8` read through their arrays
+        // because neither is stored as a flat slice of itself.
+        macro_rules! out {
+            ($($v:ident),* $(,)?) => {
+                match value {
+                    $(ScalarSlice::$v(s) => ScalarOut::$v(s[idx]),)*
+                    ScalarSlice::Bool(a) => ScalarOut::Bool(a.value(idx)),
+                    ScalarSlice::Utf8(a) => ScalarOut::Utf8(a.value(idx).to_string()),
+                }
+            };
         }
+        scalars.push(out!(
+            U8,
+            U16,
+            U32,
+            U64,
+            I8,
+            I16,
+            I32,
+            I64,
+            F32,
+            F64,
+            TimestampUs
+        ));
     }
 
     PointOut {

@@ -395,9 +395,21 @@ impl<'a> SelectionParts<'a> {
     /// both faster and obviously correct. Parts are ascending in `row_base` (row space is built by
     /// appending extents), so the first part starting at or below `slice_row` owns it.
     pub fn resolve(&self, slice_row: u32) -> (&'a SegmentData, u32) {
-        for part in self.parts.iter().rev() {
+        let (_, segment, local) = self.resolve_indexed(slice_row);
+        (segment, local)
+    }
+
+    /// [`Self::resolve`], plus **which** part answered.
+    ///
+    /// The index is what lets a caller key per-segment work it has hoisted out of its row loop —
+    /// the gather resolves each declared column's [`tessera_store::read::ScalarSlice`] once per
+    /// part rather than once per row, and needs somewhere to look the resolved set up. Returning
+    /// the index rather than having the caller match on the segment pointer keeps that lookup an
+    /// array index, and keeps `resolve`'s own contract unchanged for everyone else.
+    pub fn resolve_indexed(&self, slice_row: u32) -> (usize, &'a SegmentData, u32) {
+        for (i, part) in self.parts.iter().enumerate().rev() {
             if slice_row >= part.row_base {
-                return (part.segment, slice_row - part.row_base);
+                return (i, part.segment, slice_row - part.row_base);
             }
         }
         // Unreachable for a row this module itself produced: every such row came from a part's own
