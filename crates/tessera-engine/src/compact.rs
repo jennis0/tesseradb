@@ -1073,10 +1073,10 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     // is a property nobody observes. The carried-forward links are the executor's half, and they
     // need only their directory entries synced — a link copies no bytes.
     //
-    // ⊘ **This makes the fold's own output durable and does not make the corpus so.** A
-    // carried-forward file was written by a flush that did not sync it either, and linking it does
-    // not change that; closing it properly is a ruling about the segment writers, which serve three
-    // producers and are outside this pass.
+    // **This makes the fold's own output durable; publication does the same for what it links.** A
+    // carried-forward file was written by a flush that did not sync it either — no producer here
+    // syncs a data file — and a hard link copies no bytes, so `publish_fold` syncs the carry-forward
+    // set before the flip for exactly the reason this pass syncs its own (compaction §8).
     let mut files = BTreeMap::new();
     for (rel, path) in &written {
         files.insert(

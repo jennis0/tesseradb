@@ -24,7 +24,7 @@ pub use error::{Result, StoreError};
 pub use flush::{digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRow};
 pub use fold::{fold_row_space, FoldRowSpaceOutput, FoldRowSpaceSpec, FoldSegmentInput};
 pub use manifest_write::{
-    fsync_dirs, fsync_written, write_current, write_manifest_json, write_segments_manifest,
+    fsync_written, write_current, write_manifest_json, write_segments_manifest,
 };
 pub use pairs::PairsParquetWriter;
 pub use permutation::{Permutation, RowSpace, SegmentExtent};

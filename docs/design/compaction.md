@@ -29,8 +29,11 @@ and pass 3's external-id runs decoded rather than mapped — were the design's o
 broken in two places. Both are fixed and the anonymous term fell by two thirds. §3, §12 and §14
 are corrected to what was measured. **What remains before this becomes normative:** the invariants
 lens on the staging list of §6.2, if it is built, and on D5's rows-frozen safety claim, which has
-never had one. **§9's four gauges are all built** (2026-08-07); what remains unbuilt of this design
-is the staging list and §6.1's two page-cache hints.
+never had one — **and both are now scoped out** (decision 0057): rows-frozen is declined outright,
+and the staging list is deferred with 0053's review condition attached to it rather than to this
+document. **Nothing blocks promotion but the owner's word.** §9's four gauges are all built
+(2026-08-07); what remains unbuilt of this design is the deferred staging list and §6.1's two
+page-cache hints.
 **Owns:** the fold — what it executes, what it carries forward, how it is published, what retires
 at it, and what a viewer pays at the flip. The prefix rewrite, the `CURRENT` flip, and
 reclamation.
@@ -39,7 +42,8 @@ restated); the bundle bytes (contracts §2); ingest, the commit window, the WAL,
 lane, merge and coalesce (write-path §1–§7, normative, cited here and unchanged by this design).
 **Reads against:** architecture §4, §10.2, §11.1–§11.3, Appendix C; contracts §2.1–§2.6, §3.4;
 write-path §4–§9 and especially **§5.4 (Rule S / Rule F)** and **§8 (the seam)**; SA §6.6, §6.7;
-lifecycle §2; decisions 0013, 0040, 0041, 0042, 0043, 0044, 0046, 0047, 0048, 0054, 0055.
+lifecycle §2; decisions 0013, 0040, 0041, 0042, 0043, 0044, 0046, 0047, 0048, 0054, 0055, 0056,
+0057.
 **Citation convention:** unprefixed `§n` is the architecture design; `write-path §n`,
 `contracts §n`, `SA §n`, `lifecycle §n` as named. This document's own sections are **spec §n**,
 and are cited from elsewhere as `compaction §n`.
@@ -679,8 +683,14 @@ after a fold rebuilds inline (a measured 10.7 s end to end at 10⁹, contending)
 after it is served normally. That is 0043's *"not observable in a viewer's latency or in a viewer's
 errors"* traded down to the first of the two, which is the direction the rule permits.
 
-**A staging list is licensed as an optimisation and is not required** (decision 0053, and it is not
-built). Because a miss is merely a miss, the fold may precompute the new row space's entries into a
+**A staging list is deferred** (decision 0057), having been licensed as an optimisation and never
+required (decision 0053). What it would remove is the *first* request per session after a fold — a
+measured 10.7 s end to end at 10⁹, once per session, on an operation floored at one a day — and what
+it costs is a second cache with its own budget, a recency filter over sessions that nothing tracks,
+precomputation on a thread this design has not chosen, and the coverage check below. Cheap benefit,
+expensive machinery, in that order. **Decision 0053's condition survives the deferral**: it is not
+built without the invariants lens, which now attaches to the future work rather than to this
+document. The shape, for whoever takes it — Because a miss is merely a miss, the fold may precompute the new row space's entries into a
 **second projection cache with its own byte budget** — populated most-recently-used and filtered to
 recently-active sessions, which is what bounds its memory to a fraction of the serving cache rather
 than a copy of it — and swap it in at the flip, dropping the old list. Dropping the old list is what
@@ -798,6 +808,31 @@ is the reclamation event rather than merely one of its beneficiaries.
 Carried-forward files are **hard-linked** into the new prefix before `CURRENT` flips, so deleting
 the old tree unlinks directory entries and never live data. On an object store the link is a copy,
 and the fold's disc estimate has to say which it is.
+
+✔ **They are also fsynced before the flip, and the reason is not obvious from the link.** A hard
+link copies no bytes, so the directory entry is plainly the new thing and it is tempting to conclude
+the bytes were already durable. They were not: **no producer in this tree fsyncs a data file.**
+Neither the segment writers nor the tier, run or locator writers sync, and the side-manifest writer
+syncs the manifest and its own directory and nothing the manifest names. That is a *reasoned*
+position everywhere else in the write path — a torn file is detectable through its digest, its rows
+are still in the WAL, and the flush re-runs — and **the fold is the one operation that destroys
+every part of it**: it flips `CURRENT` onto these links, deletes the prefix holding the only other
+names for the same inodes, and rotates the WAL out from under the records. *Detectable* becomes
+*detectably gone*.
+
+The exposure was narrow and the fix is proportionate. `plan_fold` consumes everything the manifest
+named at its snapshot, so a carry-forward is by construction something that published **during the
+flight** — and of those, only what the kernel had not written back, which on Linux defaults is
+roughly the last 30 s before the flip. Syncing that set costs a handful of `fsync`s at a
+minutes-to-hours operation's end. *(Ruled 2026-08-07: sync at the fold rather than at every
+producer. Making flush, merge and coalesce sync their own output would close the same window and
+several that the WAL and the digests already cover, at a cost on the path where visibility latency
+is measured — so the operation that removes the fallback is the one that pays for it.)*
+
+⊘ **Not covered by a test, and nothing in this tree could cover it.** An `fsync` has no in-process
+observable: a publication that skipped it passes every assertion here, because the page cache
+answers reads identically either way. What would cover it is crash injection below the filesystem.
+The property is argued at the call site instead.
 
 Two other reclamations belong to the same pass and would otherwise be forgotten: the persisted
 fragment-cache directory is swept of entries under superseded identities (nothing else will ever
@@ -1178,12 +1213,13 @@ all**, where the row-space fold resets segment count from ~152 to 1 at 10⁹ —
 deliver on its own. The minutes-long flip is accepted as its price, and spec §6.1's budget is what
 brings that price down.
 
-**Rows-frozen is recorded, not built.** It stays available for a deletion-heavy deployment that
-wants retirement without the flip, and its enabling property — that removing an entity's postings
-is sufficient for invisibility and the row is only reclamation — is worth keeping written down
-either way, because it is the reason the two modes can differ at all. It also still owes the
-external-id fold, and its safety claim has never been through a review lens. What follows is the
-case, retained as the record.
+**Rows-frozen is declined** (owner, 2026-08-07; decision 0057). Not deferred — nothing will be
+built on it, which is why its safety claim needs no review lens and why this document no longer
+carries one as an obligation. **Its enabling observation stays**, because it is why the two modes
+could differ at all and it is the reason decision 0048's subtraction-only pass is safe: removing an
+entity's postings is sufficient for invisibility, and removing its row is only reclamation. What
+goes is the mode. What follows is the case, retained as the record of why it was available and what
+it gave up.
 
 **Decision 0048's subtraction-only postings pass** opens a second mode: **removing an entity's
 postings is sufficient to make it invisible; removing
@@ -1303,6 +1339,13 @@ places.** Not a review: a measurement, and the disposition of what it turned up.
 - **Obligation 9 is covered**, at the window that makes it real, and the case established something
   worth recording: three independent checks catch a merge published under a fold, each masking the
   next, so the test pins the outcome rather than any one of them.
+- **The wider fsync question is ruled** (owner, 2026-08-07), and the answer is the fold rather than
+  the producers: the carry-forward set is synced before the flip (§8). r10 left this as a ruling
+  about the segment writers; it is narrower than that, because the fold is the only operation that
+  destroys the fallback every other path relies on.
+- **The two promotion blockers are scoped out** (decision 0057): rows-frozen is declined and the
+  staging list is deferred with its review condition intact. Both were obligations on *unbuilt*
+  machinery, which is what made "run the lens" the wrong question.
 
 **r10 (2026-08-07) — three adversarial lenses against the *implementation*, and what they found was
 the documentation.** Invariants-and-fail-open, failure-and-concurrency, and fidelity, run against

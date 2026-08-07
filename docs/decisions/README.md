@@ -71,3 +71,7 @@ prevent.
 | [0051](0051-a-compaction-emits-one-base-segment-plus-its-flight.md) | 2026-08-06 | A compaction emits one base segment, plus whatever its flight published |
 | [0052](0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md) | 2026-08-06 | The fold's page-cache mitigation is `MADV_SEQUENTIAL`, not a read throttle |
 | [0053](0053-a-folds-aftermath-is-a-cache-miss-not-a-refusal.md) | 2026-08-06 | A fold's aftermath is a cache miss, not a refusal |
+| [0054](0054-a-bundle-artefacts-writer-lives-in-tessera-store.md) | 2026-08-06 | A bundle artefact's writer lives in `tessera-store` |
+| [0055](0055-the-folds-fragment-sweep-is-everything-present-at-the-flip.md) | 2026-08-06 | The fold's fragment sweep is everything present at the flip |
+| [0056](0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md) | 2026-08-07 | A fold's schedule is a gated window, not a pure timer |
+| [0057](0057-rows-frozen-is-declined-and-the-staging-list-is-deferred.md) | 2026-08-07 | Rows-frozen is declined, and the flip's staging list is deferred |

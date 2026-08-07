@@ -4357,15 +4357,29 @@ impl Executor {
             discard(&format!("its carry-forwards would not link ({e})"));
             return;
         }
-        // The links' **directory entries** have to be durable before `CURRENT` names the prefix that
-        // holds them; the bytes behind them already were (a hard link copies none). The fold's own
-        // output was synced on its thread — see `compact::execute`'s pass 5.
-        let link_dirs: Vec<PathBuf> = carried_rels
+        // **Both halves — the bytes and the names — and the bytes are the half that is not
+        // obvious.** A hard link copies no bytes, so the directory entry is plainly the new thing;
+        // the trap is concluding from that that the bytes were already durable. **No producer
+        // fsyncs a data file.** Neither `write_single_batch` nor the morton, tier or run writers
+        // sync, and `write_segments_manifest` syncs the manifest and its directory and nothing the
+        // manifest names. That is a *reasoned* position everywhere else in the write path — a torn
+        // file is detectable through its digest, its rows are still in the WAL, and the flush
+        // re-runs — and the fold is the one operation that destroys every part of it: it flips
+        // `CURRENT` onto these links, deletes the prefix holding the only other names for the same
+        // inodes, and rotates the WAL out from under the records. "Detectable" becomes "detectably
+        // gone", for whatever the kernel had not written back — roughly the last 30 s of
+        // publications before the flip, which is exactly the window a fold's carry-forward set is
+        // drawn from.
+        //
+        // Cheap, because the set is only what published *during* the flight: `plan_fold` consumes
+        // everything the manifest named at its snapshot, so nothing older than the fold is here.
+        // The fold's own five passes synced on its own thread (`compact::execute`, pass 5).
+        let carried_paths: Vec<PathBuf> = carried_rels
             .iter()
-            .filter_map(|rel| to_prefix_dir.join(rel).parent().map(Path::to_path_buf))
+            .map(|rel| to_prefix_dir.join(rel))
             .collect();
-        if let Err(e) = tessera_store::fsync_dirs(&link_dirs) {
-            discard(&format!("its carry-forward links would not sync ({e})"));
+        if let Err(e) = tessera_store::fsync_written(&carried_paths) {
+            discard(&format!("its carry-forwards would not sync ({e})"));
             return;
         }
         let manifest_digest =
