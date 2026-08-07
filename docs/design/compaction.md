@@ -1192,15 +1192,19 @@ establishes, and a section like this one is read as though it had checked.
    carried-forward segment holds its row; a carried-forward run holds its external-id binding while
    **no tier names it at all** (a zero-term item). In every shape the row and postings are gone from
    the fold's own output, the overlay entry stands, and a re-ingest of the external id **succeeds**
-   rather than 409-ing. **⊘ Partly covered.** Only the *segment* shape runs end to end
-   (`a_deletion_a_carried_forward_segment_still_names_does_not_retire`), and even it never attempts
-   the re-ingest its own text requires. The tier and zero-term-run shapes exist only in
-   `compact.rs`'s `none_of_obligation_2bs_three_shapes_retires`, against hand-built descriptors and
-   a synthetic bitmap — no real postings, no real row space, no re-ingest. That is not an oversight
-   to tidy: a real flush publishes its segment, tier, run and locator extent **together** over one
-   entity range, so isolating a carry-forward set that names only a tier, or only a run, needs a
-   fixture that decouples them. Recorded rather than waved at, because the zero-term-run shape is
-   precisely the one this obligation was added for.
+   rather than 409-ing. ✔ Covered in **two layers, and it takes both** —
+   `a_deletion_a_carried_forward_segment_still_names_does_not_retire` runs the composite through a
+   real fold: a rowed deletion and a **zero-term** one, both in `D₀`, both protected, a third
+   deletion nothing carries forward retiring beside them so the rule is not vacuous, and the
+   re-ingest this obligation's own text requires — which is a distinct rule from the retired case
+   (`a_retired_entitys_external_id_is_re_ingestible` passes unmoved when a still-deleted holder is
+   made to collide). What that fixture cannot separate is the artefacts: a real flush publishes its
+   segment, tier, run and locator extent **together** over one entity range, so end to end the
+   segment adder and the locator adder each cover the same entity and dropping either leaves it
+   green. Per-artefact independence is therefore asserted where a fixture can decouple it, in
+   `compact.rs`'s `none_of_obligation_2bs_three_shapes_retires` and
+   `a_locator_extent_alone_protects_its_range`. Neither layer alone establishes 2b; read them
+   together.
 3. **A pre-fold fragment is unreachable after the fold** — in the in-memory memo, in the persisted
    `.frag` files, and across a restart. The test that matters holds a session's fragment across the
    flip and asserts it is rebuilt rather than reused.
