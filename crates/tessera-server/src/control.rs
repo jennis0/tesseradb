@@ -1684,8 +1684,11 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // So `soft_limit_alarms` rising on a suppression-heavy deployment is a signal to look, not
         // a fold waiting to happen. `depth` is read off the live generation, so it cannot drift
         // from what a request composes against.
+        // `retirable` is the same difference made legible: a suppression-heavy deployment has a
+        // deep overlay and nothing for a fold to do, and only the pair says so.
         "overlay": {
             "depth": state.engine.overlay_depth(),
+            "retirable": state.engine.retirable_deletions(),
             "soft_limit_alarms": executor.overlay_soft_limit_alarms,
         },
         // **The most expensive operation in the system, and until this block its only surface was a
@@ -1706,7 +1709,18 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // published because compaction §3's memory budget is a *modelled* figure and this is the
         // only number a deployment has to compare against it. `passes` is the same staircase
         // unreduced: the gauges alarm, and the per-pass rows say which pass to look at.
+        // **`live_rows` is the denominator of compaction §9's tombstoned-row gauge**, and the only
+        // figure here that says how large the corpus is. The gauge itself is not published as a
+        // ratio: an operator with the numerator (`overlay.retirable`) and the denominator can form
+        // it, and a third derived number is a third thing to keep consistent.
+        //
+        // **The dead-bytes gauge is deliberately absent.** It is a walk of the live prefix, and the
+        // schedule pays for it at most once per tick and only when every cheaper route has
+        // declined; recomputing it on every `/control/status` poll would make an operator's
+        // dashboard the most expensive thing on the node. The trigger's own log line reports it
+        // when it fires.
         "compaction": {
+            "live_rows": state.engine.live_rows(),
             "folds": executor.folds,
             "fold_failures": executor.fold_failures,
             "fold_requested": executor.fold_requested,

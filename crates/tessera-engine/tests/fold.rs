@@ -1612,6 +1612,8 @@ fn the_retirable_depth_route_dispatches_a_fold_without_anyone_asking() {
             // segment count.
             max_segments: None,
             after_deletions: Some(3),
+            tombstoned_rows_fraction: None,
+            dead_bytes_ratio: None,
         }),
     );
 
@@ -1657,6 +1659,226 @@ fn the_retirable_depth_route_dispatches_a_fold_without_anyone_asking() {
     );
 }
 
+/// `(on_disc − named) / named` under the live prefix — the same two-map sum the schedule's
+/// dead-bytes gauge takes, computed here so a failure reports the ratio rather than only its
+/// verdict.
+///
+/// **Two manifests.** The build's artefacts are digested in the bundle-level `MANIFEST.json` and
+/// everything the write path produced is in the partition's side-manifest; summing one alone
+/// reported a 1065× orphan ratio in a measured run, which was a missing addend and not a leak.
+fn dead_ratio(root: &Path, engine: &Engine) -> f64 {
+    fn walk(dir: &Path, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                walk(&entry.path(), total);
+            } else {
+                *total += meta.len();
+            }
+        }
+    }
+    let generation = engine.generation();
+    let mut on_disc = 0u64;
+    walk(&root.join(&generation.prefix), &mut on_disc);
+    let named: u64 = generation
+        .bundle
+        .manifest
+        .files
+        .values()
+        .map(|d| d.size)
+        .chain(
+            generation
+                .bundle
+                .partitions
+                .values()
+                .flat_map(|p| p.manifest.files.values())
+                .map(|d| d.size),
+        )
+        .sum();
+    on_disc.saturating_sub(named) as f64 / named.max(1) as f64
+}
+
+/// **The tombstoned-row route dispatches a fold on a bundle every count gauge calls healthy**
+/// (compaction §9).
+///
+/// This is the gauge's whole reason for existing. The fixture here has one segment, no window, and
+/// an overlay far below any absolute threshold — a deployment the segment ceiling and the
+/// retirable-depth route both look at and see nothing wrong. What it also has is a fifth of its
+/// rows tombstoned: rows that exist, that every viewport scans, and that no viewer may see. The
+/// absolute route cannot reach this, because `after_deletions` is a count and this is a *ratio*: a
+/// 50,000-row deployment crosses a fifth long before it crosses 500,000 deletions, and a 10⁹-row
+/// one the other way round.
+///
+/// **Mutations this kills:** dropping the route (nothing dispatches); windowing it (the window is
+/// off here, so a windowed route can never fire); using `Overlay::len()` as the numerator (the
+/// suppression below would carry it over the threshold one deletion early); dropping the
+/// zero-denominator guard, which `a_ratio_with_a_zero_denominator_never_fires` pins at the unit
+/// level and which this case cannot reach.
+#[test]
+fn the_tombstoned_row_route_dispatches_a_fold_on_a_bundle_no_count_gauge_would_fold() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    // **A fiftieth rather than compaction §9's default fifth, and the number is not the subject.**
+    // What this case is about is that a *ratio* fires where no count does; the fraction only has to
+    // be one the fixture can cross, and every deletion below is a deny-lane round trip.
+    let threshold = 0.02f64;
+    let needed = (N_ITEMS as f64 * threshold).ceil() as u64;
+    let engine = engine_over_fixture(
+        tmp.path(),
+        &root,
+        config_scheduling(tessera_engine::CompactionSchedule {
+            min_interval_secs: 0,
+            // Every other route off: the fraction is the only thing that can dispatch, which is
+            // what makes this case about the fraction rather than about the fixture.
+            window_start_secs: None,
+            window_secs: 0,
+            window_min_segments: 0,
+            max_segments: None,
+            after_deletions: None,
+            tombstoned_rows_fraction: Some(threshold),
+            dead_bytes_ratio: None,
+        }),
+    );
+
+    // **The map is resolved once.** `entity_of_source` rebuilds it from the bundle on every call,
+    // which is free for the handful of entities every other case here names and is the whole cost
+    // of this one.
+    let map = source_to_new_map(&root, "v00000");
+    let entity = |source: u64| EntityId::new(map[&source]);
+
+    // A suppression first, so a numerator keyed on total depth would fire one deletion early.
+    engine
+        .accept_change(entity(1), ChangeOp::Suppress)
+        .expect("a suppression is accepted");
+    for source in 2..(needed + 1) {
+        engine
+            .accept_change(entity(source), ChangeOp::Delete)
+            .expect("a delete is accepted");
+    }
+    assert_eq!(
+        engine.retirable_deletions(),
+        needed - 1,
+        "one short of the fraction, with the suppression making total depth already over it"
+    );
+    assert_no_fold_within(&engine, 2);
+
+    engine
+        .accept_change(entity(needed + 1), ChangeOp::Delete)
+        .expect("a delete is accepted");
+    tick(&engine);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.write_executor_stats().folds == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the tombstoned-row route never dispatched a fold: retirable={} rows={}",
+            engine.retirable_deletions(),
+            engine.live_rows()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(engine.generation().prefix, "v00001");
+    assert_eq!(
+        engine.overlay_depth(),
+        1,
+        "every deletion retired and the suppression did not"
+    );
+}
+
+/// **The dead-bytes route dispatches a fold on a bundle with no deletions at all** (compaction §9).
+///
+/// The reclamation obligation, and the only route that covers it. A deployment whose merge is doing
+/// its job has a bounded segment count and a shallow overlay while paying for two or three copies
+/// of its corpus: every merged-away segment and every superseded side-manifest stays on disc,
+/// because a step-down serves one of them, and **a fold is the only thing that reclaims them**. The
+/// measured no-compaction steady state is 2.0–2.6×.
+///
+/// **The ratio here is 1.0 against a bundle that has merged**, so what fires it is real orphaned
+/// bytes rather than a threshold set below every possible measurement — which the config loader
+/// refuses and `a_ratio_gauge_takes_a_number_or_off_…` pins.
+///
+/// **Mutations this kills:** dropping the route (nothing dispatches, with every other gauge off and
+/// nothing deleted); walking the bundle root rather than the live prefix (a fresh bundle has no
+/// other prefix, so the ratio would be the same — but a *second* fold would then count the swept
+/// tree and never converge); counting only one of the two manifests as named (the side-manifest
+/// alone reported a 1065× orphan ratio in a measured run, so the route would fire on every bundle
+/// ever built).
+#[test]
+fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(
+        tmp.path(),
+        &root,
+        config_scheduling(tessera_engine::CompactionSchedule {
+            min_interval_secs: 0,
+            window_start_secs: None,
+            window_secs: 0,
+            window_min_segments: 0,
+            max_segments: None,
+            after_deletions: None,
+            // **5%, not compaction §9's default of 1.0, and the number is not the subject.** The
+            // default means "paying double for storage", which is the measured no-compaction steady
+            // state of a *running* deployment (2.0–2.6×) and takes more churn to reach than a test
+            // should spend. What this case asserts is the route: a bundle with orphaned bytes and
+            // nothing deleted folds, and one without does not.
+            tombstoned_rows_fraction: None,
+            dead_bytes_ratio: Some(0.05),
+        }),
+    );
+
+    // **A freshly built bundle is essentially all live.** What it holds that no manifest names is
+    // the manifests themselves — `MANIFEST.json` cannot carry its own digest — and that is a
+    // fraction of a percent. Asserted rather than assumed, because it is the floor the threshold
+    // above has to sit clear of.
+    let fresh = dead_ratio(&root, &engine);
+    assert!(
+        fresh < 0.01,
+        "a freshly built bundle should be under 1% dead, measured {fresh:.4}"
+    );
+    assert_no_fold_within(&engine, 2);
+
+    // Four flush segments and the merge that consumes them: the consumed segments stay on disc,
+    // named by no live manifest, which is exactly the dead weight this route is about.
+    for round in 0..4 {
+        ingest(&engine, format!("dead-{round}").into_bytes(), &format!("d{round}"))
+            .expect("ingest is accepted");
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_for("a flush to publish", || {
+            engine.write_executor_stats().flushes > flushes
+        });
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.write_executor_stats().folds == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dead-bytes route never dispatched a fold: dead ratio is {:.3}",
+            dead_ratio(&root, &engine)
+        );
+        engine.request_flush();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(engine.generation().prefix, "v00001");
+    assert_eq!(
+        engine.overlay_depth(),
+        0,
+        "nothing was ever deleted — this fold ran for the disc and not for the overlay"
+    );
+    // And the fold did what the route dispatched it for: the superseded prefix is gone whole, so
+    // what was dead is reclaimed rather than merely rewritten beside itself.
+    assert!(!root.join("v00000").exists());
+    let after = dead_ratio(&root, &engine);
+    assert!(
+        after < fresh.max(0.01),
+        "the folded bundle is back to a freshly-built one's dead fraction, measured {after:.4}"
+    );
+}
+
 /// **The segment ceiling dispatches a fold at any hour** — the route that says deferring segment
 /// growth to the next window has stopped being cheaper than folding now.
 ///
@@ -1684,6 +1906,8 @@ fn the_segment_ceiling_dispatches_a_fold_outside_the_window() {
             window_min_segments: 2,
             max_segments: Some(3),
             after_deletions: None,
+            tombstoned_rows_fraction: None,
+            dead_bytes_ratio: None,
         }),
     );
     // A merge would collapse the extents this case is counting, and bounding the segment axis is
@@ -1763,6 +1987,8 @@ fn the_windowed_route_fires_inside_its_window_and_not_outside_it() {
         // whole of what this case is asking.
         max_segments: None,
         after_deletions: None,
+        tombstoned_rows_fraction: None,
+        dead_bytes_ratio: None,
     };
     let open = tessera_engine::CompactionSchedule {
         window_start_secs: Some((now + 86_400 - 1_800) % 86_400),

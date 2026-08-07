@@ -2960,6 +2960,56 @@ fn sweep_orphan_prefixes(bundle_root: &Path, live: &str) {
     }
 }
 
+/// What is on disc under `prefix_dir` against what `generation`'s manifests still name — the
+/// operands of compaction §9's dead-bytes gauge. `None` where the tree cannot be walked.
+///
+/// **Two manifests, and summing one of them alone reads as a catastrophe.** The build's artefacts
+/// are digested in the bundle-level `MANIFEST.json`; everything the write path produced is in the
+/// partition's `SEGMENTS-<n>.json`. Taking only the side-manifest reported 9.1 MiB named against a
+/// 9.4 GiB tree in one measured run — an orphan ratio of 1065×, which was a missing addend and not
+/// a leak.
+///
+/// **What the gap actually is**: every merged-away segment, every consumed tier, every superseded
+/// side-manifest. They stay because a step-down serves one of them (contracts §2.3), and a fold is
+/// the only thing that reclaims them — which is what makes this a fold trigger rather than an
+/// alarm. The measured no-compaction steady state is 2.0–2.6×.
+fn dead_bytes_of(prefix_dir: &Path, generation: &Generation) -> Option<crate::compact::DeadBytes> {
+    fn walk(dir: &Path, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                walk(&entry.path(), total);
+            } else {
+                *total += meta.len();
+            }
+        }
+    }
+    if !prefix_dir.is_dir() {
+        return None;
+    }
+    let mut on_disc = 0u64;
+    walk(prefix_dir, &mut on_disc);
+    let named: u64 = generation
+        .bundle
+        .manifest
+        .files
+        .values()
+        .map(|digest| digest.size)
+        .chain(
+            generation
+                .bundle
+                .partitions
+                .values()
+                .flat_map(|partition| partition.manifest.files.values())
+                .map(|digest| digest.size),
+        )
+        .sum();
+    Some(crate::compact::DeadBytes { on_disc, named })
+}
+
 /// Free bytes on the filesystem holding `path`, or `None` where unknowable — compaction §8's
 /// pre-flight then does not run, on `tessera-build`'s precedent rather than refusing on a guess.
 ///
@@ -3710,18 +3760,36 @@ impl Executor {
 
     /// Whether [`crate::compact::CompactionSchedule`] calls for a fold now.
     ///
-    /// The two gauges are read off the generation this tick loaded, so they agree with each other
-    /// and with the plan the dispatch is about to take. Both are cheap — a `len` per slice and a
-    /// bitmap cardinality — which is what lets this run at every tick rather than on a cadence of
-    /// its own.
+    /// Every gauge is read off the generation this tick loaded, so they agree with each other and
+    /// with the plan the dispatch is about to take. **Three of the four are field reads** — a `len`
+    /// per slice, a bitmap cardinality, a sum of row counts — which is what lets this run at every
+    /// tick rather than on a cadence of its own.
+    ///
+    /// **The fourth is a directory walk, and it is a closure for that reason.** `due` calls it only
+    /// after every cheaper route has declined, so a deployment whose segments or deletions have
+    /// already dispatched a fold never pays for it, and one with the route switched off never calls
+    /// it at all. What it walks is the **live prefix**, not the bundle root: an orphaned prefix from
+    /// a discarded fold is dead bytes too, but it is the startup sweep's to reclaim and not a
+    /// fold's, so counting it here would dispatch folds that cannot reduce it.
     fn scheduled_fold(&self, generation: &Arc<Generation>) -> Option<crate::compact::FoldTrigger> {
         let now = unix_now()?;
+        let live_rows: u64 = generation
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.segments.iter())
+            .map(|descriptor| u64::from(descriptor.row_count))
+            .sum();
         crate::compact::due(
             &self.compaction,
             now,
             self.fold_floor_from(),
-            live_segments_of(generation),
-            generation.overlay.deleted_len(),
+            crate::compact::Gauges {
+                live_segments: live_segments_of(generation),
+                retirable_deletions: generation.overlay.deleted_len(),
+                live_rows,
+            },
+            || dead_bytes_of(&self.prefix_dir(generation), generation),
         )
     }
 
@@ -3871,10 +3939,17 @@ impl Executor {
         };
 
         if let Some(trigger) = scheduled {
+            // **Every gauge, not only the one that fired.** A fold is minutes to hours, and an
+            // operator reading why one started needs to see the state that produced it rather than
+            // the single number that crossed first — the dead-bytes pair especially, since it is
+            // the one figure `/control/status` does not carry.
+            let dead = dead_bytes_of(&self.prefix_dir(generation), generation);
             tracing::info!(
                 trigger = ?trigger,
                 live_segments = live_segments_of(generation),
                 retirable_deletions = generation.overlay.deleted_len(),
+                on_disc_bytes = dead.map(|d| d.on_disc),
+                named_bytes = dead.map(|d| d.named),
                 "dispatching a scheduled compaction fold"
             );
         }

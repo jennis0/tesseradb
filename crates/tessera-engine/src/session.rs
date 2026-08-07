@@ -1296,6 +1296,30 @@ impl Engine {
         self.generation.load().overlay.len()
     }
 
+    /// Rows the bundle's segments hold, tombstoned ones included — compaction §9's denominator, and
+    /// the only figure on `/control/status` that says how large the corpus actually is.
+    pub fn live_rows(&self) -> u64 {
+        self.generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.segments.iter())
+            .map(|descriptor| u64::from(descriptor.row_count))
+            .sum()
+    }
+
+    /// Retirable deletions — `|deleted|`, never the union with `suppressed`.
+    ///
+    /// **Beside [`Engine::overlay_depth`] rather than instead of it, and the pair is the point.**
+    /// Depth is what an operator alarms on and what `overlay_soft_limit` bounds; this is what a fold
+    /// can actually *reduce*, since Rule S says a suppression never retires. A deployment holding
+    /// half a million standing suppressions has a deep overlay and nothing for a fold to do, and
+    /// only publishing both numbers makes that legible (compaction §9).
+    pub fn retirable_deletions(&self) -> u64 {
+        self.generation.load().overlay.deleted_len()
+    }
+
     /// Live segments per (partition, slice), read straight off the current generation — the gauge
     /// decision 0049 obliges and `/control/status` publishes as `segments`.
     ///

@@ -184,9 +184,12 @@ pub(crate) fn executed(d0: &Bitmap, carried: &CarriedForward) -> Bitmap {
 /// Retirable depth has one threshold and no window at all, because the cost it measures is
 /// unbounded rather than merely growing: the overlay grows monotonically under deletion churn,
 /// every deny acceptance clones it, and depth is a term in I1's composition cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `PartialEq` without `Eq`: two of the thresholds are ratios, and `f64` has no total equality.
+// Nothing compares two schedules for identity — the derive exists so a test can assert what a
+// config file parsed to.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactionSchedule {
-    /// The floor under both routes — compaction §9's `compaction_min_interval_secs`. A fold within
+    /// The floor under every route — compaction §9's `compaction_min_interval_secs`. A fold within
     /// this of the last completed one is never dispatched, whatever a gauge says.
     pub min_interval_secs: u64,
     /// Seconds past **UTC** midnight at which the daily window opens; `None` switches the windowed
@@ -224,6 +227,35 @@ pub struct CompactionSchedule {
     /// unwindowed route off. Defaults to `overlay_soft_limit`, which is the action compaction §9
     /// says that alarm was always supposed to prompt.
     pub after_deletions: Option<u64>,
+    /// Tombstoned rows as a fraction of the bundle's live rows, at or above which a fold is
+    /// dispatched at any hour; `None` switches the route off.
+    ///
+    /// **A different question from [`Self::after_deletions`], over the same numerator.** That one
+    /// is an absolute: an overlay of half a million entries costs every composition, whatever the
+    /// corpus size. This is a ratio, and it is what a *viewport* pays — rows that exist, are
+    /// scanned, and no viewer may see. A 50,000-row deployment with 10,000 deletions is 20% dead
+    /// and nowhere near the absolute threshold; a 10⁹-row one crosses the absolute long before the
+    /// ratio moves. Neither subsumes the other, which is why compaction §9 makes them separate
+    /// gauges rather than one blended score.
+    pub tombstoned_rows_fraction: Option<f64>,
+    /// **Dead** bytes over named bytes — `(on_disc − named) / named` under the live prefix — at or
+    /// above which a fold is dispatched at any hour; `None` switches the route off.
+    ///
+    /// **A ratio of dead to live, not of total to live**, which is what compaction §9's default of
+    /// 1.0 means: *paying double for storage*, i.e. `on_disc = 2 × named`. Written as
+    /// `on_disc / named` instead, a threshold of 1.0 is satisfied by every bundle ever built — on
+    /// disc always exceeds named, if only by the manifests' own bytes, which nothing can name.
+    ///
+    /// **The only route that covers compaction §0's *reclamation* obligation.** A deployment with
+    /// heavy merge churn and few deletions accumulates consumed segments and superseded tiers that
+    /// no gauge above can see: its segment count is bounded (merge is doing its job), its overlay
+    /// is shallow, and it is paying for two or three copies of its corpus. The measured
+    /// no-compaction steady state is 2.0–2.6× (`docs/evidence/memos/2026-08-05-write-path-at-scale.md`).
+    ///
+    /// **This is the expensive gauge**, and the only one that is not a field read: it needs a walk
+    /// of the live prefix. [`due`] therefore takes it as a closure and calls it last, after every
+    /// cheaper route has declined.
+    pub dead_bytes_ratio: Option<f64>,
 }
 
 impl CompactionSchedule {
@@ -242,6 +274,8 @@ impl CompactionSchedule {
             window_min_segments: 0,
             max_segments: None,
             after_deletions: None,
+            tombstoned_rows_fraction: None,
+            dead_bytes_ratio: None,
         }
     }
 }
@@ -257,6 +291,33 @@ pub(crate) enum FoldTrigger {
     SegmentCount,
     /// `|deleted|` reached `after_deletions`, at whatever hour.
     RetirableDepth,
+    /// Tombstoned rows passed `tombstoned_rows_fraction` of the bundle's live rows.
+    TombstonedRows,
+    /// On-disc bytes passed `dead_bytes_ratio` × the bytes the manifests name.
+    DeadBytes,
+}
+
+/// What the schedule reads at the tick that reads it — the three cheap gauges.
+///
+/// A struct rather than three more positional parameters, because [`due`] is the one place the
+/// whole rule is stated and a seven-argument call site is a place to get an argument order wrong.
+/// The fourth gauge is not here: it is a directory walk, and it arrives as a closure.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Gauges {
+    /// The largest live segment count across the partition's slices.
+    pub(crate) live_segments: usize,
+    /// `|deleted|` — deletions alone, never the union with `suppressed` (see [`due`]).
+    pub(crate) retirable_deletions: u64,
+    /// Rows the bundle's segments hold, tombstoned ones included.
+    pub(crate) live_rows: u64,
+}
+
+/// The dead-bytes gauge's two operands: what is on disc under the live prefix, and what its
+/// manifests still name.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DeadBytes {
+    pub(crate) on_disc: u64,
+    pub(crate) named: u64,
 }
 
 /// Whether the schedule calls for a fold now.
@@ -287,10 +348,10 @@ pub(crate) fn due(
     schedule: &CompactionSchedule,
     now_unix: u64,
     last_fold_unix: Option<u64>,
-    live_segments: usize,
-    retirable_deletions: u64,
+    gauges: Gauges,
+    dead_bytes: impl FnOnce() -> Option<DeadBytes>,
 ) -> Option<FoldTrigger> {
-    // The floor, under both routes. `saturating_sub` rather than a comparison because a clock that
+    // The floor, under every route. `saturating_sub` rather than a comparison because a clock that
     // steps backwards must read as "not yet", never as a very large elapsed time.
     if let Some(last) = last_fold_unix {
         if now_unix.saturating_sub(last) < schedule.min_interval_secs {
@@ -302,21 +363,43 @@ pub(crate) fn due(
     // them *inside* its own window should log the reason that will still be true tomorrow, not the
     // hour it happened to be.
     if let Some(threshold) = schedule.after_deletions {
-        if retirable_deletions >= threshold {
+        if gauges.retirable_deletions >= threshold {
             return Some(FoldTrigger::RetirableDepth);
         }
     }
     if let Some(threshold) = schedule.max_segments {
-        if live_segments >= threshold {
+        if gauges.live_segments >= threshold {
             return Some(FoldTrigger::SegmentCount);
         }
     }
-
-    let start = schedule.window_start_secs?;
-    if live_segments < schedule.window_min_segments || schedule.window_min_segments == 0 {
-        return None;
+    // **A ratio needs a denominator**: a bundle with no rows has no fraction, and reading one as
+    // "infinitely dead" would dispatch a fold at every tick over an empty corpus.
+    if let Some(threshold) = schedule.tombstoned_rows_fraction {
+        if gauges.live_rows > 0
+            && gauges.retirable_deletions as f64 / gauges.live_rows as f64 >= threshold
+        {
+            return Some(FoldTrigger::TombstonedRows);
+        }
     }
-    in_window(now_unix, start, schedule.window_secs).then_some(FoldTrigger::Window)
+
+    // The window, which is the only route that has one.
+    if let Some(start) = schedule.window_start_secs {
+        if gauges.live_segments >= schedule.window_min_segments
+            && schedule.window_min_segments > 0
+            && in_window(now_unix, start, schedule.window_secs)
+        {
+            return Some(FoldTrigger::Window);
+        }
+    }
+
+    // **Last, and the closure is why.** Every gauge above is a field read; this one is a walk of
+    // the live prefix, so a tick pays for it only when nothing cheaper has already decided. A
+    // deployment with the route switched off never calls it at all.
+    let threshold = schedule.dead_bytes_ratio?;
+    let measured = dead_bytes()?;
+    let dead = measured.on_disc.saturating_sub(measured.named);
+    (measured.named > 0 && dead as f64 / measured.named as f64 >= threshold)
+        .then_some(FoldTrigger::DeadBytes)
 }
 
 /// Whether `now_unix` falls in the daily window `[start, start + width)` past UTC midnight.
@@ -1256,7 +1339,35 @@ mod tests {
             window_min_segments: 8,
             max_segments: Some(64),
             after_deletions: Some(500_000),
+            // The two ratio gauges are off in this helper: every case below is about the counts and
+            // the window, and a live ratio would give some of them a second reason to fire that the
+            // assertion could not tell apart. `the_two_ratio_gauges_*` arm them deliberately.
+            tombstoned_rows_fraction: None,
+            dead_bytes_ratio: None,
         }
+    }
+
+    /// [`due`] with the row count zero and the dead-bytes walk absent — the shape every case but
+    /// the ratio ones wants. A zero row count is what switches the tombstoned fraction off (a ratio
+    /// has no denominator), and `|| None` is a walk that could not be performed.
+    fn due_at(
+        s: &CompactionSchedule,
+        now: u64,
+        last: Option<u64>,
+        live_segments: usize,
+        retirable_deletions: u64,
+    ) -> Option<FoldTrigger> {
+        due(
+            s,
+            now,
+            last,
+            Gauges {
+                live_segments,
+                retirable_deletions,
+                live_rows: 0,
+            },
+            || None,
+        )
     }
 
     /// Seconds since the epoch at `day` days past it, `hour`:00 UTC.
@@ -1275,12 +1386,12 @@ mod tests {
     fn the_windowed_route_fires_only_inside_the_window_and_only_with_work() {
         let s = schedule();
         assert_eq!(
-            due(&s, at(10, 1), None, 8, 0),
+            due_at(&s, at(10, 1), None, 8, 0),
             Some(FoldTrigger::Window),
             "01:00 with eight segments is the case the window exists for"
         );
         assert_eq!(
-            due(&s, at(10, 9), None, 63, 0),
+            due_at(&s, at(10, 9), None, 63, 0),
             None,
             "09:00 is outside the window at any count below the ceiling — a start time that fires \
              at breakfast after a restart is not a start time. (63 rather than an arbitrarily \
@@ -1288,7 +1399,7 @@ mod tests {
              would stop being about the window at all.)"
         );
         assert_eq!(
-            due(&s, at(10, 1), None, 7, 0),
+            due_at(&s, at(10, 1), None, 7, 0),
             None,
             "and inside it, below the threshold, there is nothing worth folding"
         );
@@ -1305,22 +1416,22 @@ mod tests {
     fn the_unwindowed_routes_are_not_windowed() {
         let s = schedule();
         assert_eq!(
-            due(&s, at(10, 14), None, 1, 500_000),
+            due_at(&s, at(10, 14), None, 1, 500_000),
             Some(FoldTrigger::RetirableDepth),
             "14:00, one segment, at the deletion limit"
         );
         assert_eq!(
-            due(&s, at(10, 14), None, 1, 499_999),
+            due_at(&s, at(10, 14), None, 1, 499_999),
             None,
             "and not below it"
         );
 
         assert_eq!(
-            due(&s, at(10, 14), None, 64, 0),
+            due_at(&s, at(10, 14), None, 64, 0),
             Some(FoldTrigger::SegmentCount),
             "14:00, no deletions at all, at the segment ceiling"
         );
-        assert_eq!(due(&s, at(10, 14), None, 63, 0), None, "and not below it");
+        assert_eq!(due_at(&s, at(10, 14), None, 63, 0), None, "and not below it");
     }
 
     /// **The two segment thresholds are a floor and a ceiling over one gauge**, and the window is
@@ -1334,14 +1445,14 @@ mod tests {
     #[test]
     fn the_segment_gauge_has_a_window_floor_and_an_any_hour_ceiling() {
         let s = schedule();
-        assert_eq!(due(&s, at(10, 14), None, 8, 0), None, "8 at 14:00 waits");
+        assert_eq!(due_at(&s, at(10, 14), None, 8, 0), None, "8 at 14:00 waits");
         assert_eq!(
-            due(&s, at(10, 1), None, 8, 0),
+            due_at(&s, at(10, 1), None, 8, 0),
             Some(FoldTrigger::Window),
             "8 inside the window folds, and is reported as the window"
         );
         assert_eq!(
-            due(&s, at(10, 1), None, 64, 0),
+            due_at(&s, at(10, 1), None, 64, 0),
             Some(FoldTrigger::SegmentCount),
             "64 inside the window folds too — and is reported as the ceiling, because that is \
              the reason that will still be true tomorrow"
@@ -1359,17 +1470,17 @@ mod tests {
         let s = schedule();
         let last = at(10, 1);
         assert_eq!(
-            due(&s, at(10, 2), Some(last), 64, 999_999),
+            due_at(&s, at(10, 2), Some(last), 64, 999_999),
             None,
             "one hour later, with every gauge over its threshold — the floor is under all three"
         );
         assert_eq!(
-            due(&s, at(11, 1), Some(last), 8, 0),
+            due_at(&s, at(11, 1), Some(last), 8, 0),
             Some(FoldTrigger::Window),
             "and the next night's window is exactly a day past it"
         );
         assert_eq!(
-            due(&s, at(9, 1), Some(last), 64, 999_999),
+            due_at(&s, at(9, 1), Some(last), 64, 999_999),
             None,
             "a clock that stepped backwards reads as 'not yet', never as a huge elapsed time"
         );
@@ -1384,14 +1495,14 @@ mod tests {
             window_secs: 4 * 3_600,
             ..schedule()
         };
-        assert_eq!(due(&s, at(10, 23), None, 8, 0), Some(FoldTrigger::Window));
+        assert_eq!(due_at(&s, at(10, 23), None, 8, 0), Some(FoldTrigger::Window));
         assert_eq!(
-            due(&s, at(11, 1), None, 8, 0),
+            due_at(&s, at(11, 1), None, 8, 0),
             Some(FoldTrigger::Window),
             "01:00 is two hours into a window that opened at 23:00"
         );
         assert_eq!(
-            due(&s, at(11, 4), None, 8, 0),
+            due_at(&s, at(11, 4), None, 8, 0),
             None,
             "and 04:00 is past its end"
         );
@@ -1407,17 +1518,17 @@ mod tests {
             ..schedule()
         };
         assert_eq!(
-            due(&no_window, at(10, 1), None, 8, 0),
+            due_at(&no_window, at(10, 1), None, 8, 0),
             None,
             "a count that only clears the window's floor has no route left"
         );
         assert_eq!(
-            due(&no_window, at(10, 1), None, 8, 500_000),
+            due_at(&no_window, at(10, 1), None, 8, 500_000),
             Some(FoldTrigger::RetirableDepth),
             "and the unwindowed routes are untouched by it"
         );
         assert_eq!(
-            due(&no_window, at(10, 1), None, 64, 0),
+            due_at(&no_window, at(10, 1), None, 64, 0),
             Some(FoldTrigger::SegmentCount),
             "including the segment ceiling, which is where a window-less deployment's segment \
              growth is bounded"
@@ -1428,20 +1539,20 @@ mod tests {
             max_segments: None,
             ..schedule()
         };
-        assert_eq!(due(&no_depth, at(10, 14), None, 1_000, u64::MAX), None);
+        assert_eq!(due_at(&no_depth, at(10, 14), None, 1_000, u64::MAX), None);
 
         let no_ceiling = CompactionSchedule {
             max_segments: None,
             ..schedule()
         };
         assert_eq!(
-            due(&no_ceiling, at(10, 14), None, 100_000, 0),
+            due_at(&no_ceiling, at(10, 14), None, 100_000, 0),
             None,
             "with the ceiling off, segment growth waits for the window however far it goes"
         );
 
         assert_eq!(
-            due(&CompactionSchedule::off(), at(10, 1), None, 1_000, u64::MAX),
+            due_at(&CompactionSchedule::off(), at(10, 1), None, 1_000, u64::MAX),
             None,
             "off is off at every hour, every segment count and every depth"
         );
@@ -1458,6 +1569,143 @@ mod tests {
                 "a day wide at {hour}:00"
             );
         }
+    }
+
+    /// **The two ratio gauges fire at any hour, and each catches what no count above can.**
+    ///
+    /// The tombstoned fraction is a different question from `after_deletions` over the same
+    /// numerator: 10,000 deletions in a 50,000-row bundle is a fifth of every viewport's scanned
+    /// rows wasted and nowhere near the absolute threshold. The byte ratio is the only route that
+    /// covers reclamation at all — this deployment's segments and overlay are both healthy.
+    ///
+    /// Kills: dropping either route; windowing either of them (both are asserted at 14:00).
+    #[test]
+    fn the_two_ratio_gauges_fire_at_any_hour_on_bundles_no_count_gauge_would_fold() {
+        let s = CompactionSchedule {
+            tombstoned_rows_fraction: Some(0.2),
+            dead_bytes_ratio: Some(1.0),
+            ..schedule()
+        };
+        let healthy = |deletions: u64, rows: u64| Gauges {
+            live_segments: 1,
+            retirable_deletions: deletions,
+            live_rows: rows,
+        };
+
+        assert_eq!(
+            due(&s, at(10, 14), None, healthy(10_000, 50_000), || None),
+            Some(FoldTrigger::TombstonedRows),
+            "a fifth of the rows are tombstoned, outside the window, with one segment and an \
+             overlay two orders of magnitude below `after_deletions`"
+        );
+        assert_eq!(
+            due(&s, at(10, 14), None, healthy(9_999, 50_000), || None),
+            None,
+            "and just under the fraction, nothing fires"
+        );
+        assert_eq!(
+            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(DeadBytes {
+                on_disc: 200,
+                named: 100
+            })),
+            Some(FoldTrigger::DeadBytes),
+            "paying double for storage with nothing deleted and one segment — the reclamation \
+             obligation, which no other gauge sees"
+        );
+        assert_eq!(
+            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(DeadBytes {
+                on_disc: 199,
+                named: 100
+            })),
+            None,
+            "and just under the ratio, nothing fires"
+        );
+        // **The ratio is dead-to-live, not total-to-live**, and at 1.0 the difference is every
+        // bundle ever built: on disc always exceeds named, if only by the manifests' own bytes.
+        assert_eq!(
+            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(DeadBytes {
+                on_disc: 101,
+                named: 100
+            })),
+            None,
+            "a bundle with 1% dead is not a bundle paying double"
+        );
+    }
+
+    /// **The dead-bytes walk is not performed unless it decides something**, which is the whole
+    /// reason it is a closure: it is the one gauge that is not a field read.
+    ///
+    /// Kills: calling it eagerly; ordering it before any cheaper route; consulting it with the
+    /// route switched off.
+    #[test]
+    fn the_dead_bytes_walk_runs_only_when_every_cheaper_route_has_declined() {
+        let s = CompactionSchedule {
+            dead_bytes_ratio: Some(1.0),
+            ..schedule()
+        };
+        let walked = std::cell::Cell::new(0u32);
+        let walk = || {
+            walked.set(walked.get() + 1);
+            Some(DeadBytes {
+                on_disc: 200,
+                named: 100,
+            })
+        };
+
+        // The interval floor declines before anything is read at all.
+        assert_eq!(
+            due(&s, at(10, 14), Some(at(10, 13)), Gauges { live_segments: 1, retirable_deletions: 0, live_rows: 1 }, walk),
+            None
+        );
+        assert_eq!(walked.get(), 0, "a floored tick walks nothing");
+
+        // A cheaper route firing decides it.
+        assert_eq!(
+            due(&s, at(10, 14), None, Gauges { live_segments: 64, retirable_deletions: 0, live_rows: 1 }, walk),
+            Some(FoldTrigger::SegmentCount)
+        );
+        assert_eq!(walked.get(), 0, "the segment ceiling decided it, so nothing walked");
+
+        // Nothing cheaper fires: now it walks.
+        assert_eq!(
+            due(&s, at(10, 14), None, Gauges { live_segments: 1, retirable_deletions: 0, live_rows: 1 }, walk),
+            Some(FoldTrigger::DeadBytes)
+        );
+        assert_eq!(walked.get(), 1, "and exactly once");
+
+        // Switched off, it is never consulted.
+        let off = CompactionSchedule {
+            dead_bytes_ratio: None,
+            ..s
+        };
+        assert_eq!(
+            due(&off, at(10, 14), None, Gauges { live_segments: 1, retirable_deletions: 0, live_rows: 1 }, walk),
+            None
+        );
+        assert_eq!(walked.get(), 1, "an off route reads nothing");
+    }
+
+    /// A ratio with no denominator is not "infinitely dead". Both guards are the same shape and both
+    /// are reachable: an empty bundle has no rows, and a bundle whose manifests name nothing has no
+    /// named bytes — a fold at every tick over a corpus it cannot reduce.
+    #[test]
+    fn a_ratio_with_a_zero_denominator_never_fires() {
+        let s = CompactionSchedule {
+            tombstoned_rows_fraction: Some(0.2),
+            dead_bytes_ratio: Some(1.0),
+            ..schedule()
+        };
+        assert_eq!(
+            due(
+                &s,
+                at(10, 14),
+                None,
+                Gauges { live_segments: 1, retirable_deletions: 500, live_rows: 0 },
+                || Some(DeadBytes { on_disc: 1_000, named: 0 })
+            ),
+            None,
+            "no rows and no named bytes: neither ratio is defined, and neither may fire"
+        );
     }
 
     /// **The memory estimate is spec §3's table, and the figure it produces at 10⁹ is the one that

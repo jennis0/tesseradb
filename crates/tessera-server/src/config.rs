@@ -95,6 +95,12 @@ pub enum ConfigError {
     /// `ingest.compaction_after_deletions` or `ingest.compaction_max_segments` is a string other
     /// than `"off"`. See [`RawThreshold`].
     CompactionThresholdNotANumberOrOff(String),
+    /// A ratio key — `ingest.compaction_dead_rows_fraction` or `ingest.compaction_dead_bytes_ratio`
+    /// — is a string other than `"off"`. See [`RawRatio`].
+    CompactionRatioNotANumberOrOff { key: &'static str, value: String },
+    /// A ratio key is zero, negative, or not finite: a route that can never decline. See
+    /// [`ratio_or_off`].
+    CompactionRatioNotPositive { key: &'static str, value: f64 },
     /// `ingest.compaction_max_segments` is at or below `ingest.compaction_window_min_segments`,
     /// with the window armed.
     ///
@@ -286,6 +292,19 @@ impl std::fmt::Display for ConfigError {
                  (HH:MM, 24-hour) nor 'off'. It is refused rather than defaulted: read as 'off' \
                  it silently retires the deployment's fold schedule, and read as midnight it \
                  silently starts hours of IO at the hour the operator was avoiding"
+            ),
+            ConfigError::CompactionRatioNotANumberOrOff { key, value } => write!(
+                f,
+                "{key} = \"{value}\" is neither a ratio nor \"off\". A maintenance route that \
+                 silently does not run is indistinguishable from one with nothing to do, so a \
+                 spelling this loader does not recognise is refused rather than read as absent"
+            ),
+            ConfigError::CompactionRatioNotPositive { key, value } => write!(
+                f,
+                "{key} = {value} is not a positive, finite ratio. Zero or negative is satisfied by \
+                 every possible measurement, so the route would dispatch a fold at every tick that \
+                 clears the interval floor — the ungated timer compaction §9 declines, reached by \
+                 configuration. To switch the route off, write \"off\""
             ),
             ConfigError::CompactionThresholdNotANumberOrOff(value) => write!(
                 f,
@@ -557,6 +576,10 @@ struct RawIngest {
     compaction_max_segments: Option<RawThreshold>,
     #[serde(default)]
     compaction_after_deletions: Option<RawThreshold>,
+    #[serde(default)]
+    compaction_dead_rows_fraction: Option<RawRatio>,
+    #[serde(default)]
+    compaction_dead_bytes_ratio: Option<RawRatio>,
 }
 
 /// A count, or the literal `"off"` — compaction §9's spelling for a route a deployment does not
@@ -570,6 +593,19 @@ struct RawIngest {
 #[serde(untagged)]
 enum RawThreshold {
     Count(u64),
+    Word(String),
+}
+
+/// A ratio, or the literal `"off"` — [`RawThreshold`]'s shape for the two gauges that are
+/// fractions rather than counts.
+///
+/// A separate type rather than widening `RawThreshold`, because the two are refused for different
+/// reasons and an operator reading the error should be told which: a count that is negative is a
+/// typo, and a ratio that is negative is a route that could never decline.
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum RawRatio {
+    Ratio(f64),
     Word(String),
 }
 
@@ -1330,6 +1366,22 @@ const DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS: usize = 8;
 /// inverts the two is refused — see [`ConfigError::CompactionSegmentThresholdsInverted`].
 const DEFAULT_COMPACTION_MAX_SEGMENTS: usize = 64;
 
+/// Tombstoned rows as a fraction of live rows at which a fold is dispatched (compaction §9).
+///
+/// **0.2, and it is assumed rather than sized.** A fifth of every viewport's scanned rows being
+/// invisible to every viewer is obviously not-yet-urgent and obviously not fine; where between
+/// those a deployment wants the line is a judgement, and probe P1 does not settle it — P1 measures
+/// what a fold *costs*, and this is about when the saving is worth paying for.
+const DEFAULT_COMPACTION_DEAD_ROWS_FRACTION: f64 = 0.2;
+
+/// On-disc bytes over manifest-named bytes at which a fold is dispatched (compaction §9).
+///
+/// **1.0 — paying double for storage — and it sits below the measured no-compaction steady state
+/// of 2.0–2.6×** (`docs/evidence/memos/2026-08-05-write-path-at-scale.md`), which is what makes it
+/// a threshold a real deployment crosses rather than one it lives above. Assumed on the same
+/// footing as the fraction above.
+const DEFAULT_COMPACTION_DEAD_BYTES_RATIO: f64 = 1.0;
+
 /// Buffer occupancy at which `/control/ingest` is refused (§1.3).
 ///
 /// **`ingest_queue_bound` does not bound this.** That one bounds the *command queue* — 32 jobs by
@@ -1449,6 +1501,32 @@ fn parse_time_of_day(value: &str) -> Result<u32> {
         return Err(bad());
     }
     Ok(hour * 3_600 + minute * 60)
+}
+
+/// A ratio key: absent takes `default`, `"off"` switches the route off, a number must be finite and
+/// strictly positive, and anything else is refused by name.
+///
+/// **Strictly positive rather than merely non-negative.** A threshold of zero is satisfied by every
+/// possible measurement, so the route dispatches a fold at every tick that clears the interval floor
+/// — the ungated timer compaction §9 declines, reached by configuration rather than by design. A
+/// deployment that wants a route to always fire has said something it does not mean; a deployment
+/// that wants it off spells that `"off"`.
+fn ratio_or_off(key: &'static str, raw: Option<&RawRatio>, default: f64) -> Result<Option<f64>> {
+    let value = match raw {
+        None => return Ok(Some(default)),
+        Some(RawRatio::Word(word)) if word == "off" => return Ok(None),
+        Some(RawRatio::Word(word)) => {
+            return Err(ConfigError::CompactionRatioNotANumberOrOff {
+                key,
+                value: word.clone(),
+            })
+        }
+        Some(RawRatio::Ratio(value)) => *value,
+    };
+    if !value.is_finite() || value <= 0.0 {
+        return Err(ConfigError::CompactionRatioNotPositive { key, value });
+    }
+    Ok(Some(value))
 }
 
 fn non_zero_usize(key: &'static str, value: usize, consequence: &'static str) -> Result<usize> {
@@ -1750,6 +1828,26 @@ fn parse(text: &str) -> Result<Config> {
             return Err(ConfigError::CompactionThresholdNotANumberOrOff(word.clone()))
         }
     };
+    // **The two gauges compaction §9 names for the obligations the counts above cannot see.** The
+    // fraction is what a *viewport* pays — rows scanned that no viewer may see — and is a different
+    // question from `compaction_after_deletions` over the same numerator: a small corpus crosses
+    // the ratio long before the absolute, and a 10⁹-row one the other way round. The byte ratio is
+    // the only route that covers reclamation at all: a deployment with heavy merge churn and few
+    // deletions has a bounded segment count, a shallow overlay, and three copies of its corpus.
+    //
+    // **Refused rather than clamped, and a ratio has two ways to be nonsense.** Not finite, or not
+    // positive: a zero or negative threshold is a route that can never decline, which is the
+    // ungated timer §9 declines reached by setting a gauge below every possible value.
+    let compaction_dead_rows_fraction = ratio_or_off(
+        "ingest.compaction_dead_rows_fraction",
+        raw.ingest.compaction_dead_rows_fraction.as_ref(),
+        DEFAULT_COMPACTION_DEAD_ROWS_FRACTION,
+    )?;
+    let compaction_dead_bytes_ratio = ratio_or_off(
+        "ingest.compaction_dead_bytes_ratio",
+        raw.ingest.compaction_dead_bytes_ratio.as_ref(),
+        DEFAULT_COMPACTION_DEAD_BYTES_RATIO,
+    )?;
     let compaction_window_min_segments = non_zero_usize(
         "ingest.compaction_window_min_segments",
         raw.ingest
@@ -1780,6 +1878,8 @@ fn parse(text: &str) -> Result<Config> {
         window_min_segments: compaction_window_min_segments,
         max_segments: compaction_max_segments,
         after_deletions: compaction_after_deletions,
+        tombstoned_rows_fraction: compaction_dead_rows_fraction,
+        dead_bytes_ratio: compaction_dead_bytes_ratio,
     };
 
     let ingest_buffer_max_items = non_zero_usize(
@@ -2047,8 +2147,54 @@ mod tests {
                 window_min_segments: 8,
                 max_segments: Some(64),
                 after_deletions: Some(DEFAULT_OVERLAY_SOFT_LIMIT as u64),
+                tombstoned_rows_fraction: Some(0.2),
+                dead_bytes_ratio: Some(1.0),
             }
         );
+    }
+
+    /// **The two ratio gauges parse, switch off by name, and refuse a threshold that can never
+    /// decline.**
+    ///
+    /// Zero and negative are the sharp cases: both are satisfied by every possible measurement, so
+    /// the route would dispatch a fold at every tick that clears the interval floor — the ungated
+    /// timer compaction §9 declines, reached by configuration rather than by design.
+    ///
+    /// **Mutations this kills:** clamping instead of refusing; accepting `<= 0.0`; accepting a
+    /// non-finite value; reading an unrecognised word as absent (the default) rather than refusing.
+    #[test]
+    fn a_ratio_gauge_takes_a_number_or_off_and_refuses_a_threshold_nothing_can_be_under() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+
+        let set = parse(&valid_toml_with(
+            "",
+            "compaction_dead_rows_fraction = 0.05\ncompaction_dead_bytes_ratio = 2.5",
+        ))
+        .unwrap();
+        assert_eq!(set.compaction.tombstoned_rows_fraction, Some(0.05));
+        assert_eq!(set.compaction.dead_bytes_ratio, Some(2.5));
+
+        let off = parse(&valid_toml_with(
+            "",
+            "compaction_dead_rows_fraction = \"off\"\ncompaction_dead_bytes_ratio = \"off\"",
+        ))
+        .unwrap();
+        assert_eq!(off.compaction.tombstoned_rows_fraction, None);
+        assert_eq!(off.compaction.dead_bytes_ratio, None);
+
+        for bad in ["0.0", "-1.0", "\"sometimes\""] {
+            let err = parse(&valid_toml_with(
+                "",
+                &format!("compaction_dead_bytes_ratio = {bad}"),
+            ))
+            .expect_err("a threshold nothing can be under must be refused");
+            let text = err.to_string();
+            assert!(
+                text.contains("compaction_dead_bytes_ratio"),
+                "the refusal must name the key: {text}"
+            );
+        }
     }
 
     /// **The two segment thresholds are a floor and a ceiling, and an inverted pair is refused.**

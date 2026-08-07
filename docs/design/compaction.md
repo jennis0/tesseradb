@@ -18,7 +18,7 @@ carry-forward set, §6.1's throttle was refuted and replaced (decision 0052), an
 window is gone — a fold's aftermath is a cache miss, not a refusal (decision 0053), which also
 retires §6.3. **The fold is built and scheduled** (2026-08-07): the plan, the dedicated thread, all five passes,
 the publication in §4's order, retirement's `executed` derivation, reclamation, and §9's trigger as
-decision 0056 rules it — a nightly gated window and two any-hour gauges. **An adversarial round has
+decision 0056 rules it — a nightly gated window and four any-hour gauges. **An adversarial round has
 run against the implementation** (r10, three lenses; dispositioned in the body) and found no
 disclosure: what it found was two pre-flight refusals this document described as built and are not
 (§3, §8), a publication window that outlived its own durability gate, and a fold that could discard
@@ -29,7 +29,8 @@ and pass 3's external-id runs decoded rather than mapped — were the design's o
 broken in two places. Both are fixed and the anonymous term fell by two thirds. §3, §12 and §14
 are corrected to what was measured. **What remains before this becomes normative:** the invariants
 lens on the staging list of §6.2, if it is built, and on D5's rows-frozen safety claim, which has
-never had one. **What remains unbuilt** is two of §9's four gauges.
+never had one. **§9's four gauges are all built** (2026-08-07); what remains unbuilt of this design
+is the staging list and §6.1's two page-cache hints.
 **Owns:** the fold — what it executes, what it carries forward, how it is published, what retires
 at it, and what a viewer pays at the flip. The prefix rewrite, the `CURRENT` flip, and
 reclamation.
@@ -45,13 +46,11 @@ and are cited from elsewhere as `compaction §n`.
 
 **The fold runs**, and everything in §1–§5 and §8 is description. `tessera-engine::compact` holds
 the plan and the five passes; `Executor::publish_fold` holds the publication, retirement's
-derivation and the reclamation; and the two trigger routes spec §9's schedule specifies, beside
+derivation and the reclamation; and all four trigger routes spec §9's schedule specifies, beside
 `Engine::request_fold` for a caller that wants one now, which `POST /control/compact` calls. Both
 pre-flight refusals are built (spec §3, §8), and so is the startup sweep that reclaims a discarded
-fold's orphan prefix (spec §7). ⊘ **What is obligation rather than description**: two of §9's four
-gauges (dead bytes and the tombstoned-row fraction) and the `/control/status` figures for them, the
-staging list (spec §6.2), and the `MADV_SEQUENTIAL` hint and the write-side `POSIX_FADV_DONTNEED`
-(spec §6.1). Where a figure is quoted it is marked measured, modelled or assumed; claims about the
+fold's orphan prefix (spec §7). ⊘ **What is obligation rather than description**: the staging list
+(spec §6.2), and the `MADV_SEQUENTIAL` hint and the write-side `POSIX_FADV_DONTNEED` (spec §6.1). Where a figure is quoted it is marked measured, modelled or assumed; claims about the
 tree were verified against branch `geometry/cell-plus-residual`.
 
 ---
@@ -843,8 +842,12 @@ racing the tick that clears it. The `compaction` block on `/control/status` is w
 
 Gauges make the need visible on `/control/status`, one per obligation in spec §0: **overlay depth**
 (Rule F pressure — already alarmed at `overlay_soft_limit`, which gains here the action its alarm
-was always supposed to prompt), ⊘ **dead bytes** (on-disc minus manifest-named — reclamation
-pressure), and ⊘ **tombstoned rows as a fraction of live rows** (fold pressure). ✔ Beside them, what
+was always supposed to prompt), beside `retirable`, which is the part of it a fold can reduce; and
+**live rows**, the denominator of the tombstoned-row gauge, whose numerator is `retirable` — an
+operator holding both forms the ratio, and a third derived number is a third thing to keep
+consistent. **Dead bytes is deliberately not published**: it is a walk of the live prefix, and a
+figure recomputed on every status poll would make a dashboard the most expensive thing on the node.
+The trigger's own log line carries it when a fold dispatches. ✔ Beside them, what
 the fold itself did: `folds` and `fold_failures`, the last fold's wall clock, and the highest
 resident set its own pass staircase saw, with the staircase unreduced beneath. **`fold_failures` is
 the one to alarm on and it is not the mirror of `folds`** — every discard leaves a complete prefix
@@ -863,8 +866,8 @@ is over its threshold **and** the interval floor has elapsed. ✔ marks what is 
 | ✔ `retirable_depth ≥ compaction_after_deletions` | `overlay_soft_limit` (500,000) | un-retired **deletions** — see below. Unwindowed |
 | ✔ inside the daily window **and** any slice's live segment count ≥ `compaction_window_min_segments` | `00:00` UTC + 4 h, 8 segments | the axis merge saturates on (decision 0049), paid down when it is cheap to pay |
 | ✔ any slice's live segment count ≥ `compaction_max_segments` | 64 | the same axis past the point where deferring costs more than folding. Unwindowed |
-| ⊘ `dead_bytes / live_bytes ≥ compaction_dead_bytes_ratio` | 1.0 | paying double for storage; the measured no-compaction steady state is 2.0–2.6× |
-| ⊘ `tombstoned_rows / live_rows ≥ compaction_dead_rows_fraction` | 0.2 | rows every viewport pays for and no viewer may see |
+| ✔ `dead_bytes / live_bytes ≥ compaction_dead_bytes_ratio` | 1.0 | paying double for storage; the measured no-compaction steady state is 2.0–2.6×. Unwindowed |
+| ✔ `tombstoned_rows / live_rows ≥ compaction_dead_rows_fraction` | 0.2 | rows every viewport pays for and no viewer may see. Unwindowed |
 | ✔ `compaction_min_interval_secs` | 86,400 | the floor under all of them |
 
 **The segment gauge has a floor and a ceiling; retirable depth has neither a window nor a second
@@ -902,7 +905,9 @@ compaction_window_secs         = 14400    # how long it stays open; see below
 compaction_window_min_segments = 8        # segments worth folding for tonight
 compaction_max_segments        = 64       # or "off"; segments worth folding for now
 compaction_after_deletions     = 500000   # or "off"; defaults to overlay_soft_limit
-compaction_min_interval_secs   = 86400    # the floor under all three routes
+compaction_dead_rows_fraction  = 0.2      # or "off"; tombstoned rows over live rows
+compaction_dead_bytes_ratio    = 1.0      # or "off"; dead bytes over named bytes
+compaction_min_interval_secs   = 86400    # the floor under every route
 ```
 
 **`compaction_window_secs` bounds when a fold may *start*, not how long it runs.** A fold beginning
@@ -920,7 +925,34 @@ operator to see; the *trigger* takes the retirable part.
 
 An **OR over four gauges, never a blend.** The obligations are independent — a deployment that
 deletes nothing still accumulates dead bytes and segments, and one that deletes constantly hits
-retirable depth long before disc — so a combined score would let one pressure hide another.
+retirable depth long before disc — so a combined score would let one pressure hide another. **The
+two ratios earn their place by covering what the counts cannot**: `after_deletions` is an absolute
+and the tombstoned fraction is relative, so a 50,000-row deployment crosses a fifth long before half
+a million deletions and a 10⁹-row one the other way round; and the byte ratio is the *only* route
+that covers §0's reclamation obligation, since a deployment whose merge is doing its job has a
+bounded segment count, a shallow overlay, and three copies of its corpus.
+
+**They are evaluated cheapest-first, and the byte ratio is last because it is the only one that is
+not a field read.** Segment count, retirable depth and the row fraction are a `len`, a bitmap
+cardinality and a sum the manifest already holds; dead bytes is a walk of the live prefix. The
+schedule takes it as a closure and calls it only after every cheaper route has declined, so a
+deployment already folding for another reason never pays for it and one with the route off never
+calls it. What it walks is the **live prefix**, not the bundle root: an orphaned prefix is dead
+bytes too, but it is the startup sweep's to reclaim and not a fold's, so counting it would dispatch
+folds that cannot reduce it.
+
+**`dead_bytes` is `on_disc − named`, and the ratio is against `named`** — so the default of 1.0
+means *paying double*, `on_disc = 2 × named`. Written as `on_disc / named` a threshold of 1.0 is
+satisfied by every bundle ever built, since on disc always exceeds named by at least the manifests'
+own bytes, which nothing can name. **`named` is the sum of two maps**: the build's artefacts are
+digested in the bundle `MANIFEST.json` and everything the write path produced is in the partition's
+side-manifest, and summing one alone reported a 1065× orphan ratio in a measured run — a missing
+addend, not a leak.
+
+**Both ratios refuse a threshold of zero or below**, which is satisfied by every possible
+measurement and would dispatch a fold at every tick that clears the interval floor — the ungated
+timer this section declines, reached by configuration rather than by design. A deployment that wants
+a route off spells that `"off"`.
 
 **The floor is measured start-to-start, and never lets a fold begin before the last one ended.**
 Both halves are load-bearing and each fails differently alone. Measured from the *end* — which is
@@ -956,8 +988,9 @@ that fires every tick into an out-of-space refusal is a log flood, so the refusa
 crossing, exactly as the overlay alarm does.
 
 **Four numbers here are chosen without evidence**, and they are marked as assumed in spec §14
-rather than presented as sized: the two fractions above (`1.0` sits below the measured
-no-compaction steady state, `0.2` is obviously not-yet-urgent), and the window's own two —
+rather than presented as sized: the two ratios (`1.0` sits below the measured no-compaction steady
+state of 2.0–2.6×, which is what makes it a threshold a real deployment crosses rather than one it
+lives above; `0.2` is obviously not-yet-urgent and obviously not fine), and the window's own two —
 `compaction_window_secs` at 4 h, long enough that a node restarting inside the quiet period still
 folds and short enough that one down all night does not start at breakfast, and
 `compaction_window_min_segments` at 8, which is where a fold begins to be worth its flip cost on
@@ -977,7 +1010,7 @@ route off.
 | `tessera-engine::compact` | ✔ the plan (`plan_fold`, pure, on the executor — the two pre-flight refusals included, against host figures its caller measures so it stays pure), the five passes (`execute`, on one dedicated thread) and their memory staircase, the next-prefix rule and Rule F's `executed` derivation — the shape `flush.rs` / `merge.rs` / `coalesce.rs` already establish, and the fourth caller of the same publication discipline |
 | `tessera-engine::write` | ✔ `dispatch_fold` (its own thread, and the suspension of merge and coalesce), `publish_fold` (spec §4's seven steps in order), the interval floor's two origins, the deferred reclamation and the startup sweep (spec §7, §8), and the live external-id map's prune, which is the half of Rule F that lives in memory rather than in a file |
 | `tessera-engine::session` | ✔ the seam: `bundle_identity`, the fragment cache and the external-id index onto `Generation`; `GeometryPublication` and its `PrefixRotation`; `publish_rotated_prefix`; the bundle root in place of a captured prefix directory |
-| `tessera-server` | ✔ the schedule's six `[ingest].compaction_*` keys, parsed into the `CompactionSchedule` the executor reads; ✔ `POST /control/compact` and the `compaction` block on `/control/status` — counters, the last fold's wall clock, and its pass staircase; ⊘ the dead-bytes and tombstoned-row gauges (overlay depth and segment count are already published) |
+| `tessera-server` | ✔ the schedule's eight `[ingest].compaction_*` keys, parsed into the `CompactionSchedule` the executor reads; ✔ `POST /control/compact` and the `compaction` block on `/control/status` — counters, the last fold's wall clock, its pass staircase, and the trigger's own gauges |
 
 `scripts/check-layers.sh` is unaffected: the engine already depends on both store and authz, and
 the fold adds no publisher — it goes through the executor like everything else.
@@ -1202,7 +1235,7 @@ are.
 | page-cache pollution during a fold, and what a concurrent viewport pays for it | **measured** — **P3 run**, four times in the evicting regime, twice at a real 45.57 GiB bundle against 36.9–38.2 GiB of RAM. Unthrottled costs up to **2.03×**; **128 MiB/s is inside every run's noise floor**. *This was the weakest assumption in this document; it was wrong, and less wrong than §6.1 guessed* | `docs/evidence/memos/2026-08-05-compaction-flip-and-io.md` |
 | the 15.7× excursion | **measured and discounted** — cgroup-capped runs only, where direct reclaim stalls the allocating task; neither real run reproduced it. Not a fold's expected cost | same memo |
 | that 128 MiB/s is the right rate on **another** device, or at a deployment's bundle:cache ratio | **not measured.** The knee follows device bandwidth, and both runs sat at 1.24:1 and 1.96:1 where a 47 GB bundle on a 16 GB machine is ~3:1. Both are why spec §6.1 makes this a key rather than a constant | same memo |
-| the trigger's two unbuilt thresholds — dead bytes ≥ live, tombstoned rows ≥ 20% | **assumed**, and P1 does not calibrate them: it measures what a fold *costs*, and these are about when the saving is worth it. Both need a disc walk nothing performs | spec §9 |
+| the trigger's two ratio thresholds — dead bytes ≥ live, tombstoned rows ≥ 20% | **assumed**, and P1 does not calibrate them: it measures what a fold *costs*, and these are about when the saving is worth paying for. `1.0` at least sits below the measured 2.0–2.6× steady state rather than above it | spec §9 |
 | the memory pre-flight's safety factor of 2 | **assumed**. It stands in for the widest term's encode, whose modelled ~0.5 GB at 10⁹ sits far inside the ~8 GB the factor allows — but the factor was chosen to be comfortably larger, not measured to be | spec §3 |
 | the free-space pre-flight's 150% | **assumed**. The output half is bounded by construction (a fold writes at most the live bytes and links the rest); the 50% margin is a judgement about what lands beside it during a flight, which is a rate × a duration the planner does not know | spec §8 |
 | the schedule's three — 4 h wide, 8 segments, 64 segments | **assumed**. The width is bounded by two operational statements rather than a measurement (a node restarting inside the quiet period should still fold; one down all night should not start at breakfast). Both segment thresholds interpolate from one measurement rather than sitting on one: decision 0049 measured ~73 ms on a 300-tile viewport at ~152 segments against a 135–164 ms baseline, and where between 8 and 152 "gradual" becomes "now" is a judgement | spec §9, decision 0056 |
@@ -1260,8 +1293,13 @@ places.** Not a review: a measurement, and the disposition of what it turned up.
 - **Everything r10 left ⊘ is built**, on the evidence P1 supplies where it was needed: both
   pre-flight refusals (§3, §8), the startup sweep (§7), `POST /control/compact` and the fold's
   `/control/status` block (§9). The interval floor's drift is fixed with a two-origin rule (§9).
-  **What remains ⊘ is two of §9's four gauges**, which need a disc walk and whose thresholds P1 does
-  not calibrate — it measures what a fold costs, not when the saving is worth it.
+- **§9's remaining two gauges are built with them**, and the byte one had a defect in this
+  document's own arithmetic: written `on_disc / named`, a threshold of 1.0 is satisfied by every
+  bundle ever built, since on disc always exceeds named by the manifests' own bytes. The gauge is
+  `(on_disc − named) / named`, which is what "paying double for storage" means. Both thresholds stay
+  **assumed** — P1 measures what a fold costs, not when the saving is worth paying for — and both
+  routes refuse a threshold of zero or below, which is the ungated timer §9 declines reached by
+  configuration.
 - **Obligation 9 is covered**, at the window that makes it real, and the case established something
   worth recording: three independent checks catch a merge published under a fold, each masking the
   next, so the test pins the outcome rather than any one of them.

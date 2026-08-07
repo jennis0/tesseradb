@@ -125,9 +125,10 @@ Rule S is built. So what remained of [#4] was *deletions retire at the fold* —
 compaction epic, designed against [`design/compaction.md`](design/compaction.md) and broken into
 eight tasks. **The fold is built, deletions retire at it, and it is scheduled** — a nightly gated
 window and two any-hour gauges ([decision 0056](decisions/0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md)),
-with `POST /control/compact` for an operator who wants one now. What [#73] still owes is two of
-compaction §9's four gauges, dead bytes and the tombstoned-row fraction, both of which need a disc
-walk nothing performs and neither of whose thresholds is calibrated.
+with `POST /control/compact` for an operator who wants one now. **All four of compaction §9's gauges
+are built**, the last two — dead bytes and the tombstoned-row fraction — on thresholds that are
+still judgements rather than measurements, which is what a deployment's own evidence would settle.
+What [#73] owes now is the review that promotes its design, not machinery.
 
 The theme's remaining difficulty is identity rather than throughput. Entity identifiers are
 append-only and assigned in signature order, and that ordering is scoped to whatever one commit
