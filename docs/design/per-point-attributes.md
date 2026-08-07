@@ -3,10 +3,13 @@
 **Date:** 2026-08-02
 **Status:** **Provisional — reviewed, no open decisions.** The `render` placement is **built**
 (2026-08-07): a `schema.toml` compiles into the manifest, both build implementations emit the
-columns, and flush, merge and the fold carry them. To become normative: the §6 amendments folded
-into `architecture.md` and `contracts.md` — **read §6 as a status list**, since building the render
-half settled questions this document was written before, and three of its amendments would now
-deliver something decided against. Appendix A's residency *ceiling* is **ruled: there is none**
+columns, flush, merge and the fold carry them, and `/v1/categories` serves the values a code stands
+for (contracts r25). **One thing is owed and it is [#83]**: `listing = "per_viewer"` is *refused*
+rather than filtered, for want of §3.3's per-`(column, code)` membership sets — so the disclosure
+control is enforced in the fail-closed direction only. To become normative: the §6 amendments
+folded into `architecture.md` and `contracts.md` — **read §6 as a status list**, since building the
+render half settled questions this document was written before, and three of its amendments would
+now deliver something decided against. Appendix A's residency *ceiling* is **ruled: there is none**
 (owner, 2026-08-07); §2.3's "it reports; it cannot refuse" therefore stands unqualified.
 **Reads against:** architecture §4 (I2, I3, I9, I12), §5.3, §8.2, §8.3, §10.3, §10.5, Appendix A,
 Appendix C (C8, C11); contracts §2.1–§2.4, §3.2, §3.4; [`write-path.md`](write-path.md) §1.2, §4.3,
@@ -590,6 +593,7 @@ describe**. Nothing here is waiting on someone to type it out.
 | **architecture Appendix C** — C8 and C11 annotated; a new entry for §3.8's gate | **Owed, content changed.** Vocabulary **cardinality is not a threat** (owner, 2026-08-07): an ordinal leaking set size is accepted, so §3.4's dense-code disclosure needs recording as accepted rather than closed. What must be registered is what the rulings *did* keep — that a principal may see a value only if it belongs to data they can see, that aggregates over categories are masked (C8's existing `and_cardinality` shape), and that an authored gate can make a value's name more visible than any of its members |
 
 [#82]: https://github.com/jennis0/tessera-index/issues/82
+[#83]: https://github.com/jennis0/tessera-index/issues/83
 [#43]: https://github.com/jennis0/tessera-index/issues/43
 
 ---

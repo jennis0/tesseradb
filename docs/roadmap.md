@@ -168,17 +168,25 @@ or refreshes credentials, and retrieving a visible set by reference is literally
 ### Attributes and filtering
 
 > [#42 Carry per-item attributes alongside the point][#42] ·
-> [#43 Filter by category, time and number][#43]
+> [#43 Filter by category, time and number][#43] ·
+> [#83 Derive vocabulary visibility][#83]
 
 An item becomes more than a coordinate. [#42] lets a deployment declare per-item columns at build
 time and serves them; [#43] makes them filterable, and needs [#42] first because the service
 advertises an empty operand list until something populates one.
 
-**[#42]'s `render` placement is built** — a `schema.toml` compiles into the manifest, both build
-implementations emit the columns, and flush, merge and the fold carry them. What remains of it is
-[#82], which lets a vocabulary be *discovered* rather than authored up front, and the two obligations
-[#42] sets for itself: a differential oracle exercising a non-empty column set, and the disclosure
-consequences in the leak register. Those constrain nothing else's order and can land beside [#43].
+**[#42] and [#82] are closed.** A `schema.toml` compiles into the manifest, both build
+implementations emit the columns, flush, merge and the fold carry them, a vocabulary can be
+*discovered* as well as authored, and `/v1/categories` turns a served code back into its key —
+which is what makes a category renderable rather than merely present. Both obligations [#42] set
+itself are discharged: the differential oracle runs over a non-empty column set, and the attribute
+channels are in the leak register (C11, C22, C23).
+
+**What that leaves is [#83], and it constrains only itself.** `listing = "per_viewer"` is refused
+until the per-`(column, code)` membership sets exist, so a deployment whose value *names* are
+sensitive cannot yet have them; `public` vocabularies are unaffected. The artefact is measured at
+0.31–1.01× the render column it indexes, so it is a sizing question rather than a feasibility one.
+It can land beside [#43] and blocks nothing.
 
 The shape is deliberate and worth preserving under pressure: filters are order-independent set
 producers composed by intersection. The leak register can be exhaustive because there are about
@@ -395,3 +403,4 @@ and has no single position. Every downstream property rests on it. No design exi
 [#55]: https://github.com/jennis0/tessera-index/issues/55
 [#56]: https://github.com/jennis0/tessera-index/issues/56
 [#82]: https://github.com/jennis0/tessera-index/issues/82
+[#83]: https://github.com/jennis0/tessera-index/issues/83
