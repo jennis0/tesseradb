@@ -535,9 +535,9 @@ fn segment_dir(ctx: &FlushContext) -> PathBuf {
         .join(&ctx.seg_id)
 }
 
-/// The WAL's scalar shape into the segment writer's. **Matched on variants, never on
-/// discriminants**: `WalScalar`'s order is frozen by postcard's on-disc encoding and
-/// `ScalarValue`'s is not, so the two enums deliberately do not line up (see `WalScalar`'s note).
+/// The WAL's scalar shape into the segment writer's — the same set in the same order, so this is
+/// a variant-for-variant transcription and a missing arm is a compile error rather than a value
+/// silently taking another type's place.
 fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
     match scalar {
         WalScalar::U8(v) => ScalarValue::U8(*v),

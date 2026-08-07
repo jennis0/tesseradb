@@ -102,29 +102,25 @@ use tessera_types::EntityId;
 /// `crc32fast` alone (no `tessera-spatial`), so the WAL carries its own copy of the tiny, stable
 /// shape. Keep the two enums in lockstep if either changes.
 ///
-/// On-disk format: variant order is frozen and append-only (postcard encodes enum variants by
-/// declaration index) — never reorder or remove a variant, only append new ones at the end.
+/// On-disk format: postcard encodes enum variants by declaration index, so reordering this enum
+/// changes what every stored record means. That is a `WAL_VERSION` bump and a recreated log, not
+/// a reason to keep a bad order: no deployment holds a WAL (decision 0048), so the order is chosen
+/// for the reader and the version check turns a stale local log into a refusal.
 ///
-/// **The four narrow widths are appended, not sorted into place**, which is why this enum does not
-/// read in width order and `ScalarValue` does. Ordering it sensibly would renumber `F32` and
-/// `Utf8` and silently reinterpret every record already on disc; the mirror in `tessera-spatial`
-/// is under no such constraint, so the two agree on the *set* and not on the order. Anything
-/// converting between them must match on variants, never on discriminants.
-///
-/// **No `WAL_VERSION` bump**, and the version constant's own note says why the distinction
-/// matters: appending shifts no existing discriminant, so a log written before these four existed
-/// decodes identically afterwards. The reverse — an older binary meeting a record carrying one —
-/// is a downgrade, which the version check cannot catch at an unchanged version; postcard refuses
-/// the unknown discriminant, which is the fail-closed direction and not a silent misread.
+/// **In width order, matching `tessera_spatial::ScalarValue` variant for variant.** An earlier
+/// revision appended the four narrow widths after `Utf8` to preserve the existing discriminants —
+/// a compatibility cost paid to nobody, which left the two mirrored enums agreeing on the set and
+/// disagreeing on the order, and a `to_scalar_value` whose correctness depended on a reader
+/// noticing that.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WalScalar {
-    U64(u64),
-    F32(f32),
-    Utf8(String),
     U8(u8),
     U16(u16),
     U32(u32),
+    U64(u64),
     I64(i64),
+    F32(f32),
+    Utf8(String),
 }
 
 /// One item within an `IngestBatch` record.
@@ -320,8 +316,11 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// (decision 0048): `Change` was written by nothing — every accepted change is admitted against an
 /// entity — and the descriptors had no consumer once the evaluate store went. That shifts a variant
 /// index, drops an enum discriminant and drops a struct field, each of which postcard would decode
-/// as whatever bytes follow it.
-const WAL_VERSION: u16 = 5;
+/// as whatever bytes follow it. Version 6 gave [`WalScalar`] the four narrow widths and put the
+/// enum in width order, which renumbers `F32` and `Utf8`; appending them instead would have kept
+/// the discriminants stable for a reader that does not exist (decision 0048), at the price of two
+/// mirrored enums whose orders disagree.
+const WAL_VERSION: u16 = 6;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

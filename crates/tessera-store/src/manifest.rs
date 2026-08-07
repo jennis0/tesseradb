@@ -38,7 +38,10 @@ pub struct DeclaredScalar {
     /// failing to deserialise the whole manifest and taking every other field with it.
     pub arrow_type: String,
     /// For a category column, the [`ManifestVocabulary::name`] its codes index; `None` for a
-    /// plain numeric column. Absent in a bundle built before the field existed.
+    /// plain numeric column.
+    ///
+    /// `default` here is the `Option`'s own absence — a plain scalar genuinely has no vocabulary —
+    /// not tolerance of an older manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vocabulary: Option<String>,
 }
@@ -263,10 +266,14 @@ pub struct Manifest {
     pub declared_bounds: serde_json::Value,
     #[serde(default)]
     pub declared_scalars: Vec<DeclaredScalar>,
-    /// The value sets `declared_scalars`' category columns draw their codes from. Empty in a
-    /// bundle whose schema declares no category, and absent entirely in one built before the
-    /// field existed — hence `default`, which is what keeps every existing bundle openable.
-    #[serde(default)]
+    /// The value sets `declared_scalars`' category columns draw their codes from; empty in a
+    /// bundle whose schema declares no category.
+    ///
+    /// **Required, not `default`.** A manifest that omits it is malformed rather than
+    /// category-free: the two are indistinguishable under `default`, and the one that matters —
+    /// a bundle whose rows carry codes and whose bindings went missing — would open and serve
+    /// marks that decode to nothing. No bundle predates the field (decision 0048), so tolerating
+    /// its absence buys a reader that does not exist and costs the check that does.
     pub vocabularies: Vec<ManifestVocabulary>,
     pub small_term_threshold: u32,
     pub quantisation: Quantisation,

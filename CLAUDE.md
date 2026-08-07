@@ -79,6 +79,23 @@ Python is a first-class *consumer* (SDK, supervisor, the test-only reference ora
 component: no Python in any request path, in artifact production, or in the trusted computing
 base. TypeScript is the frontend.
 
+**Pre-release: accept *zero* cost for backwards compatibility.** This is the only Tessera that
+exists — no deployment, no bundle, no WAL and no client outside this repository
+([decision 0048](docs/decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)). So
+"a reader might still hold one" is never a live premise, and a format may be changed freely
+provided the artifacts are recreated: reorder an enum, rename a field, drop a column. Do not
+append a variant to preserve a discriminant, do not `#[serde(default)]` a field so an older
+bundle still opens, and do not carry a shape whose only justification is a state some earlier
+version could have produced. Version numbers still move when discriminants shift — a bump makes a
+stale local artifact a loud refusal instead of a silent misread — but that is a fail-closed guard,
+not compatibility.
+
+The line this does *not* cross is [0048](docs/decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)'s
+own: compatibility with a **past** does not exist, defences for the **present** do. Fail-closed
+guards, the contracts a second reader depends on (the Python oracle, the conformance suite), and
+the format-stability rules of a *running* process — `seg_id` never reused, dictionary extents
+positional — all stay.
+
 **Design for audit before performance.** Prefer the construction that is obviously correct; keep
 modules readable in isolation; keep the query surface narrow — the leak register is exhaustive
 *because* the surface is enumerable. New capability enters through the filter contract (§8.2). An
