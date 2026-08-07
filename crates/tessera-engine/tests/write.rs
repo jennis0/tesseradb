@@ -316,9 +316,7 @@ fn ack_follows_fsync_then_swap() {
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
 
     let e = Arc::clone(&engine);
-    let suppress = std::thread::spawn(move || {
-        e.accept_change(entity, ChangeOp::Suppress)
-    });
+    let suppress = std::thread::spawn(move || e.accept_change(entity, ChangeOp::Suppress));
 
     // Wait for the executor to be *demonstrably* parked. Not a sleep: this returns only once the
     // executor has published its arrival.
@@ -362,9 +360,7 @@ fn ack_follows_fsync_then_swap() {
     faults.arm_pause(PauseSite::BeforeAck, PauseAction::Stall);
 
     let e = Arc::clone(&engine);
-    let suppress = std::thread::spawn(move || {
-        e.accept_change(second, ChangeOp::Suppress)
-    });
+    let suppress = std::thread::spawn(move || e.accept_change(second, ChangeOp::Suppress));
 
     faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
 

@@ -666,8 +666,8 @@ fn concurrent_ingest_and_change_both_survive() {
             compute_threads: tessera_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
         },
     )
     .expect("engine should open");
@@ -689,8 +689,7 @@ fn concurrent_ingest_and_change_both_survive() {
     let change_thread = std::thread::spawn(move || {
         barrier_a.wait();
         engine_a
-            .accept_change(suppress_entity,
-                tessera_lifecycle::ChangeOp::Suppress)
+            .accept_change(suppress_entity, tessera_lifecycle::ChangeOp::Suppress)
             .expect("change should be accepted");
     });
 
@@ -3699,7 +3698,10 @@ async fn control_status_publishes_the_live_segment_count_per_slice() {
     );
     assert_eq!(segments[0]["partition"], "default");
     assert_eq!(segments[0]["slice"], "s0");
-    assert_eq!(segments[0]["count"], 1, "one segment straight out of a build");
+    assert_eq!(
+        segments[0]["count"], 1,
+        "one segment straight out of a build"
+    );
 
     let body = build_ingest_batch(&[
         (N_ITEMS + 1, 10.0, 10.0, "0"),
@@ -4059,8 +4061,7 @@ async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
         let client = server.client.clone();
         let url = server.control_url("/control/ingest");
         let body = build_ingest_batch(
-            &ids
-                .into_iter()
+            &ids.into_iter()
                 .map(|id| (id, 10.0, 10.0, "0"))
                 .collect::<Vec<_>>(),
         );

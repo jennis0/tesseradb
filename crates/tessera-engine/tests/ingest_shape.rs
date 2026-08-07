@@ -105,8 +105,8 @@ fn engine(tmp: &std::path::Path, root: &std::path::Path, window: usize) -> Engin
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
@@ -313,7 +313,11 @@ fn cost_against_signature_diversity() {
             per_row(apply),
             WriteStage::ALL
                 .iter()
-                .map(|st| format!("{} {:.2}", st.name(), per_row(stats.stage_nanos[*st as usize])))
+                .map(|st| format!(
+                    "{} {:.2}",
+                    st.name(),
+                    per_row(stats.stage_nanos[*st as usize])
+                ))
                 .collect::<Vec<_>>()
                 .join("  "),
         );

@@ -64,9 +64,16 @@ impl PairsParquetWriter {
             .set_statistics_enabled(EnabledStatistics::Chunk)
             .set_compression(Compression::SNAPPY)
             .build();
-        let file = File::create(path).map_err(|e| StoreError::Io { path: path.to_path_buf(), source: e })?;
-        let writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
-            .map_err(|e| StoreError::Parquet { path: path.to_path_buf(), detail: e.to_string() })?;
+        let file = File::create(path).map_err(|e| StoreError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        let writer = ArrowWriter::try_new(file, schema.clone(), Some(props)).map_err(|e| {
+            StoreError::Parquet {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            }
+        })?;
         Ok(PairsParquetWriter {
             path: path.to_path_buf(),
             schema,
@@ -127,20 +134,25 @@ impl PairsParquetWriter {
                 std::sync::Arc::new(UInt32Array::from(std::mem::take(&mut self.terms))) as ArrayRef,
             ],
         )
-        .map_err(|e| StoreError::Parquet { path: self.path.clone(), detail: e.to_string() })?;
+        .map_err(|e| StoreError::Parquet {
+            path: self.path.clone(),
+            detail: e.to_string(),
+        })?;
         self.entities.reserve(Self::BATCH);
         self.terms.reserve(Self::BATCH);
-        self.writer
-            .write(&batch)
-            .map_err(|e| StoreError::Parquet { path: self.path.clone(), detail: e.to_string() })
+        self.writer.write(&batch).map_err(|e| StoreError::Parquet {
+            path: self.path.clone(),
+            detail: e.to_string(),
+        })
     }
 
     pub fn finish(mut self) -> Result<()> {
         self.flush()?;
         let path = self.path.clone();
-        self.writer
-            .close()
-            .map_err(|e| StoreError::Parquet { path: path.clone(), detail: e.to_string() })?;
+        self.writer.close().map_err(|e| StoreError::Parquet {
+            path: path.clone(),
+            detail: e.to_string(),
+        })?;
         fsync_file(&path)
     }
 }

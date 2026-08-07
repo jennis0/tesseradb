@@ -227,8 +227,10 @@ pub fn write_segments_manifest(
 ) -> Result<()> {
     let dir = prefix_dir.join("partitions").join(partition);
     let path = dir.join(format!("SEGMENTS-{n}.json"));
-    let bytes = serde_json::to_vec_pretty(manifest)
-        .map_err(|source| StoreError::Json { path: path.clone(), source })?;
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|source| StoreError::Json {
+        path: path.clone(),
+        source,
+    })?;
     let io = |what: &str, source: std::io::Error| StoreError::Io {
         path: PathBuf::from(format!("{} ({what})", path.display())),
         source,

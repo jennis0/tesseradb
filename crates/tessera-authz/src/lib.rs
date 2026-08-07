@@ -11,8 +11,7 @@ pub use fragment::{
 };
 pub use postings::{
     encode_posting, encode_posting_bitmap, write_posting_records, write_postings, PostingRef,
-    PostingsReader,
-    PostingsSpool,
+    PostingsReader, PostingsSpool,
 };
 pub use term_sweep::sweep_term_postings;
 pub use tier::{coalesce_delta_tiers, write_delta_tier, DeltaTier};

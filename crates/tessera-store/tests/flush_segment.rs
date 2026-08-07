@@ -143,10 +143,7 @@ fn a_flushed_entity_resolves_in_both_external_id_directions() {
     assert_eq!(slots.len(), 3, "dense over [entity_lo, entity_hi]");
     assert_eq!(out.locator_extent.entity_lo, 50);
     assert_eq!(out.locator_extent.entity_hi, 52);
-    assert_eq!(
-        out.locator_extent.external_id_run,
-        out.external_id_run
-    );
+    assert_eq!(out.locator_extent.external_id_run, out.external_id_run);
 
     // "alpha" sorts before "zeta", so entity 52 is ordinal 0 and entity 50 is ordinal 1.
     assert_eq!(slots[0], 1, "entity 50 -> 'zeta', the second id");

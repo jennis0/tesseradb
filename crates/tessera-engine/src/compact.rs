@@ -1431,7 +1431,11 @@ mod tests {
             Some(FoldTrigger::SegmentCount),
             "14:00, no deletions at all, at the segment ceiling"
         );
-        assert_eq!(due_at(&s, at(10, 14), None, 63, 0), None, "and not below it");
+        assert_eq!(
+            due_at(&s, at(10, 14), None, 63, 0),
+            None,
+            "and not below it"
+        );
     }
 
     /// **The two segment thresholds are a floor and a ceiling over one gauge**, and the window is
@@ -1495,7 +1499,10 @@ mod tests {
             window_secs: 4 * 3_600,
             ..schedule()
         };
-        assert_eq!(due_at(&s, at(10, 23), None, 8, 0), Some(FoldTrigger::Window));
+        assert_eq!(
+            due_at(&s, at(10, 23), None, 8, 0),
+            Some(FoldTrigger::Window)
+        );
         assert_eq!(
             due_at(&s, at(11, 1), None, 8, 0),
             Some(FoldTrigger::Window),
@@ -1604,29 +1611,35 @@ mod tests {
             "and just under the fraction, nothing fires"
         );
         assert_eq!(
-            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(DeadBytes {
-                on_disc: 200,
-                named: 100
-            })),
+            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(
+                DeadBytes {
+                    on_disc: 200,
+                    named: 100
+                }
+            )),
             Some(FoldTrigger::DeadBytes),
             "paying double for storage with nothing deleted and one segment — the reclamation \
              obligation, which no other gauge sees"
         );
         assert_eq!(
-            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(DeadBytes {
-                on_disc: 199,
-                named: 100
-            })),
+            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(
+                DeadBytes {
+                    on_disc: 199,
+                    named: 100
+                }
+            )),
             None,
             "and just under the ratio, nothing fires"
         );
         // **The ratio is dead-to-live, not total-to-live**, and at 1.0 the difference is every
         // bundle ever built: on disc always exceeds named, if only by the manifests' own bytes.
         assert_eq!(
-            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(DeadBytes {
-                on_disc: 101,
-                named: 100
-            })),
+            due(&s, at(10, 14), None, healthy(0, 50_000), || Some(
+                DeadBytes {
+                    on_disc: 101,
+                    named: 100
+                }
+            )),
             None,
             "a bundle with 1% dead is not a bundle paying double"
         );
@@ -1654,21 +1667,55 @@ mod tests {
 
         // The interval floor declines before anything is read at all.
         assert_eq!(
-            due(&s, at(10, 14), Some(at(10, 13)), Gauges { live_segments: 1, retirable_deletions: 0, live_rows: 1 }, walk),
+            due(
+                &s,
+                at(10, 14),
+                Some(at(10, 13)),
+                Gauges {
+                    live_segments: 1,
+                    retirable_deletions: 0,
+                    live_rows: 1
+                },
+                walk
+            ),
             None
         );
         assert_eq!(walked.get(), 0, "a floored tick walks nothing");
 
         // A cheaper route firing decides it.
         assert_eq!(
-            due(&s, at(10, 14), None, Gauges { live_segments: 64, retirable_deletions: 0, live_rows: 1 }, walk),
+            due(
+                &s,
+                at(10, 14),
+                None,
+                Gauges {
+                    live_segments: 64,
+                    retirable_deletions: 0,
+                    live_rows: 1
+                },
+                walk
+            ),
             Some(FoldTrigger::SegmentCount)
         );
-        assert_eq!(walked.get(), 0, "the segment ceiling decided it, so nothing walked");
+        assert_eq!(
+            walked.get(),
+            0,
+            "the segment ceiling decided it, so nothing walked"
+        );
 
         // Nothing cheaper fires: now it walks.
         assert_eq!(
-            due(&s, at(10, 14), None, Gauges { live_segments: 1, retirable_deletions: 0, live_rows: 1 }, walk),
+            due(
+                &s,
+                at(10, 14),
+                None,
+                Gauges {
+                    live_segments: 1,
+                    retirable_deletions: 0,
+                    live_rows: 1
+                },
+                walk
+            ),
             Some(FoldTrigger::DeadBytes)
         );
         assert_eq!(walked.get(), 1, "and exactly once");
@@ -1679,7 +1726,17 @@ mod tests {
             ..s
         };
         assert_eq!(
-            due(&off, at(10, 14), None, Gauges { live_segments: 1, retirable_deletions: 0, live_rows: 1 }, walk),
+            due(
+                &off,
+                at(10, 14),
+                None,
+                Gauges {
+                    live_segments: 1,
+                    retirable_deletions: 0,
+                    live_rows: 1
+                },
+                walk
+            ),
             None
         );
         assert_eq!(walked.get(), 1, "an off route reads nothing");
@@ -1700,8 +1757,15 @@ mod tests {
                 &s,
                 at(10, 14),
                 None,
-                Gauges { live_segments: 1, retirable_deletions: 500, live_rows: 0 },
-                || Some(DeadBytes { on_disc: 1_000, named: 0 })
+                Gauges {
+                    live_segments: 1,
+                    retirable_deletions: 500,
+                    live_rows: 0
+                },
+                || Some(DeadBytes {
+                    on_disc: 1_000,
+                    named: 0
+                })
             ),
             None,
             "no rows and no named bytes: neither ratio is defined, and neither may fire"
@@ -1733,7 +1797,10 @@ mod tests {
     #[test]
     fn the_estimate_charges_one_permutation_and_one_locator() {
         // 4 B + 4 B per entity, doubled by the safety factor, and no dictionary term.
-        assert_eq!(memory_estimate(1_000, 1_000, 0), (4 * 1_000 + 4 * 1_000) * 2);
+        assert_eq!(
+            memory_estimate(1_000, 1_000, 0),
+            (4 * 1_000 + 4 * 1_000) * 2
+        );
         // The dictionary term is 8 B per ordinal and independent of entity space.
         assert_eq!(memory_estimate(0, 0, 1_000), 8 * 1_000 * 2);
     }

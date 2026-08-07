@@ -194,10 +194,7 @@ mod tests {
     fn returned_codes_are_u32_and_match_morton_of_on_the_source_coordinates() {
         let e = unit_extent();
         let coords = [(1u64, 0.75, 0.75), (2, 0.10, 0.10)];
-        let mut items: Vec<TilerItem> = coords
-            .iter()
-            .map(|&(id, x, y)| item(id, x, y))
-            .collect();
+        let mut items: Vec<TilerItem> = coords.iter().map(|&(id, x, y)| item(id, x, y)).collect();
         let mut entity_ids = vec![EntityId::new(1), EntityId::new(2)];
         let codes: Vec<u32> = sort_batch(&mut items, &mut entity_ids);
         assert_eq!(codes.len(), 2);

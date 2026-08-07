@@ -61,8 +61,12 @@ impl SegmentCursor {
     /// non-decreasing and the heap's output is sorted — the property
     /// [`crate::write::SegmentWriter::append`] asserts and `tile_ranges`' binary search needs.
     pub(crate) fn key(&self) -> Option<(u32, u64)> {
-        (self.row < self.rows)
-            .then(|| (self.morton.u32()[self.row], self.columns.tessera_id()[self.row]))
+        (self.row < self.rows).then(|| {
+            (
+                self.morton.u32()[self.row],
+                self.columns.tessera_id()[self.row],
+            )
+        })
     }
 }
 

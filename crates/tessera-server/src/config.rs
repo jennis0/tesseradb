@@ -97,10 +97,16 @@ pub enum ConfigError {
     CompactionThresholdNotANumberOrOff(String),
     /// A ratio key — `ingest.compaction_dead_rows_fraction` or `ingest.compaction_dead_bytes_ratio`
     /// — is a string other than `"off"`. See [`RawRatio`].
-    CompactionRatioNotANumberOrOff { key: &'static str, value: String },
+    CompactionRatioNotANumberOrOff {
+        key: &'static str,
+        value: String,
+    },
     /// A ratio key is zero, negative, or not finite: a route that can never decline. See
     /// [`ratio_or_off`].
-    CompactionRatioNotPositive { key: &'static str, value: f64 },
+    CompactionRatioNotPositive {
+        key: &'static str,
+        value: f64,
+    },
     /// `ingest.compaction_max_segments` is at or below `ingest.compaction_window_min_segments`,
     /// with the window armed.
     ///
@@ -1798,7 +1804,9 @@ fn parse(text: &str) -> Result<Config> {
         .compaction_window_secs
         .unwrap_or(DEFAULT_COMPACTION_WINDOW_SECS);
     if u64::from(compaction_window_secs) >= 86_400 {
-        return Err(ConfigError::CompactionWindowNotAWindow(compaction_window_secs));
+        return Err(ConfigError::CompactionWindowNotAWindow(
+            compaction_window_secs,
+        ));
     }
     let compaction_window_start_secs = match raw.ingest.compaction_window_start.as_deref() {
         None => Some(DEFAULT_COMPACTION_WINDOW_START_SECS),
@@ -1814,7 +1822,9 @@ fn parse(text: &str) -> Result<Config> {
         Some(RawThreshold::Count(n)) => Some(*n),
         Some(RawThreshold::Word(word)) if word == "off" => None,
         Some(RawThreshold::Word(word)) => {
-            return Err(ConfigError::CompactionThresholdNotANumberOrOff(word.clone()))
+            return Err(ConfigError::CompactionThresholdNotANumberOrOff(
+                word.clone(),
+            ))
         }
     };
     // **The segment gauge's ceiling**: the count past which deferring to the next window costs more
@@ -1825,7 +1835,9 @@ fn parse(text: &str) -> Result<Config> {
         Some(RawThreshold::Count(n)) => Some(*n as usize),
         Some(RawThreshold::Word(word)) if word == "off" => None,
         Some(RawThreshold::Word(word)) => {
-            return Err(ConfigError::CompactionThresholdNotANumberOrOff(word.clone()))
+            return Err(ConfigError::CompactionThresholdNotANumberOrOff(
+                word.clone(),
+            ))
         }
     };
     // **The two gauges compaction §9 names for the obligations the counts above cannot see.** The
@@ -2255,8 +2267,12 @@ compaction_window_min_segments = 8
     fn the_segment_ceiling_switches_off_on_its_own() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
-        let parsed = parse(&valid_toml_with("", "compaction_max_segments = \"off\"
-")).unwrap();
+        let parsed = parse(&valid_toml_with(
+            "",
+            "compaction_max_segments = \"off\"
+",
+        ))
+        .unwrap();
         assert_eq!(parsed.compaction.max_segments, None);
         assert!(parsed.compaction.window_start_secs.is_some());
     }
@@ -2267,8 +2283,12 @@ compaction_window_min_segments = 8
     fn the_deletion_route_follows_the_overlay_alarm_unless_set_apart_from_it() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
-        let followed = parse(&valid_toml_with("", "overlay_soft_limit = 42
-")).unwrap();
+        let followed = parse(&valid_toml_with(
+            "",
+            "overlay_soft_limit = 42
+",
+        ))
+        .unwrap();
         assert_eq!(followed.compaction.after_deletions, Some(42));
 
         let apart = parse(&valid_toml_with(
@@ -2290,15 +2310,21 @@ compaction_after_deletions = 9000
     fn each_compaction_route_switches_off_independently() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
-        let no_window =
-            parse(&valid_toml_with("", "compaction_window_start = \"off\"
-")).unwrap();
+        let no_window = parse(&valid_toml_with(
+            "",
+            "compaction_window_start = \"off\"
+",
+        ))
+        .unwrap();
         assert_eq!(no_window.compaction.window_start_secs, None);
         assert!(no_window.compaction.after_deletions.is_some());
 
-        let no_depth =
-            parse(&valid_toml_with("", "compaction_after_deletions = \"off\"
-")).unwrap();
+        let no_depth = parse(&valid_toml_with(
+            "",
+            "compaction_after_deletions = \"off\"
+",
+        ))
+        .unwrap();
         assert_eq!(no_depth.compaction.after_deletions, None);
         assert!(no_depth.compaction.window_start_secs.is_some());
     }
@@ -2315,20 +2341,24 @@ compaction_after_deletions = 9000
     fn the_window_start_is_a_strict_utc_time_of_day() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
-        let parsed =
-            parse(&valid_toml_with("", "compaction_window_start = \"02:30\"
-")).unwrap();
+        let parsed = parse(&valid_toml_with(
+            "",
+            "compaction_window_start = \"02:30\"
+",
+        ))
+        .unwrap();
         assert_eq!(parsed.compaction.window_start_secs, Some(2 * 3_600 + 1_800));
 
         for bad in ["9:30", "24:00", "00:60", "0230", "2:3", "midnight", ""] {
-            let toml =
-                valid_toml_with("", &format!("compaction_window_start = \"{bad}\"
-"));
-            assert!(
-                matches!(
-                    parse(&toml),
-                    Err(ConfigError::CompactionWindowNotATime(_))
+            let toml = valid_toml_with(
+                "",
+                &format!(
+                    "compaction_window_start = \"{bad}\"
+"
                 ),
+            );
+            assert!(
+                matches!(parse(&toml), Err(ConfigError::CompactionWindowNotATime(_))),
                 "'{bad}' should be refused"
             );
         }
@@ -2340,15 +2370,22 @@ compaction_after_deletions = 9000
     fn a_day_wide_window_is_refused_because_it_is_not_a_window() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
-        let toml = valid_toml_with("", "compaction_window_secs = 86400
-");
+        let toml = valid_toml_with(
+            "",
+            "compaction_window_secs = 86400
+",
+        );
         assert!(matches!(
             parse(&toml),
             Err(ConfigError::CompactionWindowNotAWindow(86_400))
         ));
         // And one second under it is a window, however impractical.
-        assert!(parse(&valid_toml_with("", "compaction_window_secs = 86399
-")).is_ok());
+        assert!(parse(&valid_toml_with(
+            "",
+            "compaction_window_secs = 86399
+"
+        ))
+        .is_ok());
     }
 
     /// A zero segment threshold makes every night's window fold a bundle that is already one
@@ -2357,8 +2394,11 @@ compaction_after_deletions = 9000
     fn a_zero_segment_threshold_is_refused() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
-        let toml = valid_toml_with("", "compaction_window_min_segments = 0
-");
+        let toml = valid_toml_with(
+            "",
+            "compaction_window_min_segments = 0
+",
+        );
         assert!(matches!(
             parse(&toml),
             Err(ConfigError::MustBeNonZero {

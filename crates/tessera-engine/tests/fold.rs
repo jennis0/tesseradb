@@ -601,7 +601,10 @@ fn a_fold_discards_when_a_merge_published_under_it_and_the_state_is_re_plannable
         "the merge's rows survived the discard — publishing the stale fold would have dropped them"
     );
     fold(&engine);
-    assert!(root.join("v00002").exists(), "the next fold takes a fresh prefix");
+    assert!(
+        root.join("v00002").exists(),
+        "the next fold takes a fresh prefix"
+    );
     let after = engine.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(
         visible(&engine, &after),
@@ -1844,8 +1847,12 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
     // Four flush segments and the merge that consumes them: the consumed segments stay on disc,
     // named by no live manifest, which is exactly the dead weight this route is about.
     for round in 0..4 {
-        ingest(&engine, format!("dead-{round}").into_bytes(), &format!("d{round}"))
-            .expect("ingest is accepted");
+        ingest(
+            &engine,
+            format!("dead-{round}").into_bytes(),
+            &format!("d{round}"),
+        )
+        .expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
         wait_for("a flush to publish", || {

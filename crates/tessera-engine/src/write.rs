@@ -2929,9 +2929,9 @@ fn sweep_orphan_prefixes(bundle_root: &Path, live: &str) {
         // A prefix is `v` + five-or-more digits (`next_prefix_name`'s own shape). Anything else
         // under the root — `CURRENT`, the WAL, a directory an operator put there — is not this
         // sweep's business and must not be guessed at.
-        let is_prefix = name.strip_prefix('v').is_some_and(|digits| {
-            digits.len() >= 5 && digits.bytes().all(|b| b.is_ascii_digit())
-        });
+        let is_prefix = name
+            .strip_prefix('v')
+            .is_some_and(|digits| digits.len() >= 5 && digits.bytes().all(|b| b.is_ascii_digit()));
         if !is_prefix || name == live || !entry.path().is_dir() {
             continue;
         }

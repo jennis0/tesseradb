@@ -218,7 +218,11 @@ impl Bundle {
     /// rewrites `deltas`, `external_id_runs`, `locator_extents`, `dict_extents` and `files`, every
     /// one of which addresses entity space. A caller that needed row space to move would be using
     /// one of the two above, and the type is what keeps the two apart.
-    pub fn with_manifest(&self, partition: &str, published: PublishedManifest) -> Result<Arc<Bundle>> {
+    pub fn with_manifest(
+        &self,
+        partition: &str,
+        published: PublishedManifest,
+    ) -> Result<Arc<Bundle>> {
         let slice = self
             .partitions
             .get(partition)

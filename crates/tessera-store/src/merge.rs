@@ -39,10 +39,10 @@ use tessera_types::{IdentityKey, TesseraId, ROW_ABSENT};
 
 use crate::coalesce::{merge_runs, open_runs};
 use crate::error::{Result, StoreError};
-use crate::segment_cursor::{gather_scalars, SegmentCursor};
 use crate::flush::{digest_of, FlushOutput};
 use crate::manifest::{LocatorExtent, SegmentDescriptor};
 use crate::permutation::SegmentExtent;
+use crate::segment_cursor::{gather_scalars, SegmentCursor};
 use crate::write::{SegmentRow, SegmentWriter};
 
 /// What a merge is allowed to take.
@@ -382,4 +382,3 @@ pub fn execute_merge(
         entity_id_high_water: spec.entity_id_high_water,
     })
 }
-

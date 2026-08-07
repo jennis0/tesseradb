@@ -842,9 +842,7 @@ fn run_ingest(
     let existing_ids: Vec<String> = resolved
         .iter()
         .zip(&supplied)
-        .filter(|(entity, _)| {
-            entity.is_some_and(|e| !overlay_generation.overlay.is_deleted(e))
-        })
+        .filter(|(entity, _)| entity.is_some_and(|e| !overlay_generation.overlay.is_deleted(e)))
         .map(|(_, (_, id))| base64::engine::general_purpose::STANDARD.encode(id))
         .collect();
     if !existing_ids.is_empty() {

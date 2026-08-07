@@ -661,7 +661,8 @@ impl Engine {
         // cache.** The value is resolved once, here, on the calling thread, strictly before the
         // parallel tile sweep begins, and is then only *borrowed* (via `compose`'s
         // `EffectiveMask`) by every `tile_result` call — never re-fetched or re-built per tile.
-        let geometry = self.session_geometry(session, &generation, slice, slice_data, &mut probe)?;
+        let geometry =
+            self.session_geometry(session, &generation, slice, slice_data, &mut probe)?;
         let base = Arc::clone(&geometry.projection);
         probe.lap(|t| &mut t.row_projection_ns);
 
@@ -676,11 +677,12 @@ impl Engine {
         // bundle disagree about what this generation holds. Serving that as "nothing is denied
         // here" would publish suppressed and deleted rows on the map with no error anywhere —
         // the same shape as `SegmentWithoutRowBase`, and refused the same way.
-        let denied = generation.denied.get(slice).ok_or_else(|| {
-            EngineError::DenyMaskMissing {
+        let denied = generation
+            .denied
+            .get(slice)
+            .ok_or_else(|| EngineError::DenyMaskMissing {
                 slice: slice.to_string(),
-            }
-        })?;
+            })?;
 
         let mask = compose(
             &session.satisfied,

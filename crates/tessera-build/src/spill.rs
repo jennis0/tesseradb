@@ -680,7 +680,10 @@ mod tests {
             // emitter's assignment-order contract, which the per-file delta encoding bakes
             // into the format itself (equal entities for one item's several terms, rising
             // between items).
-            (3, vec![(5, 1), (3, 1), (5, 1), (4, 7), (3, 9), (5, 900_000)]),
+            (
+                3,
+                vec![(5, 1), (3, 1), (5, 1), (4, 7), (3, 9), (5, 900_000)],
+            ),
             // Boundaries: maximal term delta (5-byte varint), maximal entity delta from 0,
             // equal-entity runs at the ceiling.
             (0, vec![(u32::MAX, 0), (0, u32::MAX)]),
@@ -714,7 +717,10 @@ mod tests {
         let path = temp.path().join("band.bin");
         let mut writer = BandWriter::create(&path, 10).unwrap();
         let message = err_string(writer.push(9, 0).map(|_| ()));
-        assert!(message.contains("below the band's term_lo"), "got: {message}");
+        assert!(
+            message.contains("below the band's term_lo"),
+            "got: {message}"
+        );
     }
 
     #[test]
@@ -883,7 +889,10 @@ mod tests {
         fs::write(stale.join("nested").join("band-0.bin"), b"stale").unwrap();
         let tmp = TmpDir::create(temp.path()).unwrap();
         assert!(tmp.path().is_dir());
-        assert!(!tmp.path().join("nested").exists(), "stale contents must be gone");
+        assert!(
+            !tmp.path().join("nested").exists(),
+            "stale contents must be gone"
+        );
         tmp.close().unwrap();
     }
 
