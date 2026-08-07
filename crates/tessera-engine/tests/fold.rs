@@ -10,16 +10,23 @@
 
 mod common;
 
+use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
+use arrow::array::{UInt32Array, UInt64Array};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
 use common::*;
+use parquet::arrow::ArrowWriter;
 use tessera_authz::{PostingRef, PostingsReader};
+use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_store::read::open_bundle;
-use tessera_types::{EntityId, TermId};
+use tessera_types::{EntityId, TermId, TesseraId};
 
 /// A fixture bundle and an engine over it, with the executor running and the background refresh
 /// off.
@@ -29,6 +36,103 @@ use tessera_types::{EntityId, TermId};
 /// that *failed* to notice the rotation indistinguishable from one that noticed.
 fn engine_over_fixture(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
     build_fixture(
+        root,
+        &tmp.join("points.parquet"),
+        &tmp.join("pairs.parquet"),
+    );
+    let mut engine = Engine::open(
+        root,
+        &tmp.join("cache"),
+        &tmp.join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        config,
+    )
+    .expect("engine should open against a freshly built bundle");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+    engine
+}
+
+/// Term id for the sparse principal `masked_counts_are_identical_across_the_flip_for_every_
+/// principal` grants below: `subset_credential` (`SUBSET_TERM`) sits at roughly a third of the
+/// fixture, which obligation 5's "several principals including a sparse one" does not really
+/// exercise — a third is not sparse, it is just smaller. This term is carried by one item in
+/// `SPARSE_STRIDE`, offset so source 3 — the entity that test already deletes, because it is the
+/// one item both `full` and `subset` can see — carries it too: every principal's count must move
+/// by exactly that one deletion, sparse one included.
+///
+/// `common::terms_of`'s two terms are fixed, so a sparser one is not expressible through
+/// `common::build_fixture` without changing a fixture every other test in this binary shares —
+/// this builds its own corpus instead, duplicating `common`'s writer functions rather than
+/// widening their contract for one test.
+const SPARSE_TERM: u64 = 2;
+const SPARSE_STRIDE: u64 = 97;
+
+fn sparse_credential() -> Vec<u8> {
+    br#"{"terms": ["2"]}"#.to_vec()
+}
+
+/// `common::write_pairs_n`'s term assignment, plus `SPARSE_TERM` for source ids congruent to 3
+/// mod `SPARSE_STRIDE` — about a hundredth of the fixture, an order below `SUBSET_TERM`'s third.
+fn write_pairs_with_sparse_term(path: &Path, n: u64) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("term_id", DataType::UInt32, false),
+    ]));
+    let mut entities = Vec::new();
+    let mut terms = Vec::new();
+    for e in 0..n {
+        for t in terms_of(e) {
+            entities.push(e);
+            terms.push(t as u32);
+        }
+        if e % SPARSE_STRIDE == 3 {
+            entities.push(e);
+            terms.push(SPARSE_TERM as u32);
+        }
+    }
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(entities)),
+            Arc::new(UInt32Array::from(terms)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// A fixture whose corpus is otherwise identical to [`common::build_fixture`]'s, with `SPARSE_TERM`
+/// added — see [`write_pairs_with_sparse_term`].
+fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &Path) {
+    write_points_n(points_path, N_ITEMS);
+    write_pairs_with_sparse_term(pairs_path, N_ITEMS);
+    let args = BuildArgs {
+        points: points_path.to_path_buf(),
+        pairs: pairs_path.to_path_buf(),
+        out: out.to_path_buf(),
+        extent: extent(),
+        slice_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        mint_external_ids: true,
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+    };
+    build(&args).expect("sparse-term fixture build should succeed");
+}
+
+/// [`engine_over_fixture`], over [`build_fixture_with_sparse_term`]'s corpus rather than
+/// `common::build_fixture`'s.
+fn engine_over_fixture_with_sparse_term(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
+    build_fixture_with_sparse_term(
         root,
         &tmp.join("points.parquet"),
         &tmp.join("pairs.parquet"),
@@ -1101,14 +1205,18 @@ fn an_unset_merge_cap_never_discards_a_fold() {
 /// carry-forward table exists for, and the only route by which a fold's publication ever sees a
 /// carried-forward artefact.
 ///
-/// Returns `(the entity the mid-flight flush published, the entity deleted before the fold whose
-/// row that flush carries)`.
+/// Returns `(the entity the mid-flight flush published, the live watermark and entity_id_high_water
+/// right after that flush publishes)` — the two fields `write.rs`'s `publish_fold` carries through
+/// from `live_manifest` untouched, captured at the one moment they can be told apart from the
+/// fold's own pre-flight snapshot (`the_watermark_and_high_water_published_are_the_live_ones_not_
+/// the_snapshot` and `the_folded_manifests_high_water_is_the_snapshots_entity_space` are why that
+/// moment matters).
 ///
 /// The hold is a test hook and models duration, not behaviour — see
 /// `Engine::set_fold_paused_for_test`. Everything the flush does here it does exactly as it would
 /// in production: it plans against the live generation, writes into the **old** prefix, and
 /// publishes there, because the fold has not flipped `CURRENT` yet.
-fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> EntityId {
+fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> (EntityId, u64, u64) {
     engine.set_fold_paused_for_test(true);
     let before = engine.write_executor_stats();
     engine.request_fold();
@@ -1134,6 +1242,16 @@ fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> EntityId {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
+    // The flush has published into the still-live (pre-flip) generation: this is "live", as
+    // `publish_fold` will read it moments later, and it is the last point at which reading it is
+    // this straightforward — after the flip it is what the new generation carries, which is
+    // exactly the claim under test.
+    let mid_flight = engine.generation();
+    let mid_flight_watermark = mid_flight.watermark;
+    let mid_flight_high_water = mid_flight.bundle.partitions["default"]
+        .manifest
+        .entity_id_high_water;
+
     engine.set_fold_paused_for_test(false);
     loop {
         let now = engine.write_executor_stats();
@@ -1142,7 +1260,7 @@ fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> EntityId {
             "the fold was discarded"
         );
         if now.folds > before.folds {
-            return entity;
+            return (entity, mid_flight_watermark, mid_flight_high_water);
         }
         assert!(
             std::time::Instant::now() < deadline,
@@ -1178,7 +1296,7 @@ fn a_flush_inside_the_folds_flight_is_carried_forward() {
         visible(&engine, &session)
     };
     let key = b"landed-mid-fold".to_vec();
-    let entity = fold_with_a_flush_in_flight(&engine, key.clone());
+    let (entity, _, _) = fold_with_a_flush_in_flight(&engine, key.clone());
 
     assert_eq!(engine.generation().prefix, "v00001");
     let session = engine.authorise(&full_coverage_credential()).unwrap();
@@ -1454,7 +1572,7 @@ fn the_folded_manifests_high_water_is_the_snapshots_entity_space() {
     let root = tmp.path().join("bundle");
     let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
 
-    let entity = fold_with_a_flush_in_flight(&engine, b"landed-mid-fold".to_vec());
+    let (entity, _, _) = fold_with_a_flush_in_flight(&engine, b"landed-mid-fold".to_vec());
 
     let bundle = open_bundle(&root).expect("the folded bundle opens");
     let snapshot_bound = bundle.manifest.entity_id_high_water;
@@ -1476,6 +1594,65 @@ fn the_folded_manifests_high_water_is_the_snapshots_entity_space() {
         snapshot_bound * 4,
         "and the file's bytes are what the manifest declares — the sidecar checks this at open, \
          so a live bound here is a hard failure at the first reverse resolution"
+    );
+}
+
+/// **Obligation 10: the watermark and `entity_id_high_water` published in `SEGMENTS-<n>.json` are
+/// the *live* values at the flip, not anything derived from the fold's own snapshot.**
+///
+/// `write.rs`'s `publish_fold` states the claim directly, on `SegmentsManifest`'s two fields:
+/// "Live, and untouched. Deriving either from the fold's inputs moves the watermark backwards past
+/// every post-snapshot entity, and composition treats an entity at or above it as buffered rather
+/// than rowed — so the gap goes invisible to every principal with no error." That sentence is
+/// about the `SEGMENTS-<n>.json` half of each field — the counterpart
+/// `the_folded_manifests_high_water_is_the_snapshots_entity_space` pins is `MANIFEST.json`'s, which
+/// is deliberately the *other* value.
+///
+/// A mid-flight flush is required to tell "live" from "snapshot" apart at all: without one the two
+/// coincide and a fold that mistakenly published its own pre-flight bound would pass by accident,
+/// same as the high-water case above.
+///
+/// **Mutations this kills:** `watermark: live_manifest.watermark` replaced by any value fixed at
+/// the fold's own snapshot, `0` included; likewise for `entity_id_high_water` in
+/// `SegmentsManifest`. Verified against `watermark: 0` — see this test's module-level report.
+#[test]
+fn the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+
+    let baseline_watermark = engine.generation().watermark;
+    let baseline_high_water = engine.generation().bundle.partitions["default"]
+        .manifest
+        .entity_id_high_water;
+
+    let (_, mid_flight_watermark, mid_flight_high_water) =
+        fold_with_a_flush_in_flight(&engine, b"landed-mid-fold-watermark".to_vec());
+
+    assert!(
+        mid_flight_watermark > baseline_watermark,
+        "the mid-flight flush must move the live watermark past the fold's own snapshot \
+         ({baseline_watermark} vs {mid_flight_watermark}), or this case cannot tell 'live' from \
+         'snapshot' apart"
+    );
+    assert!(
+        mid_flight_high_water > baseline_high_water,
+        "and likewise for entity_id_high_water ({baseline_high_water} vs \
+         {mid_flight_high_water})"
+    );
+
+    assert_eq!(engine.generation().prefix, "v00001");
+    let bundle = open_bundle(&root).expect("the folded bundle opens");
+    let published = &bundle.partitions["default"].manifest;
+    assert_eq!(
+        published.watermark, mid_flight_watermark,
+        "the published SEGMENTS-<n>.json watermark is the live one at the flip, not a value \
+         frozen at the fold's own snapshot"
+    );
+    assert_eq!(
+        published.entity_id_high_water, mid_flight_high_water,
+        "and likewise for entity_id_high_water — the SEGMENTS-<n>.json half is the live \
+         allocator floor, where MANIFEST.json's is deliberately the snapshot bound"
     );
 }
 
@@ -1541,14 +1718,16 @@ fn the_flip_does_not_arm_the_refresh_shed() {
     engine.set_refresh_paused_for_test(false);
 }
 
-/// **Obligations 5 and 14: masked counts are identical across the flip for every principal, up to
-/// exactly the folded deletions — and the fold's output cannot reach a principal's response.**
+/// **Obligation 5: masked counts are identical across the flip for every principal, up to exactly
+/// the folded deletions — over several principals including a genuinely sparse one.**
 ///
-/// Three principals, including a sparse one and one granted nothing at all, each established
-/// *before* the flip and asked again after it. The fold reads every column unmasked, which is
-/// sanctioned only because its outputs are bundle artefacts (I2, spec §11) — so the thing to prove
-/// is that having read them changes no answer: each principal still sees exactly `M_auth`, and the
-/// deletion each of them could see is the only difference.
+/// Four principals, established *before* the flip and asked again after it: full coverage, a
+/// subset (a third of the fixture, via `SUBSET_TERM`), a sparse grant (`SPARSE_TERM`, about a
+/// hundredth — see [`write_pairs_with_sparse_term`], since `common`'s fixed two-term fixture
+/// cannot express one), and zero. The fold reads every column unmasked, which is sanctioned only
+/// because its outputs are bundle artefacts (I2, spec §11) — so the thing to prove is that having
+/// read them changes no answer: each principal still sees exactly `M_auth`, and the deletion each
+/// of them could see is the only difference.
 ///
 /// **The zero-grant principal is the one that would catch a leak.** It is authorised for no term,
 /// so its `M_auth` is empty and *any* item reaching it is a disclosure — which is what a fold that
@@ -1556,20 +1735,24 @@ fn the_flip_does_not_arm_the_refresh_shed() {
 ///
 /// **Mutations this kills:** publishing the fold's own row set as a mask rather than rebuilding
 /// each session's (the zero-grant count stops being zero); folding the subset term's postings away
-/// (the sparse principal's count collapses).
+/// (the subset principal's count collapses); folding the sparse term's postings away (only the
+/// sparse principal's count collapses — the subset assertion alone would not catch this one,
+/// which is why a hundredth is not the same case as a third).
 #[test]
 fn masked_counts_are_identical_across_the_flip_for_every_principal() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    let engine = engine_over_fixture_with_sparse_term(tmp.path(), &root, config_uncapped());
 
-    // Source 3 carries both terms, so it is visible to the full grant *and* to the sparse one —
-    // which is what makes "up to exactly the folded deletions" a claim about both counts.
+    // Source 3 carries `ALL_TERM`, `SUBSET_TERM` (3 % 3 == 0) and `SPARSE_TERM` (3 % 97 == 3), so
+    // it is visible to every non-zero grant here — which is what makes "up to exactly the folded
+    // deletions" a claim about all three counts at once.
     let deleted = entity_of_source(&root, "v00000", 3);
 
     let principals = [
         ("full", full_coverage_credential()),
         ("subset", subset_credential()),
+        ("sparse", sparse_credential()),
         ("zero", zero_credential()),
     ];
     let sessions: Vec<_> = principals
@@ -1579,17 +1762,28 @@ fn masked_counts_are_identical_across_the_flip_for_every_principal() {
             (*name, visible(&engine, &session), session)
         })
         .collect();
-    assert_eq!(
-        sessions[2].1, 0,
-        "a zero-grant principal sees nothing to begin with"
-    );
-    assert!(
-        sessions[1].1 > 0 && sessions[1].1 < sessions[0].1,
-        "and the sparse principal sees some but not all of it: {:?}",
+    let by_name = |name: &str| sessions.iter().find(|(n, _, _)| *n == name).unwrap();
+    let summary = || {
         sessions
             .iter()
             .map(|(n, c, _)| (*n, *c))
             .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        by_name("zero").1,
+        0,
+        "a zero-grant principal sees nothing to begin with"
+    );
+    assert!(
+        by_name("subset").1 > 0 && by_name("subset").1 < by_name("full").1,
+        "the subset principal sees some but not all of it: {:?}",
+        summary()
+    );
+    assert!(
+        by_name("sparse").1 > 0 && by_name("sparse").1 < by_name("subset").1,
+        "and the sparse principal sees fewer still — genuinely sparse, not merely partial \
+         coverage: {:?}",
+        summary()
     );
 
     engine
@@ -1609,10 +1803,187 @@ fn masked_counts_are_identical_across_the_flip_for_every_principal() {
         );
     }
     assert_eq!(
-        visible(&engine, &sessions[2].2),
+        visible(&engine, &by_name("zero").2),
         0,
         "and the zero-grant principal still sees nothing — the fold read every column unmasked, \
          and none of that reached a response"
+    );
+}
+
+/// **Obligation 14, the detail-lookup half: `Engine::item` answers exactly `M_auth` across a
+/// fold, the same as the viewport does.**
+///
+/// The sibling above proves this only for `viewport` (hence its name staying "masked_counts", not
+/// "every_verb") — there is no `.item(` call anywhere else in this file, and `/v1/items/{id}` is a
+/// mounted verb the fold's unmasked read could just as easily leak through. Three cases in one
+/// fold: an item a restricted principal cannot see must answer nothing for it, both before and
+/// after; an item the full-coverage principal can see must keep answering after the fold, at its
+/// unchanged `tessera_id`; and an entity deleted before the fold — folded away, so both rowless and
+/// postingless afterwards — must answer nothing even to the full-coverage principal, or Rule F's
+/// retirement has re-exposed it through the one verb the counts test does not exercise.
+///
+/// **Mutations this kill:** disabling `plan.tombstones` in both the row-space pass and the
+/// postings sweep (`compact.rs`'s pass 1 and pass 2) — the deleted entity keeps both its row and
+/// its postings, the overlay still retires its tombstone because retirement does not depend on
+/// what the passes actually dropped, and the last assertion below is the one that catches it: the
+/// item resurrects for the full-coverage principal despite the fold having "completed".
+#[test]
+fn item_lookup_answers_exactly_m_auth_across_a_fold() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+
+    // Source 5: not a multiple of 3, so it carries only `ALL_TERM` — visible to `full`, invisible
+    // to `subset`.
+    let restricted = entity_of_source(&root, "v00000", 5);
+    // Source 6: a multiple of 3, so it carries both terms — visible to both, and the one this test
+    // deletes and folds away.
+    let deleted = entity_of_source(&root, "v00000", 6);
+
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    let subset = engine.authorise(&subset_credential()).unwrap();
+
+    let restricted_id: TesseraId = engine.tessera_id_of(restricted).unwrap();
+    let deleted_id: TesseraId = engine.tessera_id_of(deleted).unwrap();
+
+    // Before the fold: the ordinary masking rule, and confirmation the fixture set the case up as
+    // intended (a delete on an item nobody could resurrect from proves nothing).
+    assert!(engine.item(&full, restricted_id, None).unwrap().is_some());
+    assert!(engine.item(&subset, restricted_id, None).unwrap().is_none());
+    assert!(engine.item(&full, deleted_id, None).unwrap().is_some());
+
+    engine
+        .accept_change(deleted, ChangeOp::Delete)
+        .expect("a delete is accepted");
+    fold(&engine);
+    assert_eq!(engine.generation().prefix, "v00001");
+
+    // Both sessions were established before the flip: `Engine::item` takes the freshest resident
+    // fragment or rebuilds against the live generation, in both cases scoped to `v00001`
+    // (`RowProjectionCache::freshest_fragment`'s prefix filter) — so this is a real post-fold
+    // answer, not a stale one.
+    assert!(
+        engine.item(&full, restricted_id, None).unwrap().is_some(),
+        "still visible to the principal authorised for it — the fold's unmasked read did not \
+         change the answer"
+    );
+    assert!(
+        engine.item(&subset, restricted_id, None).unwrap().is_none(),
+        "still invisible to the principal that never was"
+    );
+    assert!(
+        engine.item(&full, deleted_id, None).unwrap().is_none(),
+        "the folded-away entity answers nothing even to the principal that could see \
+         everything else — its row and postings are both gone, so the identifier names \
+         nothing rather than resurrecting it"
+    );
+}
+
+/// **Obligation 11: an individual term ordinal is unchanged across a fold, not merely the total.**
+///
+/// `prefix_rotation.rs`'s `dict.len()` equality is a headcount: a rotation that renumbered every
+/// ordinal while holding the total steady would pass it silently. This resolves two descriptors'
+/// ordinals before a fold — one from the fixture's original dictionary and one promoted by a flush
+/// just beforehand, so the dictionary carries more than one `dict_extents` entry across the fold —
+/// and asserts the identical ordinals answer after it. A single-extent dictionary cannot tell
+/// "preserved" from "coincidentally the same"; two can, because reordering the extents changes
+/// every ordinal after the first one.
+///
+/// **Checked against a freshly reopened engine, not the live one.** `write.rs`'s `publish_fold`
+/// carries the *live process's* dictionary forward as `Arc::clone(&live.dict)` — never reloaded
+/// from the new manifest's `dict_extents` at all — so the live generation's ordinals are stable by
+/// construction and asking it again would prove nothing about whether the fold wrote a correct
+/// `dict_extents` list. What has to be checked is what a fresh open reconstructs from disc
+/// (`session.rs`'s `Dict::load(&dict_paths)`, taken from the *new* prefix's manifest), which is
+/// what a restart, and every future fold's own `open_rotation`, both depend on.
+///
+/// **Mutation this kills:** reversing `dict_extents`' listed order before it is carried into the
+/// new `SEGMENTS-<n>.json` (`write.rs`'s `publish_fold` currently copies `live_manifest
+/// .dict_extents` verbatim) — `Dict::load` assigns ordinals by position in the listed
+/// concatenation (`tessera-authz`'s `dict.rs`), so a reordered list answers a different ordinal
+/// for the descriptor promoted after the base extent, on the next open.
+#[test]
+fn term_ordinals_are_stable_across_a_fold() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+
+    // Promote a novel descriptor before the fold, so the dictionary carries a second
+    // `dict_extents` entry across it — the shape a single-extent dictionary cannot distinguish
+    // from "coincidentally unchanged".
+    let novel_row = UnallocatedRow {
+        external_id: Some(b"novel-holder".to_vec()),
+        slice: "s0".to_string(),
+        descriptors: vec![b"novel".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"novel".to_vec()]),
+    };
+    engine
+        .accept_ingest(vec![novel_row], "promote-novel".to_string(), [0u8; 32])
+        .expect("the novel descriptor is accepted");
+    let flushes_before = engine.write_executor_stats().flushes;
+    engine.request_flush();
+    wait_for("the promoting flush to publish", || {
+        engine.write_executor_stats().flushes > flushes_before
+    });
+
+    let before = engine.generation();
+    let all_term_id = before
+        .dict
+        .lookup(b"0")
+        .expect("ALL_TERM is in the fixture's base dictionary");
+    let subset_term_id = before
+        .dict
+        .lookup(b"1")
+        .expect("SUBSET_TERM is in the fixture's base dictionary");
+    let novel_term_id = before
+        .dict
+        .lookup(b"novel")
+        .expect("the promoted descriptor is now an ordinary ordinal, in a second extent");
+    let len_before = before.dict.len();
+    assert_eq!(
+        before.bundle.partitions["default"]
+            .manifest
+            .dict_extents
+            .len(),
+        2,
+        "the promotion above must add a second dict_extents entry, or reordering them proves \
+         nothing"
+    );
+
+    fold(&engine);
+    assert_eq!(engine.generation().prefix, "v00001");
+    drop(engine);
+
+    // A fresh open, over the folded bundle on disc — not the live process's carried-forward
+    // `Arc<Dict>`, which cannot observe a `dict_extents` bug at all (see this test's doc).
+    let restarted = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        config_uncapped(),
+    )
+    .expect("the folded prefix opens on its own");
+    assert_eq!(restarted.generation().prefix, "v00001");
+
+    let after = restarted.generation();
+    assert_eq!(
+        after.dict.lookup(b"0"),
+        Some(all_term_id),
+        "a descriptor's ordinal must not move across a fold"
+    );
+    assert_eq!(after.dict.lookup(b"1"), Some(subset_term_id));
+    assert_eq!(
+        after.dict.lookup(b"novel"),
+        Some(novel_term_id),
+        "including a descriptor promoted from a second dict_extents entry, not just the base one"
+    );
+    assert!(
+        after.dict.len() >= len_before,
+        "dict.len() must never decrease across a fold"
     );
 }
 
