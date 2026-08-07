@@ -470,6 +470,16 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         // carries the row index and the declared extent, which are the caller's own request and the
         // deployment's published `/v1/meta`. Withholding it would leave a 422 the caller cannot act
         // on — and the whole point of refusing rather than clamping is that someone notices.
+        // **The detail reaches the caller here too, and for the same reason.** Code-space
+        // exhaustion names a vocabulary and its declared width — the caller's own data measured
+        // against the deployment's published schema, never a filesystem path — and
+        // per-point-attributes §3.6 makes it a 422 rather than a fail-closed 500: the request is
+        // refusable and the caller is the only one who can act on it. Widening or wrapping the
+        // code space instead would recolour every row already carrying a code, so the refusal is
+        // the whole answer and it has to say what was refused.
+        AcceptError::Exec(ExecError::VocabularyRefused { detail }) => {
+            ApiError::Contract(detail.clone())
+        }
         e @ AcceptError::OutsideExtent { .. } => ApiError::Contract(e.to_string()),
     }
 }
@@ -637,7 +647,9 @@ fn exec_failure_may_be_in_force(
     use tessera_lifecycle::{ChangeOp, ExecError};
     match e {
         ExecError::Wal(_) => matches!(op, ChangeOp::Delete | ChangeOp::Suppress),
-        ExecError::BatchConflict { .. } | ExecError::DuplicateExternalId { .. } => false,
+        ExecError::BatchConflict { .. }
+        | ExecError::DuplicateExternalId { .. }
+        | ExecError::VocabularyRefused { .. } => false,
         ExecError::Alloc(_) => false,
     }
 }

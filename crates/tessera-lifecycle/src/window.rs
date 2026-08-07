@@ -155,6 +155,18 @@ impl<W> ClosedEntry<W> {
         }
     }
 
+    /// The record's rows, mutably — for the executor to resolve a novel category key to its code
+    /// **in place, before this entry's record is appended** (per-point-attributes §3.4). Minting
+    /// has to land here, between allocation and the append loop: the row still carries the key
+    /// [`crate::window`]'s caller admitted, and this is the last point it can be rewritten before
+    /// the WAL frames it durably. Same `unreachable!` as [`Self::rows`], for the same reason.
+    pub fn rows_mut(&mut self) -> &mut [WalRow] {
+        match &mut self.record {
+            WalRecord::IngestBatch { rows, .. } => rows,
+            _ => unreachable!("a ClosedEntry's record is always an IngestBatch"),
+        }
+    }
+
     /// `(batch_id, body_hash)` — the idempotency key the executor records after the swap.
     pub fn batch_key(&self) -> (&str, [u8; 32]) {
         match &self.record {

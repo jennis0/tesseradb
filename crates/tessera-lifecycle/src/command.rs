@@ -339,6 +339,22 @@ pub enum ExecError {
     /// Evaluated on the executor rather than in the handler, which is why it is an [`ExecError`]
     /// and not something the handler decides before submitting.
     BatchConflict { batch_id: String },
+    /// A category key could not acquire a code → HTTP 422 naming the vocabulary and its width. The
+    /// batch has no effect: nothing was appended and nothing applied.
+    ///
+    /// **Code-space exhaustion is the case this exists for**, and per-point-attributes §3.6 makes
+    /// it a `422` at ingest rather than a 500 — the request names more distinct values than the
+    /// declared width can hold, which is the caller's own data measured against the deployment's
+    /// published schema, exactly the shape `AcceptError::OutsideExtent` already answers that way.
+    /// Widening or wrapping instead would recolour every row already carrying a code, so neither
+    /// is done and the refusal is the whole answer.
+    ///
+    /// **A rendered string, not the error itself.** Minting lives in `tessera-store`, and this
+    /// crate deliberately carries no dependency on it (see this module's header), so the detail is
+    /// rendered on the executor and travels as text. It names a vocabulary and a width — the
+    /// deployment's own schema, never a filesystem path — so unlike most executor failures it may
+    /// reach the caller, who cannot otherwise act on it.
+    VocabularyRefused { detail: String },
     /// `count` of this batch's rows name an external id the live map **already** holds → HTTP 409,
     /// no effect (contracts §3.1's duplicate row).
     ///
@@ -371,6 +387,7 @@ impl std::fmt::Display for ExecError {
                 "{count} row(s) name an external id this deployment already knows; the batch had \
                  no effect"
             ),
+            ExecError::VocabularyRefused { detail } => write!(f, "{detail}"),
         }
     }
 }
