@@ -34,8 +34,9 @@ never had one — **and both were scoped out** (decision 0057): rows-frozen is d
 the staging list is deferred with 0053's review condition attached to it rather than to this
 document. Both were obligations on *unbuilt* machinery, which is what made "run the lens" the wrong
 question. **Promoted on that basis** (owner, 2026-08-07). §9's four gauges are all built; what
-remains unbuilt of this design is the deferred staging list and §6.1's two page-cache hints, and
-both are marked at their sites.
+remains unbuilt of this design is the deferred staging list, the write-side `POSIX_FADV_DONTNEED`
+of §6.1, and a re-run of P3 against the `MADV_SEQUENTIAL` hint that is now applied. All three are
+marked at their sites.
 **Owns:** the fold — what it executes, what it carries forward, how it is published, what retires
 at it, and what a viewer pays at the flip. The prefix rewrite, the `CURRENT` flip, and
 reclamation.
@@ -56,7 +57,8 @@ derivation and the reclamation; and all four trigger routes spec §9's schedule 
 `Engine::request_fold` for a caller that wants one now, which `POST /control/compact` calls. Both
 pre-flight refusals are built (spec §3, §8), and so is the startup sweep that reclaims a discarded
 fold's orphan prefix (spec §7). ⊘ **What is obligation rather than description**: the staging list
-(spec §6.2), and the `MADV_SEQUENTIAL` hint and the write-side `POSIX_FADV_DONTNEED` (spec §6.1). Where a figure is quoted it is marked measured, modelled or assumed; claims about the
+(spec §6.2), the *measurement* of §6.1's `MADV_SEQUENTIAL` hint — which is applied but whose effect
+nothing has re-run P3 against — and the write-side `POSIX_FADV_DONTNEED`, which still has no site. Where a figure is quoted it is marked measured, modelled or assumed; claims about the
 tree were verified against branch `geometry/cell-plus-residual`.
 
 ---
@@ -629,18 +631,31 @@ viewport's mapped hot pages are evicted for bytes nothing will read again. `MADV
 exactly what is true — this range is streamed and may be freed soon after access — in one call per
 input, with no rate and no device-specific constant.
 
-**⊘ It is a hint, nothing measures it yet, and the site is not the one this paragraph implies.**
-"Each input mapping" is not a set the fold owns. Pass 1's segments are opened by the fold itself
-(`SegmentCursor::open`), so advising those is safe. **Pass 2's are the live readers** — §3 hands the
-fold `Arc<PostingsReader>` and the live `Arc<DeltaTier>`s deliberately, *"the same mappings every
-request is already serving from"*, because reopening them would double the fold's resident cost.
-`MADV_SEQUENTIAL` on one of those tells the kernel to drop pages **the viewport is reading**, which
-is the harm this mitigation exists to prevent, applied by hand. So the hint has one safe site today
-and one that needs a ruling: either the fold reopens its postings and tiers — which P1 has made
-cheaper to argue than it was, since the duplicated cost is reclaimable page cache rather than heap —
-or pass 2 goes unadvised and the mitigation covers row space alone.
+✔ **It is applied where the fold owns the mapping, and nowhere else** (owner ruling, 2026-08-07).
+*"Each input mapping"* is not one set: `madvise` applies to a **mapping**, not to a file, so what
+decides whether the hint may be given is who else holds *that* mapping.
 
-P3 must then be re-run with whatever is applied, over a sweep long enough to displace a real
+- ✔ **Passes 1 and 3 open their own.** `SegmentCursor::open` maps a segment's `morton.u32` and
+  `columns.arrow`; `RunCursor::open` maps an external-id run. A viewport reads the same *files*
+  through mappings of its own, so advising these changes the fold's traversal and nothing else.
+  Together they are the great majority of the bytes a fold moves.
+- ⊘ **Pass 2's are the live readers, and stay unadvised.** §3 hands the fold `Arc<PostingsReader>`
+  and the live `Arc<DeltaTier>`s deliberately — *"the same mappings every request is already serving
+  from"*. Advising one of those disables random-access read-ahead **for the request path**, on the
+  object it is using, for the life of the mapping. That is the harm this mitigation exists to
+  prevent, applied by hand.
+
+**Reopening postings and tiers so they could be advised is declined, and not on the cost §3 gives.**
+P1 weakened that argument — the duplicate is reclaimable page cache rather than heap — but the
+reopen does not buy what it would need to: page-cache pages are per *inode*, so freeing them behind
+the fold's own mapping frees them for the viewport's too. It would pay a second reader's
+construction to reach the same place. Pass 2 is also the cheapest pass by a wide margin — ~5% of the
+fold's wall clock at 10⁷ (P1) — so what goes unadvised is a small share of a smaller pass.
+
+**The same two cursors serve merge and coalesce**, which stream over bounded inputs for the same
+reason, so the hint is theirs as well rather than a fold-only special case.
+
+⊘ **Unmeasured.** P3 must be re-run with it applied, over a sweep long enough to displace a real
 fraction of the bundle. `MADV_COLD` behind the cursor is the escalation if it proves insufficient;
 decision 0052 records why the windowed-unmap and producer-pacing routes were declined.
 
@@ -1364,6 +1379,11 @@ places.** Not a review: a measurement, and the disposition of what it turned up.
   the producers: the carry-forward set is synced before the flip (§8). r10 left this as a ruling
   about the segment writers; it is narrower than that, because the fold is the only operation that
   destroys the fallback every other path relies on.
+- **§6.1's hint has a site, and the site is the ruling** (owner, 2026-08-07). `madvise` applies to
+  a mapping rather than to a file, so the question was never "which inputs" but "who else holds
+  this mapping": passes 1 and 3 open their own and are advised; pass 2's are the live readers and
+  are not. Reopening those to advise them is declined — page-cache pages are per inode, so it would
+  pay a second reader's construction to free the viewport's pages anyway.
 - **The two promotion blockers are scoped out** (decision 0057): rows-frozen is declined and the
   staging list is deferred with its review condition intact. Both were obligations on *unbuilt*
   machinery, which is what made "run the lens" the wrong question.

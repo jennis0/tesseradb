@@ -152,6 +152,12 @@ impl RunCursor {
             path: path.to_path_buf(),
             source,
         })?;
+        // The same reclaim bias `SegmentCursor::open` asks for, for the same reason: both callers
+        // of this cursor — a coalesce's merge and the fold's pass 3 — read every run once, and the
+        // sidecar that serves *requests* from these files holds its own mapping
+        // (`sidecar::load_validated`), which this does not touch. See
+        // `MortonSlice::advise_sequential`.
+        let _ = mapping.advise(memmap2::Advice::Sequential);
         let len = mapping.len();
         let arc: Arc<Mmap> = Arc::new(mapping);
         let ptr = NonNull::new(arc.as_ptr() as *mut u8)
