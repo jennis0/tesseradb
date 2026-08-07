@@ -1163,6 +1163,10 @@ fn the_retirable_depth_route_dispatches_a_fold_without_anyone_asking() {
             window_start_secs: None,
             window_secs: 0,
             window_min_segments: 0,
+            // The segment ceiling is off, so nothing but the deletion gauge can dispatch here —
+            // which is what makes this case about that gauge rather than about the fixture's
+            // segment count.
+            max_segments: None,
             after_deletions: Some(3),
         }),
     );
@@ -1210,6 +1214,81 @@ fn the_retirable_depth_route_dispatches_a_fold_without_anyone_asking() {
     );
 }
 
+/// **The segment ceiling dispatches a fold at any hour** — the route that says deferring segment
+/// growth to the next window has stopped being cheaper than folding now.
+///
+/// The window here is deliberately **shut** (it opens in six hours) and the deletion route is off,
+/// so the only thing that can dispatch is the ceiling. Without it a deployment ingesting through
+/// the day reaches a segment count every viewport pays for and waits until midnight anyway, which
+/// is the hole a windowed-only segment gauge leaves.
+///
+/// **Mutations this kills:** windowing the ceiling (nothing folds); dropping the ceiling route
+/// (same); reading the ceiling against the window's floor instead of its own value (the fold fires
+/// one flush early, at the first assertion).
+#[test]
+fn the_segment_ceiling_dispatches_a_fold_outside_the_window() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let now = utc_time_of_day();
+    let engine = engine_over_fixture(
+        tmp.path(),
+        &root,
+        config_scheduling(tessera_engine::CompactionSchedule {
+            min_interval_secs: 0,
+            // Shut: opens in six hours, for one hour.
+            window_start_secs: Some((now + 6 * 3_600) % 86_400),
+            window_secs: 3_600,
+            window_min_segments: 2,
+            max_segments: Some(3),
+            after_deletions: None,
+        }),
+    );
+    // A merge would collapse the extents this case is counting, and bounding the segment axis is
+    // exactly what it does — so it is off, and the fold is the only thing moving the count.
+    engine.set_merge_for_test(false);
+
+    let flush_once = |n: usize| {
+        let before = engine.write_executor_stats().flushes;
+        ingest(&engine, format!("seg-{n}").into_bytes(), &format!("b{n}")).expect("ingest");
+        engine.request_flush();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while engine.write_executor_stats().flushes == before {
+            assert!(std::time::Instant::now() < deadline, "the flush never landed");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+
+    // The base plus one extent: two segments, which clears the *window's* floor and not the
+    // ceiling — and the window is shut, so nothing may happen.
+    flush_once(1);
+    tick(&engine);
+    tick(&engine);
+    assert_eq!(
+        engine.write_executor_stats().folds,
+        0,
+        "two segments is worth a fold tonight and not worth one now, and it is not tonight"
+    );
+
+    // The base plus two extents: three, which is the ceiling.
+    flush_once(2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.write_executor_stats().folds == 0 {
+        tick(&engine);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the ceiling never dispatched a fold outside the window"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(engine.generation().prefix, "v00001");
+    let bundle = open_bundle(&root).expect("the folded bundle opens");
+    assert_eq!(
+        bundle.partitions["default"].slices["s0"].segments.len(),
+        1,
+        "and the fold did what the gauge asked for: one segment per partition-slice"
+    );
+}
+
 /// **The windowed route fires inside its window and not outside it**, which is the whole of what a
 /// start time buys: a fold is minutes to hours of IO that costs a concurrent viewport a measured
 /// up-to-2.03×, and an operator setting `00:00` is saying "not during the day".
@@ -1232,6 +1311,9 @@ fn the_windowed_route_fires_inside_its_window_and_not_outside_it() {
         window_start_secs: Some((now + 6 * 3_600) % 86_400),
         window_secs: 3_600,
         window_min_segments: 1,
+        // Both any-hour routes off: the window is the only thing that can dispatch, which is the
+        // whole of what this case is asking.
+        max_segments: None,
         after_deletions: None,
     };
     let engine = engine_over_fixture(tmp.path(), &root, config_scheduling(closed));

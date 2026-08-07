@@ -168,12 +168,22 @@ pub(crate) fn executed(d0: &Bitmap, carried: &CarriedForward) -> Bitmap {
 
 /// When a fold is dispatched without anyone asking for one (compaction §9, decision 0056).
 ///
-/// **Two routes, and the split is by urgency rather than by taste.** Segment count is a *read* cost
-/// — a tile resolves to one contiguous range per live segment, so a viewport pays a binary search
-/// and a `range_cardinality` per segment per tile — which degrades gradually and can wait for a
-/// quiet hour. Retirable depth is a *write* cost and it is unbounded: the overlay grows
-/// monotonically under deletion churn, every deny acceptance clones it, and depth is a term in I1's
-/// composition cost. So the first route is windowed and the second is not.
+/// **Three routes over two gauges, and the shape is a floor and a ceiling rather than a split.**
+///
+/// Segment count is a *read* cost — a tile resolves to one contiguous range per live segment, so a
+/// viewport pays a binary search and a `range_cardinality` per segment per tile — and it is
+/// deferrable *up to a point*, not indefinitely: at ~152 segments decision 0049 measured ~73 ms on
+/// a 300-tile viewport against a 135–164 ms baseline, which is a ~50% regression that no viewer
+/// should carry until midnight. So it gets two thresholds: [`window_min_segments`], the low one,
+/// which fires only inside the daily window, and [`max_segments`], the high one, which fires at any
+/// hour.
+///
+/// [`window_min_segments`]: Self::window_min_segments
+/// [`max_segments`]: Self::max_segments
+///
+/// Retirable depth has one threshold and no window at all, because the cost it measures is
+/// unbounded rather than merely growing: the overlay grows monotonically under deletion churn,
+/// every deny acceptance clones it, and depth is a term in I1's composition cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactionSchedule {
     /// The floor under both routes — compaction §9's `compaction_min_interval_secs`. A fold within
@@ -193,7 +203,23 @@ pub struct CompactionSchedule {
     pub window_secs: u32,
     /// Live segments in any one slice at or above which a fold is worth running *inside the
     /// window*. Below it the window passes and nothing happens.
+    ///
+    /// **The low threshold of two.** It answers "is there enough here to be worth a quiet-hours
+    /// fold"; [`Self::max_segments`] answers "is this bad enough that it cannot wait".
     pub window_min_segments: usize,
+    /// Live segments in any one slice at or above which a fold is dispatched **at any hour**;
+    /// `None` switches this route off.
+    ///
+    /// **Deferring segment growth has a limit, and this is it.** The windowed threshold exists
+    /// because segment count degrades a viewport gradually and gradual costs can wait for a quiet
+    /// hour. That argument runs out: a deployment ingesting fast enough to add segments through the
+    /// night reaches a count every viewport pays for long before the next window, and telling it to
+    /// wait is choosing a worse hour for the read path over a worse hour for the write path.
+    ///
+    /// Must sit strictly above [`Self::window_min_segments`] where both are armed, or the window is
+    /// unreachable — `tessera-server` refuses that configuration rather than shipping a key that
+    /// cannot fire.
+    pub max_segments: Option<usize>,
     /// Retirable deletions at or above which a fold is dispatched at any hour; `None` switches the
     /// unwindowed route off. Defaults to `overlay_soft_limit`, which is the action compaction §9
     /// says that alarm was always supposed to prompt.
@@ -214,6 +240,7 @@ impl CompactionSchedule {
             window_start_secs: None,
             window_secs: 0,
             window_min_segments: 0,
+            max_segments: None,
             after_deletions: None,
         }
     }
@@ -225,6 +252,9 @@ impl CompactionSchedule {
 pub(crate) enum FoldTrigger {
     /// Inside the daily window, with a slice over `window_min_segments`.
     Window,
+    /// A slice reached `max_segments`, at whatever hour — segment growth past the point where
+    /// deferring it is cheaper than paying it.
+    SegmentCount,
     /// `|deleted|` reached `after_deletions`, at whatever hour.
     RetirableDepth,
 }
@@ -260,11 +290,17 @@ pub(crate) fn due(
         }
     }
 
-    // **The unwindowed route first**, because it is the urgent one: a deployment over its retirable
-    // depth inside its own window should log the reason that will still be true tomorrow.
+    // **The unwindowed routes first**, because they are the urgent ones: a deployment over one of
+    // them *inside* its own window should log the reason that will still be true tomorrow, not the
+    // hour it happened to be.
     if let Some(threshold) = schedule.after_deletions {
         if retirable_deletions >= threshold {
             return Some(FoldTrigger::RetirableDepth);
+        }
+    }
+    if let Some(threshold) = schedule.max_segments {
+        if live_segments >= threshold {
+            return Some(FoldTrigger::SegmentCount);
         }
     }
 
@@ -968,6 +1004,7 @@ mod tests {
             window_start_secs: Some(0),
             window_secs: 4 * 3_600,
             window_min_segments: 8,
+            max_segments: Some(64),
             after_deletions: Some(500_000),
         }
     }
@@ -993,10 +1030,12 @@ mod tests {
             "01:00 with eight segments is the case the window exists for"
         );
         assert_eq!(
-            due(&s, at(10, 9), None, 64, 0),
+            due(&s, at(10, 9), None, 63, 0),
             None,
-            "09:00 is outside the window however many segments there are — a start time that \
-             fires at breakfast after a restart is not a start time"
+            "09:00 is outside the window at any count below the ceiling — a start time that fires \
+             at breakfast after a restart is not a start time. (63 rather than an arbitrarily \
+             large number, because past `max_segments` a different route takes over and this case \
+             would stop being about the window at all.)"
         );
         assert_eq!(
             due(&s, at(10, 1), None, 7, 0),
@@ -1005,20 +1044,54 @@ mod tests {
         );
     }
 
-    /// **The unwindowed route fires at any hour**, because retirable depth is a write cost that
-    /// grows without bound where segment count is a read cost that degrades gradually.
+    /// **The unwindowed routes fire at any hour**, because the costs they measure stop being
+    /// deferrable: retirable depth grows without bound, and segment count past `max_segments` is a
+    /// regression every viewport pays for until the next window.
     ///
-    /// **Mutation this kills:** windowing both routes — a deployment reaching its limit at 14:00
-    /// then waits ten hours while every deny acceptance clones a growing overlay.
+    /// **Mutation this kills:** windowing either route — a deployment reaching its limit at 14:00
+    /// then waits ten hours while every deny acceptance clones a growing overlay, or while every
+    /// tile pays a binary search per segment.
     #[test]
-    fn the_retirable_depth_route_is_not_windowed() {
+    fn the_unwindowed_routes_are_not_windowed() {
         let s = schedule();
         assert_eq!(
             due(&s, at(10, 14), None, 1, 500_000),
             Some(FoldTrigger::RetirableDepth),
-            "14:00, one segment, at the limit"
+            "14:00, one segment, at the deletion limit"
         );
         assert_eq!(due(&s, at(10, 14), None, 1, 499_999), None, "and not below it");
+
+        assert_eq!(
+            due(&s, at(10, 14), None, 64, 0),
+            Some(FoldTrigger::SegmentCount),
+            "14:00, no deletions at all, at the segment ceiling"
+        );
+        assert_eq!(due(&s, at(10, 14), None, 63, 0), None, "and not below it");
+    }
+
+    /// **The two segment thresholds are a floor and a ceiling over one gauge**, and the window is
+    /// what separates them: eight segments is worth a fold tonight, sixty-four is worth one now.
+    ///
+    /// **Mutations this kills:** collapsing the two into one threshold (either the window fires at
+    /// 64 — so a deployment sitting at 8 never tidies — or the unwindowed route fires at 8, which
+    /// is a fold in the middle of the working day for a cost that could have waited); reporting the
+    /// window trigger for a count that cleared the ceiling, which would tell an operator the fold
+    /// was routine when it was not.
+    #[test]
+    fn the_segment_gauge_has_a_window_floor_and_an_any_hour_ceiling() {
+        let s = schedule();
+        assert_eq!(due(&s, at(10, 14), None, 8, 0), None, "8 at 14:00 waits");
+        assert_eq!(
+            due(&s, at(10, 1), None, 8, 0),
+            Some(FoldTrigger::Window),
+            "8 inside the window folds, and is reported as the window"
+        );
+        assert_eq!(
+            due(&s, at(10, 1), None, 64, 0),
+            Some(FoldTrigger::SegmentCount),
+            "64 inside the window folds too — and is reported as the ceiling, because that is \
+             the reason that will still be true tomorrow"
+        );
     }
 
     /// **The floor is under both routes**, and it is what keeps a daily window to one fold a day
@@ -1031,9 +1104,13 @@ mod tests {
     fn the_minimum_interval_floors_both_routes_and_survives_a_backward_clock() {
         let s = schedule();
         let last = at(10, 1);
-        assert_eq!(due(&s, at(10, 2), Some(last), 64, 999_999), None, "one hour later");
         assert_eq!(
-            due(&s, at(11, 1), Some(last), 64, 0),
+            due(&s, at(10, 2), Some(last), 64, 999_999),
+            None,
+            "one hour later, with every gauge over its threshold — the floor is under all three"
+        );
+        assert_eq!(
+            due(&s, at(11, 1), Some(last), 8, 0),
             Some(FoldTrigger::Window),
             "and the next night's window is exactly a day past it"
         );
@@ -1071,18 +1148,39 @@ mod tests {
             window_start_secs: None,
             ..schedule()
         };
-        assert_eq!(due(&no_window, at(10, 1), None, 1_000, 0), None);
         assert_eq!(
-            due(&no_window, at(10, 1), None, 1_000, 500_000),
+            due(&no_window, at(10, 1), None, 8, 0),
+            None,
+            "a count that only clears the window's floor has no route left"
+        );
+        assert_eq!(
+            due(&no_window, at(10, 1), None, 8, 500_000),
             Some(FoldTrigger::RetirableDepth),
-            "and the other route is untouched by it"
+            "and the unwindowed routes are untouched by it"
+        );
+        assert_eq!(
+            due(&no_window, at(10, 1), None, 64, 0),
+            Some(FoldTrigger::SegmentCount),
+            "including the segment ceiling, which is where a window-less deployment's segment \
+             growth is bounded"
         );
 
         let no_depth = CompactionSchedule {
             after_deletions: None,
+            max_segments: None,
             ..schedule()
         };
         assert_eq!(due(&no_depth, at(10, 14), None, 1_000, u64::MAX), None);
+
+        let no_ceiling = CompactionSchedule {
+            max_segments: None,
+            ..schedule()
+        };
+        assert_eq!(
+            due(&no_ceiling, at(10, 14), None, 100_000, 0),
+            None,
+            "with the ceiling off, segment growth waits for the window however far it goes"
+        );
 
         assert_eq!(
             due(&CompactionSchedule::off(), at(10, 1), None, 1_000, u64::MAX),

@@ -786,17 +786,24 @@ completed. ✔ marks what is built:
 |---|---|---|
 | ✔ `retirable_depth ≥ compaction_after_deletions` | `overlay_soft_limit` (500,000) | un-retired **deletions** — see below. Unwindowed |
 | ✔ inside the daily window **and** any slice's live segment count ≥ `compaction_window_min_segments` | `00:00` UTC + 4 h, 8 segments | the axis merge saturates on (decision 0049), paid down when it is cheap to pay |
+| ✔ any slice's live segment count ≥ `compaction_max_segments` | 64 | the same axis past the point where deferring costs more than folding. Unwindowed |
 | ⊘ `dead_bytes / live_bytes ≥ compaction_dead_bytes_ratio` | 1.0 | paying double for storage; the measured no-compaction steady state is 2.0–2.6× |
 | ⊘ `tombstoned_rows / live_rows ≥ compaction_dead_rows_fraction` | 0.2 | rows every viewport pays for and no viewer may see |
 | ✔ `compaction_min_interval_secs` | 86,400 | the floor under all of them |
 
-**One gauge is windowed and one is not, and the split is by urgency** (decision 0056). Segment count
-is a *read* cost that degrades a viewport gradually — ~73 ms on a 300-tile viewport at ~152 segments
-— and nothing breaks if it is paid down tonight, so it fires only inside
-`compaction_window_start .. + compaction_window_secs`. Retirable depth is a *write* cost and it is
-unbounded: the overlay grows monotonically under deletion churn, every deny acceptance clones it,
-and depth is a term in I1's composition cost. A deployment that reaches its limit at 14:00 should
-not wait ten hours to start recovering, so that route has no window.
+**The segment gauge has a floor and a ceiling; retirable depth has neither a window nor a second
+threshold** (decision 0056). Segment count is a *read* cost that degrades a viewport gradually, so
+at eight segments nothing breaks if it is paid down tonight — that is the window's floor. But
+"gradually" is a rate rather than a ceiling: ~73 ms on a 300-tile viewport at ~152 segments against
+a 135–164 ms baseline is a ~50% regression, and a deployment ingesting through the night reaches it
+long before the next window. Telling it to wait chooses a worse hour for the read path over a worse
+hour for the write path, on behalf of every viewer — so the same gauge fires at any hour once it
+reaches `compaction_max_segments`. **The ceiling must sit strictly above the floor**, or the window
+is unreachable and its keys are inert; the loader refuses that rather than shipping it.
+
+Retirable depth is a *write* cost and it is unbounded: the overlay grows monotonically under
+deletion churn, every deny acceptance clones it, and depth is a term in I1's composition cost. There
+is no threshold below which waiting is free, so there is nothing for a window to protect.
 
 **The window is a start time, not a deadline.** A node down at 00:00 and started at 09:00 folds
 nothing: the window has closed and the next one is tonight. That is what `compaction_window_secs`
@@ -814,12 +821,19 @@ maintenance route that silently does not run is indistinguishable from one with 
 
 ```toml
 [ingest]
-compaction_window_start      = "00:00"   # UTC HH:MM, or "off" — the windowed route's switch
-compaction_window_secs       = 14400     # how long it stays open; a start time, not a deadline
-compaction_window_min_segments = 8       # segments in any one slice worth folding for
-compaction_after_deletions   = 500000    # or "off"; defaults to overlay_soft_limit
-compaction_min_interval_secs = 86400     # the floor under both routes
+compaction_window_start        = "00:00"  # UTC HH:MM, or "off" — the windowed route's switch
+compaction_window_secs         = 14400    # how long it stays open; see below
+compaction_window_min_segments = 8        # segments worth folding for tonight
+compaction_max_segments        = 64       # or "off"; segments worth folding for now
+compaction_after_deletions     = 500000   # or "off"; defaults to overlay_soft_limit
+compaction_min_interval_secs   = 86400    # the floor under all three routes
 ```
+
+**`compaction_window_secs` bounds when a fold may *start*, not how long it runs.** A fold beginning
+at 03:59 against a 4 h window runs for as long as it needs, hours past the close; there is no
+mechanism to stop one mid-flight and none is designed. What the width buys is that a node which was
+down, busy or floor-blocked at 00:00 does not fold at 09:00 instead — without it, "a start time"
+means "at or after", which is the hour the operator was avoiding.
 
 **The overlay gauge is `|deleted|`, not `Overlay::len()`, and the difference is a live bug in r1**
 (r3, memory F5). `Overlay::len()` is `|deleted ∪ suppressed|`, and Rule S says a suppression never
@@ -1073,7 +1087,7 @@ are.
 | the 15.7× excursion | **measured and discounted** — cgroup-capped runs only, where direct reclaim stalls the allocating task; neither real run reproduced it. Not a fold's expected cost | same memo |
 | that 128 MiB/s is the right rate on **another** device, or at a deployment's bundle:cache ratio | **not measured.** The knee follows device bandwidth, and both runs sat at 1.24:1 and 1.96:1 where a 47 GB bundle on a 16 GB machine is ~3:1. Both are why spec §6.1 makes this a key rather than a constant | same memo |
 | the trigger's two unbuilt thresholds — dead bytes ≥ live, tombstoned rows ≥ 20% | **assumed**. Nothing has run a fold, so neither is calibrated; P1 is what makes them evidence | spec §9 |
-| the window's two — 4 h wide, 8 segments | **assumed**. The width is bounded by two operational statements rather than a measurement (a node restarting inside the quiet period should still fold; one down all night should not start at breakfast); the segment threshold sits an order below the ~152 at which decision 0049 measured ~73 ms on a 300-tile viewport, and is otherwise a guess | spec §9, decision 0056 |
+| the schedule's three — 4 h wide, 8 segments, 64 segments | **assumed**. The width is bounded by two operational statements rather than a measurement (a node restarting inside the quiet period should still fold; one down all night should not start at breakfast). Both segment thresholds interpolate from one measurement rather than sitting on one: decision 0049 measured ~73 ms on a 300-tile viewport at ~152 segments against a 135–164 ms baseline, and where between 8 and 152 "gradual" becomes "now" is a judgement | spec §9, decision 0056 |
 
 Three probes were named because three claims cannot be believed without them. **P1** — fold peak
 RSS and wall clock at 10⁷ with a scaling argument to 10⁹ — is unbuilt, there being no fold to run.

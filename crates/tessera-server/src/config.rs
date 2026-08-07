@@ -92,8 +92,21 @@ pub enum ConfigError {
     /// one read as midnight silently starts hours of IO at an hour the operator was trying to
     /// avoid.
     CompactionWindowNotATime(String),
-    /// `ingest.compaction_after_deletions` is a string other than `"off"`. See [`RawThreshold`].
+    /// `ingest.compaction_after_deletions` or `ingest.compaction_max_segments` is a string other
+    /// than `"off"`. See [`RawThreshold`].
     CompactionThresholdNotANumberOrOff(String),
+    /// `ingest.compaction_max_segments` is at or below `ingest.compaction_window_min_segments`,
+    /// with the window armed.
+    ///
+    /// The two are a floor and a ceiling over one gauge — "worth folding tonight" and "cannot wait
+    /// for tonight" — so a ceiling at or below the floor makes the window **unreachable**: every
+    /// count that would have opened it has already fired the any-hour route. Refused rather than
+    /// shipped, because the result is three keys that parse, validate and can never fire, which is
+    /// the inert key decision 0045 forbids.
+    CompactionSegmentThresholdsInverted {
+        window_min_segments: usize,
+        max_segments: usize,
+    },
     /// `ingest.compaction_window_secs` is at or past a whole day, which makes the "window" every
     /// hour of every day — i.e. the ungated timer compaction §9 declines, reached by setting a
     /// width rather than by asking for one.
@@ -269,15 +282,34 @@ impl std::fmt::Display for ConfigError {
             ),
             ConfigError::CompactionWindowNotATime(value) => write!(
                 f,
-                "ingest.compaction_window_start = '{value}' is neither a UTC time of day (HH:MM,                  24-hour) nor 'off'. It is refused rather than defaulted: read as 'off' it                  silently retires the deployment's fold schedule, and read as midnight it                  silently starts hours of IO at the hour the operator was avoiding"
+                "ingest.compaction_window_start = '{value}' is neither a UTC time of day \
+                 (HH:MM, 24-hour) nor 'off'. It is refused rather than defaulted: read as 'off' \
+                 it silently retires the deployment's fold schedule, and read as midnight it \
+                 silently starts hours of IO at the hour the operator was avoiding"
             ),
             ConfigError::CompactionThresholdNotANumberOrOff(value) => write!(
                 f,
-                "ingest.compaction_after_deletions = '{value}' is neither a count nor 'off'"
+                "a compaction threshold is set to '{value}', which is neither a count nor 'off' \
+                 (ingest.compaction_after_deletions, ingest.compaction_max_segments)"
+            ),
+            ConfigError::CompactionSegmentThresholdsInverted {
+                window_min_segments,
+                max_segments,
+            } => write!(
+                f,
+                "ingest.compaction_max_segments = {max_segments} is not above \
+                 ingest.compaction_window_min_segments = {window_min_segments}. The two are a \
+                 floor and a ceiling over one gauge — 'worth folding tonight' and 'cannot wait for \
+                 tonight' — so a ceiling at or below the floor makes the window unreachable and \
+                 its three keys inert"
             ),
             ConfigError::CompactionWindowNotAWindow(secs) => write!(
                 f,
-                "ingest.compaction_window_secs = {secs} is a whole day or more, which makes the                  window every hour of every day — the ungated timer compaction §9 declines,                  reached by setting a width. Use 'compaction_window_start = \"off\"' if the                  intent is to fold whenever there is work, and set the segment threshold to say                  how much work"
+                "ingest.compaction_window_secs = {secs} is a whole day or more, which makes the \
+                 window every hour of every day — the ungated timer compaction §9 declines, \
+                 reached by setting a width. Set 'compaction_window_start = \"off\"' if the \
+                 intent is to fold whenever there is work, and let compaction_max_segments say \
+                 how much work"
             ),
             ConfigError::FloorClauseDisabled => write!(
                 f,
@@ -521,6 +553,8 @@ struct RawIngest {
     compaction_window_secs: Option<u32>,
     #[serde(default)]
     compaction_window_min_segments: Option<usize>,
+    #[serde(default)]
+    compaction_max_segments: Option<RawThreshold>,
     #[serde(default)]
     compaction_after_deletions: Option<RawThreshold>,
 }
@@ -1283,6 +1317,19 @@ const DEFAULT_COMPACTION_WINDOW_SECS: u32 = 4 * 3_600;
 /// it.
 const DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS: usize = 8;
 
+/// Sixty-four live segments in any one slice, **at any hour** — compaction §9's own default, and
+/// the ceiling above which deferring segment growth to the next window costs more than folding now.
+///
+/// **The one threshold here with a measurement behind it, though not at this value**: decision 0049
+/// measured ~73 ms on a 300-tile viewport at ~152 segments against a 135–164 ms baseline, so the
+/// regression is real and roughly linear in segment count. 64 is where §9 drew the line between
+/// "gradual, and can wait for a quiet hour" and "every viewer is paying for this now"; the
+/// interpolation is a judgement and probe P1 is what would replace it.
+///
+/// It must sit strictly above [`DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS`], and a configuration that
+/// inverts the two is refused — see [`ConfigError::CompactionSegmentThresholdsInverted`].
+const DEFAULT_COMPACTION_MAX_SEGMENTS: usize = 64;
+
 /// Buffer occupancy at which `/control/ingest` is refused (§1.3).
 ///
 /// **`ingest_queue_bound` does not bound this.** That one bounds the *command queue* — 32 jobs by
@@ -1692,6 +1739,37 @@ fn parse(text: &str) -> Result<Config> {
             return Err(ConfigError::CompactionThresholdNotANumberOrOff(word.clone()))
         }
     };
+    // **The segment gauge's ceiling**: the count past which deferring to the next window costs more
+    // than folding now. Off is legitimate for a deployment that would rather never fold in
+    // business hours than never carry a slow viewport.
+    let compaction_max_segments = match &raw.ingest.compaction_max_segments {
+        None => Some(DEFAULT_COMPACTION_MAX_SEGMENTS),
+        Some(RawThreshold::Count(n)) => Some(*n as usize),
+        Some(RawThreshold::Word(word)) if word == "off" => None,
+        Some(RawThreshold::Word(word)) => {
+            return Err(ConfigError::CompactionThresholdNotANumberOrOff(word.clone()))
+        }
+    };
+    let compaction_window_min_segments = non_zero_usize(
+        "ingest.compaction_window_min_segments",
+        raw.ingest
+            .compaction_window_min_segments
+            .unwrap_or(DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS),
+        "a zero threshold makes every night's window fold a bundle that is already one segment \
+         per slice — the ungated timer compaction §9 declines, reached by setting a gauge to a \
+         value nothing can be below",
+    )?;
+    // The floor must sit strictly below the ceiling or the window can never open — see
+    // `ConfigError::CompactionSegmentThresholdsInverted`. Checked only while the window is armed:
+    // with `compaction_window_start = "off"` there is no window for the floor to be inert in.
+    if let (Some(_), Some(ceiling)) = (compaction_window_start_secs, compaction_max_segments) {
+        if ceiling <= compaction_window_min_segments {
+            return Err(ConfigError::CompactionSegmentThresholdsInverted {
+                window_min_segments: compaction_window_min_segments,
+                max_segments: ceiling,
+            });
+        }
+    }
     let compaction = tessera_engine::CompactionSchedule {
         min_interval_secs: raw
             .ingest
@@ -1699,13 +1777,8 @@ fn parse(text: &str) -> Result<Config> {
             .unwrap_or(DEFAULT_COMPACTION_MIN_INTERVAL_SECS),
         window_start_secs: compaction_window_start_secs,
         window_secs: compaction_window_secs,
-        window_min_segments: non_zero_usize(
-            "ingest.compaction_window_min_segments",
-            raw.ingest
-                .compaction_window_min_segments
-                .unwrap_or(DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS),
-            "a zero threshold makes every night's window fold a bundle that is already one              segment per slice — the ungated timer compaction §9 declines, reached by setting a              gauge to a value nothing can be below",
-        )?,
+        window_min_segments: compaction_window_min_segments,
+        max_segments: compaction_max_segments,
         after_deletions: compaction_after_deletions,
     };
 
@@ -1972,9 +2045,74 @@ mod tests {
                 window_start_secs: Some(0),
                 window_secs: 4 * 3_600,
                 window_min_segments: 8,
+                max_segments: Some(64),
                 after_deletions: Some(DEFAULT_OVERLAY_SOFT_LIMIT as u64),
             }
         );
+    }
+
+    /// **The two segment thresholds are a floor and a ceiling, and an inverted pair is refused.**
+    ///
+    /// A ceiling at or below the floor makes the window unreachable: every count that would have
+    /// opened it has already fired the any-hour route, so three keys parse, validate and can never
+    /// fire — the inert key decision 0045 forbids.
+    ///
+    /// **Mutations this kills:** dropping the check (a deployment ships with a dead window);
+    /// making it `<` rather than `<=` (equal thresholds leave the window equally unreachable, since
+    /// the unwindowed route is consulted first); applying it while the window is off, where the
+    /// floor has no route to be inert in.
+    #[test]
+    fn an_inverted_pair_of_segment_thresholds_is_refused_unless_the_window_is_off() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        for ceiling in ["4", "8"] {
+            let toml = valid_toml_with(
+                "",
+                &format!(
+                    "compaction_window_min_segments = 8
+compaction_max_segments = {ceiling}
+"
+                ),
+            );
+            assert!(
+                matches!(
+                    parse(&toml),
+                    Err(ConfigError::CompactionSegmentThresholdsInverted { .. })
+                ),
+                "a ceiling of {ceiling} under a floor of 8 leaves the window unreachable"
+            );
+        }
+        assert!(parse(&valid_toml_with(
+            "",
+            "compaction_window_min_segments = 8
+compaction_max_segments = 9
+"
+        ))
+        .is_ok());
+
+        // With the window off there is no window to make inert, so the pair is not compared.
+        let window_off = parse(&valid_toml_with(
+            "",
+            "compaction_window_start = \"off\"
+compaction_window_min_segments = 8
+             compaction_max_segments = 4
+",
+        ))
+        .expect("a window that is off cannot be made unreachable");
+        assert_eq!(window_off.compaction.max_segments, Some(4));
+    }
+
+    /// The any-hour segment ceiling switches off on its own, leaving segment growth to the window
+    /// however far it goes — the posture a deployment takes when it would rather carry a slow
+    /// viewport than fold in business hours.
+    #[test]
+    fn the_segment_ceiling_switches_off_on_its_own() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let parsed = parse(&valid_toml_with("", "compaction_max_segments = \"off\"
+")).unwrap();
+        assert_eq!(parsed.compaction.max_segments, None);
+        assert!(parsed.compaction.window_start_secs.is_some());
     }
 
     /// `overlay_soft_limit` is the *alarm*, and the unwindowed route follows it unless told

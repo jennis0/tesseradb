@@ -2,6 +2,14 @@
 
 **Date:** 2026-08-07 · **Status:** Settled (owner ruling)
 
+> **Extended the same day, before anything was built on the first form.** As first ruled, the
+> segment gauge fired *only* inside the window. The owner's correction is that segment growth is
+> deferrable up to a point and not indefinitely, so it gets a second, higher threshold that fires at
+> any hour. The window and its argument are unchanged; what changed is that the segment gauge now
+> has a floor **and** a ceiling. Recorded in place rather than as a superseding decision because it
+> completes this ruling rather than reversing it — the reader who wants the difference has one
+> commit to look at.
+
 ## Context
 
 `compaction.md` §9 specifies the fold's automatic trigger as an **OR over four work gauges** with
@@ -20,17 +28,21 @@ its traffic, is reliably the busiest one.
 
 ## The decision
 
-**Two trigger routes, and each is a work gauge — one of them additionally constrained to a window.**
+**Three trigger routes over two work gauges, and only one of them is windowed.**
 
-1. **A daily window.** `compaction_window_start` (UTC `HH:MM`, default `00:00`) opens a window of
-   `compaction_window_secs` (default 4 h) in which a fold is dispatched **if** any live slice holds
-   at least `compaction_window_min_segments` segments (default 8). Outside the window this route
-   never fires, whatever the segment count.
-2. **Retirable depth, unwindowed.** A fold is dispatched at any hour once `|deleted|` reaches
-   `compaction_after_deletions`, which defaults to `overlay_soft_limit` — §9's own gauge, and the
-   action that alarm was always supposed to prompt.
+1. **A daily window, over the segment gauge's floor.** `compaction_window_start` (UTC `HH:MM`,
+   default `00:00`) opens a window of `compaction_window_secs` (default 4 h) in which a fold is
+   dispatched **if** any live slice holds at least `compaction_window_min_segments` segments
+   (default 8). Outside the window this route never fires.
+2. **The segment gauge's ceiling, unwindowed.** A fold is dispatched at any hour once any live
+   slice reaches `compaction_max_segments` (default 64) — §9's own gauge at §9's own default.
+3. **Retirable depth, unwindowed.** A fold is dispatched at any hour once `|deleted|` reaches
+   `compaction_after_deletions`, which defaults to `overlay_soft_limit` — the action that alarm was
+   always supposed to prompt.
 
-`compaction_min_interval_secs` (86,400) remains the floor under both.
+`compaction_min_interval_secs` (86,400) remains the floor under all three, and the ceiling must sit
+strictly above the floor or the window is unreachable — a configuration the loader refuses rather
+than ships.
 
 **The window is not a maximum age and does not become one after a missed window.** A node that is
 down at 00:00 and starts at 09:00 does **not** fold: the window has closed, and the next one is
@@ -45,13 +57,19 @@ merge is keeping the segment axis bounded on its own, crosses no threshold and f
 own precedent — the growth-gated tick rotation, where an idle node rotates nothing — is the same
 shape. What the window adds is *when*, not *whether*.
 
-**The two routes carry different urgency and that is why they are not one.** Segment count is a read
-cost: it degrades a viewport gradually and nothing breaks if it is paid down tonight rather than now
-(decision 0049 measured ~73 ms on a 300-tile viewport against a 135–164 ms baseline at ~152
-segments). Retirable depth is a write cost, and it is unbounded: the overlay grows monotonically
-under deletion churn, every deny acceptance clones it, and depth is a term in I1's composition cost.
-A deployment that hits 500,000 un-retired deletions at 14:00 should not wait ten hours to start
-recovering. So the cheap-to-defer gauge is windowed and the expensive-to-defer one is not.
+**Deferring a cost is not the same as ignoring it, which is why the segment gauge has two
+thresholds and not one.** Segment count is a read cost that degrades a viewport gradually, so at
+eight segments nothing breaks if it is paid down tonight — that is the window's floor. But
+"gradually" is a rate, not a ceiling: decision 0049 measured ~73 ms on a 300-tile viewport at ~152
+segments against a 135–164 ms baseline, a ~50% regression, and a deployment ingesting fast enough to
+add segments through the night gets there long before the next window. Telling it to wait is
+choosing a worse hour for the read path over a worse hour for the write path, on behalf of every
+viewer. So the same gauge fires at any hour once it reaches `compaction_max_segments`.
+
+**Retirable depth has no window at all**, because the cost it measures is unbounded rather than
+merely growing: the overlay grows monotonically under deletion churn, every deny acceptance clones
+it, and depth is a term in I1's composition cost. There is no threshold below which waiting is
+free, so there is nothing for a window to protect.
 
 **UTC, not local time, and this is a correctness argument rather than a convenience one.** A
 local-time window shifts by an hour twice a year, and on the transition day it fires either twice or
@@ -78,6 +96,11 @@ right thing for an operator to see.
 **A window with no work gate.** That is the pure timer §9 declined, and the argument is unchanged: a
 deployment that takes three deletions a year has no reason to rewrite 47 GB at midnight.
 
+**A windowed-only segment gauge**, which is how this decision first read. It leaves a deployment
+that reaches a viewport-degrading segment count at 09:00 waiting until midnight while every tile
+pays a binary search per segment — deferring a cost past the point where deferring is the cheaper
+option, which is the opposite of what the window is for.
+
 **Making the window a deadline that survives its own end** (fold as soon as possible after a missed
 window). It converts the one knob whose purpose is *"not during the day"* into a guarantee that a
 fold will eventually run during the day.
@@ -93,9 +116,8 @@ is a state a fold does not leave behind.
 
 - `compaction.md` §9's trigger table gains the window and its two knobs, and the paragraph declining
   a pure timer is narrowed to say which timer it declines.
-- Three of §9's four gauges stay **unbuilt**: dead bytes, the tombstoned-row fraction, and the
-  unwindowed segment-count trigger. The first two are the two thresholds §14 already marks as
-  *assumed*, and the third is what the window now covers on a cadence instead of continuously.
+- Two of §9's four gauges stay **unbuilt**: dead bytes and the tombstoned-row fraction, which are
+  the two thresholds §14 already marks as *assumed* and which need a disc walk nothing performs.
 - Two new defaults — `compaction_window_secs` (4 h) and `compaction_window_min_segments` (8) — are
   **assumed**, on the same footing as §9's other two uncalibrated numbers, and probe **P1** is what
   turns them into evidence.
