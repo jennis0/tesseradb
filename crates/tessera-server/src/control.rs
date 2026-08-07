@@ -1633,10 +1633,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // 10⁹, so it is invisible to a soak and needs a gauge. Rising past the low hundreds means
         // merge has stopped bounding it and only a fold will reset it.
         //
-        // ⊘ **And no fold exists**, so today this gauge has no lever: an operator watching it climb
-        // has nothing to act with except `max_merged_segment_bytes`, which decision 0049 declines to
-        // raise until merge streams. It is published anyway, because the constant being
-        // unobservable is how it went unnoticed to 10⁹ in the first place.
+        // A fold resets it to one segment per partition-slice, and ⊘ **nothing schedules one**:
+        // compaction §9's automatic trigger and `POST /control/compact` are unbuilt, so an operator
+        // watching this climb has no endpoint to act with. It is published anyway, because the
+        // constant being unobservable is how it went unnoticed to 10⁹ in the first place.
         //
         // A list rather than a scalar because the trigger compaction §9 specifies is per
         // (partition, slice); this build emits one of each, so the list has one element and will not

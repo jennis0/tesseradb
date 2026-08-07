@@ -121,10 +121,13 @@ obligation. Two retirement rules retire two different ways
 ([`design/write-path.md`](design/write-path.md) §5.4); the stamp ledger [#4]'s title names is
 **deleted from the spec rather than deferred**, and the predicate-change rule has no producer and
 no machinery ([decision 0048](decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)).
-Rule S is built. So what remains of [#4] is *deletions retire at the fold* — which is [#73], the
+Rule S is built. So what remained of [#4] was *deletions retire at the fold* — which is [#73], the
 compaction epic, designed against [`design/compaction.md`](design/compaction.md) and broken into
-eight tasks. Nothing but an unsuppress retires today, which is fail-closed and is why the theme is
-safe to sequence late.
+eight tasks. **The fold is built and deletions retire at it.** What [#73] still owes is its
+operator surface: the three gauges, the automatic trigger and `POST /control/compact` (compaction
+§9). Until one of those lands nothing *schedules* a fold, so an overlay comes down when something
+asks for one — which constrains cadence rather than correctness, and is why the theme was safe to
+sequence late.
 
 The theme's remaining difficulty is identity rather than throughput. Entity identifiers are
 append-only and assigned in signature order, and that ordering is scoped to whatever one commit

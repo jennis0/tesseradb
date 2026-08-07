@@ -1,12 +1,15 @@
 //! **The publication seam, widened to survive a prefix flip** — compaction §4's four gaps.
 //!
-//! ⊘ No fold exists. These cases stand in for one by publishing a *second prefix* whose bytes are
-//! the first's, under a `MANIFEST.json` that differs — so the bundle identity rotates, every file
-//! still verifies, and the seam is exercised in exactly the shape a fold will use it: `CURRENT`
-//! flipped, then [`Engine::publish_rotated_prefix`]. What the stand-in does not model is the fold's
-//! *content* (dropped rows, rewritten postings, dropped keys); it models the identity rotation,
-//! which is the half Rule F's safety hangs on and the half write-path §5.4 requires be closed in the
-//! same change as the first fold.
+//! These cases stand in for a fold by publishing a *second prefix* whose bytes are the first's,
+//! under a `MANIFEST.json` that differs — so the bundle identity rotates, every file still
+//! verifies, and the seam is exercised in exactly the shape a fold uses it: `CURRENT` flipped, then
+//! [`Engine::publish_rotated_prefix`]. What the stand-in does not model is the fold's *content*
+//! (dropped rows, rewritten postings, dropped keys); it models the identity rotation, which is the
+//! half Rule F's safety hangs on.
+//!
+//! **The fold itself is in `tests/fold.rs`**, which runs the real thing. These stay because they
+//! isolate the seam: a fold exercises it only along the one path its publication takes, where each
+//! case here holds one gap open on its own.
 //!
 //! The four gaps, and the case that holds each open:
 //!

@@ -796,11 +796,13 @@ either way.)*
   it bought incremental early retirement that no requirement asks for, now that the read path's
   deny term is a mask rather than a walk. It was not wrong; it was precision nothing pays for.
 
-⊘ **Today nothing retires at all** — no fold exists. `Overlay::retire` is Rule F's route and the
-publication seam carries it, but nothing derives an executed set, so every publication passes an
-empty one: deletion denies are immortal; the overlay grows monotonically under deletion churn;
-`overlay_soft_limit` (500,000) alarms on depth and nothing acts, because the lever its response
-should pull — *schedule a compaction* — does not exist. Fail-closed, and not the mechanism.
+**Retirement now happens, and the fold is what performs it.** `Overlay::retire` is Rule F's route,
+the publication seam carries it, and the fold derives the executed set at its own publication from
+what it demonstrably removed (compaction §5). ⊘ What is still missing is a *schedule*:
+`overlay_soft_limit` (500,000) alarms on depth, and the lever its response should pull —
+compaction §9's automatic trigger, and the `POST /control/compact` contracts §3.4 reserves — is
+unbuilt, so a deployment's overlay comes down when something asks for a fold and not before.
+Fail-closed, and now a question of cadence rather than of mechanism.
 
 ### 5.5 Durability failure: the apply-anyway fold
 

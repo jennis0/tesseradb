@@ -1,7 +1,7 @@
 # Compaction — design
 
 **Date:** 2026-08-05
-**Status:** **Provisional — r8; the seam and the three passes are built.** Two adversarial rounds
+**Status:** **Provisional — r9; the fold is built.** Two adversarial rounds
 have run (r3, three lenses; r5, two lenses on the sections that changed shape) and both are
 dispositioned in the body. r4's three fatal findings and its refuted mechanism are fixed there:
 retirement is derived from what the publication removed, the locator is snapshot-bounded, the seam
@@ -16,13 +16,11 @@ extents (r21, decision 0051). **The §5/§6 re-review ran at r5 and is
 dispositioned**, and its findings changed both sections: §5's retirement rule tests the whole
 carry-forward set, §6.1's throttle was refuted and replaced (decision 0052), and §6.2's refusal
 window is gone — a fold's aftermath is a cache miss, not a refusal (decision 0053), which also
-retires §6.3. **The publication seam (§4) and Rule F's retirement route (§5) are built**, ahead of
-the fold everything else in this document describes, because they are the change write-path §5.4
-requires be made in the same change as the first fold and because every other part of the fold
-publishes through them. **What remains before it becomes normative:** the invariants lens on the
-staging list of §6.2, if it is built, and on D5's rows-frozen safety claim, which has never had one.
-Code may be written against this document meanwhile; neither gates implementation of the fold
-itself.
+retires §6.3. **The fold is built** (2026-08-07): the plan, the dedicated thread, all five passes, the
+publication in §4's order, retirement's `executed` derivation and reclamation. **What remains before
+this becomes normative:** the invariants lens on the staging list of §6.2, if it is built, and on
+D5's rows-frozen safety claim, which has never had one. **What remains unbuilt** is the operator
+surface (§9) — a fold happens when something calls for one, and nothing schedules it.
 **Owns:** the fold — what it executes, what it carries forward, how it is published, what retires
 at it, and what a viewer pays at the flip. The prefix rewrite, the `CURRENT` flip, and
 reclamation.
@@ -36,18 +34,14 @@ lifecycle §2; decisions 0013, 0040, 0041, 0042, 0043, 0044, 0046, 0047, 0048, 0
 `contracts §n`, `SA §n`, `lifecycle §n` as named. This document's own sections are **spec §n**,
 and are cited from elsewhere as `compaction §n`.
 
-**⊘ No fold exists**, and everything this document says about one is obligation rather than
-description. What *is* built are the primitives its passes compose and **the publication seam they
-publish through**, marked ✔ where they appear — the streaming segment writer and its k-way merge
-producer (spec §3 pass 1), the mapped `permutation.bin` scatter (pass 1), the streaming external-id
-run merge (pass 3), the refresh's prefix carry and its MRU ordering (spec §6.2), the seam's four
-gaps and Rule F's retirement route (spec §4, spec §5), and probes **P2** and **P3** (spec §14).
-**Passes 1, 2 and 3 are built too** (spec §3), and what none of them has is a caller that folds.
-**The plan, the dedicated thread that runs the passes, passes 4 and 5, retirement's *derivation*
-(spec §5's `executed` rule), reclamation (spec §8) and the operator surface (spec §9) are
-unbuilt.** Where a figure is quoted it is marked measured, modelled
-or assumed; claims about the tree were verified against branch `geometry/cell-plus-residual` and
-re-verified for each ✔.
+**The fold runs**, and everything in §1–§5 and §8 is description. `tessera-engine::compact` holds
+the plan and the five passes; `Executor::publish_fold` holds the publication, retirement's
+derivation and the reclamation; `Engine::request_fold` is the only trigger. ⊘ **What is obligation
+rather than description**: the operator surface (spec §9) — the three gauges, the automatic trigger
+and `POST /control/compact` — the staging list (spec §6.2), the `MADV_SEQUENTIAL` hint and the
+write-side `POSIX_FADV_DONTNEED` (spec §6.1), and probe **P1**, whose absence leaves this document's
+central memory claim modelled. Where a figure is quoted it is marked measured, modelled or assumed;
+claims about the tree were verified against branch `geometry/cell-plus-residual`.
 
 ---
 
@@ -326,9 +320,21 @@ is **declined**: it copies gigabytes to bound an axis `coalesce` already bounds.
 
 ### Pass 5 — the manifests
 
-`MANIFEST.json` for the new prefix, digesting each file as it is written rather than re-reading it;
-then the carried-forward files hard-linked in (spec §8); then `SEGMENTS-<n>.json` assembled at
-publication, not here (spec §4).
+`MANIFEST.json` for the new prefix, over the digests of everything the passes wrote; then the
+carried-forward files hard-linked in (spec §8); then `SEGMENTS-<n>.json` — and, as it turns out,
+`MANIFEST.json` itself — assembled at publication, not here (spec §4). The manifest cannot be
+written until the carry-forward set is known, and that set is live state, decided at publication
+like every other live thing (spec §2). What pass 5 owns is the digests.
+
+**Each digest is taken by reading the file back, and this paragraph used to claim otherwise.** It
+said "digesting each file as it is written rather than re-reading it", which none of the five
+writers the passes compose can offer: `SegmentWriter`, `RunWriter`, `LocatorWriter` and
+`PostingsSpool` all *assemble* their output at `finish` from a spool they map back, and
+`PairsParquetWriter` hands its bytes to an Arrow writer that owns the file. Hashing at the source
+means a hashing wrapper inside each of them, against writers whose byte-identity with the build's is
+itself under test. So the fold re-reads, which is what `tessera-build` does at every scale it has
+been measured at — and it is a stage, not a rounding error: ~47 GB at 10⁹. Recorded as a cost this
+design pays rather than as one it avoids.
 
 **Failure at any point discards the fold.** Its files are orphans under a prefix `CURRENT` does not
 name, the next trigger re-plans from scratch, and there is no resume: a resumable fold would need
@@ -351,6 +357,16 @@ On the executor, in this order.
    watermark as buffered rather than rowed, so the gap goes invisible to every principal with no
    error. ✔ The seam refuses a regression rather than trusting the rule
    (`geometry::check_publishable`).
+
+   **The two `entity_id_high_water` fields mean different things, and only one of them is live.**
+   `SEGMENTS-<n>.json`'s seeds the I9 allocator and is the live value, as above.
+   `MANIFEST.json`'s is read by exactly one thing — `ExternalIdSidecar::deferred_from_manifest`,
+   as the base locator's **declared length** — so it must be the *snapshot's* entity space, which
+   is what pass 3 sized the locator to. A live value there re-opens fidelity F1 by the back door:
+   the base locator would claim every post-snapshot entity and answer "this item has no external
+   id" for items that have one. It also fails loudly rather than quietly, because the sidecar
+   checks the declared length against the file's bytes at first touch — but a design that relies
+   on that is relying on a check it did not put there.
 3. **Check the merge-size relation against the fold's own output.** `max_merged_segment_bytes` must
    stay strictly below the base segment's bytes or the *next startup* refuses the configuration
    (write-path §10) — and a fold *grows* the base, folding every extent into it, so the relation
@@ -428,11 +444,23 @@ a restart could not find.
 The executed entries leave `deleted` **in the fold's own swap** — Rule F, whose
 safety is the identity match spec §4 builds, not a stamp ordering.
 
-✔ **The route is built and the rule is not.** `Overlay::retire` is the one thing that removes from
+✔ **Both the route and the rule are built.** `Overlay::retire` is the one thing that removes from
 `deleted`, it takes only deletions and has no sibling for `suppressed`, and it is reachable only
 through a publication carrying a `PrefixRotation` — so the identity match and the retirement are
-one swap by construction. What is unbuilt is the set: `executed` below is the fold's to derive, and
-an empty one is what every caller passes today.
+one swap by construction. `executed` is derived at `Executor::publish_fold`, from the live
+manifest minus what the fold consumed.
+
+**Rule F has a third half that is neither the overlay nor the postings, and it is easy to miss.**
+Retirement makes `overlay.is_deleted` false, and both ingest duplicate checks exempt a holder only
+while it is true — so the write path's **live `established` map** must lose the retired entities'
+bindings in the same swap, or a lawful re-ingest of one of those external ids is refused 409,
+permanently, since nothing else ever removes a key. Pass 3 drops the keys from the folded run and
+that is not sufficient: the live map is consulted first and is never rebuilt from the bundle. ✔ The
+prune sits at `Executor::publish_geometry`, immediately before the retirement, which is the order
+with no window — between a prune and a retirement the key is simply absent from the live map and
+the bundle's own sidecar still answers for a holder that is still deleted, so the check still
+exempts. The other order leaves a window in which the key resolves to an entity that is no longer
+deleted, which is the 409 this exists to close.
 
 **What "executed" means is the whole of this section, and the obvious definition is fail-open**
 (r3, invariants F1). Retiring the plan's tombstone clone `D₀` serves an acknowledged deletion,
@@ -678,7 +706,12 @@ That, and the absence of a throttle site (spec §6.1), is what remains open here
 ## 7. Interleavings worth stating once
 
 - **Flush during the fold**: publishes into the old prefix, carried forward at the flip with a new
-  `row_base`. Never blocked.
+  `row_base`. Never blocked. ✔ **And it arises from the tick's own ordering rather than needing a
+  long fold to be likely**: a tick plans and dispatches a flush and *then* dispatches the fold
+  against the generation that flush has not published into yet, so the fold's snapshot names none
+  of its rows. That is exactly the interleaving spec §5's rule exists for, and it is why the rule
+  is not a hypothetical: the segment carried forward may name, in its declared range, an entity in
+  `D₀` that has no row in it at all.
 - **Deny during the fold**: in force at its own ack. A delete is post-snapshot, so its entity keeps
   its row in the folded base and its tombstone is carried forward — the fail-open spec §2 exists to
   close.
@@ -790,9 +823,10 @@ until then they are marked as assumed in spec §14 and a deployment may set eith
 | `tessera-authz` | ✔ the bitmap-shaped `encode_posting` sibling; ✔ pass 2 — `sweep_term_postings`, which hands `pairs.parquet`'s relation to a callback because this crate cannot reach the Parquet writer (see below); ✔ `FragmentCache::rotate` and the identity a `FrozenFragment` carries (spec §4) |
 | `tessera-build` | a consumer of `PairsParquetWriter` now rather than its owner (see the rule below) — still the only crate that *builds* a bundle from source, and still the only Parquet reader |
 | `tessera-lifecycle` | ✔ `Overlay::retire` — Rule F's one route out of `deleted`, with no sibling for `suppressed` (spec §5) |
-| `tessera-engine::compact` | plan, execute, publish — the shape `flush.rs` / `merge.rs` / `coalesce.rs` already establish, and the fourth caller of the same publication discipline |
+| `tessera-engine::compact` | ✔ the plan (`plan_fold`, pure, on the executor), the five passes (`execute`, on one dedicated thread), the next-prefix rule and Rule F's `executed` derivation — the shape `flush.rs` / `merge.rs` / `coalesce.rs` already establish, and the fourth caller of the same publication discipline |
+| `tessera-engine::write` | ✔ `dispatch_fold` (its own thread, and the suspension of merge and coalesce), `publish_fold` (spec §4's seven steps in order), the deferred reclamation (spec §8), and the live external-id map's prune, which is the half of Rule F that lives in memory rather than in a file |
 | `tessera-engine::session` | ✔ the seam: `bundle_identity`, the fragment cache and the external-id index onto `Generation`; `GeometryPublication` and its `PrefixRotation`; `publish_rotated_prefix`; the bundle root in place of a captured prefix directory |
-| `tessera-server` | `POST /control/compact`, the three gauges, the free-space precondition |
+| `tessera-server` | ⊘ `POST /control/compact`, the three gauges, the free-space precondition. `Engine::request_fold` is the trigger they will call; nothing else does |
 
 `scripts/check-layers.sh` is unaffected: the engine already depends on both store and authz, and
 the fold adds no publisher — it goes through the executor like everything else.
@@ -839,6 +873,16 @@ it.
 
 Fifteen obligations, in the shape write-path §14 uses. Numbers 1–4 are the fold's reason for
 existing and none of them can be inferred from the others passing.
+
+✔ **Thirteen are covered**, in `tessera-engine/tests/fold.rs` against a real fold and in
+`compact.rs`'s unit cases for the retirement rule itself. **Two are not, and neither for want of a
+test**: 12 is probe **P1**, which nothing has run, so this design's central memory claim stays
+modelled; and 9 (the fold discards when a merge or coalesce published under it) has the rebase check
+and the suspension but no case that constructs the race, which needs a merge held mid-flight against
+a fold — machinery neither pass has today. Obligation 2b's *end-to-end* case pins the rule over the
+whole carry-forward set; the per-artefact independence it also claims is only separable in the unit
+fixture, because a flush publishes its segment, tier, run and locator extent together over one
+entity range, and that is recorded at both tests rather than assumed.
 
 1. **All three halves of one deletion, in one test:** a folded entity's row is absent from the new
    base, its postings are absent from the new term index, and its overlay entry is retired. Two of
@@ -1011,6 +1055,36 @@ P2 dropped its pre-swap arm: D2 was withdrawn at r3 (spec §13), so there is no 
 compare against and what the probe measures is the post-swap pass alone.
 
 ## Appendix R — Review record
+
+**r9 (2026-08-07) — the fold is built, and §1–§5 and §8 become description.** Not a review round.
+The plan, the dedicated thread, all five passes, §4's publication in order, retirement's `executed`
+derivation and §8's reclamation landed together, because they are one ordering and the fail-open
+lives inside it. Six things this round found or settled that the document did not say:
+
+- **`MANIFEST.json`'s `entity_id_high_water` is not `SEGMENTS-<n>.json`'s.** The first is read by
+  exactly one thing — the base locator's declared length — so it must carry the *snapshot's* entity
+  space, which is what pass 3 sized the locator to; the second seeds the allocator and is the live
+  value. §4 step 2 said only "the live values", which re-opens r3's fidelity F1 through a field it
+  did not name. Both are now stated at the site.
+- **Rule F has a third half, and it is neither the overlay nor the postings.** Retirement makes
+  `overlay.is_deleted` false, and both ingest duplicate checks exempt a holder only while it is
+  true — so the write path's live `established` map has to lose the retired bindings in the same
+  swap or a lawful re-ingest is refused 409, permanently. §3 pass 3 already said "either alone
+  leaves the other path answering" and nothing owned it; it is now at §5 and at the code.
+- **Pass 5 cannot digest as it writes**, and the claim that it does is withdrawn (§3, pass 5). None
+  of the five writers it composes assembles its output before `finish`, so the fold re-reads — which
+  is what `tessera-build` does, and is a stage rather than a rounding error.
+- **The r3 interleaving arises from the tick's own ordering** (§7): a tick dispatches a flush and
+  then the fold, so a carried-forward segment's declared range can name a `D₀` entity that has no
+  row in it. The rule was written against a hypothetical; it is not one.
+- **A fold that would break write-path §7's base-segment relation is discarded** (§4 step 3), and
+  the check needs the *configured* `max_merged_segment_bytes` rather than the resolved policy value
+  — the startup refusal it mirrors checks only an explicitly set one.
+- **Reclamation waits on the superseded generation's last reader** (§8). Unlinking a mapped file is
+  safe, but the external-id sidecar opens its runs lazily, so a request holding the superseded
+  generation may not have opened its files yet. The executor holds that generation and reclaims at a
+  strong count of one; a process exiting first leaves the tree as an orphan, which is §7's startup
+  sweep and is still unbuilt.
 
 **r8 (2026-08-06) — the three passes are built, and §3 was contradicting §5 in four places.** Not a
 review round. Passes 1, 2 and 3 landed (`fold_row_space`, `sweep_term_postings`,

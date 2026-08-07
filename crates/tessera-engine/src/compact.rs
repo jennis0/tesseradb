@@ -1,10 +1,22 @@
 //! The compaction fold — plan, execute, publish (compaction §1).
 //!
-//! ⊘ **No fold runs yet.** What is built here is the publication-time half that decides *which
-//! deletions retire*, which is the one part of the fold where a mistake is fail-open rather than
-//! merely wrong. The passes it will drive are built and live in `tessera-store` and `tessera-authz`
-//! (`fold_row_space`, `sweep_term_postings`, `fold_external_id_runs`); the plan, the dedicated
-//! thread that runs them, and the publication that carries their output through the seam are not.
+//! Three parts, on three different threads, and the split is the design rather than an
+//! implementation detail:
+//!
+//! - [`plan_fold`] runs **on the executor**, against the live generation, and is pure. It names
+//!   files and clones one entity-space bitmap (`D₀`). Nothing it decides depends on live state
+//!   surviving, because everything about live state is decided again at publication (compaction
+//!   §2).
+//! - [`execute`] runs **on one dedicated thread**, not the shared rayon pool. A fold's input is the
+//!   corpus, and occupying request-serving workers for the minutes-to-hours that takes is the
+//!   maintenance schedule leaking into the product that decision 0043 forbids. Sequential also
+//!   bounds memory: there are no per-worker buffers to multiply.
+//! - Publication is `Executor::publish_fold` (`write.rs`), on the executor again, because the
+//!   executor is the process's only publisher (lifecycle §1.3).
+//!
+//! `flush.rs` / `merge.rs` / `coalesce.rs` establish the plan → context → execute → completed →
+//! publish shape and this is its fourth caller. What differs is the thread, and that it publishes a
+//! **new prefix** rather than into the live one.
 //!
 //! # Retirement, and why the obvious definition is fail-open
 //!
@@ -47,19 +59,32 @@
 //! while its row and its external-id binding are both carried forward. Retiring it would 409 a
 //! lawful re-ingest of its external id (decision 0047), which is why compaction §12's obligation 2b
 //! names it as the shape a tier test misses.
+//!
+//! # Passes 1–3 execute over `D₀`, and this module holds both sets without confusing them
+//!
+//! [`FoldPlan::tombstones`] is `D₀` and is what [`execute`] hands to every pass. [`executed`] is
+//! computed hours later, at publication, from what the publication carried forward. The
+//! containment `executed ⊆ D₀` is the safety property: everything that retires demonstrably lost
+//! its row and its postings, and an entity in `D₀ \ executed` has lost both as well and merely
+//! keeps its overlay entry for another round. The passes themselves live in `tessera-store` and
+//! `tessera-authz`, crates from which [`executed`] is not reachable, so the confusion is not
+//! expressible there at all — only here, and only by handing the wrong field to a pass.
 
-// ⊘ **Nothing calls this yet, and the marker is deliberate.** The publication that will —
-// compaction §4's step 6, which hands `executed` to `Engine::publish_rotated_prefix` — is the next
-// part of this epic. The retirement rule is built ahead of it because it is the half of the fold
-// where a mistake is fail-open, and it is testable in isolation while a whole fold is not: every
-// case below is one of compaction §12's obligations, and none of them needs a fold to run. The
-// alternative was to land the rule inside the publication and have its first test be an end-to-end
-// one, which is how a rule this shape gets checked once and never again.
-#![allow(dead_code)]
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use tessera_store::manifest::{LocatorExtent, SegmentDescriptor};
+use tessera_authz::{sweep_term_postings, DeltaTier, PostingsReader, PostingsSpool};
+use tessera_spatial::tiler::ScalarType;
+use tessera_store::manifest::{FileDigest, SegmentDescriptor};
+use tessera_store::{
+    fold_external_id_runs, fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter,
+};
+use tessera_types::IdentityKey;
+
+use crate::Generation;
 
 /// Every entity a carried-forward artefact names — the operand [`executed`] subtracts from `D₀`.
 ///
@@ -91,14 +116,8 @@ impl CarriedForward {
 
     /// A locator extent the fold did not consume — the external-id half of compaction §5's
     /// "tier, segment *and* run", and the one that names a zero-term item's binding.
-    pub(crate) fn add_locator_extent(&mut self, extent: &LocatorExtent) {
+    pub(crate) fn add_locator_extent(&mut self, extent: &tessera_store::manifest::LocatorExtent) {
         self.add_range(extent.entity_lo, extent.entity_hi);
-    }
-
-    /// An entity named directly — the escape hatch for an artefact that carries no range, so that
-    /// a future carried-forward kind is expressible without widening the fail-open.
-    pub(crate) fn add_entity(&mut self, entity: u64) {
-        self.add_range(entity, entity);
     }
 
     /// `entity_lo ..= entity_hi`, inclusive.
@@ -143,9 +162,498 @@ pub(crate) fn executed(d0: &Bitmap, carried: &CarriedForward) -> Bitmap {
     executed
 }
 
+// =================================================================================================
+// The plan
+// =================================================================================================
+
+/// One live segment of one slice, as the plan names it.
+///
+/// `dir` is **prefix-relative**, so the plan is a list of names rather than of resolved paths — the
+/// same form the manifest's `files` map takes, and the form [`execute`] joins onto whichever prefix
+/// directory it is reading.
+pub(crate) struct PlannedSegment {
+    pub(crate) seg_id: String,
+    pub(crate) dir: String,
+}
+
+/// One slice's half of a fold plan.
+pub(crate) struct FoldSlicePlan {
+    pub(crate) slice: String,
+    /// Every live segment of this slice at the snapshot — the base plus every extent. Pass 1 merges
+    /// them all; order does not matter to it, since the merge is driven by a heap over each
+    /// cursor's `(morton, tessera_id)` key.
+    pub(crate) segments: Vec<PlannedSegment>,
+    /// The bound for this slice's new `permutation.bin`: **one past the highest entity the
+    /// snapshot's row space covers**, and emphatically not the live `entity_id_high_water`.
+    ///
+    /// `RowSpace::with_extent` refuses an extent that begins below the base permutation's bound, so
+    /// a bound taken from the allocator's high-water would refuse every carried-forward flush
+    /// segment whose entities were *buffered* at the snapshot — and it would refuse them at
+    /// `open_written_prefix`, which runs after `CURRENT` has already flipped. Taken from the row
+    /// space, the floor is exactly what every post-snapshot publication had to clear to become live
+    /// in the first place.
+    pub(crate) permutation_bound: u64,
+}
+
+/// One fold's immutable plan: the files it consumes, and `D₀`.
+///
+/// **Pure, and it holds nothing open.** Every input is an immutable file named by path, so the plan
+/// survives arbitrary churn on the executor while the fold runs — what it does *not* survive is a
+/// publication that consumed one of those files, which is what the rebase check at publication
+/// (compaction §4 step 1) is for.
+pub(crate) struct FoldPlan {
+    pub(crate) partition: String,
+    pub(crate) slices: Vec<FoldSlicePlan>,
+    /// Every live delta tier, prefix-relative, in the live manifest's order — all consumed.
+    pub(crate) tiers: Vec<String>,
+    /// Every live external-id run, prefix-relative, oldest first — all consumed by pass 3.
+    pub(crate) runs: Vec<String>,
+    /// Every live locator extent's path — consumed with the runs they index.
+    pub(crate) locator_extents: Vec<String>,
+    /// `D₀` — the plan's tombstone clone. Handed to passes 1–3 whole; never [`executed`].
+    pub(crate) tombstones: Bitmap,
+    /// One past the highest entity **with a row anywhere in this partition** at the snapshot — the
+    /// span pass 3's `ext-locator.u32` covers, and therefore the value the new `MANIFEST.json`
+    /// carries as `entity_id_high_water` (which is what the sidecar reads it as; see
+    /// `ExternalIdSidecar::deferred_from_manifest`).
+    ///
+    /// **Not the live high-water**, for compaction §3 pass 3's reason: the base locator has
+    /// absolute priority below its own length, so a full-length locator swallows every
+    /// post-snapshot entity and answers "this item has no external id" for items that have one.
+    pub(crate) entity_bound: u64,
+    /// The dictionary length the term sweep emits records for. Every ordinal below it gets a
+    /// record, empty or not.
+    pub(crate) dict_len: u32,
+    pub(crate) small_term_threshold: u32,
+    /// The prefix this plan was taken against. A publication into a different one is discarded.
+    pub(crate) prefix: String,
+}
+
+/// Why a tick planned no fold. Each is a distinct operator-facing condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoFold {
+    /// **The WAL is poisoned.** A fold writes `tombstones` and `deny` into its new side-manifest
+    /// from an overlay holding dispositions no durable record backs, and it rotates the WAL
+    /// immediately afterwards — the same two reasons `plan_flush` and `publish_overlay_state`
+    /// refuse.
+    WalPoisoned,
+    /// **The in-memory overlay has diverged from the durable WAL** (write-path §7.2).
+    OverlayDiverged,
+    /// **A partition is serving a stepped-down side-manifest.** A fold assembled from older served
+    /// state would fold the stepped-past segment out of existence rather than merely shadow it.
+    SteppedDown,
+    /// No partition, or a partition with no slice holding a segment. Nothing to fold.
+    NothingToFold,
+    /// The bundle declares a scalar column this build cannot write, so pass 1 would emit a segment
+    /// the reader refuses. The same fail-closed answer a flush gives.
+    UnwritableScalarSchema,
+}
+
+/// Plan a fold of `generation`'s single partition.
+///
+/// Pure, so the selection is testable without an executor: it reads the generation and the two
+/// executor-health flags and nothing else.
+pub(crate) fn plan_fold(
+    generation: &Generation,
+    wal_poisoned: bool,
+    overlay_diverged: bool,
+) -> Result<FoldPlan, NoFold> {
+    if wal_poisoned {
+        return Err(NoFold::WalPoisoned);
+    }
+    if overlay_diverged {
+        return Err(NoFold::OverlayDiverged);
+    }
+    if generation
+        .bundle
+        .partitions
+        .values()
+        .any(|p| p.stepped_down())
+    {
+        return Err(NoFold::SteppedDown);
+    }
+    if crate::write::scalar_schema_of(&generation.bundle.manifest).is_none() {
+        return Err(NoFold::UnwritableScalarSchema);
+    }
+
+    let (partition, partition_data) = generation
+        .bundle
+        .partitions
+        .iter()
+        .next()
+        .ok_or(NoFold::NothingToFold)?;
+    let manifest = &partition_data.manifest;
+
+    let mut slices: Vec<FoldSlicePlan> = Vec::new();
+    // Sorted, so a plan is a function of the generation and not of a `HashMap`'s iteration order —
+    // the new manifest's segment list follows this order, and a manifest whose bytes depend on
+    // hashing is a bundle identity that depends on hashing.
+    let mut slice_ids: Vec<&String> = partition_data.slices.keys().collect();
+    slice_ids.sort_unstable();
+    for slice in slice_ids {
+        let slice_data = &partition_data.slices[slice];
+        if slice_data.segments.is_empty() {
+            continue;
+        }
+        let row_space = &slice_data.row_space;
+        let permutation_bound = row_space
+            .extents()
+            .last()
+            .map_or(row_space.base().bound(), |extent| extent.entity_hi + 1);
+        slices.push(FoldSlicePlan {
+            slice: slice.clone(),
+            segments: slice_data
+                .segments
+                .iter()
+                .map(|segment| PlannedSegment {
+                    dir: format!(
+                        "partitions/{partition}/slices/{slice}/segments/{}",
+                        segment.seg_id
+                    ),
+                    seg_id: segment.seg_id.clone(),
+                })
+                .collect(),
+            permutation_bound,
+        });
+    }
+    if slices.is_empty() {
+        return Err(NoFold::NothingToFold);
+    }
+
+    // The partition-wide locator span. Every post-snapshot locator extent begins above this, for
+    // the same reason every post-snapshot segment does — `with_extent`'s floor — and publication
+    // checks that rather than assuming it.
+    let entity_bound = slices
+        .iter()
+        .map(|slice| slice.permutation_bound)
+        .max()
+        .unwrap_or(0);
+
+    let mut tombstones = Bitmap::new();
+    for entity in generation.overlay.deleted_entities() {
+        // `deleted` is already a `u32`-domain Roaring bitmap on the overlay; the round trip through
+        // `deleted_entities` is what keeps this module off `Overlay`'s private representation.
+        tombstones.add(entity as u32);
+    }
+
+    Ok(FoldPlan {
+        partition: partition.clone(),
+        slices,
+        tiers: manifest.deltas.clone(),
+        runs: manifest.external_id_runs.clone(),
+        locator_extents: manifest
+            .locator_extents
+            .iter()
+            .map(|extent| extent.path.clone())
+            .collect(),
+        tombstones,
+        entity_bound,
+        dict_len: generation.dict.len(),
+        small_term_threshold: generation.bundle.manifest.small_term_threshold,
+        prefix: generation.prefix.clone(),
+    })
+}
+
+// =================================================================================================
+// Execution — five streaming passes into a new prefix
+// =================================================================================================
+
+/// Everything [`execute`] needs beyond its plan.
+///
+/// Taken from the generation on the executor thread and then **immutable**, exactly as a flush's
+/// context is. The two `Arc`s are the live readers rather than reopened files: they are the same
+/// mappings every request is already serving from, and reopening them would double the fold's
+/// resident cost for nothing.
+pub(crate) struct FoldContext {
+    /// The prefix the fold **reads** — the live one when the plan was taken.
+    pub(crate) from_prefix_dir: PathBuf,
+    /// The prefix the fold **writes**, which no `CURRENT` names until publication.
+    pub(crate) to_prefix: String,
+    pub(crate) to_prefix_dir: PathBuf,
+    pub(crate) identity_key: IdentityKey,
+    pub(crate) shard_id: u32,
+    pub(crate) scalar_schema: Vec<(String, ScalarType)>,
+    /// The new base segment's id, one per slice — never reused, so a discarded fold's orphans can
+    /// never be mistaken for a later one's output (contracts §2.1).
+    pub(crate) seg_id: String,
+    /// The live base postings and the live tiers — pass 2's inputs.
+    pub(crate) base_postings: Arc<PostingsReader>,
+    pub(crate) tiers: Vec<Arc<DeltaTier>>,
+}
+
+/// A fold whose files are durable under a prefix nothing yet names.
+pub(crate) struct CompletedFold {
+    pub(crate) plan: FoldPlan,
+    pub(crate) prefix: String,
+    /// The new base segment of each slice, in the plan's slice order.
+    pub(crate) segments: Vec<SegmentDescriptor>,
+    /// Every file the fold itself wrote, prefix-relative, with its digest. Publication adds the
+    /// carried-forward files' digests and writes the result as `MANIFEST.json`.
+    pub(crate) files: BTreeMap<String, FileDigest>,
+    /// The new run 0's prefix-relative path — `None` when the deployment holds no external ids at
+    /// all, in which case pass 3 wrote nothing and the new manifest lists no runs.
+    pub(crate) external_id_run: Option<String>,
+    /// The largest new base segment's `columns.arrow + morton.u32` bytes — compaction §4 step 3's
+    /// operand, computed here because these are the files that were just written.
+    pub(crate) base_segment_bytes: u64,
+}
+
+/// Why a fold produced nothing. **Every failure discards the fold** (compaction §3, pass 5): its
+/// files are orphans under a prefix `CURRENT` does not name, and the next trigger re-plans from
+/// scratch. There is no resume, deliberately — a resumable fold needs its own durable progress
+/// record, and re-doing a maintenance pass is cheaper than a second thing to get wrong.
+#[derive(Debug)]
+pub(crate) struct FoldFailed(pub(crate) String);
+
+impl std::fmt::Display for FoldFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Run the fold's five passes into `ctx.to_prefix_dir`. **On one dedicated thread** — see the
+/// module doc.
+///
+/// # Why the digests are re-read rather than computed as the bytes are written
+///
+/// Compaction §3 pass 5 asks for digests taken "as each file is written rather than re-reading
+/// it". None of the five writers this pass composes can offer that: `SegmentWriter`,
+/// `RunWriter`, `LocatorWriter` and `PostingsSpool` all *assemble* their output at `finish` from a
+/// spool they map back, and `PairsParquetWriter` hands its bytes to an Arrow writer that owns the
+/// file. Hashing at the source would mean a hashing wrapper inside each of them, against writers
+/// whose byte-identity with the build's is itself under test. So the digests are taken by reading
+/// each written file back — which is exactly what `tessera-build` does at every scale it has been
+/// measured at, and what its own §8 calls a stage. Stated here rather than left as a silent
+/// divergence from the design, and corrected in that document.
+pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold, FoldFailed> {
+    let failed = |what: &str, e: &dyn std::fmt::Display| FoldFailed(format!("{what}: {e}"));
+
+    let partition_dir = ctx
+        .to_prefix_dir
+        .join("partitions")
+        .join(&plan.partition);
+    let terms_dir = partition_dir.join("terms");
+    let entities_dir = partition_dir.join("entities");
+    for dir in [&terms_dir, &entities_dir] {
+        std::fs::create_dir_all(dir).map_err(|e| failed("creating the new prefix", &e))?;
+    }
+
+    // Every file this fold writes, prefix-relative and resolved, in write order — pass 5 digests
+    // exactly this list, so a file added to a pass without being recorded here is a file the new
+    // `MANIFEST.json` does not name and `ensure_verified` refuses at the first read.
+    let mut written: Vec<(String, PathBuf)> = Vec::new();
+
+    // ---- pass 1 — row space -------------------------------------------------------------------
+    //
+    // One new segment per (partition, slice), and one `permutation.bin` beside it. Rows whose
+    // entity is in `D₀` are dropped, which shifts the row id of every row after them — the whole
+    // reason compaction §6 exists.
+    let mut segments: Vec<SegmentDescriptor> = Vec::with_capacity(plan.slices.len());
+    let mut base_segment_bytes = 0u64;
+    for slice in &plan.slices {
+        let slice_rel = format!(
+            "partitions/{}/slices/{}",
+            plan.partition, slice.slice
+        );
+        let slice_dir = ctx.to_prefix_dir.join(&slice_rel);
+        std::fs::create_dir_all(&slice_dir).map_err(|e| failed("creating the slice", &e))?;
+        let segment_rel = format!("{slice_rel}/segments/{}", ctx.seg_id);
+        let segment_dir = ctx.to_prefix_dir.join(&segment_rel);
+        let permutation_rel = format!("{slice_rel}/permutation.bin");
+        let permutation_path = ctx.to_prefix_dir.join(&permutation_rel);
+
+        let inputs: Vec<FoldSegmentInput> = slice
+            .segments
+            .iter()
+            .map(|planned| FoldSegmentInput {
+                seg_id: planned.seg_id.clone(),
+                dir: ctx.from_prefix_dir.join(&planned.dir),
+            })
+            .collect();
+        let out = fold_row_space(
+            &segment_dir,
+            &permutation_path,
+            FoldRowSpaceSpec {
+                inputs: &inputs,
+                identity_key: &ctx.identity_key,
+                shard_id: ctx.shard_id,
+                scalar_schema: &ctx.scalar_schema,
+                // `D₀`, whole and unmodified. See the module doc.
+                tombstones: &plan.tombstones,
+                permutation_bound: slice.permutation_bound,
+            },
+        )
+        .map_err(|e| failed("pass 1 (row space)", &e))?;
+
+        let mut slice_bytes = 0u64;
+        for name in ["morton.u32", "columns.arrow"] {
+            let path = segment_dir.join(name);
+            slice_bytes += std::fs::metadata(&path)
+                .map_err(|e| failed("sizing the new base segment", &e))?
+                .len();
+            written.push((format!("{segment_rel}/{name}"), path));
+        }
+        base_segment_bytes = base_segment_bytes.max(slice_bytes);
+        written.push((permutation_rel, permutation_path));
+
+        segments.push(SegmentDescriptor {
+            slice: slice.slice.clone(),
+            seg_id: ctx.seg_id.clone(),
+            row_count: out.row_count,
+            entity_lo: 0,
+            // Inclusive, and the permutation's span rather than the highest surviving entity: this
+            // is what the base *addresses*, and a range short of it would leave a carried-forward
+            // extent's floor test asking about entities the base already owns.
+            entity_hi: slice.permutation_bound.saturating_sub(1),
+        });
+    }
+
+    // ---- pass 2 — postings, and `pairs.parquet` as a side output ------------------------------
+    //
+    // A fold rewrites postings by subtraction only (decision 0048 deleted the evaluate arm), so
+    // there is no scatter, no descriptor resolution and no dictionary write on this path. Every
+    // ordinal below `dict_len` gets a record, empty or not: `dict.len()` must not decrease and
+    // every ordinal must stay stable across a fold.
+    //
+    // **`pairs.parquet` cannot be carried forward.** It would then disagree with the new base
+    // postings about every folded deletion, which is the one disagreement the I1 differential
+    // exists to catch — so a fold that carried it would silently make the compacted bundle
+    // unconformable. It is written unconditionally, even where the source build emitted none:
+    // nothing in the bundle records whether a deployment wants the file, so the alternative is to
+    // infer "do not write it" from its absence, which makes conformability a property of a build
+    // flag nobody can read back.
+    let postings_rel = format!("partitions/{}/terms/postings.arrow", plan.partition);
+    let pairs_rel = format!("partitions/{}/terms/pairs.parquet", plan.partition);
+    let postings_path = ctx.to_prefix_dir.join(&postings_rel);
+    let pairs_path = ctx.to_prefix_dir.join(&pairs_rel);
+    let spool_path = terms_dir.join("postings.spool");
+    {
+        let mut spool =
+            PostingsSpool::create(&spool_path).map_err(|e| failed("pass 2 (spool)", &e))?;
+        let mut pairs =
+            PairsParquetWriter::create(&pairs_path).map_err(|e| failed("pass 2 (pairs)", &e))?;
+        let sweep = sweep_term_postings(
+            plan.dict_len,
+            &ctx.base_postings,
+            &ctx.tiers,
+            &plan.tombstones,
+            plan.small_term_threshold,
+            &mut spool,
+            |term, entities| {
+                pairs
+                    .push_iter(term.raw(), entities.iter())
+                    .map_err(|e| std::io::Error::other(e.to_string()))
+            },
+        );
+        let outcome = sweep
+            .and_then(|()| spool.finish(&postings_path))
+            .map_err(|e| failed("pass 2 (postings)", &e));
+        // The spool is deleted by `finish` on success. On failure it is this function's to remove:
+        // a fold's own spool files go on every exit path (compaction §8).
+        if outcome.is_err() {
+            let _ = std::fs::remove_file(&spool_path);
+        }
+        outcome?;
+        pairs.finish().map_err(|e| failed("pass 2 (pairs)", &e))?;
+    }
+    written.push((postings_rel, postings_path));
+    written.push((pairs_rel, pairs_path));
+
+    // ---- pass 3 — external ids ----------------------------------------------------------------
+    //
+    // One run 0 and one locator, **bounded at the snapshot's entity space** so post-snapshot
+    // locator extents stay reachable past it. `D₀`'s keys are dropped: leaving one standing turns a
+    // lawful re-ingest of that external id into a 409 once retirement makes `is_deleted` false,
+    // which contradicts decision 0047 directly.
+    //
+    // A deployment whose callers supplied no external ids has no runs and no locator (contracts
+    // §2.4 r6), and the fold emits none either — writing an empty pair here would give the sidecar
+    // a run list where the bundle's own state is "this deployment has none".
+    let external_id_run = if plan.runs.is_empty() {
+        None
+    } else {
+        let run_paths: Vec<PathBuf> = plan
+            .runs
+            .iter()
+            .map(|rel| ctx.from_prefix_dir.join(rel))
+            .collect();
+        fold_external_id_runs(
+            &run_paths,
+            0,
+            plan.entity_bound.saturating_sub(1),
+            &plan.tombstones,
+            &entities_dir,
+        )
+        .map_err(|e| failed("pass 3 (external ids)", &e))?;
+        // The sidecar derives the locator's path from the *first* run's directory rather than from
+        // a manifest field of its own (contracts §2.4 r6 gives it a fixed name), so run 0 and the
+        // locator must sit in one directory and run 0 must stay first in `external_id_runs`.
+        let run_rel = format!("partitions/{}/entities/external-ids.arrow", plan.partition);
+        let locator_rel = format!("partitions/{}/entities/ext-locator.u32", plan.partition);
+        written.push((run_rel.clone(), entities_dir.join("external-ids.arrow")));
+        written.push((locator_rel, entities_dir.join("ext-locator.u32")));
+        Some(run_rel)
+    };
+
+    // ---- pass 4 — the dictionary ---------------------------------------------------------------
+    //
+    // Carried forward verbatim, hard-linked, never renumbered and never shrunk — and the linking
+    // happens at publication with every other carry-forward (compaction §4 step 4), because a fold
+    // discarded before then must leave nothing behind that a later reader could name. Nothing is
+    // written here, and the live `Arc<Dict>` is carried onto the new generation unchanged, so the
+    // 7.1 GB copy a promoting flush pays at 1.17×10⁸ terms has no counterpart.
+
+    // ---- pass 5 — the digests ------------------------------------------------------------------
+    let mut files = BTreeMap::new();
+    for (rel, path) in &written {
+        files.insert(
+            rel.clone(),
+            crate::flush::digest_of(path).map_err(FoldFailed)?,
+        );
+    }
+
+    Ok(CompletedFold {
+        plan,
+        prefix: ctx.to_prefix,
+        segments,
+        files,
+        external_id_run,
+        base_segment_bytes,
+    })
+}
+
+/// The next `v#####` prefix name under `bundle_root` — one past the highest already present.
+///
+/// **Derived from the directory listing rather than from the live prefix's own number**, because a
+/// discarded fold leaves a complete `v#####` tree that `CURRENT` never named. Numbering from the
+/// live prefix would hand the next fold that same name, and its first `hard_link_forward` would
+/// then refuse (an existing target is a caller bug there, never a case to overwrite) — after the
+/// fold had already re-read the corpus. Contracts §2.1 makes never-reused ids the rule; this is
+/// that rule for the prefix.
+pub(crate) fn next_prefix_name(bundle_root: &Path) -> std::io::Result<String> {
+    let mut highest = 0u64;
+    for entry in std::fs::read_dir(bundle_root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(digits) = name.strip_prefix('v') else {
+            continue;
+        };
+        if digits.len() != 5 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(n) = digits.parse::<u64>() {
+            highest = highest.max(n);
+        }
+    }
+    Ok(format!("v{:05}", highest + 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use tessera_store::manifest::LocatorExtent;
 
     fn segment(seg_id: &str, entity_lo: u64, entity_hi: u64) -> SegmentDescriptor {
         SegmentDescriptor {
@@ -290,5 +798,31 @@ mod tests {
             executed(&d0, &carried).is_empty(),
             "both entities are inside the carried range once it is clamped outward"
         );
+    }
+
+    /// **The next prefix is one past the highest `v#####` present, not one past the live one.**
+    ///
+    /// A discarded fold leaves a complete tree under a name `CURRENT` never took. Numbering from
+    /// the live prefix would hand the next fold that same name, whose first carry-forward link then
+    /// refuses — after the corpus has already been re-read.
+    ///
+    /// **Mutation this kills:** deriving the name from the live prefix (`v00003` here would come
+    /// back as `v00001`).
+    #[test]
+    fn the_next_prefix_steps_past_every_name_present_including_an_orphan() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for name in ["v00000", "v00003", "not-a-prefix", "v0004", "v000004"] {
+            std::fs::create_dir(tmp.path().join(name)).unwrap();
+        }
+        assert_eq!(next_prefix_name(tmp.path()).unwrap(), "v00004");
+    }
+
+    /// An empty bundle root still names a prefix rather than failing — the shape a fold would meet
+    /// only if the root held no prefix at all, which is not a state a fold reaches, but the
+    /// arithmetic must not underflow to reach it.
+    #[test]
+    fn the_next_prefix_over_an_empty_root_is_the_first_one() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(next_prefix_name(tmp.path()).unwrap(), "v00001");
     }
 }

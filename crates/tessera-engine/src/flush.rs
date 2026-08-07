@@ -543,7 +543,12 @@ fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
     }
 }
 
-fn digest_of(path: &Path) -> Result<FileDigest, String> {
+/// One file's size and hex SHA-256, by reading it back.
+///
+/// `pub(crate)` because compaction's pass 5 digests its own outputs the same way — see
+/// `crate::compact::execute`, which states why the digest is taken from a re-read rather than
+/// computed as the bytes are written.
+pub(crate) fn digest_of(path: &Path) -> Result<FileDigest, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("digest {}: {e}", path.display()))?;
     let digest = Sha256::digest(&bytes);
     let mut hex = String::with_capacity(64);
