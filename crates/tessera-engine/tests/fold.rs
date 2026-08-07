@@ -115,6 +115,9 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
         out: out.to_path_buf(),
         extent: extent(),
         slice_id: "s0".to_string(),
+        // No declared columns: this fixture's subject is the sparse *term*, not the scalar tail,
+        // and an empty schema is what `common`'s builder uses for the same reason.
+        schema: Default::default(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
