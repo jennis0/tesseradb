@@ -139,7 +139,7 @@ import pyarrow.ipc as ipc
 import pytest
 
 from oracle import mask as mask_mod
-from oracle.catalogue import catalogue_points_path
+from oracle.catalogue import catalogue_points_path, ingest_fx_keys
 from oracle.harness import (
     kill_server,
     open_bundle_with_source,
@@ -174,6 +174,10 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
             pa.field("access", pa.utf8()),
+            # The catalogue declares `fx_key`, and a declared column must be present in every
+            # batch (contracts §2.2) — the tail is read back positionally, so an omission shifts
+            # every later scalar rather than defaulting. The fixture chooses the values.
+            pa.field("fx_key", pa.uint64()),
         ]
     )
     batch = pa.record_batch(
@@ -182,6 +186,7 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             pa.array(xs, type=pa.float32()),
             pa.array(ys, type=pa.float32()),
             pa.array(accesses, type=pa.utf8()),
+            pa.array(ingest_fx_keys(len(external_ids)), type=pa.uint64()),
         ],
         schema=schema,
     )

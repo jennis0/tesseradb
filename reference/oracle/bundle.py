@@ -537,13 +537,37 @@ class Bundle:
         # regardless of slice (postings/pairs are entity-space, not slice-scoped).
         return self._partition_dir / "terms" / "pairs.parquet"
 
+    def _external_id_runs(self) -> list[str]:
+        """`SEGMENTS-<n>.json`'s external-ID extent paths, under the name the writer actually uses.
+
+        **One accessor because there were four call sites and every one had the name wrong.** They
+        read `external_id_extents`, which is the Phase 1 *plan*'s spelling; contracts §2.4 and
+        `tessera-store` have always written **`external_id_runs`**. Each site defaulted with
+        `.get(key, [])`, so the mismatch produced not an error but an empty list — the sidecar
+        silently absent, `_known_entity_ids` yielding nothing, the locator check raising "bundle
+        names no external-id extents" about a bundle that names several, and `external_id_of`
+        raising `KeyError` on every entity.
+
+        So it refuses rather than defaulting. A bundle genuinely built without `--mint-external-ids`
+        has no runs and that is legitimate — `external_id_of` on such a bundle is a caller error
+        either way — but *silence* is what let a renamed key survive unnoticed, and the empty list
+        is indistinguishable from the absent key that caused this.
+        """
+        runs = self.segments_manifest.get("external_id_runs")
+        if runs is None:
+            raise KeyError(
+                "SEGMENTS manifest has no 'external_id_runs' key (contracts §2.4). If this "
+                "bundle predates the field, it predates the reader too"
+            )
+        return runs
+
     def external_id_of(self, entity_id: int) -> bytes:
         """Invert `entities/external-ids-0.arrow` (sorted by external_id bytes) to find the
         external id for a given entity id — needed to address `/control/changes` at a specific
         entity (the tessera-build convention: 8 bytes little-endian of the source corpus id)."""
         if not hasattr(self, "_entity_to_external"):
             mapping: dict[int, bytes] = {}
-            for rel in self.segments_manifest.get("external_id_extents", []):
+            for rel in self._external_id_runs():
                 path = self.prefix_dir / rel
                 with ipc.open_file(path) as reader:
                     table = reader.read_all()
@@ -563,7 +587,7 @@ class Bundle:
         the earlier `prefix_dir / "entities" / ...` guess named a path that never exists, and
         the caller's `if locator_path.exists()` guard then turned the whole check into a no-op.
         """
-        extents = self.segments_manifest.get("external_id_extents", [])
+        extents = self._external_id_runs()
         if not extents:
             raise ValueError("bundle names no external-id extents, so it has no locator either")
         first = extents[0]
@@ -631,14 +655,14 @@ class Bundle:
         ordinals index into (contracts §2.4 r6: "that entity's ordinal in the concatenated sorted
         external-ID extents")."""
         keys: list[bytes] = []
-        for rel in self.segments_manifest.get("external_id_extents", []):
+        for rel in self._external_id_runs():
             with ipc.open_file(self.prefix_dir / rel) as reader:
                 table = reader.read_all()
             keys.extend(table.column("external_id").to_pylist())
         return keys
 
     def _known_entity_ids(self):
-        for rel in self.segments_manifest.get("external_id_extents", []):
+        for rel in self._external_id_runs():
             path = self.prefix_dir / rel
             with ipc.open_file(path) as reader:
                 table = reader.read_all()

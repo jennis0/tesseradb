@@ -161,30 +161,22 @@ def test_fx_keys_are_unique_and_not_derived_from_the_entity_id():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BLOCKED ON A RUST CHANGE (Track T does not own any crate — reported to the controller). "
-        "`fx_key` is planted in the catalogue's points parquet, but no built bundle can carry it: "
-        "tessera-build writes `declared_scalars: Vec::new()` into MANIFEST and `scalars: "
-        "Vec::new()` onto every tiler item, so the engine has no declared-scalar column to serve. "
-        "The plumbing exists on both sides of the gap — tessera-store::write_segment takes a "
-        "scalar schema, tessera-wire::viewport_ipc emits scalar columns, and /control/ingest "
-        "parses them — only the build does not connect them. STRICT xfail on purpose: this test "
-        "must fail the day the build gains support, so the gap cannot be forgotten."
-    ),
-)
 def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogue_server):
     """The join `AckedJournal` and the I2 canonicalisation both need: a served point names its
     fixture item, with no reverse map, no extra endpoint, and no external ID on the viewer plane.
 
     **The assertion is on the served column, not on MANIFEST.** An earlier version of this body
-    checked only that MANIFEST declared a scalar named `fx_key` — so on the day the build gains
-    support it would XPASS, the strict marker would be deleted, and the wire path would stay
-    untested while "fx_key works" read green. The manifest check survives as the first line
-    because it is the precondition (and is what fails today), but the property this test is named
-    for is the last three: request a viewport, decode the points batch, and check each served
-    point's `fx_key` against the value the fixture planted for that item.
+    checked only that MANIFEST declared a scalar named `fx_key`, and carried a strict xfail while
+    the build could not emit one. Had it stayed manifest-only, the day the build gained support it
+    would have XPASSed, the marker would have been deleted, and the wire path would have stayed
+    untested while "fx_key works" read green. The manifest check survives as the first line because
+    it is the precondition; the property this test is named for is the last three — request a
+    viewport, decode the points batch, and check each served point's `fx_key` against the value the
+    fixture planted for that item.
+
+    The xfail was removed on 2026-08-07, when `tessera build` gained `--schema` and the catalogue
+    fixture began declaring `fx_key`. That the marker was **strict** is why this became a test that
+    flipped rather than a gap somebody had to remember.
     """
     assert catalogue_bundle.manifest["declared_scalars"], (
         "MANIFEST declares no scalars, so no points batch can carry fx_key"

@@ -55,11 +55,11 @@ entity ID, so serving it would be the very disclosure I10 forbids and the byte-s
 exists to catch. The fixture holds the mapping because it planted it; nothing recovers `fx_key`
 from an entity ID or the reverse.
 
-**Not yet served — see the report.** `tessera-build` writes `declared_scalars: []` into MANIFEST
-and `scalars: Vec::new()` onto every tiler item, so a *built* bundle carries no declared-scalar
-column and the engine has none to serve. The column is planted in the points parquet here so the
-fixture is complete the moment the build gains support; `conformance/tests/test_mask_catalogue.py`
-carries a strict xfail that will fail the day it starts working, so the gap cannot be forgotten.
+**Served, since 2026-08-07.** The build gained declared-column support, so `fx_key` is declared in
+[`SCHEMA_TOML`], compiled into `MANIFEST.declared_scalars`, written into `columns.arrow` and
+carried in the points batch. It was planted in the points parquet long before that, against the
+day the gap closed; `conformance/tests/test_mask_catalogue.py` held a strict xfail throughout,
+which is what made the closure a test that flipped rather than a gap somebody had to remember.
 
 ## Reuse is decided by a stamped recipe, not by a predicate over the artefact
 
@@ -108,6 +108,27 @@ SEED = 20260731
 
 POINTS_NAME = "catalogue-points.parquet"
 PAIRS_NAME = "catalogue-pairs.parquet"
+SCHEMA_NAME = "catalogue-schema.toml"
+
+# The declaration that makes `fx_key` a served column (per-point-attributes §4.2). Written beside
+# the points parquet on the build path and bound with `--schema`.
+#
+# **`u64` and not a category**, deliberately: `fx_key` is 64 random bits with no vocabulary and no
+# presentation, and declaring a category would need a value set enumerating every item — the
+# fixture would then be maintaining a 1:1 vocabulary to say nothing. `used_for = ["render"]` is
+# what puts it in `columns.arrow` and therefore in the points batch, which is the join this exists
+# for.
+#
+# Its content is part of [`recipe`] rather than only its filename: the receipt reduces paths to
+# basenames, so a changed declaration under an unchanged name would otherwise reuse a bundle built
+# against the old one — the silent divergence this module's doc warns about, arriving by a new
+# route.
+SCHEMA_TOML = """\
+[[attribute]]
+name     = "fx_key"
+type     = "u64"
+used_for = ["render"]
+"""
 
 # The whole map, as `(x0, y0, x1, y1)` — the request's bbox order, which is **not** the order
 # `Bundle.extent` uses for the same four numbers (`(x_min, x_max, y_min, y_max)`). Writing the
@@ -385,6 +406,35 @@ def fx_keys() -> list[int]:
     return _draw_fx_keys(random.Random(_FX_SEED))
 
 
+def ingest_fx_keys(n: int) -> list[int]:
+    """`fx_key` values for items **ingested at runtime**, disjoint from the planted ones.
+
+    A declared column must be present in every ingest batch (contracts §2.2): the scalar tail is
+    read back positionally, so an omitted column shifts every later scalar rather than defaulting.
+    Once the catalogue declares `fx_key`, a conformance test that ingests has to supply one, and
+    the value is the fixture's to choose — an ingested item is not in [`fx_keys`], whose list is
+    the corpus.
+
+    **Its own seeded stream, and rejected against the planted set.** Deriving one from the external
+    id would make it an encoding of an identifier the test chose, and re-using a planted key would
+    make two items answer to one join value — the mapping `fx_key` exists to be. Separate streams
+    are this module's existing discipline (see [`fx_keys`]), for the same reason: the values stay a
+    pure function of `SEED` and not of how many draws anything else took.
+    """
+    planted = set(fx_keys())
+    rng = random.Random(SEED ^ 0x5851_F42D_4C95_7F2D)
+    seen: set[int] = set()
+    keys: list[int] = []
+    for _ in range(n):
+        while True:
+            k = rng.getrandbits(64)
+            if k not in planted and k not in seen:
+                break
+        seen.add(k)
+        keys.append(k)
+    return keys
+
+
 def _draw_fx_keys(rng: random.Random) -> list[int]:
     seen: set[int] = set()
     keys: list[int] = []
@@ -495,6 +545,8 @@ def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
         str(work_dir / POINTS_NAME),
         "--pairs",
         str(work_dir / PAIRS_NAME),
+        "--schema",
+        str(work_dir / SCHEMA_NAME),
         "--extent",
         EXTENT_ARG,
         "--slice",
@@ -524,7 +576,11 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     """
     argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
     return {
-        "recipe_version": 2,
+        # 3: the bundle gained a declared `fx_key` column (2026-08-07). The `schema` key below
+        # would force a rebuild on its own; the version moves too, because a receipt that merely
+        # *gained* a key is one an older reader would compare unequal for the right reason by
+        # accident rather than by rule.
+        "recipe_version": 3,
         "layout": [list(entry) for entry in _LAYOUT],
         "n_items": N_ITEMS,
         "seed": SEED,
@@ -534,6 +590,10 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         "slice": SLICE_ID,
         "one_tile": [ONE_TILE_DEPTH, ONE_TILE_TX, ONE_TILE_TY],
         "id_key": CATALOGUE_ID_KEY_HEX,
+        # The declaration's *content*, not just its filename. `build_argv` below reduces paths to
+        # basenames, so an edited `SCHEMA_TOML` under an unchanged name would leave the receipt
+        # identical and reuse a bundle whose columns no longer match the declaration.
+        "schema": SCHEMA_TOML,
         "build_argv": [Path(a).name if a.startswith("/") else a for a in argv],
     }
 
@@ -569,6 +629,9 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
     if bundle_root.exists():
         shutil.rmtree(bundle_root)
     write_corpus(work_dir)
+    # Written on the build path only, beside the corpus and for the same reason: writing it
+    # unconditionally is what let bundle and corpus diverge before.
+    (work_dir / SCHEMA_NAME).write_text(SCHEMA_TOML)
     subprocess.run(_build_argv(work_dir, bundle_root), cwd=REPO_ROOT, check=True)
     write_recipe(bundle_root, wanted)
     return bundle_root, fx_keys()
