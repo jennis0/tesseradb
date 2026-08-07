@@ -2673,15 +2673,7 @@ pub(crate) fn scalar_schema_of(
     manifest
         .declared_scalars
         .iter()
-        .map(|d| {
-            let ty = match d.arrow_type.as_str() {
-                "u64" => ScalarType::U64,
-                "f32" => ScalarType::F32,
-                "utf8" => ScalarType::Utf8,
-                _ => return None,
-            };
-            Some((d.name.clone(), ty))
-        })
+        .map(|d| Some((d.name.clone(), ScalarType::parse(&d.arrow_type)?)))
         .collect()
 }
 

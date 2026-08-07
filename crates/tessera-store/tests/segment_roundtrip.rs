@@ -232,13 +232,27 @@ fn write_permutation_rejects_entity_id_at_or_above_bound() {
     assert!(result.is_err(), "entity id == bound must be rejected");
 }
 
+/// A bound above `2^32` names no entity that could occupy a slot (R1: entity ids fit `u32` in
+/// `bundle_format = 1`), and is refused **before the slot array is allocated**.
+///
+/// **The file assertion is the test.** The bound was always rejected — but by
+/// `PermutationWriter::set`, after `create` had already sized the file at `bound × 4` and filled
+/// it with the row-absent sentinel. A `2^33` bound therefore wrote 32 GB to the temp volume in
+/// order to return an error, and an interrupted run left it there: four such files, 68 GB, were
+/// recovered from `/tmp` on 2026-08-07. Asserting `is_err()` alone cannot tell the two orderings
+/// apart, which is why the earlier version of this test passed for as long as it did.
 #[test]
-fn write_permutation_rejects_entity_id_not_fitting_u32() {
+fn write_permutation_rejects_a_bound_above_the_u32_entity_ceiling() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("permutation.bin");
-    let entities = vec![EntityId::new(1u64 << 32)];
-    let result = write_permutation(&path, &entities, 1u64 << 33);
-    assert!(result.is_err(), "entity id >= 2^32 must be rejected");
+    let entities = vec![EntityId::new(1)];
+    let result = write_permutation(&path, &entities, (1u64 << 32) + 1);
+    assert!(result.is_err(), "a bound above 2^32 must be rejected");
+    assert!(
+        !path.exists(),
+        "an unsatisfiable bound must cost no allocation: {} was created",
+        path.display()
+    );
 }
 
 #[test]
@@ -452,7 +466,10 @@ fn write_columns_from_parts_matches_write_columns_byte_for_byte() {
         let residual: Vec<u32> = (0..rows).map(|i| (i as u32).wrapping_mul(2_654_435_761)).collect();
 
         let via_vecs = dir.path().join(format!("vecs-{rows}.arrow"));
-        write_columns(&via_vecs, tessera.clone(), residual.clone()).expect("write_columns");
+        // No scalar tail: this test is about the two *fixed*-column paths agreeing, and
+        // `write_columns` delegates to `write_columns_from_parts` in exactly that case.
+        write_columns(&via_vecs, tessera.clone(), residual.clone(), Vec::new())
+            .expect("write_columns");
         let vec_bytes = fs::read(&via_vecs).expect("read write_columns output");
 
         // Heap-backed buffers through the from-parts door.

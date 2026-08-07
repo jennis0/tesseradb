@@ -57,11 +57,15 @@ use crate::session::{Engine, EngineError, Result, Session};
 use crate::timing::{Probe, StageTimings, TileProbe, TileStats};
 use crate::Generation;
 
-/// One declared-scalar value carried alongside a point (mirrors `tessera_spatial::ScalarValue`'s
-/// three kinds, but on the *output* side — read from `ColumnsRef`, not staged for write).
+/// One declared-scalar value carried alongside a point (mirrors `tessera_spatial::ScalarValue`,
+/// but on the *output* side — read from `ColumnsRef`, not staged for write).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarOut {
+    U8(u8),
+    U16(u16),
+    U32(u32),
     U64(u64),
+    I64(i64),
     F32(f32),
     Utf8(String),
 }
@@ -1435,12 +1439,17 @@ fn row_to_point(segment: &SegmentData, row: u32, declared: &[DeclaredScalar]) ->
 
     let mut scalars = Vec::with_capacity(declared.len());
     for declared_scalar in declared {
-        // A declared scalar absent from this segment's schema (shouldn't happen once the build
-        // pipeline writes declared columns, which it does not yet) is skipped rather
-        // than treated as an error — nothing here is authorisation-relevant.
+        // A declared scalar absent from this segment's schema is skipped rather than treated as
+        // an error — nothing here is authorisation-relevant, and the fail-closed check is at the
+        // write end: `gather_scalars` refuses a segment missing a declared column, so a merge or
+        // fold cannot propagate one. What reaches here is a read of a segment already published.
         if let Some(value) = cols.scalar(&declared_scalar.name) {
             scalars.push(match value {
+                ScalarSlice::U8(s) => ScalarOut::U8(s[idx]),
+                ScalarSlice::U16(s) => ScalarOut::U16(s[idx]),
+                ScalarSlice::U32(s) => ScalarOut::U32(s[idx]),
                 ScalarSlice::U64(s) => ScalarOut::U64(s[idx]),
+                ScalarSlice::I64(s) => ScalarOut::I64(s[idx]),
                 ScalarSlice::F32(s) => ScalarOut::F32(s[idx]),
                 ScalarSlice::Utf8(arr) => ScalarOut::Utf8(arr.value(idx).to_string()),
             });

@@ -415,17 +415,33 @@ struct RawIngestItem {
 /// caller-declared scalar.
 const RESERVED_COLUMNS: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];
 
-/// The arrow type spelling `MANIFEST.declared_scalars` uses for each type this path accepts.
+/// One value out of an ingest batch's column, tagged with the spelling
+/// `MANIFEST.declared_scalars` would use for its type — `None` for a column type this build
+/// cannot store, which is refused by name rather than by dropping the column.
 ///
-/// Three types, because three are what `WalScalar` can carry. A declared scalar of any other type
-/// is a manifest this build cannot ingest against, and it is refused by name rather than by
-/// dropping the column.
+/// **The tag comes from `ScalarType::arrow_type_name` via [`DeclaredScalar::scalar_type`], not
+/// from a table written here.** This function used to carry its own spellings — `uint64` where
+/// the flush path parsed `u64` — so a manifest one accepted was one the other refused. Both were
+/// unreachable while `declared_scalars` was written empty unconditionally; populating it is
+/// exactly what would have made them collide.
 fn scalar_of(col: &dyn Array, row: usize) -> Option<(WalScalar, &'static str)> {
-    if let Some(a) = col.as_any().downcast_ref::<arrow::array::UInt64Array>() {
-        Some((WalScalar::U64(a.value(row)), "uint64"))
-    } else if let Some(a) = col.as_any().downcast_ref::<arrow::array::Float32Array>() {
-        Some((WalScalar::F32(a.value(row)), "float32"))
-    } else if let Some(a) = col.as_any().downcast_ref::<arrow::array::StringArray>() {
+    use arrow::array::{
+        Float32Array, Int64Array, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    };
+    let any = col.as_any();
+    if let Some(a) = any.downcast_ref::<UInt8Array>() {
+        Some((WalScalar::U8(a.value(row)), "u8"))
+    } else if let Some(a) = any.downcast_ref::<UInt16Array>() {
+        Some((WalScalar::U16(a.value(row)), "u16"))
+    } else if let Some(a) = any.downcast_ref::<UInt32Array>() {
+        Some((WalScalar::U32(a.value(row)), "u32"))
+    } else if let Some(a) = any.downcast_ref::<UInt64Array>() {
+        Some((WalScalar::U64(a.value(row)), "u64"))
+    } else if let Some(a) = any.downcast_ref::<Int64Array>() {
+        Some((WalScalar::I64(a.value(row)), "i64"))
+    } else if let Some(a) = any.downcast_ref::<Float32Array>() {
+        Some((WalScalar::F32(a.value(row)), "f32"))
+    } else if let Some(a) = any.downcast_ref::<StringArray>() {
         Some((WalScalar::Utf8(a.value(row).to_string()), "utf8"))
     } else {
         None
@@ -503,6 +519,19 @@ fn parse_ingest_batch(
                     d.name
                 )));
             };
+            // A declaration this build cannot parse is refused before the column is examined, and
+            // refused even for an empty batch. Leaving it to the comparison below would report it
+            // as a column/manifest *mismatch*, pointing an operator at the batch when the defect
+            // is in the bundle — and would let a zero-row batch through against a declaration no
+            // flush could ever write (`scalar_schema_of` returns `None`, and the flush refuses).
+            if d.scalar_type().is_none() {
+                return Err(ApiError::Contract(format!(
+                    "MANIFEST.declared_scalars declares column '{}' as '{}', which this build \
+                     cannot store; no flush could write the resulting segment, so the batch is \
+                     refused rather than buffered against a bundle that cannot receive it",
+                    d.name, d.arrow_type
+                )));
+            }
             // One row's worth is enough to identify the column's type, and a batch with no rows has
             // no scalar to mistype.
             if batch.num_rows() > 0 {
@@ -518,8 +547,8 @@ fn parse_ingest_batch(
                     None => {
                         return Err(ApiError::Contract(format!(
                             "ingest body: column '{}' is of a type this build cannot store \
-                             (uint64, float32 and utf8 are the three `WalScalar` carries); \
-                             refused rather than dropped",
+                             (u8, u16, u32, u64, i64, f32 and utf8 are what `WalScalar` \
+                             carries); refused rather than dropped",
                             d.name
                         )));
                     }

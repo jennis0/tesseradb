@@ -535,9 +535,16 @@ fn segment_dir(ctx: &FlushContext) -> PathBuf {
         .join(&ctx.seg_id)
 }
 
+/// The WAL's scalar shape into the segment writer's. **Matched on variants, never on
+/// discriminants**: `WalScalar`'s order is frozen by postcard's on-disc encoding and
+/// `ScalarValue`'s is not, so the two enums deliberately do not line up (see `WalScalar`'s note).
 fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
     match scalar {
+        WalScalar::U8(v) => ScalarValue::U8(*v),
+        WalScalar::U16(v) => ScalarValue::U16(*v),
+        WalScalar::U32(v) => ScalarValue::U32(*v),
         WalScalar::U64(v) => ScalarValue::U64(*v),
+        WalScalar::I64(v) => ScalarValue::I64(*v),
         WalScalar::F32(v) => ScalarValue::F32(*v),
         WalScalar::Utf8(v) => ScalarValue::Utf8(v.clone()),
     }
@@ -641,6 +648,7 @@ mod tests {
             data_plugin_hash: "builtin:passthrough:1".to_string(),
             declared_bounds: serde_json::json!({}),
             declared_scalars: vec![],
+            vocabularies: vec![],
             small_term_threshold: 32,
             quantisation: Quantisation {
                 x_min: 0.0,

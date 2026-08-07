@@ -33,7 +33,10 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BinaryArray, Float32Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{
+    ArrayRef, BinaryArray, Float32Array, Int64Array, StringArray, UInt16Array, UInt32Array,
+    UInt64Array, UInt8Array,
+};
 use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{ArrowNativeType, DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
@@ -47,6 +50,11 @@ const PERMUTATION_MAGIC: &[u8; 4] = b"TSPM";
 const PERMUTATION_VERSION: u16 = 1;
 const PERMUTATION_RESERVED: u16 = 0;
 const PERMUTATION_ABSENT: u32 = 0xFFFF_FFFF;
+
+/// The largest satisfiable `permutation.bin` bound: entity ids must fit `u32` in
+/// `bundle_format = 1` (R1), so the highest addressable id is `2^32 - 1` and the bound — one past
+/// it — is `2^32`. A bound above this names no entity that could ever occupy a slot.
+const PERMUTATION_MAX_BOUND: u64 = 1 << 32;
 
 /// Write `columns.arrow` (Arrow IPC file format, one record batch, uncompressed buffers) and
 /// `morton.u32` (raw little-endian `u32` codes, no header) into `dir`.
@@ -340,12 +348,15 @@ impl Drop for SpoolGuard {
 /// The two columns contracts §2.6 fixes; everything after them is a declared scalar.
 const FIXED_COLUMN_COUNT: usize = 2;
 
-/// What kind of Arrow column a spool is accumulating — the four types [`fixed_fields`] and
+/// What kind of Arrow column a spool is accumulating — the types [`fixed_fields`] and
 /// [`arrow_type_of`] between them can produce.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ColumnKind {
-    U64,
+    U8,
+    U16,
     U32,
+    U64,
+    I64,
     F32,
     Utf8,
     /// `external-ids.arrow`'s key column (contracts §2.4). Same shape as [`ColumnKind::Utf8`] —
@@ -356,8 +367,11 @@ pub(crate) enum ColumnKind {
 impl ColumnKind {
     fn of(ty: &DataType, name: &str) -> io::Result<Self> {
         match ty {
-            DataType::UInt64 => Ok(ColumnKind::U64),
+            DataType::UInt8 => Ok(ColumnKind::U8),
+            DataType::UInt16 => Ok(ColumnKind::U16),
             DataType::UInt32 => Ok(ColumnKind::U32),
+            DataType::UInt64 => Ok(ColumnKind::U64),
+            DataType::Int64 => Ok(ColumnKind::I64),
             DataType::Float32 => Ok(ColumnKind::F32),
             DataType::Utf8 => Ok(ColumnKind::Utf8),
             DataType::Binary => Ok(ColumnKind::Binary),
@@ -454,7 +468,11 @@ impl ColumnSpool {
     /// every value against the wrong identity, and no error anywhere.
     fn append(&mut self, value: &ScalarValue, name: &str, tessera_id: TesseraId) -> io::Result<()> {
         match (self.kind, value) {
+            (ColumnKind::U8, ScalarValue::U8(v)) => self.writer.write_all(&v.to_ne_bytes()),
+            (ColumnKind::U16, ScalarValue::U16(v)) => self.writer.write_all(&v.to_ne_bytes()),
+            (ColumnKind::U32, ScalarValue::U32(v)) => self.writer.write_all(&v.to_ne_bytes()),
             (ColumnKind::U64, ScalarValue::U64(v)) => self.writer.write_all(&v.to_ne_bytes()),
+            (ColumnKind::I64, ScalarValue::I64(v)) => self.writer.write_all(&v.to_ne_bytes()),
             (ColumnKind::F32, ScalarValue::F32(v)) => self.writer.write_all(&v.to_ne_bytes()),
             (ColumnKind::Utf8, ScalarValue::Utf8(v)) => {
                 let next = self.next_offset(v.len(), name)?;
@@ -490,8 +508,11 @@ impl ColumnSpool {
         // producers can legitimately write no rows, so this is the ordinary empty case.
         if len == 0 {
             return Ok(match kind {
-                ColumnKind::U64 => Arc::new(UInt64Array::from(Vec::<u64>::new())) as ArrayRef,
+                ColumnKind::U8 => Arc::new(UInt8Array::from(Vec::<u8>::new())) as ArrayRef,
+                ColumnKind::U16 => Arc::new(UInt16Array::from(Vec::<u16>::new())),
                 ColumnKind::U32 => Arc::new(UInt32Array::from(Vec::<u32>::new())),
+                ColumnKind::U64 => Arc::new(UInt64Array::from(Vec::<u64>::new())),
+                ColumnKind::I64 => Arc::new(Int64Array::from(Vec::<i64>::new())),
                 ColumnKind::F32 => Arc::new(Float32Array::from(Vec::<f32>::new())),
                 ColumnKind::Utf8 => Arc::new(
                     StringArray::try_new(
@@ -523,11 +544,13 @@ impl ColumnSpool {
         let buffer = unsafe { Buffer::from_custom_allocation(ptr, len, arc) };
 
         Ok(match kind {
-            ColumnKind::U64 => Arc::new(UInt64Array::new(
-                typed_column(name, buffer, rows)?,
-                None,
-            )) as ArrayRef,
+            ColumnKind::U8 => {
+                Arc::new(UInt8Array::new(typed_column(name, buffer, rows)?, None)) as ArrayRef
+            }
+            ColumnKind::U16 => Arc::new(UInt16Array::new(typed_column(name, buffer, rows)?, None)),
             ColumnKind::U32 => Arc::new(UInt32Array::new(typed_column(name, buffer, rows)?, None)),
+            ColumnKind::U64 => Arc::new(UInt64Array::new(typed_column(name, buffer, rows)?, None)),
+            ColumnKind::I64 => Arc::new(Int64Array::new(typed_column(name, buffer, rows)?, None)),
             ColumnKind::F32 => Arc::new(Float32Array::new(typed_column(name, buffer, rows)?, None)),
             ColumnKind::Utf8 => Arc::new(
                 StringArray::try_new(OffsetBuffer::new(ScalarBuffer::from(offsets)), buffer, None)
@@ -581,9 +604,16 @@ fn write_single_batch(path: &Path, schema: &Arc<Schema>, batch: &RecordBatch) ->
     Ok(())
 }
 
+/// The Arrow type each declared scalar width becomes in `columns.arrow`'s schema. Paired with
+/// `read::validate_schema`'s accepted set and [`ColumnKind::of`]: a type added to one and not the
+/// others is a segment one writer emits and the reader refuses.
 fn arrow_type_of(ty: ScalarType) -> DataType {
     match ty {
+        ScalarType::U8 => DataType::UInt8,
+        ScalarType::U16 => DataType::UInt16,
+        ScalarType::U32 => DataType::UInt32,
         ScalarType::U64 => DataType::UInt64,
+        ScalarType::I64 => DataType::Int64,
         ScalarType::F32 => DataType::Float32,
         ScalarType::Utf8 => DataType::Utf8,
     }
@@ -616,6 +646,7 @@ pub fn write_columns(
     path: &Path,
     tessera_id: Vec<u64>,
     residual: Vec<u32>,
+    scalars: Vec<(String, ScalarColumnData)>,
 ) -> io::Result<()> {
     let rows = tessera_id.len();
     if residual.len() != rows {
@@ -627,18 +658,171 @@ pub fn write_columns(
             ),
         ));
     }
+    for (name, column) in &scalars {
+        if column.len() != rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "write_columns: declared scalar '{name}' has {} rows, tessera_id has {rows}. \
+                     A short column is not a partial write — arrow refuses the batch, and a long \
+                     one would put values under the wrong identities",
+                    column.len()
+                ),
+            ));
+        }
+    }
 
-    // Delegation, not duplication: `Buffer::from_vec` takes ownership of each `Vec`'s
-    // allocation with no copy, and `write_columns_from_parts` builds the identical record
-    // batch (same schema, same zero-null primitive arrays over the same bytes) through the
-    // same `write_single_batch` path — so the delegated output is byte-for-byte what this
-    // function wrote before it delegated.
-    write_columns_from_parts(
-        path,
-        Buffer::from_vec(tessera_id),
-        Buffer::from_vec(residual),
-        rows,
-    )
+    // **The no-scalar case delegates, and must keep doing so.** `write_columns_from_parts` builds
+    // the identical two-column record batch through the same `write_single_batch` path, so a
+    // bundle whose schema declares nothing gets byte-for-byte the file it got before this
+    // parameter existed — which is what `tessera-cli`'s identity test and the build-equivalence
+    // oracle both assert.
+    if scalars.is_empty() {
+        return write_columns_from_parts(
+            path,
+            Buffer::from_vec(tessera_id),
+            Buffer::from_vec(residual),
+            rows,
+        );
+    }
+
+    let mut fields = fixed_fields();
+    let mut columns: Vec<ArrayRef> = vec![
+        Arc::new(UInt64Array::new(
+            typed_column("tessera_id", Buffer::from_vec(tessera_id), rows)?,
+            None,
+        )),
+        Arc::new(UInt32Array::new(
+            typed_column("residual", Buffer::from_vec(residual), rows)?,
+            None,
+        )),
+    ];
+    for (name, column) in scalars {
+        fields.push(Field::new(&name, column.arrow_type(), false));
+        columns.push(column.into_array(rows, &name)?);
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    write_single_batch(path, &schema, &batch)
+}
+
+/// One declared scalar's values, column-major and already in row order.
+///
+/// **The column-major counterpart to [`SegmentRow`]'s row-major `scalars`**, and both exist
+/// because the two producers genuinely hold their data differently: a merge or a flush walks rows
+/// and has one row's values at a time, while the tiered batch build permutes whole columns and
+/// would have to transpose 10⁹ rows into per-row vectors to use the other shape. Each `Vec`
+/// *becomes* the Arrow values buffer with no copy.
+#[derive(Debug)]
+pub enum ScalarColumnData {
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+    U32(Vec<u32>),
+    U64(Vec<u64>),
+    I64(Vec<i64>),
+    F32(Vec<f32>),
+    Utf8(Vec<String>),
+}
+
+impl ScalarColumnData {
+    /// An empty column of the given type — what a build allocates before filling it.
+    pub fn of(ty: ScalarType, capacity: usize) -> Self {
+        match ty {
+            ScalarType::U8 => ScalarColumnData::U8(Vec::with_capacity(capacity)),
+            ScalarType::U16 => ScalarColumnData::U16(Vec::with_capacity(capacity)),
+            ScalarType::U32 => ScalarColumnData::U32(Vec::with_capacity(capacity)),
+            ScalarType::U64 => ScalarColumnData::U64(Vec::with_capacity(capacity)),
+            ScalarType::I64 => ScalarColumnData::I64(Vec::with_capacity(capacity)),
+            ScalarType::F32 => ScalarColumnData::F32(Vec::with_capacity(capacity)),
+            ScalarType::Utf8 => ScalarColumnData::Utf8(Vec::with_capacity(capacity)),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            ScalarColumnData::U8(v) => v.len(),
+            ScalarColumnData::U16(v) => v.len(),
+            ScalarColumnData::U32(v) => v.len(),
+            ScalarColumnData::U64(v) => v.len(),
+            ScalarColumnData::I64(v) => v.len(),
+            ScalarColumnData::F32(v) => v.len(),
+            ScalarColumnData::Utf8(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Append one value, refusing a tag that is not this column's type — [`ColumnSpool::append`]'s
+    /// rule and its reasoning: a coerced or dropped value shifts every later row of the column
+    /// into another row's place, with every value present and none against its own identity.
+    pub fn push(&mut self, value: ScalarValue, name: &str) -> io::Result<()> {
+        let expected = self.arrow_type();
+        match (self, value) {
+            (ScalarColumnData::U8(v), ScalarValue::U8(x)) => v.push(x),
+            (ScalarColumnData::U16(v), ScalarValue::U16(x)) => v.push(x),
+            (ScalarColumnData::U32(v), ScalarValue::U32(x)) => v.push(x),
+            (ScalarColumnData::U64(v), ScalarValue::U64(x)) => v.push(x),
+            (ScalarColumnData::I64(v), ScalarValue::I64(x)) => v.push(x),
+            (ScalarColumnData::F32(v), ScalarValue::F32(x)) => v.push(x),
+            (ScalarColumnData::Utf8(v), ScalarValue::Utf8(x)) => v.push(x),
+            (_, got) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "write_columns: scalar '{name}' is {expected:?}, got {got:?}"
+                    ),
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    fn arrow_type(&self) -> DataType {
+        match self {
+            ScalarColumnData::U8(_) => DataType::UInt8,
+            ScalarColumnData::U16(_) => DataType::UInt16,
+            ScalarColumnData::U32(_) => DataType::UInt32,
+            ScalarColumnData::U64(_) => DataType::UInt64,
+            ScalarColumnData::I64(_) => DataType::Int64,
+            ScalarColumnData::F32(_) => DataType::Float32,
+            ScalarColumnData::Utf8(_) => DataType::Utf8,
+        }
+    }
+
+    fn into_array(self, rows: usize, name: &str) -> io::Result<ArrayRef> {
+        Ok(match self {
+            ScalarColumnData::U8(v) => Arc::new(UInt8Array::new(
+                typed_column(name, Buffer::from_vec(v), rows)?,
+                None,
+            )) as ArrayRef,
+            ScalarColumnData::U16(v) => Arc::new(UInt16Array::new(
+                typed_column(name, Buffer::from_vec(v), rows)?,
+                None,
+            )),
+            ScalarColumnData::U32(v) => Arc::new(UInt32Array::new(
+                typed_column(name, Buffer::from_vec(v), rows)?,
+                None,
+            )),
+            ScalarColumnData::U64(v) => Arc::new(UInt64Array::new(
+                typed_column(name, Buffer::from_vec(v), rows)?,
+                None,
+            )),
+            ScalarColumnData::I64(v) => Arc::new(Int64Array::new(
+                typed_column(name, Buffer::from_vec(v), rows)?,
+                None,
+            )),
+            ScalarColumnData::F32(v) => Arc::new(Float32Array::new(
+                typed_column(name, Buffer::from_vec(v), rows)?,
+                None,
+            )),
+            // The one type with no reusable allocation: `StringArray` owns an offset table this
+            // shape does not carry, so it is built rather than adopted.
+            ScalarColumnData::Utf8(v) => Arc::new(StringArray::from_iter_values(v.iter())),
+        })
+    }
 }
 
 /// [`write_columns`], but from raw column bytes instead of `Vec`s: `tessera_id` as `rows`
@@ -784,7 +968,23 @@ impl PermutationWriter {
     /// is row 0 — a real row belonging to a real entity — so an unfilled slot would serve one
     /// entity's coordinates under every id that never got a row. The sentinel is `0xFFFF_FFFF`, so
     /// this writes `bound × 4` bytes of `0xFF` up front.
+    ///
+    /// **The bound ceiling is checked before the file is opened, and that ordering is the point.**
+    /// The fill above is proportional to `bound`, so validating it afterwards means writing
+    /// `bound × 4` bytes to disk in order to discover the caller asked for something no entity
+    /// could ever occupy — 32 GB for a bound of `2^33`, paid in full before the error is raised.
+    /// A caller deriving a bound from a corrupt `entity_id_high_water` gets a refusal here, not a
+    /// filled volume.
     pub fn create(path: &Path, bound: u64) -> io::Result<Self> {
+        if bound > PERMUTATION_MAX_BOUND {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "write_permutation: bound {bound} exceeds the largest satisfiable bound \
+                     {PERMUTATION_MAX_BOUND} (entity ids must fit u32 in bundle_format = 1)"
+                ),
+            ));
+        }
         let slots_bytes = usize::try_from(bound)
             .ok()
             .and_then(|b| b.checked_mul(4))

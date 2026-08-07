@@ -194,6 +194,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     };
     let report = build(&args).expect("build should succeed");
     assert_eq!(report.items, N_ITEMS);
@@ -483,6 +484,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     };
     build(&args).unwrap();
     // A second build into the same root would leave the first bundle's files half-overwritten
@@ -515,6 +517,7 @@ fn build_rejects_an_empty_selection() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     })
     .is_err());
 }
@@ -549,6 +552,7 @@ fn morton_input_requires_the_identity_extent() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     };
 
     // The caller's own extent, which the x/y branch would happily accept, must be rejected here.
@@ -590,6 +594,7 @@ fn morton_input_requires_the_identity_extent() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     })
     .unwrap();
     let bundle = open_bundle(&out).unwrap();
@@ -632,6 +637,7 @@ fn build_rejects_an_unsafe_slice_id() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     })
     .is_err());
 }
@@ -673,6 +679,7 @@ fn limit_filters_the_source_entity_id_prefix() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     })
     .unwrap();
     assert_eq!(report.items, 100);
@@ -708,6 +715,7 @@ fn verify_accepts_a_freshly_built_bundle() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     })
     .unwrap();
 
@@ -746,6 +754,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     })
     .unwrap();
 

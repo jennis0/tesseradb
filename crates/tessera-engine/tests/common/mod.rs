@@ -179,6 +179,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         batch_items: None,
         memory_budget: None,
         band_rows: None,
+        schema: Default::default(),
     };
     build(&args).expect("fixture build should succeed");
 }

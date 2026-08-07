@@ -97,13 +97,25 @@ pub(crate) fn gather_scalars(
                          wrong column"
                     ),
                 })?;
+            // Each arm pairs the *stored* type with the *declared* one and the fallthrough
+            // refuses: a narrowing or widening coercion here would let a merge rewrite a column
+            // at a width the manifest does not declare, which the next reader opens as garbage
+            // rather than as an error.
             match (slice, declared) {
+                (ScalarSlice::U8(v), ScalarType::U8) => Ok(ScalarValue::U8(v[row])),
+                (ScalarSlice::U16(v), ScalarType::U16) => Ok(ScalarValue::U16(v[row])),
+                (ScalarSlice::U32(v), ScalarType::U32) => Ok(ScalarValue::U32(v[row])),
                 (ScalarSlice::U64(v), ScalarType::U64) => Ok(ScalarValue::U64(v[row])),
+                (ScalarSlice::I64(v), ScalarType::I64) => Ok(ScalarValue::I64(v[row])),
                 (ScalarSlice::F32(v), ScalarType::F32) => Ok(ScalarValue::F32(v[row])),
                 (ScalarSlice::Utf8(v), ScalarType::Utf8) => {
                     Ok(ScalarValue::Utf8(v.value(row).to_string()))
                 }
+                (ScalarSlice::U8(_), declared) => Err(mismatch(*declared, "u8")),
+                (ScalarSlice::U16(_), declared) => Err(mismatch(*declared, "u16")),
+                (ScalarSlice::U32(_), declared) => Err(mismatch(*declared, "u32")),
                 (ScalarSlice::U64(_), declared) => Err(mismatch(*declared, "u64")),
+                (ScalarSlice::I64(_), declared) => Err(mismatch(*declared, "i64")),
                 (ScalarSlice::F32(_), declared) => Err(mismatch(*declared, "f32")),
                 (ScalarSlice::Utf8(_), declared) => Err(mismatch(*declared, "utf8")),
             }

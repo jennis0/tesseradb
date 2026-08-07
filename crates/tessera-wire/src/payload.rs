@@ -39,7 +39,10 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float32Array, StringArray, UInt64Array};
+use arrow::array::{
+    ArrayRef, Float32Array, Int64Array, StringArray, UInt16Array, UInt32Array, UInt64Array,
+    UInt8Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
@@ -49,7 +52,11 @@ use arrow::record_batch::RecordBatch;
 /// Plain data only — no engine or store type. Each variant's slice must be the same length as
 /// `points_tessera_ids`/`codes` in the corresponding [`viewport_ipc`] call.
 pub enum ScalarColumn<'a> {
+    U8(&'a [u8]),
+    U16(&'a [u16]),
+    U32(&'a [u32]),
     U64(&'a [u64]),
+    I64(&'a [i64]),
     F32(&'a [f32]),
     Utf8(&'a [String]),
 }
@@ -105,7 +112,11 @@ pub fn viewport_ipc(cols: &ViewportColumns<'_>) -> Vec<u8> {
     );
     for (name, col) in cols.scalars {
         let len = match col {
+            ScalarColumn::U8(s) => s.len(),
+            ScalarColumn::U16(s) => s.len(),
+            ScalarColumn::U32(s) => s.len(),
             ScalarColumn::U64(s) => s.len(),
+            ScalarColumn::I64(s) => s.len(),
             ScalarColumn::F32(s) => s.len(),
             ScalarColumn::Utf8(s) => s.len(),
         };
@@ -195,7 +206,11 @@ fn encode_points_batch(
     ];
     for (name, col) in scalars {
         let ty = match col {
+            ScalarColumn::U8(_) => DataType::UInt8,
+            ScalarColumn::U16(_) => DataType::UInt16,
+            ScalarColumn::U32(_) => DataType::UInt32,
             ScalarColumn::U64(_) => DataType::UInt64,
+            ScalarColumn::I64(_) => DataType::Int64,
             ScalarColumn::F32(_) => DataType::Float32,
             ScalarColumn::Utf8(_) => DataType::Utf8,
         };
@@ -211,7 +226,11 @@ fn encode_points_batch(
     let mut columns: Vec<ArrayRef> = vec![id_col, code_col];
     for (_, col) in scalars {
         let array: ArrayRef = match col {
+            ScalarColumn::U8(s) => Arc::new(UInt8Array::from_iter_values(s.iter().copied())),
+            ScalarColumn::U16(s) => Arc::new(UInt16Array::from_iter_values(s.iter().copied())),
+            ScalarColumn::U32(s) => Arc::new(UInt32Array::from_iter_values(s.iter().copied())),
             ScalarColumn::U64(s) => Arc::new(UInt64Array::from_iter_values(s.iter().copied())),
+            ScalarColumn::I64(s) => Arc::new(Int64Array::from_iter_values(s.iter().copied())),
             ScalarColumn::F32(s) => Arc::new(Float32Array::from_iter_values(s.iter().copied())),
             ScalarColumn::Utf8(s) => Arc::new(StringArray::from_iter_values(s.iter())),
         };

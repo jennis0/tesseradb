@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use tessera_spatial::tiler::ScalarType;
 use tessera_types::{IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 use crate::error::{Result, StoreError};
@@ -31,7 +32,70 @@ pub struct FileDigest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeclaredScalar {
     pub name: String,
+    /// One of [`ScalarType::arrow_type_name`]'s spellings. A `String` rather than the enum
+    /// because the manifest must survive being read by a build that does not know a type a later
+    /// one wrote — the reader then refuses by name, which is the fail-closed answer, rather than
+    /// failing to deserialise the whole manifest and taking every other field with it.
     pub arrow_type: String,
+    /// For a category column, the [`ManifestVocabulary::name`] its codes index; `None` for a
+    /// plain numeric column. Absent in a bundle built before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocabulary: Option<String>,
+}
+
+impl DeclaredScalar {
+    /// This column's type, or `None` if the manifest names one this build cannot handle.
+    ///
+    /// **The one parser, reachable from every layer that needs it.** `tessera-server` may not
+    /// depend on `tessera-spatial` (SA §3, enforced by `check-layers.sh`), so ingest validation
+    /// used to carry a second copy of this mapping — and the copies disagreed, one spelling
+    /// `uint64` where the other spelt `u64`. Neither had ever run against a non-empty
+    /// declaration, so nothing caught it. The server reaches this through the engine's
+    /// re-export instead of transcribing the table again.
+    pub fn scalar_type(&self) -> Option<ScalarType> {
+        ScalarType::parse(&self.arrow_type)
+    }
+}
+
+/// One `vocabularies` entry: a named value set, its pinned codes and their presentation.
+///
+/// **Flat, and per-placement rather than per-capability** (per-point-attributes §4.1). The schema
+/// the operator wrote says what each attribute is *for*; the manifest says only what a reader must
+/// load. A reader should never have to understand intent to know what a column holds, so nothing
+/// of `used_for` survives compilation — only the column, its width, and the vocabulary it indexes.
+///
+/// **Codes are the compiled artifact and are never re-derived.** `columns.arrow` stores the code,
+/// not the key, so a rebuild that re-derived codes from a re-supplied vocabulary file —
+/// regenerated, re-sorted, hand-edited — would silently recolour the whole corpus with no error
+/// and no digest mismatch (§3.4). The mapping lives here, under the manifest digest, for the same
+/// reason `identity.key` does.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestVocabulary {
+    /// The name a [`DeclaredScalar::vocabulary`] refers to.
+    pub name: String,
+    /// `per_viewer` or `public` (§3.8). **⊘ Recorded, not enforced**: no endpoint publishes a
+    /// vocabulary yet, so `per_viewer` currently gates nothing. It is carried now because a
+    /// bundle built without it would have to be rebuilt to acquire it.
+    pub listing: String,
+    pub values: Vec<ManifestVocabularyValue>,
+    /// Retired codes, never reassigned (§3.4). Carried into the manifest rather than left in the
+    /// schema file so that a later build reading this bundle's lineage can see which codes are
+    /// spent without needing the artifact that retired them.
+    #[serde(default)]
+    pub reserved: Vec<u32>,
+}
+
+/// One value of a vocabulary: its stable opaque key, its pinned code, and its presentation.
+///
+/// **The key is not the display name** (§3.4). `sev_1` is the key a row's code stands for;
+/// "Critical" is a property of it. Conflating them makes renaming for display a rewrite of every
+/// row, which is why `label` is separate and amendable without a build.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestVocabularyValue {
+    pub key: String,
+    pub code: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// `quantisation`: the extent Morton codes are computed against (contracts §2.5).
@@ -199,6 +263,11 @@ pub struct Manifest {
     pub declared_bounds: serde_json::Value,
     #[serde(default)]
     pub declared_scalars: Vec<DeclaredScalar>,
+    /// The value sets `declared_scalars`' category columns draw their codes from. Empty in a
+    /// bundle whose schema declares no category, and absent entirely in one built before the
+    /// field existed — hence `default`, which is what keeps every existing bundle openable.
+    #[serde(default)]
+    pub vocabularies: Vec<ManifestVocabulary>,
     pub small_term_threshold: u32,
     pub quantisation: Quantisation,
     pub entity_id_high_water: u64,

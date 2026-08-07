@@ -235,6 +235,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         data_plugin_hash: String::new(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
+        vocabularies: vec![],
         small_term_threshold: 32,
         quantisation: Quantisation {
             x_min: 0.0,

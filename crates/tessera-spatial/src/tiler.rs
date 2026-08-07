@@ -9,22 +9,108 @@ use tessera_types::{EntityId, TesseraId};
 
 use crate::morton::split32;
 
-/// A declared-scalar value carried alongside the fixed columns (`tessera_id`, `x`, `y`,
-/// `priority`). The three kinds below are the whole set (contracts §2.2).
+/// A declared-scalar value carried alongside the fixed columns (`tessera_id`, `residual`).
+/// The kinds below are the whole set (contracts §2.2).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarValue {
+    U8(u8),
+    U16(u16),
+    U32(u32),
     U64(u64),
+    I64(i64),
     F32(f32),
     Utf8(String),
 }
 
 /// The Arrow type of a declared scalar column, used to build `columns.arrow`'s schema
 /// (`scalar_schema` in [`crate::tiler`]'s consumers, e.g. `tessera_store::write::write_segment`).
+///
+/// **The narrow widths are the point, not a convenience.** A hot column is baked into every row
+/// and priced at 0.93 GiB per byte per row per 10⁹ items (§10.5), so a category code declared
+/// `u64` because that was the only integer available costs 7.45 GiB where `u8` costs 0.93. The
+/// width is also unalterable — changing it rewrites the corpus (per-point-attributes §2.2), which
+/// is why the set is widened here rather than left for a caller to work around.
+///
+/// `Utf8` is the one variable-width member and the one the segment writer pays an offset table
+/// for. It predates the fixed-width set and is kept, but per-point-attributes §3.6 is explicit
+/// that a category belongs in a fixed-width column: a string repeated per row is the vocabulary
+/// stored a hundred million times.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarType {
+    U8,
+    U16,
+    U32,
     U64,
+    I64,
     F32,
     Utf8,
+}
+
+impl ScalarType {
+    /// The spelling `MANIFEST.declared_scalars[].arrow_type` uses.
+    ///
+    /// **One definition, because there were two and they disagreed.** The flush path parsed
+    /// `"u64"` while ingest validation compared against `"uint64"`, so a manifest either path
+    /// accepted was one the other refused. Neither had ever run — `declared_scalars` was written
+    /// empty unconditionally — so the disagreement was invisible until something populated it.
+    /// These are the short forms because they are what the design's own §3.6 writes (`u8`,
+    /// `u16`, `u32`) and what a schema author therefore types.
+    pub fn arrow_type_name(self) -> &'static str {
+        match self {
+            ScalarType::U8 => "u8",
+            ScalarType::U16 => "u16",
+            ScalarType::U32 => "u32",
+            ScalarType::U64 => "u64",
+            ScalarType::I64 => "i64",
+            ScalarType::F32 => "f32",
+            ScalarType::Utf8 => "utf8",
+        }
+    }
+
+    /// The inverse of [`ScalarType::arrow_type_name`]; `None` for a spelling this build cannot
+    /// write, which every caller must treat as fail-closed rather than as an absent column.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "u8" => ScalarType::U8,
+            "u16" => ScalarType::U16,
+            "u32" => ScalarType::U32,
+            "u64" => ScalarType::U64,
+            "i64" => ScalarType::I64,
+            "f32" => ScalarType::F32,
+            "utf8" => ScalarType::Utf8,
+            _ => return None,
+        })
+    }
+
+    /// Bytes this column adds to every row, or `None` for [`ScalarType::Utf8`], whose cost
+    /// depends on the data. The figure a residency report multiplies by the row count.
+    pub fn row_bytes(self) -> Option<u64> {
+        Some(match self {
+            ScalarType::U8 => 1,
+            ScalarType::U16 => 2,
+            ScalarType::U32 | ScalarType::F32 => 4,
+            ScalarType::U64 | ScalarType::I64 => 8,
+            ScalarType::Utf8 => return None,
+        })
+    }
+
+    /// Whether a value of this type can be a category code — per-point-attributes §3.6's three
+    /// declarable widths. `u64`, `i64`, `f32` and `utf8` are excluded: a code space wider than
+    /// `u32` is not a vocabulary, and the last two cannot index one at all.
+    pub fn is_category_width(self) -> bool {
+        matches!(self, ScalarType::U8 | ScalarType::U16 | ScalarType::U32)
+    }
+
+    /// The largest code this width can carry. Code `0` is the reserved *absent* sentinel
+    /// (§3.6), so the usable count is one less than this.
+    pub fn max_code(self) -> Option<u32> {
+        Some(match self {
+            ScalarType::U8 => u8::MAX as u32,
+            ScalarType::U16 => u16::MAX as u32,
+            ScalarType::U32 => u32::MAX,
+            _ => return None,
+        })
+    }
 }
 
 /// One item to be placed into a segment: its wire identity, geometry, and any declared

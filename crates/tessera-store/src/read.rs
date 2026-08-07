@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use arrow::array::{Array, Float32Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{
+    Array, Float32Array, Int64Array, StringArray, UInt16Array, UInt32Array, UInt64Array,
+    UInt8Array,
+};
 use arrow::buffer::Buffer;
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::ipc::convert::fb_to_schema;
@@ -1074,7 +1077,11 @@ impl MortonSlice {
 /// One declared-scalar column's typed, zero-copy value slice.
 #[derive(Debug)]
 pub enum ScalarSlice<'a> {
+    U8(&'a [u8]),
+    U16(&'a [u16]),
+    U32(&'a [u32]),
     U64(&'a [u64]),
+    I64(&'a [i64]),
     F32(&'a [f32]),
     /// Variable-length; `StringArray` itself is a zero-copy view over the mapped buffers, so
     /// this is still zero-copy even though it isn't a flat `&[&str]`.
@@ -1167,10 +1174,38 @@ impl ColumnsRef {
         let idx = *self.scalar_index.get(name)?;
         let column = self.batch.column(idx);
         Some(match column.data_type() {
+            DataType::UInt8 => ScalarSlice::U8(
+                column
+                    .as_any()
+                    .downcast_ref::<UInt8Array>()
+                    .expect("data_type checked")
+                    .values(),
+            ),
+            DataType::UInt16 => ScalarSlice::U16(
+                column
+                    .as_any()
+                    .downcast_ref::<UInt16Array>()
+                    .expect("data_type checked")
+                    .values(),
+            ),
+            DataType::UInt32 => ScalarSlice::U32(
+                column
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .expect("data_type checked")
+                    .values(),
+            ),
             DataType::UInt64 => ScalarSlice::U64(
                 column
                     .as_any()
                     .downcast_ref::<UInt64Array>()
+                    .expect("data_type checked")
+                    .values(),
+            ),
+            DataType::Int64 => ScalarSlice::I64(
+                column
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
                     .expect("data_type checked")
                     .values(),
             ),
@@ -1244,9 +1279,17 @@ fn validate_schema(batch: &RecordBatch, path: &Path) -> Result<()> {
                 ),
             });
         }
+        // The accepted set is `write::arrow_type_of`'s range, and the two must move together:
+        // a type this refuses is a segment the writer can produce and no reader can open.
         if !matches!(
             field.data_type(),
-            DataType::UInt64 | DataType::Float32 | DataType::Utf8
+            DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+                | DataType::Int64
+                | DataType::Float32
+                | DataType::Utf8
         ) {
             return Err(StoreError::InvalidColumns {
                 path: path.to_path_buf(),

@@ -288,6 +288,7 @@ mod tests {
             data_plugin_hash: "builtin:passthrough:1".to_string(),
             declared_bounds: serde_json::json!({}),
             declared_scalars: vec![],
+            vocabularies: vec![],
             small_term_threshold: 32,
             quantisation: Quantisation {
                 x_min: 0.0,

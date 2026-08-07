@@ -129,7 +129,10 @@ use rustc_hash::FxHashMap;
 use tessera_authz::encode_posting;
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
-use tessera_store::write::{write_columns, write_morton_codes, write_permutation_iter};
+use tessera_spatial::tiler::ScalarValue;
+use tessera_store::write::{
+    write_columns, write_morton_codes, write_permutation_iter, ScalarColumnData,
+};
 use tessera_types::{EntityId, IdentityKey, SMALL_TERM_THRESHOLD_DEFAULT};
 
 use crate::error::{BuildError, Result};
@@ -1139,6 +1142,17 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
              (row count unchanged)",
         ));
     }
+    // The declared attribute tail, read **here** and not at the segment write, because this is
+    // where the two things that resolve it are still alive: `source_ids` maps a file's id to its
+    // ordinal, and `entity_of_ordinal` maps that ordinal to the entity the build assigned it.
+    // Entity ids are assigned in *signature-sorted* order (§11.1), so a source id is emphatically
+    // not its own entity id — indexing the attribute arrays by source id gives every item another
+    // item's attributes, coherently and with no error anywhere. Caught at 2.4M against the source
+    // corpus; the geometry pass three statements above resolves through the same two structures
+    // for the same reason.
+    let attributes_by_entity =
+        read_attributes_by_entity(args, n, &source_ids, &entity_of_ordinal)?;
+
     drop(source_ids);
     drop(entity_of_ordinal);
 
@@ -1222,8 +1236,20 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             })
             .collect::<std::result::Result<_, _>>()
             .map_err(BuildError::Identity)?;
+        // The declared attribute tail, permuted into the same row order as everything above.
+        //
+        // **Gathered per entity, then permuted — not read in row order.** The attribute pass
+        // visits the points file in *file* order, and `entity_row` is the row-order permutation
+        // of entity ids, so the tail is materialised entity-major first and indexed through
+        // `entity_row` exactly as `residual_row` is. Reading the file a third time in row order
+        // is the alternative, and it is a random-access read of a multi-gigabyte parquet file.
+        //
+        // Held after `x_of_entity`/`y_of_entity` are dropped, so the peak is the record batch plus
+        // one attribute tail rather than both — at the widths §3.6 argues for (1–4 B/row against
+        // geometry's 8) the tail is the smaller term either way.
+        let scalars = permute_attribute_tail(&args.schema, attributes_by_entity, &entity_row)?;
         drop(entity_row);
-        write_columns(&columns_path, tessera_row, residual_row)
+        write_columns(&columns_path, tessera_row, residual_row, scalars)
             .map_err(|e| BuildError::io(&columns_path, e))?;
     }
     fsync_file(&columns_path)?;
@@ -1253,6 +1279,95 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // so it scales with bundle size rather than with item count.
     timer.end(BuildStage::Manifests, report.bundle_bytes);
     Ok(report)
+}
+
+/// Read the declared attribute columns into **entity-major** vectors, one per declared attribute.
+///
+/// Resolved through `source_ids` → ordinal → `entity_of_ordinal`, exactly as the geometry pass
+/// above resolves its own rows, and for the same reason: entity ids are assigned in
+/// signature-sorted order (§11.1), so a source id is not its own entity id and a direct index
+/// hands every item another item's attributes. That is a defect with no symptom — every value is
+/// present, every value is well-typed, and every value belongs to a different item.
+///
+/// Returns an empty vector when the schema declares nothing, which is what keeps a schema-less
+/// build's `columns.arrow` byte-identical to the one it wrote before this existed.
+///
+/// **Every entity must be visited.** A source row this pass misses would leave its entity's slot
+/// at the type's zero — indistinguishable from a legitimately absent value, in a column that
+/// reports no error. The count is checked rather than trusted: this is a *third* pass over the
+/// points file, and a file that changed under the build is exactly what the geometry pass's own
+/// anchor check exists to catch.
+fn read_attributes_by_entity(
+    args: &BuildArgs,
+    n: u64,
+    source_ids: &[u64],
+    entity_of_ordinal: &[u32],
+) -> Result<Vec<Vec<ScalarValue>>> {
+    if args.schema.is_empty() {
+        return Ok(Vec::new());
+    }
+    let attributes = &args.schema.attributes;
+    // One flat vector per column, indexed by entity. `ScalarValue` rather than a typed vector:
+    // this form is transient and the typed allocation is the one that survives into the record
+    // batch, so paying for the enum here and the tight `Vec` there is the right way round.
+    let mut by_entity: Vec<Vec<ScalarValue>> = attributes
+        .iter()
+        .map(|_| vec![ScalarValue::U8(0); n as usize])
+        .collect();
+    let mut seen = 0u64;
+    let mut unknown: Option<u64> = None;
+    input::scan_attributes(&args.points, &args.schema, args.limit, |source_id, values| {
+        // Binary search rather than `join_chunk`'s merge sweep: this pass is per-row work over a
+        // handful of narrow columns, not the corpus-scale join the geometry pass does, so the
+        // sweep's chunk machinery would cost more than the log n it saves.
+        let Ok(ordinal) = source_ids.binary_search(&source_id) else {
+            unknown.get_or_insert(source_id);
+            return;
+        };
+        let entity = entity_of_ordinal[ordinal] as usize;
+        seen += 1;
+        for (column, value) in by_entity.iter_mut().zip(values) {
+            column[entity] = value.clone();
+        }
+    })?;
+    if let Some(source_id) = unknown {
+        return Err(input_changed(&format!(
+            "the points file's attribute pass names entity {source_id}, which its first pass did \
+             not"
+        )));
+    }
+    if seen != n {
+        return Err(input_changed(&format!(
+            "the points file's attribute pass yielded {seen} rows, but its first pass selected \
+             {n} — some row would carry a value that is absent only because it was never read"
+        )));
+    }
+    Ok(by_entity)
+}
+
+/// Permute the entity-major columns into **row order**, ready for `write_columns`.
+///
+/// `entity_row[r]` is the entity whose values row `r` carries — the same permutation
+/// `residual_row` and `tessera_row` are built through, applied to the same arrays, so a row's
+/// geometry, identity and attributes cannot come from different items.
+fn permute_attribute_tail(
+    schema: &crate::schema::Schema,
+    by_entity: Vec<Vec<ScalarValue>>,
+    entity_row: &[u32],
+) -> Result<Vec<(String, ScalarColumnData)>> {
+    let mut out = Vec::with_capacity(by_entity.len());
+    for (attribute, values) in schema.attributes.iter().zip(by_entity) {
+        let mut column = ScalarColumnData::of(attribute.ty, entity_row.len());
+        for &entity in entity_row {
+            column
+                .push(values[entity as usize].clone(), &attribute.name)
+                .map_err(|e| {
+                    BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
+                })?;
+        }
+        out.push((attribute.name.clone(), column));
+    }
+    Ok(out)
 }
 
 /// The selected source ids, in scan order (which is **no particular order** — the decode is

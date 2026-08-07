@@ -104,11 +104,27 @@ use tessera_types::EntityId;
 ///
 /// On-disk format: variant order is frozen and append-only (postcard encodes enum variants by
 /// declaration index) — never reorder or remove a variant, only append new ones at the end.
+///
+/// **The four narrow widths are appended, not sorted into place**, which is why this enum does not
+/// read in width order and `ScalarValue` does. Ordering it sensibly would renumber `F32` and
+/// `Utf8` and silently reinterpret every record already on disc; the mirror in `tessera-spatial`
+/// is under no such constraint, so the two agree on the *set* and not on the order. Anything
+/// converting between them must match on variants, never on discriminants.
+///
+/// **No `WAL_VERSION` bump**, and the version constant's own note says why the distinction
+/// matters: appending shifts no existing discriminant, so a log written before these four existed
+/// decodes identically afterwards. The reverse — an older binary meeting a record carrying one —
+/// is a downgrade, which the version check cannot catch at an unchanged version; postcard refuses
+/// the unknown discriminant, which is the fail-closed direction and not a silent misread.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WalScalar {
     U64(u64),
     F32(f32),
     Utf8(String),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    I64(i64),
 }
 
 /// One item within an `IngestBatch` record.

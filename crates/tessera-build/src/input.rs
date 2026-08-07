@@ -28,6 +28,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
+use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_spatial::{fixed32, Bounds};
 
 use crate::error::{BuildError, Result};
@@ -623,6 +624,385 @@ fn read_f32_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
             detail: format!("column '{name}' has unsupported type {other:?}"),
         }),
     }
+}
+
+/// Read a vocabulary file: `(key, code)` plus an optional `label` (§4.4).
+///
+/// **Parquet, like every other build input**, so a 400-value published vocabulary is the same
+/// kind of artifact as the points and pairs files and needs no second reader.
+///
+/// A `gate` column is **refused rather than ignored** (⊘, §3.8): an explicit gate label replaces
+/// membership-derivation for its value, which is an authorisation statement, and a build that
+/// silently dropped it would produce a bundle whose vocabulary is more visible than its author
+/// declared. There is no vocabulary-visibility evaluation yet to honour it, so refusing is the
+/// only answer that does not manufacture an assurance.
+pub fn read_vocabulary_file(path: &Path, attribute: &str) -> Result<crate::schema::ValueSet> {
+    use arrow::array::StringArray;
+
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let schema = builder.schema().clone();
+    if schema.column_with_name("gate").is_some() {
+        return Err(crate::schema::schema_error(format!(
+            "attribute '{attribute}': the vocabulary at {} carries a `gate` column, which is \
+             specified and not built (per-point-attributes §3.8). An explicit gate label replaces \
+             membership-derivation for its value — an authorisation statement — and nothing \
+             evaluates one yet. Refused rather than dropped: a dropped gate is a value more \
+             visible than its author declared",
+            path.display()
+        )));
+    }
+    let key_idx = column_index(path, &schema, "key")?;
+    let code_idx = column_index(path, &schema, "code")?;
+    let label_idx = schema.column_with_name("label").map(|(i, _)| i);
+
+    let reader = builder
+        .build()
+        .map_err(|e| BuildError::parquet(path, e))?;
+
+    let mut set = crate::schema::ValueSet::default();
+    for batch in reader {
+        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+        let keys = batch
+            .column(key_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: "vocabulary column 'key' must be utf8".into(),
+            })?;
+        let code_values = read_u64_column(path, &batch, code_idx, "code")?;
+        let label_values = match label_idx {
+            Some(idx) => Some(
+                batch
+                    .column(idx)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| BuildError::Schema {
+                        path: path.to_path_buf(),
+                        detail: "vocabulary column 'label' must be utf8".into(),
+                    })?
+                    .clone(),
+            ),
+            None => None,
+        };
+        for (row, raw) in code_values.iter().enumerate() {
+            let key = keys.value(row).to_string();
+            let code = u32::try_from(*raw).map_err(|_| {
+                crate::schema::schema_error(format!(
+                    "attribute '{attribute}': value '{key}' has code {raw}, which is not a u32"
+                ))
+            })?;
+            // A duplicate key here is a duplicate *code assignment*, which the caller's file
+            // decides silently by row order unless it is refused. `check_codes` catches two keys
+            // at one code; this catches one key at two.
+            if let Some(previous) = set.codes.insert(key.clone(), code) {
+                return Err(crate::schema::schema_error(format!(
+                    "attribute '{attribute}': the vocabulary at {} lists key '{key}' twice, at \
+                     codes {previous} and {code}. Which one every row carrying '{key}' would \
+                     mean is decided by row order, so it is refused",
+                    path.display()
+                )));
+            }
+            if let Some(values) = &label_values {
+                set.labels.insert(key, values.value(row).to_string());
+            }
+        }
+    }
+    // `reserved` has no file spelling: a tombstone belongs in the reviewed schema artifact rather
+    // than in a regenerable data file, on §3.4's argument that a re-sorted or regenerated
+    // vocabulary file must not be able to change what a stored code means.
+    Ok(set)
+}
+
+/// Stream the declared attribute columns, calling `visit(entity_id, values)` once per selected
+/// row with the values in **declared order** — the order `columns.arrow`'s tail is written and
+/// read back in.
+///
+/// **A second pass over the points file rather than a widening of [`scan_points`].** [`PointRow`]
+/// is a 16-byte `Copy` struct held one per entity by both builds, and its doc argues that width;
+/// a variable-length attribute tail hung off it would make the build's one per-entity structure
+/// grow with the schema. The two passes are independent, and this one is single-threaded because
+/// an attribute column is 1–8 bytes against geometry's decode cost — the parallel decode
+/// [`scan_points`] needs buys nothing here.
+///
+/// Category keys are mapped to codes through `vocabularies`; a key the vocabulary does not
+/// declare is a **build failure** naming the column and the key, per §5's declare-then-use rule.
+/// A row whose category column is null carries [`crate::schema::ABSENT_CODE`].
+pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
+    path: &Path,
+    schema_decl: &crate::schema::Schema,
+    limit: Option<u64>,
+    mut visit: F,
+) -> Result<()> {
+    use arrow::array::StringArray;
+
+    if schema_decl.is_empty() {
+        return Ok(());
+    }
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let file_schema = builder.schema().clone();
+
+    let mut roots = vec![column_index(path, &file_schema, "entity_id")?];
+    for attribute in &schema_decl.attributes {
+        roots.push(
+            file_schema
+                .column_with_name(&attribute.name)
+                .map(|(i, _)| i)
+                .ok_or_else(|| BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "the schema declares attribute '{}', which this points file has no \
+                         column for. A declared column the data lacks would otherwise be written \
+                         as the absent sentinel for every row — a column that cost its width to \
+                         say nothing",
+                        attribute.name
+                    ),
+                })?,
+        );
+    }
+    let projection =
+        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots.clone());
+    let reader = builder
+        .with_projection(projection)
+        .with_batch_size(65_536)
+        .build()
+        .map_err(|e| BuildError::parquet(path, e))?;
+    let projected = arrow::array::RecordBatchReader::schema(&reader);
+    let id_idx = column_index(path, &projected, "entity_id")?;
+    let attribute_idx: Vec<usize> = schema_decl
+        .attributes
+        .iter()
+        .map(|a| column_index(path, &projected, &a.name))
+        .collect::<Result<_>>()?;
+
+    let mut row_values: Vec<ScalarValue> = Vec::with_capacity(schema_decl.attributes.len());
+    for batch in reader {
+        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+        let ids = read_u64_column(path, &batch, id_idx, "entity_id")?;
+        for (row, &entity_id) in ids.iter().enumerate() {
+            if limit.is_some_and(|l| entity_id >= l) {
+                continue;
+            }
+            row_values.clear();
+            for (attribute, &idx) in schema_decl.attributes.iter().zip(&attribute_idx) {
+                let column = batch.column(idx);
+                let value = match &attribute.vocabulary {
+                    Some(vocabulary) => {
+                        // A category arrives as its *key*, never as a code: §3.1 — the key in the
+                        // row is not the display name, and the code is assigned once and pinned,
+                        // so a data file supplying codes directly would be a second place codes
+                        // are decided.
+                        let keys = column
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .ok_or_else(|| BuildError::Schema {
+                                path: path.to_path_buf(),
+                                detail: format!(
+                                    "attribute '{}' is a category, so its column must hold value \
+                                     keys (utf8); this file holds {:?}. A category's code is \
+                                     assigned once from the vocabulary and never re-derived from \
+                                     the data (per-point-attributes §3.4)",
+                                    attribute.name,
+                                    column.data_type()
+                                ),
+                            })?;
+                        let code = if keys.is_null(row) {
+                            crate::schema::ABSENT_CODE
+                        } else {
+                            let key = keys.value(row);
+                            schema_decl.vocabularies[vocabulary]
+                                .code_of(key)
+                                .ok_or_else(|| {
+                                    crate::schema::schema_error(format!(
+                                        "attribute '{}': the points file carries value '{key}', \
+                                         which the declared vocabulary does not list. Under \
+                                         `vocabulary = \"declared\"` there is no auto-mint: a \
+                                         category carries properties and a visibility \
+                                         consequence, so a typo must not create one \
+                                         (per-point-attributes §5)",
+                                        attribute.name
+                                    ))
+                                })?
+                        };
+                        code_as(attribute.ty, code)
+                    }
+                    None => plain_scalar(path, column, row, attribute)?,
+                };
+                row_values.push(value);
+            }
+            visit(entity_id, &row_values);
+        }
+    }
+    Ok(())
+}
+
+/// A vocabulary code at the column's declared width. Every code reaching here was checked
+/// against [`ScalarType::max_code`] at parse, so the narrowing cannot lose a value.
+fn code_as(ty: ScalarType, code: u32) -> ScalarValue {
+    match ty {
+        ScalarType::U8 => ScalarValue::U8(code as u8),
+        ScalarType::U16 => ScalarValue::U16(code as u16),
+        _ => ScalarValue::U32(code),
+    }
+}
+
+/// One non-category attribute's value, at the column's declared type.
+///
+/// **Null becomes the type's zero**, matching a category's *absent* sentinel: `columns.arrow` is
+/// contractually non-nullable (R4) and the reader refuses a nullable column outright, so there is
+/// no third state to carry. For a numeric attribute that makes zero ambiguous between "absent"
+/// and "zero", which is why §3's first-class case is the category — where code 0 means absent and
+/// nothing else.
+fn plain_scalar(
+    path: &Path,
+    column: &arrow::array::ArrayRef,
+    row: usize,
+    attribute: &crate::schema::Attribute,
+) -> Result<ScalarValue> {
+    use arrow::array::{Float32Array, Float64Array, UInt64Array};
+    let mismatch = |found: &DataType| BuildError::Schema {
+        path: path.to_path_buf(),
+        detail: format!(
+            "attribute '{}' is declared '{}', but the points file holds {found:?}. The width is \
+             baked into every row and changing it rewrites the corpus (per-point-attributes \
+             §2.2), so it is taken from the declaration and the data must match it",
+            attribute.name,
+            attribute.ty.arrow_type_name()
+        ),
+    };
+    if column.is_null(row) {
+        return Ok(match attribute.ty {
+            ScalarType::U8 => ScalarValue::U8(0),
+            ScalarType::U16 => ScalarValue::U16(0),
+            ScalarType::U32 => ScalarValue::U32(0),
+            ScalarType::U64 => ScalarValue::U64(0),
+            ScalarType::I64 => ScalarValue::I64(0),
+            ScalarType::F32 => ScalarValue::F32(0.0),
+            ScalarType::Utf8 => ScalarValue::Utf8(String::new()),
+        });
+    }
+    let any = column.as_any();
+    // Each arm accepts the declared type and the wider source types that carry it losslessly —
+    // a `u8` attribute read from a parquet `u32` column, which is how most tooling writes small
+    // integers — and refuses anything else rather than truncating.
+    Ok(match attribute.ty {
+        ScalarType::U8 => ScalarValue::U8(narrow(
+            read_integer(any, column.data_type()).ok_or_else(|| mismatch(column.data_type()))?
+                [row],
+            u8::MAX as i64,
+            attribute,
+        )? as u8),
+        ScalarType::U16 => ScalarValue::U16(narrow(
+            read_integer(any, column.data_type()).ok_or_else(|| mismatch(column.data_type()))?
+                [row],
+            u16::MAX as i64,
+            attribute,
+        )? as u16),
+        ScalarType::U32 => ScalarValue::U32(narrow(
+            read_integer(any, column.data_type()).ok_or_else(|| mismatch(column.data_type()))?
+                [row],
+            u32::MAX as i64,
+            attribute,
+        )? as u32),
+        ScalarType::U64 => {
+            if let Some(a) = any.downcast_ref::<UInt64Array>() {
+                ScalarValue::U64(a.value(row))
+            } else {
+                let v = read_integer(any, column.data_type())
+                    .ok_or_else(|| mismatch(column.data_type()))?[row];
+                ScalarValue::U64(u64::try_from(v).map_err(|_| mismatch(column.data_type()))?)
+            }
+        }
+        ScalarType::I64 => ScalarValue::I64(
+            read_integer(any, column.data_type()).ok_or_else(|| mismatch(column.data_type()))?
+                [row],
+        ),
+        ScalarType::F32 => {
+            if let Some(a) = any.downcast_ref::<Float32Array>() {
+                ScalarValue::F32(a.value(row))
+            } else if let Some(a) = any.downcast_ref::<Float64Array>() {
+                ScalarValue::F32(a.value(row) as f32)
+            } else {
+                return Err(mismatch(column.data_type()));
+            }
+        }
+        ScalarType::Utf8 => {
+            // Unreachable: `render` on `utf8` is refused at parse (§4.3). Kept as an error rather
+            // than an `unreachable!` so that lifting that refusal cannot land on a panic.
+            return Err(mismatch(column.data_type()));
+        }
+    })
+}
+
+/// Any integer parquet column as `i64`, or `None` if it is not an integer column at all.
+fn read_integer(any: &dyn std::any::Any, ty: &DataType) -> Option<Vec<i64>> {
+    use arrow::array::{Int32Array, Int64Array, UInt16Array, UInt32Array, UInt64Array, UInt8Array};
+    Some(match ty {
+        DataType::UInt8 => any
+            .downcast_ref::<UInt8Array>()?
+            .values()
+            .iter()
+            .map(|v| *v as i64)
+            .collect(),
+        DataType::UInt16 => any
+            .downcast_ref::<UInt16Array>()?
+            .values()
+            .iter()
+            .map(|v| *v as i64)
+            .collect(),
+        DataType::UInt32 => any
+            .downcast_ref::<UInt32Array>()?
+            .values()
+            .iter()
+            .map(|v| *v as i64)
+            .collect(),
+        DataType::UInt64 => any
+            .downcast_ref::<UInt64Array>()?
+            .values()
+            .iter()
+            .map(|v| *v as i64)
+            .collect(),
+        DataType::Int32 => any
+            .downcast_ref::<Int32Array>()?
+            .values()
+            .iter()
+            .map(|v| *v as i64)
+            .collect(),
+        DataType::Int64 | DataType::Timestamp(_, _) => {
+            // A timestamp is an `i64` of its declared unit; the schema declares `i64` and the
+            // *unit* stays the caller's business, exactly as it is in the source file.
+            any.downcast_ref::<Int64Array>()
+                .map(|a| a.values().to_vec())
+                .or_else(|| {
+                    use arrow::array::TimestampMicrosecondArray;
+                    any.downcast_ref::<TimestampMicrosecondArray>()
+                        .map(|a| a.values().to_vec())
+                })?
+        }
+        _ => return None,
+    })
+}
+
+/// A value that must fit the declared width, refused rather than truncated.
+///
+/// **The refusal is the point.** A `u8` category column whose data carries 300 is a build that
+/// would otherwise write 44 — a different value, in a column whose width cannot be changed
+/// without rewriting the corpus, with nothing downstream able to notice.
+fn narrow(value: i64, max: i64, attribute: &crate::schema::Attribute) -> Result<i64> {
+    if value < 0 || value > max {
+        return Err(crate::schema::schema_error(format!(
+            "attribute '{}': the points file carries {value}, which does not fit its declared \
+             '{}' (0..={max}). Refused rather than truncated — the width is baked into every row \
+             and the remedy is a rebuild at a wider declaration (per-point-attributes §3.6)",
+            attribute.name,
+            attribute.ty.arrow_type_name()
+        )));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
