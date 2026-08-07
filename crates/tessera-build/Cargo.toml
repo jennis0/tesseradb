@@ -22,3 +22,7 @@ chrono = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
+# Test-only: `tests/term_sweep_pairs.rs` drives `tessera_authz::term_sweep::sweep_term_postings`
+# end to end, which takes the fold's tombstone set as a `croaring::Bitmap` (compaction §3). Not a
+# [dependencies] entry — no non-test code in this crate names the type.
+croaring = { workspace = true }

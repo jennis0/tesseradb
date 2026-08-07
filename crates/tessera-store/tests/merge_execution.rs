@@ -307,6 +307,110 @@ fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
     );
 }
 
+/// **One writer, two producers — and the k-way merge's bytes are the sort's bytes** (write-path §7).
+///
+/// `execute_merge` streams its inputs through a heap into `SegmentWriter` rather than decoding them
+/// into `TilerItem`s and re-sorting, because the old shape peaked at a measured 4.4–4.9× its
+/// inputs' bytes and that multiplier — not the policy — is why decision 0049 could not raise
+/// `max_merged_segment_bytes`. A substitution is only safe if the output does not move, and "it
+/// merges" is not that claim: this compares **both segment files byte for byte** against what
+/// `write_segment` emits from the same rows concatenated and sorted, which is what the merge did
+/// before.
+///
+/// The fixture interleaves deliberately (see [`segment`]'s `stride`), so the two producers
+/// genuinely disagree about input order and agree only about output order.
+///
+/// **Mutations this kills:** dropping the `tessera_id` component of the heap key (ties inside one
+/// Morton cell then order by input, not by identity); reading the residual from the wrong cursor;
+/// spooling a column little-endian where arrow reads it native; emitting the extent's ordinal
+/// rather than the emission ordinal.
+#[test]
+fn the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would() {
+    use tessera_spatial::tiler::TilerItem;
+    use tessera_spatial::unsplit32;
+    use tessera_store::write::write_segment;
+    use tessera_types::{MortonCode, TesseraId};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    build_bundle(dir.path(), 10);
+    let inputs = [
+        segment(dir.path(), "in-a", 100, 23, 7),
+        segment(dir.path(), "in-b", 200, 19, 31),
+        segment(dir.path(), "in-c", 300, 17, 11),
+    ];
+
+    // What the superseded path did: read every input's rows, concatenate, sort by
+    // `(morton, tessera_id)`, write through the one segment writer.
+    let mut items: Vec<TilerItem> = Vec::new();
+    let mut entity_ids: Vec<tessera_types::EntityId> = Vec::new();
+    for input in &inputs {
+        let d = seg_dir(dir.path(), &input.seg_id);
+        let codes = MortonSlice::load(&d.join("morton.u32")).unwrap();
+        let cols = ColumnsRef::load(&d.join("columns.arrow")).unwrap();
+        for row in 0..codes.u32().len() {
+            let tessera_id = TesseraId::new(cols.tessera_id()[row]);
+            let (qx, qy) = unsplit32(MortonCode::new(codes.u32()[row]), cols.residual()[row]);
+            items.push(TilerItem {
+                tessera_id,
+                qx,
+                qy,
+                scalars: vec![],
+            });
+            entity_ids.push(key().invert(tessera_id).1);
+        }
+    }
+    let expected_dir = dir.path().join("expected");
+    std::fs::create_dir_all(&expected_dir).unwrap();
+    let codes = tessera_spatial::sort_batch(&mut items, &mut entity_ids);
+    write_segment(&expected_dir, &items, &codes, &[]).expect("the reference segment writes");
+
+    merge(dir.path(), &inputs);
+    let merged = seg_dir(dir.path(), "merged-1");
+    for name in ["morton.u32", "columns.arrow"] {
+        assert_eq!(
+            std::fs::read(merged.join(name)).unwrap(),
+            std::fs::read(expected_dir.join(name)).unwrap(),
+            "{name}: the k-way merge and the sort must produce the same bytes, not merely the \
+             same rows"
+        );
+    }
+}
+
+/// **The spools do not survive the merge that wrote them.**
+///
+/// `SegmentWriter` streams each column to a file beside its output and maps it back at `finish`.
+/// At the fold's scale those spools are the corpus (compaction §3, ~12 GB at 10⁹), and a filled
+/// device takes the whole write path down with it (write-path §1.3) — so they are unlinked by a
+/// destructor rather than by a line at the bottom of the happy path.
+///
+/// **Mutation:** replace `SpoolGuard`'s `Drop` with a `remove_file` at the end of `finish` and this
+/// still passes; delete either and it fails. What it pins is that a published segment directory
+/// holds exactly the four files the manifest names.
+#[test]
+fn a_merged_segment_directory_holds_no_spool_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    build_bundle(dir.path(), 10);
+    let a = segment(dir.path(), "in-a", 100, 6, 7);
+    let b = segment(dir.path(), "in-b", 200, 5, 31);
+
+    merge(dir.path(), &[a, b]);
+    let mut names: Vec<String> = std::fs::read_dir(seg_dir(dir.path(), "merged-1"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "columns.arrow",
+            "ext-locator.u32",
+            "external-ids.arrow",
+            "morton.u32"
+        ],
+        "the segment directory must hold exactly what the manifest names"
+    );
+}
+
 /// **A merge must not move the watermark**, and deriving one from its inputs would.
 ///
 /// The output shape is a flush's, where `entity_hi + 1` is right because a flush's entities are the

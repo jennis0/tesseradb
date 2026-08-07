@@ -31,6 +31,7 @@ use tessera_store::{Bundle, StoreError};
 use tessera_types::{EntityId, IdentityError, IdentityKey, TermId, TesseraId};
 
 use crate::cache::RowProjectionCache;
+use crate::geometry::GeometryPublication;
 use crate::write::{PublishGeometryError, WritePath};
 use crate::{Generation, GenerationHandle};
 
@@ -125,6 +126,14 @@ pub struct EngineConfig {
     /// configured value was checked and discarded. That is the inert key decision 0045 forbids,
     /// with the additional trap that validation made it look effective.
     pub max_merged_segment_bytes: Option<u64>,
+    /// When a fold is dispatched with nobody asking for one — compaction §9's automatic trigger,
+    /// as decision 0056 rules it.
+    ///
+    /// **[`CompactionSchedule::off`] is the value an embedder gets unless it says otherwise**, and
+    /// that is deliberate: a fold is minutes to hours of IO, and starting one from a default nobody
+    /// chose is not a decision this type may make on a caller's behalf. `tessera-server` applies
+    /// §9's defaults, because it is where an operator can see and change them.
+    pub compaction: crate::compact::CompactionSchedule,
 }
 
 /// The row-space merge's policy (write-path §7).
@@ -263,6 +272,23 @@ impl Session {
     pub fn is_stale(&self, generation: &Generation) -> bool {
         self.unresolved_count > 0 && generation.dict.len() > self.dict_len_at_authorise
     }
+}
+
+/// One (partition, slice)'s live segment count — [`Engine::live_segment_counts`]'s element, and
+/// what `/control/status` publishes under `segments`.
+///
+/// **Plain `String`s and a `usize`, defined here rather than re-exported from `tessera-store`.**
+/// `check-layers.sh` denies a `tessera-server → tessera-store` edge (SA §3), so a gauge the server
+/// publishes must be nameable from this crate — the discipline `FragmentCacheStats` and
+/// `DeclaredScalar` already establish at the crate root. This one owns nothing of the store's
+/// vocabulary, so it is a definition here rather than a re-export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SliceSegments {
+    pub partition: String,
+    pub slice: String,
+    /// Segments this slice's viewport sweep would iterate — base plus every flush extent merge has
+    /// not yet collapsed.
+    pub segments: usize,
 }
 
 /// Engine-level failures. Every variant here is fail-closed (Global Constraint 3): none of them
@@ -438,15 +464,21 @@ impl std::error::Error for EngineError {}
 pub type Result<T> = std::result::Result<T, EngineError>;
 
 /// The request-serving engine: one immutable [`Generation`] behind an atomically-swappable
-/// pointer, plus the process-lifetime state that doesn't change on an overlay/bundle swap (the
-/// dictionary, the postings reader, the fragment cache).
+/// pointer, plus the state that genuinely is process-lifetime — the plugin, the compute pool, the
+/// `tessera_id` key, the row-projection cache and the bundle root.
+///
+/// **The dictionary, the postings reader, the fragment cache and the external-id sidecar are not
+/// among them, and used to be.** Each is per-generation because something publishes a new one: a
+/// flush promotes into the dictionary, a fold rewrites the term index and rotates the fragment
+/// identity, and a fold or a coalesce rewrites the external-id runs. Holding them here made a
+/// publication that changed any of them inexpressible — see [`Generation::fragments`] for what
+/// that cost.
 pub struct Engine {
     /// The live generation pointer. `Arc`-shared with [`WritePath`], which publishes every
     /// generation swap through this exact pointer: the write path owns the swap, the
     /// read paths own the load, and both must see one pointer or a swap would be invisible.
     pub(crate) generation: Arc<GenerationHandle>,
     pub(crate) plugin: Arc<dyn Plugin>,
-    pub(crate) fragment_cache: Arc<FragmentCache>,
     /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
     pub(crate) row_projection_cache: Arc<RowProjectionCache>,
     /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
@@ -457,9 +489,17 @@ pub struct Engine {
     /// D-D's one shared compute pool — and, since flush, the pool a segment write executes on
     /// (§1.1). `Arc` because the executor thread holds it too; still exactly one pool.
     pub(crate) pool: Arc<rayon::ThreadPool>,
-    /// The bundle's current prefix directory. A flush writes inside it and never touches
-    /// `MANIFEST.json` or `CURRENT`, which is what separates it from a compaction.
-    pub(crate) prefix_dir: std::path::PathBuf,
+    /// The bundle **root** — the directory holding `CURRENT` and every prefix under it.
+    ///
+    /// **The root, not the prefix directory, and that is the fourth gap of compaction §4.** A
+    /// prefix directory captured once is correct for as long as nothing can publish a new prefix,
+    /// which is exactly the premise a fold breaks: the first deny published after a flip would
+    /// write its side-manifest into the prefix reclamation is about to delete — acked deny state,
+    /// gone from the restore path, with no error anywhere. A second copy that rotates is not the
+    /// fix either; it is one more thing to miss at one of eight call sites. The prefix directory
+    /// is **derived** from the live generation's own `prefix` wherever it is needed
+    /// (`Executor::prefix_dir`), so it cannot go stale by construction.
+    pub(crate) bundle_root: std::path::PathBuf,
     pub(crate) config: EngineConfig,
     next_token_id: AtomicU64,
     /// The write path: the WAL, the I9 allocator, the live external-id maps, the resolver's
@@ -468,15 +508,6 @@ pub struct Engine {
     /// and its two siblings) compose over its read accessors, so this crate has one owner for each
     /// mutable field rather than two.
     pub(crate) write: WritePath,
-    /// External ids established by the bundle's runs — the reader half of contracts §2.4.
-    ///
-    /// **Swappable, because the entity-space coalesce rewrites the run list** (`crate::coalesce`).
-    /// It is not per-generation: a coalesce is content-preserving, so an old sidecar and a new
-    /// generation answer identically for every key, and a request that loaded one before the swap
-    /// and the other after it cannot observe a difference. What the swap buys is the bound the
-    /// coalesce exists for — `resolve` scans every run whose bounds admit the key, and without it
-    /// a live process kept the pre-coalesce list until its next restart.
-    external_index: Arc<arc_swap::ArcSwap<ExternalIdIndex>>,
     /// The `tessera_id` blinding permutation's per-deployment key (contracts §2.6 r6, design
     /// memo `docs/evidence/memos/2026-07-30-tessera-id-construction.md`) — parsed once at open from
     /// MANIFEST's `identity.key` and held for the process lifetime. Never leaves the server (I10).
@@ -509,7 +540,7 @@ pub struct Engine {
     /// the swap and the pool task's first insert must see `true`, or after a merge it takes the
     /// measured 4.55 s rebuild inline (review finding F5). Shared with the executor, which is the
     /// only writer.
-    pub(crate) refresh_in_flight: Arc<AtomicBool>,
+    pub(crate) refresh_in_flight: Arc<AtomicU64>,
     /// Whether the background refresh runs — see [`crate::refresh::RefreshDeps::enabled`].
     pub(crate) refresh_enabled: Arc<AtomicBool>,
     /// Whether the background refresh **holds** — see [`crate::refresh::RefreshDeps::paused`].
@@ -520,6 +551,11 @@ pub struct Engine {
     /// hold the entity-space axes still, since a merge coalesces runs and locator extents of its
     /// own and the two passes would otherwise race for the same entries.
     pub(crate) merge_enabled: Arc<AtomicBool>,
+    /// Whether a fold **holds** between finishing its passes and submitting the result — see
+    /// [`Engine::set_fold_paused_for_test`]. Always `false` in a shipped build.
+    pub(crate) fold_paused: Arc<AtomicBool>,
+    /// See [`Engine::set_fold_publication_paused_for_test`]. Always `false` in a shipped build.
+    pub(crate) fold_publication_paused: Arc<AtomicBool>,
     /// How many row projections were built from the whole fragment rather than derived from the
     /// preceding generation's — the observable behind [`Engine::full_projection_builds`].
     ///
@@ -637,7 +673,8 @@ impl Engine {
         // the manifest names but no map covers would be served unverified.
         let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
         for rel in &partition.manifest.deltas {
-            if !partition.manifest.files.contains_key(rel) && !bundle.manifest.files.contains_key(rel)
+            if !partition.manifest.files.contains_key(rel)
+                && !bundle.manifest.files.contains_key(rel)
             {
                 return Err(EngineError::Malformed(format!(
                     "the side-manifest lists delta tier '{rel}' which no files map digests, so \
@@ -654,10 +691,10 @@ impl Engine {
         // data (paths and digests), never the filesystem. No extent descriptor, digest, ordinal
         // or file path is handed to this crate — the constructor takes the manifests and the
         // prefix directory and keeps everything else behind its own API.
-        let external_index = Arc::new(arc_swap::ArcSwap::from(Arc::new(
+        let external_index = Arc::new(
             ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
                 .map_err(EngineError::Store)?,
-        )));
+        );
 
         // Contracts §2.6 r6: the deployment's `tessera_id` key, parsed once here and held for
         // the process lifetime. `IdentityKey::from_hex` also rejects a degenerate key — a bundle
@@ -749,6 +786,8 @@ impl Engine {
             bundle: Arc::clone(&bundle),
             dict: Arc::clone(&dict),
             postings: Arc::clone(&postings),
+            fragments: fragment_cache,
+            external_index,
             delta_postings,
             overlay_version: 0,
             overlay: Arc::new(overlay),
@@ -760,26 +799,26 @@ impl Engine {
         // after `open`, having validated the figure; every other embedder (tests, benches,
         // examples) gets unbounded caches, which is what a read-only embedder wants.
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
-        let refresh_in_flight = Arc::new(AtomicBool::new(false));
+        let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));
         let refresh_enabled = Arc::new(AtomicBool::new(true));
         let refresh_paused = Arc::new(AtomicBool::new(false));
         let coalesce_enabled = Arc::new(AtomicBool::new(true));
         let merge_enabled = Arc::new(AtomicBool::new(true));
+        let fold_paused = Arc::new(AtomicBool::new(false));
+        let fold_publication_paused = Arc::new(AtomicBool::new(false));
 
         Ok(Engine {
             generation: Arc::clone(&generation),
             plugin,
-            fragment_cache,
             // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
             // after `open`, having validated the figure; every other embedder (tests, benches,
             // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: Arc::clone(&row_projection_cache),
             pool,
-            prefix_dir,
+            bundle_root: bundle_root.to_path_buf(),
             config,
             next_token_id: AtomicU64::new(0),
             write: WritePath::new(write_state),
-            external_index: Arc::clone(&external_index),
             identity_key,
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
             stale_serves: AtomicU64::new(0),
@@ -789,6 +828,8 @@ impl Engine {
             refresh_paused: Arc::clone(&refresh_paused),
             coalesce_enabled: Arc::clone(&coalesce_enabled),
             merge_enabled: Arc::clone(&merge_enabled),
+            fold_paused: Arc::clone(&fold_paused),
+            fold_publication_paused: Arc::clone(&fold_publication_paused),
             full_projection_builds: AtomicU64::new(0),
         })
     }
@@ -848,6 +889,44 @@ impl Engine {
     /// *finishes*: the flag clears there, and rung 3 builds instead of refusing.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
+    /// Hold a fold between its last pass and its submission, so a test can land a flush **inside
+    /// the fold's flight** — the interleaving compaction §2's whole carry-forward table exists for,
+    /// and the one nothing else here can construct.
+    ///
+    /// A fold over a fixture-sized corpus finishes in well under a second, so an unassisted test
+    /// racing a flush against it would be a coin toss; over a real corpus the same window is hours
+    /// wide and needs no help. What the hook models is therefore the *duration*, not a behaviour:
+    /// the flush publishes into the old prefix exactly as it would in production, and the
+    /// publication that follows sees it as a carry-forward through the live manifest, which is the
+    /// only route it ever has.
+    ///
+    /// Held after the passes rather than during them, which is where the interleaving's
+    /// consequences live: a flush landing mid-pass is one the fold's file list does not name, and
+    /// so is one the publication must carry forward — which is the same state this produces.
+    pub fn set_fold_paused_for_test(&self, paused: bool) {
+        self.fold_paused.store(paused, Ordering::SeqCst);
+    }
+
+    /// Hold a **completed** fold in its channel, undrained, so a merge or coalesce can publish
+    /// under it — see [`crate::write::MaintenanceDeps::fold_publication_paused`] for which window
+    /// this is and why it is a real one.
+    ///
+    /// Unpausing wakes the executor, because the loop that would drain the fold may already have
+    /// parked: the pause makes `publish_completed_folds` report that nothing happened, which is
+    /// exactly what sends an otherwise-idle executor to `wait_for_work`.
+    pub fn set_fold_publication_paused_for_test(&self, paused: bool) {
+        self.fold_publication_paused.store(paused, Ordering::SeqCst);
+        if !paused {
+            self.write.wake();
+        }
+    }
+
+    /// Whether a fold has finished its passes and is holding at [`Self::set_fold_paused_for_test`].
+    /// The condition a test waits on instead of guessing at the hold with a sleep.
+    pub fn fold_is_holding_for_test(&self) -> bool {
+        self.write.health().fold_holding.load(Ordering::SeqCst)
+    }
+
     pub fn set_refresh_paused_for_test(&self, paused: bool) {
         self.refresh_paused.store(paused, Ordering::SeqCst);
     }
@@ -937,8 +1016,8 @@ impl Engine {
         // a function of the exact `auth_data` that produced `satisfied` above, which it is.
         let auth_data_hash: [u8; 32] = Sha256::digest(auth_data).into();
 
-        let fragment = self
-            .fragment_cache
+        let fragment = generation
+            .fragments
             .get_or_build(
                 &satisfied_sorted,
                 auth_data_hash,
@@ -990,24 +1069,25 @@ impl Engine {
     /// **The single seam a geometry swap may go through**, and the only thing in this process that
     /// moves `segments_version`. A flush is its production caller.
     ///
-    /// **It structurally cannot regress authorisation state.** `overlay`, `buffer` and
-    /// `overlay_version` are carried forward *unchanged* from whatever generation is live at the
-    /// instant of the compare-and-swap — this method has no parameter that could carry a stale one,
-    /// which is what lets it exist as a public API at all. `overlay_version` in particular is
-    /// carried, never bumped: bumping it on a geometry-only swap would falsely signal a change on
-    /// lifecycle §1.2's *security-state* axis, which §8.5's cache keys read.
+    /// **It structurally cannot regress authorisation state.** `overlay` and `buffer` are carried
+    /// forward from whatever generation is live at the instant of the swap — this method has no
+    /// parameter that could carry a stale one, which is what lets it exist as a public API at all.
+    /// The one thing that may change them is `PrefixRotation::retired`, Rule F's retirement, and it
+    /// only ever *withdraws* deletions.
     ///
-    /// **What it does NOT swap, and a flush must not assume otherwise.** `Engine`'s `postings`
-    /// reader, `dict` and the `FragmentCache`'s `bundle_identity` are all bound at
-    /// [`Engine::open`] for the process lifetime. This method is therefore a **compaction-shaped**
-    /// publication: correct when the new prefix's term index and dictionary are the same ones (a
-    /// compaction rewrites the permutation, tile table, columns and candidate lists, and
-    /// deliberately does *not* invalidate the term index or masks — §11.3), and **not sufficient
-    /// for a flush that introduces new terms or new entities**, which would leave every
-    /// subsequently-authorised session building its fragment from the old prefix's postings. That
-    /// direction is conservative rather than fail-open — a newly flushed entity is absent from the
-    /// stale fragment, so it goes unseen — but it is wrong, and a flush must widen this signature
-    /// or swap those fields alongside.
+    /// `overlay_version` moves with that and with nothing else. Bumping it on a geometry-only swap
+    /// would falsely signal a change on lifecycle §1.2's *security-state* axis, which §8.5's cache
+    /// keys read; **not** bumping it on a retirement would leave a real change to that state
+    /// invisible to the same keys.
+    ///
+    /// **What it swaps, and what it carries forward.** Everything a [`GeometryPublication`] names,
+    /// plus — where the publication carries a `PrefixRotation` — the base postings, the bundle
+    /// identity and the fragment cache it keys, and the external-id sidecar. Those four used to be
+    /// bound at [`Engine::open`] for the process lifetime, which made this a **compaction-shaped**
+    /// publication in the narrow sense that it presumed the term index and dictionary were
+    /// unchanged (§11.3 as it then read) — precisely the premise a fold breaks (decision 0050). It
+    /// no longer presumes it: a rotation is expressible here, and a publication that does not carry
+    /// one carries those four forward from the live generation unchanged.
     ///
     /// **Publication happens on the write executor, and this is a submission to it.** That is
     /// what makes "one publisher" structural rather than a discipline (`write.rs`'s module doc;
@@ -1017,37 +1097,89 @@ impl Engine {
     /// was narrowed by re-reading the identity and never closed. It is closed now: there is one
     /// publisher and nothing to race. Closes #59.
     ///
-    /// `prefix`, `segments_version` and `watermark` are the values from the new prefix's own
-    /// SEGMENTS manifest; they are taken separately from `bundle` rather than read out of it
-    /// because the caller — a flush or a compaction publication — is the thing that decides what
-    /// `n` the new manifest carries. `segments_version` must strictly increase; see
-    /// [`GeometryRefused`] and `crate::geometry::check_publishable` for why that is a refusal and
-    /// not a warning.
-    ///
-    /// `dict` and `delta_postings` are published with the geometry rather than read out of the
-    /// engine, because a flush produces both: it promotes novel descriptors to durable ordinals
-    /// and publishes the assignment as a `dict_extents` entry (§3.2), and it publishes one sparse
-    /// delta postings tier per segment (§5.2). A caller with neither passes the current
-    /// generation's own.
-    ///
     /// Blocks until the executor has performed the swap, so a returned `Ok` means the geometry is
     /// live — the same promise a `Receipt` carries for a lifecycle command.
     pub fn publish_geometry(
         &self,
-        prefix: String,
+        publication: GeometryPublication,
+    ) -> std::result::Result<(), PublishGeometryError> {
+        self.write.publish_geometry(publication)
+    }
+
+    /// Publish a **new prefix** this process just wrote: open it, rotate the term index, the
+    /// bundle identity, the fragment cache and the external-id sidecar onto it, retire `retired`,
+    /// and swap — steps 5 and 6 of compaction §4, as one call.
+    ///
+    /// # There is no production caller, and the name now says so
+    ///
+    /// **The fold does not take this route.** It publishes from the executor thread, where a
+    /// submission to the executor would deadlock, so it calls [`open_rotation`] — the seam both
+    /// share — and publishes inline (`crate::write::Executor::publish_fold`). Nothing else writes a
+    /// prefix. This entry point existed for "an embedder that wrote a prefix by some other means",
+    /// which is a caller that does not exist, and its only real users are the prefix-rotation cases
+    /// in `tests/prefix_rotation.rs`, which exercise the swap's half of compaction §4 against a
+    /// stand-in prefix rather than a whole fold.
+    ///
+    /// That mattered because of what it accepts. `retired` is Rule F's executed set and **this
+    /// function retires whatever it is handed** — the one place compaction §5's derivation is
+    /// enforced by documentation rather than by construction, since a caller could pass any bitmap
+    /// and make a deletion's tombstone leave `deleted` while its item is still visible. Keeping a
+    /// `pub` name that reads like the production route, in front of that, is an invitation. The
+    /// seam stays covered; what changes is that nobody reaches for this by accident.
+    ///
+    /// The refusals, the identity, and why the open skips verification are all [`open_rotation`]'s
+    /// and documented there.
+    ///
+    /// # `watermark` and `dict` are the **live** values, passed through untouched
+    ///
+    /// Compaction §4 step 2 and pass 4. A fold folds rows; it does not advance the entity axis and
+    /// it does not renumber the dictionary, so both come from the live generation and neither is
+    /// derived from the fold's inputs — deriving the watermark that way moves it backwards past
+    /// every entity accepted since the fold's snapshot, and every one of them goes invisible.
+    /// `crate::geometry::check_publishable` refuses a regression rather than trusting this
+    /// paragraph.
+    ///
+    /// # `retired` — Rule F, and the caller's obligation
+    ///
+    /// Entities whose tombstones leave `deleted` in this same swap. **Only those whose row and
+    /// postings this publication demonstrably removed** — compaction §5's
+    /// `{ e ∈ D₀ : no carried-forward artefact names e }`, evaluated against what was published
+    /// and never against what the plan predicted, with *artefact* meaning tier, segment **and**
+    /// external-id run. See `tessera_lifecycle::Overlay::retire`, which states what retiring one
+    /// entity too many costs. Empty is always safe: an un-retired tombstone is fail-closed, and
+    /// the next fold takes it.
+    pub fn publish_rotated_prefix_for_test(
+        &self,
+        prefix: &str,
         segments_version: u64,
         watermark: u64,
-        bundle: Arc<Bundle>,
         dict: Arc<Dict>,
         delta_postings: Vec<Arc<DeltaTier>>,
+        retired: &[EntityId],
     ) -> std::result::Result<(), PublishGeometryError> {
-        self.write.publish_geometry(
+        let mut retired_bitmap = croaring::Bitmap::new();
+        for entity in retired {
+            retired_bitmap.add(u32::try_from(entity.raw()).expect(
+                "entity ids are capped at u32::MAX by the I9 allocator (contracts §2.6 r6)",
+            ));
+        }
+        let (bundle, rotation) = open_rotation(
+            &self.bundle_root,
             prefix,
-            segments_version,
-            watermark,
-            bundle,
-            dict,
-            delta_postings,
+            &self.generation.load().fragments,
+            retired_bitmap,
+        )?;
+
+        self.write.publish_geometry(
+            GeometryPublication::within_prefix(
+                prefix.to_string(),
+                segments_version,
+                watermark,
+                bundle,
+                dict,
+                delta_postings,
+            )
+            .rotating(rotation),
         )
     }
 
@@ -1111,7 +1243,10 @@ impl Engine {
     pub fn set_cache_bounds(&self, row_projection_bytes: u64, fragment_bytes: u64) {
         self.row_projection_cache
             .set_bound_bytes(row_projection_bytes);
-        self.fragment_cache.set_memory_bound(fragment_bytes);
+        self.generation
+            .load()
+            .fragments
+            .set_memory_bound(fragment_bytes);
     }
 
     /// The row count at which a commit window closes (`ingest.commit_window_max_items`,
@@ -1157,8 +1292,9 @@ impl Engine {
                 overlay_depth = depth,
                 overlay_soft_limit = limit,
                 "ALARM: this node replayed a WAL whose overlay is already at or above the \
-                 configured soft limit. It alarms; it does not act — there is no fold until stage \
-                 2.3"
+                 configured soft limit. A fold is what brings it down, and the schedule's \
+                 retirable-depth route dispatches one at this threshold by default — so this is a \
+                 signal that the fold has work, not that nothing will act (compaction §9)"
             );
         }
     }
@@ -1168,6 +1304,70 @@ impl Engine {
     /// its own and cannot drift from what a request would compose against.
     pub fn overlay_depth(&self) -> usize {
         self.generation.load().overlay.len()
+    }
+
+    /// Rows the bundle's segments hold, tombstoned ones included — compaction §9's denominator, and
+    /// the only figure on `/control/status` that says how large the corpus actually is.
+    pub fn live_rows(&self) -> u64 {
+        self.generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.segments.iter())
+            .map(|descriptor| u64::from(descriptor.row_count))
+            .sum()
+    }
+
+    /// Retirable deletions — `|deleted|`, never the union with `suppressed`.
+    ///
+    /// **Beside [`Engine::overlay_depth`] rather than instead of it, and the pair is the point.**
+    /// Depth is what an operator alarms on and what `overlay_soft_limit` bounds; this is what a fold
+    /// can actually *reduce*, since Rule S says a suppression never retires. A deployment holding
+    /// half a million standing suppressions has a deep overlay and nothing for a fold to do, and
+    /// only publishing both numbers makes that legible (compaction §9).
+    pub fn retirable_deletions(&self) -> u64 {
+        self.generation.load().overlay.deleted_len()
+    }
+
+    /// Live segments per (partition, slice), read straight off the current generation — the gauge
+    /// decision 0049 obliges and `/control/status` publishes as `segments`.
+    ///
+    /// **This is a read-path constant made observable, not a maintenance counter.** A viewport pays
+    /// a measured 1.4–1.6 µs per (tile × segment), and `MergePolicy::select`'s ladder saturates at
+    /// `max_merged_segment_bytes` — so live segment count settles at corpus bytes ÷ the saturation
+    /// size and thereafter tracks the corpus rather than being bounded by merge (decision 0049,
+    /// pinned by `merge_selection.rs`'s
+    /// `the_size_ladder_saturates_at_the_cap_and_segment_count_then_tracks_the_corpus`). At 10⁹ rows
+    /// that is ~152 segments and ~73 ms on a 300-tile viewport against a 135–164 ms baseline. It is
+    /// invisible at 10⁷, which is why nothing measured it until the corpus was large enough, and why
+    /// it needs a gauge rather than a soak.
+    ///
+    /// **Off the live generation, with no counter of its own**, for `overlay_depth`'s reason: a
+    /// separate counter maintained by flush and merge is a second definition that can drift from the
+    /// segment set a request actually sweeps. What a reader gets here is exactly what
+    /// `viewport::tile_ranges_all` would iterate at the same instant.
+    ///
+    /// Sorted by `(partition, slice)` because the generation holds them in `HashMap`s: an operator
+    /// diffing two status responses must not see a reordering that means nothing.
+    pub fn live_segment_counts(&self) -> Vec<SliceSegments> {
+        let generation = self.generation.load();
+        let mut counts: Vec<SliceSegments> = generation
+            .bundle
+            .partitions
+            .iter()
+            .flat_map(|(partition, data)| {
+                data.slices
+                    .iter()
+                    .map(move |(slice, slice_data)| SliceSegments {
+                        partition: partition.clone(),
+                        slice: slice.clone(),
+                        segments: slice_data.segments.len(),
+                    })
+            })
+            .collect();
+        counts.sort_by(|a, b| (&a.partition, &a.slice).cmp(&(&b.partition, &b.slice)));
+        counts
     }
 
     /// The row-projection cache's operator gauges — what `/control/status` publishes as
@@ -1193,14 +1393,20 @@ impl Engine {
     /// through
     /// [`Self::set_cache_bounds`], by the one caller that has validated it.
     pub fn fragment_cache_stats(&self) -> tessera_authz::fragment::CacheStats {
-        self.fragment_cache.stats()
+        self.generation.load().fragments.stats()
     }
 
     /// Times the fragment cache has actually re-unioned postings (rather than reopening a
     /// digest-verified `.frag` sidecar or hitting the in-memory tier). The observable that
     /// separates an in-memory eviction from a genuinely cold rebuild.
+    ///
+    /// **This and [`Self::fragment_cache_stats`] are read off the live generation's cache, so both
+    /// reset to zero at a compaction.** That is not a lost counter: a fold rotates the bundle
+    /// identity, and the entries counted before it are keyed under an identity nothing will compute
+    /// again — a hit rate carried across would be describing two different caches as one. An
+    /// operator watching a fold sees the numbers restart, which is the honest reading.
     pub fn fragment_cache_rebuilds(&self) -> u64 {
-        self.fragment_cache.rebuild_count()
+        self.generation.load().fragments.rebuild_count()
     }
 
     /// The canonical cache key for `satisfied` under this engine's bundle and plugin identity, at
@@ -1212,8 +1418,10 @@ impl Engine {
     /// to name is one the current generation could produce; a stale-watermark entry is unreachable
     /// by any lookup anyway (§9).
     pub fn fragment_canonical_key(&self, satisfied: &[TermId]) -> [u8; 32] {
-        self.fragment_cache
-            .canonical_key_for(satisfied, self.generation.load().watermark)
+        let generation = self.generation.load();
+        generation
+            .fragments
+            .canonical_key_for(satisfied, generation.watermark)
     }
 
     /// Drop one entry from the fragment cache's **in-memory** tier; returns whether it was there.
@@ -1223,7 +1431,7 @@ impl Engine {
     ///
     /// The conformance command is the intended caller.
     pub fn evict_fragment(&self, key: &[u8; 32]) -> bool {
-        self.fragment_cache.evict(key)
+        self.generation.load().fragments.evict(key)
     }
 
     /// `session`'s mask fragment **at `generation`'s watermark** — the one thing on the request
@@ -1276,10 +1484,21 @@ impl Engine {
         session: &Session,
         generation: &Generation,
     ) -> Result<Arc<FrozenFragment>> {
-        if session.fragment.watermark >= generation.watermark {
+        // **Both tests, and the identity one is not redundant.** A flush advances the watermark, so
+        // the watermark alone decides whether a session's own fragment is still current *within* a
+        // prefix. A fold advances no watermark at all — it rewrites the term index and rotates the
+        // bundle identity (decision 0050) — so on the watermark test alone a session authorised
+        // before a fold would go on composing against a fragment that still contains every entity
+        // the fold retired. That is Rule F re-exposing exactly what it withdrew, and it is why
+        // compaction §4 puts the comparison *here*, at composition: this fragment is held by
+        // `Session`, outside `FragmentCache` altogether, so rotating the cache does not reach it.
+        if session.fragment.identity == generation.bundle_identity()
+            && session.fragment.watermark >= generation.watermark
+        {
             return Ok(Arc::clone(&session.fragment));
         }
-        self.fragment_cache
+        generation
+            .fragments
             .get_or_build(
                 &session.satisfied_sorted,
                 session.auth_data_hash,
@@ -1315,7 +1534,7 @@ impl Engine {
     /// Whether the external-id sidecar has opened any extent (or its locator) yet — exposed for
     /// tests confirming `Engine::open` never touches it — the per-extent laziness guarantee.
     pub fn external_id_sidecar_is_open(&self) -> bool {
-        self.external_index.load().0.is_open()
+        self.generation.load().external_index.0.is_open()
     }
 
     /// The plugin this engine was opened with — the `/control/ingest` handler calls
@@ -1367,7 +1586,7 @@ impl Engine {
         if let Some(entity) = self.write.established_entity(external_id) {
             return Ok(Some(entity));
         }
-        self.external_index.load().resolve(external_id)
+        self.generation.load().external_index.resolve(external_id)
     }
 
     /// Batch form of [`Self::resolve_external_id`] for `/control/ingest`'s duplicate check
@@ -1435,7 +1654,11 @@ impl Engine {
             .iter()
             .map(|&i| external_ids[i].clone())
             .collect();
-        let residual_results = self.external_index.load().resolve_many(&residual_keys)?;
+        let residual_results = self
+            .generation
+            .load()
+            .external_index
+            .resolve_many(&residual_keys)?;
         for (pos, resolved) in residual_positions.into_iter().zip(residual_results) {
             results[pos] = resolved;
         }
@@ -1455,11 +1678,26 @@ impl Engine {
         &self,
         entity: EntityId,
     ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
+        self.external_id_of_in(&self.generation.load(), entity)
+    }
+
+    /// [`Self::external_id_of`] against a generation the caller already loaded.
+    ///
+    /// `Engine::item` is the caller, and it must not take a second `load()`: the sidecar is now
+    /// per-generation (a fold rewrites it — see [`Generation::external_index`]), so a drill-down
+    /// that resolved its row against one generation and its external id against another would be
+    /// exactly the cross-generation mix I11's within-request rule forbids, reached through the one
+    /// field that used to be process-wide.
+    pub(crate) fn external_id_of_in(
+        &self,
+        generation: &Generation,
+        entity: EntityId,
+    ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
         if let Some(external_id) = self.write.established_external_id(entity) {
             return Ok(Some(external_id));
         }
-        self.external_index
-            .load()
+        generation
+            .external_index
             .external_id_of_checked(entity, self.allocator_high_water())
     }
 
@@ -1519,19 +1757,24 @@ impl Engine {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: crate::coalesce::CoalescePolicy::default(),
                 merge: merge_policy(self.config.max_merged_segment_bytes),
+                // The **configured** value, not the resolved policy's: compaction §4 step 3
+                // re-checks write-path §7's base-segment relation against the fold's own output,
+                // and `tessera-server`'s loader checks only an explicitly set one.
+                configured_merge_bytes: self.config.max_merged_segment_bytes,
+                compaction: self.config.compaction,
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
-                external_index: Arc::clone(&self.external_index),
+                fold_paused: Arc::clone(&self.fold_paused),
+                fold_publication_paused: Arc::clone(&self.fold_publication_paused),
                 refresh: crate::refresh::RefreshDeps {
                     cache: Arc::clone(&self.row_projection_cache),
-                    fragments: Arc::clone(&self.fragment_cache),
                     pool: Arc::clone(&self.pool),
                     in_flight: Arc::clone(&self.refresh_in_flight),
                     refreshes: Arc::clone(&self.refreshes),
                     enabled: Arc::clone(&self.refresh_enabled),
                     paused: Arc::clone(&self.refresh_paused),
                 },
-                prefix_dir: self.prefix_dir.clone(),
+                bundle_root: self.bundle_root.clone(),
                 identity_key: self.identity_key,
                 pool: Arc::clone(&self.pool),
                 max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
@@ -1568,19 +1811,24 @@ impl Engine {
                 max_age_secs: self.config.flush_max_age_secs,
                 coalesce: crate::coalesce::CoalescePolicy::default(),
                 merge: merge_policy(self.config.max_merged_segment_bytes),
+                // The **configured** value, not the resolved policy's: compaction §4 step 3
+                // re-checks write-path §7's base-segment relation against the fold's own output,
+                // and `tessera-server`'s loader checks only an explicitly set one.
+                configured_merge_bytes: self.config.max_merged_segment_bytes,
+                compaction: self.config.compaction,
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
-                external_index: Arc::clone(&self.external_index),
+                fold_paused: Arc::clone(&self.fold_paused),
+                fold_publication_paused: Arc::clone(&self.fold_publication_paused),
                 refresh: crate::refresh::RefreshDeps {
                     cache: Arc::clone(&self.row_projection_cache),
-                    fragments: Arc::clone(&self.fragment_cache),
                     pool: Arc::clone(&self.pool),
                     in_flight: Arc::clone(&self.refresh_in_flight),
                     refreshes: Arc::clone(&self.refreshes),
                     enabled: Arc::clone(&self.refresh_enabled),
                     paused: Arc::clone(&self.refresh_paused),
                 },
-                prefix_dir: self.prefix_dir.clone(),
+                bundle_root: self.bundle_root.clone(),
                 identity_key: self.identity_key,
                 pool: Arc::clone(&self.pool),
                 max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
@@ -1616,6 +1864,12 @@ impl Engine {
         self.write.health().stats()
     }
 
+    /// The last compaction fold's per-pass wall clock and resident set — empty before the first
+    /// fold. Operator plane only, beside [`Engine::write_executor_stats`].
+    pub fn last_fold_passes(&self) -> Vec<crate::compact::PassCost> {
+        self.write.health().last_fold_passes()
+    }
+
     /// Items in the ingest buffer as of the executor's last apply — what `/control/ingest`'s
     /// occupancy bound is checked against (§1.3).
     ///
@@ -1640,6 +1894,29 @@ impl Engine {
         self.write
             .health()
             .flush_requested
+            .store(true, Ordering::SeqCst);
+        self.write.wake();
+    }
+
+    /// Request a **compaction fold** — the trigger `POST /control/compact` will take (contracts
+    /// §3.4, reserved and unbuilt).
+    ///
+    /// The same shape as [`Engine::request_flush`] and for the same reason: the flag is read at the
+    /// tick, on the one thread that publishes, so everything a tick guarantees holds for a
+    /// requested fold. What differs is where the work runs — a fold gets its own thread rather than
+    /// the shared pool (compaction §3) — and how long it takes: a 202 here means "accepted", and
+    /// the fold is minutes to hours of IO afterwards.
+    ///
+    /// **At most one fold is in flight and a second request is not queued**: a fold requested while
+    /// one runs is satisfied by neither, because the flag is a flag. That is the same answer
+    /// compaction §9 gives the automatic trigger, which is refused outright while one runs.
+    ///
+    /// ⊘ **The trigger's three gauges and its minimum interval are not built** (compaction §9). A
+    /// fold happens when something calls this, which for now is an operator or a test.
+    pub fn request_fold(&self) {
+        self.write
+            .health()
+            .fold_requested
             .store(true, Ordering::SeqCst);
         self.write.wake();
     }
@@ -1715,6 +1992,100 @@ impl Engine {
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
         self.write.submit_change(entity, op)
     }
+}
+
+/// Steps 5 of compaction §4 for a prefix already committed: open it, and assemble the
+/// [`PrefixRotation`](crate::geometry::PrefixRotation) that must ride the swap with it.
+///
+/// **Two callers, one on each side of the executor queue**, which is why this is a free function
+/// rather than an `Engine` method. [`Engine::publish_rotated_prefix_for_test`] calls it and then *submits*
+/// the publication; the fold's own publication (`crate::write::Executor::publish_fold`) calls it on
+/// the executor thread and publishes inline, because a submission from the executor to itself is a
+/// deadlock. A second copy of this sequence is how the two would come to rotate different subsets
+/// of the four artefacts, which is the fail-open `PrefixRotation` exists to make unexpressible.
+///
+/// # Order: `CURRENT` first, and this refuses otherwise
+///
+/// `CURRENT` is the commit point and the only mutable file in a bundle (contracts §2.1), and the
+/// bundle identity **is** the digest it names. So this reads `CURRENT`, refuses unless it names
+/// `prefix`, and takes the identity from it. Publishing a prefix `CURRENT` does not name would
+/// serve geometry that a restart would not find — the process and its own storage disagreeing
+/// about which bundle is live, with nothing to detect it until the restart.
+///
+/// # Why the open skips verification
+///
+/// [`tessera_store::open_written_prefix`], not `open_bundle`: the caller wrote and digested every
+/// one of these bytes moments ago, and re-reading tens of gigabytes to re-derive digests it already
+/// computed proves nothing. That constructor's doc carries the premise and the caller obligation in
+/// full — **this function's two callers are the obligation's only holders**, and each discharges it
+/// by `prefix` having been written by the fold that is calling.
+pub(crate) fn open_rotation(
+    bundle_root: &Path,
+    prefix: &str,
+    live_fragments: &FragmentCache,
+    retired: croaring::Bitmap,
+) -> std::result::Result<(Arc<Bundle>, crate::geometry::PrefixRotation), PublishGeometryError> {
+    let current = read_current(bundle_root)
+        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
+    if current.prefix != prefix {
+        return Err(PublishGeometryError::PrefixNotCommitted {
+            offered: prefix.to_string(),
+            current: current.prefix,
+        });
+    }
+    let bundle_identity = hex_decode_32(&current.manifest_digest).ok_or_else(|| {
+        PublishGeometryError::PrefixNotOpenable(format!(
+            "CURRENT manifest_digest '{}' is not 64 hex characters",
+            current.manifest_digest
+        ))
+    })?;
+
+    let prefix_dir = bundle_root.join(prefix);
+    let bundle = Arc::new(
+        tessera_store::open_written_prefix(bundle_root, prefix)
+            .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
+    );
+    let (phash, partition) = bundle
+        .partitions
+        .iter()
+        .next()
+        .map(|(k, v)| (k.clone(), v))
+        .ok_or_else(|| {
+            PublishGeometryError::PrefixNotOpenable(
+                "the written prefix has no partitions".to_string(),
+            )
+        })?;
+
+    let postings = Arc::new(
+        PostingsReader::open(
+            &prefix_dir
+                .join("partitions")
+                .join(&phash)
+                .join("terms")
+                .join("postings.arrow"),
+            true,
+        )
+        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
+    );
+    let external_index = Arc::new(
+        ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
+            .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
+    );
+
+    // **Rotated from the live one, never freshly constructed.** `FragmentCache::rotate` is what
+    // carries the validated byte bound across; a `FragmentCache::new` here would silently unbound
+    // the cache a deployment's startup refusal exists to bound.
+    let fragments = Arc::new(live_fragments.rotate(bundle_identity));
+
+    Ok((
+        bundle,
+        crate::geometry::PrefixRotation {
+            postings,
+            fragments,
+            external_index,
+            retired,
+        },
+    ))
 }
 
 fn read_current(root: &Path) -> Result<CurrentPointer> {

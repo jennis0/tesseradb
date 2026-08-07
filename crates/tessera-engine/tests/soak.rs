@@ -36,7 +36,10 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     }
 }
 
-fn viewport(engine: &Engine, session: &tessera_engine::Session) -> tessera_engine::viewport::ViewportOut {
+fn viewport(
+    engine: &Engine,
+    session: &tessera_engine::Session,
+) -> tessera_engine::viewport::ViewportOut {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         match engine.viewport(
@@ -45,7 +48,10 @@ fn viewport(engine: &Engine, session: &tessera_engine::Session) -> tessera_engin
         ) {
             Ok(out) => return out,
             Err(e) => {
-                assert!(Instant::now() < deadline, "timed out retrying a viewport: {e}");
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out retrying a viewport: {e}"
+                );
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
@@ -75,6 +81,8 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
             // wall-clock.
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
@@ -243,6 +251,8 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )

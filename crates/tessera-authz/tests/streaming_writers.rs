@@ -132,3 +132,52 @@ fn postings_spool_matches_for_zero_records() {
 fn postings_spool_matches_for_a_single_record() {
     assert_spool_matches_buffered(&posting_records(1));
 }
+
+/// **`encode_posting_bitmap` and `encode_posting` agree byte for byte, across the tag boundary.**
+///
+/// The bitmap encoder is compaction's pass 2 primitive: the fold's term sweep works in Roaring
+/// throughout (union the tiers, subtract the tombstones) and must not materialise a `Vec<u32>` to
+/// encode the result — the widest term is a measured 125.12 MB as portable Roaring against 2 GB as
+/// `u32`s at 10⁹, per term, on a pass that visits every term in the dictionary.
+///
+/// Being a *second producer* rather than a second format is the whole property, so this sweeps the
+/// tag rule's boundary explicitly: cardinalities either side of `small_term_threshold` take
+/// different arms (tag 0 raw `u32` LEs, tag 1 run-optimised portable Roaring), and both arms must
+/// match. The empty set and the singleton are included because they are the cases where a
+/// cardinality comparison is easiest to get off by one.
+///
+/// **Mutation:** drop the `run_optimize` from the bitmap arm, or compare `<` rather than `<=`
+/// against the threshold, and the tag-1 or boundary cases stop matching.
+#[test]
+fn the_bitmap_and_slice_encoders_agree_byte_for_byte() {
+    use croaring::Bitmap;
+    use tessera_authz::encode_posting_bitmap;
+
+    const THRESHOLD: u32 = 8;
+
+    // Sets chosen around the threshold, plus a run-heavy one (where `run_optimize` actually fires)
+    // and a scattered one (where it does not).
+    let cases: Vec<Vec<u32>> = vec![
+        vec![],
+        vec![7],
+        (0..THRESHOLD).collect(),     // exactly at the threshold: tag 0
+        (0..THRESHOLD + 1).collect(), // one past it: tag 1
+        (0..5_000u32).collect(),      // one long run
+        (0..5_000u32).map(|i| i * 977).collect(), // scattered, no runs
+        vec![0, u32::MAX / 2, u32::MAX - 1], // sparse across the whole space
+    ];
+
+    for entities in cases {
+        let from_slice = encode_posting(0, &entities, THRESHOLD)
+            .expect("the slice encoder accepts sorted input");
+        let from_bitmap = encode_posting_bitmap(&Bitmap::of(&entities), THRESHOLD)
+            .expect("the bitmap encoder accepts any bitmap");
+        assert_eq!(
+            from_slice,
+            from_bitmap,
+            "the two encoders disagree at cardinality {} (tag {})",
+            entities.len(),
+            from_slice.first().copied().unwrap_or(255)
+        );
+    }
+}

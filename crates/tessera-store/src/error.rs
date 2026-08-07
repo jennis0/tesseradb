@@ -97,11 +97,23 @@ pub enum StoreError {
     /// with an empty or partial `files` map would otherwise verify vacuously). Fail closed
     /// rather than open a file the manifest never vouched for.
     UnverifiedFile { path: PathBuf },
+    /// [`crate::reclaim::reclaim_prefix`] was asked to delete the prefix `CURRENT` still names.
+    ///
+    /// **Its own variant because this is the only operation in the system that deletes bundle
+    /// data**, and a wrong argument to it is unrecoverable. A caller — or a test — that has to
+    /// match on free text to tell "refused, and nothing was deleted" from any other malformed-input
+    /// error is one string edit away from not noticing when the refusal stops firing.
+    ReclaimRefused { prefix: String, current: String },
     /// A manifest-derived path component (partition `phash`, slice/segment id, or a `files`
     /// map key) was rejected before ever being joined onto a filesystem path — empty, `.`,
     /// `..`, absolute, or containing a path separator where a single opaque component was
     /// expected. Bundle contents are trusted for shape but never for path escape.
     UnsafePath { what: String, value: String },
+    /// Writing `terms/pairs.parquet` failed in the Parquet encoder — see [`crate::pairs`]. Its
+    /// own variant rather than `Io` or `MalformedBundle`: an encoder failure is neither a
+    /// filesystem fault nor a claim about a bundle already on disc, and the two producers (a build
+    /// and compaction's pass 2) both need to report it as what it is.
+    Parquet { path: PathBuf, detail: String },
     /// `columns.arrow` failed Arrow IPC / schema validation (wrong column count, name, type,
     /// more than one record batch, compressed buffers, or misaligned buffers).
     InvalidColumns { path: PathBuf, detail: String },
@@ -189,8 +201,16 @@ impl fmt::Display for StoreError {
                 "refusing to open {} — not covered by any verified `files` entry",
                 path.display()
             ),
+            StoreError::ReclaimRefused { prefix, current } => write!(
+                f,
+                "refusing to reclaim prefix '{prefix}': CURRENT still names '{current}' as live, \
+                 and reclamation is the one operation here that deletes bundle data"
+            ),
             StoreError::UnsafePath { what, value } => {
                 write!(f, "unsafe path in manifest ({what}): '{value}'")
+            }
+            StoreError::Parquet { path, detail } => {
+                write!(f, "writing {}: {detail}", path.display())
             }
             StoreError::InvalidColumns { path, detail } => {
                 write!(f, "invalid columns.arrow at {}: {detail}", path.display())

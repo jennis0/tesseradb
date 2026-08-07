@@ -65,6 +65,8 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
@@ -82,13 +84,19 @@ fn whole_extent() -> ViewportRequest<'static> {
 /// A viewport, retried past the bounded `ProjectionBuilding` a merge's refresh window answers
 /// with. Decision 0044 permits exactly that residual — stale-serve is unsound across a merge —
 /// and a test that did not retry would be asserting the residual does not exist.
-fn viewport(engine: &Engine, session: &tessera_engine::Session) -> tessera_engine::viewport::ViewportOut {
+fn viewport(
+    engine: &Engine,
+    session: &tessera_engine::Session,
+) -> tessera_engine::viewport::ViewportOut {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match engine.viewport(session, whole_extent()) {
             Ok(out) => return out,
             Err(e) => {
-                assert!(Instant::now() < deadline, "timed out retrying a viewport: {e}");
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out retrying a viewport: {e}"
+                );
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
@@ -319,7 +327,11 @@ fn a_sparse_principal_sees_the_same_subset_across_a_merge() {
     let before = served_ids(&engine, &sparse);
     // Every third base item carries SUBSET_TERM (common::terms_of), plus the even-t ingested ones.
     let expected = (0..64u64).filter(|i| i.is_multiple_of(3)).count() + TIER_WIDTH * ROWS_EACH / 2;
-    assert_eq!(before.len(), expected, "the sparse principal's set before the merge");
+    assert_eq!(
+        before.len(),
+        expected,
+        "the sparse principal's set before the merge"
+    );
     assert!(
         before.is_subset(&served_ids(&engine, &full)),
         "and it is a subset of what full coverage sees"

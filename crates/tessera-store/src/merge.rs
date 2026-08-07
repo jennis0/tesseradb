@@ -29,21 +29,21 @@
 //! states the rule after the borrowed policy that offered the trigger was retired at r33). A merge
 //! that dropped rows would have left this module.
 
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fs;
 use std::path::Path;
 
-use tessera_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
-use tessera_spatial::{sort_batch, unsplit32};
-use tessera_types::{EntityId, IdentityKey, MortonCode, TesseraId, ROW_ABSENT};
+use tessera_spatial::tiler::ScalarType;
+use tessera_types::{IdentityKey, TesseraId, ROW_ABSENT};
 
-use crate::coalesce::{read_runs, write_coalesced_run};
+use crate::coalesce::{merge_runs, open_runs};
 use crate::error::{Result, StoreError};
 use crate::flush::{digest_of, FlushOutput};
 use crate::manifest::{LocatorExtent, SegmentDescriptor};
 use crate::permutation::SegmentExtent;
-use crate::read::{ColumnsRef, MortonSlice, ScalarSlice};
-use crate::write::write_segment;
+use crate::segment_cursor::{gather_scalars, SegmentCursor};
+use crate::write::{SegmentRow, SegmentWriter};
 
 /// What a merge is allowed to take.
 ///
@@ -183,22 +183,37 @@ pub struct MergeSpec<'a> {
 /// a fold is invariant-bearing work this layer must not do. Every input row is re-emitted.
 ///
 /// **Byte-exact through the code, never through coordinates.** A segment stores the Morton code and
-/// its residual, not the axes; [`tessera_spatial::unsplit32`] recovers the axes as a bit
-/// permutation, so the merged segment's codes are identical to its inputs'. Dequantising to floats
-/// and re-quantising would move every point by up to a quantisation step on every merge, silently.
+/// its residual, not the axes, and both are carried through untouched — nothing here dequantises,
+/// so nothing here can re-quantise a point onto a neighbouring cell.
 ///
-/// **It re-sorts rather than k-way merging, deliberately.** The plan specified a linear merge-sort
-/// over the inputs' code arrays; this concatenates and re-sorts through [`sort_batch`] instead, so
-/// that the *one* writer that knows a segment's layout — [`crate::write::write_segment`] — is the
-/// one that writes this too. A second writer is how the two come to disagree about a format, and
-/// the merge policy's `max_merged_segment_bytes` is what keeps the sort's inputs in hand. The
-/// result is identical either way: `sort_batch` orders by code then `tessera_id`, which is total.
+/// **A k-way merge over the inputs' mapped bytes, feeding [`SegmentWriter`].** Every input is
+/// already `(morton, tessera_id)` ascending (contracts §2.6) and mmapped uncompressed, so a cursor
+/// into one costs two integers and the merged order falls out of a heap over *k* keys. No sort, no
+/// decoded batch, and **no second writer**: this feeds [`SegmentWriter`], whose other producer is
+/// `write_segment` (write-path §7).
+///
+/// *This replaced a concatenate-and-re-sort, which is why decision 0049 could not raise
+/// `max_merged_segment_bytes`: the old path decoded every input into `TilerItem`s and doubled again
+/// at the sort, for a **measured 4.4–4.9×** peak over the inputs' on-disk bytes
+/// (`probes/2026-08-04-maintenance-memory/`), so the cap was a memory bound rather than a
+/// write-amplification knob. The result is identical either way — a merge of runs each sorted by
+/// `(morton, tessera_id)` is exactly `sort_batch`'s total order — which is what makes this a
+/// substitution rather than a change of output.*
+///
+/// **The external-id runs stream too**, by the same k-way shape over inputs already sorted on the
+/// key the output needs — [`merge_runs`], which is also compaction's pass 3 (compaction §3, §10).
+/// What a merge still materialises is the **extent**: `ROW_ABSENT`-filled and 4 B per entity in
+/// the merged span, which is bounded by `max_merged_segment_bytes` here and is the term the fold
+/// must instead write through a mapping.
 ///
 /// **Sorting is unconditional** (arch §11.3). Lucene reorders a merged segment for doc-id
 /// locality, an optimisation it may skip under pressure, and the policy this one was drawn from
-/// offered that as a decorator. Here the Morton sort *is* the tile index — a segment that is not
-/// internally sorted breaks `tile_ranges`' binary search outright — so sorting cannot be skipped
-/// and there is nothing to make conditional on a document count.
+/// offered that as a decorator. Here the Morton order *is* the tile index — a segment that is not
+/// internally sorted breaks `tile_ranges`' binary search outright — so it cannot be skipped and
+/// there is nothing to make conditional on a document count.
+/// Names this producer in any error the shared cursor or scalar adapter raises.
+const OP: &str = "execute_merge";
+
 pub fn execute_merge(
     prefix_dir: &Path,
     partition: &str,
@@ -232,53 +247,16 @@ pub fn execute_merge(
             .join(seg_id)
     };
 
-    let mut items: Vec<TilerItem> = Vec::new();
-    let mut entity_ids: Vec<EntityId> = Vec::new();
-    let mut forward: Vec<(Vec<u8>, u32)> = Vec::new();
-
+    let mut cursors: Vec<SegmentCursor> = Vec::with_capacity(spec.inputs.len());
+    let mut run_paths: Vec<std::path::PathBuf> = Vec::with_capacity(spec.inputs.len());
     for input in spec.inputs {
         let dir = seg_path(&input.seg_id);
-        let morton = MortonSlice::load(&dir.join("morton.u32"))?;
-        let columns = ColumnsRef::load(&dir.join("columns.arrow"))?;
-        let codes = morton.u32();
-        let tessera_ids = columns.tessera_id();
-        let residuals = columns.residual();
-        if codes.len() != tessera_ids.len() || codes.len() != residuals.len() {
-            return Err(StoreError::MalformedBundle {
-                detail: format!(
-                    "execute_merge: segment '{}' has {} codes against {} identities",
-                    input.seg_id,
-                    codes.len(),
-                    tessera_ids.len()
-                ),
-            });
-        }
-
-        for row in 0..codes.len() {
-            let tessera_id = TesseraId::new(tessera_ids[row]);
-            let (shard, entity) = spec.identity_key.invert(tessera_id);
-            if shard != spec.shard_id {
-                return Err(StoreError::MalformedBundle {
-                    detail: format!(
-                        "execute_merge: segment '{}' row {row} inverts to shard {shard}, not this \
-                         bundle's {} — merging it would place another shard's entity in this \
-                         slice's row space",
-                        input.seg_id, spec.shard_id
-                    ),
-                });
-            }
-            let (qx, qy) = unsplit32(MortonCode::new(codes[row]), residuals[row]);
-            items.push(TilerItem {
-                tessera_id,
-                qx,
-                qy,
-                scalars: gather_scalars(&columns, spec.scalar_schema, row, &input.seg_id)?,
-            });
-            entity_ids.push(entity);
-        }
-
-        forward.extend(read_runs(&[dir.join("external-ids.arrow")])?);
+        cursors.push(SegmentCursor::open(&dir, input.seg_id.clone(), OP)?);
+        run_paths.push(dir.join("external-ids.arrow"));
     }
+    // Opened here, with the segment cursors, so a missing or malformed run fails the merge before
+    // a byte of output is written. The cursors themselves hold only mapped batches and a position.
+    let run_cursors = open_runs(&run_paths)?;
 
     let entity_lo = spec.inputs[0].entity_lo;
     let entity_hi = spec.inputs[spec.inputs.len() - 1].entity_hi;
@@ -293,24 +271,70 @@ pub fn execute_merge(
         source,
     })?;
 
-    let row_count = items.len();
-    let codes = sort_batch(&mut items, &mut entity_ids);
-    write_segment(&out_dir, &items, &codes, spec.scalar_schema).map_err(|source| {
-        StoreError::Io {
-            path: out_dir.join("columns.arrow"),
-            source,
-        }
-    })?;
-
+    let io = |source| StoreError::Io {
+        path: out_dir.join("columns.arrow"),
+        source,
+    };
+    let mut writer = SegmentWriter::create(&out_dir, spec.scalar_schema).map_err(io)?;
     let mut extent_rows = vec![ROW_ABSENT; span];
-    for (row, entity) in entity_ids.iter().enumerate() {
-        extent_rows[(entity.raw() - entity_lo) as usize] = row as u32;
+
+    // The merged order, from a heap over one key per live cursor. `Reverse` because
+    // `BinaryHeap` is a max-heap and row order is ascending; the cursor index is the last
+    // component so the ordering is total even though `(morton, tessera_id)` already is —
+    // `tessera_id` is a bijection and each entity has one row, so no two cursors can offer the
+    // same pair.
+    let mut heap: BinaryHeap<Reverse<(u32, u64, usize)>> = BinaryHeap::with_capacity(cursors.len());
+    for (index, cursor) in cursors.iter().enumerate() {
+        if let Some((morton, tessera_id)) = cursor.key() {
+            heap.push(Reverse((morton, tessera_id, index)));
+        }
     }
+
+    let mut row_count: usize = 0;
+    while let Some(Reverse((morton, tessera_raw, index))) = heap.pop() {
+        let cursor = &mut cursors[index];
+        let row = cursor.row;
+        let tessera_id = TesseraId::new(tessera_raw);
+        let (shard, entity) = spec.identity_key.invert(tessera_id);
+        if shard != spec.shard_id {
+            return Err(StoreError::MalformedBundle {
+                detail: format!(
+                    "execute_merge: segment '{}' row {row} inverts to shard {shard}, not this \
+                     bundle's {} — merging it would place another shard's entity in this \
+                     slice's row space",
+                    cursor.seg_id, spec.shard_id
+                ),
+            });
+        }
+        let scalars = gather_scalars(&cursor.columns, spec.scalar_schema, row, &cursor.seg_id, OP)?;
+        writer
+            .append(SegmentRow {
+                tessera_id,
+                morton,
+                residual: cursor.columns.residual()[row],
+                scalars: &scalars,
+            })
+            .map_err(io)?;
+        // The extent is filled as rows are emitted, so it needs no companion permutation of the
+        // entity axis: the merged row *is* the emission ordinal.
+        extent_rows[(entity.raw() - entity_lo) as usize] = row_count as u32;
+        row_count += 1;
+
+        cursor.row += 1;
+        if let Some((next_morton, next_id)) = cursor.key() {
+            heap.push(Reverse((next_morton, next_id, index)));
+        }
+    }
+    writer.finish().map_err(io)?;
+    // The inputs' mappings go before the coalesce and the digests below, which read whole files:
+    // holding *k* segment mappings across work that does not need them is the one place this
+    // function could reintroduce a resident term it just removed.
+    drop(cursors);
 
     // The runs and their reverse locator are entity-space work, shared verbatim with the
     // entity-space coalesce publication that does it *without* a segment — see
     // [`crate::coalesce`] for the key order and the keep-newest rule.
-    write_coalesced_run(forward, entity_lo, entity_hi, &out_dir)?;
+    merge_runs(&run_cursors, entity_lo, entity_hi, &out_dir)?;
 
     let rel = |name: &str| {
         format!(
@@ -357,51 +381,4 @@ pub fn execute_merge(
         watermark: spec.watermark,
         entity_id_high_water: spec.entity_id_high_water,
     })
-}
-
-/// This row's declared scalars, in schema order — the shape [`TilerItem`] wants.
-///
-/// **A column the input lacks, or holds under another type, fails the merge**, and the alternative
-/// is why: a `filter_map` here drops the missing one and shifts every later scalar up a position,
-/// so the merged segment's columns are silently transposed — every value present, every value
-/// against the wrong name, no error anywhere. Unreachable through [`crate::write::write_segment`],
-/// which emits the declared schema in full; reachable the moment a merge takes an input this
-/// process did not write, which is what a stepped-down or hand-repaired bundle is.
-fn gather_scalars(
-    columns: &ColumnsRef,
-    schema: &[(String, ScalarType)],
-    row: usize,
-    seg_id: &str,
-) -> Result<Vec<ScalarValue>> {
-    let mismatch = |declared: ScalarType, found: &str| StoreError::MalformedBundle {
-        detail: format!(
-            "execute_merge: segment '{seg_id}' holds scalar column of type {found} where the \
-             bundle declares {declared:?}; merging it would write the value under another \
-             column's name"
-        ),
-    };
-    schema
-        .iter()
-        .map(|(name, declared)| {
-            let slice = columns
-                .scalar(name)
-                .ok_or_else(|| StoreError::MalformedBundle {
-                    detail: format!(
-                        "execute_merge: segment '{seg_id}' has no scalar column '{name}', which \
-                         this bundle declares; dropping it would shift every later scalar into \
-                         the wrong column"
-                    ),
-                })?;
-            match (slice, declared) {
-                (ScalarSlice::U64(v), ScalarType::U64) => Ok(ScalarValue::U64(v[row])),
-                (ScalarSlice::F32(v), ScalarType::F32) => Ok(ScalarValue::F32(v[row])),
-                (ScalarSlice::Utf8(v), ScalarType::Utf8) => {
-                    Ok(ScalarValue::Utf8(v.value(row).to_string()))
-                }
-                (ScalarSlice::U64(_), declared) => Err(mismatch(*declared, "u64")),
-                (ScalarSlice::F32(_), declared) => Err(mismatch(*declared, "f32")),
-                (ScalarSlice::Utf8(_), declared) => Err(mismatch(*declared, "utf8")),
-            }
-        })
-        .collect()
 }

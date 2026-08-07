@@ -51,14 +51,14 @@ fn an_engine_without_a_write_executor_cannot_publish() {
     let live = engine.generation();
 
     let err = engine
-        .publish_geometry(
+        .publish_geometry(GeometryPublication::within_prefix(
             live.prefix.clone(),
             live.segments_version + 1,
             live.watermark,
             std::sync::Arc::clone(&live.bundle),
             std::sync::Arc::clone(&live.dict),
             Vec::new(),
-        )
+        ))
         .expect_err("there is no publisher thread");
     assert_eq!(err, PublishGeometryError::NoExecutor);
     assert_eq!(
@@ -69,3 +69,4 @@ fn an_engine_without_a_write_executor_cannot_publish() {
 }
 
 mod common;
+use tessera_engine::GeometryPublication;

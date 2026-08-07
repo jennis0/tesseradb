@@ -315,6 +315,8 @@ fn main() {
         compute_threads: tessera_engine::default_compute_threads(),
         flush_max_age_secs: 90,
         max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
     };
 
     // Both engines are configured IDENTICALLY, including the thread pool. The single variable

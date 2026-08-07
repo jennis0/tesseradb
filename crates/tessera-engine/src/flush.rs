@@ -38,19 +38,15 @@
 //! `SliceDescriptor`) is the change that would otherwise have to update both.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-use sha2::{Digest, Sha256};
 
 use rustc_hash::FxHashMap;
 use tessera_authz::{write_delta_tier, DeltaTier, Dict, DictStreamWriter};
 use tessera_lifecycle::wal::WalScalar;
 use tessera_lifecycle::{BufferedItem, Overlay};
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
-use tessera_store::manifest::{DictExtent, FileDigest, Quantisation, SegmentsManifest};
+use tessera_store::manifest::{DictExtent, FileDigest, Quantisation};
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::{write_flush_segment, FlushInput, FlushRow};
@@ -331,7 +327,10 @@ pub(crate) fn execute_flush(
     // restore never reads — the segment silently lost. And the deny fields must reflect the
     // overlay at *publication*, not at plan time, which is a thing only the executor holds.
     let mut files = out.files;
-    files.insert(tier_rel.clone(), digest_of(&tier_path).map_err(FlushFailed)?);
+    files.insert(
+        tier_rel.clone(),
+        digest_of(&tier_path).map_err(FlushFailed)?,
+    );
     let dict_extent = match promotion.extent {
         Some(extent) => {
             files.insert(
@@ -545,71 +544,17 @@ fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
     }
 }
 
-/// Write `SEGMENTS-<n>.json`, fsynced, and fsync its directory entry.
+/// One file's size and hex SHA-256, by reading it back — `tessera_store::digest_of` with this
+/// crate's error type.
 ///
-/// **This is the commit point** (§7.3). Everything it names is already durable; a crash before the
-/// link leaves orphan files nothing references, and a crash after it leaves a bundle that opens
-/// at `n` with everything present.
-///
-/// **It refuses to replace an existing `SEGMENTS-<n>.json`, and that is a safety property.** A
-/// side-manifest is complete current state for its partition, not a diff, so a second writer at
-/// the same `n` does not merge with the first — it *replaces* it, with a manifest built from the
-/// same base and naming only its own segment. The winner's rows would then be absent from the
-/// manifest a restart opens, having been acked and published: silent loss of exactly the kind the
-/// rest of this module is built to prevent. Two plans in one dispatch share `next_n` and would do
-/// this; `dispatch_flushes` now sends one, and this is the guard at the artefact rather than at
-/// the caller — the same belt-and-braces the dictionary's no-duplicate rule takes, and for the
-/// same reason: a rule held by one caller is rediscovered from prose by the next.
-///
-/// **`hard_link` rather than `rename`, because `std` has no `RENAME_NOREPLACE`.** `rename(2)`
-/// replaces silently; `link(2)` fails with `AlreadyExists` and is equally atomic, so the reader's
-/// property — `SEGMENTS-<n>.json` existing at all means it is complete — is unchanged. A crash
-/// between the link and the unlink leaves a `.tmp` orphan, which is the same orphan story every
-/// stage before this one already accepts.
-pub(crate) fn write_segments_manifest(
-    prefix_dir: &Path,
-    partition: &str,
-    n: u64,
-    manifest: &SegmentsManifest,
-) -> Result<(), FlushFailed> {
-    let dir = prefix_dir.join("partitions").join(partition);
-    let path = dir.join(format!("SEGMENTS-{n}.json"));
-    let bytes = serde_json::to_vec_pretty(manifest)
-        .map_err(|e| FlushFailed(format!("side-manifest: {e}")))?;
-    let io = |what: &str, e: std::io::Error| FlushFailed(format!("side-manifest {what}: {e}"));
-
-    // Written to a temporary sibling and linked into place, so a reader walking the candidate list
-    // never sees a partial one: `SEGMENTS-<n>.json` existing at all must mean it is complete.
-    let tmp = dir.join(format!("SEGMENTS-{n}.json.tmp"));
-    {
-        let mut file = File::create(&tmp).map_err(|e| io("create", e))?;
-        file.write_all(&bytes).map_err(|e| io("write", e))?;
-        file.sync_all().map_err(|e| io("fsync", e))?;
-    }
-    // Refuse-to-replace — see this function's doc for why this is not a rename.
-    let linked = std::fs::hard_link(&tmp, &path);
-    // The temporary is consumed either way: on success it has a second name, on refusal it is
-    // rubbish. Unlinked before the error surfaces so a refused write leaves nothing behind for the
-    // next attempt at this `n` to trip over.
-    let _ = std::fs::remove_file(&tmp);
-    linked.map_err(|e| io("link (a side-manifest is never replaced)", e))?;
-    File::open(&dir)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| io("dir fsync", e))?;
-    Ok(())
-}
-
-fn digest_of(path: &Path) -> Result<FileDigest, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("digest {}: {e}", path.display()))?;
-    let digest = Sha256::digest(&bytes);
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    Ok(FileDigest {
-        size: bytes.len() as u64,
-        sha256: hex,
-    })
+/// **One definition, in the crate that owns the manifest format.** Three copies of this existed,
+/// here, in `coalesce.rs` and in `tessera-store`, and all three read the whole file into memory;
+/// the fold's pass 5 is where that stopped being affordable (probe P1), and a fix applied to one
+/// copy would have left the other two. `pub(crate)` because compaction's pass 5 digests its own
+/// outputs the same way — see `crate::compact::execute`, which states why the digest is taken from
+/// a re-read rather than computed as the bytes are written.
+pub(crate) fn digest_of(path: &Path) -> Result<FileDigest, String> {
+    tessera_store::digest_of(path).map_err(|e| format!("digest {}: {e}", path.display()))
 }
 
 /// Whether `entity` is deleted as of this overlay.
@@ -715,6 +660,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("a temp dir");
         let postings_path = dir.path().join("postings.arrow");
         tessera_authz::write_postings(&postings_path, &[], 32).expect("an empty postings file");
+        let (fragments, external_index) = crate::synthetic_generation_parts();
         Generation {
             prefix: "v00000".to_string(),
             segments_version: 0,
@@ -727,6 +673,8 @@ mod tests {
             postings: Arc::new(
                 tessera_authz::PostingsReader::open(&postings_path, false).expect("it opens"),
             ),
+            fragments,
+            external_index,
             delta_postings: Vec::new(),
             overlay_version: 0,
             overlay: Arc::new(overlay),
@@ -738,23 +686,6 @@ mod tests {
 
     fn plan(generation: &Generation) -> Result<FlushPlan, NoFlush> {
         plan_flush(generation, SLICE, false, false)
-    }
-
-    /// An empty side-manifest. `watermark` is the field the refuse-to-replace test varies, so the
-    /// two writers' manifests are distinguishable in the committed bytes.
-    fn manifest_fixture() -> SegmentsManifest {
-        SegmentsManifest {
-            watermark: 0,
-            entity_id_high_water: 0,
-            segments: Vec::new(),
-            deltas: Vec::new(),
-            dict_extents: Vec::new(),
-            external_id_runs: Vec::new(),
-            locator_extents: Vec::new(),
-            tombstones: Vec::new(),
-            deny: Vec::new(),
-            files: BTreeMap::new(),
-        }
     }
 
     /// **A suppression never touches postings and retires only on unsuppress**, so a flush that
@@ -843,61 +774,5 @@ mod tests {
         let plan = plan(&generation).unwrap();
         let ids: Vec<u64> = plan.items.iter().map(|(e, _)| e.raw()).collect();
         assert_eq!(ids, vec![3, 7, 9]);
-    }
-    /// **Obligation 11: a side-manifest is never replaced.**
-    ///
-    /// A side-manifest is complete current state for its partition, not a diff, so a second write
-    /// at the same `n` does not merge with the first — before refuse-to-replace it *replaced* it,
-    /// with a manifest built from the same base and naming only its own segment, so the winner's
-    /// acked and published rows went missing from what a restart opens.
-    ///
-    /// Asserted at the filesystem operation rather than through two slices, because
-    /// `tessera build` emits one and `dispatch_flushes` now sends one plan: the collision is a
-    /// property of the write, and this is the guard at the artefact that stands behind the rule at
-    /// the caller.
-    ///
-    /// **Mutation:** restore `std::fs::rename` and the second write succeeds, silently.
-    #[test]
-    fn a_side_manifest_is_never_replaced() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let prefix_dir = tmp.path();
-        std::fs::create_dir_all(prefix_dir.join("partitions").join("default")).unwrap();
-
-        let mut first = manifest_fixture();
-        first.watermark = 11;
-        write_segments_manifest(prefix_dir, "default", 4, &first).expect("the first write commits");
-
-        let mut second = manifest_fixture();
-        second.watermark = 22;
-        let refused = write_segments_manifest(prefix_dir, "default", 4, &second)
-            .expect_err("the second write at the same n must be refused");
-        assert!(
-            refused.0.contains("never replaced"),
-            "the refusal must say what it is: {}",
-            refused.0
-        );
-
-        let committed: SegmentsManifest = serde_json::from_slice(
-            &std::fs::read(
-                prefix_dir
-                    .join("partitions")
-                    .join("default")
-                    .join("SEGMENTS-4.json"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            committed.watermark, 11,
-            "the first writer's manifest is intact — the loser overwrote nothing"
-        );
-        assert!(
-            !prefix_dir
-                .join("partitions")
-                .join("default")
-                .join("SEGMENTS-4.json.tmp")
-                .exists(),
-            "and the refused write left no temporary behind"
-        );
     }
 }

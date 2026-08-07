@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use common::*;
 use tessera_authz::DictWriter;
+use tessera_engine::GeometryPublication;
 use tessera_engine::{Engine, Session, ViewportRequest};
 
 /// A descriptor no fixture dictionary carries, so it resolves to `None` at authorise.
@@ -58,14 +59,14 @@ fn promote(engine: &Engine, dir: &Path, descriptor: &[u8]) {
     // this keep evaluating the terms it was granted (§3.4's premise 3).
     let extended = Arc::new(live.dict.load_extending(&extent).unwrap());
     engine
-        .publish_geometry(
+        .publish_geometry(GeometryPublication::within_prefix(
             live.prefix.clone(),
             live.segments_version + 1,
             live.watermark,
             Arc::clone(&live.bundle),
             extended,
             Vec::new(),
-        )
+        ))
         .expect("the publication is accepted");
 }
 

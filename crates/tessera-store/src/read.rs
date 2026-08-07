@@ -218,7 +218,11 @@ impl Bundle {
     /// rewrites `deltas`, `external_id_runs`, `locator_extents`, `dict_extents` and `files`, every
     /// one of which addresses entity space. A caller that needed row space to move would be using
     /// one of the two above, and the type is what keeps the two apart.
-    pub fn with_manifest(&self, partition: &str, published: PublishedManifest) -> Result<Arc<Bundle>> {
+    pub fn with_manifest(
+        &self,
+        partition: &str,
+        published: PublishedManifest,
+    ) -> Result<Arc<Bundle>> {
         let slice = self
             .partitions
             .get(partition)
@@ -295,8 +299,7 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
             source,
         })?;
 
-    let prefix_dir = root.join(&current.prefix);
-    let manifest_path = prefix_dir.join("MANIFEST.json");
+    let manifest_path = root.join(&current.prefix).join("MANIFEST.json");
     let manifest_bytes = read_to_vec(&manifest_path)?;
 
     let actual_digest = hex_sha256(&manifest_bytes);
@@ -306,6 +309,78 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
             actual: actual_digest,
         });
     }
+
+    // The **bytes just digested**, not a second read: `MANIFEST.json` is immutable by contract
+    // (§2.1 — `CURRENT` is the only mutable file), but building the bundle from a re-read would
+    // make the digest a claim about one read and the bundle a product of another, on the one file
+    // whose digest *is* the bundle identity.
+    open_prefix(root, &current.prefix, manifest_bytes, Verification::Digests)
+}
+
+/// How much of a prefix an open re-checks before mapping it — see [`open_written_prefix`] for the
+/// one caller that may answer anything but [`Verification::Digests`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verification {
+    /// The read protocol in full: every file named by either `files` map is read and hashed, and
+    /// `permutation.bin`'s row bound is re-validated. What every bundle arriving from storage
+    /// gets, because a bundle whose bytes were not checked is a bundle whose authorisation data
+    /// was not checked.
+    Digests,
+    /// The bytes were produced and digested by *this process*, moments ago — see
+    /// [`open_written_prefix`].
+    JustWritten,
+}
+
+/// Open a prefix **this process just wrote**, skipping the digest sweep and the permutation's row
+/// validation. The fourth bundle constructor, and the one a compaction's publication needs.
+///
+/// # Why this exists rather than a second [`open_bundle`] call
+///
+/// A fold writes a whole new prefix and must then serve from it *in this process* — decision D1
+/// (compaction §13): the alternative was publish-then-restart, whose price is the measured 40–53 s
+/// dictionary lookup rebuild and every session re-established. [`Bundle`]'s three incremental
+/// constructors ([`Bundle::with_segment`], [`Bundle::with_merged`], [`Bundle::with_manifest`]) all
+/// work *within* one prefix, so none of them can express a prefix change; [`open_bundle`] can, and
+/// re-reads and re-hashes every byte both `files` maps name — tens of gigabytes the fold has just
+/// finished writing and hashing — and re-pays `Permutation::validate_rows` over the whole entity
+/// space on top.
+///
+/// # What is skipped, and what is emphatically not
+///
+/// Skipped: the two `verify_files` sweeps, and `Permutation::validate_rows`. **Both are checks on
+/// bytes that arrived from storage**, and the premise here is that they did not: the fold hashed
+/// each file as it wrote it (compaction §3, pass 5), and the digests in the manifest this call
+/// parses are the ones it computed from the bytes it had in hand. Re-reading them proves nothing
+/// that the write did not already prove, and costs the whole bundle in IO.
+///
+/// Kept, all of it: the `bundle_format` ceiling, `identity.validate()`, every path-component
+/// sanitisation, the `ensure_verified` membership check (a file the loader reads must appear in a
+/// `files` map — cheap, and it catches a manifest that names a file it does not digest), the
+/// `row_count` agreement between the manifest and `morton.u32`/`columns.arrow`, and every extent's
+/// `rebuild`/`with_extent` contiguity check. These are checks on the manifest's *self-consistency*
+/// and on the writer's own correctness, not on the medium, so the premise above does not cover them
+/// and they stay unconditional.
+///
+/// # The caller's obligation, stated because nothing here can check it
+///
+/// **The files under `prefix` must have been written by this process since it started, and must
+/// not have been read back from anywhere else.** A caller that pointed this at a prefix it did not
+/// write would map unverified bytes as authorisation data. There is exactly one such caller — the
+/// fold's publication — and `open_bundle` is what everything else uses, including every restart.
+pub fn open_written_prefix(root: &Path, prefix: &str) -> Result<Bundle> {
+    let manifest_path = root.join(prefix).join("MANIFEST.json");
+    let manifest_bytes = read_to_vec(&manifest_path)?;
+    open_prefix(root, prefix, manifest_bytes, Verification::JustWritten)
+}
+
+fn open_prefix(
+    root: &Path,
+    prefix: &str,
+    manifest_bytes: Vec<u8>,
+    verification: Verification,
+) -> Result<Bundle> {
+    let prefix_dir = root.join(prefix);
+    let manifest_path = prefix_dir.join("MANIFEST.json");
 
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).map_err(|source| StoreError::Json {
@@ -328,7 +403,9 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
     // verified once, up front — it isn't partition-specific, and the reader protocol requires
     // every one of these entries to verify regardless of which SEGMENTS-<n>.json a partition
     // settles on.
-    verify_files(&prefix_dir, &manifest.files)?;
+    if verification == Verification::Digests {
+        verify_files(&prefix_dir, &manifest.files)?;
+    }
 
     // Row space above the build bound is rebuilt from each flush segment's own `tessera_id`
     // column — see [`SegmentExtent::rebuild`] for why nothing is stored for it and what that
@@ -344,7 +421,7 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
     for partition_desc in &manifest.partitions {
         sanitize_component("partition phash", &partition_desc.phash)?;
         let partition_dir = prefix_dir.join("partitions").join(&partition_desc.phash);
-        let selected = load_verifying_segments_manifest(&prefix_dir, &partition_dir)?;
+        let selected = load_verifying_segments_manifest(&prefix_dir, &partition_dir, verification)?;
         let segments_manifest = selected.manifest;
 
         let mut slices: HashMap<String, SliceData> = HashMap::new();
@@ -428,7 +505,7 @@ pub fn open_bundle(root: &Path) -> Result<Bundle> {
             // row bound against that segment's `row_count` the first time we see it (I11/I4 —
             // a corrupt permutation must never hand out a `RowId` that indexes `columns.arrow`
             // out of range). Only meaningful once, against the one segment a Phase-1 slice has.
-            if is_new_slice {
+            if is_new_slice && verification == Verification::Digests {
                 slice_entry
                     .row_space
                     .base()
@@ -624,6 +701,7 @@ fn ensure_verified(
 fn load_verifying_segments_manifest(
     prefix_dir: &Path,
     partition_dir: &Path,
+    verification: Verification,
 ) -> Result<SelectedManifest> {
     let mut candidates = list_segments_manifests(partition_dir)?;
     // Highest n first.
@@ -696,7 +774,14 @@ fn load_verifying_segments_manifest(
             }
         }
 
-        match verify_files(prefix_dir, &segments_manifest.files) {
+        let verified = match verification {
+            Verification::Digests => verify_files(prefix_dir, &segments_manifest.files),
+            // The step-down walk still runs: a just-written prefix carries exactly the one
+            // manifest its publication wrote, so there is nothing to step past, and leaving the
+            // walk in place keeps one code path rather than two.
+            Verification::JustWritten => Ok(()),
+        };
+        match verified {
             Ok(()) => {
                 return Ok(SelectedManifest {
                     manifest: segments_manifest,
@@ -775,6 +860,10 @@ fn list_segments_manifests(partition_dir: &Path) -> Result<Vec<u64>> {
     Ok(found)
 }
 
+/// **The one path-escape rule in this crate**, shared with [`crate::reclaim`] rather than copied:
+/// a second implementation of what counts as a safe manifest path is a second thing to get right,
+/// on the boundary where getting it wrong walks outside the bundle root.
+///
 /// Join a manifest-supplied, forward-slash `files`-map key onto `base` one component at a
 /// time, rejecting anything that could escape `base`: a leading `/` (absolute), a backslash
 /// (not R1's convention and a Windows path-separator ambiguity), or any `.`/`..`/empty
@@ -782,7 +871,7 @@ fn list_segments_manifests(partition_dir: &Path) -> Result<Vec<u64>> {
 /// instead of erroring, and a naive `.replace('/', separator)` would happily turn
 /// `"../../etc/passwd"` into a working traversal — this walks the split path so no single
 /// string ever reaches `PathBuf::join` unchecked.
-fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
+pub(crate) fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
     if rel.is_empty() || rel.starts_with('/') || rel.contains('\\') {
         return Err(StoreError::UnsafePath {
             what: "files map path".to_string(),
@@ -933,6 +1022,32 @@ impl MortonSlice {
         self.mmap.len() as u64
     }
 
+    /// `madvise(MADV_SEQUENTIAL)` on this mapping — compaction §6.1's mitigation, decision 0052.
+    ///
+    /// **Called by the streaming passes and never by the request path**, which is the whole of what
+    /// makes it safe: `madvise` applies to the *mapping*, so advising one a viewport also holds
+    /// would disable its random-access read-ahead for the life of that mapping. A fold and a merge
+    /// each `load` their own, through [`crate::segment_cursor::SegmentCursor`]; a viewport's is a
+    /// different mapping of the same file and is untouched.
+    ///
+    /// What it buys is reclaim order. Without it the fold's pages are the most recently touched in
+    /// the whole machine and therefore look hottest, so the kernel evicts a viewport's genuinely hot
+    /// tiles to make room for bytes nothing will read again — a measured 2.03× on a concurrent
+    /// viewport (P3). This states what is true: streamed once, freeable after.
+    ///
+    /// **A hint, so a refusal is not a failure.** `madvise` failing leaves a correct mapping that
+    /// is merely no gentler than before, and turning that into a failed segment open would trade
+    /// the whole operation for an optimisation.
+    ///
+    /// ⊘ **Unmeasured.** P3 must be re-run with this applied, over a sweep long enough to displace
+    /// a real fraction of the bundle; `MADV_COLD` behind the cursor is the escalation if it proves
+    /// insufficient (compaction §6.1).
+    pub fn advise_sequential(&self) {
+        if streaming_advice_enabled() {
+            let _ = self.mmap.advise(memmap2::Advice::Sequential);
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
@@ -1006,6 +1121,10 @@ pub enum ScalarSlice<'a> {
 pub struct ColumnsRef {
     batch: RecordBatch,
     scalar_index: HashMap<String, usize>,
+    /// The mapping `batch`'s buffers point into, kept only so [`ColumnsRef::advise_sequential`] has
+    /// something to advise: the `Arc` is already captured as each `Buffer`'s allocation, and there
+    /// is no way back to it from a `RecordBatch`. A second reference count, no second mapping.
+    mapping: Arc<Mmap>,
 }
 
 const FIXED_COLUMNS: [(&str, DataType); 2] = [
@@ -1036,7 +1155,11 @@ impl ColumnsRef {
         let arc: Arc<Mmap> = Arc::new(mapping);
         let ptr = NonNull::new(arc.as_ptr() as *mut u8)
             .expect("memmap2::Mmap never returns a null base pointer");
-        let buffer = unsafe { Buffer::from_custom_allocation(ptr, len, arc) };
+        // Cloned rather than moved: the buffer's allocation and `ColumnsRef::mapping` are two
+        // references to one mapping, which is what lets the latter exist at all (a `RecordBatch`
+        // offers no way back to the allocation its buffers hold).
+        let allocation: Arc<Mmap> = Arc::clone(&arc);
+        let buffer = unsafe { Buffer::from_custom_allocation(ptr, len, allocation) };
 
         let batch = decode_single_batch(&buffer, path)?;
         validate_schema(&batch, path)?;
@@ -1053,7 +1176,16 @@ impl ColumnsRef {
         Ok(ColumnsRef {
             batch,
             scalar_index,
+            mapping: arc,
         })
+    }
+
+    /// `madvise(MADV_SEQUENTIAL)` on this mapping — see [`MortonSlice::advise_sequential`], which
+    /// states why this is the streaming passes' call and not the request path's.
+    pub fn advise_sequential(&self) {
+        if streaming_advice_enabled() {
+            let _ = self.mapping.advise(memmap2::Advice::Sequential);
+        }
     }
 
     pub fn row_count(&self) -> u32 {
@@ -1508,6 +1640,30 @@ pub fn tile_ranges_all(seg: &SegmentData, tiles: &[Tile]) -> Vec<Range<u32>> {
         out[i] = start as u32..end as u32;
     }
     out
+}
+
+/// Whether the streaming passes issue `madvise(MADV_SEQUENTIAL)` on the mappings they open —
+/// **on by default**, and switchable only so a probe can measure what it is worth.
+///
+/// Compaction §6.1 rules the hint in (decision 0052) and §14 recorded its effect as *unmeasured*:
+/// P3 measured the harm an unthrottled streaming read does to a concurrent viewport and could not
+/// measure any mitigation, because it modelled a buffered reader and the fold's inputs are all
+/// mappings. Answering "does the hint help" needs the same fold run twice, and a compile-time
+/// constant cannot be run twice. Probe **P4** is what runs it.
+///
+/// A process-global rather than a parameter threaded to every cursor: the answer is the same for
+/// every mapping in a process, the only writer is a probe before it starts, and a parameter would
+/// put a measurement's switch in the signature of two hot constructors.
+static STREAMING_ADVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn streaming_advice_enabled() -> bool {
+    STREAMING_ADVICE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turn [`STREAMING_ADVICE`] off or on. **Probe use only** — a deployment has no reason to want the
+/// hint off, and this is not a configuration key.
+pub fn set_streaming_advice_for_test(enabled: bool) {
+    STREAMING_ADVICE.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(test)]

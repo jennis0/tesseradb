@@ -84,6 +84,8 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
         EngineConfig {
             flush_max_age_secs: tick_secs,
             max_merged_segment_bytes: None,
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
             ..config()
         },
     )
@@ -312,6 +314,8 @@ fn promotion_past_the_declared_term_ceiling_refuses_the_flush() {
         EngineConfig {
             flush_max_age_secs: 1,
             max_merged_segment_bytes: None,
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
             ..config()
         },
     )

@@ -85,6 +85,44 @@ pub enum ConfigError {
         max_merged_segment_bytes: u64,
         base_segment_bytes: u64,
     },
+    /// `ingest.compaction_window_start` is neither `HH:MM` nor `"off"`.
+    ///
+    /// Refused rather than defaulted, because the two failure directions are both bad and neither
+    /// is visible: a value read as "off" silently retires the deployment's only fold schedule, and
+    /// one read as midnight silently starts hours of IO at an hour the operator was trying to
+    /// avoid.
+    CompactionWindowNotATime(String),
+    /// `ingest.compaction_after_deletions` or `ingest.compaction_max_segments` is a string other
+    /// than `"off"`. See [`RawThreshold`].
+    CompactionThresholdNotANumberOrOff(String),
+    /// A ratio key — `ingest.compaction_dead_rows_fraction` or `ingest.compaction_dead_bytes_ratio`
+    /// — is a string other than `"off"`. See [`RawRatio`].
+    CompactionRatioNotANumberOrOff {
+        key: &'static str,
+        value: String,
+    },
+    /// A ratio key is zero, negative, or not finite: a route that can never decline. See
+    /// [`ratio_or_off`].
+    CompactionRatioNotPositive {
+        key: &'static str,
+        value: f64,
+    },
+    /// `ingest.compaction_max_segments` is at or below `ingest.compaction_window_min_segments`,
+    /// with the window armed.
+    ///
+    /// The two are a floor and a ceiling over one gauge — "worth folding tonight" and "cannot wait
+    /// for tonight" — so a ceiling at or below the floor makes the window **unreachable**: every
+    /// count that would have opened it has already fired the any-hour route. Refused rather than
+    /// shipped, because the result is three keys that parse, validate and can never fire, which is
+    /// the inert key decision 0045 forbids.
+    CompactionSegmentThresholdsInverted {
+        window_min_segments: usize,
+        max_segments: usize,
+    },
+    /// `ingest.compaction_window_secs` is at or past a whole day, which makes the "window" every
+    /// hour of every day — i.e. the ungated timer compaction §9 declines, reached by setting a
+    /// width rather than by asking for one.
+    CompactionWindowNotAWindow(u32),
     /// `serve.max_underlay_offset` above the grid's own depth. The §5.2 grid is 2¹⁶ × 2¹⁶, so an
     /// offset beyond 16 can never be usable at any zoom — every request naming it would be refused
     /// at the depth check. It is refused at startup instead, because the value also feeds a
@@ -253,6 +291,50 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "unsupported plugin module '{module}' — this build ships only \
                  builtin:passthrough (the wasmtime plugin host is not built)"
+            ),
+            ConfigError::CompactionWindowNotATime(value) => write!(
+                f,
+                "ingest.compaction_window_start = '{value}' is neither a UTC time of day \
+                 (HH:MM, 24-hour) nor 'off'. It is refused rather than defaulted: read as 'off' \
+                 it silently retires the deployment's fold schedule, and read as midnight it \
+                 silently starts hours of IO at the hour the operator was avoiding"
+            ),
+            ConfigError::CompactionRatioNotANumberOrOff { key, value } => write!(
+                f,
+                "{key} = \"{value}\" is neither a ratio nor \"off\". A maintenance route that \
+                 silently does not run is indistinguishable from one with nothing to do, so a \
+                 spelling this loader does not recognise is refused rather than read as absent"
+            ),
+            ConfigError::CompactionRatioNotPositive { key, value } => write!(
+                f,
+                "{key} = {value} is not a positive, finite ratio. Zero or negative is satisfied by \
+                 every possible measurement, so the route would dispatch a fold at every tick that \
+                 clears the interval floor — the ungated timer compaction §9 declines, reached by \
+                 configuration. To switch the route off, write \"off\""
+            ),
+            ConfigError::CompactionThresholdNotANumberOrOff(value) => write!(
+                f,
+                "a compaction threshold is set to '{value}', which is neither a count nor 'off' \
+                 (ingest.compaction_after_deletions, ingest.compaction_max_segments)"
+            ),
+            ConfigError::CompactionSegmentThresholdsInverted {
+                window_min_segments,
+                max_segments,
+            } => write!(
+                f,
+                "ingest.compaction_max_segments = {max_segments} is not above \
+                 ingest.compaction_window_min_segments = {window_min_segments}. The two are a \
+                 floor and a ceiling over one gauge — 'worth folding tonight' and 'cannot wait for \
+                 tonight' — so a ceiling at or below the floor makes the window unreachable and \
+                 its three keys inert"
+            ),
+            ConfigError::CompactionWindowNotAWindow(secs) => write!(
+                f,
+                "ingest.compaction_window_secs = {secs} is a whole day or more, which makes the \
+                 window every hour of every day — the ungated timer compaction §9 declines, \
+                 reached by setting a width. Set 'compaction_window_start = \"off\"' if the \
+                 intent is to fold whenever there is work, and let compaction_max_segments say \
+                 how much work"
             ),
             ConfigError::FloorClauseDisabled => write!(
                 f,
@@ -488,6 +570,49 @@ struct RawIngest {
     flush_max_age_secs: Option<u64>,
     #[serde(default)]
     ingest_buffer_max_items: Option<usize>,
+    #[serde(default)]
+    compaction_min_interval_secs: Option<u64>,
+    #[serde(default)]
+    compaction_window_start: Option<String>,
+    #[serde(default)]
+    compaction_window_secs: Option<u32>,
+    #[serde(default)]
+    compaction_window_min_segments: Option<usize>,
+    #[serde(default)]
+    compaction_max_segments: Option<RawThreshold>,
+    #[serde(default)]
+    compaction_after_deletions: Option<RawThreshold>,
+    #[serde(default)]
+    compaction_dead_rows_fraction: Option<RawRatio>,
+    #[serde(default)]
+    compaction_dead_bytes_ratio: Option<RawRatio>,
+}
+
+/// A count, or the literal `"off"` — compaction §9's spelling for a route a deployment does not
+/// want.
+///
+/// **Untagged, and the string arm is not a free-text field**: anything other than `"off"` is
+/// refused at startup ([`ConfigError::CompactionThresholdNotANumberOrOff`]) rather than read as
+/// zero, because a typo that disables a maintenance route silently is the failure this whole file
+/// is built to avoid.
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum RawThreshold {
+    Count(u64),
+    Word(String),
+}
+
+/// A ratio, or the literal `"off"` — [`RawThreshold`]'s shape for the two gauges that are
+/// fractions rather than counts.
+///
+/// A separate type rather than widening `RawThreshold`, because the two are refused for different
+/// reasons and an operator reading the error should be told which: a count that is negative is a
+/// typo, and a ratio that is negative is a route that could never decline.
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum RawRatio {
+    Ratio(f64),
+    Word(String),
 }
 
 #[derive(Deserialize)]
@@ -656,9 +781,16 @@ pub struct Config {
     /// [`DEFAULT_WAL_HARD_LIMIT_BYTES`] for what would be needed to make the name true.
     pub wal_hard_limit_bytes: u64,
     /// Overlay depth at which an alarm is raised. See [`DEFAULT_OVERLAY_SOFT_LIMIT`].
-    /// **Alarms only** — ⊘ no compaction fold exists, so crossing it gets an operator a signal,
-    /// never relief.
+    ///
+    /// **The alarm is on total depth and the fold trigger is not** (compaction §9): this counts
+    /// `deleted ∪ suppressed`, which is the right thing for an operator to see, while
+    /// [`Config::compaction`]'s route keys on the deletions alone — a suppression never retires, so
+    /// a trigger reading this number would dispatch a no-op fold for ever on a deployment holding
+    /// standing suppressions.
     pub overlay_soft_limit: usize,
+    /// When a fold is dispatched with nobody asking for one — compaction §9's automatic trigger as
+    /// decision 0056 rules it, parsed from the four `ingest.compaction_*` keys.
+    pub compaction: tessera_engine::CompactionSchedule,
     /// The flush tick: the period at which geometry is published, and therefore the bound on how
     /// stale an acknowledged item's absence may be. See [`DEFAULT_FLUSH_MAX_AGE_SECS`].
     pub flush_max_age_secs: u64,
@@ -1175,11 +1307,13 @@ const DEFAULT_WAL_HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Overlay depth at which an alarm is raised. **SA §7's own default**, carried across unchanged.
 ///
-/// **It alarms; it does not act.** ⊘ Specified, not implemented: no compaction fold exists, so an
-/// operator who sets this gets a signal that the overlay is deep, not a mechanism that makes it
-/// shallower. The
-/// depth matters beyond memory: every deny acceptance clones the overlay inside the WAL critical
-/// section, so overlay depth is a term in deny-ack latency.
+/// **It alarms, and it is now also the default trigger for the thing that acts.** The alarm counts
+/// `deleted ∪ suppressed`, which is the right thing for an operator to see; the fold trigger it
+/// seeds — `ingest.compaction_after_deletions` — counts the deletions alone, because a suppression
+/// never retires and a fold keyed on the union would rewrite the corpus to retire nothing on any
+/// deployment holding standing suppressions (compaction §9; r3, memory F5). The depth matters
+/// beyond memory: every deny acceptance clones the overlay inside the WAL critical section, so
+/// overlay depth is a term in deny-ack latency.
 const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 
 // `flush_max_items` is deleted, not inert (decision 0045). "Marks the buffer flush-ready" had no
@@ -1203,6 +1337,56 @@ const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 /// across the whole session population at every tick. 90 is kept because it is the number this
 /// deployment has run at, not because anything now forces it.
 const DEFAULT_FLUSH_MAX_AGE_SECS: u64 = 90;
+
+/// Compaction §9's floor, under both trigger routes: at most one fold a day.
+///
+/// It is also what keeps the daily window to one firing without any "did I fire today" state — the
+/// window is hours wide and the floor is a day, so the arithmetic does the bookkeeping.
+const DEFAULT_COMPACTION_MIN_INTERVAL_SECS: u64 = 86_400;
+
+/// Midnight **UTC**, per decision 0056. Not local time: a local window shifts by an hour twice a
+/// year and on the transition day fires twice or not at all, for the most expensive operation in
+/// the system.
+const DEFAULT_COMPACTION_WINDOW_START_SECS: u32 = 0;
+
+/// Four hours. **Assumed, not sized** (compaction §14): long enough that a node restarting inside
+/// the quiet period still folds, short enough that one down all night does not start at breakfast.
+const DEFAULT_COMPACTION_WINDOW_SECS: u32 = 4 * 3_600;
+
+/// Eight live segments in any one slice. **Assumed, not sized** (compaction §14): decision 0049
+/// measured ~73 ms on a 300-tile viewport at ~152 segments against a 135–164 ms baseline, so this
+/// is where a fold begins to be worth its flip cost and is otherwise a guess. Probe P1 calibrates
+/// it.
+const DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS: usize = 8;
+
+/// Sixty-four live segments in any one slice, **at any hour** — compaction §9's own default, and
+/// the ceiling above which deferring segment growth to the next window costs more than folding now.
+///
+/// **The one threshold here with a measurement behind it, though not at this value**: decision 0049
+/// measured ~73 ms on a 300-tile viewport at ~152 segments against a 135–164 ms baseline, so the
+/// regression is real and roughly linear in segment count. 64 is where §9 drew the line between
+/// "gradual, and can wait for a quiet hour" and "every viewer is paying for this now"; the
+/// interpolation is a judgement and probe P1 is what would replace it.
+///
+/// It must sit strictly above [`DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS`], and a configuration that
+/// inverts the two is refused — see [`ConfigError::CompactionSegmentThresholdsInverted`].
+const DEFAULT_COMPACTION_MAX_SEGMENTS: usize = 64;
+
+/// Tombstoned rows as a fraction of live rows at which a fold is dispatched (compaction §9).
+///
+/// **0.2, and it is assumed rather than sized.** A fifth of every viewport's scanned rows being
+/// invisible to every viewer is obviously not-yet-urgent and obviously not fine; where between
+/// those a deployment wants the line is a judgement, and probe P1 does not settle it — P1 measures
+/// what a fold *costs*, and this is about when the saving is worth paying for.
+const DEFAULT_COMPACTION_DEAD_ROWS_FRACTION: f64 = 0.2;
+
+/// On-disc bytes over manifest-named bytes at which a fold is dispatched (compaction §9).
+///
+/// **1.0 — paying double for storage — and it sits below the measured no-compaction steady state
+/// of 2.0–2.6×** (`docs/evidence/memos/2026-08-05-write-path-at-scale.md`), which is what makes it
+/// a threshold a real deployment crosses rather than one it lives above. Assumed on the same
+/// footing as the fraction above.
+const DEFAULT_COMPACTION_DEAD_BYTES_RATIO: f64 = 1.0;
 
 /// Buffer occupancy at which `/control/ingest` is refused (§1.3).
 ///
@@ -1306,6 +1490,51 @@ const DEFAULT_EXPECTED_CONCURRENT_SESSIONS: usize = 8;
 
 /// Refuses a zero for one of the write-path knobs, naming the silent failure zero would cause.
 /// See [`ConfigError::MustBeNonZero`] for why these refuse rather than clamp.
+/// `HH:MM`, 24-hour, to seconds past UTC midnight.
+///
+/// Strict: exactly two fields, both numeric, hour `< 24` and minute `< 60`. A lenient parser here
+/// would accept `"24:00"` or `"0:0"` and answer with a time the operator did not write, for a knob
+/// whose whole purpose is *which hour*.
+fn parse_time_of_day(value: &str) -> Result<u32> {
+    let bad = || ConfigError::CompactionWindowNotATime(value.to_string());
+    let (hh, mm) = value.split_once(':').ok_or_else(bad)?;
+    if hh.len() != 2 || mm.len() != 2 {
+        return Err(bad());
+    }
+    let hour: u32 = hh.parse().map_err(|_| bad())?;
+    let minute: u32 = mm.parse().map_err(|_| bad())?;
+    if hour > 23 || minute > 59 {
+        return Err(bad());
+    }
+    Ok(hour * 3_600 + minute * 60)
+}
+
+/// A ratio key: absent takes `default`, `"off"` switches the route off, a number must be finite and
+/// strictly positive, and anything else is refused by name.
+///
+/// **Strictly positive rather than merely non-negative.** A threshold of zero is satisfied by every
+/// possible measurement, so the route dispatches a fold at every tick that clears the interval floor
+/// — the ungated timer compaction §9 declines, reached by configuration rather than by design. A
+/// deployment that wants a route to always fire has said something it does not mean; a deployment
+/// that wants it off spells that `"off"`.
+fn ratio_or_off(key: &'static str, raw: Option<&RawRatio>, default: f64) -> Result<Option<f64>> {
+    let value = match raw {
+        None => return Ok(Some(default)),
+        Some(RawRatio::Word(word)) if word == "off" => return Ok(None),
+        Some(RawRatio::Word(word)) => {
+            return Err(ConfigError::CompactionRatioNotANumberOrOff {
+                key,
+                value: word.clone(),
+            })
+        }
+        Some(RawRatio::Ratio(value)) => *value,
+    };
+    if !value.is_finite() || value <= 0.0 {
+        return Err(ConfigError::CompactionRatioNotPositive { key, value });
+    }
+    Ok(Some(value))
+}
+
 fn non_zero_usize(key: &'static str, value: usize, consequence: &'static str) -> Result<usize> {
     if value == 0 {
         return Err(ConfigError::MustBeNonZero { key, consequence });
@@ -1565,6 +1794,106 @@ fn parse(text: &str) -> Result<Config> {
         "a zero tick asks the executor to publish geometry continuously, which is a publication \
          per loop iteration and a drain entry per publication",
     )?;
+    // ---- the compaction schedule (compaction §9, decision 0056) ---------------------------------
+    //
+    // Two routes, each switchable off on its own, and a floor under both. Every value is validated
+    // here rather than clamped, on this file's standing rule: a maintenance route that silently
+    // does not run is indistinguishable from one that has nothing to do.
+    let compaction_window_secs = raw
+        .ingest
+        .compaction_window_secs
+        .unwrap_or(DEFAULT_COMPACTION_WINDOW_SECS);
+    if u64::from(compaction_window_secs) >= 86_400 {
+        return Err(ConfigError::CompactionWindowNotAWindow(
+            compaction_window_secs,
+        ));
+    }
+    let compaction_window_start_secs = match raw.ingest.compaction_window_start.as_deref() {
+        None => Some(DEFAULT_COMPACTION_WINDOW_START_SECS),
+        Some("off") => None,
+        Some(value) => Some(parse_time_of_day(value)?),
+    };
+    // **Defaults to `overlay_soft_limit`**, which is the action compaction §9 says that alarm was
+    // always supposed to prompt. Two independently-set thresholds is how an operator ends up with
+    // an alarm that never has a consequence; it stays separately settable for the deployment that
+    // wants to be told earlier than it wants to act.
+    let compaction_after_deletions = match &raw.ingest.compaction_after_deletions {
+        None => Some(overlay_soft_limit as u64),
+        Some(RawThreshold::Count(n)) => Some(*n),
+        Some(RawThreshold::Word(word)) if word == "off" => None,
+        Some(RawThreshold::Word(word)) => {
+            return Err(ConfigError::CompactionThresholdNotANumberOrOff(
+                word.clone(),
+            ))
+        }
+    };
+    // **The segment gauge's ceiling**: the count past which deferring to the next window costs more
+    // than folding now. Off is legitimate for a deployment that would rather never fold in
+    // business hours than never carry a slow viewport.
+    let compaction_max_segments = match &raw.ingest.compaction_max_segments {
+        None => Some(DEFAULT_COMPACTION_MAX_SEGMENTS),
+        Some(RawThreshold::Count(n)) => Some(*n as usize),
+        Some(RawThreshold::Word(word)) if word == "off" => None,
+        Some(RawThreshold::Word(word)) => {
+            return Err(ConfigError::CompactionThresholdNotANumberOrOff(
+                word.clone(),
+            ))
+        }
+    };
+    // **The two gauges compaction §9 names for the obligations the counts above cannot see.** The
+    // fraction is what a *viewport* pays — rows scanned that no viewer may see — and is a different
+    // question from `compaction_after_deletions` over the same numerator: a small corpus crosses
+    // the ratio long before the absolute, and a 10⁹-row one the other way round. The byte ratio is
+    // the only route that covers reclamation at all: a deployment with heavy merge churn and few
+    // deletions has a bounded segment count, a shallow overlay, and three copies of its corpus.
+    //
+    // **Refused rather than clamped, and a ratio has two ways to be nonsense.** Not finite, or not
+    // positive: a zero or negative threshold is a route that can never decline, which is the
+    // ungated timer §9 declines reached by setting a gauge below every possible value.
+    let compaction_dead_rows_fraction = ratio_or_off(
+        "ingest.compaction_dead_rows_fraction",
+        raw.ingest.compaction_dead_rows_fraction.as_ref(),
+        DEFAULT_COMPACTION_DEAD_ROWS_FRACTION,
+    )?;
+    let compaction_dead_bytes_ratio = ratio_or_off(
+        "ingest.compaction_dead_bytes_ratio",
+        raw.ingest.compaction_dead_bytes_ratio.as_ref(),
+        DEFAULT_COMPACTION_DEAD_BYTES_RATIO,
+    )?;
+    let compaction_window_min_segments = non_zero_usize(
+        "ingest.compaction_window_min_segments",
+        raw.ingest
+            .compaction_window_min_segments
+            .unwrap_or(DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS),
+        "a zero threshold makes every night's window fold a bundle that is already one segment \
+         per slice — the ungated timer compaction §9 declines, reached by setting a gauge to a \
+         value nothing can be below",
+    )?;
+    // The floor must sit strictly below the ceiling or the window can never open — see
+    // `ConfigError::CompactionSegmentThresholdsInverted`. Checked only while the window is armed:
+    // with `compaction_window_start = "off"` there is no window for the floor to be inert in.
+    if let (Some(_), Some(ceiling)) = (compaction_window_start_secs, compaction_max_segments) {
+        if ceiling <= compaction_window_min_segments {
+            return Err(ConfigError::CompactionSegmentThresholdsInverted {
+                window_min_segments: compaction_window_min_segments,
+                max_segments: ceiling,
+            });
+        }
+    }
+    let compaction = tessera_engine::CompactionSchedule {
+        min_interval_secs: raw
+            .ingest
+            .compaction_min_interval_secs
+            .unwrap_or(DEFAULT_COMPACTION_MIN_INTERVAL_SECS),
+        window_start_secs: compaction_window_start_secs,
+        window_secs: compaction_window_secs,
+        window_min_segments: compaction_window_min_segments,
+        max_segments: compaction_max_segments,
+        after_deletions: compaction_after_deletions,
+        tombstoned_rows_fraction: compaction_dead_rows_fraction,
+        dead_bytes_ratio: compaction_dead_bytes_ratio,
+    };
+
     let ingest_buffer_max_items = non_zero_usize(
         "ingest.ingest_buffer_max_items",
         raw.ingest
@@ -1730,6 +2059,7 @@ fn parse(text: &str) -> Result<Config> {
         ingest_max_batch_bytes,
         wal_hard_limit_bytes,
         overlay_soft_limit,
+        compaction,
         flush_max_age_secs,
         row_projection_cache_bytes,
         fragment_cache_bytes,
@@ -1802,6 +2132,279 @@ mod tests {
         assert!(matches!(
             err,
             ConfigError::MissingDisclosureKey("token_max_lifetime")
+        ));
+    }
+
+    // ---- the compaction schedule (compaction §9, decision 0056) ------------------------------
+
+    /// **The shipped defaults are the ones compaction §9 states**, and a deployment that writes no
+    /// `[ingest]` section gets them: a fold at midnight UTC for four hours once a slice reaches
+    /// eight segments, an unwindowed fold at `overlay_soft_limit` deletions, and one fold a day.
+    ///
+    /// **Mutations this kills:** defaulting the window off (a deployment gets a mechanism only if
+    /// it remembers, which is what decision 0056's D3 predecessor refuses); defaulting
+    /// `after_deletions` to a number of its own rather than to `overlay_soft_limit` (an alarm with
+    /// no consequence).
+    #[test]
+    fn the_compaction_schedule_defaults_to_section_9s_own_numbers() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("")).unwrap();
+        assert_eq!(
+            config.compaction,
+            tessera_engine::CompactionSchedule {
+                min_interval_secs: 86_400,
+                window_start_secs: Some(0),
+                window_secs: 4 * 3_600,
+                window_min_segments: 8,
+                max_segments: Some(64),
+                after_deletions: Some(DEFAULT_OVERLAY_SOFT_LIMIT as u64),
+                tombstoned_rows_fraction: Some(0.2),
+                dead_bytes_ratio: Some(1.0),
+            }
+        );
+    }
+
+    /// **The two ratio gauges parse, switch off by name, and refuse a threshold that can never
+    /// decline.**
+    ///
+    /// Zero and negative are the sharp cases: both are satisfied by every possible measurement, so
+    /// the route would dispatch a fold at every tick that clears the interval floor — the ungated
+    /// timer compaction §9 declines, reached by configuration rather than by design.
+    ///
+    /// **Mutations this kills:** clamping instead of refusing; accepting `<= 0.0`; accepting a
+    /// non-finite value; reading an unrecognised word as absent (the default) rather than refusing.
+    #[test]
+    fn a_ratio_gauge_takes_a_number_or_off_and_refuses_a_threshold_nothing_can_be_under() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+
+        let set = parse(&valid_toml_with(
+            "",
+            "compaction_dead_rows_fraction = 0.05\ncompaction_dead_bytes_ratio = 2.5",
+        ))
+        .unwrap();
+        assert_eq!(set.compaction.tombstoned_rows_fraction, Some(0.05));
+        assert_eq!(set.compaction.dead_bytes_ratio, Some(2.5));
+
+        let off = parse(&valid_toml_with(
+            "",
+            "compaction_dead_rows_fraction = \"off\"\ncompaction_dead_bytes_ratio = \"off\"",
+        ))
+        .unwrap();
+        assert_eq!(off.compaction.tombstoned_rows_fraction, None);
+        assert_eq!(off.compaction.dead_bytes_ratio, None);
+
+        for bad in ["0.0", "-1.0", "\"sometimes\""] {
+            let err = parse(&valid_toml_with(
+                "",
+                &format!("compaction_dead_bytes_ratio = {bad}"),
+            ))
+            .expect_err("a threshold nothing can be under must be refused");
+            let text = err.to_string();
+            assert!(
+                text.contains("compaction_dead_bytes_ratio"),
+                "the refusal must name the key: {text}"
+            );
+        }
+    }
+
+    /// **The two segment thresholds are a floor and a ceiling, and an inverted pair is refused.**
+    ///
+    /// A ceiling at or below the floor makes the window unreachable: every count that would have
+    /// opened it has already fired the any-hour route, so three keys parse, validate and can never
+    /// fire — the inert key decision 0045 forbids.
+    ///
+    /// **Mutations this kills:** dropping the check (a deployment ships with a dead window);
+    /// making it `<` rather than `<=` (equal thresholds leave the window equally unreachable, since
+    /// the unwindowed route is consulted first); applying it while the window is off, where the
+    /// floor has no route to be inert in.
+    #[test]
+    fn an_inverted_pair_of_segment_thresholds_is_refused_unless_the_window_is_off() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        for ceiling in ["4", "8"] {
+            let toml = valid_toml_with(
+                "",
+                &format!(
+                    "compaction_window_min_segments = 8
+compaction_max_segments = {ceiling}
+"
+                ),
+            );
+            assert!(
+                matches!(
+                    parse(&toml),
+                    Err(ConfigError::CompactionSegmentThresholdsInverted { .. })
+                ),
+                "a ceiling of {ceiling} under a floor of 8 leaves the window unreachable"
+            );
+        }
+        assert!(parse(&valid_toml_with(
+            "",
+            "compaction_window_min_segments = 8
+compaction_max_segments = 9
+"
+        ))
+        .is_ok());
+
+        // With the window off there is no window to make inert, so the pair is not compared.
+        let window_off = parse(&valid_toml_with(
+            "",
+            "compaction_window_start = \"off\"
+compaction_window_min_segments = 8
+             compaction_max_segments = 4
+",
+        ))
+        .expect("a window that is off cannot be made unreachable");
+        assert_eq!(window_off.compaction.max_segments, Some(4));
+    }
+
+    /// The any-hour segment ceiling switches off on its own, leaving segment growth to the window
+    /// however far it goes — the posture a deployment takes when it would rather carry a slow
+    /// viewport than fold in business hours.
+    #[test]
+    fn the_segment_ceiling_switches_off_on_its_own() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let parsed = parse(&valid_toml_with(
+            "",
+            "compaction_max_segments = \"off\"
+",
+        ))
+        .unwrap();
+        assert_eq!(parsed.compaction.max_segments, None);
+        assert!(parsed.compaction.window_start_secs.is_some());
+    }
+
+    /// `overlay_soft_limit` is the *alarm*, and the unwindowed route follows it unless told
+    /// otherwise — compaction §9's "the action its alarm was always supposed to prompt".
+    #[test]
+    fn the_deletion_route_follows_the_overlay_alarm_unless_set_apart_from_it() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let followed = parse(&valid_toml_with(
+            "",
+            "overlay_soft_limit = 42
+",
+        ))
+        .unwrap();
+        assert_eq!(followed.compaction.after_deletions, Some(42));
+
+        let apart = parse(&valid_toml_with(
+            "",
+            "overlay_soft_limit = 42
+compaction_after_deletions = 9000
+",
+        ))
+        .unwrap();
+        assert_eq!(
+            apart.compaction.after_deletions,
+            Some(9000),
+            "a deployment may be told earlier than it acts"
+        );
+    }
+
+    /// Each route switches off on its own, spelled `"off"` — compaction §9's own word for it.
+    #[test]
+    fn each_compaction_route_switches_off_independently() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let no_window = parse(&valid_toml_with(
+            "",
+            "compaction_window_start = \"off\"
+",
+        ))
+        .unwrap();
+        assert_eq!(no_window.compaction.window_start_secs, None);
+        assert!(no_window.compaction.after_deletions.is_some());
+
+        let no_depth = parse(&valid_toml_with(
+            "",
+            "compaction_after_deletions = \"off\"
+",
+        ))
+        .unwrap();
+        assert_eq!(no_depth.compaction.after_deletions, None);
+        assert!(no_depth.compaction.window_start_secs.is_some());
+    }
+
+    /// `HH:MM` is parsed strictly, in UTC, and anything else is refused at startup.
+    ///
+    /// **Refused rather than defaulted**, because both failure directions are silent: read as
+    /// "off" it retires the deployment's only fold schedule, and read as midnight it starts hours
+    /// of IO at the hour the operator was trying to avoid.
+    ///
+    /// **Mutation this kills:** a lenient parser — `"9:30"`, `"24:00"` and `"00:60"` would all be
+    /// accepted, each answering with a time nobody wrote.
+    #[test]
+    fn the_window_start_is_a_strict_utc_time_of_day() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let parsed = parse(&valid_toml_with(
+            "",
+            "compaction_window_start = \"02:30\"
+",
+        ))
+        .unwrap();
+        assert_eq!(parsed.compaction.window_start_secs, Some(2 * 3_600 + 1_800));
+
+        for bad in ["9:30", "24:00", "00:60", "0230", "2:3", "midnight", ""] {
+            let toml = valid_toml_with(
+                "",
+                &format!(
+                    "compaction_window_start = \"{bad}\"
+"
+                ),
+            );
+            assert!(
+                matches!(parse(&toml), Err(ConfigError::CompactionWindowNotATime(_))),
+                "'{bad}' should be refused"
+            );
+        }
+    }
+
+    /// A width of a whole day is the ungated timer compaction §9 declines, reached by setting a
+    /// width rather than by asking for one — so it is refused rather than accepted as "always".
+    #[test]
+    fn a_day_wide_window_is_refused_because_it_is_not_a_window() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let toml = valid_toml_with(
+            "",
+            "compaction_window_secs = 86400
+",
+        );
+        assert!(matches!(
+            parse(&toml),
+            Err(ConfigError::CompactionWindowNotAWindow(86_400))
+        ));
+        // And one second under it is a window, however impractical.
+        assert!(parse(&valid_toml_with(
+            "",
+            "compaction_window_secs = 86399
+"
+        ))
+        .is_ok());
+    }
+
+    /// A zero segment threshold makes every night's window fold a bundle that is already one
+    /// segment per slice — the same ungated timer, reached through the gauge instead.
+    #[test]
+    fn a_zero_segment_threshold_is_refused() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let toml = valid_toml_with(
+            "",
+            "compaction_window_min_segments = 0
+",
+        );
+        assert!(matches!(
+            parse(&toml),
+            Err(ConfigError::MustBeNonZero {
+                key: "ingest.compaction_window_min_segments",
+                ..
+            })
         ));
     }
 

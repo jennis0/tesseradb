@@ -398,7 +398,13 @@ impl Engine {
         // two enforcement representations drifting under stale-serve. Falls back to a build only
         // when this session has no resident entry at all, which is establishment. **No projection
         // is constructed either way**: this is a read of the cache, never a claim on it.
-        let fragment = match self.row_projection_cache.freshest_fragment(session.token_id) {
+        // **Scoped to this generation's prefix**, so a fold's flip cannot answer an
+        // entity-space question from a fragment built against the term index it replaced — see
+        // `RowProjectionCache::freshest_fragment`.
+        let fragment = match self
+            .row_projection_cache
+            .freshest_fragment(session.token_id, &generation.prefix)
+        {
             Some(fragment) => fragment,
             None => self.fragment_for(session, &generation)?,
         };
@@ -433,7 +439,11 @@ impl Engine {
                     scalars: row_to_point(segment, row.raw() - row_base, declared_scalars).scalars,
                     // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
                     // every other store-backed call in this crate uses (see `Engine::open`).
-                    external_id: self.external_id_of(entity).map_err(EngineError::Store)?,
+                    // Against the generation this request loaded, never a second `load()`: the
+                    // sidecar is per-generation now, and a fold rewrites it.
+                    external_id: self
+                        .external_id_of_in(&generation, entity)
+                        .map_err(EngineError::Store)?,
                 }));
             }
         }
@@ -517,8 +527,11 @@ impl Engine {
             }
         }
 
-        // Rung 3.
-        if self.refresh_in_flight.load(Ordering::SeqCst) {
+        // Rung 3. **Compared against this request's own generation**, not read as a boolean: the
+        // claim names the `segments_version` whose refresh is running, so a pass still finishing
+        // for a *superseded* generation does not shed a request whose key nothing is coming to
+        // produce — which would be a 429 with no end.
+        if self.refresh_in_flight.load(Ordering::SeqCst) == key.segments_version {
             return Err(EngineError::ProjectionBuilding);
         }
 
@@ -648,7 +661,8 @@ impl Engine {
         // cache.** The value is resolved once, here, on the calling thread, strictly before the
         // parallel tile sweep begins, and is then only *borrowed* (via `compose`'s
         // `EffectiveMask`) by every `tile_result` call — never re-fetched or re-built per tile.
-        let geometry = self.session_geometry(session, &generation, slice, slice_data, &mut probe)?;
+        let geometry =
+            self.session_geometry(session, &generation, slice, slice_data, &mut probe)?;
         let base = Arc::clone(&geometry.projection);
         probe.lap(|t| &mut t.row_projection_ns);
 
@@ -663,11 +677,12 @@ impl Engine {
         // bundle disagree about what this generation holds. Serving that as "nothing is denied
         // here" would publish suppressed and deleted rows on the map with no error anywhere —
         // the same shape as `SegmentWithoutRowBase`, and refused the same way.
-        let denied = generation.denied.get(slice).ok_or_else(|| {
-            EngineError::DenyMaskMissing {
+        let denied = generation
+            .denied
+            .get(slice)
+            .ok_or_else(|| EngineError::DenyMaskMissing {
                 slice: slice.to_string(),
-            }
-        })?;
+            })?;
 
         let mask = compose(
             &session.satisfied,

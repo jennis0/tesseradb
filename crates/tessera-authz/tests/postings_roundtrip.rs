@@ -23,7 +23,11 @@ fn round_trip_three_terms() {
     let reader = PostingsReader::open(&path, false).unwrap();
     assert_eq!(reader.term_count(), 3);
 
-    match reader.posting(TermId::new(0)).unwrap().expect("the term is present in this file") {
+    match reader
+        .posting(TermId::new(0))
+        .unwrap()
+        .expect("the term is present in this file")
+    {
         PostingRef::Array(bytes) => {
             assert_eq!(bytes.len(), 4, "one u32 LE entry");
             let v = u32::from_le_bytes(bytes.try_into().unwrap());
@@ -32,7 +36,11 @@ fn round_trip_three_terms() {
         PostingRef::Roaring(_) => panic!("term 0 should be tag 0 (array)"),
     };
 
-    match reader.posting(TermId::new(1)).unwrap().expect("the term is present in this file") {
+    match reader
+        .posting(TermId::new(1))
+        .unwrap()
+        .expect("the term is present in this file")
+    {
         PostingRef::Roaring(bm) => {
             let collected: Vec<u32> = bm.iter().collect();
             assert_eq!(collected, large);
@@ -40,7 +48,11 @@ fn round_trip_three_terms() {
         PostingRef::Array(_) => panic!("term 1 should be tag 1 (roaring)"),
     };
 
-    match reader.posting(TermId::new(2)).unwrap().expect("the term is present in this file") {
+    match reader
+        .posting(TermId::new(2))
+        .unwrap()
+        .expect("the term is present in this file")
+    {
         PostingRef::Array(bytes) => {
             assert_eq!(bytes.len(), 0, "empty term has zero entries");
         }
@@ -75,11 +87,19 @@ fn open_with_mmap() {
 
     let reader = PostingsReader::open(&path, true).unwrap();
     assert_eq!(reader.term_count(), 2);
-    match reader.posting(TermId::new(0)).unwrap().expect("the term is present in this file") {
+    match reader
+        .posting(TermId::new(0))
+        .unwrap()
+        .expect("the term is present in this file")
+    {
         PostingRef::Array(bytes) => assert_eq!(bytes.len(), 12),
         PostingRef::Roaring(_) => panic!("expected array"),
     };
-    match reader.posting(TermId::new(1)).unwrap().expect("the term is present in this file") {
+    match reader
+        .posting(TermId::new(1))
+        .unwrap()
+        .expect("the term is present in this file")
+    {
         PostingRef::Roaring(bm) => assert_eq!(bm.cardinality(), 50),
         PostingRef::Array(_) => panic!("expected roaring"),
     };

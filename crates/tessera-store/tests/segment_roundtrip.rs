@@ -14,8 +14,8 @@ use arrow::record_batch::RecordBatch;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use tessera_spatial::tiler::{sort_batch, ScalarType, TilerItem};
 use tessera_spatial::split32;
+use tessera_spatial::tiler::{sort_batch, ScalarType, TilerItem};
 use tessera_store::manifest::Manifest;
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{ColumnsRef, StoreError};
@@ -232,13 +232,27 @@ fn write_permutation_rejects_entity_id_at_or_above_bound() {
     assert!(result.is_err(), "entity id == bound must be rejected");
 }
 
+/// A bound above `2^32` names no entity that could occupy a slot (R1: entity ids fit `u32` in
+/// `bundle_format = 1`), and is refused **before the slot array is allocated**.
+///
+/// **The file assertion is the test.** The bound was always rejected — but by
+/// `PermutationWriter::set`, after `create` had already sized the file at `bound × 4` and filled
+/// it with the row-absent sentinel. A `2^33` bound therefore wrote 32 GB to the temp volume in
+/// order to return an error, and an interrupted run left it there: four such files, 68 GB, were
+/// recovered from `/tmp` on 2026-08-07. Asserting `is_err()` alone cannot tell the two orderings
+/// apart, which is why the earlier version of this test passed for as long as it did.
 #[test]
-fn write_permutation_rejects_entity_id_not_fitting_u32() {
+fn write_permutation_rejects_a_bound_above_the_u32_entity_ceiling() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("permutation.bin");
-    let entities = vec![EntityId::new(1u64 << 32)];
-    let result = write_permutation(&path, &entities, 1u64 << 33);
-    assert!(result.is_err(), "entity id >= 2^32 must be rejected");
+    let entities = vec![EntityId::new(1)];
+    let result = write_permutation(&path, &entities, (1u64 << 32) + 1);
+    assert!(result.is_err(), "a bound above 2^32 must be rejected");
+    assert!(
+        !path.exists(),
+        "an unsatisfiable bound must cost no allocation: {} was created",
+        path.display()
+    );
 }
 
 #[test]
@@ -449,7 +463,9 @@ fn write_columns_from_parts_matches_write_columns_byte_for_byte() {
         let tessera: Vec<u64> = (0..rows as u64)
             .map(|i| synthetic_tessera_id(i).raw())
             .collect();
-        let residual: Vec<u32> = (0..rows).map(|i| (i as u32).wrapping_mul(2_654_435_761)).collect();
+        let residual: Vec<u32> = (0..rows)
+            .map(|i| (i as u32).wrapping_mul(2_654_435_761))
+            .collect();
 
         let via_vecs = dir.path().join(format!("vecs-{rows}.arrow"));
         write_columns(&via_vecs, tessera.clone(), residual.clone()).expect("write_columns");
@@ -510,13 +526,8 @@ fn write_columns_from_parts_rejects_short_and_misaligned_buffers_without_panicki
     let residual = Buffer::from_vec(vec![0u32; 4]);
 
     // Too short: 3 u64s cannot back 4 rows.
-    let err = write_columns_from_parts(
-        &path,
-        Buffer::from_vec(vec![0u64; 3]),
-        residual.clone(),
-        4,
-    )
-    .expect_err("a buffer shorter than `rows` values must be a typed error");
+    let err = write_columns_from_parts(&path, Buffer::from_vec(vec![0u64; 3]), residual.clone(), 4)
+        .expect_err("a buffer shorter than `rows` values must be a typed error");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 
     // Misaligned: slicing a u64 buffer at byte 4 moves it off 8-byte alignment. Arrow's own
@@ -529,5 +540,104 @@ fn write_columns_from_parts_rejects_short_and_misaligned_buffers_without_panicki
     assert!(
         err.to_string().contains("aligned"),
         "error should name the alignment failure: {err}"
+    );
+}
+
+/// **Scatter order is free, and it produces exactly the bytes the sequential path does.**
+///
+/// This is the property compaction's pass 1 needs and the old writer could not offer: the fold
+/// emits rows in `(morton, tessera_id)` order and learns `perm[entity]` in *that* order, which is
+/// not entity order. `write_permutation` remains the sequential producer, and the two must not be
+/// allowed to drift — so the assertion is on the whole file, not on a slot.
+///
+/// **Mutation:** write the slot natively rather than little-endian in `PermutationWriter::set`,
+/// or move the header's field order, and these bytes stop matching.
+#[test]
+fn a_scattered_permutation_is_byte_identical_to_a_sequential_one() {
+    use tessera_store::write::PermutationWriter;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bound = 64u64;
+    // Row order with deliberate gaps: entities 7, 19 and 40 never get a row, so the absent
+    // sentinel has to survive in three interior slots rather than only at the tail.
+    let row_order: Vec<EntityId> = [3u64, 11, 0, 55, 28, 63, 1, 44]
+        .into_iter()
+        .map(EntityId::new)
+        .collect();
+
+    let sequential = dir.path().join("sequential.bin");
+    write_permutation(&sequential, &row_order, bound).expect("the sequential path writes");
+
+    // The same mapping, learned in an order unrelated to either entity or row — which is what a
+    // Morton-ordered pass 1 produces.
+    let scattered = dir.path().join("scattered.bin");
+    let mut writer = PermutationWriter::create(&scattered, bound).expect("create");
+    let mut shuffled: Vec<(usize, EntityId)> = row_order.iter().copied().enumerate().collect();
+    shuffled.sort_by_key(|(row, entity)| entity.raw().wrapping_mul(7).wrapping_add(*row as u64));
+    for (row, entity) in shuffled {
+        writer.set(entity, row as u32).expect("set");
+    }
+    writer.finish().expect("finish");
+
+    assert_eq!(
+        fs::read(&sequential).unwrap(),
+        fs::read(&scattered).unwrap(),
+        "the scattered and sequential producers must write the same permutation.bin byte for byte"
+    );
+}
+
+/// **An entity that never got a row reads as absent, not as row 0.**
+///
+/// A freshly extended file reads as zeros and zero is a real row belonging to a real entity, so a
+/// writer that skipped the sentinel fill would serve one entity's coordinates under every id that
+/// has none — a cross-identity disclosure with no error anywhere. The mapped writer fills
+/// `bound × 4` bytes of `0xFF` up front for exactly this reason.
+///
+/// **Mutation:** delete the `map[HEADER..].fill(0xFF)` in `PermutationWriter::create` and every
+/// gap below resolves to row 0.
+#[test]
+fn an_entity_with_no_row_is_absent_rather_than_row_zero() {
+    use tessera_store::write::PermutationWriter;
+    use tessera_store::Permutation;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("permutation.bin");
+    let mut writer = PermutationWriter::create(&path, 16).expect("create");
+    // Only entity 9 gets a row, and it is row 0 — the value an unfilled slot would masquerade as.
+    writer.set(EntityId::new(9), 0).expect("set");
+    writer.finish().expect("finish");
+
+    let perm = Permutation::load(&path).expect("the permutation loads");
+    assert_eq!(
+        perm.row_of(EntityId::new(9)).map(|r| r.raw()),
+        Some(0),
+        "the one entity with a row keeps it"
+    );
+    for entity in (0..16u64).filter(|e| *e != 9) {
+        assert!(
+            perm.row_of(EntityId::new(entity)).is_none(),
+            "entity {entity} never got a row and must be absent, not row 0"
+        );
+    }
+}
+
+/// One entity cannot occupy two rows, and the refusal names it — the check that stops a scatter
+/// silently overwriting a slot it already filled.
+#[test]
+fn a_scattered_duplicate_entity_is_refused() {
+    use tessera_store::write::PermutationWriter;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("permutation.bin");
+    let mut writer = PermutationWriter::create(&path, 16).expect("create");
+    writer
+        .set(EntityId::new(4), 1)
+        .expect("the first set lands");
+    let err = writer
+        .set(EntityId::new(4), 2)
+        .expect_err("a second row for one entity must be refused");
+    assert!(
+        err.to_string().contains('4'),
+        "the refusal must name the entity: {err}"
     );
 }

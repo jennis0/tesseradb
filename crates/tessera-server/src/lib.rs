@@ -196,6 +196,11 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         // Validated against write-path §7's base-segment relation in `validate_merge_size`, and
         // now delivered: before this it was checked and dropped.
         max_merged_segment_bytes: config.max_merged_segment_bytes,
+        // Compaction §9's automatic trigger. The engine's own default is `off` — a fold is minutes
+        // to hours of IO and a library type may not start one from a default nobody chose — so
+        // this is the one place §9's defaults are applied, which is also the one place an operator
+        // can see and change them.
+        compaction: config.compaction,
     };
     let mut engine = Engine::open(
         &config.bundle_path,

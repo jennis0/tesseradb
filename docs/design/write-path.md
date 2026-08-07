@@ -1,6 +1,6 @@
 # The write path — design
 
-**Date:** 2026-08-03 · **Promoted:** 2026-08-04
+**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r8, 2026-08-06
 **Status:** **Normative** for the write path. Owner sign-off 2026-08-04; the adversarial review
 ran the same day across three lenses with every finding dispositioned (Appendix R); §13.4's
 rulings landed as decisions 0044 and 0045; §13.3's corrections and §13.1's supersession edits are
@@ -23,7 +23,8 @@ must not.
 
 **Does not own:** the invariants and the leak register (architecture §4, Appendix C — cited here,
 never restated as this document's); the byte-level formats and API (contracts); compaction and
-the fold, which do not exist and get a boundary statement here (spec §9) rather than a design;
+the fold, which get a boundary statement here (spec §9) rather than a design — `compaction.md`
+owns them and is where they are built;
 the read path's own machinery (lifecycle §1.1, §2, §7).
 
 **Every claim below was verified against the tree on 2026-08-04** (branch
@@ -73,9 +74,10 @@ The temporal shape to keep in mind, because everything else hangs from it:
   entry is fsync'd *and* the generation carrying it is swapped in, so no window ever exists
   between "accepted" and "in force". Everything after the ack — manifest publication, storage
   enforcement — is cleanup, not a precondition.
-- **Nothing retires.** ⊘ Compaction does not exist, so deletion denies are immortal and the
-  overlay grows monotonically. Fail-closed — an entry that never retires can never re-expose —
-  but it is not the specified mechanism (spec §8).
+- **Deletions retire at the fold that executes them**, and nowhere else (Rule F, spec §5.4). Until
+  one runs, the overlay grows monotonically under deletion churn — fail-closed, since an entry that
+  has not retired can never re-expose — and the schedule compaction §9 specifies is what decides how
+  long that is.
 
 Each of the four journeys below states, per step: what happens, what it is for, what the
 **writer** observes (latency, what the acknowledgement asserts, what each error means and whether
@@ -783,30 +785,25 @@ either way.)*
   is ever acceptable. The safety property is an **identity match**: a fold publishes a new prefix, whose manifest digest
   rotates the fragment identity, so no pre-fold fragment is reachable by key afterwards; a
   request is entirely pre-fold or entirely post-fold because it loads one generation pointer.
-  **Three gaps must close in the same change as the first fold**, and the third is the one this
-  rule's safety actually hangs on (found in review, 2026-08-04): (1) the in-memory fragment memo
-  key carries no generation identity; (2) a session-held fragment rebuilds only when its
-  watermark is behind — a fold advances no watermark; and (3) **nothing can rotate the fragment
-  identity in-process at all**: `bundle_identity` — the MANIFEST digest keying both the
-  in-memory slots and the *persisted* `.frag` files — is bound once at `Engine::open`, and the
-  only geometry-publication seam carries no postings reader and no identity; its own doc calls
-  it "compaction-shaped" precisely because it presumes the term index and dictionary are
-  unchanged, which is the premise the fold breaks. A fold published through today's seam would
-  leave every pre-fold fragment reachable by key — across a restart of the fragment map, since
-  the key names the persisted file — and Rule F would then serve a folded-away deletion. One
-  rule closes all three: *a fragment carries the identity of the generation whose postings built
-  it, composition uses it only when that matches, and the fold's publication path must carry new
-  postings and a new identity — or the fold is an offline operation (publish, then restart), and
-  §8 must say which.*
+  One rule closes the three gaps this used to enumerate (found in review, 2026-08-04): *a
+  fragment carries the identity of the generation whose postings built it, composition uses it
+  only when that matches, and the fold's publication path carries new postings and a new
+  identity.* The alternative it left open — an offline fold, publish then restart — is declined
+  (decision D1, compaction §13): the fold is in-process. **The publication seam does all of
+  this**, and compaction §4 is where it is described; what closes the rule at *composition*
+  rather than at a container is that both pre-fold fragment holders sit outside `FragmentCache`
+  — the session's own `Arc`, and the row-projection cache's freshest-entry read.
 - The earlier stamp-ledger design (per-deny tombstone stamps, `stamp_counts`,
   `min_live_stamp`, the two-kind retirement floor) is **deleted from the spec, not deferred**:
   it bought incremental early retirement that no requirement asks for, now that the read path's
   deny term is a mask rather than a walk. It was not wrong; it was precision nothing pays for.
 
-⊘ **Today nothing retires at all** — no fold exists. Deletion denies are
-immortal; the overlay grows monotonically under deletion churn;
-`overlay_soft_limit` (500,000) alarms on depth and nothing acts, because the lever its response
-should pull — *schedule a compaction* — does not exist. Fail-closed, and not the mechanism.
+**Retirement now happens, and the fold is what performs it.** `Overlay::retire` is Rule F's route,
+the publication seam carries it, and the fold derives the executed set at its own publication from
+what it demonstrably removed (compaction §5). **The schedule exists too**: `overlay_soft_limit`
+(500,000) alarms on depth and now has the lever its alarm was always supposed to pull — compaction
+§9's automatic trigger keys its unwindowed route on exactly that threshold, and `POST
+/control/compact` is the operator's own door onto the same dispatch.
 
 ### 5.5 Durability failure: the apply-anyway fold
 
@@ -984,7 +981,22 @@ day. **Three of the four are bounded; segments are not**, which is exactly the s
 segments of equal power-of-two size class over `max(size, segment_floor_bytes)` (16 MiB), total
 within `max_merged_segment_bytes`, first window wins (predictable from the manifest beats
 marginally better); adjacency is `hi < lo`, deliberately not `hi + 1 == lo`, because
-deleted-at-flush entities leave legitimate gaps. Execution — row-count preserving (no later
+deleted-at-flush entities leave legitimate gaps.
+
+**The ladder saturates, and what it saturates at is a read-path constant** (decision 0049;
+`merge_selection.rs` pins it). The cap is on the *total of the inputs* and a merge preserves row
+count, so the ladder climbs in ×`tier_width` steps from the floor and stops at the last step within
+the cap — 16 → 64 → 256 MiB at the defaults, after which four 256 MiB segments total 1 GiB and
+nothing further ever qualifies. **Live segment count then settles at corpus bytes ÷ the saturation
+size and grows linearly with the corpus**: ~152 at 10⁹, which is ~73 ms on a 300-tile viewport
+against a 135–164 ms baseline. Immaterial at 10⁷ — which is why the soak, settling at 6, cannot
+show it. This is the price of §11.3's bounded-rewrite rule rather than a defect, but the bound is
+*corpus-proportional*, not constant, and §11.3's "the operation that bounds it is a merge" must be
+read that way. **Raising the cap is declined until merge streams** (0049): it trades linearly
+against the measured 4.4–4.9× memory multiplier, so ~20 segments at 10⁹ would model to a 9–10 GB
+transient. **And `tier_width` moves the fixpoint in the counter-intuitive direction** — width 8
+reaches 128 MiB, overshoots one rung earlier and leaves *twice* as many segments, so widening the
+tier to merge less often raises what every viewport pays. Execution — row-count preserving (no later
 extent's `row_base` moves; dropping a row is a fold and folds are compaction's), **byte-exact
 through the code**: `unsplit32` recovers axes as a bit permutation so merged codes are identical
 to their inputs' (dequantise-requantise would move every point up to a quantisation step per
@@ -1085,8 +1097,14 @@ is not thereby unsafe, only refused.
 
 ## 8. Where compaction sits — the seam, stated so it is not rediscovered
 
-⊘ **Compaction does not exist.** No fold, no prefix rewrite, no `CURRENT` flip, no
-re-ranking, no batch-grid change. Everything in this section is obligation, not description.
+**Compaction exists.** The fold, the prefix rewrite and the `CURRENT` flip are built, on the
+design this section's obligation list produced; re-ranking needs no separate mechanism (the fold's
+output is globally Morton-sorted by construction) and the batch-grid change is still an
+identity-breaking rebuild rather than a fold. What remains obligation here is the operator surface
+and the two pre-flight refusals compaction §3 and §8 name. A **provisional** design
+answering this section's obligation list is at [`compaction.md`](compaction.md) (2026-08-05,
+reviewed at r3 and r5, the seam built); this section stays the boundary statement and wins until
+that document is promoted.
 
 Compaction is the **invariant-bearing** half flush and merge are defined by contrast with: it
 folds — snapshot-covered delta tiers into base postings, tombstoned rows out of row space **and
@@ -1104,10 +1122,9 @@ because an overwrite after the first flush silently deletes acked, visible items
 the deployment's **only** reorganisation path: the fold, re-ranking, a batch-grid change. Not
 re-quantisation (decision 0040: bounds are immutable per slice; a wrong extent is a migration).
 
-Obligations already accumulated against it, from this document alone: **Rule F's three gaps**
-(spec §5.4 — above all, a publication path that can carry the fold's rewritten postings and
-rotate the fragment identity, which today's compaction-shaped seam cannot; or a ruled offline
-fold); the deletion accepted
+Obligations already accumulated against it, from this document alone: **Rule F's gaps** (spec
+§5.4 — a publication path that carries the fold's rewritten postings and rotates the fragment
+identity; ✔ built, compaction §4); the deletion accepted
 after a flush snapshot whose row exists (spec §4.2); the immortal overlay (spec §5.4);
 `overlay_soft_limit`'s response becoming *schedule a compaction*; the dictionary's monotone
 length (the staleness hint's counter — a renumbering compaction must not reduce it); the
@@ -1160,9 +1177,9 @@ fold's asymmetry, the diverged-node publication gate, and the reader's honour-be
 | `ingest_max_batch_rows` / `_bytes` | 10,000 / 16 MiB | 422 / route-level refusal (decision 0036) |
 | `overlay_soft_limit` | 500,000 | the pressure gauge; alarms, does not act (⊘ no fold to schedule) |
 | `wal_hard_limit_bytes` | 8 GiB | a **startup relation** on the command queue's worst case (+1 GiB deny headroom); ⊘ not a runtime ceiling — nothing measures the live log (ruled nice-to-have) |
-| `segment_floor_bytes` | 16 MiB | below this, segments compare equal for merge selection |
-| `tier_width` | 4 | segments per size class before a merge is selected |
-| `max_merged_segment_bytes` | unset | cap on one merge; **must be strictly below the base segment's bytes** — refused at startup otherwise |
+| `segment_floor_bytes` | 16 MiB | below this, segments compare equal for merge selection. With `tier_width`, sets where the size ladder saturates — a read-path constant (§7, decision 0049) |
+| `tier_width` | 4 | segments per size class before a merge is selected. **Widening it leaves *more* live segments**, not fewer (§7) |
+| `max_merged_segment_bytes` | unset (256 MiB in the engine) | cap on one merge; **must be strictly below the base segment's bytes** — refused at startup otherwise. Also the saturation size, hence live segment count ≈ corpus ÷ this. **Not raised until merge streams** — it bounds selection-time file bytes, and peak memory is a measured 4.4–4.9× those (decision 0049) |
 | `DENY_WINDOW_MAX_ENTRIES` (const) | 1,000 | the deny window, and the handler's chunk size |
 | `OVERLAY_PUBLICATION_MAX_WINDOWS` (const) | 64 | the deny-publication liveness floor |
 | `KEEP_SUPERSEDED_GENERATIONS` (const) | 1 | row-projection retention — exactly what the patch needs |
@@ -1334,7 +1351,18 @@ with every item **and every consumed segment's delta tier still listed** (exists
 
 ## Appendix R — Review record
 
-**r7 (2026-08-06) — decision 0048: the evaluate machinery is deleted, not carried.** Tessera has
+**r9 (2026-08-06) — Rule F's gaps are closed, and §5.4 stops enumerating them.** The publication
+seam now carries the fold's rewritten postings, the bundle identity and the fragment cache it keys,
+the external-id sidecar and the executed retirement set, in one swap; the prefix directory a
+side-manifest is written into is derived from the publishing generation rather than captured at
+open, which is the fourth gap and the one whose failure loses acked deny state silently; and
+`Overlay::retire` is Rule F's route out of `deleted`, with no sibling for `suppressed`. Nothing
+retires yet — no fold derives an executed set — so §5.4's ⊘ stands with its reason narrowed. §8's
+obligation list drops the seam and keeps everything else. The alternative §5.4 left open, an offline
+fold, is declined by compaction's D1; the mechanism is described at compaction §4 and this section
+stays the boundary statement.
+
+**r8 (2026-08-06) — decision 0048: the evaluate machinery is deleted, not carried.** Tessera has
 no deployment, so "entries arise only from pre-0047 WALs" (r5's reason for keeping the machinery
 dormant) names an empty set. Deleted: the `evaluate` store and its `PredicateChange`; the WAL's
 external-id-keyed `Change` variant, `ChangeOp::Predicate` and the `descriptors` field of
@@ -1349,6 +1377,16 @@ collapsing the remaining ones — and the `predicate` op keeps its typed 422 at 
 (conformance script 35), so the withdrawal still names the flow. Script 15 loses its evaluate
 half. Replay became infallible with the `Change` variant: it no longer resolves external ids at
 all, that resolution happening once, in the handler, at admission.
+
+**r7 (2026-08-05) — a measured correction to §7, not a design change** (decision 0049). The merge
+size ladder **saturates**: live segment count settles at corpus bytes ÷ the saturation size and
+grows linearly with the corpus — ~152 at 10⁹ — where this document previously implied merge bounded
+the axis outright. Pinned by test. §7 and §10 gain the constant, the reason the cap is not raised
+(the measured memory multiplier, not the cap, is the binding constraint), and the warning that
+widening `tier_width` raises the count. The gauge that would make it observable is ⊘ unbuilt. No
+mechanism changed and no invariant is affected; §8's compaction boundary gains segment count as a
+fold trigger by reference to [`compaction.md`](compaction.md) §9.
+
 
 **r6 (2026-08-04) — promoted to normative, and the mechanism it was gated on is built.** Owner
 sign-off; §13.1's supersession edits **performed** (`flush-and-merge.md` deleted; the lifecycle

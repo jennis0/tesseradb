@@ -10,9 +10,11 @@
 //! rewritten — a reader who finds it describing per-deny retirement stamps has found the stale
 //! text, not a second mechanism.)*
 //!
-//! **⊘ Only the unsuppress rule exists.** There is no compaction fold, so nothing retires a
-//! deletion — safe today precisely because nothing retires at all, and fail-open the moment a fold
-//! is built without Rule F's identity match (`write-path.md` §5.4).
+//! **A deletion retires at the fold that executes it.** [`Overlay::retire`] is Rule F's only route
+//! out of `deleted`, and its caller is the fold's own publication, which derives the executed set
+//! from what it demonstrably removed (`tessera_engine`'s `compact`, compaction §5). Rule F's safety
+//! is the identity match the publication seam builds (`write-path.md` §5.4, compaction §4), not a
+//! stamp ordering.
 //!
 //! Collapsing the two into a single enum ("last write wins") is fail-open, and has been caught
 //! twice: the sequence `delete → suppress → unsuppress` must not re-expose a deleted item. Two
@@ -49,8 +51,7 @@ use crate::wal::{ChangeOp, OverlaySnapshotEntry, WalRecord};
 /// space, where a set is the whole content.
 #[derive(Debug, Default, Clone)]
 pub struct Overlay {
-    /// Set by `Delete`. **Terminal: nothing removes from it**, because Rule F's compaction fold —
-    /// the only thing that may execute a deletion — does not exist (⊘).
+    /// Set by `Delete`, and removed from **only** by [`Overlay::retire`] — Rule F's single route.
     deleted: Bitmap,
     /// Set by `Suppress`, cleared **only** by `Unsuppress`. Never touched by `Delete`, which is
     /// true by construction rather than by discipline.
@@ -124,11 +125,23 @@ impl Overlay {
             .collect()
     }
 
+    /// How many deletions stand — **the gauge a compaction trigger keys on**, and not the same
+    /// number as [`Self::len`].
+    ///
+    /// `len` is `|deleted ∪ suppressed|`, and Rule S says a suppression never retires, so a
+    /// deployment holding 500,000 standing suppressions is permanently over any limit expressed in
+    /// those terms — and a trigger reading it would dispatch a **full no-op fold every interval,
+    /// for ever**, rewriting the corpus to retire nothing (compaction §9; r3, memory F5). A
+    /// trigger keys on what a fold can actually reduce; the *alarm* stays on total depth, which is
+    /// the right thing for an operator to see.
+    pub fn deleted_len(&self) -> u64 {
+        self.deleted.cardinality()
+    }
+
     /// How many entities this overlay has an opinion on — the depth the soft-limit alarm gauges.
     ///
-    /// **This can now go down.** An unsuppress genuinely removes an id, so the one disposition with
-    /// a retirement rule that exists is the one the gauge can reflect. Deletions never shrink (⊘),
-    /// so the depth's floor is the deletion set.
+    /// **This can now go down**, in both directions: an unsuppress removes an id, and a fold's
+    /// retirement removes the deletions it executed ([`Self::retire`]).
     pub fn len(&self) -> usize {
         self.denied().cardinality() as usize
     }
@@ -151,6 +164,37 @@ impl Overlay {
                 self.suppressed.remove(as_u32(entity));
             }
         }
+    }
+
+    /// Withdraw `executed` from `deleted` — **Rule F's only retirement route, and it takes only
+    /// deletions** (write-path §5.4).
+    ///
+    /// `suppressed` is not an operand and there is no sibling for it: a suppression's invisibility
+    /// rests on its overlay entry for as long as it stands, so any retirement route at all is
+    /// fail-open — *"any stamp eventually retires the entry and re-exposes the item"*. That is why
+    /// this takes one bitmap and subtracts it from one store rather than taking a set of entities
+    /// and asking which store they are in.
+    ///
+    /// # The caller's obligation, which nothing here can check
+    ///
+    /// **`executed` must contain only entities whose row and postings the publication being made
+    /// in this same swap demonstrably removed** — compaction §5's rule, `{ e ∈ D₀ : no
+    /// carried-forward artefact names e }`, evaluated against what was published and never against
+    /// what a plan predicted. An entity retired while any carried-forward segment, tier or run
+    /// still names it is an acknowledged deletion served to every authorised principal, permanently
+    /// and with no error: the fold's identity match cannot see it, because no fragment is stale —
+    /// the entity genuinely is in the post-fold postings.
+    ///
+    /// **In the publication's own swap, never before it.** An entry withdrawn while the old
+    /// geometry is still live re-exposes the item for the width of that window. After it is merely
+    /// wasteful, and is the safe direction if the ordering ever has to give.
+    ///
+    /// Returns how many entries were retired, which is what makes "this fold retired nothing"
+    /// distinguishable from "this fold was not asked to".
+    pub fn retire(&mut self, executed: &Bitmap) -> u64 {
+        let before = self.deleted.cardinality();
+        self.deleted.andnot_inplace(executed);
+        before - self.deleted.cardinality()
     }
 
     /// Re-state this overlay as WAL records, so the `ChangeByEntity` records it was accumulated
@@ -338,6 +382,67 @@ mod tests {
             "unsuppress clears the suppression and nothing else — it cannot reach the other \
              store at all"
         );
+    }
+
+    /// **Rule F's route takes deletions and cannot reach a suppression** — the fail-open caught
+    /// twice in review, in its most direct form.
+    ///
+    /// A retirement set is entities, not dispositions, so an entity that is both deleted and
+    /// suppressed is the case that matters: the deletion retires and the suppression stands, and
+    /// the item is still hidden afterwards. There is no sibling of this method for `suppressed`
+    /// and there must not be one — a suppression's invisibility rests on its entry for as long as
+    /// it stands, so any retirement route at all re-exposes the item.
+    #[test]
+    fn retirement_takes_deletions_and_leaves_every_suppression_standing() {
+        let mut overlay = Overlay::new();
+        let both = EntityId::new(1);
+        let deleted_only = EntityId::new(2);
+        let suppressed_only = EntityId::new(3);
+        let untouched_delete = EntityId::new(4);
+
+        overlay.apply(both, ChangeOp::Delete);
+        overlay.apply(both, ChangeOp::Suppress);
+        overlay.apply(deleted_only, ChangeOp::Delete);
+        overlay.apply(suppressed_only, ChangeOp::Suppress);
+        overlay.apply(untouched_delete, ChangeOp::Delete);
+
+        let mut executed = Bitmap::new();
+        for entity in [both, deleted_only, suppressed_only] {
+            executed.add(as_u32(entity));
+        }
+        assert_eq!(
+            overlay.retire(&executed),
+            2,
+            "the count is deletions withdrawn — the suppressed-only entity was in the set and \
+             contributed nothing"
+        );
+
+        assert!(!overlay.is_deleted(both));
+        assert!(
+            overlay.is_suppressed(both),
+            "an entity that is both loses only its deletion; the suppression is what still hides it"
+        );
+        assert!(!overlay.is_deleted(deleted_only));
+        assert!(
+            overlay.is_suppressed(suppressed_only),
+            "a suppression named in a retirement set is not retired — it has no route at all"
+        );
+        assert!(
+            overlay.is_deleted(untouched_delete),
+            "a deletion outside the set stands, which is the fail-closed direction: the next fold \
+             takes it"
+        );
+        assert_eq!(overlay.len(), 3);
+    }
+
+    /// An empty retirement set is a no-op, which is what every fold whose tombstones were all
+    /// carried forward produces.
+    #[test]
+    fn retiring_nothing_withdraws_nothing() {
+        let mut overlay = Overlay::new();
+        overlay.apply(EntityId::new(9), ChangeOp::Delete);
+        assert_eq!(overlay.retire(&Bitmap::new()), 0);
+        assert!(overlay.is_deleted(EntityId::new(9)));
     }
 
     #[test]

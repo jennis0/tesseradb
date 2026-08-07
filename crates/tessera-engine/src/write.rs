@@ -67,7 +67,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use tessera_authz::{DeltaTier, Dict};
+use tessera_authz::{DeltaTier, Dict, FragmentCache};
 use tessera_lifecycle::alloc::{high_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
@@ -79,12 +79,11 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 
 use crate::cache::RowProjectionCache;
 use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
-use crate::geometry::{check_publishable, GeometryRefused};
+use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
 use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{DenyEntry as ManifestDenyEntry, SegmentsManifest};
 use tessera_store::merge::MergePolicy;
-use tessera_store::Bundle;
 use tessera_types::{EntityId, IdentityKey, TermId};
 
 use crate::session::EngineError;
@@ -225,6 +224,21 @@ pub struct ExecutorHealth {
     /// Distinct from [`Self::wal_poisoned`], which is mirrored from the WAL in both directions:
     /// this one latches, because what diverged stays diverged until the process is replaced.
     pub(crate) overlay_diverged: AtomicBool,
+    /// **`CURRENT` names a prefix this process is not serving** — the fold flipped the commit point
+    /// and then could not complete its swap.
+    ///
+    /// Latching, like [`Self::overlay_diverged`] and for a sharper version of its reason. After the
+    /// flip the durable bundle is the new prefix and the live generation is still the old one, so
+    /// every publication this executor performs writes into a tree no restart reads: a flush's
+    /// side-manifest and segment land under the superseded prefix, the rows are acked, and the WAL
+    /// rotation that follows reclaims the only other copy of them. That is **acked ingest lost at
+    /// the next restart**, behind no error at all — the failure a crash cannot cause, because a
+    /// crashed process stops writing.
+    ///
+    /// So the node keeps serving what it has and publishes nothing until it is restarted, at which
+    /// point it opens the prefix `CURRENT` names and is correct again. Cleared only by that
+    /// restart.
+    pub(crate) prefix_diverged: AtomicBool,
     /// Buffer occupancy as of the last apply — what `/control/ingest`'s occupancy bound is checked
     /// against.
     ///
@@ -267,6 +281,52 @@ pub struct ExecutorHealth {
     /// costs a refresh round, a coalesce does neither.
     pub(crate) merges: AtomicU64,
     pub(crate) merge_failures: AtomicU64,
+    /// Compaction folds published since the executor started, and the ones that produced nothing.
+    ///
+    /// A fold's own counter rather than a share of `merges`, because the two are different events:
+    /// a merge bounds an axis inside the live prefix, a fold replaces the prefix, retires
+    /// deletions and reclaims the superseded tree. The failure counter is what an operator watches
+    /// for a fold that keeps re-reading the corpus and discarding — every failure leaves orphans
+    /// under a prefix `CURRENT` never named, so the disc cost is visible before the cause is.
+    pub(crate) folds: AtomicU64,
+    pub(crate) fold_failures: AtomicU64,
+    /// A `POST /control/compact` awaiting the tick that dispatches it. A flag rather than a count,
+    /// for `flush_requested`'s reason: at most one fold is in flight, so two requests before one
+    /// tick are satisfied by that tick together.
+    pub(crate) fold_requested: AtomicBool,
+    /// A completed fold has been sent to `fold_done` and not yet drained — the dedicated thread's
+    /// half of the same completion handshake a flush has, and set before the send for the same
+    /// reason.
+    pub(crate) fold_completed_pending: AtomicBool,
+    /// When the last fold **ended**, however it ended, as a unix second — 0 before the first one.
+    ///
+    /// **Written by the fold's own thread on both of its exits**, because the executor never sees
+    /// one of them: a failure inside `execute` reaches no `publish_fold` and would otherwise leave
+    /// the schedule believing the attempt was still the one that started. It exists for the
+    /// interval floor's second half — see [`Executor::fold_floor_from`], where the rule it serves
+    /// is stated.
+    pub(crate) fold_ended_unix: AtomicU64,
+    /// The last fold's wall clock in seconds, and the highest resident set its own staircase saw
+    /// (`compact::PassCost`) — the two gauges `/control/status` publishes for the most expensive
+    /// operation in the system. Both are 0 before the first fold.
+    ///
+    /// **The RSS figure is a staircase maximum, not a peak**, and the difference is not pedantry:
+    /// it is sampled at five pass boundaries, so a spike inside a pass is invisible to it. It is
+    /// what a deployment has, and probe P1 is what says how far under the true peak it sits.
+    pub(crate) last_fold_secs: AtomicU64,
+    pub(crate) last_fold_rss: AtomicU64,
+    /// The last fold's staircase, pass by pass — what the two gauges above are a reduction of.
+    ///
+    /// **The gauges alarm and this diagnoses**, which is why both exist: `last_fold_rss` says the
+    /// fold reached 9 GiB and this says which pass it reached it on, and only the second is
+    /// actionable. A `Mutex` rather than a fifth atomic because it is written once per fold, hours
+    /// apart, and read only by `/control/status`.
+    pub(crate) last_fold_passes: Mutex<Vec<crate::compact::PassCost>>,
+    /// A fold has finished its passes and is **holding** at the test hook
+    /// (`Engine::set_fold_paused_for_test`). Always `false` in a shipped build, where nothing ever
+    /// sets the flag it waits on; it exists so a test can wait on the hold as a condition rather
+    /// than guess at it with a sleep, which is what makes the mid-flight-flush cases deterministic.
+    pub(crate) fold_holding: AtomicBool,
     /// See [`Self::flush_completed_pending`], whose handshake this shares.
     pub(crate) merge_completed_pending: AtomicBool,
     /// Whether a completed coalesce is waiting to be published — see
@@ -371,12 +431,13 @@ pub struct ExecutorHealth {
     /// "alarm on everything" on the other. That is how a knob comes to be silently inert.
     overlay_soft_limit: AtomicUsize,
     /// Times the overlay has **crossed** into being at or above [`Self::overlay_soft_limit`]. **It
-    /// alarms; it does not act** — there is no compaction fold (⊘), so this counter and its log
+    /// alarms, and the schedule acts on a different number** — this counter and its log
     /// line are the whole of the mechanism.
     ///
     /// **Crossings, not publications.** Counting every apply at or above the limit is
-    /// level-triggering on a quantity that never decreases: `Overlay` entries survive
-    /// `suppress → unsuppress`, and nothing shrinks the overlay. A node that crossed 500 000 would
+    /// level-triggering on a quantity that falls only at a fold, and only for its deletion half:
+    /// `Overlay` entries survive `suppress → unsuppress`, and a suppression never retires at all.
+    /// A node that crossed 500 000 would
     /// emit one four-line WARN **per deny, forever**, with no path back — flooding the log precisely
     /// while the node is under deny pressure. `control.rs` states that exact standard itself ("an
     /// ERROR per occurrence is an alarm flood rather than a signal") one file over.
@@ -574,11 +635,26 @@ pub struct ExecutorStats {
     /// "the segment count is bounded".
     pub merges: u64,
     pub merge_failures: u64,
+    /// Compaction folds published, and the ones discarded — the observable behind "deletions
+    /// retire, orphans are reclaimed, and the bundle returns to one segment per partition-slice".
+    pub folds: u64,
+    pub fold_failures: u64,
+    /// Whether a `POST /control/compact` is awaiting the next tick.
+    pub fold_requested: bool,
+    /// The last fold's wall clock in seconds and the highest resident set its pass staircase saw,
+    /// in bytes — see [`ExecutorHealth::last_fold_secs`] for what the second number is and is not.
+    /// Both 0 before the first fold.
+    pub last_fold_secs: u64,
+    pub last_fold_rss: u64,
     /// Whether a `POST /control/flush` is awaiting the next tick.
     pub flush_requested: bool,
     /// Whether this node's overlay has diverged from its durable WAL (§7.2). **Latching**: it
     /// publishes no flush and rotates no WAL until restarted.
     pub overlay_diverged: bool,
+    /// Whether `CURRENT` names a prefix this process is not serving (see
+    /// [`ExecutorHealth::prefix_diverged`]). **Latching**: it publishes nothing and rotates no WAL
+    /// until restarted.
+    pub prefix_diverged: bool,
     /// Successful WAL appends since the executor started.
     pub wal_appends: u64,
     /// Successful WAL fsyncs since the executor started — the unit group commit is
@@ -716,6 +792,7 @@ impl ExecutorHealth {
             flush_requested: AtomicBool::new(false),
             flush_completed_pending: AtomicBool::new(false),
             overlay_diverged: AtomicBool::new(false),
+            prefix_diverged: AtomicBool::new(false),
             overlay_publications: AtomicU64::new(0),
             buffered_items: AtomicUsize::new(0),
             flushable_items: AtomicUsize::new(0),
@@ -728,6 +805,15 @@ impl ExecutorHealth {
             merges: AtomicU64::new(0),
             merge_failures: AtomicU64::new(0),
             merge_completed_pending: AtomicBool::new(false),
+            folds: AtomicU64::new(0),
+            fold_failures: AtomicU64::new(0),
+            fold_requested: AtomicBool::new(false),
+            fold_completed_pending: AtomicBool::new(false),
+            fold_ended_unix: AtomicU64::new(0),
+            last_fold_secs: AtomicU64::new(0),
+            last_fold_rss: AtomicU64::new(0),
+            last_fold_passes: Mutex::new(Vec::new()),
+            fold_holding: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
             stage_nanos: Default::default(),
             apply_nanos_max: AtomicU64::new(0),
@@ -799,6 +885,15 @@ impl ExecutorHealth {
         self.wal_recoveries.load(Ordering::Relaxed)
     }
 
+    /// The last fold's staircase, pass by pass — empty before the first fold.
+    ///
+    /// **Separate from [`ExecutorStats`] rather than a field on it.** That struct is `Copy` and is
+    /// read on paths that take it per request; a `Vec` in it would make every one of those an
+    /// allocation for a figure only the operator plane wants, hours apart.
+    pub fn last_fold_passes(&self) -> Vec<crate::compact::PassCost> {
+        lock_recover(&self.last_fold_passes).clone()
+    }
+
     pub fn stats(&self) -> ExecutorStats {
         let work_submitted = self.work_submitted.load(Ordering::Relaxed);
         let work_completed = self.work_completed.load(Ordering::Relaxed);
@@ -823,6 +918,7 @@ impl ExecutorHealth {
             fragmentation_windows: self.fragmentation_windows.load(Ordering::Relaxed),
             ticks: self.ticks.load(Ordering::Relaxed),
             overlay_diverged: self.overlay_diverged.load(Ordering::SeqCst),
+            prefix_diverged: self.prefix_diverged.load(Ordering::SeqCst),
             flushable_items: self.flushable_items.load(Ordering::SeqCst),
             flushes: self.flushes.load(Ordering::Relaxed),
             overlay_publications: self.overlay_publications.load(Ordering::Relaxed),
@@ -832,6 +928,11 @@ impl ExecutorHealth {
             coalesce_failures: self.coalesce_failures.load(Ordering::Relaxed),
             merges: self.merges.load(Ordering::Relaxed),
             merge_failures: self.merge_failures.load(Ordering::Relaxed),
+            folds: self.folds.load(Ordering::Relaxed),
+            fold_failures: self.fold_failures.load(Ordering::Relaxed),
+            fold_requested: self.fold_requested.load(Ordering::SeqCst),
+            last_fold_secs: self.last_fold_secs.load(Ordering::Relaxed),
+            last_fold_rss: self.last_fold_rss.load(Ordering::Relaxed),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
         }
@@ -888,8 +989,10 @@ impl ExecutorHealth {
         #[cfg(feature = "bench-timing")]
         {
             let now = std::time::Instant::now();
-            self.stage_nanos[stage as usize]
-                .fetch_add(now.duration_since(mark.0).as_nanos() as u64, Ordering::Relaxed);
+            self.stage_nanos[stage as usize].fetch_add(
+                now.duration_since(mark.0).as_nanos() as u64,
+                Ordering::Relaxed,
+            );
             StageMark(now)
         }
         #[cfg(not(feature = "bench-timing"))]
@@ -999,9 +1102,9 @@ impl ExecutorHealth {
     /// existed — go through here, so they share the counter *and* the edge.
     ///
     /// Returns `true` at most once per crossing. Depth falling back below the limit re-arms it, as
-    /// does re-setting the limit; neither happens as the code stands (overlay entries survive
-    /// `unsuppress` and there is no compaction fold, ⊘), and the trigger is written for the
-    /// mechanism rather than for the absence of one.
+    /// does re-setting the limit — and the first of those is now a live path rather than a
+    /// hypothetical: a fold's retirement withdraws the executed deletions, so an alarmed node that
+    /// folds drops back under the limit and alarms again if it climbs back.
     pub fn note_overlay_depth(&self, depth: usize) -> bool {
         if depth >= self.overlay_soft_limit.load(Ordering::Relaxed) {
             if self
@@ -1350,6 +1453,49 @@ impl LiveState {
             .filter_map(|id| established.get(id.as_slice()))
             .filter(|entity| !is_deleted(**entity))
             .count()
+    }
+
+    /// Drop every retired entity's external-id binding from the live map — **the other half of
+    /// Rule F's retirement, and without it retirement 409s a lawful re-ingest.**
+    ///
+    /// Compaction §3 pass 3 drops the retired entities' keys from the folded run 0, and says in
+    /// the same breath that the fold *also* removes them from the live external-id map, because
+    /// "either alone leaves the other path answering". This is that other path. Both duplicate
+    /// checks — the handler's in `control.rs` and [`Self::established_collisions`] here — exempt a
+    /// holder only while `overlay.is_deleted(holder)` is true, and retirement is precisely what
+    /// makes it false. A binding left standing therefore turns a re-ingest of that external id
+    /// into a **409** the moment the fold publishes: a user's write refused, contradicting decision
+    /// 0047 directly, and permanently, since nothing else ever removes a key.
+    ///
+    /// **Called before the swap, not after**, at the one site that also retires
+    /// ([`Executor::publish_geometry`]). Between a prune and a retirement the key is simply absent
+    /// from the live map and the bundle's own sidecar still answers for it, whose holder is still
+    /// deleted — so the check still exempts and the write is still allowed. The other order has a
+    /// window in which the key resolves to an entity that is no longer deleted, which is the 409
+    /// this exists to close, narrowed but not removed.
+    ///
+    /// **A rebind is not disturbed.** Decision 0047 makes edit a delete plus a re-ingest, so an
+    /// external id whose deleted holder has already been re-ingested maps to the *new* entity here.
+    /// The forward entry is removed only when it still names the retired entity, so retiring the
+    /// forgotten holder cannot unbind the live one.
+    fn forget_established(&self, retired: &croaring::Bitmap) -> usize {
+        if retired.is_empty() {
+            return 0;
+        }
+        let mut inverse = lock_recover(&self.established_inverse);
+        let mut established = lock_recover(&self.established);
+        let mut forgotten = 0usize;
+        for entity in retired.iter() {
+            let entity = EntityId::new(u64::from(entity));
+            let Some(key) = inverse.remove(&entity) else {
+                continue;
+            };
+            if established.get(&key) == Some(&entity) {
+                established.remove(&key);
+            }
+            forgotten += 1;
+        }
+        forgotten
     }
 
     /// Run `f` with the I9 allocator held. The window's whole allocation is one call to this, so
@@ -1704,6 +1850,11 @@ impl WritePath {
         let wal = self.wal.take().ok_or(ExecutorStartError::AlreadyStarted)?;
         let wal_position_at_start = wal.position();
 
+        // **Compaction §7's startup sweep, before anything else and before the thread** — see
+        // `sweep_orphan_prefixes` for why both halves of that matter. `AlreadyStarted` is checked
+        // first, so a second `start_executor` on the same path cannot sweep a second time.
+        sweep_orphan_prefixes(&flush.bundle_root, &generation.load().prefix);
+
         let (work_tx, work_rx) = std::sync::mpsc::sync_channel(queue_bound);
         let (deny_tx, deny_rx) = std::sync::mpsc::channel();
         // Capacity one, and `try_send` that discards `Full`: a token means "something may be
@@ -1717,6 +1868,7 @@ impl WritePath {
         let (flush_tx, flush_rx) = std::sync::mpsc::channel();
         let (coalesce_tx, coalesce_rx) = std::sync::mpsc::channel();
         let (merge_tx, merge_rx) = std::sync::mpsc::channel();
+        let (fold_tx, fold_rx) = std::sync::mpsc::channel();
 
         // A clone, not a move: `ExecutorHealth` keeps the other end, which is what gives the
         // counters a reader outside the executor thread (`ExecutorStats::wal_fsyncs`).
@@ -1759,7 +1911,7 @@ impl WritePath {
                     next_manifest_n: flush.next_manifest_n,
                     deny_dirty: false,
                     windows_since_publication: 0,
-                    prefix_dir: flush.prefix_dir,
+                    bundle_root: flush.bundle_root,
                     identity_key: flush.identity_key,
                     pool: flush.pool,
                     max_distinct_terms: flush.max_distinct_terms,
@@ -1770,7 +1922,6 @@ impl WritePath {
                     coalesce_attempt: 0,
                     coalesce_done: coalesce_rx,
                     coalesce_submit: coalesce_tx,
-                    external_index: flush.external_index,
                     refresh: flush.refresh,
                     merge_policy: flush.merge,
                     coalesce_enabled: flush.coalesce_enabled,
@@ -1779,6 +1930,17 @@ impl WritePath {
                     merge_attempt: 0,
                     merge_done: merge_rx,
                     merge_submit: merge_tx,
+                    fold_in_flight: Arc::new(AtomicBool::new(false)),
+                    fold_attempt: 0,
+                    fold_done: fold_rx,
+                    fold_submit: fold_tx,
+                    configured_merge_bytes: flush.configured_merge_bytes,
+                    fold_paused: flush.fold_paused,
+                    fold_publication_paused: flush.fold_publication_paused,
+                    compaction: flush.compaction,
+                    last_fold_start_unix: None,
+                    superseded_sidecars: Vec::new(),
+                    pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
                     // Seeded from the opened WAL's position so a freshly started node does not
                     // rotate until something is appended in this run.
@@ -1893,24 +2055,12 @@ impl WritePath {
     /// Rides the work lane and is never shed — see [`LifecycleHandle::publish_geometry`].
     pub(crate) fn publish_geometry(
         &self,
-        prefix: String,
-        segments_version: u64,
-        watermark: u64,
-        bundle: Arc<Bundle>,
-        dict: Arc<Dict>,
-        delta_postings: Vec<Arc<DeltaTier>>,
+        publication: GeometryPublication,
     ) -> std::result::Result<(), PublishGeometryError> {
         self.handle
             .as_ref()
             .ok_or(PublishGeometryError::NoExecutor)?
-            .publish_geometry(
-                prefix,
-                segments_version,
-                watermark,
-                bundle,
-                dict,
-                delta_postings,
-            )
+            .publish_geometry(publication)
     }
 
     pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
@@ -2069,12 +2219,7 @@ pub(crate) struct Job {
 pub(crate) enum ExecutorWork {
     Lifecycle(Job),
     PublishGeometry {
-        prefix: String,
-        segments_version: u64,
-        watermark: u64,
-        bundle: Arc<Bundle>,
-        dict: Arc<Dict>,
-        delta_postings: Vec<Arc<DeltaTier>>,
+        publication: GeometryPublication,
         respond: SyncSender<std::result::Result<(), GeometryRefused>>,
     },
 }
@@ -2089,6 +2234,17 @@ pub enum PublishGeometryError {
     /// publish at all. Reachable only by an embedder that skipped `start_write_executor`;
     /// `tessera-server` starts it unconditionally.
     NoExecutor,
+    /// [`crate::Engine::publish_rotated_prefix_for_test`] was offered a prefix `CURRENT` does not name.
+    ///
+    /// **Refused rather than published**, because `CURRENT` is the commit point and the bundle
+    /// identity *is* the digest it names (contracts §2.1). Publishing an uncommitted prefix would
+    /// leave the process serving geometry a restart could not find, and nothing would detect the
+    /// disagreement until that restart.
+    PrefixNotCommitted { offered: String, current: String },
+    /// [`crate::Engine::publish_rotated_prefix_for_test`] could not open the prefix it was handed, or one of
+    /// the artefacts inside it. Its files stand as orphans under a prefix nothing serves, and
+    /// nothing was swapped.
+    PrefixNotOpenable(String),
 }
 
 impl std::fmt::Display for PublishGeometryError {
@@ -2098,6 +2254,14 @@ impl std::fmt::Display for PublishGeometryError {
             PublishGeometryError::NoExecutor => f.write_str(
                 "this engine has no write executor, and a geometry publication is a swap on that                  thread (lifecycle §1.3)",
             ),
+            PublishGeometryError::PrefixNotCommitted { offered, current } => write!(
+                f,
+                "refusing to publish prefix '{offered}': CURRENT names '{current}', so the \
+                 publication is not committed and a restart would not find it"
+            ),
+            PublishGeometryError::PrefixNotOpenable(detail) => {
+                write!(f, "the written prefix would not open: {detail}")
+            }
         }
     }
 }
@@ -2188,22 +2352,12 @@ impl LifecycleHandle {
     /// reason: a token may be spurious, never missing.
     pub(crate) fn publish_geometry(
         &self,
-        prefix: String,
-        segments_version: u64,
-        watermark: u64,
-        bundle: Arc<Bundle>,
-        dict: Arc<Dict>,
-        delta_postings: Vec<Arc<DeltaTier>>,
+        publication: GeometryPublication,
     ) -> std::result::Result<(), PublishGeometryError> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.work
             .send(ExecutorWork::PublishGeometry {
-                prefix,
-                segments_version,
-                watermark,
-                bundle,
-                dict,
-                delta_postings,
+                publication,
                 respond: tx,
             })
             .map_err(|_| PublishGeometryError::NoExecutor)?;
@@ -2457,6 +2611,16 @@ const OVERLAY_PUBLICATION_MAX_WINDOWS: u64 = 64;
 /// an idle node, and the ack→visibility bound at one tick rather than two.
 const FLUSH_COMPLETION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// How often the executor looks for a **completed fold** while one is running.
+///
+/// Coarser than [`FLUSH_COMPLETION_POLL`] purely because a fold's duration is minutes to hours
+/// rather than seconds (compaction §14: modelled, IO-bound, never measured), so the 20 ms interval
+/// would spin the loop hundreds of thousands of times waiting for one publication. There is no
+/// latency argument on the other side: compaction §6.1's standing ruling is that a fold's wall
+/// clock is a property nobody observes, so a fifth of a second at the end of it is free. Once the
+/// fold *has* sent, `fold_completed_pending` puts the wait back on the fast poll.
+const FOLD_COMPLETION_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// How long the executor waits before each re-attempt at making a deny window durable, and
 /// therefore how many attempts there are: the first sync, plus one per entry here.
 ///
@@ -2513,10 +2677,6 @@ pub(crate) struct MaintenanceDeps {
     pub(crate) max_age_secs: u64,
     /// The entity-space coalesce's policy — see [`crate::coalesce::CoalescePolicy`].
     pub(crate) coalesce: crate::coalesce::CoalescePolicy,
-    /// The external-id sidecar, so a coalesce publication can install the one it just wrote. The
-    /// executor is the only writer of this cell, exactly as it is the only publisher of
-    /// generations.
-    pub(crate) external_index: Arc<arc_swap::ArcSwap<crate::session::ExternalIdIndex>>,
     /// What a geometry publication needs to start the background refresh decision 0044's D1
     /// rules — see [`crate::refresh`].
     pub(crate) refresh: crate::refresh::RefreshDeps,
@@ -2525,9 +2685,9 @@ pub(crate) struct MaintenanceDeps {
     /// Whether the coalesce and the merge run at all — see `Engine::merge_enabled`.
     pub(crate) coalesce_enabled: Arc<AtomicBool>,
     pub(crate) merge_enabled: Arc<AtomicBool>,
-    /// The bundle's current prefix directory. A flush writes inside it, and never touches
-    /// `MANIFEST.json` or `CURRENT`.
-    pub(crate) prefix_dir: PathBuf,
+    /// The bundle **root**, from which the live prefix directory is derived per use — see
+    /// [`Executor::prefix_dir`] and `Engine::bundle_root`.
+    pub(crate) bundle_root: PathBuf,
     pub(crate) identity_key: IdentityKey,
     /// D-D's one shared compute pool — a flush's segment write runs on it, off this thread,
     /// because this thread is the one that must reach a queued deny promptly (§1.1).
@@ -2539,6 +2699,38 @@ pub(crate) struct MaintenanceDeps {
     /// One past the highest `SEGMENTS-<n>.json` this bundle carries — the executor's manifest
     /// counter seed. See [`Executor::next_manifest_n`].
     pub(crate) next_manifest_n: u64,
+    /// `EngineConfig::max_merged_segment_bytes` **as configured**, `None` where the deployment set
+    /// nothing — not the resolved policy value, which always has one.
+    ///
+    /// Compaction §4 step 3 re-checks write-path §7's base-segment relation against the fold's own
+    /// output, because a fold that shrank the base below an operator's configured merge cap would
+    /// publish a deployment the *next startup* refuses to open. `tessera-server`'s loader checks
+    /// only an explicitly set value (an unset one is derived from the base and cannot violate the
+    /// relation), so the fold must be able to tell the two apart — which the policy alone cannot.
+    pub(crate) configured_merge_bytes: Option<u64>,
+    /// Whether a fold **holds** between its last pass and its submission —
+    /// `Engine::set_fold_paused_for_test`, which is what lets a test land a flush inside a fold's
+    /// flight. Always `false` in a shipped build.
+    pub(crate) fold_paused: Arc<AtomicBool>,
+    /// Whether a **completed** fold is left undrained in its channel —
+    /// `Engine::set_fold_publication_paused_for_test`. Always `false` in a shipped build.
+    ///
+    /// **The other half of [`Self::fold_paused`], and it opens a different window.** That one holds
+    /// the fold thread *before* it clears `fold_in_flight`, so merge and coalesce are still
+    /// suspended and nothing can publish under it. This one lets the thread finish — the flag
+    /// clears, the suspension lifts — and stops the executor draining the result, which is the one
+    /// state in which a merge or coalesce can dispatch, publish, and leave the fold planned against
+    /// artefacts the live manifest no longer lists.
+    ///
+    /// That state is reachable in production and is not a contrivance: the fold thread clears
+    /// `fold_in_flight` after its send, and an executor already inside `tick_if_due` reads the
+    /// cleared flag and dispatches. The window is microseconds wide there and every outcome is
+    /// fail-closed; what this makes is that same window deterministic, so compaction §12's
+    /// obligation 9 is a test rather than an argument.
+    pub(crate) fold_publication_paused: Arc<AtomicBool>,
+    /// When a fold is dispatched with nobody asking for one — see
+    /// [`crate::compact::CompactionSchedule`].
+    pub(crate) compaction: crate::compact::CompactionSchedule,
 }
 
 /// The bundle's declared scalar tail, as the segment writer wants it.
@@ -2547,7 +2739,7 @@ pub(crate) struct MaintenanceDeps {
 /// then: `columns.arrow`'s schema is the fixed columns plus this tail, so a dropped column would
 /// produce a segment the reader refuses — and refusing to flush is the fail-closed answer, where
 /// writing a short segment is a bundle that no longer opens.
-fn scalar_schema_of(
+pub(crate) fn scalar_schema_of(
     manifest: &tessera_store::manifest::Manifest,
 ) -> Option<Vec<(String, ScalarType)>> {
     manifest
@@ -2618,6 +2810,250 @@ fn plan_to_dispatch(
 /// be a liveness hole bought for no safety.
 fn dictionary_moved_under(promoted_from_dict_len: Option<u32>, live_len: u32) -> bool {
     promoted_from_dict_len.is_some_and(|planned| planned != live_len)
+}
+
+/// One superseded prefix awaiting reclamation, and the two `Arc`s whose release says no thread can
+/// still resolve a path inside it — see [`Executor::pending_reclaim`].
+struct PendingReclaim {
+    generation: Arc<Generation>,
+    prefix_dir: PathBuf,
+    /// Every sidecar that was live over this prefix **before** the one the held generation carries
+    /// — see [`Executor::superseded_sidecars`].
+    superseded_sidecars: Vec<std::sync::Weak<crate::session::ExternalIdIndex>>,
+}
+
+/// Seconds since the Unix epoch, or `None` if the clock is before it.
+///
+/// `None` reads as "no fold has ended yet", which switches the interval floor off rather than
+/// jamming it on — the safe direction for a clock this absurd, and the same answer a fresh process
+/// gives.
+fn unix_now() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_secs())
+}
+
+/// Memory this process could take without reclaiming anything it needs, in bytes — the figure
+/// compaction §3's pre-flight compares its estimate against. `None` where unknowable.
+///
+/// **Two sources and the smaller wins**, because either can be the real bound: `MemAvailable` is
+/// the kernel's own estimate of what an allocation could get without swapping, already net of the
+/// page cache it would evict; a cgroup v2 `memory.max` is the ceiling a container is killed at, and
+/// it charges page cache against itself, so a node with 400 GiB of host RAM and a 16 GiB cgroup is
+/// bounded by the cgroup. Reading only the first is how a fold passes its pre-flight and is then
+/// OOM-killed by the container that always owned the answer.
+fn available_memory() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let available = meminfo
+        .lines()
+        .find(|line| line.starts_with("MemAvailable:"))
+        .and_then(|line| line.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map(|kib| kib * 1024)?;
+
+    // `memory.max` is "max" when unlimited, which parses to `None` and leaves `MemAvailable` as the
+    // answer — the same result as no cgroup at all.
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|cgroup| {
+            let path = cgroup
+                .lines()
+                .next()?
+                .split(':')
+                .nth(2)?
+                .trim_start_matches('/');
+            std::fs::read_to_string(format!("/sys/fs/cgroup/{path}/memory.max")).ok()
+        })
+        .and_then(|max| max.trim().parse::<u64>().ok());
+
+    Some(cgroup.map_or(available, |limit| limit.min(available)))
+}
+
+/// **Compaction §7's startup sweep**: delete every `v#####` tree under the bundle root that
+/// `CURRENT` does not name, once, before the executor thread is spawned.
+///
+/// # What it is cleaning up, and why nothing else could
+///
+/// Two residues, and neither has any other route out. A **discarded fold** leaves a complete
+/// prefix — five passes' worth of output, up to a bundle in size — under a name `CURRENT` never
+/// took; `next_prefix_name` steps *past* it by construction and the reclamation at a fold's tail
+/// takes only the prefix that fold itself superseded, so no later fold ever comes back for it. A
+/// **process that exits mid-fold, or between the `CURRENT` flip and the swap, or while a
+/// superseded prefix is still waiting on its last reader**, leaves the same thing. Without this
+/// each occurrence costs a bundle of disc until an operator notices, which is what made the
+/// interval floor on a *discarded* fold the only thing between one bad configuration value and a
+/// full device (compaction §8, §9).
+///
+/// # Why startup is the only safe time, and the executor the only safe caller
+///
+/// Mid-life, a prefix `CURRENT` does not name may still be one this process is serving: the live
+/// generation holds mappings into it until the last request finishes, which is exactly what
+/// [`Executor::pending_reclaim`] waits on. At the moment the write executor starts there is no such
+/// generation — nothing has been served, and the only prefix any mapping can name is the one
+/// `Engine::open` read from `CURRENT`. So "not live" and "not in use" coincide here and nowhere
+/// else.
+///
+/// **Called synchronously from `start_executor`, before the thread is spawned, and that is not a
+/// detail.** A directory that exists but is not yet committed is indistinguishable from an orphan —
+/// which is correct for a fold's output, since a fold cannot run before this does, and wrong for a
+/// prefix a *caller* is staging through `Engine::publish_rotated_prefix_for_test`. Running on the spawned
+/// thread leaves exactly that race: `start_write_executor` returns, the caller begins staging, and
+/// the sweep reads the directory between its creation and the `CURRENT` flip. Running here makes
+/// "the sweep has finished" something the caller can observe, by `start_write_executor` having
+/// returned.
+///
+/// **A writer's act, which is why it is not in `Engine::open`.** A node that has not started a write
+/// executor has not declared itself the bundle's writer, and deleting another process's superseded
+/// prefix from a read-only replica is not this crate's judgement to make. (It would in fact be safe
+/// — a POSIX mapping outlives its directory entry, the same argument compaction §8 makes for the
+/// fragment sweep, and a fresh open resolves through `CURRENT`, which is never swept — but "safe"
+/// is not "ours to do".)
+///
+/// # A swept name can be issued again, and that is not contracts §2.1's id reuse
+///
+/// `next_prefix_name` counts from the directory listing, so once an orphan `v00003` is gone the
+/// next fold may be `v00003`. A `seg_id` may never be reused because a rebase check compares them
+/// to decide whether a mid-flight unit still applies; a prefix name is a directory name nothing
+/// holds across the sweep. What identifies a bundle is its `MANIFEST.json` digest, which `CURRENT`
+/// carries beside the prefix and which the fragment cache keys on — two prefixes sharing a name
+/// across a proven-complete deletion of the first are still distinguishable by every mechanism that
+/// has to tell them apart.
+///
+/// **Every failure is a warning and nothing else.** `reclaim_prefix` refuses the live prefix itself
+/// (a second guard behind this one's own filter), and a tree that cannot be deleted is a tree that
+/// stays — the same residual as before this existed, and never a reason to refuse to start.
+fn sweep_orphan_prefixes(bundle_root: &Path, live: &str) {
+    let Ok(entries) = std::fs::read_dir(bundle_root) else {
+        return;
+    };
+    let (mut swept, mut refused) = (0usize, 0usize);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        // A prefix is `v` + five-or-more digits (`next_prefix_name`'s own shape). Anything else
+        // under the root — `CURRENT`, the WAL, a directory an operator put there — is not this
+        // sweep's business and must not be guessed at.
+        let is_prefix = name
+            .strip_prefix('v')
+            .is_some_and(|digits| digits.len() >= 5 && digits.bytes().all(|b| b.is_ascii_digit()));
+        if !is_prefix || name == live || !entry.path().is_dir() {
+            continue;
+        }
+        match tessera_store::reclaim_prefix(&entry.path()) {
+            Ok(()) => {
+                swept += 1;
+                tracing::info!(
+                    prefix = %name,
+                    "startup sweep: reclaimed an orphaned prefix left by a discarded fold or an \
+                     exit mid-publication"
+                );
+            }
+            Err(e) => {
+                refused += 1;
+                tracing::warn!(
+                    prefix = %name,
+                    error = %e,
+                    "startup sweep: could not reclaim an orphaned prefix; it stands, and its disc \
+                     with it"
+                );
+            }
+        }
+    }
+    if swept > 0 || refused > 0 {
+        tracing::info!(live = %live, swept, refused, "startup sweep complete");
+    }
+}
+
+/// What is on disc under `prefix_dir` against what `generation`'s manifests still name — the
+/// operands of compaction §9's dead-bytes gauge. `None` where the tree cannot be walked.
+///
+/// **Two manifests, and summing one of them alone reads as a catastrophe.** The build's artefacts
+/// are digested in the bundle-level `MANIFEST.json`; everything the write path produced is in the
+/// partition's `SEGMENTS-<n>.json`. Taking only the side-manifest reported 9.1 MiB named against a
+/// 9.4 GiB tree in one measured run — an orphan ratio of 1065×, which was a missing addend and not
+/// a leak.
+///
+/// **What the gap actually is**: every merged-away segment, every consumed tier, every superseded
+/// side-manifest. They stay because a step-down serves one of them (contracts §2.3), and a fold is
+/// the only thing that reclaims them — which is what makes this a fold trigger rather than an
+/// alarm. The measured no-compaction steady state is 2.0–2.6×.
+fn dead_bytes_of(prefix_dir: &Path, generation: &Generation) -> Option<crate::compact::DeadBytes> {
+    fn walk(dir: &Path, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                walk(&entry.path(), total);
+            } else {
+                *total += meta.len();
+            }
+        }
+    }
+    if !prefix_dir.is_dir() {
+        return None;
+    }
+    let mut on_disc = 0u64;
+    walk(prefix_dir, &mut on_disc);
+    let named: u64 = generation
+        .bundle
+        .manifest
+        .files
+        .values()
+        .map(|digest| digest.size)
+        .chain(
+            generation
+                .bundle
+                .partitions
+                .values()
+                .flat_map(|partition| partition.manifest.files.values())
+                .map(|digest| digest.size),
+        )
+        .sum();
+    Some(crate::compact::DeadBytes { on_disc, named })
+}
+
+/// Free bytes on the filesystem holding `path`, or `None` where unknowable — compaction §8's
+/// pre-flight then does not run, on `tessera-build`'s precedent rather than refusing on a guess.
+///
+/// `f_bavail`, not `f_bfree`: the reserved blocks a filesystem keeps for root are not space a fold
+/// may plan to use.
+#[cfg(unix)]
+fn free_disc(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stats) } != 0 {
+        return None;
+    }
+    Some(stats.f_bavail as u64 * stats.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+fn free_disc(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// The largest live segment count across this generation's slices — compaction §9's segment gauge.
+///
+/// The **max** rather than the sum, because the gauge is per (partition, slice): a tile resolves to
+/// one contiguous range per live segment *of the slice it is in*, so one slice at 64 segments is
+/// what a viewport there pays, whatever the others hold.
+///
+/// ⊘ **Untestable today, and stated rather than claimed**: no build emits a second slice
+/// (compaction §6.3), so max and sum agree on every bundle that exists and no case here
+/// distinguishes them. It is written this way because the slices fold-in is what makes the
+/// difference real, not because a test caught it.
+fn live_segments_of(generation: &Generation) -> usize {
+    generation
+        .bundle
+        .partitions
+        .values()
+        .flat_map(|partition| partition.slices.values())
+        .map(|slice| slice.segments.len())
+        .max()
+        .unwrap_or(0)
 }
 
 fn slices_of(generation: &Generation) -> Vec<String> {
@@ -2699,10 +3135,17 @@ struct Executor {
     /// Deny windows applied since the last publication — the counter
     /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
     windows_since_publication: u64,
-    /// The bundle prefix directory a flush writes into. A flush publishes **inside the current
-    /// prefix** — never `MANIFEST.json`, never `CURRENT` — which is what separates it from a
-    /// compaction.
-    prefix_dir: PathBuf,
+    /// The bundle root. **Not the prefix directory, and that is the fourth gap of compaction §4.**
+    ///
+    /// A flush publishes *inside* the live prefix — never `MANIFEST.json`, never `CURRENT` — which
+    /// is what separates it from a compaction, and for as long as nothing could publish a new
+    /// prefix a directory captured once was the same value. A fold breaks that: the first deny
+    /// published after a flip would write its side-manifest into the prefix reclamation is about
+    /// to delete, which is acked deny state gone from the restore path with no error anywhere.
+    /// Storing a second copy and rotating it is not the fix — it is one more thing to miss at one
+    /// of eight call sites. [`Executor::prefix_dir`] derives it from the live generation instead,
+    /// and a derived value cannot go stale.
+    bundle_root: PathBuf,
     identity_key: IdentityKey,
     /// The shared compute pool a flush executes on (§1.1), and the handle it submits its completed
     /// unit back through.
@@ -2729,8 +3172,6 @@ struct Executor {
     coalesce_attempt: u64,
     coalesce_done: Receiver<crate::coalesce::CompletedCoalesce>,
     coalesce_submit: Sender<crate::coalesce::CompletedCoalesce>,
-    /// The external-id sidecar cell — see [`MaintenanceDeps::external_index`].
-    external_index: Arc<arc_swap::ArcSwap<crate::session::ExternalIdIndex>>,
     /// The background refresh's dependencies — see [`crate::refresh`].
     refresh: crate::refresh::RefreshDeps,
     /// The row-space merge's policy, its in-flight flag, its attempt counter and its own
@@ -2745,6 +3186,87 @@ struct Executor {
     merge_attempt: u64,
     merge_done: Receiver<crate::merge::CompletedMerge>,
     merge_submit: Sender<crate::merge::CompletedMerge>,
+    /// **The compaction fold** — the same in-flight flag, attempt counter and completion channel
+    /// the other three maintenance passes have, and one thing none of them has: its own thread.
+    ///
+    /// A fold's input is the corpus, and `flush`, `merge` and `coalesce` all execute on the shared
+    /// rayon pool a viewport's tile loop installs onto. Occupying request-serving workers for the
+    /// minutes-to-hours a fold takes is the maintenance schedule leaking into the product that
+    /// decision 0043 forbids, so [`Executor::dispatch_fold`] spawns a plain thread and the fold
+    /// stays sequential on it (compaction §3, which also takes the memory bound sequential
+    /// execution gives: there are no per-worker buffers to multiply).
+    fold_in_flight: Arc<AtomicBool>,
+    fold_attempt: u64,
+    fold_done: Receiver<crate::compact::CompletedFold>,
+    fold_submit: Sender<crate::compact::CompletedFold>,
+    /// See [`MaintenanceDeps::configured_merge_bytes`].
+    configured_merge_bytes: Option<u64>,
+    /// See [`MaintenanceDeps::fold_paused`].
+    fold_paused: Arc<AtomicBool>,
+    /// See [`MaintenanceDeps::fold_publication_paused`].
+    fold_publication_paused: Arc<AtomicBool>,
+    /// See [`crate::compact::CompactionSchedule`]. Consulted at the tick, beside the flush's own.
+    compaction: crate::compact::CompactionSchedule,
+    /// When the last fold attempt **started**, as a Unix timestamp — half of the operand
+    /// `compaction_min_interval_secs` is measured from. See [`Executor::fold_floor_from`] for the
+    /// rule and [`ExecutorHealth::fold_ended_unix`] for the other half.
+    ///
+    /// **Stamped by every dispatch, whatever the attempt then does**, and that is what makes the
+    /// interval a rate limit rather than a success-rate limit. Several discard causes are
+    /// *persistent* — the merge-size relation against a small corpus, a carried file with no digest
+    /// — and a discard leaves the gauge that dispatched the fold exactly where it was. Stamped only
+    /// on success, the next tick would redispatch, rewrite the whole corpus, discard again, and
+    /// repeat for ever, each iteration leaving a complete prefix `CURRENT` never named and which
+    /// no sweep reclaims. One bad configuration value would fill the device and take the write
+    /// path down with it.
+    ///
+    /// Process-local, and `crate::compact::due` argues why that is harmless for the *success*
+    /// case: both gauges are read against the bundle a fold itself produced.
+    last_fold_start_unix: Option<u64>,
+    /// Every external-id sidecar that has been **replaced** over the live prefix, weakly.
+    ///
+    /// **A `Weak`, and that is the whole trick.** The question reclamation has to answer is "can any
+    /// live generation still resolve a path under this prefix", and a generation resolves external
+    /// ids through its sidecar. A flush publishes by *cloning* the live sidecar `Arc`, so one
+    /// pointer answers for every generation a flush produced — which is what
+    /// [`Executor::reclaim_superseded_prefixes`] counts. **A coalesce does not**: it builds a new
+    /// sidecar over the same prefix, so a generation still holding the pre-coalesce one is invisible
+    /// to that count, and unlinking the tree under it turns its next external-id lookup into a typed
+    /// IO error. Holding the old sidecars *strongly* would answer the question and keep their
+    /// mappings alive for the prefix's whole life; a `Weak` answers it and costs a pointer.
+    ///
+    /// Pruned at each push, so a long-lived prefix does not accumulate dead entries, and moved into
+    /// the [`PendingReclaim`] at a fold's publication — the new prefix starts with none.
+    superseded_sidecars: Vec<std::sync::Weak<crate::session::ExternalIdIndex>>,
+    /// Superseded prefixes awaiting reclamation, each held by the generation that named it.
+    ///
+    /// **The `Arc` is the wait.** Compaction §8 reclaims the old prefix whole, and lifecycle §2
+    /// adds that prefix deletion waits on the requests still finishing against it. Unlinking a
+    /// *mapped* file is safe on POSIX — `reclaim.rs` rests on exactly that — but the external-id
+    /// sidecar opens its runs lazily, so a request holding the superseded generation could still
+    /// be about to `File::open` a path under that tree. Holding the generation and reclaiming only
+    /// once nothing else holds it turns that window into a wait: the pointer has already moved, so
+    /// no new holder can appear and the count falls monotonically to one.
+    ///
+    /// **The sidecar's own count is asked too, and it is the one that reaches furthest.** The
+    /// hazard is a *lazy* open: `ExternalIdSidecar` maps each run and locator extent at first touch,
+    /// so a request that loaded a generation over the old prefix and has not yet resolved an
+    /// external id will `File::open` a path under the deleted tree. A flush publishes by cloning
+    /// the live sidecar `Arc`, so every generation a flush produced over this prefix shares one —
+    /// and waiting on that `Arc` sees them all, where waiting on the fold's own superseded
+    /// generation sees only itself.
+    ///
+    /// ⊘ **It is a narrowing, not a proof.** A coalesce publishes a *new* sidecar over the same
+    /// prefix, so a generation still holding the pre-coalesce one is invisible to both counts. The
+    /// residual is a request that fails with a typed IO error — never a wrong answer, since the
+    /// paths simply cease to exist — and closing it properly means tracking every live generation
+    /// per prefix, which nothing does today.
+    ///
+    /// A `Vec` rather than an `Option` because several folds may run in one process and a busy
+    /// generation may outlive the next fold's snapshot. What it does **not** cover is a process
+    /// that exits first: the tree then stands as an orphan until something sweeps it, which is
+    /// compaction §7's startup sweep and is not built.
+    pending_reclaim: Vec<PendingReclaim>,
     /// The sender pool tasks are given a clone of.
     ///
     /// **Nothing rings the doorbell when a flush completes**, and that is deliberate twice over.
@@ -2815,7 +3337,8 @@ impl Executor {
             // that planned first would re-plan the very rows the completed unit already wrote.
             let published = self.publish_completed_flushes()
                 | self.publish_completed_coalesces()
-                | self.publish_completed_merges();
+                | self.publish_completed_merges()
+                | self.publish_completed_folds();
             self.tick_if_due();
             while self.run_deny_pass() {}
             // **At drain close**: one write covers a burst of consecutive windows rather than one
@@ -2857,9 +3380,16 @@ impl Executor {
         // operator action, rate-decoupled from ingest by construction.
         let period_due = self.last_tick.elapsed() >= period;
         let requested = self.health.flush_requested.load(Ordering::SeqCst);
-        if !period_due && !requested {
+        let fold_requested = self.health.fold_requested.load(Ordering::SeqCst);
+        if !period_due && !requested && !fold_requested {
             return;
         }
+        // **Reclamation is checked at every tick, ahead of the flush's in-flight gate**, because it
+        // is the one maintenance step whose readiness depends on nothing this executor does: it is
+        // waiting on request threads to finish against a superseded generation. Skipping it on a
+        // tick that found a flush running would leave a whole prefix on disc for another period
+        // for no reason.
+        self.reclaim_superseded_prefixes();
 
         let generation = self.generation.load_full();
 
@@ -2886,7 +3416,9 @@ impl Executor {
                     .iter()
                     .filter(|(entity, _)| !generation.overlay.is_deleted(**entity))
                     .count();
-                self.health.flushable_items.store(flushable, Ordering::SeqCst);
+                self.health
+                    .flushable_items
+                    .store(flushable, Ordering::SeqCst);
                 if flushable > 0 {
                     self.health.flush_skips.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
@@ -2948,6 +3480,9 @@ impl Executor {
         } else {
             self.dispatch_flushes(&generation, plans);
         }
+        // **The fold is dispatched before the two it suspends**, so a tick that starts one does not
+        // also start a merge that the flip would orphan (compaction §1).
+        self.dispatch_fold(&generation);
         // **The entity-space coalesce shares the tick and nothing else** (decision 0044 D2). It
         // is independent of the flush: it consumes what earlier ticks published, so a tick that
         // dispatched a flush may dispatch one too, and a gated node — which publishes no
@@ -2963,9 +3498,16 @@ impl Executor {
     /// is: two passes would select overlapping windows and the loser's manifest edit would no
     /// longer rebase, having done all of its IO first.
     fn dispatch_coalesce(&mut self, generation: &Arc<Generation>) {
+        // **Suspended for a fold's duration** (compaction §1): a coalesce publishing under one
+        // would be orphaned by the flip and would discard the fold at its rebase check, so running
+        // it is waste rather than hazard. The safety argument rests on that rebase check, not on
+        // this line; what this buys is that the fold is not routinely discarded by the maintenance
+        // running beside it.
         if self.coalesce_policy.width < 2
             || !self.coalesce_enabled.load(Ordering::SeqCst)
             || self.coalesce_in_flight.load(Ordering::SeqCst)
+            || self.fold_in_flight.load(Ordering::SeqCst)
+            || !self.may_publish()
         {
             return;
         }
@@ -2993,7 +3535,7 @@ impl Executor {
 
         self.coalesce_attempt += 1;
         let ctx = crate::coalesce::CoalesceContext {
-            prefix_dir: self.prefix_dir.clone(),
+            prefix_dir: self.prefix_dir(generation),
             prefix: generation.prefix.clone(),
             // The same never-reused shape a `seg_id` has, and for the same reason: two passes at
             // one `n` would otherwise write one path, and the second `File::create` truncates
@@ -3041,10 +3583,12 @@ impl Executor {
     /// nothing (`plan_merge` checks the last itself, it being bundle state rather than executor
     /// health).
     fn dispatch_merge(&mut self, generation: &Arc<Generation>) {
+        // Suspended for a fold's duration, for the reason `dispatch_coalesce` states.
         if !self.merge_enabled.load(Ordering::SeqCst)
             || self.merge_in_flight.load(Ordering::SeqCst)
+            || self.fold_in_flight.load(Ordering::SeqCst)
             || self.wal.is_poisoned()
-            || self.health.overlay_diverged.load(Ordering::SeqCst)
+            || !self.may_publish()
         {
             return;
         }
@@ -3061,15 +3605,12 @@ impl Executor {
 
         self.merge_attempt += 1;
         let ctx = crate::merge::MergeContext {
-            prefix_dir: self.prefix_dir.clone(),
+            prefix_dir: self.prefix_dir(generation),
             prefix: generation.prefix.clone(),
             // The same never-reused shape a flush's `seg_id` has, and for the same reason: two
             // attempts at one `n` would otherwise write one path, and the second `File::create`
             // truncates files the first has memory-mapped.
-            seg_id: format!(
-                "merge-{}-{}",
-                partition_data.segments_n, self.merge_attempt
-            ),
+            seg_id: format!("merge-{}-{}", partition_data.segments_n, self.merge_attempt),
             identity_key: self.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
@@ -3131,6 +3672,12 @@ impl Executor {
     /// round, nothing a viewer observes.
     fn publish_merge(&mut self, completed: crate::merge::CompletedMerge) {
         let started = std::time::Instant::now();
+        // **A node whose durable state disagrees with what it is serving publishes nothing**
+        // (`may_publish`). The unit's files are orphans and its inputs still stand, which is the
+        // same posture every other publication failure takes.
+        if !self.may_publish() {
+            return;
+        }
         let live = self.generation.load_full();
         if live.prefix != completed.prefix {
             tracing::warn!("discarding a completed merge planned against a superseded prefix");
@@ -3150,8 +3697,8 @@ impl Executor {
         write_deny_state(&mut manifest, &live.overlay);
 
         let manifest_n = self.allocate_manifest_n();
-        if let Err(e) = crate::flush::write_segments_manifest(
-            &self.prefix_dir,
+        if let Err(e) = tessera_store::write_segments_manifest(
+            &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
             &manifest,
@@ -3206,6 +3753,8 @@ impl Executor {
             bundle: next_bundle,
             dict: Arc::clone(&live.dict),
             postings: Arc::clone(&live.postings),
+            fragments: Arc::clone(&live.fragments),
+            external_index: Arc::clone(&live.external_index),
             // **The consumed segments' delta tiers stay listed**, and the entities they carry
             // still have rows — in the merged segment. Dropping one would make every item it
             // carries invisible to every session. See `crate::merge::rebase_into`.
@@ -3215,13 +3764,932 @@ impl Executor {
             buffer: Arc::clone(&live.buffer),
             denied,
         });
-        self.refresh.in_flight.store(true, Ordering::SeqCst);
+        // The claim names the generation it is for, so a pass that is superseded mid-flight
+        // releases nothing when it ends — see `refresh::clear_if_current`.
+        self.refresh
+            .in_flight
+            .store(segments_version, Ordering::SeqCst);
         let _published = self.publish_arc(Arc::clone(&next), started);
         self.refresh.spawn(next);
 
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
         self.health.merges.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether [`crate::compact::CompactionSchedule`] calls for a fold now.
+    ///
+    /// Every gauge is read off the generation this tick loaded, so they agree with each other and
+    /// with the plan the dispatch is about to take. **Three of the four are field reads** — a `len`
+    /// per slice, a bitmap cardinality, a sum of row counts — which is what lets this run at every
+    /// tick rather than on a cadence of its own.
+    ///
+    /// **The fourth is a directory walk, and it is a closure for that reason.** `due` calls it only
+    /// after every cheaper route has declined, so a deployment whose segments or deletions have
+    /// already dispatched a fold never pays for it, and one with the route switched off never calls
+    /// it at all. What it walks is the **live prefix**, not the bundle root: an orphaned prefix from
+    /// a discarded fold is dead bytes too, but it is the startup sweep's to reclaim and not a
+    /// fold's, so counting it here would dispatch folds that cannot reduce it.
+    fn scheduled_fold(&self, generation: &Arc<Generation>) -> Option<crate::compact::FoldTrigger> {
+        let now = unix_now()?;
+        let live_rows: u64 = generation
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.segments.iter())
+            .map(|descriptor| u64::from(descriptor.row_count))
+            .sum();
+        crate::compact::due(
+            &self.compaction,
+            now,
+            self.fold_floor_from(),
+            crate::compact::Gauges {
+                live_segments: live_segments_of(generation),
+                retirable_deletions: generation.overlay.deleted_len(),
+                live_rows,
+            },
+            || dead_bytes_of(&self.prefix_dir(generation), generation),
+        )
+    }
+
+    /// The instant `compaction_min_interval_secs` is measured from, and it is neither the last
+    /// fold's start nor its end alone.
+    ///
+    /// **The rule: a fold may start no sooner than the interval after the previous one *started*,
+    /// and never before the previous one has *ended*.** Both halves are load-bearing and each
+    /// breaks a different way on its own.
+    ///
+    /// Measuring from the **end** — which is what a naive "stamp on completion" gives — makes the
+    /// floor a function of the fold's own duration, and that drifts the window off its schedule. A
+    /// fold that starts at 00:10 and takes three hours ends at 03:10; tomorrow's window opens at
+    /// 00:00, which is inside a 24 h floor measured from 03:10, so it folds on alternate nights and
+    /// the deployment's segment count sawtooths at twice the amplitude the operator configured.
+    /// That is the whole knob's purpose defeated by an accident of duration.
+    ///
+    /// Measuring from the **start** alone is fail-open in the other direction. A fold that runs
+    /// *longer* than the interval and then discards clears the floor the instant it ends, leaving
+    /// the gauge that dispatched it exactly where it was — the redispatch-for-ever loop
+    /// [`Executor::last_fold_start_unix`] describes, reached by the one case a start stamp cannot
+    /// see. Taking `end − interval` when that is the later origin costs a long fold one further
+    /// interval of quiet and costs a short one nothing, since `end − interval` is then behind its
+    /// own start.
+    ///
+    /// `fold_ended_unix` is the end of the fold's *passes*, written by its own thread; the
+    /// publication that follows is executor work of seconds and is deliberately not counted.
+    fn fold_floor_from(&self) -> Option<u64> {
+        let started = self.last_fold_start_unix?;
+        let ended = self.health.fold_ended_unix.load(Ordering::SeqCst);
+        Some(started.max(ended.saturating_sub(self.compaction.min_interval_secs)))
+    }
+
+    /// Plan a fold and start it **on its own thread**, if one is requested and nothing blocks it.
+    ///
+    /// **Not on the shared pool** (compaction §3). Flush, merge and coalesce all execute on the
+    /// rayon pool a viewport's tile loop installs onto, and that is right for them because
+    /// `max_merged_segment_bytes` bounds what they do. A fold's input is the corpus, so occupying
+    /// request-serving workers for its duration is exactly the maintenance schedule leaking into
+    /// the product that decision 0043 forbids.
+    ///
+    /// **The request flag is consumed by a refusal but not by a wait.** A gate — poisoned,
+    /// diverged, stepped down — is a state an operator must act on, and re-planning into it every
+    /// tick is the log flood compaction §9 refuses; the request is answered with one warning and
+    /// dropped. A merge or coalesce already in flight is neither a refusal nor a state to act on,
+    /// so the flag stays armed and the next tick tries again once that pass lands.
+    fn dispatch_fold(&mut self, generation: &Arc<Generation>) {
+        // A fold this node could not publish is hours of IO spent to produce an orphan. The
+        // planner's own gates cover the recoverable postures; this one covers the two that latch.
+        if !self.may_publish() {
+            return;
+        }
+        // **A request arriving while a fold runs is refused, not held** (compaction §9: "the
+        // trigger is refused while one runs"). Consuming the flag is what makes that true — left
+        // armed, it is also a *wake* reason (`tick_if_due`), so every completion poll for the
+        // running fold's remaining hours would take a full tick and plan a flush off it, collapsing
+        // the publication cadence to the poll interval and then dispatching a second corpus rewrite
+        // the moment the first landed.
+        if self.fold_in_flight.load(Ordering::SeqCst) {
+            if self.health.fold_requested.swap(false, Ordering::SeqCst) {
+                tracing::warn!(
+                    "a compaction fold was requested while one is already running; refused rather \
+                     than queued — at most one fold is in flight, and the running one will \
+                     re-evaluate the gauges when it lands"
+                );
+            }
+            return;
+        }
+        // A request dispatches on its own terms — whatever hour it is and whatever the gauges read
+        // — so the schedule is not consulted for one. **That is about attribution rather than
+        // about whether the fold happens**: evaluating both would dispatch exactly the same fold,
+        // and what it would additionally do is log a requested fold under whichever gauge happened
+        // to agree, in the line an operator reads to find out why the corpus was rewritten.
+        let requested = self.health.fold_requested.load(Ordering::SeqCst);
+        let scheduled = if requested {
+            None
+        } else {
+            self.scheduled_fold(generation)
+        };
+        if !requested && scheduled.is_none() {
+            return;
+        }
+        // **At most one fold, and none while a merge or a coalesce is running.** Their outputs
+        // would be orphaned by the flip and their inputs are the fold's, so starting now would
+        // mean re-reading the corpus to discard it at the rebase check.
+        if self.merge_in_flight.load(Ordering::SeqCst)
+            || self.coalesce_in_flight.load(Ordering::SeqCst)
+        {
+            return;
+        }
+
+        let plan = match crate::compact::plan_fold(
+            generation,
+            self.wal.is_poisoned(),
+            self.health.overlay_diverged.load(Ordering::SeqCst),
+            crate::compact::FoldResources {
+                available_memory: available_memory(),
+                free_disc: free_disc(&self.bundle_root),
+            },
+        ) {
+            Ok(plan) => plan,
+            Err(reason) => {
+                self.health.fold_requested.store(false, Ordering::SeqCst);
+                tracing::warn!(
+                    gate = ?reason,
+                    "a compaction fold was requested and refused: this node folds nothing in \
+                     this state, and the request is answered rather than retried"
+                );
+                return;
+            }
+        };
+
+        let manifest = &generation.bundle.manifest;
+        // `plan_fold` already refused an unwritable declaration; this is the call that produces the
+        // value rather than a second judgement about it.
+        let Some(scalar_schema) = scalar_schema_of(manifest) else {
+            return;
+        };
+        let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
+            return;
+        };
+        let to_prefix = match crate::compact::next_prefix_name(&self.bundle_root) {
+            Ok(prefix) => prefix,
+            Err(e) => {
+                self.health.fold_requested.store(false, Ordering::SeqCst);
+                self.health.fold_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(error = %e, "could not name a new prefix for the fold");
+                return;
+            }
+        };
+
+        self.fold_attempt += 1;
+        let ctx = crate::compact::FoldContext {
+            from_prefix_dir: self.prefix_dir(generation),
+            to_prefix_dir: self.bundle_root.join(&to_prefix),
+            to_prefix: to_prefix.clone(),
+            identity_key: self.identity_key,
+            shard_id: manifest.identity.shard_id,
+            scalar_schema,
+            // The same never-reused shape a flush's and a merge's `seg_id` have (contracts §2.1).
+            // A fold writes into a fresh prefix, so nothing can collide today; the id is still
+            // unique because a `seg_id` naming two different segments across a bundle's life is
+            // what makes a rebase's ABA check meaningless.
+            seg_id: format!("fold-{}-{}", partition_data.segments_n, self.fold_attempt),
+            base_postings: Arc::clone(&generation.postings),
+            tiers: generation.delta_postings.clone(),
+        };
+
+        if let Some(trigger) = scheduled {
+            // **Every gauge, not only the one that fired.** A fold is minutes to hours, and an
+            // operator reading why one started needs to see the state that produced it rather than
+            // the single number that crossed first — the dead-bytes pair especially, since it is
+            // the one figure `/control/status` does not carry.
+            let dead = dead_bytes_of(&self.prefix_dir(generation), generation);
+            tracing::info!(
+                trigger = ?trigger,
+                live_segments = live_segments_of(generation),
+                retirable_deletions = generation.overlay.deleted_len(),
+                on_disc_bytes = dead.map(|d| d.on_disc),
+                named_bytes = dead.map(|d| d.named),
+                "dispatching a scheduled compaction fold"
+            );
+        }
+        self.health.fold_requested.store(false, Ordering::SeqCst);
+        self.fold_in_flight.store(true, Ordering::SeqCst);
+        let in_flight = Arc::clone(&self.fold_in_flight);
+        let health = Arc::clone(&self.health);
+        let submit = self.fold_submit.clone();
+        let paused = Arc::clone(&self.fold_paused);
+        let spawned = std::thread::Builder::new()
+            .name("tessera-fold".to_string())
+            .spawn(move || {
+                match crate::compact::execute(plan, ctx) {
+                    Ok(completed) => {
+                        // A test holding the fold here models the flight a real corpus gives for
+                        // free — see `Engine::set_fold_paused_for_test`. Always false otherwise.
+                        health.fold_holding.store(true, Ordering::SeqCst);
+                        while paused.load(Ordering::SeqCst) {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        health.fold_holding.store(false, Ordering::SeqCst);
+                        // Set before the send, exactly as a flush's is — see
+                        // `ExecutorHealth::flush_completed_pending` for the handshake's ordering.
+                        health.fold_completed_pending.store(true, Ordering::SeqCst);
+                        let _ = submit.send(completed);
+                    }
+                    Err(e) => {
+                        health.fold_failures.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            error = %e,
+                            "a compaction fold failed; its files are orphans under a prefix \
+                             CURRENT does not name, nothing retired, and the next trigger \
+                             re-plans from scratch"
+                        );
+                    }
+                }
+                // **The attempt's end, recorded on the thread because one of its two exits never
+                // reaches the executor.** See `fold_floor_from`. Written before the in-flight flag
+                // clears, so a tick that observes the fold finished also observes when.
+                health
+                    .fold_ended_unix
+                    .store(unix_now().unwrap_or(0), Ordering::SeqCst);
+                in_flight.store(false, Ordering::SeqCst);
+            });
+        if spawned.is_ok() {
+            // This attempt's start — see `fold_floor_from`.
+            self.last_fold_start_unix = unix_now();
+        }
+        if let Err(e) = spawned {
+            // The closure — and with it the in-flight clone — was dropped, so the flag is cleared
+            // through the field rather than through the copy that never ran.
+            self.fold_in_flight.store(false, Ordering::SeqCst);
+            self.health.fold_failures.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(error = %e, "the OS refused a thread for the compaction fold");
+        }
+    }
+
+    /// Apply every completed fold waiting from its thread, and report whether any did.
+    fn publish_completed_folds(&mut self) -> bool {
+        // Left in the channel rather than dropped — see `MaintenanceDeps::fold_publication_paused`.
+        // Always false in a shipped build.
+        if self.fold_publication_paused.load(Ordering::SeqCst) {
+            return false;
+        }
+        let mut any = false;
+        while let Ok(completed) = self.fold_done.try_recv() {
+            self.publish_fold(completed);
+            any = true;
+        }
+        if any {
+            self.health
+                .fold_completed_pending
+                .store(false, Ordering::SeqCst);
+        }
+        any
+    }
+
+    /// **Publish a fold: compaction §4's seven steps, in order, and the reclamation §8 owes.**
+    ///
+    /// Rebase or discard → assemble `SEGMENTS-<n>` from the live partition manifest → check the
+    /// merge-size relation against the fold's own output → hard-link the carry-forwards, write
+    /// `MANIFEST.json`, write `SEGMENTS-<n>.json`, flip `CURRENT` → open the new prefix in-process
+    /// → one swap → rotate the WAL → reclaim the old prefix.
+    ///
+    /// # Everything about live state is decided here, and nothing about it was decided at the plan
+    ///
+    /// The plan named files and cloned `D₀`. What the fold *carries forward* — post-snapshot
+    /// segments, tiers, runs, locator extents — is whatever the live manifest still holds that the
+    /// plan did not consume, and it is read here, hours later. `tombstones` is the one arithmetic
+    /// that must be a set difference against live state: a delete accepted during the fold's flight
+    /// names an entity whose row the fold did *not* drop, so publishing the executed set (or the
+    /// plan's) would retire that deletion while its row survives in the rebuilt base.
+    ///
+    /// # `CURRENT` is the commit point, and everything before it is reversible
+    ///
+    /// A failure at any step up to the flip discards the fold: its files are orphans under a prefix
+    /// nothing names, every consumed artefact still stands, and the next trigger re-plans. A
+    /// failure *after* the flip is a different thing and is alarmed as one — the bundle on disc is
+    /// the new one and a restart opens it, while this process goes on serving the old geometry it
+    /// still holds mapped. That is compaction §7's "crash between `CURRENT` and the swap", reached
+    /// without a crash.
+    fn publish_fold(&mut self, completed: crate::compact::CompletedFold) {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let started = std::time::Instant::now();
+        let live = self.generation.load_full();
+        let plan = &completed.plan;
+        // **A node whose durable state disagrees with what it is serving publishes nothing**
+        // (`may_publish`). The unit's files are orphans and its inputs still stand, which is the
+        // same posture every other publication failure takes.
+        if !self.may_publish() {
+            return;
+        }
+        // Every discard below is the same posture — nothing happened, the files are orphans, the
+        // next trigger re-plans — so it is one closure rather than a shape repeated eleven times.
+        // It owns what it reports so that it borrows nothing from `self` or from `completed`, both
+        // of which the sequence below still needs.
+        let discard = {
+            let health = Arc::clone(&self.health);
+            let prefix = completed.prefix.clone();
+            move |reason: &str| {
+                health.fold_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    prefix = %prefix,
+                    "discarding a completed fold: {reason}. Its files are orphans under a prefix \
+                     CURRENT does not name, every consumed artefact still stands, and nothing \
+                     retired"
+                );
+            }
+        };
+
+        // **The durability gates are asked again here, hours after the plan asked them.** A fold's
+        // flight is the widest window in the write path, and what it publishes at the end of it is
+        // a side-manifest carrying `tombstones` and `deny` serialised from the live overlay. If the
+        // WAL poisoned or the overlay diverged meanwhile, that overlay holds dispositions no
+        // durable record backs — the apply-anyway entries of write-path §5.5, in force behind a
+        // 500 and never acked — and writing them into a manifest makes them permanent on every
+        // restore, which is the outcome the gate exists to prevent. `plan_fold` refuses for exactly
+        // this reason; every other manifest writer re-asks at its own dispatch, and only this one
+        // had a window long enough for the answer to change.
+        //
+        // The divergence half is already asked by `may_publish` above; this is the WAL's own.
+        if self.wal.is_poisoned() {
+            discard(
+                "the WAL poisoned during its flight, so its manifest would publish deny state \
+                     no durable record backs",
+            );
+            return;
+        }
+
+        if live.prefix != plan.prefix {
+            discard("it was planned against a superseded prefix");
+            return;
+        }
+        let Some(partition_data) = live.bundle.partitions.get(&plan.partition) else {
+            discard("the live bundle no longer carries the partition it folded");
+            return;
+        };
+        let live_manifest = &partition_data.manifest;
+
+        // ---- step 1: rebase or discard --------------------------------------------------------
+        //
+        // ABA-safe because ids are never reused (contracts §2.1), so an artefact still listed is
+        // the same artefact the fold consumed. A merge or a coalesce that published under the fold
+        // fails this — which the suspension in `dispatch_merge`/`dispatch_coalesce` makes a
+        // crash-and-race path rather than the steady one.
+        let consumed_segments: FxHashSet<(&str, &str)> = plan
+            .slices
+            .iter()
+            .flat_map(|slice| {
+                slice
+                    .segments
+                    .iter()
+                    .map(move |segment| (slice.slice.as_str(), segment.seg_id.as_str()))
+            })
+            .collect();
+        let listed_segments: FxHashSet<(&str, &str)> = live_manifest
+            .segments
+            .iter()
+            .map(|d| (d.slice.as_str(), d.seg_id.as_str()))
+            .collect();
+        if !consumed_segments.is_subset(&listed_segments)
+            || !plan.tiers.iter().all(|t| live_manifest.deltas.contains(t))
+            || !plan
+                .runs
+                .iter()
+                .all(|r| live_manifest.external_id_runs.contains(r))
+            || !plan.locator_extents.iter().all(|path| {
+                live_manifest
+                    .locator_extents
+                    .iter()
+                    .any(|extent| &extent.path == path)
+            })
+        {
+            discard("an artefact it consumed is no longer listed in the live manifest");
+            return;
+        }
+
+        // ---- the carry-forward set ------------------------------------------------------------
+        //
+        // Listed order is preserved in every one of these: for segments it is entity order, which
+        // `RowSpace::with_extent` requires; for runs it is recency, which decision 0047's
+        // newest-first resolution reads.
+        let carried_segments: Vec<&tessera_store::manifest::SegmentDescriptor> = live_manifest
+            .segments
+            .iter()
+            .filter(|d| !consumed_segments.contains(&(d.slice.as_str(), d.seg_id.as_str())))
+            .collect();
+        let carried_tiers: Vec<String> = live_manifest
+            .deltas
+            .iter()
+            .filter(|t| !plan.tiers.contains(t))
+            .cloned()
+            .collect();
+        let carried_runs: Vec<String> = live_manifest
+            .external_id_runs
+            .iter()
+            .filter(|r| !plan.runs.contains(r))
+            .cloned()
+            .collect();
+        let carried_locators: Vec<tessera_store::manifest::LocatorExtent> = live_manifest
+            .locator_extents
+            .iter()
+            .filter(|extent| !plan.locator_extents.contains(&extent.path))
+            .cloned()
+            .collect();
+
+        // **Every carried-forward extent must begin at or above the fold's own base**, per slice.
+        // `RowSpace::with_extent` refuses an extent below the base permutation's bound and
+        // `ExternalIdSidecar` gives the base locator absolute priority below its own length — so a
+        // violation here is a prefix that either will not open or answers "this item has no
+        // external id" for items that have one (contracts §2.4's wrong-answer-wearing-a-legitimate-
+        // state's-clothes). Both would be discovered *after* `CURRENT` had flipped, so they are
+        // checked before anything is written. The relation holds for every publication that
+        // cleared the live row space's own floor; this refuses to be the place it is assumed.
+        for descriptor in &carried_segments {
+            let Some(slice) = plan.slices.iter().find(|s| s.slice == descriptor.slice) else {
+                discard("a carried-forward segment names a slice the fold has no base for");
+                return;
+            };
+            if descriptor.entity_lo < slice.permutation_bound {
+                discard("a carried-forward segment begins below the fold's own base permutation");
+                return;
+            }
+        }
+        // **Partition-wide here where the segment loop above is per-slice, and that is correct
+        // rather than a coarsening.** `ext-locator.u32` is one array per partition (§3, pass 3), so
+        // there is no per-slice bound to compare against — but the reason it cannot falsely fire is
+        // the allocator, not the file: entity ids are issued monotonically from **one** bundle-wide
+        // high-water (I9), so a locator extent published after the fold's snapshot begins above
+        // every entity that had a row at it, in every slice. `plan.entity_bound` is the maximum of
+        // those per-slice bounds and is therefore at or below that high-water. A slice whose own
+        // bound is lower cannot produce an extent beneath the maximum, because it does not get to
+        // choose its ids.
+        if carried_locators
+            .iter()
+            .any(|extent| extent.entity_lo < plan.entity_bound)
+        {
+            discard("a carried-forward locator extent begins below the fold's own base locator");
+            return;
+        }
+        // The fold emits no run 0 for a deployment that held no external ids at its snapshot
+        // (contracts §2.4 r6: no runs, no locator). If one arrived during the flight, a
+        // carried-forward flush run would become `external_id_runs[0]` — and the sidecar derives
+        // the *base locator's* path from that entry's directory, so it would take a flush's
+        // entity-range extent for the full-length base locator. Discarded rather than published;
+        // the next fold's snapshot holds the run and emits a proper base for it.
+        if completed.external_id_run.is_none() && !carried_runs.is_empty() {
+            discard("the deployment gained its first external-id run during the fold's flight");
+            return;
+        }
+
+        // ---- retirement: compaction §5, evaluated here and nowhere earlier ---------------------
+        let mut carried = crate::compact::CarriedForward::new();
+        for descriptor in &carried_segments {
+            carried.add_segment(descriptor);
+        }
+        for extent in &carried_locators {
+            carried.add_locator_extent(extent);
+        }
+        let executed = crate::compact::executed(&plan.tombstones, &carried);
+        let retired_count = executed.cardinality();
+
+        // ---- step 3: the merge-size relation, against the fold's own output --------------------
+        //
+        // `max_merged_segment_bytes` must stay strictly below the base segment's bytes or the
+        // *next startup* refuses the configuration (write-path §7). A fold normally satisfies it
+        // more comfortably — it folds every extent into the base — and the case to catch is the
+        // small corpus where it does not. Refused here, loudly, rather than at the restart that
+        // discovers it.
+        if let Some(configured) = self.configured_merge_bytes {
+            if completed.base_segment_bytes > 0 && configured >= completed.base_segment_bytes {
+                self.health.fold_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    max_merged_segment_bytes = configured,
+                    base_segment_bytes = completed.base_segment_bytes,
+                    "ALARM: publishing this fold would leave a deployment the next startup \
+                     refuses to open — merge.max_merged_segment_bytes is not strictly below the \
+                     folded base segment's size. The fold is discarded and the configuration \
+                     needs lowering before the next one"
+                );
+                return;
+            }
+        }
+
+        // ---- step 2: assemble `SEGMENTS-<n>` from the live partition manifest ------------------
+        //
+        // Each slice's fold base first and its carried extents after it, because the reader takes
+        // the first segment listed for a slice as the one `permutation.bin` addresses and every
+        // later one as an extent above it.
+        let mut segments = Vec::with_capacity(completed.segments.len() + carried_segments.len());
+        for base in &completed.segments {
+            segments.push(base.clone());
+            segments.extend(
+                carried_segments
+                    .iter()
+                    .filter(|d| d.slice == base.slice)
+                    .map(|d| (*d).clone()),
+            );
+        }
+        let mut external_id_runs = Vec::with_capacity(1 + carried_runs.len());
+        external_id_runs.extend(completed.external_id_run.clone());
+        external_id_runs.extend(carried_runs.iter().cloned());
+
+        // **The executed entries leave `tombstones` here as well as the overlay**, and the two must
+        // be one decision: the manifest is the overlay's other durable home (write-path §4.5), so a
+        // manifest carrying what the swap is about to retire would re-seed it at the next restart.
+        let mut published_overlay = (*live.overlay).clone();
+        published_overlay.retire(&executed);
+
+        let mut segments_manifest = SegmentsManifest {
+            // **Live, and untouched.** Deriving either from the fold's inputs moves the watermark
+            // backwards past every post-snapshot entity, and composition treats an entity at or
+            // above it as buffered rather than rowed — so the gap goes invisible to every principal
+            // with no error. `check_publishable` refuses a regression; this is what keeps it from
+            // having to.
+            watermark: live_manifest.watermark,
+            entity_id_high_water: live_manifest.entity_id_high_water,
+            segments,
+            deltas: carried_tiers.clone(),
+            // **Verbatim, and the live list rather than the plan's**: a flush that promoted during
+            // the fold's flight appended an extent whose ordinals the live dictionary already
+            // holds, and dropping it would shift every ordinal after it.
+            dict_extents: live_manifest.dict_extents.clone(),
+            external_id_runs,
+            locator_extents: carried_locators.clone(),
+            tombstones: Vec::new(),
+            deny: Vec::new(),
+            // Every digest goes in `MANIFEST.json` instead — see below.
+            files: BTreeMap::new(),
+        };
+        write_deny_state(&mut segments_manifest, &published_overlay);
+
+        // ---- the new `MANIFEST.json` ----------------------------------------------------------
+        //
+        // **`entity_id_high_water` here is the *snapshot's* entity space, not the live one**, and
+        // the two fields of that name mean different things. `SEGMENTS-<n>.json`'s seeds the I9
+        // allocator and is the live value, above. `MANIFEST.json`'s is what
+        // `ExternalIdSidecar::deferred_from_manifest` takes as the base locator's declared length —
+        // the reader that makes this field's value load-bearing here — and
+        // pass 3 sized that locator to the snapshot so post-snapshot locator extents stay reachable
+        // past it (compaction §3, pass 3). A live value here would make the base locator claim
+        // every post-snapshot entity and answer "this item has no external id" for items that have
+        // one.
+        //
+        // **It is not the only reader, and the second one is I9's allocator.** `Engine::open` seeds
+        // the allocator's floor from `bundle.manifest.entity_id_high_water.max(side_manifest)`
+        // (`session.rs`), so writing a *lower* value here is safe only because the side-manifest
+        // carries the live one and the `max` picks it up. That is the whole of why lowering this
+        // field does not re-issue entity ids after a restart — and it is a property of the other
+        // reader, not of this one, so a change on either side has to re-check it.
+        let mut bundle_manifest = live.bundle.manifest.clone();
+        bundle_manifest.entity_id_high_water = plan.entity_bound;
+        bundle_manifest.files = completed.files.clone();
+
+        // Exactly the files the new manifest names, deduplicated: a carried segment's run and
+        // locator are already in the run and locator lists, and linking one path twice is what
+        // `hard_link_forward` refuses.
+        let mut carried_rels: BTreeSet<String> = BTreeSet::new();
+        for descriptor in &carried_segments {
+            for name in ["morton.u32", "columns.arrow"] {
+                carried_rels.insert(format!(
+                    "partitions/{}/slices/{}/segments/{}/{name}",
+                    plan.partition, descriptor.slice, descriptor.seg_id
+                ));
+            }
+        }
+        carried_rels.extend(carried_runs.iter().cloned());
+        carried_rels.extend(carried_locators.iter().map(|e| e.path.clone()));
+        carried_rels.extend(carried_tiers.iter().cloned());
+        carried_rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
+        for rel in &carried_rels {
+            // A hard link changes nothing about a file's content, so the digest it earned under the
+            // old prefix's path is still correct under the new one — nothing is re-hashed. A file
+            // the live manifests name but do not digest is a bundle this fold must not propagate.
+            let Some(digest) = live_manifest
+                .files
+                .get(rel)
+                .or_else(|| live.bundle.manifest.files.get(rel))
+            else {
+                discard("a carried-forward file has no digest in either live manifest");
+                return;
+            };
+            bundle_manifest.files.insert(rel.clone(), digest.clone());
+        }
+
+        // ---- step 4: link, write, write, flip --------------------------------------------------
+        let from_prefix_dir = self.prefix_dir(&live);
+        let to_prefix_dir = self.bundle_root.join(&completed.prefix);
+        let carried_rels: Vec<String> = carried_rels.into_iter().collect();
+        if let Err(e) =
+            tessera_store::hard_link_forward(&from_prefix_dir, &to_prefix_dir, &carried_rels)
+        {
+            discard(&format!("its carry-forwards would not link ({e})"));
+            return;
+        }
+        // **Both halves — the bytes and the names — and the bytes are the half that is not
+        // obvious.** A hard link copies no bytes, so the directory entry is plainly the new thing;
+        // the trap is concluding from that that the bytes were already durable. **No producer
+        // fsyncs a data file.** Neither `write_single_batch` nor the morton, tier or run writers
+        // sync, and `write_segments_manifest` syncs the manifest and its directory and nothing the
+        // manifest names. That is a *reasoned* position everywhere else in the write path — a torn
+        // file is detectable through its digest, its rows are still in the WAL, and the flush
+        // re-runs — and the fold is the one operation that destroys every part of it: it flips
+        // `CURRENT` onto these links, deletes the prefix holding the only other names for the same
+        // inodes, and rotates the WAL out from under the records. "Detectable" becomes "detectably
+        // gone", for whatever the kernel had not written back — roughly the last 30 s of
+        // publications before the flip, which is exactly the window a fold's carry-forward set is
+        // drawn from.
+        //
+        // Cheap, because the set is only what published *during* the flight: `plan_fold` consumes
+        // everything the manifest named at its snapshot, so nothing older than the fold is here.
+        // The fold's own five passes synced on its own thread (`compact::execute`, pass 5).
+        let carried_paths: Vec<PathBuf> = carried_rels
+            .iter()
+            .map(|rel| to_prefix_dir.join(rel))
+            .collect();
+        if let Err(e) = tessera_store::fsync_written(&carried_paths) {
+            discard(&format!("its carry-forwards would not sync ({e})"));
+            return;
+        }
+        let manifest_digest =
+            match tessera_store::write_manifest_json(&to_prefix_dir, &bundle_manifest) {
+                Ok(digest) => digest,
+                Err(e) => {
+                    discard(&format!("its MANIFEST.json would not commit ({e})"));
+                    return;
+                }
+            };
+        let manifest_n = self.allocate_manifest_n();
+        if let Err(e) = tessera_store::write_segments_manifest(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &segments_manifest,
+        ) {
+            discard(&format!(
+                "its SEGMENTS-{manifest_n}.json would not commit ({e})"
+            ));
+            return;
+        }
+        // **The commit point.** Everything above is reversible; nothing below is.
+        if let Err(e) =
+            tessera_store::write_current(&self.bundle_root, &completed.prefix, &manifest_digest)
+        {
+            discard(&format!("CURRENT would not flip ({e})"));
+            return;
+        }
+
+        // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
+        let rotation = crate::session::open_rotation(
+            &self.bundle_root,
+            &completed.prefix,
+            &live.fragments,
+            executed,
+        );
+        let (bundle, rotation) = match rotation {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.diverge_from_current(&completed.prefix);
+                tracing::error!(
+                    error = %e,
+                    prefix = %completed.prefix,
+                    "ALARM: CURRENT names the folded prefix and this process could not open it. \
+                     The bundle on disc is complete and a restart serves it; until then this node \
+                     serves the superseded prefix and publishes nothing. Nothing retired"
+                );
+                return;
+            }
+        };
+
+        // **The tier list, re-derived from the committed manifest** rather than filtered
+        // positionally: `deltas` is the authority on which tiers are live (contracts §2.3 r18), and
+        // re-deriving from it is the one form that cannot drift from what a restart would open. The
+        // readers themselves are the live `Arc`s — their mappings are of the same inodes the
+        // carry-forward just gave a second name, so they survive the old prefix's deletion exactly
+        // as `reclaim_prefix` argues.
+        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::with_capacity(carried_tiers.len());
+        for rel in &segments_manifest.deltas {
+            match live
+                .delta_postings
+                .iter()
+                .zip(&live_manifest.deltas)
+                .find(|(_, live_rel)| *live_rel == rel)
+            {
+                Some((tier, _)) => delta_postings.push(Arc::clone(tier)),
+                None => {
+                    self.diverge_from_current(&completed.prefix);
+                    tracing::error!(
+                        tier = %rel,
+                        "ALARM: the folded manifest names a delta tier this process does not hold \
+                         open; abandoning the swap rather than serving a fragment built from fewer \
+                         tiers than the manifest declares. CURRENT names the new prefix and a \
+                         restart serves it"
+                    );
+                    return;
+                }
+            }
+        }
+
+        let segments_version = live.segments_version + 1;
+        if let Err(e) = self.publish_geometry(
+            GeometryPublication::within_prefix(
+                completed.prefix.clone(),
+                segments_version,
+                // Live, and untouched — see the manifest's own note above.
+                live.watermark,
+                bundle,
+                // Carried forward, never renumbered and never shrunk (compaction §3, pass 4).
+                Arc::clone(&live.dict),
+                delta_postings,
+            )
+            .rotating(rotation),
+        ) {
+            self.diverge_from_current(&completed.prefix);
+            tracing::error!(
+                error = %e,
+                "ALARM: CURRENT names the folded prefix and the swap was refused. A restart \
+                 serves the new bundle; until then this node serves the superseded one and \
+                 publishes nothing"
+            );
+            return;
+        }
+
+        // ---- step 7: rotate the WAL ------------------------------------------------------------
+        //
+        // Immediately, and that is compaction §5's whole mitigation for retirement's durability
+        // window: the manifest seed no longer carries the executed entries, but the WAL still holds
+        // the original `ChangeByEntity{Delete}` records, so until a rotation whose head snapshot
+        // postdates this fold has reclaimed them a restart resurrects them — harmlessly (they name
+        // entities with no row and no postings) and **permanently**, since a rotation snapshot
+        // applies entries and never assigns.
+        self.rotate_wal();
+
+        // ---- step 8: reclaim the superseded prefix (compaction §8) ------------------------------
+        self.pending_reclaim.push(PendingReclaim {
+            generation: live,
+            prefix_dir: from_prefix_dir,
+            // Taken, not cloned: these belong to the prefix being superseded, and the prefix this
+            // fold just published starts with none.
+            superseded_sidecars: std::mem::take(&mut self.superseded_sidecars),
+        });
+        self.reclaim_superseded_prefixes();
+
+        self.health.folds.fetch_add(1, Ordering::Relaxed);
+        // **The fold's own account of what it spent, at the one severity an operator reads.** The
+        // most expensive operation in the system had no cost record at all until it had one here:
+        // its counters said a fold happened, and nothing said what it took. The staircase is the
+        // diagnostic half — a resident set that climbs on one pass names that pass — and the two
+        // gauges below are the alarming half, on `/control/status`.
+        let passes = completed
+            .cost
+            .iter()
+            .map(|c| {
+                // Total and anonymous, because §3's budget is a claim about the split: a fold
+                // whose total climbs because its mapped inputs became resident is behaving as
+                // designed, and one whose *anonymous* half climbs with the corpus has a term
+                // nobody budgeted. One number cannot distinguish them.
+                format!(
+                    "{}={:?}/{:.2}GiB({:.2} anon)",
+                    c.pass,
+                    c.elapsed,
+                    c.rss as f64 / (1u64 << 30) as f64,
+                    c.anon as f64 / (1u64 << 30) as f64,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let fold_secs: u64 = completed.cost.iter().map(|c| c.elapsed.as_secs()).sum();
+        let staircase_rss = completed.cost.iter().map(|c| c.rss).max().unwrap_or(0);
+        self.health
+            .last_fold_secs
+            .store(fold_secs, Ordering::Relaxed);
+        self.health
+            .last_fold_rss
+            .store(staircase_rss, Ordering::Relaxed);
+        *lock_recover(&self.health.last_fold_passes) = completed.cost.clone();
+        tracing::info!(
+            prefix = %completed.prefix,
+            segments_version,
+            retired = retired_count,
+            carried_entities = carried.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            passes = %passes,
+            fold_secs,
+            staircase_rss,
+            "a compaction fold published: the bundle is one base segment per partition-slice, one \
+             base postings tier, one external-id run and one locator, plus whatever landed during \
+             its flight"
+        );
+    }
+
+    /// Latch [`ExecutorHealth::prefix_diverged`]: `CURRENT` names a prefix this process could not
+    /// swap onto, so it must stop writing durable state.
+    ///
+    /// **Every publication after this point would land in a tree no restart reads.** The live
+    /// generation still names the superseded prefix and every manifest path derives its directory
+    /// from that generation — correctly, on the success path — so a flush would write its segment
+    /// and side-manifest under the old prefix, ack the rows, and then rotate the WAL and reclaim
+    /// their records. Acked ingest, lost at the next restart, with nothing logged at the loss. A
+    /// crash cannot produce this because a crashed process stops writing; only a live one that
+    /// flipped `CURRENT` and carried on can.
+    ///
+    /// The superseded prefix is deliberately **not** reclaimed on this path — it is what this
+    /// process is still serving from, and `reclaim_prefix` would refuse it anyway now that
+    /// `CURRENT` names the other one.
+    fn diverge_from_current(&self, committed: &str) {
+        self.health.fold_failures.fetch_add(1, Ordering::Relaxed);
+        self.health.prefix_diverged.store(true, Ordering::SeqCst);
+        tracing::error!(
+            committed_prefix = %committed,
+            "ALARM: this node's live generation and its durable CURRENT disagree. It keeps serving \
+             what it has and publishes nothing — no geometry, no deny state, no WAL rotation — \
+             until it is restarted, at which point it opens the committed prefix and is correct \
+             again. Publishing from here would write acked state into a prefix no restart reads"
+        );
+    }
+
+    /// Whether this executor may still write durable state — the two latching postures, asked in
+    /// one place so a new publication kind cannot miss one.
+    ///
+    /// Deliberately **not** including the WAL's poison flag: that one is recoverable and is asked
+    /// separately by the callers that care (`rotate_wal` cannot append at all; `plan_flush` refuses
+    /// for the apply-anyway reason). These two are terminal until a restart.
+    fn may_publish(&self) -> bool {
+        !self.health.overlay_diverged.load(Ordering::SeqCst)
+            && !self.health.prefix_diverged.load(Ordering::SeqCst)
+    }
+
+    /// Delete every superseded prefix nothing is reading any more — **the reclamation event**
+    /// compaction §8 makes the fold's reason for existing (on-disc bytes are a measured 2.0–2.6×
+    /// the bytes the manifest names, and nothing else in the system can delete a file).
+    ///
+    /// **The `Arc` is the wait, and it is a wait rather than a hope.** Every file the new prefix
+    /// still needs has a directory entry there, so this unlinks directory entries and never live
+    /// data — but the external-id sidecar opens its runs lazily, so a request still holding the
+    /// superseded generation could be about to open a path under that tree. The generation pointer
+    /// has already moved, so no new holder can appear; holding the `Arc` here and reclaiming only
+    /// at a count of one turns "wait for the readers" into a condition rather than a delay.
+    ///
+    /// **And it is now exhaustive rather than a narrowing.** It once counted the held generation
+    /// and its sidecar, which together answer for every generation a *flush* produced over the
+    /// prefix and for none of the ones holding a sidecar a **coalesce** replaced — a set the counts
+    /// could not see at all. `superseded_sidecars` closes that, weakly, so the three counts between
+    /// them name every sidecar that was ever live over the prefix and therefore every generation
+    /// that could still resolve a path inside it.
+    ///
+    /// A failure alarms once and drops the entry: `remove_dir_all` failing is a permissions or
+    /// device fault rather than a transient one, and retrying it every tick is a log flood around a
+    /// condition an operator has to act on. The tree then stands as an orphan, which is the same
+    /// residual a process exiting mid-wait leaves.
+    fn reclaim_superseded_prefixes(&mut self) {
+        if self.pending_reclaim.is_empty() {
+            return;
+        }
+        let mut still_read = Vec::new();
+        for pending in std::mem::take(&mut self.pending_reclaim) {
+            // **Three counts, because they reach three different sets** — see `pending_reclaim`
+            // and `superseded_sidecars`. The generation's own count answers for itself; its
+            // sidecar's answers for every *other* generation a flush produced over the same prefix,
+            // because a flush publishes by cloning the live sidecar `Arc` rather than building one;
+            // and the weak list answers for the generations that hold a sidecar a **coalesce**
+            // replaced, which is the one publication that builds a new one over an unchanged
+            // prefix and so the one case the second count cannot see.
+            //
+            // Read off the held generation, so at rest the two strong counts are 1 — this entry is
+            // the only holder of the generation, and the generation is the only holder of the
+            // sidecar — and every weak count is 0. The post-fold generation has a sidecar of its
+            // own and appears in none of the three.
+            if Arc::strong_count(&pending.generation) > 1
+                || Arc::strong_count(&pending.generation.external_index) > 1
+                || pending
+                    .superseded_sidecars
+                    .iter()
+                    .any(|held| held.strong_count() > 0)
+            {
+                still_read.push(pending);
+                continue;
+            }
+            let PendingReclaim {
+                generation,
+                prefix_dir,
+                superseded_sidecars,
+            } = pending;
+            drop(superseded_sidecars);
+            drop(generation);
+            match tessera_store::reclaim_prefix(&prefix_dir) {
+                Ok(()) => tracing::info!(
+                    prefix = %prefix_dir.display(),
+                    "the superseded prefix is reclaimed: the build's base, every merged-away \
+                     segment, every consumed tier and every superseded side-manifest"
+                ),
+                Err(e) => tracing::error!(
+                    error = %e,
+                    prefix = %prefix_dir.display(),
+                    "ALARM: the superseded prefix could not be reclaimed and stands as an orphan. \
+                     Nothing live was unlinked; what is lost is the disc the fold exists to free"
+                ),
+            }
+        }
+        self.pending_reclaim = still_read;
     }
 
     /// Apply every completed coalesce waiting from the pool, and report whether any did.
@@ -3262,6 +4730,12 @@ impl Executor {
     /// compaction's, along with every other orphan.
     fn publish_coalesce(&mut self, completed: crate::coalesce::CompletedCoalesce) {
         let started = std::time::Instant::now();
+        // **A node whose durable state disagrees with what it is serving publishes nothing**
+        // (`may_publish`). The unit's files are orphans and its inputs still stand, which is the
+        // same posture every other publication failure takes.
+        if !self.may_publish() {
+            return;
+        }
         let live = self.generation.load_full();
         if live.prefix != completed.prefix {
             tracing::warn!(
@@ -3287,13 +4761,15 @@ impl Executor {
         write_deny_state(&mut manifest, &live.overlay);
 
         let manifest_n = self.allocate_manifest_n();
-        if let Err(e) = crate::flush::write_segments_manifest(
-            &self.prefix_dir,
+        if let Err(e) = tessera_store::write_segments_manifest(
+            &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
             &manifest,
         ) {
-            self.health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+            self.health
+                .coalesce_failures
+                .fetch_add(1, Ordering::Relaxed);
             tracing::error!(
                 error = %e,
                 "ALARM: a completed coalesce's side-manifest could not be committed; its files \
@@ -3308,11 +4784,13 @@ impl Executor {
         let next_index = match crate::session::ExternalIdIndex::open(
             &live.bundle.manifest,
             &manifest,
-            &self.prefix_dir,
+            &self.prefix_dir(&live),
         ) {
             Ok(index) => index,
             Err(e) => {
-                self.health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                self.health
+                    .coalesce_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     error = %e,
                     "ALARM: a coalesce's manifest committed but its external-id sidecar would not \
@@ -3381,14 +4859,30 @@ impl Executor {
             bundle: next_bundle,
             dict: Arc::clone(&live.dict),
             postings: Arc::clone(&live.postings),
+            fragments: Arc::clone(&live.fragments),
+            // **The sidecar rides the swap, rather than being stored beside it.** It used to be an
+            // `ArcSwap` on the `Engine`, stored one statement after this publication; that was
+            // sound here because a coalesce is content-preserving, and it is not sound for a fold,
+            // which drops the retired entities' keys and writes into a new prefix. One pointer
+            // now carries both, so no request can ever hold a generation and a sidecar from two
+            // publications.
+            external_index: Arc::new(next_index),
             delta_postings,
             overlay_version: live.overlay_version,
             overlay: Arc::clone(&live.overlay),
             buffer: Arc::clone(&live.buffer),
             denied: Arc::clone(&live.denied),
         };
+        // **The outgoing sidecar is remembered before it stops being live.** A coalesce is the one
+        // publication that builds a *new* one over the same prefix, so from here a generation
+        // holding the old one is invisible to the sidecar count reclamation takes — see
+        // `superseded_sidecars`. Weakly, and pruned as it goes, so a prefix that coalesces all day
+        // accumulates pointers rather than mappings.
+        self.superseded_sidecars
+            .retain(|held| held.strong_count() > 0);
+        self.superseded_sidecars
+            .push(Arc::downgrade(&live.external_index));
         let _published = self.publish(next, started);
-        self.external_index.store(Arc::new(next_index));
         self.health.coalesces.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -3510,7 +5004,7 @@ impl Executor {
             contexts.push((
                 plan,
                 crate::flush::FlushContext {
-                    prefix_dir: self.prefix_dir.clone(),
+                    prefix_dir: self.prefix_dir(generation),
                     partition: partition.clone(),
                     slice: slice.clone(),
                     // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
@@ -3547,9 +5041,7 @@ impl Executor {
                     Ok(completed) => {
                         // **Pending is set before the send** — the completion handshake's whole
                         // ordering; see `ExecutorHealth::flush_completed_pending`.
-                        health
-                            .flush_completed_pending
-                            .store(true, Ordering::SeqCst);
+                        health.flush_completed_pending.store(true, Ordering::SeqCst);
                         // A send failure means the executor is gone, which is a shutdown and not a
                         // fault: the files are orphans nothing references, and replay re-flushes.
                         let _ = submit.send(completed);
@@ -3665,9 +5157,13 @@ impl Executor {
         } else if self.flush_in_flight.load(Ordering::SeqCst)
             || self.health.flush_completed_pending.load(Ordering::SeqCst)
             || self.coalesce_in_flight.load(Ordering::SeqCst)
-            || self.health.coalesce_completed_pending.load(Ordering::SeqCst)
+            || self
+                .health
+                .coalesce_completed_pending
+                .load(Ordering::SeqCst)
             || self.merge_in_flight.load(Ordering::SeqCst)
             || self.health.merge_completed_pending.load(Ordering::SeqCst)
+            || self.health.fold_completed_pending.load(Ordering::SeqCst)
         {
             // A flush or a coalesce is executing on the pool, or its completed unit is waiting in
             // the corresponding channel. The pool cannot ring the doorbell (see `flush_submit`),
@@ -3676,6 +5172,13 @@ impl Executor {
             // waits for the next *tick*, which at a 90 s period is 90 s of a pass that has already
             // done all of its IO sitting unpublished.
             until_tick.min(FLUSH_COMPLETION_POLL)
+        } else if self.fold_in_flight.load(Ordering::SeqCst) {
+            // A fold is running on its own thread, which — like the pool — cannot ring the
+            // doorbell. Its completion has to be noticed by polling, and the *only* reason this is
+            // a separate, coarser interval from the arm above is duration: a fold runs for minutes
+            // to hours where a flush runs for seconds, so the 20 ms poll would spin the loop
+            // hundreds of thousands of times for one publication whose latency nobody observes.
+            until_tick.min(FOLD_COMPLETION_POLL)
         } else {
             until_tick
         };
@@ -3697,7 +5200,7 @@ impl Executor {
     /// cycles — measured at one fsync per item and ~300 denies/second, i.e. tens of minutes for a
     /// bulk revocation, with every other deny behind it and ingest starved throughout. The fsync is
     /// only half of it: a per-item path clones the whole [`Overlay`] each time, and the overlay
-    /// never shrinks — there is no compaction fold (⊘) — so an N-item revocation
+    /// shrinks only at a fold — so an N-item revocation
     /// also copies Θ(N²) entries. A window pays both once.
     ///
     /// It takes **two** halves to get that, and neither works alone. This is the executor half; the
@@ -3896,8 +5399,7 @@ impl Executor {
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
 
-        let applied: Vec<(EntityId, ChangeOp)> =
-            entries.iter().map(|e| (e.entity, e.op)).collect();
+        let applied: Vec<(EntityId, ChangeOp)> = entries.iter().map(|e| (e.entity, e.op)).collect();
 
         // One overlay clone, one generation, **one swap** for every entry in the window.
         //
@@ -4094,12 +5596,7 @@ impl Executor {
             let job = match work {
                 ExecutorWork::Lifecycle(job) => job,
                 ExecutorWork::PublishGeometry {
-                    prefix,
-                    segments_version,
-                    watermark,
-                    bundle,
-                    dict,
-                    delta_postings,
+                    publication,
                     respond,
                 } => {
                     // **The open window closes first, and that is ordering rather than tidiness.**
@@ -4112,14 +5609,7 @@ impl Executor {
                     if !window.is_empty() {
                         window = self.close_and_reopen(window);
                     }
-                    let _ = respond.send(self.publish_geometry(
-                        prefix,
-                        segments_version,
-                        watermark,
-                        bundle,
-                        dict,
-                        delta_postings,
-                    ));
+                    let _ = respond.send(self.publish_geometry(publication));
                     self.health.note_work_refused();
                     did_work = true;
                     continue;
@@ -4210,6 +5700,25 @@ impl Executor {
     fn next_flush_attempt(&mut self) -> u64 {
         self.flush_attempt += 1;
         self.flush_attempt
+    }
+
+    /// The prefix directory to write into, **derived from the generation the caller is publishing
+    /// against** rather than remembered.
+    ///
+    /// This is compaction §4's fourth gap, closed by construction. Every write inside a bundle
+    /// belongs to one prefix, and which prefix that is changes when a fold flips `CURRENT`. The
+    /// alternative — a stored `PathBuf` rotated at the flip — has to be got right at all eight
+    /// sites that use it, and the one that would be missed is not the flush path anybody would
+    /// think to check: it is [`Executor::publish_deny_state`], where the first deny published
+    /// after a flip writes its side-manifest into the prefix reclamation is about to delete. Acked
+    /// deny state, absent from the restore path, no error anywhere. A derived value cannot be
+    /// missed.
+    ///
+    /// Every caller already holds the generation it is acting on — publications load it to rebase
+    /// against, and the maintenance planners load it to plan from — so this costs one `join` and
+    /// no lookup.
+    fn prefix_dir(&self, generation: &Generation) -> PathBuf {
+        self.bundle_root.join(&generation.prefix)
     }
 
     /// Take the next side-manifest number. See [`Executor::next_manifest_n`].
@@ -4699,6 +6208,8 @@ impl Executor {
             bundle: Arc::clone(&generation.bundle),
             dict: Arc::clone(&generation.dict),
             postings: Arc::clone(&generation.postings),
+            fragments: Arc::clone(&generation.fragments),
+            external_index: Arc::clone(&generation.external_index),
             delta_postings: generation.delta_postings.clone(),
             overlay: Arc::clone(&generation.overlay),
             // Neither the deny sets nor the row space moved, so the mask is unchanged. An ingest
@@ -4713,7 +6224,7 @@ impl Executor {
     /// Clone the overlay **once**, apply every change in the window, publish **once**.
     ///
     /// The amortisation this buys is the one that grows. [`Overlay`] never shrinks —
-    /// entries survive `suppress → unsuppress` and there is no compaction fold (⊘) — so the clone
+    /// entries survive `suppress → unsuppress` and shrink only at a fold — so the clone
     /// is O(overlay depth) and the depth rises by one per new item denied. Applying an N-item
     /// revocation one command at a time therefore copies Θ(N²) entries; a window of k pays the clone
     /// once for the k. The clone is also every deny's ack-latency floor
@@ -4727,10 +6238,7 @@ impl Executor {
     /// Pins are never invalidated by this (I11): a pin fixes `(prefix, segments_version)`, and this
     /// bumps `overlay_version`. That is lifecycle §2.3's rule that a suppression applies to a
     /// pinned request the moment it is accepted, without expiring the pin.
-    fn apply_changes(
-        &self,
-        changes: Vec<(EntityId, ChangeOp)>,
-    ) -> Published {
+    fn apply_changes(&self, changes: Vec<(EntityId, ChangeOp)>) -> Published {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let mut overlay: Overlay = (*generation.overlay).clone();
@@ -4751,9 +6259,10 @@ impl Executor {
             overlay.apply(entity, op);
         }
 
-        // **It alarms; it does not act** — there is no compaction fold, so an operator who sets
-        // `overlay_soft_limit` gets a signal that the overlay is deep, not a mechanism that makes
-        // it shallower.
+        // **It alarms on the union; the schedule acts on the deletions.** `overlay_soft_limit`
+        // gauges `deleted ∪ suppressed`, which is what an operator should see, while the fold
+        // trigger it seeds keys on the retirable part — a suppression never retires, and a fold
+        // dispatched on the union would rewrite the corpus to retire nothing (compaction §9).
         //
         // This is the only place the overlay grows **at runtime**; it is not the only place it
         // grows. `WritePath::reconstruct` builds one from WAL replay before this executor exists,
@@ -4769,9 +6278,11 @@ impl Executor {
             tracing::warn!(
                 overlay_depth = depth,
                 overlay_soft_limit = limit,
-                "ALARM: the overlay has crossed its configured soft limit. Nothing acts on this: \
-                 there is no fold until stage 2.3, so the depth will not come down on its own — and \
-                 this line is edge-triggered, so it will NOT repeat while the overlay stays over. \
+                "ALARM: the overlay has crossed its configured soft limit. A compaction fold is \
+                 the lever — it retires the executed deletions (Rule F) — but nothing schedules \
+                 one: the automatic trigger and POST /control/compact are unbuilt (compaction \
+                 §9), so the depth comes down only when something calls for a fold. This line is \
+                 edge-triggered, so it will NOT repeat while the overlay stays over. \
                  Overlay depth is a term in I1's composition cost and in every deny's ack latency \
                  (each acceptance clones the overlay); watch overlay.depth on /control/status"
             );
@@ -4839,6 +6350,8 @@ impl Executor {
             bundle: Arc::clone(&generation.bundle),
             dict: Arc::clone(&generation.dict),
             postings: Arc::clone(&generation.postings),
+            fragments: Arc::clone(&generation.fragments),
+            external_index: Arc::clone(&generation.external_index),
             delta_postings: generation.delta_postings.clone(),
             buffer,
             denied,
@@ -4871,7 +6384,7 @@ impl Executor {
         if !self.deny_dirty {
             return;
         }
-        if self.wal.is_poisoned() || self.health.overlay_diverged.load(Ordering::SeqCst) {
+        if self.wal.is_poisoned() || !self.may_publish() {
             tracing::warn!(
                 "ALARM: deny state is unpublished and this node is poisoned or diverged, so it                  will not write a side-manifest. The dispositions are in force and WAL-durable;                  what is degraded is the restore path, until the node recovers or restarts"
             );
@@ -4883,9 +6396,12 @@ impl Executor {
             let mut manifest = partition_data.manifest.clone();
             write_deny_state(&mut manifest, &live.overlay);
             let n = self.allocate_manifest_n();
-            if let Err(e) =
-                crate::flush::write_segments_manifest(&self.prefix_dir, partition, n, &manifest)
-            {
+            if let Err(e) = tessera_store::write_segments_manifest(
+                &self.prefix_dir(&live),
+                partition,
+                n,
+                &manifest,
+            ) {
                 tracing::error!(
                     error = %e,
                     partition = %partition,
@@ -4897,7 +6413,9 @@ impl Executor {
 
         self.deny_dirty = false;
         self.windows_since_publication = 0;
-        self.health.overlay_publications.fetch_add(1, Ordering::Relaxed);
+        self.health
+            .overlay_publications
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// **Publication by rebase** (§1.2): apply a completed flush to the **then-current**
@@ -4914,6 +6432,12 @@ impl Executor {
     /// next tick re-plans.
     fn publish_flush(&mut self, completed: crate::flush::CompletedFlush) {
         let started = std::time::Instant::now();
+        // **A node whose durable state disagrees with what it is serving publishes nothing**
+        // (`may_publish`). The unit's files are orphans and its inputs still stand, which is the
+        // same posture every other publication failure takes.
+        if !self.may_publish() {
+            return;
+        }
         let live = self.generation.load_full();
         if live.prefix != completed.prefix {
             // A compaction moved the prefix under this flush. Nothing to apply it to.
@@ -4979,8 +6503,8 @@ impl Executor {
         // here discards the flush: its files become orphans nothing references, the buffer is
         // retained, the next tick re-plans. The same posture as every other flush failure, and
         // the reason the write precedes the swap.
-        if let Err(e) = crate::flush::write_segments_manifest(
-            &self.prefix_dir,
+        if let Err(e) = tessera_store::write_segments_manifest(
+            &self.prefix_dir(&live),
             &completed.partition,
             manifest_n,
             &manifest,
@@ -5043,6 +6567,8 @@ impl Executor {
             bundle: next_bundle,
             dict: completed.dict,
             postings: Arc::clone(&live.postings),
+            fragments: Arc::clone(&live.fragments),
+            external_index: Arc::clone(&live.external_index),
             delta_postings,
             overlay_version: live.overlay_version,
             overlay: Arc::clone(&live.overlay),
@@ -5054,7 +6580,11 @@ impl Executor {
         // find the flag set, or it takes rung 3 of the ladder as a *build* — the measured 4 550 ms
         // rebuild after a merge — where the whole design is that it be shed with a 429 for the
         // bounded duration of the refresh instead.
-        self.refresh.in_flight.store(true, Ordering::SeqCst);
+        // The claim names the generation it is for, so a pass that is superseded mid-flight
+        // releases nothing when it ends — see `refresh::clear_if_current`.
+        self.refresh
+            .in_flight
+            .store(segments_version, Ordering::SeqCst);
         let _published = self.publish_arc(Arc::clone(&next), started);
         self.refresh.spawn(next);
 
@@ -5103,7 +6633,7 @@ impl Executor {
         if self.wal.is_poisoned() {
             return;
         }
-        if self.health.overlay_diverged.load(Ordering::SeqCst) {
+        if !self.may_publish() {
             tracing::warn!(
                 "this node's overlay has diverged from its durable WAL, so it rotates nothing;                  the log grows until an operator restarts it"
             );
@@ -5192,23 +6722,67 @@ impl Executor {
     ///
     /// `check_publishable` is evaluated against the generation actually being replaced, which is
     /// the one loaded here, because this is the only thread that can replace it.
+    ///
+    /// # The one swap, and everything that rides it
+    ///
+    /// Compaction §4 step 6: prefix, `segments_version`, watermark, bundle, dictionary and tier
+    /// list always; and, when the publication carries a `PrefixRotation`, the base postings, the
+    /// fragment cache and the identity it keys, the external-id sidecar, and the retirement of the
+    /// executed deletions — all through the single `store` below. Not a sequence of stores that a
+    /// request could land between: a request loads one pointer and gets a geometry, a term index,
+    /// a fragment identity and a sidecar that agree.
     fn publish_geometry(
         &mut self,
-        prefix: String,
-        segments_version: u64,
-        watermark: u64,
-        bundle: Arc<Bundle>,
-        dict: Arc<Dict>,
-        delta_postings: Vec<Arc<DeltaTier>>,
+        publication: GeometryPublication,
     ) -> std::result::Result<(), GeometryRefused> {
+        let GeometryPublication {
+            prefix,
+            segments_version,
+            watermark,
+            bundle,
+            dict,
+            delta_postings,
+            rotation,
+        } = publication;
         let started = std::time::Instant::now();
         let previous = self.generation.load_full();
-        check_publishable(&previous, &prefix, segments_version)?;
+        check_publishable(&previous, &prefix, segments_version, watermark)?;
+
+        // **Rule F, in the fold's own swap and nowhere else** (write-path §5.4). An entry
+        // withdrawn while the old geometry is still live re-exposes the item for the width of that
+        // window, so the overlay is cloned, retired against, and published — never mutated in
+        // place on a shared `Arc`, which the read path is holding.
+        //
+        // `overlay_version` moves **only** when something actually retired. A geometry-only swap
+        // that bumped it would falsely signal a change on lifecycle §1.2's *security-state* axis,
+        // which §8.5's cache keys read; a retirement that did not bump it would be a real change
+        // to that state, invisible to the same keys.
+        let (overlay, overlay_version) = match rotation.as_ref().map(|r| &r.retired) {
+            Some(retired) if !retired.is_empty() => {
+                // **The live external-id map loses the retired bindings first** — see
+                // `LiveState::forget_established` for why before the retirement rather than after,
+                // and for what a binding left standing costs (a lawful re-ingest, refused 409,
+                // permanently).
+                let forgotten = self.live.forget_established(retired);
+                let mut overlay = (*previous.overlay).clone();
+                let count = overlay.retire(retired);
+                tracing::info!(
+                    retired = count,
+                    forgotten_external_ids = forgotten,
+                    prefix = %prefix,
+                    "Rule F: executed deletions retired in the fold's own publication"
+                );
+                (Arc::new(overlay), previous.overlay_version + 1)
+            }
+            _ => (Arc::clone(&previous.overlay), previous.overlay_version),
+        };
 
         // Rebuilt against the new row space: row ids mean something only within one
         // `segments_version`, so a geometry publication invalidates every row in the old mask
-        // (`derive_denied`). Taken before `bundle` moves into the generation.
-        let denied = Arc::new(crate::compose::derive_denied(&previous.overlay, &bundle));
+        // (`derive_denied`). Derived from the **retired** overlay, not the previous one, or the
+        // retired entities would keep their rows in the mask over a row space that no longer holds
+        // them. Taken before `bundle` moves into the generation.
+        let denied = Arc::new(crate::compose::derive_denied(&overlay, &bundle));
 
         let next = Generation {
             prefix,
@@ -5216,14 +6790,58 @@ impl Executor {
             watermark,
             bundle,
             dict,
-            postings: Arc::clone(&previous.postings),
+            postings: rotation.as_ref().map_or_else(
+                || Arc::clone(&previous.postings),
+                |r| Arc::clone(&r.postings),
+            ),
+            fragments: rotation.as_ref().map_or_else(
+                || Arc::clone(&previous.fragments),
+                |r| Arc::clone(&r.fragments),
+            ),
+            external_index: rotation.as_ref().map_or_else(
+                || Arc::clone(&previous.external_index),
+                |r| Arc::clone(&r.external_index),
+            ),
             delta_postings,
-            overlay_version: previous.overlay_version,
-            overlay: Arc::clone(&previous.overlay),
+            overlay_version,
+            overlay,
             buffer: Arc::clone(&previous.buffer),
             denied,
         };
-        let _published = self.publish(next, started);
+        // **Listed before the swap, deleted after it** (compaction §8). At this instant every
+        // persisted fragment is under the identity about to be superseded, so the listing *is* the
+        // set §8 names — which is not selectable by name, since a cache entry is a SHA-256 over the
+        // identity and a hash does not invert. Taking it here and deleting below closes both
+        // hazards at once: a listing taken before the swap can never name an entry a request wrote
+        // after it, and nothing is deleted at all if the swap does not happen.
+        let superseded = rotation
+            .as_ref()
+            .map(|_| previous.fragments.superseded_entries())
+            .unwrap_or_default();
+
+        let next = Arc::new(next);
+        let _published = self.publish_arc(Arc::clone(&next), started);
+
+        // **A rotation refreshes after the swap and does not arm the shed** (decision 0053). The
+        // pass still runs, most-recently-used first, so a resident session's projection is rebuilt
+        // proactively rather than on its next request — but it is no longer load-bearing, and
+        // `refresh.in_flight` is deliberately not set: shed only while the refresh pass is shorter
+        // than the rebuild it would save, and a fold inverts that by two orders. After a fold a
+        // missing projection is an ordinary cache miss. The rule is stated at
+        // `RefreshDeps::in_flight`, which is where a future publication kind will look for it.
+        if rotation.is_some() {
+            self.refresh.spawn(next);
+        }
+
+        if !superseded.is_empty() {
+            let swept = FragmentCache::sweep(&superseded);
+            tracing::info!(
+                swept,
+                named = superseded.len(),
+                "the fold's identity rotated; the persisted fragments under the superseded one are \
+                 unreachable and have been reclaimed"
+            );
+        }
 
         // The retention pass, at the swap rather than at a reclaim — see
         // `RowProjectionCache::prune_generations_below` for why depth 1 rather than depth 0, which
@@ -5506,7 +7124,7 @@ mod retry_after_tests {
     }
 
     /// **The soft-limit alarm is edge-triggered.** `Overlay::len` never decreases — entries survive
-    /// `suppress → unsuppress` and there is no compaction fold — so a level-triggered check emits a
+    /// `suppress → unsuppress` and shrink only at a fold — so a level-triggered check emits a
     /// four-line WARN per deny, forever, with no path back, precisely while the node is under deny
     /// pressure.
     ///

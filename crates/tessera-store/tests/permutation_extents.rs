@@ -20,7 +20,10 @@ fn base_of(rows: &[u32]) -> RowSpace {
         in_row_order[row as usize] = EntityId::new(entity as u64);
     }
     write_permutation(&path, &in_row_order, rows.len() as u64).unwrap();
-    RowSpace::new(Arc::new(Permutation::load(&path).unwrap()), rows.len() as u32)
+    RowSpace::new(
+        Arc::new(Permutation::load(&path).unwrap()),
+        rows.len() as u32,
+    )
 }
 
 fn extent(lo: u64, hi: u64, seg_id: &str, row_base: u32, rows: &[u32]) -> SegmentExtent {
@@ -90,7 +93,9 @@ fn collapsing_adjacent_extents_preserves_every_row_id() {
 /// ABA safety: a merge whose inputs are gone publishes nothing.
 #[test]
 fn collapsing_refuses_when_an_input_seg_id_is_absent() {
-    let space = base_of(&[0]).with_extent(extent(1, 1, "s1", 1, &[0])).unwrap();
+    let space = base_of(&[0])
+        .with_extent(extent(1, 1, "s1", 1, &[0]))
+        .unwrap();
     assert!(space
         .collapsing(&["s-gone".into()], extent(1, 1, "s9", 1, &[0]))
         .is_none());
@@ -104,7 +109,10 @@ fn an_extent_free_row_space_projects_exactly_what_the_base_does() {
     let mask = croaring::Bitmap::of(&[0, 2, 3, 4, 99]);
     assert_eq!(
         space.project(&mask).serialize::<croaring::Portable>(),
-        space.base().project(&mask).serialize::<croaring::Portable>()
+        space
+            .base()
+            .project(&mask)
+            .serialize::<croaring::Portable>()
     );
     assert_eq!(space.extent_count(), 0);
     assert_eq!(space.total_rows(), 5);

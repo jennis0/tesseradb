@@ -85,6 +85,46 @@ pub fn encode_posting(
     Ok(record)
 }
 
+/// [`encode_posting`] from a `Bitmap` rather than a `&[u32]` — compaction's pass 2 primitive
+/// (compaction §3).
+///
+/// **Why this exists at all: the `&[u32]` signature is a memory bound in disguise.** A fold's term
+/// sweep unions the base posting with every live tier's and subtracts the tombstone set, all in
+/// Roaring, and then has to encode the result. Going through `encode_posting` means materialising
+/// that bitmap as a `Vec<u32>` first — and the largest term plausibly covers 25–50% of all points
+/// (§3), which at 10⁹ is **2 GB as `u32`s against a measured 125.12 MB as the portable Roaring the
+/// tag-1 record already holds** (`probes/results.md` §4.2). The fold would pay that per term, on
+/// the one pass that sweeps every term in the dictionary.
+///
+/// **Byte-identical to [`encode_posting`] over the same set**, which is what makes this a second
+/// producer rather than a second format: both apply the same tag rule against
+/// `small_term_threshold`, tag 0 writes the same ascending `u32` LEs, and tag 1 runs the same
+/// `run_optimize` before the same `Portable` serialisation. Pinned by
+/// `postings::the_bitmap_and_slice_encoders_agree_byte_for_byte`.
+///
+/// No sortedness check, and none is possible or needed: a `Bitmap` *is* a sorted, deduplicated
+/// set, which is the invariant [`encode_posting`] has to verify on a slice it did not build.
+pub fn encode_posting_bitmap(bitmap: &Bitmap, small_term_threshold: u32) -> io::Result<Vec<u8>> {
+    let cardinality = bitmap.cardinality();
+    let mut record = Vec::new();
+    if cardinality <= small_term_threshold as u64 {
+        record.push(0u8);
+        // Ascending by construction — `Bitmap`'s iterator is ordered — so this is the same byte
+        // sequence `encode_posting` writes from an ascending slice.
+        for entity in bitmap.iter() {
+            record.extend_from_slice(&entity.to_le_bytes());
+        }
+    } else {
+        // Cloned because `run_optimize` mutates, and the caller's bitmap is the sweep's own
+        // working set. The clone is the compressed representation, not an expansion.
+        let mut optimised = bitmap.clone();
+        optimised.run_optimize();
+        record.push(1u8);
+        record.extend_from_slice(&optimised.serialize::<Portable>());
+    }
+    Ok(record)
+}
+
 /// Write `postings.arrow` from already-encoded records (see [`encode_posting`]); record ordinal
 /// = term id. Byte-for-byte the same file [`write_postings`] would write from the same postings.
 pub fn write_posting_records(path: &Path, records: &[Vec<u8>]) -> io::Result<()> {

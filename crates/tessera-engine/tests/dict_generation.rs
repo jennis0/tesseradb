@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use common::*;
 use tessera_authz::{Dict, DictWriter};
+use tessera_engine::GeometryPublication;
 use tessera_types::TermId;
 
 /// Ordinals are stable across an extension: a term that resolved to 3 before still does, or
@@ -69,14 +70,14 @@ fn the_write_path_resolves_against_the_generations_dict() {
             .unwrap(),
     );
     engine
-        .publish_geometry(
+        .publish_geometry(GeometryPublication::within_prefix(
             live.prefix.clone(),
             live.segments_version + 1,
             live.watermark,
             Arc::clone(&live.bundle),
             extended,
             Vec::new(),
-        )
+        ))
         .unwrap();
 
     assert_eq!(
@@ -123,14 +124,14 @@ fn authorise_resolves_against_the_generations_dict() {
             .unwrap(),
     );
     engine
-        .publish_geometry(
+        .publish_geometry(GeometryPublication::within_prefix(
             live.prefix.clone(),
             live.segments_version + 1,
             live.watermark,
             Arc::clone(&live.bundle),
             extended,
             Vec::new(),
-        )
+        ))
         .unwrap();
 
     let after = engine.authorise(&credential).unwrap();

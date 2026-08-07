@@ -15,7 +15,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, Float32Array, Float64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{
+    Array, BinaryArray, Float32Array, Float64Array, StringArray, UInt32Array, UInt64Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
@@ -203,6 +205,8 @@ pub fn default_engine_config() -> EngineConfig {
         // tessera-engine's `tests/common/mod.rs`.
         flush_max_age_secs: 90,
         max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
     }
 }
 

@@ -51,6 +51,8 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
             EngineConfig {
                 flush_max_age_secs: 3600,
                 max_merged_segment_bytes: None,
+                // Compaction §9's trigger is off unless a deployment configures one.
+                compaction: tessera_engine::CompactionSchedule::off(),
                 ..config()
             },
         )
@@ -62,7 +64,11 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
 
     // First life: ingest doc-1, flush it so its binding reaches a sidecar run.
     let first = engine
-        .accept_ingest(vec![row(&engine, b"doc-1")], "life-1".to_string(), [1u8; 32])
+        .accept_ingest(
+            vec![row(&engine, b"doc-1")],
+            "life-1".to_string(),
+            [1u8; 32],
+        )
         .expect("first ingest accepted")[0];
     engine.request_flush();
     wait_until("first flush publishes", || {
@@ -77,9 +83,16 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
     // Second life: same external id, accepted — the executor's own backstop check is the one
     // this exercises (no HTTP handler in front of it here).
     let second = engine
-        .accept_ingest(vec![row(&engine, b"doc-1")], "life-2".to_string(), [2u8; 32])
+        .accept_ingest(
+            vec![row(&engine, b"doc-1")],
+            "life-2".to_string(),
+            [2u8; 32],
+        )
         .expect("a deleted holder does not block re-ingest (decision 0047)")[0];
-    assert_ne!(first, second, "I9: the dead entity's id is burned, never reused");
+    assert_ne!(
+        first, second,
+        "I9: the dead entity's id is burned, never reused"
+    );
 
     engine.request_flush();
     wait_until("second flush publishes", || {
@@ -135,6 +148,8 @@ fn a_suppressed_holder_still_blocks_reingest() {
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: tessera_engine::CompactionSchedule::off(),
             ..config()
         },
     )

@@ -130,7 +130,13 @@ fn points_of(root: &Path, seg_id: &str) -> Vec<(u64, u32, u32)> {
     let codes = MortonSlice::load(&d.join("morton.u32")).expect("morton loads");
     let cols = ColumnsRef::load(&d.join("columns.arrow")).expect("columns load");
     let mut out: Vec<(u64, u32, u32)> = (0..codes.u32().len())
-        .map(|row| (cols.tessera_id()[row], codes.u32()[row], cols.residual()[row]))
+        .map(|row| {
+            (
+                cols.tessera_id()[row],
+                codes.u32()[row],
+                cols.residual()[row],
+            )
+        })
         .collect();
     out.sort_unstable();
     out

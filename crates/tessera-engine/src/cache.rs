@@ -288,11 +288,23 @@ impl RowProjectionCache {
     ///
     /// **Per token, never per entity** — the scan cost cannot depend on which identifier was
     /// asked for, which is Critical C-5's constant-time property.
-    pub(crate) fn freshest_fragment(&self, token_id: u64) -> Option<Arc<FrozenFragment>> {
+    ///
+    /// **Scoped to `prefix`, and taking the max by `segments_version` alone was a pre-fold fragment
+    /// holder** (compaction §4). Within one prefix the version is a sufficient discriminator and
+    /// the freshest entry is the best answer; across a fold it is not, because a fold rewrites the
+    /// term index and every entry from the superseded prefix carries a fragment built from it.
+    /// Both prunes miss those entries in the window that matters — `prune_generations_below` keeps
+    /// the generation immediately under the live one, which after a fold is a pre-fold entry — so
+    /// the scoping is here, at the read, rather than arranged for by eviction.
+    pub(crate) fn freshest_fragment(
+        &self,
+        token_id: u64,
+        prefix: &str,
+    ) -> Option<Arc<FrozenFragment>> {
         self.inner
             .ready_entries()
             .into_iter()
-            .filter(|(key, _)| key.token_id == token_id)
+            .filter(|(key, _)| key.token_id == token_id && key.prefix == prefix)
             .max_by_key(|(key, _)| key.segments_version)
             .map(|(_, geometry)| Arc::clone(&geometry.fragment))
     }

@@ -419,21 +419,46 @@ struct BuildPlan {
     recorded_batch_items: Option<u64>,
 }
 
-/// The budget when none is given: MemAvailable, damped to leave room for the page cache and
-/// the allocator's slack; clamped so a tiny CI box still gets a workable floor.
+/// The budget when none is given: the smaller of MemAvailable and this process's cgroup limit,
+/// damped to leave room for the page cache and the allocator's slack; clamped so a tiny CI box
+/// still gets a workable floor.
+///
+/// **Both sources, and the smaller wins, because either can be the real bound.** `MemAvailable` is
+/// the kernel's estimate of what an allocation could get on the *host*; a cgroup v2 `memory.max` is
+/// the ceiling this process is killed at, and it charges page cache against itself. A build inside
+/// a 4 GiB container on a 48 GiB machine that reads only the first sizes its batches for 38 GiB and
+/// is OOM-killed by the limit that always owned the answer — which is the failure this crate exists
+/// to prevent, arriving through the detector rather than through the batch size.
 fn detect_memory_budget() -> u64 {
     const FALLBACK: u64 = 24 << 30;
     let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") else {
         return FALLBACK;
     };
-    meminfo
+    let Some(available) = meminfo
         .lines()
         .find(|l| l.starts_with("MemAvailable:"))
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|v| v.parse::<u64>().ok())
-        .map(|kib| ((kib * 1024) as f64 * 0.8) as u64)
-        .map(|b| b.clamp(2 << 30, 1 << 40))
-        .unwrap_or(FALLBACK)
+        .map(|kib| kib * 1024)
+    else {
+        return FALLBACK;
+    };
+    // "max" when unlimited, which parses to `None` and leaves `MemAvailable` as the answer — the
+    // same result as no cgroup at all.
+    let limit = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|cgroup| {
+            let path = cgroup
+                .lines()
+                .next()?
+                .split(':')
+                .nth(2)?
+                .trim_start_matches('/');
+            std::fs::read_to_string(format!("/sys/fs/cgroup/{path}/memory.max")).ok()
+        })
+        .and_then(|max| max.trim().parse::<u64>().ok());
+    let bound = limit.map_or(available, |limit| limit.min(available));
+    ((bound as f64 * 0.8) as u64).clamp(2 << 30, 1 << 40)
 }
 
 /// Free bytes on the filesystem holding `path`, or `None` where unknowable — the disk
