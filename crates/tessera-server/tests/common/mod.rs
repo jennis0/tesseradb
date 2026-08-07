@@ -203,6 +203,8 @@ pub fn default_engine_config() -> EngineConfig {
         // tessera-engine's `tests/common/mod.rs`.
         flush_max_age_secs: 90,
         max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
     }
 }
 

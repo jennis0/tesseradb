@@ -126,6 +126,14 @@ pub struct EngineConfig {
     /// configured value was checked and discarded. That is the inert key decision 0045 forbids,
     /// with the additional trap that validation made it look effective.
     pub max_merged_segment_bytes: Option<u64>,
+    /// When a fold is dispatched with nobody asking for one — compaction §9's automatic trigger,
+    /// as decision 0056 rules it.
+    ///
+    /// **[`CompactionSchedule::off`] is the value an embedder gets unless it says otherwise**, and
+    /// that is deliberate: a fold is minutes to hours of IO, and starting one from a default nobody
+    /// chose is not a decision this type may make on a caller's behalf. `tessera-server` applies
+    /// §9's defaults, because it is where an operator can see and change them.
+    pub compaction: crate::compact::CompactionSchedule,
 }
 
 /// The row-space merge's policy (write-path §7).
@@ -1694,6 +1702,7 @@ impl Engine {
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
                 configured_merge_bytes: self.config.max_merged_segment_bytes,
+                compaction: self.config.compaction,
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 fold_paused: Arc::clone(&self.fold_paused),
@@ -1746,6 +1755,7 @@ impl Engine {
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
                 configured_merge_bytes: self.config.max_merged_segment_bytes,
+                compaction: self.config.compaction,
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
                 fold_paused: Arc::clone(&self.fold_paused),

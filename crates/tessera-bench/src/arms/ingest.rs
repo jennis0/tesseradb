@@ -495,6 +495,8 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     compute_threads: tessera_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
                     max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
                 },
             )?;
             // The WAL lives on a dedicated executor thread, so an engine that writes must start
@@ -623,6 +625,8 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 compute_threads: tessera_engine::default_compute_threads(),
                 flush_max_age_secs: 90,
                 max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
             },
         )?;
         // The WAL lives on a dedicated executor thread, so an engine that writes must start one.
@@ -862,6 +866,8 @@ pub fn run_concurrent(
                     compute_threads: tessera_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
                     max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
                 },
             )?;
             // Generous, deliberately: this arm means to measure what a full window collects, never
@@ -1202,6 +1208,8 @@ pub fn run_rate(ctx: &Context, sweep: &RateSweep) -> Result<()> {
                             // rate rather than an axis.
                             flush_max_age_secs: 86_400,
                             max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
                         },
                     )?;
                     // Generous: this arm never means to measure queue-full backpressure.

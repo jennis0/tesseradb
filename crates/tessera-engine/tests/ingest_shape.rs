@@ -105,6 +105,8 @@ fn engine(tmp: &std::path::Path, root: &std::path::Path, window: usize) -> Engin
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )

@@ -36,11 +36,14 @@ and are cited from elsewhere as `compaction §n`.
 
 **The fold runs**, and everything in §1–§5 and §8 is description. `tessera-engine::compact` holds
 the plan and the five passes; `Executor::publish_fold` holds the publication, retirement's
-derivation and the reclamation; `Engine::request_fold` is the only trigger. ⊘ **What is obligation
-rather than description**: the operator surface (spec §9) — the three gauges, the automatic trigger
-and `POST /control/compact` — the staging list (spec §6.2), the `MADV_SEQUENTIAL` hint and the
-write-side `POSIX_FADV_DONTNEED` (spec §6.1), and probe **P1**, whose absence leaves this document's
-central memory claim modelled. Where a figure is quoted it is marked measured, modelled or assumed;
+derivation and the reclamation; and the two trigger routes spec §9's schedule specifies, beside
+`Engine::request_fold` for a caller that wants one now. ⊘ **What is obligation rather than
+description**: two of §9's four gauges (dead bytes and the tombstoned-row fraction) and the
+`/control/status` figures for them, `POST /control/compact` and the free-space precondition (spec
+§9), the staging list (spec §6.2), the `MADV_SEQUENTIAL` hint and the write-side
+`POSIX_FADV_DONTNEED` (spec §6.1), the startup sweep that would reclaim a discarded fold's orphan
+prefix (spec §7), and probe **P1**, whose absence leaves this document's central memory claim
+modelled. Where a figure is quoted it is marked measured, modelled or assumed;
 claims about the tree were verified against branch `geometry/cell-plus-residual`.
 
 ---
@@ -775,17 +778,48 @@ pressure), and **tombstoned rows as a fraction of live rows** (fold pressure).
 
 ### The automatic trigger
 
-Evaluated at the flush tick, like every other cadence here. A fold is dispatched when **any** of
-the three gauges is over its threshold **and** `compaction_min_interval_secs` has elapsed since the
-last one completed:
+Evaluated at the flush tick, like every other cadence here. A fold is dispatched when **any** gauge
+is over its threshold **and** `compaction_min_interval_secs` has elapsed since the last one
+completed. ✔ marks what is built:
 
 | Condition | Default | What it is measuring |
 |---|---|---|
-| `retirable_depth ≥ overlay_soft_limit` | 500,000 | un-retired **deletions** — see below |
-| live segment count ≥ `compaction_max_segments` | 64 | the axis merge saturates on (decision 0049) |
-| `dead_bytes / live_bytes ≥ compaction_dead_bytes_ratio` | 1.0 | paying double for storage; the measured no-compaction steady state is 2.0–2.6× |
-| `tombstoned_rows / live_rows ≥ compaction_dead_rows_fraction` | 0.2 | rows every viewport pays for and no viewer may see |
-| `compaction_min_interval_secs` | 86,400 | the floor under all three |
+| ✔ `retirable_depth ≥ compaction_after_deletions` | `overlay_soft_limit` (500,000) | un-retired **deletions** — see below. Unwindowed |
+| ✔ inside the daily window **and** any slice's live segment count ≥ `compaction_window_min_segments` | `00:00` UTC + 4 h, 8 segments | the axis merge saturates on (decision 0049), paid down when it is cheap to pay |
+| ⊘ `dead_bytes / live_bytes ≥ compaction_dead_bytes_ratio` | 1.0 | paying double for storage; the measured no-compaction steady state is 2.0–2.6× |
+| ⊘ `tombstoned_rows / live_rows ≥ compaction_dead_rows_fraction` | 0.2 | rows every viewport pays for and no viewer may see |
+| ✔ `compaction_min_interval_secs` | 86,400 | the floor under all of them |
+
+**One gauge is windowed and one is not, and the split is by urgency** (decision 0056). Segment count
+is a *read* cost that degrades a viewport gradually — ~73 ms on a 300-tile viewport at ~152 segments
+— and nothing breaks if it is paid down tonight, so it fires only inside
+`compaction_window_start .. + compaction_window_secs`. Retirable depth is a *write* cost and it is
+unbounded: the overlay grows monotonically under deletion churn, every deny acceptance clones it,
+and depth is a term in I1's composition cost. A deployment that reaches its limit at 14:00 should
+not wait ten hours to start recovering, so that route has no window.
+
+**The window is a start time, not a deadline.** A node down at 00:00 and started at 09:00 folds
+nothing: the window has closed and the next one is tonight. That is what `compaction_window_secs`
+is for, and it is the whole difference between a start time and "any time after a restart".
+
+**The window is UTC**, which is a correctness argument rather than a convenience one: a local-time
+window shifts by an hour twice a year, and on the transition day it fires either twice or not at
+all — against a 24 h floor that would then block or admit the second firing depending on which way
+the clock moved.
+
+✔ The keys, under `[ingest]` beside `overlay_soft_limit`, which is the section SA §7 already puts
+the write-path knobs in. Every one is optional and the whole section may be absent; each route
+switches off on its own, spelled `"off"`, and every value is **refused rather than clamped** — a
+maintenance route that silently does not run is indistinguishable from one with nothing to do.
+
+```toml
+[ingest]
+compaction_window_start      = "00:00"   # UTC HH:MM, or "off" — the windowed route's switch
+compaction_window_secs       = 14400     # how long it stays open; a start time, not a deadline
+compaction_window_min_segments = 8       # segments in any one slice worth folding for
+compaction_after_deletions   = 500000    # or "off"; defaults to overlay_soft_limit
+compaction_min_interval_secs = 86400     # the floor under both routes
+```
 
 **The overlay gauge is `|deleted|`, not `Overlay::len()`, and the difference is a live bug in r1**
 (r3, memory F5). `Overlay::len()` is `|deleted ∪ suppressed|`, and Rule S says a suppression never
@@ -798,22 +832,29 @@ An **OR over four gauges, never a blend.** The obligations are independent — a
 deletes nothing still accumulates dead bytes and segments, and one that deletes constantly hits
 retirable depth long before disc — so a combined score would let one pressure hide another.
 
-**The minimum interval is a floor, not a trigger, and there is deliberately no maximum age.** A
-pure timer was considered and is declined: it schedules the most expensive operation in the system
-against a bundle that may have nothing to reclaim. The precedent is the growth-gated tick rotation
-(write-path §4.5) — an idle node rotates nothing — and the same argument applies with more force
-here, where the operation doubles disc and rebuilds every session's row projection. A deployment
-that takes three deletions a year has three un-retired entries and no reason to rewrite 47 GB.
+**The minimum interval is a floor, not a trigger, and there is still no maximum age.** An
+**ungated** timer was considered and is declined: it schedules the most expensive operation in the
+system against a bundle that may have nothing to reclaim. The precedent is the growth-gated tick
+rotation (write-path §4.5) — an idle node rotates nothing — and the same argument applies with more
+force here, where the operation doubles disc and rebuilds every session's row projection. A
+deployment that takes three deletions a year has three un-retired entries and no reason to rewrite
+47 GB. **The window above is not that timer** (decision 0056): it is a work gauge with an hour
+attached, it fires only when a slice has segments worth folding, and it decides *when* rather than
+*whether*.
 
 Three refusals, and each says so rather than retrying silently: the gates above (poisoned,
 diverged, stepped down), one fold at a time, and the free-space precondition (spec §8) — a trigger
 that fires every tick into an out-of-space refusal is a log flood, so the refusal alarms once per
 crossing, exactly as the overlay alarm does.
 
-**The two fractions are the only numbers in this design chosen without evidence.** Nothing has ever
-run a fold, so `1.0` and `0.2` are picked to sit below the measured no-compaction steady state and
-to be obviously not-yet-urgent respectively. Probe P1 is what turns them into calibrated values;
-until then they are marked as assumed in spec §14 and a deployment may set either to `off`.
+**Four numbers here are chosen without evidence**, and they are marked as assumed in spec §14
+rather than presented as sized: the two fractions above (`1.0` sits below the measured
+no-compaction steady state, `0.2` is obviously not-yet-urgent), and the window's own two —
+`compaction_window_secs` at 4 h, long enough that a node restarting inside the quiet period still
+folds and short enough that one down all night does not start at breakfast, and
+`compaction_window_min_segments` at 8, which is where a fold begins to be worth its flip cost on
+decision 0049's measurement and is otherwise a guess. Probe **P1** is what turns any of them into
+calibrated values; until then a deployment may switch each route off.
 
 ## 10. Where it lands in the tree
 
@@ -826,7 +867,7 @@ until then they are marked as assumed in spec §14 and a deployment may set eith
 | `tessera-engine::compact` | ✔ the plan (`plan_fold`, pure, on the executor), the five passes (`execute`, on one dedicated thread), the next-prefix rule and Rule F's `executed` derivation — the shape `flush.rs` / `merge.rs` / `coalesce.rs` already establish, and the fourth caller of the same publication discipline |
 | `tessera-engine::write` | ✔ `dispatch_fold` (its own thread, and the suspension of merge and coalesce), `publish_fold` (spec §4's seven steps in order), the deferred reclamation (spec §8), and the live external-id map's prune, which is the half of Rule F that lives in memory rather than in a file |
 | `tessera-engine::session` | ✔ the seam: `bundle_identity`, the fragment cache and the external-id index onto `Generation`; `GeometryPublication` and its `PrefixRotation`; `publish_rotated_prefix`; the bundle root in place of a captured prefix directory |
-| `tessera-server` | ⊘ `POST /control/compact`, the three gauges, the free-space precondition. `Engine::request_fold` is the trigger they will call; nothing else does |
+| `tessera-server` | ✔ the schedule's five `[ingest].compaction_*` keys, parsed into the `CompactionSchedule` the executor reads; ⊘ `POST /control/compact`, the dead-bytes and tombstoned-row gauges on `/control/status` (overlay depth and segment count are already published), and the free-space precondition |
 
 `scripts/check-layers.sh` is unaffected: the engine already depends on both store and authz, and
 the fold adds no publisher — it goes through the executor like everything else.
@@ -1031,7 +1072,8 @@ are.
 | page-cache pollution during a fold, and what a concurrent viewport pays for it | **measured** — **P3 run**, four times in the evicting regime, twice at a real 45.57 GiB bundle against 36.9–38.2 GiB of RAM. Unthrottled costs up to **2.03×**; **128 MiB/s is inside every run's noise floor**. *This was the weakest assumption in this document; it was wrong, and less wrong than §6.1 guessed* | `docs/evidence/memos/2026-08-05-compaction-flip-and-io.md` |
 | the 15.7× excursion | **measured and discounted** — cgroup-capped runs only, where direct reclaim stalls the allocating task; neither real run reproduced it. Not a fold's expected cost | same memo |
 | that 128 MiB/s is the right rate on **another** device, or at a deployment's bundle:cache ratio | **not measured.** The knee follows device bandwidth, and both runs sat at 1.24:1 and 1.96:1 where a 47 GB bundle on a 16 GB machine is ~3:1. Both are why spec §6.1 makes this a key rather than a constant | same memo |
-| the trigger's two new thresholds — dead bytes ≥ live, tombstoned rows ≥ 20% | **assumed**. Nothing has run a fold, so neither is calibrated; P1 is what makes them evidence | spec §9 |
+| the trigger's two unbuilt thresholds — dead bytes ≥ live, tombstoned rows ≥ 20% | **assumed**. Nothing has run a fold, so neither is calibrated; P1 is what makes them evidence | spec §9 |
+| the window's two — 4 h wide, 8 segments | **assumed**. The width is bounded by two operational statements rather than a measurement (a node restarting inside the quiet period should still fold; one down all night should not start at breakfast); the segment threshold sits an order below the ~152 at which decision 0049 measured ~73 ms on a 300-tile viewport, and is otherwise a guess | spec §9, decision 0056 |
 
 Three probes were named because three claims cannot be believed without them. **P1** — fold peak
 RSS and wall clock at 10⁷ with a scaling argument to 10⁹ — is unbuilt, there being no fold to run.

@@ -1860,6 +1860,8 @@ impl WritePath {
                     fold_submit: fold_tx,
                     configured_merge_bytes: flush.configured_merge_bytes,
                     fold_paused: flush.fold_paused,
+                    compaction: flush.compaction,
+                    last_fold_completed_unix: None,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
                     // Seeded from the opened WAL's position so a freshly started node does not
@@ -2632,6 +2634,9 @@ pub(crate) struct MaintenanceDeps {
     /// `Engine::set_fold_paused_for_test`, which is what lets a test land a flush inside a fold's
     /// flight. Always `false` in a shipped build.
     pub(crate) fold_paused: Arc<AtomicBool>,
+    /// When a fold is dispatched with nobody asking for one — see
+    /// [`crate::compact::CompactionSchedule`].
+    pub(crate) compaction: crate::compact::CompactionSchedule,
 }
 
 /// The bundle's declared scalar tail, as the segment writer wants it.
@@ -2711,6 +2716,27 @@ fn plan_to_dispatch(
 /// be a liveness hole bought for no safety.
 fn dictionary_moved_under(promoted_from_dict_len: Option<u32>, live_len: u32) -> bool {
     promoted_from_dict_len.is_some_and(|planned| planned != live_len)
+}
+
+/// The largest live segment count across this generation's slices — compaction §9's segment gauge.
+///
+/// The **max** rather than the sum, because the gauge is per (partition, slice): a tile resolves to
+/// one contiguous range per live segment *of the slice it is in*, so one slice at 64 segments is
+/// what a viewport there pays, whatever the others hold.
+///
+/// ⊘ **Untestable today, and stated rather than claimed**: no build emits a second slice
+/// (compaction §6.3), so max and sum agree on every bundle that exists and no case here
+/// distinguishes them. It is written this way because the slices fold-in is what makes the
+/// difference real, not because a test caught it.
+fn live_segments_of(generation: &Generation) -> usize {
+    generation
+        .bundle
+        .partitions
+        .values()
+        .flat_map(|partition| partition.slices.values())
+        .map(|slice| slice.segments.len())
+        .max()
+        .unwrap_or(0)
 }
 
 fn slices_of(generation: &Generation) -> Vec<String> {
@@ -2860,6 +2886,15 @@ struct Executor {
     configured_merge_bytes: Option<u64>,
     /// See [`MaintenanceDeps::fold_paused`].
     fold_paused: Arc<AtomicBool>,
+    /// See [`crate::compact::CompactionSchedule`]. Consulted at the tick, beside the flush's own.
+    compaction: crate::compact::CompactionSchedule,
+    /// When the last fold **completed**, as a Unix timestamp — the operand
+    /// `compaction_min_interval_secs` is measured from.
+    ///
+    /// Process-local, and `crate::compact::due` argues why that is harmless: both gauges are read
+    /// against the bundle a fold itself produced, so a node restarting inside its own window
+    /// dispatches nothing rather than folding twice.
+    last_fold_completed_unix: Option<u64>,
     /// Superseded prefixes awaiting reclamation, each held by the generation that named it.
     ///
     /// **The `Arc` is the wait.** Compaction §8 reclaims the old prefix whole, and lifecycle §2
@@ -3379,6 +3414,26 @@ impl Executor {
         self.health.merges.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Whether [`crate::compact::CompactionSchedule`] calls for a fold now.
+    ///
+    /// The two gauges are read off the generation this tick loaded, so they agree with each other
+    /// and with the plan the dispatch is about to take. Both are cheap — a `len` per slice and a
+    /// bitmap cardinality — which is what lets this run at every tick rather than on a cadence of
+    /// its own.
+    fn scheduled_fold(&self, generation: &Arc<Generation>) -> Option<crate::compact::FoldTrigger> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        crate::compact::due(
+            &self.compaction,
+            now,
+            self.last_fold_completed_unix,
+            live_segments_of(generation),
+            generation.overlay.deleted_len(),
+        )
+    }
+
     /// Plan a fold and start it **on its own thread**, if one is requested and nothing blocks it.
     ///
     /// **Not on the shared pool** (compaction §3). Flush, merge and coalesce all execute on the
@@ -3393,9 +3448,21 @@ impl Executor {
     /// dropped. A merge or coalesce already in flight is neither a refusal nor a state to act on,
     /// so the flag stays armed and the next tick tries again once that pass lands.
     fn dispatch_fold(&mut self, generation: &Arc<Generation>) {
-        if !self.health.fold_requested.load(Ordering::SeqCst)
-            || self.fold_in_flight.load(Ordering::SeqCst)
-        {
+        if self.fold_in_flight.load(Ordering::SeqCst) {
+            return;
+        }
+        // A request dispatches on its own terms — whatever hour it is and whatever the gauges read
+        // — so the schedule is not consulted for one. **That is about attribution rather than
+        // about whether the fold happens**: evaluating both would dispatch exactly the same fold,
+        // and what it would additionally do is log a requested fold under whichever gauge happened
+        // to agree, in the line an operator reads to find out why the corpus was rewritten.
+        let requested = self.health.fold_requested.load(Ordering::SeqCst);
+        let scheduled = if requested {
+            None
+        } else {
+            self.scheduled_fold(generation)
+        };
+        if !requested && scheduled.is_none() {
             return;
         }
         // **At most one fold, and none while a merge or a coalesce is running.** Their outputs
@@ -3459,6 +3526,14 @@ impl Executor {
             tiers: generation.delta_postings.clone(),
         };
 
+        if let Some(trigger) = scheduled {
+            tracing::info!(
+                trigger = ?trigger,
+                live_segments = live_segments_of(generation),
+                retirable_deletions = generation.overlay.deleted_len(),
+                "dispatching a scheduled compaction fold"
+            );
+        }
         self.health.fold_requested.store(false, Ordering::SeqCst);
         self.fold_in_flight.store(true, Ordering::SeqCst);
         let in_flight = Arc::clone(&self.fold_in_flight);
@@ -3936,6 +4011,12 @@ impl Executor {
         self.reclaim_superseded_prefixes();
 
         self.health.folds.fetch_add(1, Ordering::Relaxed);
+        // The floor's operand, taken at completion rather than at dispatch: an hours-long fold that
+        // started inside last night's window must not make tonight's window eligible again.
+        self.last_fold_completed_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs());
         tracing::info!(
             prefix = %completed.prefix,
             segments_version,

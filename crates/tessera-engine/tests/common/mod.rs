@@ -79,6 +79,8 @@ pub fn config() -> EngineConfig {
         flush_max_age_secs: 90,
         // The built-in default; `tests/scale.rs` is where this knob is exercised.
         max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
     }
 }
 

@@ -51,6 +51,8 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
             EngineConfig {
                 flush_max_age_secs: 3600,
                 max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
                 ..config()
             },
         )
@@ -135,6 +137,8 @@ fn a_suppressed_holder_still_blocks_reingest() {
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
             ..config()
         },
     )

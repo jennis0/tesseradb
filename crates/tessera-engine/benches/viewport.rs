@@ -184,6 +184,8 @@ fn bench_viewport(c: &mut Criterion) {
             compute_threads: tessera_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
         },
     )
     .expect("engine should open the 2.4M bundle");

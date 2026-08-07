@@ -163,6 +163,138 @@ pub(crate) fn executed(d0: &Bitmap, carried: &CarriedForward) -> Bitmap {
 }
 
 // =================================================================================================
+// The schedule
+// =================================================================================================
+
+/// When a fold is dispatched without anyone asking for one (compaction §9, decision 0056).
+///
+/// **Two routes, and the split is by urgency rather than by taste.** Segment count is a *read* cost
+/// — a tile resolves to one contiguous range per live segment, so a viewport pays a binary search
+/// and a `range_cardinality` per segment per tile — which degrades gradually and can wait for a
+/// quiet hour. Retirable depth is a *write* cost and it is unbounded: the overlay grows
+/// monotonically under deletion churn, every deny acceptance clones it, and depth is a term in I1's
+/// composition cost. So the first route is windowed and the second is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionSchedule {
+    /// The floor under both routes — compaction §9's `compaction_min_interval_secs`. A fold within
+    /// this of the last completed one is never dispatched, whatever a gauge says.
+    pub min_interval_secs: u64,
+    /// Seconds past **UTC** midnight at which the daily window opens; `None` switches the windowed
+    /// route off entirely.
+    ///
+    /// UTC rather than local time, and that is a correctness argument: a local-time window shifts
+    /// by an hour twice a year, and on the transition day it fires either twice or not at all —
+    /// against a 24 h floor that would then block or admit the second firing depending on which way
+    /// the clock moved. A deployment wanting local midnight sets the offset once, and it stays put.
+    pub window_start_secs: Option<u32>,
+    /// How long the window stays open. **This is what makes the start time a start time**: without
+    /// it a node down at 00:00 and started at 09:00 would fold at 09:00, which is the one hour the
+    /// operator configured it away from.
+    pub window_secs: u32,
+    /// Live segments in any one slice at or above which a fold is worth running *inside the
+    /// window*. Below it the window passes and nothing happens.
+    pub window_min_segments: usize,
+    /// Retirable deletions at or above which a fold is dispatched at any hour; `None` switches the
+    /// unwindowed route off. Defaults to `overlay_soft_limit`, which is the action compaction §9
+    /// says that alarm was always supposed to prompt.
+    pub after_deletions: Option<u64>,
+}
+
+impl CompactionSchedule {
+    /// Neither route armed — what an embedder gets by default, and what every test that is not
+    /// about the schedule uses.
+    ///
+    /// **Off rather than on**, because `Engine` is a library type with no configuration file behind
+    /// it: a fold started by a default nobody chose is minutes to hours of IO an embedder did not
+    /// ask for. `tessera-server` is where the defaults compaction §9 states are applied, because it
+    /// is where an operator can see and change them.
+    pub fn off() -> Self {
+        CompactionSchedule {
+            min_interval_secs: 0,
+            window_start_secs: None,
+            window_secs: 0,
+            window_min_segments: 0,
+            after_deletions: None,
+        }
+    }
+}
+
+/// Why the schedule dispatched a fold — carried into the log line, so an operator can tell a
+/// nightly tidy from a deployment that is drowning in un-retired deletions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FoldTrigger {
+    /// Inside the daily window, with a slice over `window_min_segments`.
+    Window,
+    /// `|deleted|` reached `after_deletions`, at whatever hour.
+    RetirableDepth,
+}
+
+/// Whether the schedule calls for a fold now.
+///
+/// **Pure, so the whole trigger is testable without a clock or an executor** — which matters more
+/// here than usual, because the alternative is a test that waits for midnight. `now_unix` and
+/// `last_fold_unix` are seconds; `live_segments` is the largest live segment count across slices,
+/// since compaction §9's gauge is per (partition, slice) and any slice over the threshold is worth
+/// a fold.
+///
+/// # The floor is process-local, and the work gates are what make that harmless
+///
+/// `last_fold_unix` does not survive a restart, so a node that restarts inside its own window has
+/// no record of the fold it just finished. It dispatches nothing anyway: a fold leaves one segment
+/// per partition-slice and an overlay with the executed deletions gone, so both gauges are re-read
+/// against the bundle the fold itself produced and neither is over. Durable last-fold state would
+/// buy only the case where a restart lands between a fold completing and its own output being
+/// visible, which is not a state a fold leaves behind.
+pub(crate) fn due(
+    schedule: &CompactionSchedule,
+    now_unix: u64,
+    last_fold_unix: Option<u64>,
+    live_segments: usize,
+    retirable_deletions: u64,
+) -> Option<FoldTrigger> {
+    // The floor, under both routes. `saturating_sub` rather than a comparison because a clock that
+    // steps backwards must read as "not yet", never as a very large elapsed time.
+    if let Some(last) = last_fold_unix {
+        if now_unix.saturating_sub(last) < schedule.min_interval_secs {
+            return None;
+        }
+    }
+
+    // **The unwindowed route first**, because it is the urgent one: a deployment over its retirable
+    // depth inside its own window should log the reason that will still be true tomorrow.
+    if let Some(threshold) = schedule.after_deletions {
+        if retirable_deletions >= threshold {
+            return Some(FoldTrigger::RetirableDepth);
+        }
+    }
+
+    let start = schedule.window_start_secs?;
+    if live_segments < schedule.window_min_segments || schedule.window_min_segments == 0 {
+        return None;
+    }
+    in_window(now_unix, start, schedule.window_secs).then_some(FoldTrigger::Window)
+}
+
+/// Whether `now_unix` falls in the daily window `[start, start + width)` past UTC midnight.
+///
+/// **Wraps past midnight**, which a window starting at 23:00 needs and which is the only reason
+/// this is a function rather than two comparisons.
+fn in_window(now_unix: u64, start_secs: u32, window_secs: u32) -> bool {
+    const DAY: u64 = 86_400;
+    // A width at or past a whole day is always open — stated rather than left to the arithmetic,
+    // which would otherwise compare a `since` against a value it can never reach.
+    if u64::from(window_secs) >= DAY {
+        return true;
+    }
+    if window_secs == 0 {
+        return false;
+    }
+    let time_of_day = now_unix % DAY;
+    let since = (time_of_day + DAY - u64::from(start_secs)) % DAY;
+    since < u64::from(window_secs)
+}
+
+// =================================================================================================
 // The plan
 // =================================================================================================
 
@@ -824,5 +956,148 @@ mod tests {
     fn the_next_prefix_over_an_empty_root_is_the_first_one() {
         let tmp = tempfile::TempDir::new().unwrap();
         assert_eq!(next_prefix_name(tmp.path()).unwrap(), "v00001");
+    }
+
+    // ---- the schedule (compaction §9, decision 0056) -----------------------------------------
+
+    /// Midnight UTC + 4 h, 8 segments, 500,000 deletions, 24 h floor — `tessera-server`'s defaults,
+    /// so these cases exercise the shipped configuration rather than a shape invented for them.
+    fn schedule() -> CompactionSchedule {
+        CompactionSchedule {
+            min_interval_secs: 86_400,
+            window_start_secs: Some(0),
+            window_secs: 4 * 3_600,
+            window_min_segments: 8,
+            after_deletions: Some(500_000),
+        }
+    }
+
+    /// Seconds since the epoch at `day` days past it, `hour`:00 UTC.
+    fn at(day: u64, hour: u64) -> u64 {
+        day * 86_400 + hour * 3_600
+    }
+
+    /// **Inside the window with enough segments, and nowhere else.** The window is a start time,
+    /// and the segment count is what makes it a gauge rather than the pure timer compaction §9
+    /// declines.
+    ///
+    /// **Mutations this kills:** dropping the window bound (09:00 fires); dropping the segment gate
+    /// (01:00 with one segment fires, which is a fold that rewrites the corpus to reorganise
+    /// nothing).
+    #[test]
+    fn the_windowed_route_fires_only_inside_the_window_and_only_with_work() {
+        let s = schedule();
+        assert_eq!(
+            due(&s, at(10, 1), None, 8, 0),
+            Some(FoldTrigger::Window),
+            "01:00 with eight segments is the case the window exists for"
+        );
+        assert_eq!(
+            due(&s, at(10, 9), None, 64, 0),
+            None,
+            "09:00 is outside the window however many segments there are — a start time that \
+             fires at breakfast after a restart is not a start time"
+        );
+        assert_eq!(
+            due(&s, at(10, 1), None, 7, 0),
+            None,
+            "and inside it, below the threshold, there is nothing worth folding"
+        );
+    }
+
+    /// **The unwindowed route fires at any hour**, because retirable depth is a write cost that
+    /// grows without bound where segment count is a read cost that degrades gradually.
+    ///
+    /// **Mutation this kills:** windowing both routes — a deployment reaching its limit at 14:00
+    /// then waits ten hours while every deny acceptance clones a growing overlay.
+    #[test]
+    fn the_retirable_depth_route_is_not_windowed() {
+        let s = schedule();
+        assert_eq!(
+            due(&s, at(10, 14), None, 1, 500_000),
+            Some(FoldTrigger::RetirableDepth),
+            "14:00, one segment, at the limit"
+        );
+        assert_eq!(due(&s, at(10, 14), None, 1, 499_999), None, "and not below it");
+    }
+
+    /// **The floor is under both routes**, and it is what keeps a daily window to one fold a day
+    /// without any "did I already fire today" state.
+    ///
+    /// **Mutations this kills:** applying the floor to only one route (the deletions case fires an
+    /// hour after the last fold); comparing rather than saturating (a clock stepping backwards
+    /// makes `now - last` enormous and every gauge fires at once).
+    #[test]
+    fn the_minimum_interval_floors_both_routes_and_survives_a_backward_clock() {
+        let s = schedule();
+        let last = at(10, 1);
+        assert_eq!(due(&s, at(10, 2), Some(last), 64, 999_999), None, "one hour later");
+        assert_eq!(
+            due(&s, at(11, 1), Some(last), 64, 0),
+            Some(FoldTrigger::Window),
+            "and the next night's window is exactly a day past it"
+        );
+        assert_eq!(
+            due(&s, at(9, 1), Some(last), 64, 999_999),
+            None,
+            "a clock that stepped backwards reads as 'not yet', never as a huge elapsed time"
+        );
+    }
+
+    /// **A window that wraps past midnight is the ordinary case for anything after noon**, and it
+    /// is the only reason the containment test is arithmetic rather than two comparisons.
+    #[test]
+    fn a_window_starting_before_midnight_wraps_into_the_next_day() {
+        let s = CompactionSchedule {
+            window_start_secs: Some(23 * 3_600),
+            window_secs: 4 * 3_600,
+            ..schedule()
+        };
+        assert_eq!(due(&s, at(10, 23), None, 8, 0), Some(FoldTrigger::Window));
+        assert_eq!(
+            due(&s, at(11, 1), None, 8, 0),
+            Some(FoldTrigger::Window),
+            "01:00 is two hours into a window that opened at 23:00"
+        );
+        assert_eq!(due(&s, at(11, 4), None, 8, 0), None, "and 04:00 is past its end");
+    }
+
+    /// **Either route switches off on its own**, which is what `spec §9`'s "a deployment may switch
+    /// each route off" means. A schedule with both off never dispatches, whatever the gauges say —
+    /// the posture an embedder gets by default and the one `Engine::request_fold` exists beside.
+    #[test]
+    fn each_route_switches_off_independently_and_off_means_never() {
+        let no_window = CompactionSchedule {
+            window_start_secs: None,
+            ..schedule()
+        };
+        assert_eq!(due(&no_window, at(10, 1), None, 1_000, 0), None);
+        assert_eq!(
+            due(&no_window, at(10, 1), None, 1_000, 500_000),
+            Some(FoldTrigger::RetirableDepth),
+            "and the other route is untouched by it"
+        );
+
+        let no_depth = CompactionSchedule {
+            after_deletions: None,
+            ..schedule()
+        };
+        assert_eq!(due(&no_depth, at(10, 14), None, 1_000, u64::MAX), None);
+
+        assert_eq!(
+            due(&CompactionSchedule::off(), at(10, 1), None, 1_000, u64::MAX),
+            None,
+            "off is off at every hour, every segment count and every depth"
+        );
+    }
+
+    /// A zero-width window never opens, and a width of a whole day never closes. Both are
+    /// reachable by configuration and neither may read as its opposite.
+    #[test]
+    fn a_zero_width_window_never_opens_and_a_day_wide_one_never_closes() {
+        for hour in [0u64, 1, 12, 23] {
+            assert!(!in_window(at(10, hour), 0, 0), "zero width at {hour}:00");
+            assert!(in_window(at(10, hour), 0, 86_400), "a day wide at {hour}:00");
+        }
     }
 }

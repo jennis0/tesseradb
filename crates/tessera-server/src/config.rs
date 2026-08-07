@@ -85,6 +85,19 @@ pub enum ConfigError {
         max_merged_segment_bytes: u64,
         base_segment_bytes: u64,
     },
+    /// `ingest.compaction_window_start` is neither `HH:MM` nor `"off"`.
+    ///
+    /// Refused rather than defaulted, because the two failure directions are both bad and neither
+    /// is visible: a value read as "off" silently retires the deployment's only fold schedule, and
+    /// one read as midnight silently starts hours of IO at an hour the operator was trying to
+    /// avoid.
+    CompactionWindowNotATime(String),
+    /// `ingest.compaction_after_deletions` is a string other than `"off"`. See [`RawThreshold`].
+    CompactionThresholdNotANumberOrOff(String),
+    /// `ingest.compaction_window_secs` is at or past a whole day, which makes the "window" every
+    /// hour of every day — i.e. the ungated timer compaction §9 declines, reached by setting a
+    /// width rather than by asking for one.
+    CompactionWindowNotAWindow(u32),
     /// `serve.max_underlay_offset` above the grid's own depth. The §5.2 grid is 2¹⁶ × 2¹⁶, so an
     /// offset beyond 16 can never be usable at any zoom — every request naming it would be refused
     /// at the depth check. It is refused at startup instead, because the value also feeds a
@@ -253,6 +266,18 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "unsupported plugin module '{module}' — this build ships only \
                  builtin:passthrough (the wasmtime plugin host is not built)"
+            ),
+            ConfigError::CompactionWindowNotATime(value) => write!(
+                f,
+                "ingest.compaction_window_start = '{value}' is neither a UTC time of day (HH:MM,                  24-hour) nor 'off'. It is refused rather than defaulted: read as 'off' it                  silently retires the deployment's fold schedule, and read as midnight it                  silently starts hours of IO at the hour the operator was avoiding"
+            ),
+            ConfigError::CompactionThresholdNotANumberOrOff(value) => write!(
+                f,
+                "ingest.compaction_after_deletions = '{value}' is neither a count nor 'off'"
+            ),
+            ConfigError::CompactionWindowNotAWindow(secs) => write!(
+                f,
+                "ingest.compaction_window_secs = {secs} is a whole day or more, which makes the                  window every hour of every day — the ungated timer compaction §9 declines,                  reached by setting a width. Use 'compaction_window_start = \"off\"' if the                  intent is to fold whenever there is work, and set the segment threshold to say                  how much work"
             ),
             ConfigError::FloorClauseDisabled => write!(
                 f,
@@ -488,6 +513,30 @@ struct RawIngest {
     flush_max_age_secs: Option<u64>,
     #[serde(default)]
     ingest_buffer_max_items: Option<usize>,
+    #[serde(default)]
+    compaction_min_interval_secs: Option<u64>,
+    #[serde(default)]
+    compaction_window_start: Option<String>,
+    #[serde(default)]
+    compaction_window_secs: Option<u32>,
+    #[serde(default)]
+    compaction_window_min_segments: Option<usize>,
+    #[serde(default)]
+    compaction_after_deletions: Option<RawThreshold>,
+}
+
+/// A count, or the literal `"off"` — compaction §9's spelling for a route a deployment does not
+/// want.
+///
+/// **Untagged, and the string arm is not a free-text field**: anything other than `"off"` is
+/// refused at startup ([`ConfigError::CompactionThresholdNotANumberOrOff`]) rather than read as
+/// zero, because a typo that disables a maintenance route silently is the failure this whole file
+/// is built to avoid.
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum RawThreshold {
+    Count(u64),
+    Word(String),
 }
 
 #[derive(Deserialize)]
@@ -656,9 +705,16 @@ pub struct Config {
     /// [`DEFAULT_WAL_HARD_LIMIT_BYTES`] for what would be needed to make the name true.
     pub wal_hard_limit_bytes: u64,
     /// Overlay depth at which an alarm is raised. See [`DEFAULT_OVERLAY_SOFT_LIMIT`].
-    /// **Alarms only** — ⊘ no compaction fold exists, so crossing it gets an operator a signal,
-    /// never relief.
+    ///
+    /// **The alarm is on total depth and the fold trigger is not** (compaction §9): this counts
+    /// `deleted ∪ suppressed`, which is the right thing for an operator to see, while
+    /// [`Config::compaction`]'s route keys on the deletions alone — a suppression never retires, so
+    /// a trigger reading this number would dispatch a no-op fold for ever on a deployment holding
+    /// standing suppressions.
     pub overlay_soft_limit: usize,
+    /// When a fold is dispatched with nobody asking for one — compaction §9's automatic trigger as
+    /// decision 0056 rules it, parsed from the four `ingest.compaction_*` keys.
+    pub compaction: tessera_engine::CompactionSchedule,
     /// The flush tick: the period at which geometry is published, and therefore the bound on how
     /// stale an acknowledged item's absence may be. See [`DEFAULT_FLUSH_MAX_AGE_SECS`].
     pub flush_max_age_secs: u64,
@@ -1175,11 +1231,13 @@ const DEFAULT_WAL_HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Overlay depth at which an alarm is raised. **SA §7's own default**, carried across unchanged.
 ///
-/// **It alarms; it does not act.** ⊘ Specified, not implemented: no compaction fold exists, so an
-/// operator who sets this gets a signal that the overlay is deep, not a mechanism that makes it
-/// shallower. The
-/// depth matters beyond memory: every deny acceptance clones the overlay inside the WAL critical
-/// section, so overlay depth is a term in deny-ack latency.
+/// **It alarms, and it is now also the default trigger for the thing that acts.** The alarm counts
+/// `deleted ∪ suppressed`, which is the right thing for an operator to see; the fold trigger it
+/// seeds — `ingest.compaction_after_deletions` — counts the deletions alone, because a suppression
+/// never retires and a fold keyed on the union would rewrite the corpus to retire nothing on any
+/// deployment holding standing suppressions (compaction §9; r3, memory F5). The depth matters
+/// beyond memory: every deny acceptance clones the overlay inside the WAL critical section, so
+/// overlay depth is a term in deny-ack latency.
 const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 
 // `flush_max_items` is deleted, not inert (decision 0045). "Marks the buffer flush-ready" had no
@@ -1203,6 +1261,27 @@ const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 /// across the whole session population at every tick. 90 is kept because it is the number this
 /// deployment has run at, not because anything now forces it.
 const DEFAULT_FLUSH_MAX_AGE_SECS: u64 = 90;
+
+/// Compaction §9's floor, under both trigger routes: at most one fold a day.
+///
+/// It is also what keeps the daily window to one firing without any "did I fire today" state — the
+/// window is hours wide and the floor is a day, so the arithmetic does the bookkeeping.
+const DEFAULT_COMPACTION_MIN_INTERVAL_SECS: u64 = 86_400;
+
+/// Midnight **UTC**, per decision 0056. Not local time: a local window shifts by an hour twice a
+/// year and on the transition day fires twice or not at all, for the most expensive operation in
+/// the system.
+const DEFAULT_COMPACTION_WINDOW_START_SECS: u32 = 0;
+
+/// Four hours. **Assumed, not sized** (compaction §14): long enough that a node restarting inside
+/// the quiet period still folds, short enough that one down all night does not start at breakfast.
+const DEFAULT_COMPACTION_WINDOW_SECS: u32 = 4 * 3_600;
+
+/// Eight live segments in any one slice. **Assumed, not sized** (compaction §14): decision 0049
+/// measured ~73 ms on a 300-tile viewport at ~152 segments against a 135–164 ms baseline, so this
+/// is where a fold begins to be worth its flip cost and is otherwise a guess. Probe P1 calibrates
+/// it.
+const DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS: usize = 8;
 
 /// Buffer occupancy at which `/control/ingest` is refused (§1.3).
 ///
@@ -1306,6 +1385,25 @@ const DEFAULT_EXPECTED_CONCURRENT_SESSIONS: usize = 8;
 
 /// Refuses a zero for one of the write-path knobs, naming the silent failure zero would cause.
 /// See [`ConfigError::MustBeNonZero`] for why these refuse rather than clamp.
+/// `HH:MM`, 24-hour, to seconds past UTC midnight.
+///
+/// Strict: exactly two fields, both numeric, hour `< 24` and minute `< 60`. A lenient parser here
+/// would accept `"24:00"` or `"0:0"` and answer with a time the operator did not write, for a knob
+/// whose whole purpose is *which hour*.
+fn parse_time_of_day(value: &str) -> Result<u32> {
+    let bad = || ConfigError::CompactionWindowNotATime(value.to_string());
+    let (hh, mm) = value.split_once(':').ok_or_else(bad)?;
+    if hh.len() != 2 || mm.len() != 2 {
+        return Err(bad());
+    }
+    let hour: u32 = hh.parse().map_err(|_| bad())?;
+    let minute: u32 = mm.parse().map_err(|_| bad())?;
+    if hour > 23 || minute > 59 {
+        return Err(bad());
+    }
+    Ok(hour * 3_600 + minute * 60)
+}
+
 fn non_zero_usize(key: &'static str, value: usize, consequence: &'static str) -> Result<usize> {
     if value == 0 {
         return Err(ConfigError::MustBeNonZero { key, consequence });
@@ -1565,6 +1663,52 @@ fn parse(text: &str) -> Result<Config> {
         "a zero tick asks the executor to publish geometry continuously, which is a publication \
          per loop iteration and a drain entry per publication",
     )?;
+    // ---- the compaction schedule (compaction §9, decision 0056) ---------------------------------
+    //
+    // Two routes, each switchable off on its own, and a floor under both. Every value is validated
+    // here rather than clamped, on this file's standing rule: a maintenance route that silently
+    // does not run is indistinguishable from one that has nothing to do.
+    let compaction_window_secs = raw
+        .ingest
+        .compaction_window_secs
+        .unwrap_or(DEFAULT_COMPACTION_WINDOW_SECS);
+    if u64::from(compaction_window_secs) >= 86_400 {
+        return Err(ConfigError::CompactionWindowNotAWindow(compaction_window_secs));
+    }
+    let compaction_window_start_secs = match raw.ingest.compaction_window_start.as_deref() {
+        None => Some(DEFAULT_COMPACTION_WINDOW_START_SECS),
+        Some("off") => None,
+        Some(value) => Some(parse_time_of_day(value)?),
+    };
+    // **Defaults to `overlay_soft_limit`**, which is the action compaction §9 says that alarm was
+    // always supposed to prompt. Two independently-set thresholds is how an operator ends up with
+    // an alarm that never has a consequence; it stays separately settable for the deployment that
+    // wants to be told earlier than it wants to act.
+    let compaction_after_deletions = match &raw.ingest.compaction_after_deletions {
+        None => Some(overlay_soft_limit as u64),
+        Some(RawThreshold::Count(n)) => Some(*n),
+        Some(RawThreshold::Word(word)) if word == "off" => None,
+        Some(RawThreshold::Word(word)) => {
+            return Err(ConfigError::CompactionThresholdNotANumberOrOff(word.clone()))
+        }
+    };
+    let compaction = tessera_engine::CompactionSchedule {
+        min_interval_secs: raw
+            .ingest
+            .compaction_min_interval_secs
+            .unwrap_or(DEFAULT_COMPACTION_MIN_INTERVAL_SECS),
+        window_start_secs: compaction_window_start_secs,
+        window_secs: compaction_window_secs,
+        window_min_segments: non_zero_usize(
+            "ingest.compaction_window_min_segments",
+            raw.ingest
+                .compaction_window_min_segments
+                .unwrap_or(DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS),
+            "a zero threshold makes every night's window fold a bundle that is already one              segment per slice — the ungated timer compaction §9 declines, reached by setting a              gauge to a value nothing can be below",
+        )?,
+        after_deletions: compaction_after_deletions,
+    };
+
     let ingest_buffer_max_items = non_zero_usize(
         "ingest.ingest_buffer_max_items",
         raw.ingest
@@ -1730,6 +1874,7 @@ fn parse(text: &str) -> Result<Config> {
         ingest_max_batch_bytes,
         wal_hard_limit_bytes,
         overlay_soft_limit,
+        compaction,
         flush_max_age_secs,
         row_projection_cache_bytes,
         fragment_cache_bytes,
@@ -1802,6 +1947,140 @@ mod tests {
         assert!(matches!(
             err,
             ConfigError::MissingDisclosureKey("token_max_lifetime")
+        ));
+    }
+
+    // ---- the compaction schedule (compaction §9, decision 0056) ------------------------------
+
+    /// **The shipped defaults are the ones compaction §9 states**, and a deployment that writes no
+    /// `[ingest]` section gets them: a fold at midnight UTC for four hours once a slice reaches
+    /// eight segments, an unwindowed fold at `overlay_soft_limit` deletions, and one fold a day.
+    ///
+    /// **Mutations this kills:** defaulting the window off (a deployment gets a mechanism only if
+    /// it remembers, which is what decision 0056's D3 predecessor refuses); defaulting
+    /// `after_deletions` to a number of its own rather than to `overlay_soft_limit` (an alarm with
+    /// no consequence).
+    #[test]
+    fn the_compaction_schedule_defaults_to_section_9s_own_numbers() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("")).unwrap();
+        assert_eq!(
+            config.compaction,
+            tessera_engine::CompactionSchedule {
+                min_interval_secs: 86_400,
+                window_start_secs: Some(0),
+                window_secs: 4 * 3_600,
+                window_min_segments: 8,
+                after_deletions: Some(DEFAULT_OVERLAY_SOFT_LIMIT as u64),
+            }
+        );
+    }
+
+    /// `overlay_soft_limit` is the *alarm*, and the unwindowed route follows it unless told
+    /// otherwise — compaction §9's "the action its alarm was always supposed to prompt".
+    #[test]
+    fn the_deletion_route_follows_the_overlay_alarm_unless_set_apart_from_it() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let followed = parse(&valid_toml_with("", "overlay_soft_limit = 42
+")).unwrap();
+        assert_eq!(followed.compaction.after_deletions, Some(42));
+
+        let apart = parse(&valid_toml_with(
+            "",
+            "overlay_soft_limit = 42
+compaction_after_deletions = 9000
+",
+        ))
+        .unwrap();
+        assert_eq!(
+            apart.compaction.after_deletions,
+            Some(9000),
+            "a deployment may be told earlier than it acts"
+        );
+    }
+
+    /// Each route switches off on its own, spelled `"off"` — compaction §9's own word for it.
+    #[test]
+    fn each_compaction_route_switches_off_independently() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let no_window =
+            parse(&valid_toml_with("", "compaction_window_start = \"off\"
+")).unwrap();
+        assert_eq!(no_window.compaction.window_start_secs, None);
+        assert!(no_window.compaction.after_deletions.is_some());
+
+        let no_depth =
+            parse(&valid_toml_with("", "compaction_after_deletions = \"off\"
+")).unwrap();
+        assert_eq!(no_depth.compaction.after_deletions, None);
+        assert!(no_depth.compaction.window_start_secs.is_some());
+    }
+
+    /// `HH:MM` is parsed strictly, in UTC, and anything else is refused at startup.
+    ///
+    /// **Refused rather than defaulted**, because both failure directions are silent: read as
+    /// "off" it retires the deployment's only fold schedule, and read as midnight it starts hours
+    /// of IO at the hour the operator was trying to avoid.
+    ///
+    /// **Mutation this kills:** a lenient parser — `"9:30"`, `"24:00"` and `"00:60"` would all be
+    /// accepted, each answering with a time nobody wrote.
+    #[test]
+    fn the_window_start_is_a_strict_utc_time_of_day() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let parsed =
+            parse(&valid_toml_with("", "compaction_window_start = \"02:30\"
+")).unwrap();
+        assert_eq!(parsed.compaction.window_start_secs, Some(2 * 3_600 + 1_800));
+
+        for bad in ["9:30", "24:00", "00:60", "0230", "2:3", "midnight", ""] {
+            let toml =
+                valid_toml_with("", &format!("compaction_window_start = \"{bad}\"
+"));
+            assert!(
+                matches!(
+                    parse(&toml),
+                    Err(ConfigError::CompactionWindowNotATime(_))
+                ),
+                "'{bad}' should be refused"
+            );
+        }
+    }
+
+    /// A width of a whole day is the ungated timer compaction §9 declines, reached by setting a
+    /// width rather than by asking for one — so it is refused rather than accepted as "always".
+    #[test]
+    fn a_day_wide_window_is_refused_because_it_is_not_a_window() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let toml = valid_toml_with("", "compaction_window_secs = 86400
+");
+        assert!(matches!(
+            parse(&toml),
+            Err(ConfigError::CompactionWindowNotAWindow(86_400))
+        ));
+        // And one second under it is a window, however impractical.
+        assert!(parse(&valid_toml_with("", "compaction_window_secs = 86399
+")).is_ok());
+    }
+
+    /// A zero segment threshold makes every night's window fold a bundle that is already one
+    /// segment per slice — the same ungated timer, reached through the gauge instead.
+    #[test]
+    fn a_zero_segment_threshold_is_refused() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let toml = valid_toml_with("", "compaction_window_min_segments = 0
+");
+        assert!(matches!(
+            parse(&toml),
+            Err(ConfigError::MustBeNonZero {
+                key: "ingest.compaction_window_min_segments",
+                ..
+            })
         ));
     }
 

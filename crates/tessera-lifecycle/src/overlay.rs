@@ -124,11 +124,23 @@ impl Overlay {
             .collect()
     }
 
+    /// How many deletions stand — **the gauge a compaction trigger keys on**, and not the same
+    /// number as [`Self::len`].
+    ///
+    /// `len` is `|deleted ∪ suppressed|`, and Rule S says a suppression never retires, so a
+    /// deployment holding 500,000 standing suppressions is permanently over any limit expressed in
+    /// those terms — and a trigger reading it would dispatch a **full no-op fold every interval,
+    /// for ever**, rewriting the corpus to retire nothing (compaction §9; r3, memory F5). A
+    /// trigger keys on what a fold can actually reduce; the *alarm* stays on total depth, which is
+    /// the right thing for an operator to see.
+    pub fn deleted_len(&self) -> u64 {
+        self.deleted.cardinality()
+    }
+
     /// How many entities this overlay has an opinion on — the depth the soft-limit alarm gauges.
     ///
-    /// **This can now go down.** An unsuppress genuinely removes an id, so the one disposition with
-    /// a retirement rule that exists is the one the gauge can reflect. Deletions never shrink (⊘),
-    /// so the depth's floor is the deletion set.
+    /// **This can now go down**, in both directions: an unsuppress removes an id, and a fold's
+    /// retirement removes the deletions it executed ([`Self::retire`]).
     pub fn len(&self) -> usize {
         self.denied().cardinality() as usize
     }

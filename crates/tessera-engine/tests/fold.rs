@@ -1103,6 +1103,178 @@ fn masked_counts_are_identical_across_the_flip_for_every_principal() {
     );
 }
 
+/// Seconds past UTC midnight, now.
+fn utc_time_of_day() -> u32 {
+    (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        % 86_400) as u32
+}
+
+/// A config whose fold schedule is `schedule` and whose tick is otherwise the fixture's.
+fn config_scheduling(schedule: tessera_engine::CompactionSchedule) -> EngineConfig {
+    EngineConfig {
+        compaction: schedule,
+        ..config_uncapped()
+    }
+}
+
+/// Pull the tick forward and wait for the schedule to be evaluated on it.
+///
+/// `request_flush` is the deterministic way to make a tick happen now — it is the one operator
+/// trigger that pulls the deadline — and the fold schedule is read on that same tick, beside the
+/// flush's own plan. So this is a tick, not a sleep, and `ticks` is what says one happened.
+fn tick(engine: &Engine) {
+    let before = engine.write_executor_stats().ticks;
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().ticks == before {
+        assert!(std::time::Instant::now() < deadline, "the tick never fired");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// **The retirable-depth route dispatches a fold with nobody asking for one, at any hour**
+/// (compaction §9, decision 0056).
+///
+/// The urgent route: retirable depth is a write cost that grows without bound — the overlay grows
+/// monotonically under deletion churn and every deny acceptance clones it — so it is not windowed.
+///
+/// **The threshold is three, and the fixture is one suppression plus deletions**, which is what
+/// makes this case able to tell the two gauges apart. At one suppression and two deletions the
+/// overlay's *depth* is already 3 and its *retirable* part is 2 — so a trigger keyed on
+/// `Overlay::len()` fires here and the correct one does not. That is r3's memory F5 in its exact
+/// shape: a suppression never retires, so a `len`-keyed trigger dispatches a full fold that
+/// retires nothing, every interval, for ever.
+///
+/// **Mutations this kills:** never consulting the schedule (no fold happens at all); keying the
+/// gauge on `Overlay::len()` rather than `deleted_len()` (the fold fires one deletion early, at the
+/// assertion below).
+#[test]
+fn the_retirable_depth_route_dispatches_a_fold_without_anyone_asking() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(
+        tmp.path(),
+        &root,
+        config_scheduling(tessera_engine::CompactionSchedule {
+            min_interval_secs: 0,
+            window_start_secs: None,
+            window_secs: 0,
+            window_min_segments: 0,
+            after_deletions: Some(3),
+        }),
+    );
+
+    let suppressed = entity_of_source(&root, "v00000", 8);
+    engine
+        .accept_change(suppressed, ChangeOp::Suppress)
+        .expect("a suppression is accepted");
+    for source in [3u64, 4] {
+        let entity = entity_of_source(&root, "v00000", source);
+        engine
+            .accept_change(entity, ChangeOp::Delete)
+            .expect("a delete is accepted");
+    }
+    assert_eq!(engine.overlay_depth(), 3, "depth is three; the retirable part is two");
+    tick(&engine);
+    tick(&engine);
+    assert_eq!(
+        engine.write_executor_stats().folds,
+        0,
+        "a suppression is not retirable, so it moves the gauge a fold keys on by nothing — and a \
+         trigger reading total depth instead would have fired here"
+    );
+
+    let third = entity_of_source(&root, "v00000", 5);
+    engine
+        .accept_change(third, ChangeOp::Delete)
+        .expect("a delete is accepted");
+    tick(&engine);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.write_executor_stats().folds == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the schedule never dispatched a fold"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(engine.generation().prefix, "v00001");
+    assert_eq!(
+        engine.overlay_depth(),
+        1,
+        "the three deletions retired and the suppression did not — Rule S is untouched by a \
+         scheduled fold exactly as it is by a requested one"
+    );
+}
+
+/// **The windowed route fires inside its window and not outside it**, which is the whole of what a
+/// start time buys: a fold is minutes to hours of IO that costs a concurrent viewport a measured
+/// up-to-2.03×, and an operator setting `00:00` is saying "not during the day".
+///
+/// Both halves in one case, against the same clock: a window that opened half an hour ago folds,
+/// and one that opens in six hours does not — with the same segment count, so the only variable is
+/// the hour.
+///
+/// **Mutations this kills:** ignoring the window and firing on the segment gauge alone (the closed
+/// case folds); ignoring the segment gauge (the closed case is unaffected, but the *first*
+/// assertion below — that a window over an already-folded bundle dispatches nothing — fails).
+#[test]
+fn the_windowed_route_fires_inside_its_window_and_not_outside_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let now = utc_time_of_day();
+    let closed = tessera_engine::CompactionSchedule {
+        min_interval_secs: 0,
+        // Opens in six hours, for one hour: closed now, whatever "now" is when this runs.
+        window_start_secs: Some((now + 6 * 3_600) % 86_400),
+        window_secs: 3_600,
+        window_min_segments: 1,
+        after_deletions: None,
+    };
+    let engine = engine_over_fixture(tmp.path(), &root, config_scheduling(closed));
+
+    tick(&engine);
+    tick(&engine);
+    assert_eq!(
+        engine.write_executor_stats().folds,
+        0,
+        "one segment is over the threshold and the window is shut, so nothing happens — a start \
+         time that fires outside its own window is not a start time"
+    );
+    assert_eq!(engine.generation().prefix, "v00000");
+
+    // The same deployment, the same segment count, a window that opened half an hour ago.
+    drop(engine);
+    let open = tessera_engine::CompactionSchedule {
+        window_start_secs: Some((now + 86_400 - 1_800) % 86_400),
+        ..closed
+    };
+    let mut engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        config_scheduling(open),
+    )
+    .expect("the engine reopens");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+
+    tick(&engine);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.write_executor_stats().folds == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the schedule never dispatched a fold inside its own window"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(engine.generation().prefix, "v00001");
+}
+
 /// **Two folds in a row**, which is what makes prefix naming and the manifest counter a rule rather
 /// than a coincidence: `n` continues across the prefix (contracts §2.3) and a prefix name is never
 /// reused.

@@ -1,13 +1,14 @@
 # Measurement — design
 
-**Date:** 2026-08-02
+**Date:** 2026-08-07
 **Status:** Provisional — under review, and **not approved**. **To become normative:** owner
 sign-off, the §10 amendments landed in `bench/README.md` and `bench/matrix.toml`, and the schema-2
 `Work` fields carried by at least one arm — the two reporting modes (§4) are the part a reader could
 otherwise take as already in force.
-**Reads against:** architecture §4 (I2, I7), §7.2, Appendix A, Appendix C (C4); conformance §6;
-[`write-path.md`](write-path.md) §14; `per-point-attributes.md` §8; `hot-row-geometry.md` §7;
-`probes/optimisations.md` §0; `probes/results.md` §1, §5, §6.
+**Reads against:** architecture §4 (I2, I7), §7.2, §11.3, Appendix A, Appendix C (C4);
+conformance §6; [`write-path.md`](write-path.md) §14; [`compaction.md`](compaction.md) §6, §9, §14;
+`per-point-attributes.md` §8; `hot-row-geometry.md` §7; `probes/optimisations.md` §0;
+`probes/results.md` §1, §5, §6; decisions 0049–0056.
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **spec §n**.
 
@@ -20,17 +21,21 @@ and `docs/evidence/memos/`), or the correctness gate (`conformance.md`).
 
 ## 1. Summary
 
-The suite measures a **frozen bundle under a varying request**. Flush, merge and per-point
-attributes each break that assumption from a different side: the first two make the bundle move
-under a running reader, the third makes the row wider. The expansion is therefore not a longer list
-of arms but **one new axis** — the bundle's own state — carried in the record beside the container
-counts that already make a latency portable.
+The suite measures a **frozen bundle under a varying request**. The completed ingest pipeline and
+per-point attributes break that assumption from different sides: flush, merge and the fold make the
+bundle move under a running reader, the attribute tail makes the row wider. The expansion is
+therefore not a longer list of arms but **one new axis** — the bundle's own state — carried in the
+record beside the container counts that already make a latency portable.
 
-Two conventions follow from it, and they are the part most easily got wrong:
+The three publication kinds are not one mechanism at three sizes. Flush and merge are frequent and
+invisible to a resident session; the fold costs a full rebuild per resident session and can run for
+minutes (spec §2.3). An arm calibrated on the first two will read the third as a stall.
+
+Two conventions follow, and they are the part most easily got wrong:
 
 - `min_ns` over 3–5 repetitions is correct for A/B of a code path and **cannot express a
-  percentile**. A merge is a scheduled perturbation on a minority of requests; min-of-N is
-  constructed to absorb exactly that.
+  percentile**. A merge is a scheduled perturbation on a minority of requests, and a fold is a large
+  one; min-of-N is constructed to absorb exactly that.
 - Throughput has no single unit here. Requests, served marks and masked rows examined scale on
   three different denominators, and the middle term — the masking arithmetic, which is the product —
   is invisible in the two units a reader reaches for first.
@@ -42,7 +47,7 @@ Two conventions follow from it, and they are the part most easily got wrong:
 Every arm today holds the bundle constant and varies the request. Nothing varies the bundle under a
 constant request: the arms were written when `tessera build` produced one segment and it stayed.
 
-With flush and merge built, a reader's cost depends on quantities no existing record carries. A tile
+With the pipeline complete, a reader's cost depends on quantities no existing record carries. A tile
 resolves to one contiguous range **per live segment** (§11.3), so a viewport's latency is a function
 of the merge policy's recent history. A regression and "the merge policy left more segments live"
 are the same number without that count beside it, and it is the most likely false alarm of the next
@@ -90,19 +95,67 @@ external-id runs and six dictionary extents, with a control showing each grows o
 the maintenance passes are stopped. What the arm adds there is the same axis under hours of load
 rather than forty ticks, with read latency beside it.
 
-> ⊘ **The arm does not exist.** Flush and both halves of merge do (write-path §4, §7), so the gates
-> in spec §8 have something to bound: the ack→visible gap is `flush_max_age_secs` per slice rather
-> than unbounded, and G5's counts are the ones `soak.rs` already holds. What is missing is only the
-> arm — until it runs, nothing measures read latency under sustained ingest at all.
+> ⊘ **The arm does not exist.** Flush, both halves of merge and the fold all do (write-path §4, §7;
+> compaction §4), so the gates in spec §8 have something to bound: the ack→visible gap is
+> `flush_max_age_secs` per slice rather than unbounded, and G5's counts are the ones `soak.rs`
+> already holds. What is missing is only the arm — until it runs, nothing measures read latency
+> under sustained ingest at all.
 
-### 2.3 Residency, and why it cannot be measured naively
+### 2.3 The fold is a third publication kind, and it is not a bigger merge
 
-Appendix A's residency arithmetic is the justification for several shipped decisions, and **none of
-it has ever been measured**. hot-row-geometry §7 states the reason plainly: the bench has no
-memory-pressure mechanism, and a residency saving becomes latency only under contention. The
-`cold_*` arms are a token-cache split, not a page-cache one.
+Flush and merge are cheap, frequent and invisible to a resident session. The fold is none of those,
+and treating it as one more point on the merge curve is the mistake this section exists to prevent.
 
-Three obvious mechanisms fail, and the reasons are worth recording so they are not retried:
+**The flip is measured, and the cost is per resident session, not per byte.** Probe P2
+(`docs/evidence/memos/2026-08-05-compaction-flip-and-io.md`): the refresh's per-entry cost on the
+flush and merge path is **11.1–24.2 ms**, and the full rebuild a fold forces is **267–352 ms** — a
+**15–24×** ratio, linear in the resident population. Scaled to 10⁹ that is ≈12.8 s per entry and a
+flip of **≈3 minutes** for the last session, confirmed independently by
+`probes/2026-08-04-refresh-ladder/`.
+
+Three settled rulings shape what an arm may assert about it:
+
+- **The aftermath is a cache miss, not a refusal** (decision 0053). A session whose projection is
+  missing after the flip rebuilds inline; there is no 429. So the fold's cost appears in the arm as
+  a **latency tail on a minority of sessions**, and an arm that only counts errors will report a
+  clean run through a three-minute event.
+- **The schedule is a gated window, not a timer** (decision 0056). A fold fires on work gauges
+  within a window, so a soak that runs for a fixed wall-clock duration may see zero folds or
+  several. The count is an outcome to report, never an assumption — and forcing one is the only way
+  to measure it deterministically.
+- **The IO mitigation is `MADV_SEQUENTIAL`, not a throttle** (decision 0052). The fold's inputs are
+  all mappings, so there is no read to rate-limit. The *harm* P3 measured stands (below); the rate
+  arms in that memo measure a mechanism that was refuted and **must not be quoted as a throttle
+  setting**.
+
+**What an arm must therefore report** is the flip as an interval with a session population attached
+— entries refreshed, entries left to miss, and the latency each class saw — rather than a duration.
+A fold that took three minutes while every session was idle cost nothing.
+
+### 2.4 Residency, measured
+
+Appendix A's residency arithmetic justifies several shipped decisions, and until probe P3 none of it
+had been measured — hot-row-geometry §7 records the reason: the bench had no memory-pressure
+mechanism, and a residency saving becomes latency only under contention.
+
+**P3 closed that, and it did so both ways** (`docs/evidence/memos/2026-08-05-compaction-flip-and-io.md`,
+extended to the >RAM regime 2026-08-06). A corpus-scale streaming read costs a concurrent viewport up
+to **2.03× at a 45.57 GiB bundle against 36.9–38.2 GiB of RAM** — global reclaim, the real thing —
+and up to **15.67× at a 7.84 GiB bundle under a 4 GiB cgroup cap**, a harsher 1.96:1 ratio standing
+in cheaply for the same effect. So both of the following are now established rather than proposed:
+
+- **Outgrowing RAM is reachable on this hardware.** An earlier revision of this section said it was
+  not, reasoning from the 10⁹ bundle's ~14 GB of hot columns against 47 GB of RAM. That was wrong:
+  a whole bundle is far larger than its hot columns, and P3 built one at 45.57 GiB.
+- **The cgroup cap works as a proxy** and is much cheaper per trial, at the cost of a ratio that is
+  chosen rather than natural. Both regimes agree in direction and disagree in magnitude by ~8×, so
+  the cheap proxy establishes *shape* and the real regime establishes *scale* — quote them apart.
+
+The mechanism, for a controlled sweep: cgroup v2 is delegated on this box and drives unprivileged,
+`systemd-run --user --scope -p MemoryMax=<N> -p MemorySwapMax=0`. `MemorySwapMax=0` is not optional —
+with swap available the experiment measures swap thrash rather than page-cache reclaim.
+
+Three mechanisms fail, and the reasons are recorded so they are not retried:
 
 - **`drop_caches`** needs root, is global, and is one-shot. It evicts the binary along with the
   bundle, can only run between cells, and the first request re-warms everything — one cold sample
@@ -112,16 +165,14 @@ Three obvious mechanisms fail, and the reasons are worth recording so they are n
   leaving the pages in page cache, so the next touch is a **minor** fault. That measures fault and
   TLB cost, not IO. Genuine eviction needs unmap → `posix_fadvise(DONTNEED)` → remap, which means an
   engine re-open per trial — and re-open digest-verifies the bundle, reading it all back in.
-- **Outgrowing RAM** is unavailable on the hardware this project measures on: 47 GB against a 10⁹
-  bundle whose hot columns are ~14 GB.
+- **`MADV_SEQUENTIAL` is a hint, not a lever** (decision 0052). It is the fold's mitigation and it
+  is not a rate control; an arm cannot use it to set a read rate, and P3's rate arms measure a
+  mechanism the r5 review refuted.
 
-**The mechanism is cgroup v2**, which is delegated on this box and drives unprivileged:
-`systemd-run --user --scope -p MemoryMax=<N> -p MemorySwapMax=0`. `MemorySwapMax=0` is not optional
-— with swap available the experiment measures swap thrash rather than page-cache reclaim.
-
-The axis is not cold-versus-hot. It is the **residency ratio** *r* = memory available to the page
-cache ÷ bytes the workload actually touches, swept *r* ≥ 1, 0.5, 0.25, 0.1. That matches the
-deployment question, which is never "is the cache cold" but "the working set exceeds RAM and the
+**What remains is the read arms, not the mechanism.** P3 measured a *concurrent streaming read*
+against a viewport. Nothing yet sweeps the residency ratio *r* = memory available to the page cache
+÷ bytes the workload touches, across `viewport`, `gather` and `session` at *r* ≥ 1, 0.5, 0.25, 0.1 —
+which is the deployment question, never "is the cache cold" but "the working set exceeds RAM and the
 kernel is reclaiming continuously".
 
 Three consequences:
@@ -137,29 +188,51 @@ Three consequences:
   selects the warmest sample by construction, which is exactly what it was chosen to do. Cells are
   first-touch, or a distribution over independent trials at steady-state pressure.
 
-What this unblocks is the comparison hot-row-geometry §7 records as open. The fixed-row saving —
-**18 → 12 B/row**, the `x`/`y` pair having become `residual` and `priority` having been cut
-(decision 0046) — is arithmetic against Appendix A and **must not be quoted as a measurement**; a
-`variant` field (spec §7) plus a residency sweep is the first construction in which it could
-become one.
+What a swept read arm would unblock is the comparison hot-row-geometry §7 records as open. The
+fixed-row saving — **18 → 12 B/row**, the `x`/`y` pair having become `residual` and `priority` having
+been cut (decision 0046) — is arithmetic against Appendix A and **must not be quoted as a
+measurement**. P3 does not close it: it establishes that residency has a price, not that this
+particular 6 B/row buys any of it. A `variant` field (spec §7) plus the sweep is still the first
+construction in which it could.
 
 ---
 
-## 3. What the existing ingest arms stop measuring
+## 3. What the ingest arms measure now
 
-[`bench/README.md`](../../bench/README.md) §9 records the caveat that governs them: *"Ingested rows
-never become visible."* Flush has ended that condition, and two arms are re-derived rather than
-extended.
+[`bench/README.md`](../../bench/README.md) §9's governing caveat — *"Ingested rows never become
+visible"* — is dead: flush ended it, and `crates/tessera-engine/tests/scale.rs` has since carried
+10,000,000 rows through 32 rounds, 9 merges and 4 coalesces with every masked total exact after
+every round.
 
-`ingest-continuous` currently measures `compose` over **rejected** entries — a buffered entity has
-no row in the segment permutation, so `compose` skips it at `perm.row_of`. F2's measured ~10 ns per
-buffered item is therefore a **lower bound over the cheap branch**. Resolved entries additionally
-push into `pass_rows`/`fail_rows` and build the diff bitmaps. Re-baseline the constant; do not
-inherit it.
+**Three readings this document previously carried are withdrawn by the ingest-rate campaign**
+(`docs/evidence/memos/2026-08-05-ingest-rate.md`), and none of them should be re-derived from the
+older arms:
 
-F3 remains **NOT confirmed by measurement**, and the reason is unchanged: a single-item ack is
-~3.2 ms and entirely fsync-dominated, so any O(buffer) clone term is buried. An attribute-tail sweep
-that stops at batch=1000 will report attribute cost as free and be wrong for the same reason.
+- **"Ingest throughput is an fsync amortisation story" — withdrawn.** fsync is **11–24%** of a
+  serial caller's per-row cost, against `apply_window`'s **38–50%**. The old reading described a
+  batch of one and was generalised past its evidence.
+- **"~1.37 M items/s at batch=10,000" — withdrawn.** It was a `min` over a rising series, at a term
+  density and buffer depth where the costs that dominate a deployment are invisible.
+- **F3 is no longer an open question, and it was never an fsync question.** `apply_window`'s
+  `B²/2W` clone term is real and is now the axis that matters; the earlier "buried under a ~3.2 ms
+  fsync floor" reading held only at depths nobody deploys at.
+
+**There is no single ingest rate.** The spread across plausible deployment shapes is **4.8×** —
+250,000–465,000 rows/s submitted for a bulk loader, 150,000–270,000 once the flush that makes those
+rows visible is counted, and 97,000 for a single caller sending small batches into a deep buffer.
+Which end a deployment gets is decided by three properties, and `ingest-rate` is the arm that sweeps
+them: term density (up to **43%** on per-row cost, and only when the buffer is deep), `B/W` (four
+commit windows between publications is optimal; flushing every window is 30–42% worse and buffering
+twenty-four is 20–36% worse), and caller concurrency.
+
+Two arms therefore keep narrower jobs than their names suggest. `ingest-batch` measures a **ramp,
+not a rate** — nothing in it flushes, so every repetition lands on a deeper buffer — and its own doc
+now says so. `ingest-continuous` measures `compose` over entries that a flush would have resolved,
+so F2's ~10 ns per buffered item is a **lower bound over the cheap branch**; re-baseline it against
+a flushing engine rather than inheriting it.
+
+The attribute-tail warning stands and is unaffected: a sweep that stops at batch=1000 will report
+attribute cost as free, because per-row costs only separate from the fixed ones above it.
 
 ---
 
@@ -236,11 +309,22 @@ produces can be normalised the way every other arm's can.
 
 Six, and the constraint on them matters more than the list.
 
-1. **Ack→visible, p99.** "A write is queryable within X." The strongest external consequence of the
-   flush work: it turns `flush_max_age_secs` from a config key into a claim.
-2. **Points/second ingested, against concurrent writers.** Must be **over the wire**
-   (`/control/ingest`). `ingest-concurrent` is in-process, so it excludes serialisation, the handler
-   and the queue — a gap that is invisible in the number and unacceptable in a published one.
+1. **Ack→visible — three intervals, not one.** "Visible" has three answers depending on who asks,
+   and `scale.rs` has measured all three at 5M and 10M: `ack` (durable and invisible) 1.8–4.6 s for
+   a 250k batch; `publish` (visible to a session authorised after it) **0.42–0.58 s**; `refresh`
+   (live sessions brought forward) **5–142 ms**. Publishing one number here would be a choice about
+   which reader to mislead. The headline claim is the one that dominates: **visibility is ~99%
+   tick** — the wait is `flush_max_age_secs`, default 90 s, and the mechanical terms are noise
+   beside it.
+2. **Rows/second ingested, against the write's *shape*.** The earlier form of this figure —
+   against concurrent writers — is **refuted as a headline**: concurrency is worth 3× only to a
+   caller sending small batches (97,000 → 286,000 rows/s at eight callers), and buys nothing
+   measurable for one sending maximal batches, because `commit_window_max_items` equals
+   `ingest_max_batch_rows` by design and one maximal batch fills a window. **Concurrency is not a
+   multiplier on the bulk-loader figure**, which is exactly what it was suspected of being. Publish
+   the two deployment shapes — bulk loader and small-batch caller — with `B/W` and term density
+   named, and publish it **over the wire**: `ingest-rate` is in-process, so it excludes
+   serialisation, the handler and the queue.
 3. **Requests/second at a stated SLO**, both session arms. Not peak: Arm A at c=1000 sustained
    18,599 rps with a **1.04 s p99** (the F4 projection-lock finding), which a peak-throughput
    headline reports as healthy.
@@ -248,6 +332,14 @@ Six, and the constraint on them matters more than the list.
 5. **Latency against corpus scale** at a fixed viewport, k and coverage held.
 6. **Latency against points-in-view**, never against viewport area — the geometry is UMAP output and
    heavily concentrated, so area is not a workload.
+7. **The fold's flip, as an interval with a population** (spec §2.3) — entries refreshed, entries
+   left to take a cache miss, and the latency each class saw. A deployment needs to know what its
+   worst-served session experiences during the most expensive operation in the system, and decision
+   0053 makes that a latency rather than an error count.
+
+Figure 5 has a standing caveat now that merge is built: **on-disc bytes are 2.0–2.6× the live
+working set and only grow** until a fold reclaims, so a scale figure quoted without saying whether a
+fold has run is quoting one of two very different numbers.
 
 ### 6.1 A concurrency number is not a user count
 
@@ -298,13 +390,16 @@ publishing half of C4.
 
 **New.**
 
-- **`soak`** (spec §2.2).
+- **`soak`** (spec §2.2), now also carrying the fold: a run long enough to contain one is the only
+  place the flip's population term (spec §2.3) meets a real session mix. Its fold count is an
+  outcome, not a setting (decision 0056), so the arm needs a forced-fold mode to be deterministic.
 - **`session`** (spec §6.1) — the only arm that represents a viewer rather than a request. Shares
   `load`'s generator and ceiling calibration; adds the trajectory script, think time and the
   cold-start arc.
-- **`residency`** (spec §2.3) — any read arm re-run inside a memory-limited scope, swept over *r*.
+- **`residency`** (spec §2.4) — any read arm re-run inside a memory-limited scope, swept over *r*.
   Not a new measurement so much as a new environment for existing ones, so it is a wrapper plus an
-  `Env` extension rather than an arm with its own axes.
+  `Env` extension rather than an arm with its own axes. P3 proved the environment works; what is
+  missing is the read arms inside it.
 - **`filter`** — vocabulary-filter cost against vocabulary size × **principal sparsity** × overlay
   depth, at cold and cached fingerprints. per-point-attributes §3.3 predicts sparse principals are
   cheapest; an arm that does not vary sparsity cannot check the prediction it most needs to. Second
@@ -318,8 +413,10 @@ publishing half of C4.
 - `gather`, `viewport` — attribute-tail column axis; bytes per served mark split geometry ÷ tail;
   varying the **number** of category columns, not only their width.
 - `ingest-build` — an attribute-column stage in the eleven-stage decomposition.
-- `ingest-batch` — swept past 1000, per spec §3.
-- `ingest-continuous` — re-derived, per spec §3.
+- `ingest-rate` — **exists** (density × `B/W` × submitters), and is the arm to quote a throughput
+  from. What it lacks is the wire: it drives `accept_ingest`, not `/control/ingest`.
+- `ingest-batch` — a ramp, not a rate; keep it and stop reading throughput off it (spec §3).
+- `ingest-continuous` — re-derived against a flushing engine, per spec §3.
 
 **Infrastructure**, and the cheapest items here.
 
@@ -342,9 +439,12 @@ they belong to conformance §6's nightly tier, which does not exist (⊘).
 |---|---|---|
 | **G4** | soak p99 shows no monotonic drift across the window beyond +15% | steady-state regression — the class a frozen-bundle suite structurally cannot catch |
 | **G5** | segment, delta-tier, external-id-run and dictionary-extent counts, and ack→visible, within configured bounds | write-path §14.10/§14.11 violated |
+| **G6** | on-disc bytes fall at a fold, and the flip's missed-session latency stays within its measured band | the fold reclaimed nothing, or its aftermath became a refusal rather than a miss (decision 0053) |
 
-G5 is an assertion about the system, not about its speed, and it fails the run rather than reporting
-a regression.
+G5 and G6 are assertions about the system, not about its speed, and they fail the run rather than
+reporting a regression. G6 needs the soak arm's forced-fold mode: on a gated-window schedule
+(decision 0056) a run can legitimately contain no fold, and a gate that passes because nothing
+happened is worse than no gate.
 
 ---
 
@@ -378,15 +478,20 @@ gives: putting an hours-long cell beside a two-microsecond one makes the default
 
 - **No new corpus.** Every axis here is constructible within the existing fixtures plus an attribute
   tail. Signature-sorted contiguity still cannot be synthesised and still costs a rebuild.
-- **No residency figure yet.** Spec §2.3 specifies the mechanism; until it runs, hot-row-geometry
-  §7 stands unchanged and the 18 → 12 B/row saving stays arithmetic against Appendix A.
+- **No residency figure for the read arms.** P3 measured what a concurrent streaming read costs a
+  viewport (spec §2.4); nothing sweeps *r* across `viewport`, `gather` or `session`, so
+  hot-row-geometry §7 stands unchanged and the 18 → 12 B/row saving stays arithmetic against
+  Appendix A.
 - **No claim that the residency sweep is representative.** A cgroup limit reclaims by the kernel's
   LRU, not by a deployment's access pattern, and the ratio *r* is chosen rather than observed. It
   establishes a curve's **shape**; it does not predict a given deployment's point on it.
-- **No published figure for anything unbuilt.** ⊘ Four of the six spec §6 figures cannot be produced
-  today: ack→visible and the soak curve need the soak arm — flush itself is built, so what is
-  missing is the measurement rather than the mechanism; the attribute split needs the tail; the wire
-  ingest number needs `ingest-wire`.
+- **No published figure for anything unbuilt.** ⊘ Of the seven spec §6 figures, three now have
+  measurements behind them — ack→visible's three intervals and the scale figure from `scale.rs`,
+  and the ingest rate from `ingest-rate` — but none over the wire, and none under a session mix.
+  The soak curve needs the soak arm; the flip figure needs it too, with a forced fold; the attribute
+  split needs the tail; the wire ingest number needs `ingest-wire`.
+- **No fold throttle, and no figure that implies one.** Decision 0052 refuted the mechanism; P3's
+  rate arms measure something that cannot be set. The harm they establish is real, the lever is not.
 - **No replacement for the correctness gate.** A soak that stays fast while leaking passes every
   gate here. `conformance.md` owns that, and this document does not weaken the split.
 
@@ -411,7 +516,17 @@ Spec §6.1 was added after drafting, on the observation that `Pan` and `Zoom` re
 place — so the sequential locality a real pan has is precisely what the repetition removes, and no
 arm represented a viewer rather than a request.
 
-Spec §2.3 was added on the objection that cold-page effects cannot be measured naively, which is
-correct: the three mechanisms a reader would reach for first each fail for a different reason, and
-the corpus cannot outgrow this hardware's RAM. `MemoryMax` under an unprivileged
-`systemd-run --user --scope` was verified to apply on this box before being specified.
+Spec §2.4 was added on the objection that cold-page effects cannot be measured naively, which is
+correct: the three mechanisms a reader would reach for first each fail for a different reason.
+`MemoryMax` under an unprivileged `systemd-run --user --scope` was verified to apply on this box
+before being specified.
+
+**Revised 2026-08-07 against the completed ingest pipeline.** Flush, merge and the fold are built,
+and the measurements that followed them overturned four claims this document carried: that residency
+had never been measured and could not outgrow this hardware's RAM (P3 did both — spec §2.4); that
+ingest throughput is an fsync amortisation story (fsync is 11–24%, `apply_window` 38–50%); that
+concurrent writers are the axis a published ingest rate should be plotted against (they are not a
+multiplier on the bulk-loader figure); and that ack→visible is one number (it is three). Spec §2.3
+is new — the fold is a third publication kind whose cost is per resident session rather than per
+byte, and the three rulings that shape what an arm may assert about it (decisions 0052, 0053, 0056)
+all post-date the original draft.

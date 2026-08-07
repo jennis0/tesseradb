@@ -46,6 +46,8 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str, tick_secs
         EngineConfig {
             flush_max_age_secs: tick_secs,
             max_merged_segment_bytes: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: tessera_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
