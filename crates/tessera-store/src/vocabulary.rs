@@ -536,6 +536,35 @@ impl Vocabularies {
     }
 }
 
+/// Fold a prefix's `vocabulary_extensions` into the `MANIFEST.vocabularies` the next prefix will
+/// carry — the compaction fold's whole vocabulary duty (§3.3).
+///
+/// **Verbatim, and verbatim is the whole rule.** Keys and codes move across byte-identical and
+/// `reserved` is untouched. A fold that re-derived, re-sorted or re-numbered would recolour the
+/// entire corpus with no error and no digest mismatch, because `columns.arrow` stores the code and
+/// nothing else records what it stood for.
+///
+/// A binding that arrives twice — the same key at the same code, from two partitions or from a
+/// restated manifest — folds once. A *contradicting* one cannot arrive: [`Vocabularies::seed`]
+/// refuses to open a bundle whose homes disagree, so by the time a fold runs the two are known to
+/// agree. An extension naming a vocabulary the table lacks is refused at the same place, so it is
+/// skipped here rather than tolerated with a silent home of its own.
+pub fn fold_extensions_into(
+    vocabularies: &mut [ManifestVocabulary],
+    extensions: &[VocabularyExtension],
+) {
+    for extension in extensions {
+        let Some(vocabulary) = vocabularies.iter_mut().find(|v| v.name == extension.name) else {
+            continue;
+        };
+        for value in &extension.values {
+            if !vocabulary.values.iter().any(|held| held.key == value.key) {
+                vocabulary.values.push(value.clone());
+            }
+        }
+    }
+}
+
 /// The highest usable code at `width` — also the mask that makes a raw `u32` draw uniform over the
 /// width's domain. Code 0 is reserved, so the count of usable codes equals this value.
 fn usable_max(width: ScalarType) -> u32 {
@@ -865,6 +894,79 @@ mod tests {
             matches!(err, SeedError::ExtensionWithoutVocabulary { .. }),
             "{err}"
         );
+    }
+
+    /// The fold moves bindings between homes and must not change one. A code that came back
+    /// different — re-derived, re-sorted, re-numbered — would recolour every row carrying it, with
+    /// no error and no digest mismatch anywhere.
+    #[test]
+    fn the_fold_moves_bindings_verbatim() {
+        let mut built = vec![ManifestVocabulary {
+            name: "departments".to_string(),
+            listing: "per_viewer".to_string(),
+            values: vec![ManifestVocabularyValue {
+                key: "ops".to_string(),
+                code: 4711,
+                label: Some("Operations".to_string()),
+            }],
+            reserved: vec![99],
+        }];
+        let extensions = vec![VocabularyExtension {
+            name: "departments".to_string(),
+            values: vec![
+                ManifestVocabularyValue {
+                    key: "k9-unit".to_string(),
+                    code: 31_337,
+                    label: None,
+                },
+                // Restated from an earlier manifest: folded once, not twice.
+                ManifestVocabularyValue {
+                    key: "ops".to_string(),
+                    code: 4711,
+                    label: None,
+                },
+            ],
+        }];
+
+        fold_extensions_into(&mut built, &extensions);
+
+        let folded: Vec<(&str, u32)> = built[0]
+            .values
+            .iter()
+            .map(|v| (v.key.as_str(), v.code))
+            .collect();
+        assert_eq!(folded, vec![("ops", 4711), ("k9-unit", 31_337)]);
+        assert_eq!(
+            built[0].values[0].label.as_deref(),
+            Some("Operations"),
+            "a restated binding must not strip the label the build gave it"
+        );
+        assert_eq!(built[0].reserved, vec![99], "retirements are carried");
+
+        // Folding again is a no-op: the next prefix's side-manifest restates an empty set, but a
+        // fold that ran twice over the same input must not duplicate a value either.
+        fold_extensions_into(&mut built, &extensions);
+        assert_eq!(built[0].values.len(), 2);
+    }
+
+    /// An extension naming no vocabulary is skipped rather than given a home of its own — the
+    /// bundle that carried it would not have opened (`an_extension_with_no_vocabulary_refuses`).
+    #[test]
+    fn the_fold_skips_an_extension_with_no_vocabulary() {
+        let mut built = vec![vocabulary("departments", &[])];
+        fold_extensions_into(
+            &mut built,
+            &[VocabularyExtension {
+                name: "ghosts".to_string(),
+                values: vec![ManifestVocabularyValue {
+                    key: "k".to_string(),
+                    code: 4,
+                    label: None,
+                }],
+            }],
+        );
+        assert_eq!(built.len(), 1);
+        assert!(built[0].values.is_empty());
     }
 
     /// Exhaustion names the column and its width and never widens or wraps: both recolour rows

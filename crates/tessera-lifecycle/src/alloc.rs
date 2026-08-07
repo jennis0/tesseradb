@@ -118,6 +118,9 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
                     }
                 }
             }
+            // A mint names no entity. It is the one record whose subject is vocabulary space
+            // rather than entity space, and the two allocators share nothing (§3.4).
+            WalRecord::VocabularyMint { .. } => {}
             // An overlay snapshot names entities that were certainly allocated, so it raises the
             // floor — but only for entities something has *denied*, which is a weak bound and not
             // the mechanism. Rotation deletes the `IngestBatch` records this function really

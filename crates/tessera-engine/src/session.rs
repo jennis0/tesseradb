@@ -738,7 +738,7 @@ impl Engine {
         // `deny` and `tombstones` (`HONOURED_STATE`), which means acting on them here. A manifest
         // that opened and whose deny state went nowhere would serve every entity it names.
         let initial_deny = initial_deny_of(&bundle);
-        let vocabularies = Arc::new(initial_vocabularies_of(&bundle)?);
+        let mut vocabularies = initial_vocabularies_of(&bundle)?;
         // **The allocator floor comes from the side-manifest, never from the build manifest
         // alone.** Every flush raises `SegmentsManifest::entity_id_high_water` past the ids it
         // consumed, while `MANIFEST.json`'s value is frozen at build. Seeding from the build value
@@ -760,6 +760,7 @@ impl Engine {
                 .max(side_manifest_high_water),
             &dict,
             &initial_deny,
+            &mut vocabularies,
             // An entity belongs to exactly one slice, so "any slice's row space holds it" is the
             // same question as "its slice's does" — and asking it this way needs no slice lookup,
             // which the buffer would otherwise have to supply before it has been filtered.
@@ -817,7 +818,7 @@ impl Engine {
             overlay_version: 0,
             overlay: Arc::new(overlay),
             buffer: Arc::new(buffer),
-            vocabularies,
+            vocabularies: Arc::new(vocabularies),
             denied,
         })));
 

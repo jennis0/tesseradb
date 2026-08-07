@@ -84,6 +84,7 @@ use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{DenyEntry as ManifestDenyEntry, SegmentsManifest};
 use tessera_store::merge::MergePolicy;
+use tessera_store::vocabulary::Vocabularies;
 use tessera_types::{EntityId, IdentityKey, TermId};
 
 use crate::session::EngineError;
@@ -1694,9 +1695,40 @@ impl WritePath {
         manifest_high_water: u64,
         dict: &Dict,
         initial_deny: &[(EntityId, ChangeOp)],
+        vocabularies: &mut Vocabularies,
         has_row: impl Fn(EntityId) -> bool,
     ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
+
+        // **Mints apply over the manifest seed, in log order** — the same seed-before-replay rule
+        // the deny state follows below, and for the same reason: every WAL record postdates the
+        // manifests. The caller has already seeded from `MANIFEST.vocabularies` and the served
+        // side-manifests' `vocabulary_extensions`, so what remains is what was minted after the
+        // last manifest write.
+        //
+        // Bindings are append-only and never rebound, so this is order-insensitive except for
+        // conflicts — and a conflict inside the durable prefix is corruption of acked state, never
+        // a race: every row written under either binding is of unknowable colour. Refusing to open
+        // is the only answer that does not silently recolour one of them.
+        for record in &records {
+            if let WalRecord::VocabularyMint {
+                vocabulary,
+                key,
+                code,
+            } = record
+            {
+                let minter = vocabularies.get_mut(vocabulary).ok_or_else(|| {
+                    EngineError::Malformed(format!(
+                        "the WAL mints into vocabulary '{vocabulary}', which this bundle does not \
+                         declare. Every row that carries one of its codes would be of unknowable \
+                         colour, so this node does not open"
+                    ))
+                })?;
+                minter
+                    .seed_value(key, *code)
+                    .map_err(|e| EngineError::Malformed(e.to_string()))?;
+            }
+        }
 
         let high_water = manifest_high_water.max(high_water_from(&records));
         // `try_new`, not `new`: the seed comes from durable state this process did not write in
@@ -4336,6 +4368,30 @@ impl Executor {
         let mut bundle_manifest = live.bundle.manifest.clone();
         bundle_manifest.entity_id_high_water = plan.entity_bound;
         bundle_manifest.files = completed.files.clone();
+        // **The extensions fold in verbatim, and verbatim is the whole rule** (§3.3). Every binding
+        // the served side-manifests carried becomes a value of the new prefix's
+        // `MANIFEST.vocabularies`, keys and codes byte-identical, and the new prefix's first
+        // `SEGMENTS-<n>.json` restates an empty extension set — which is what the `Vec::new()`
+        // above is.
+        //
+        // A fold that re-derived, re-sorted or re-numbered here would recolour the whole corpus
+        // with no error and no digest mismatch, because `columns.arrow` stores the code and nothing
+        // else records what it meant. Appending the carried values is therefore the entire
+        // operation: no compilation, no normalisation, no pass through the schema compiler.
+        //
+        // Decision 0050 touches none of this. Codes are not ordinals, index nothing positional, and
+        // no cached artefact is keyed by them, so the fold's postings rewrite and fragment
+        // invalidation pass over the vocabulary table without reading it.
+        let carried_bindings: Vec<_> = live
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.vocabulary_extensions.iter().cloned())
+            .collect();
+        tessera_store::vocabulary::fold_extensions_into(
+            &mut bundle_manifest.vocabularies,
+            &carried_bindings,
+        );
 
         // Exactly the files the new manifest names, deduplicated: a carried segment's run and
         // locator are already in the run and locator lists, and linking one path twice is what

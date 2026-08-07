@@ -322,6 +322,14 @@ pub fn replay<'a>(
             WalRecord::OverlaySnapshot { entries } => {
                 overlay.apply_snapshot(entries);
             }
+            // **Applied by the caller, against the live vocabularies, not here.** This replay
+            // builds the overlay and the buffer, and reaches neither the bundle manifest a binding
+            // is seeded from nor the minter that has to hold it — `tessera-lifecycle` does not
+            // depend on `tessera-store`. `WritePath::reconstruct` walks the same records for the
+            // mints, after seeding, so the seed-before-replay order is preserved where the state
+            // lives. The rows here already carry their codes, so the buffer needs no binding to
+            // read one.
+            WalRecord::VocabularyMint { .. } => {}
         }
     }
 
