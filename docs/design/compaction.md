@@ -1,9 +1,10 @@
 # Compaction — design
 
 **Date:** 2026-08-05
-**Status:** **Provisional — r9; the fold is built.** Two adversarial rounds
-have run (r3, three lenses; r5, two lenses on the sections that changed shape) and both are
-dispositioned in the body. r4's three fatal findings and its refuted mechanism are fixed there:
+**Status:** **Normative for the fold** (owner, 2026-08-07) **— r11.** Three adversarial rounds have
+run (r3, three lenses; r5, two lenses on the sections that changed shape; r10, three against the
+implementation) and all are dispositioned in the body, and probe P1 has measured the one claim that
+was never more than modelled (r11). r4's three fatal findings and its refuted mechanism are fixed there:
 retirement is derived from what the publication removed, the locator is snapshot-bounded, the seam
 has four gaps rather than three, the memory claim is a checked budget, and the pre-swap refresh is
 withdrawn for the post-swap floor.
@@ -29,11 +30,12 @@ and pass 3's external-id runs decoded rather than mapped — were the design's o
 broken in two places. Both are fixed and the anonymous term fell by two thirds. §3, §12 and §14
 are corrected to what was measured. **What remains before this becomes normative:** the invariants
 lens on the staging list of §6.2, if it is built, and on D5's rows-frozen safety claim, which has
-never had one — **and both are now scoped out** (decision 0057): rows-frozen is declined outright,
-and the staging list is deferred with 0053's review condition attached to it rather than to this
-document. **Nothing blocks promotion but the owner's word.** §9's four gauges are all built
-(2026-08-07); what remains unbuilt of this design is the deferred staging list and §6.1's two
-page-cache hints.
+never had one — **and both were scoped out** (decision 0057): rows-frozen is declined outright, and
+the staging list is deferred with 0053's review condition attached to it rather than to this
+document. Both were obligations on *unbuilt* machinery, which is what made "run the lens" the wrong
+question. **Promoted on that basis** (owner, 2026-08-07). §9's four gauges are all built; what
+remains unbuilt of this design is the deferred staging list and §6.1's two page-cache hints, and
+both are marked at their sites.
 **Owns:** the fold — what it executes, what it carries forward, how it is published, what retires
 at it, and what a viewer pays at the flip. The prefix rewrite, the `CURRENT` flip, and
 reclamation.
