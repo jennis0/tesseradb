@@ -125,6 +125,62 @@ fn write_and_fsync(path: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
+/// `fsync` every file in `paths` **and every directory that holds one**, so both the bytes and the
+/// names that reach them are durable.
+///
+/// # Why a caller needs this at all
+///
+/// The segment, postings and external-id writers do not sync: `write_single_batch` says so at the
+/// site, and the reasoning has always been that a partially-written file is *detectable* — the
+/// manifest digests catch it, and the producer re-runs. That holds for a build (nothing else has
+/// been deleted yet) and for a flush (the WAL still holds the rows, and the side-manifest it was
+/// committed under can be stepped past). **It does not hold for a fold**, which flips `CURRENT` onto
+/// the new prefix and then deletes the old tree and reclaims the WAL members behind it. After that
+/// the folded bytes are the only copy, so "detectable" becomes "detectably gone".
+///
+/// Ordering matters and is the caller's: this must complete **before** `CURRENT` names the prefix
+/// these files sit under. Afterwards is too late by exactly the window it exists to close.
+///
+/// Directories are deduplicated and synced after the files they hold, because a directory entry is
+/// not durable until its directory is and the entry must not outlive the data it names.
+pub fn fsync_written(paths: &[PathBuf]) -> Result<()> {
+    let mut dirs: Vec<&Path> = Vec::new();
+    for path in paths {
+        // Read-only is enough: `fsync(2)` flushes the *file*, not the descriptor's access mode, and
+        // this is the same open `pairs.rs` already uses for its own sync.
+        File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        if let Some(dir) = path.parent() {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    for dir in dirs {
+        fsync_dir(dir)?;
+    }
+    Ok(())
+}
+
+/// `fsync` each directory in `dirs`, deduplicated — the names half on its own, for a caller whose
+/// files were already durable before it linked them (compaction §8's carry-forwards: a hard link
+/// adds a directory entry and copies no bytes, so only the entry is new).
+pub fn fsync_dirs(dirs: &[PathBuf]) -> Result<()> {
+    let mut seen: Vec<&Path> = Vec::new();
+    for dir in dirs {
+        if seen.contains(&dir.as_path()) {
+            continue;
+        }
+        seen.push(dir);
+        fsync_dir(dir)?;
+    }
+    Ok(())
+}
+
 fn fsync_dir(path: &Path) -> Result<()> {
     let dir = File::open(path).map_err(|source| StoreError::Io {
         path: path.to_path_buf(),

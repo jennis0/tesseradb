@@ -23,7 +23,8 @@ must not.
 
 **Does not own:** the invariants and the leak register (architecture §4, Appendix C — cited here,
 never restated as this document's); the byte-level formats and API (contracts); compaction and
-the fold, which do not exist and get a boundary statement here (spec §9) rather than a design;
+the fold, which get a boundary statement here (spec §9) rather than a design — `compaction.md`
+owns them and is where they are built;
 the read path's own machinery (lifecycle §1.1, §2, §7).
 
 **Every claim below was verified against the tree on 2026-08-04** (branch
@@ -73,9 +74,10 @@ The temporal shape to keep in mind, because everything else hangs from it:
   entry is fsync'd *and* the generation carrying it is swapped in, so no window ever exists
   between "accepted" and "in force". Everything after the ack — manifest publication, storage
   enforcement — is cleanup, not a precondition.
-- **Nothing retires.** ⊘ Compaction does not exist, so deletion denies are immortal and the
-  overlay grows monotonically. Fail-closed — an entry that never retires can never re-expose —
-  but it is not the specified mechanism (spec §8).
+- **Deletions retire at the fold that executes them**, and nowhere else (Rule F, spec §5.4). Until
+  one runs, the overlay grows monotonically under deletion churn — fail-closed, since an entry that
+  has not retired can never re-expose — and the schedule compaction §9 specifies is what decides how
+  long that is.
 
 Each of the four journeys below states, per step: what happens, what it is for, what the
 **writer** observes (latency, what the acknowledgement asserts, what each error means and whether
@@ -1096,10 +1098,11 @@ is not thereby unsafe, only refused.
 
 ## 8. Where compaction sits — the seam, stated so it is not rediscovered
 
-⊘ **Compaction does not exist.** No fold, no prefix rewrite, no `CURRENT` flip, no
-re-ranking, no batch-grid change. Everything in this section is obligation, not description —
-except the **publication seam** it would go through, which is built because Rule F's safety hangs
-on it and because everything else in the fold publishes through it. A **provisional** design
+**Compaction exists.** The fold, the prefix rewrite and the `CURRENT` flip are built, on the
+design this section's obligation list produced; re-ranking needs no separate mechanism (the fold's
+output is globally Morton-sorted by construction) and the batch-grid change is still an
+identity-breaking rebuild rather than a fold. What remains obligation here is the operator surface
+and the two pre-flight refusals compaction §3 and §8 name. A **provisional** design
 answering this section's obligation list is at [`compaction.md`](compaction.md) (2026-08-05,
 reviewed at r3 and r5, the seam built); this section stays the boundary statement and wins until
 that document is promoted.

@@ -68,7 +68,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `architecture.md` | Normative — r34 | 16 |
 | `caching.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
-| `compaction.md` | Provisional — under review | 9 |
+| `compaction.md` | Provisional — under review | 14 |
 | `concurrency-lifecycle.md` | Normative — r8 | 14 |
 | `conformance.md` | Normative — r8 | 15 |
 | `contracts.md` | Normative — r21 | 15 |
@@ -80,6 +80,6 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `measurement.md` | Provisional — under review | 5 |
 | `per-point-attributes.md` | Provisional — under review | 6 |
 | `slices-and-multi-table.md` | Provisional — under review | 8 |
-| `system-architecture.md` | Normative — r14 | 26 |
+| `system-architecture.md` | Normative — r14 | 24 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `write-path.md` | Normative for the write path. Owner sign | 25 |
+| `write-path.md` | Normative for the write path. Owner sign | 23 |

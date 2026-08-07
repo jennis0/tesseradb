@@ -1633,10 +1633,12 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // 10⁹, so it is invisible to a soak and needs a gauge. Rising past the low hundreds means
         // merge has stopped bounding it and only a fold will reset it.
         //
-        // A fold resets it to one segment per partition-slice, and ⊘ **nothing schedules one**:
-        // compaction §9's automatic trigger and `POST /control/compact` are unbuilt, so an operator
-        // watching this climb has no endpoint to act with. It is published anyway, because the
-        // constant being unobservable is how it went unnoticed to 10⁹ in the first place.
+        // A fold resets it to one segment per partition-slice, and the schedule dispatches one at
+        // `compaction_max_segments` at any hour, or at `compaction_window_min_segments` inside the
+        // nightly window (compaction §9, decision 0056). So this gauge now has a lever, and reading
+        // it climbing past the ceiling means the fold is being *refused* rather than not
+        // scheduled — check the interval floor and the executor's gates. ⊘ `POST /control/compact`
+        // is still unbuilt, so there is no way to ask for one out of band.
         //
         // A list rather than a scalar because the trigger compaction §9 specifies is per
         // (partition, slice); this build emits one of each, so the list has one element and will not
@@ -1649,10 +1651,13 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "count": s.segments,
             }))
             .collect::<Vec<_>>(),
-        // **It alarms; it does not act.** ⊘ Specified, not implemented: no compaction fold brings
-        // an over-limit overlay back down, so `soft_limit_alarms` rising is a signal that the
-        // overlay is deep and never a mechanism that makes it shallower. `depth` is read off the
-        // live generation, so it cannot drift from what a request composes against.
+        // **The alarm and the trigger read different numbers, deliberately.** `depth` is
+        // `deleted ∪ suppressed` — the right thing for an operator to see — while the schedule's
+        // retirable-depth route keys on the deletions alone, because a suppression never retires
+        // and a fold keyed on the union would rewrite the corpus to retire nothing (compaction §9).
+        // So `soft_limit_alarms` rising on a suppression-heavy deployment is a signal to look, not
+        // a fold waiting to happen. `depth` is read off the live generation, so it cannot drift
+        // from what a request composes against.
         "overlay": {
             "depth": state.engine.overlay_depth(),
             "soft_limit_alarms": executor.overlay_soft_limit_alarms,

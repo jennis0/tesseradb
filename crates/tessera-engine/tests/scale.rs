@@ -87,7 +87,7 @@
 //! [`the_flip_costs_what_the_resident_population_costs`] (**P2**) and
 //! [`a_streaming_read_of_the_whole_bundle_against_a_live_viewport`] (**P3**) live here rather than
 //! as standalone binaries so their figures re-run from the tree. Neither needs a compaction fold —
-//! **there is none** — and each measures the term the fold's cost is made of rather than the fold:
+//! neither runs one — and each measures the term the fold's cost is made of rather than the fold:
 //!
 //! * **P2** gates whether retained-row-space migration is built at all (`compaction.md` §6.3). The
 //!   fold's flip is `N` resident entries × a **full** projection rebuild, because a fold permutes
@@ -243,7 +243,7 @@ fn masked_total(engine: &Engine, session: &Session) -> u64 {
 /// **Not the same number as [`live_bytes`], and the gap is the point.** A merge's consumed
 /// segments and a coalesce's consumed tiers stay on disc: every side-manifest below the current
 /// `n` still names them, and a step-down serves one of those (contracts §2.3). Reclaiming them is
-/// compaction's, and **the compaction fold does not exist** — so this number only ever grows, and
+/// compaction's, and **this harness runs no fold** — so within a run this number only ever grows, and
 /// the ratio between the two is what a deployment would actually have to provision for today.
 fn bundle_bytes(root: &std::path::Path) -> u64 {
     fn walk(dir: &std::path::Path, total: &mut u64) {
@@ -819,7 +819,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
 /// and this buys little; at 10⁹ with a full projection cache it is minutes and this is the only
 /// thing that removes it. Measure the flip against a realistic session population first."*
 ///
-/// # There is no fold, and this does not need one
+/// # This harness runs no fold, and does not need one
 ///
 /// A flip's window is `N` resident entries × the per-entry refresh, run by a **serial** loop
 /// (`refresh_resident`), with every request for a key the pass has not reached shed 429 for its

@@ -267,14 +267,22 @@ pub(crate) enum FoldTrigger {
 /// since compaction §9's gauge is per (partition, slice) and any slice over the threshold is worth
 /// a fold.
 ///
-/// # The floor is process-local, and the work gates are what make that harmless
+/// # The floor is what stops a persistently-discarding fold, so it must be stamped by a discard
 ///
-/// `last_fold_unix` does not survive a restart, so a node that restarts inside its own window has
-/// no record of the fold it just finished. It dispatches nothing anyway: a fold leaves one segment
-/// per partition-slice and an overlay with the executed deletions gone, so both gauges are re-read
-/// against the bundle the fold itself produced and neither is over. Durable last-fold state would
-/// buy only the case where a restart lands between a fold completing and its own output being
-/// visible, which is not a state a fold leaves behind.
+/// `last_fold_unix` is *"when the last attempt ended"*, not *"when the last fold succeeded"* —
+/// see `Executor::last_fold_attempt_unix`. Several discard causes are persistent and leave the
+/// gauge that dispatched the fold exactly where it was, so a success-only stamp turns one bad
+/// configuration value into a loop that rewrites the corpus at every tick and leaves an unreclaimed
+/// prefix behind each time. The floor is the only rate limit on this path.
+///
+/// # It is process-local, and for the *success* case the work gates make that harmless
+///
+/// A node that restarts inside its own window has no record of the fold it just finished. It
+/// dispatches nothing anyway: a fold leaves one segment per partition-slice and an overlay with the
+/// executed deletions gone, so both gauges are re-read against the bundle the fold itself produced
+/// and neither is over. A restart after a *discard* does lose the back-off — the orphan the discard
+/// left is not a gauge anything reads — so the loop above is bounded by the floor within one
+/// process's life and by nothing across restarts.
 pub(crate) fn due(
     schedule: &CompactionSchedule,
     now_unix: u64,
@@ -771,7 +779,25 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     // written here, and the live `Arc<Dict>` is carried onto the new generation unchanged, so the
     // 7.1 GB copy a promoting flush pays at 1.17×10⁸ terms has no counterpart.
 
-    // ---- pass 5 — the digests ------------------------------------------------------------------
+    // ---- pass 5 — the digests, and the durability the flip is about to vouch for ----------------
+    //
+    // **`CURRENT` is a durable pointer at bytes that are not yet durable, until this runs.** The
+    // segment, postings and external-id writers deliberately do not sync — a partially-written file
+    // is *detectable* through the manifest digests, and a build or a flush can simply re-run. A
+    // fold cannot: it flips `CURRENT` onto this prefix and then deletes the old tree and reclaims
+    // the WAL members behind it, so these bytes become the only copy and "detectable" becomes
+    // "detectably gone". A power loss inside the writeback window would leave a durable `CURRENT`
+    // naming a torn prefix with nothing to fall back to.
+    //
+    // Here, on the fold's own thread, rather than at publication: it is the executor that must stay
+    // free to reach a queued deny, and compaction §6.1's standing ruling is that a fold's wall clock
+    // is a property nobody observes. The carried-forward links are the executor's half, and they
+    // need only their directory entries synced — a link copies no bytes.
+    //
+    // ⊘ **This makes the fold's own output durable and does not make the corpus so.** A
+    // carried-forward file was written by a flush that did not sync it either, and linking it does
+    // not change that; closing it properly is a ruling about the segment writers, which serve three
+    // producers and are outside this pass.
     let mut files = BTreeMap::new();
     for (rel, path) in &written {
         files.insert(
@@ -779,6 +805,8 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             crate::flush::digest_of(path).map_err(FoldFailed)?,
         );
     }
+    let paths: Vec<PathBuf> = written.iter().map(|(_, path)| path.clone()).collect();
+    tessera_store::fsync_written(&paths).map_err(|e| failed("pass 5 (durability)", &e))?;
 
     Ok(CompletedFold {
         plan,
@@ -807,7 +835,13 @@ pub(crate) fn next_prefix_name(bundle_root: &Path) -> std::io::Result<String> {
         let Some(digits) = name.strip_prefix('v') else {
             continue;
         };
-        if digits.len() != 5 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        // **At least five digits, not exactly five.** `{:05}` is a minimum width, so the
+        // hundred-thousandth prefix is `v100000` — six digits — and a parser that required five
+        // would stop seeing every prefix from there on, compute `v100000` for ever, and collide
+        // with the existing tree at the first carry-forward link, discarding each fold after it had
+        // re-read the corpus. Lexical order stops matching numeric order at the same point, which
+        // is why the scan takes a max rather than the last name.
+        if digits.len() < 5 || !digits.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
         if let Ok(n) = digits.parse::<u64>() {
@@ -979,10 +1013,26 @@ mod tests {
     #[test]
     fn the_next_prefix_steps_past_every_name_present_including_an_orphan() {
         let tmp = tempfile::TempDir::new().unwrap();
-        for name in ["v00000", "v00003", "not-a-prefix", "v0004", "v000004"] {
+        for name in ["v00000", "v00003", "not-a-prefix", "v0004"] {
             std::fs::create_dir(tmp.path().join(name)).unwrap();
         }
         assert_eq!(next_prefix_name(tmp.path()).unwrap(), "v00004");
+    }
+
+    /// **The scan does not stop seeing prefixes at the hundred-thousandth.** `{:05}` is a minimum
+    /// width, so `v100000` is a legitimate name this function itself produces — and a parser that
+    /// required exactly five digits would ignore it, recompute `v100000` at every fold for ever,
+    /// and collide with the tree already there after each fold had re-read the corpus.
+    ///
+    /// **Mutation this kills:** `digits.len() != 5` in place of `< 5` (the answer becomes
+    /// `v100000`, which already exists).
+    #[test]
+    fn the_next_prefix_keeps_counting_past_five_digits() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for name in ["v00000", "v99999", "v100000"] {
+            std::fs::create_dir(tmp.path().join(name)).unwrap();
+        }
+        assert_eq!(next_prefix_name(tmp.path()).unwrap(), "v100001");
     }
 
     /// An empty bundle root still names a prefix rather than failing — the shape a fold would meet

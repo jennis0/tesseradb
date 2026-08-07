@@ -1260,8 +1260,9 @@ impl Engine {
                 overlay_depth = depth,
                 overlay_soft_limit = limit,
                 "ALARM: this node replayed a WAL whose overlay is already at or above the \
-                 configured soft limit. It alarms; it does not act — a fold is the lever and \
-                 nothing schedules one yet (compaction §9)"
+                 configured soft limit. A fold is what brings it down, and the schedule's \
+                 retirable-depth route dispatches one at this threshold by default — so this is a \
+                 signal that the fold has work, not that nothing will act (compaction §9)"
             );
         }
     }

@@ -823,6 +823,103 @@ fn a_flush_inside_the_folds_flight_is_carried_forward() {
     );
 }
 
+/// **Obligation 2: a delete accepted *after* the snapshot survives the fold** — its entity keeps
+/// its row in the folded base, its id is in the new manifest's `tombstones`, its overlay entry does
+/// not retire, and it is invisible throughout.
+///
+/// This is the fail-open compaction §2 calls the reason three of its four carried categories exist:
+/// the `tombstones` line is the one arithmetic that must be a **set difference against live state**.
+/// A delete accepted during the fold's flight names an entity whose row the fold did *not* drop —
+/// it was not in `D₀` — so publishing the executed set, or copying the plan's, would retire that
+/// deletion while its row survives in the rebuilt base, and the item would be drawn, counted and
+/// served to every authorised principal.
+///
+/// **Mutations this kills:** publishing `tombstones` from the plan's `D₀` rather than from the live
+/// overlay minus `executed` (the id is absent from the manifest, so a restart re-exposes the item);
+/// retiring `D₀ ∪ (live deleted)` (depth drops to zero and the item comes back immediately).
+#[test]
+fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+
+    let baseline = {
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        visible(&engine, &session)
+    };
+    // Deleted before the fold, so it *is* in `D₀`: the contrast that stops this case passing
+    // because nothing retired at all.
+    let folded = entity_of_source(&root, "v00000", 3);
+    engine
+        .accept_change(folded, ChangeOp::Delete)
+        .expect("a delete is accepted");
+
+    // Now hold the fold and accept a second delete *inside its flight* — after the plan cloned
+    // `D₀`, so this one is not in it and the fold's passes never saw it.
+    engine.set_fold_paused_for_test(true);
+    let before = engine.write_executor_stats();
+    engine.request_fold();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !engine.fold_is_holding_for_test() {
+        assert!(std::time::Instant::now() < deadline, "the fold never reached its hold");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    let mid_flight = entity_of_source(&root, "v00000", 9);
+    engine
+        .accept_change(mid_flight, ChangeOp::Delete)
+        .expect("a delete is accepted during the fold's flight");
+    {
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        assert_eq!(
+            visible(&engine, &session),
+            baseline - 2,
+            "invisible from the moment it is acked, which is before the fold publishes"
+        );
+    }
+
+    engine.set_fold_paused_for_test(false);
+    loop {
+        let now = engine.write_executor_stats();
+        assert_eq!(now.fold_failures, before.fold_failures, "the fold was discarded");
+        if now.folds > before.folds {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the fold never published");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let bundle = open_bundle(&root).expect("the folded bundle opens");
+    let partition = &bundle.partitions["default"];
+    assert!(
+        partition.slices["s0"].row_space.row_of(mid_flight).is_some(),
+        "the post-snapshot deletion keeps its row: the fold's passes ran over `D₀`, which did not          name it"
+    );
+    assert!(
+        partition.slices["s0"].row_space.row_of(folded).is_none(),
+        "and the pre-snapshot one lost its row, so the fold did fold something"
+    );
+    assert!(
+        partition.manifest.tombstones.contains(&mid_flight.raw()),
+        "its id is in the new manifest's tombstones — the seed a restart reads, and the only thing          still hiding it: tombstones is `live deleted − executed`, never the plan's set"
+    );
+    assert!(
+        !partition.manifest.tombstones.contains(&folded.raw()),
+        "while the executed one is gone from the seed"
+    );
+    assert_eq!(
+        engine.overlay_depth(),
+        1,
+        "its overlay entry did not retire; the executed one's did"
+    );
+    let after = engine.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(
+        visible(&engine, &after),
+        baseline - 2,
+        "and it is still invisible after the flip — throughout, with no window in which the fold's          own publication re-exposed it"
+    );
+}
+
 /// **Obligation 2b, end to end: a delete in `D₀` whose entity a carried-forward artefact still
 /// names does not retire** — the fail-open compaction §5's rule replaced, in the interleaving that
 /// actually produces it.
@@ -1120,6 +1217,29 @@ fn config_scheduling(schedule: tessera_engine::CompactionSchedule) -> EngineConf
     }
 }
 
+/// Drive ticks for `secs` and assert the schedule dispatched nothing in that time.
+///
+/// **A negative assertion here has to wait, and `folds == 0` straight after a tick does not.**
+/// `tick` returns when the tick *counter* moves, which happens before `dispatch_fold` runs — and
+/// even once it has run, a dispatched fold is on its own thread and increments nothing until it
+/// publishes. So the naive check passes while a fold is in flight, which is exactly how the first
+/// version of `the_windowed_route_…` came to survive the mutation its doc claimed to kill. The
+/// fixture folds in well under a second; this waits several times that.
+fn assert_no_fold_within(engine: &Engine, secs: u64) {
+    let before = engine.write_executor_stats();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < until {
+        tick(engine);
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            (now.folds, now.fold_failures),
+            (before.folds, before.fold_failures),
+            "the schedule dispatched a fold it had no route to dispatch"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Pull the tick forward and wait for the schedule to be evaluated on it.
 ///
 /// `request_flush` is the deterministic way to make a tick happen now — it is the one operator
@@ -1182,14 +1302,9 @@ fn the_retirable_depth_route_dispatches_a_fold_without_anyone_asking() {
             .expect("a delete is accepted");
     }
     assert_eq!(engine.overlay_depth(), 3, "depth is three; the retirable part is two");
-    tick(&engine);
-    tick(&engine);
-    assert_eq!(
-        engine.write_executor_stats().folds,
-        0,
-        "a suppression is not retirable, so it moves the gauge a fold keys on by nothing — and a \
-         trigger reading total depth instead would have fired here"
-    );
+    // A suppression is not retirable, so it moves the gauge a fold keys on by nothing — and a
+    // trigger reading total depth instead would have fired here.
+    assert_no_fold_within(&engine, 2);
 
     let third = entity_of_source(&root, "v00000", 5);
     engine
@@ -1260,14 +1375,9 @@ fn the_segment_ceiling_dispatches_a_fold_outside_the_window() {
 
     // The base plus one extent: two segments, which clears the *window's* floor and not the
     // ceiling — and the window is shut, so nothing may happen.
+    // Two segments is worth a fold tonight and not worth one now, and it is not tonight.
     flush_once(1);
-    tick(&engine);
-    tick(&engine);
-    assert_eq!(
-        engine.write_executor_stats().folds,
-        0,
-        "two segments is worth a fold tonight and not worth one now, and it is not tonight"
-    );
+    assert_no_fold_within(&engine, 2);
 
     // The base plus two extents: three, which is the ceiling.
     flush_once(2);
@@ -1297,9 +1407,14 @@ fn the_segment_ceiling_dispatches_a_fold_outside_the_window() {
 /// and one that opens in six hours does not — with the same segment count, so the only variable is
 /// the hour.
 ///
+/// **Both halves are load-bearing, and the fixture is built so that neither alone explains the
+/// outcome**: the threshold is two against a one-segment bundle, so the open-window arm dispatches
+/// nothing until a flush supplies the second segment. An earlier version used a threshold of one,
+/// which the fixture already met — so removing the segment gate entirely left this case green, and
+/// it proved only half of what it claimed. Verified by running that mutation.
+///
 /// **Mutations this kills:** ignoring the window and firing on the segment gauge alone (the closed
-/// case folds); ignoring the segment gauge (the closed case is unaffected, but the *first*
-/// assertion below — that a window over an already-folded bundle dispatches nothing — fails).
+/// arm folds); ignoring the segment gauge (the open-but-below-threshold arm folds).
 #[test]
 fn the_windowed_route_fires_inside_its_window_and_not_outside_it() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1310,44 +1425,50 @@ fn the_windowed_route_fires_inside_its_window_and_not_outside_it() {
         // Opens in six hours, for one hour: closed now, whatever "now" is when this runs.
         window_start_secs: Some((now + 6 * 3_600) % 86_400),
         window_secs: 3_600,
-        window_min_segments: 1,
+        // Two, against a fixture that builds one segment — so the gate is what decides, not the
+        // fixture.
+        window_min_segments: 2,
         // Both any-hour routes off: the window is the only thing that can dispatch, which is the
         // whole of what this case is asking.
         max_segments: None,
         after_deletions: None,
     };
-    let engine = engine_over_fixture(tmp.path(), &root, config_scheduling(closed));
-
-    tick(&engine);
-    tick(&engine);
-    assert_eq!(
-        engine.write_executor_stats().folds,
-        0,
-        "one segment is over the threshold and the window is shut, so nothing happens — a start \
-         time that fires outside its own window is not a start time"
-    );
-    assert_eq!(engine.generation().prefix, "v00000");
-
-    // The same deployment, the same segment count, a window that opened half an hour ago.
-    drop(engine);
     let open = tessera_engine::CompactionSchedule {
         window_start_secs: Some((now + 86_400 - 1_800) % 86_400),
         ..closed
     };
-    let mut engine = Engine::open(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
-        config_scheduling(open),
-    )
-    .expect("the engine reopens");
-    engine.start_write_executor(8).expect("the executor starts");
-    engine.set_background_refresh_for_test(false);
 
-    tick(&engine);
+    let engine = engine_over_fixture(tmp.path(), &root, config_scheduling(closed));
+    engine.set_merge_for_test(false);
+    // Two segments, so the *only* thing keeping this from folding is the shut window.
+    ingest(&engine, b"second-segment".to_vec(), "b1").expect("ingest");
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.write_executor_stats().flushes == 0 {
+        assert!(std::time::Instant::now() < deadline, "the flush never landed");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Two segments is over the threshold and the window is shut, so nothing happens — a start time
+    // that fires outside its own window is not a start time.
+    assert_no_fold_within(&engine, 2);
+    assert_eq!(engine.generation().prefix, "v00000");
+    drop(engine);
+
+    // A fresh deployment, the window now open, and **one** segment: below the threshold, so the
+    // window opening is not on its own a reason to fold.
+    let tmp2 = tempfile::TempDir::new().unwrap();
+    let root2 = tmp2.path().join("bundle");
+    let engine = engine_over_fixture(tmp2.path(), &root2, config_scheduling(open));
+    engine.set_merge_for_test(false);
+    // Inside the window, below the threshold: there is nothing here worth folding.
+    assert_no_fold_within(&engine, 2);
+
+    // The second segment arrives and the same open window now has work.
+    ingest(&engine, b"second-segment".to_vec(), "b1").expect("ingest");
+    engine.request_flush();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while engine.write_executor_stats().folds == 0 {
+        tick(&engine);
         assert!(
             std::time::Instant::now() < deadline,
             "the schedule never dispatched a fold inside its own window"

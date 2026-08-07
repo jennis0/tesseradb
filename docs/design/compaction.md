@@ -16,11 +16,16 @@ extents (r21, decision 0051). **The §5/§6 re-review ran at r5 and is
 dispositioned**, and its findings changed both sections: §5's retirement rule tests the whole
 carry-forward set, §6.1's throttle was refuted and replaced (decision 0052), and §6.2's refusal
 window is gone — a fold's aftermath is a cache miss, not a refusal (decision 0053), which also
-retires §6.3. **The fold is built** (2026-08-07): the plan, the dedicated thread, all five passes, the
-publication in §4's order, retirement's `executed` derivation and reclamation. **What remains before
-this becomes normative:** the invariants lens on the staging list of §6.2, if it is built, and on
-D5's rows-frozen safety claim, which has never had one. **What remains unbuilt** is the operator
-surface (§9) — a fold happens when something calls for one, and nothing schedules it.
+retires §6.3. **The fold is built and scheduled** (2026-08-07): the plan, the dedicated thread, all five passes,
+the publication in §4's order, retirement's `executed` derivation, reclamation, and §9's trigger as
+decision 0056 rules it — a nightly gated window and two any-hour gauges. **An adversarial round has
+run against the implementation** (r10, three lenses; dispositioned in the body) and found no
+disclosure: what it found was two pre-flight refusals this document described as built and are not
+(§3, §8), a publication window that outlived its own durability gate, and a fold that could discard
+in a loop. **What remains before this becomes normative:** the invariants lens on the staging list
+of §6.2, if it is built, and on D5's rows-frozen safety claim, which has never had one. **What
+remains unbuilt** is the rest of the operator surface — `POST /control/compact`, two of §9's four
+gauges, and both pre-flight refusals.
 **Owns:** the fold — what it executes, what it carries forward, how it is published, what retires
 at it, and what a viewer pays at the flip. The prefix rewrite, the `CURRENT` flip, and
 reclamation.
@@ -87,7 +92,7 @@ flowchart TD
   A["plan on the executor:<br/>name the files, clone the tombstone set"] --> B["execute on one dedicated thread:<br/>five streaming passes into a new prefix"]
   B --> C["publish on the executor:<br/>hard-link carry-forwards, MANIFEST,<br/>SEGMENTS-n, flip CURRENT"]
   C --> D["one swap: new prefix, new postings,<br/>new identity, retirement, re-derived deny mask"]
-  D --> E["post-swap refresh, MRU order —<br/>the 429 window (spec §6)"]
+  D --> E["post-swap refresh, MRU order —<br/>a cache miss, never a refusal (spec §6)"]
   D --> F["WAL rotation — the snapshot that makes<br/>retirement durable (spec §5)"]
   F --> G["reclaim the old prefix, whole (spec §8)"]
 ```
@@ -149,8 +154,8 @@ maintenance schedule leaking into the product that decision 0043 forbids, so the
 thread and stays sequential. Sequential also bounds memory: there are no per-worker buffers to
 multiply.
 
-**The memory rule this design is built around: peak RSS is a stated budget, checked before the
-fold starts, and independent of row count.** *(r1 claimed "O(1) in corpus size"; that is false and
+**The memory rule this design is built around: peak RSS is a stated budget, ⊘ *to be* checked
+before the fold starts, and independent of row count.** *(r1 claimed "O(1) in corpus size"; that is false and
 both reviewers said so. Dirty shared file mappings are resident and cgroup-charged, so
 `permutation.bin` and `ext-locator.u32` are real `VmHWM` — the pre-flight refusal below is what
 "does not OOM" actually rests on, and it is the claim to make.)* The terms that scale, and on which
@@ -171,9 +176,17 @@ which is charged to RSS on exactly the same argument. Corrected on the second re
 more than a figure this load-bearing should have needed.)* A **rows-frozen fold does not run
 pass 1 at all**, so it drops the first of the three and peaks at ~5.5 GB; splitting the base
 locator into entity-range extents — the mechanism flush segments already use — would drop the
-second and take it to ~1.5 GB. It **estimates that figure and refuses to start above the
-available headroom**, on `tessera-build`'s precedent: that crate exists because the in-memory build
-was OOM-killed at 10⁹ on a 47 GiB box, and the lesson is a pre-flight budget, not an assurance.
+second and take it to ~1.5 GB.
+
+⊘ **The pre-flight refusal is not built, and it is the load-bearing half of this section.** The
+design is that the fold **estimates that figure and refuses to start above the available
+headroom**, on `tessera-build`'s precedent — that crate exists because the in-memory build was
+OOM-killed at 10⁹ on a 47 GiB box, and the lesson is a pre-flight budget rather than an assurance.
+`plan_fold` gates on the WAL, the overlay, step-down, an unwritable scalar declaration and an empty
+partition, and on nothing about memory. **What happens instead** is that a fold dispatched on a box
+whose serving load already holds most of RAM takes its ~9–10 GB in-process and the OOM killer takes
+the node — the failure `tessera-build` exists to prevent, reintroduced through the serving binary.
+Everything above is the *estimate* a refusal would compare against; nothing compares it.
 
 A merge's measured 4.4–4.9× multiplier on its inputs' bytes
 (`probes/2026-08-04-maintenance-memory/`) is affordable only because a policy cap bounds its
@@ -363,9 +376,17 @@ On the executor, in this order.
 
    **The two `entity_id_high_water` fields mean different things, and only one of them is live.**
    `SEGMENTS-<n>.json`'s seeds the I9 allocator and is the live value, as above.
-   `MANIFEST.json`'s is read by exactly one thing — `ExternalIdSidecar::deferred_from_manifest`,
-   as the base locator's **declared length** — so it must be the *snapshot's* entity space, which
-   is what pass 3 sized the locator to. A live value there re-opens fidelity F1 by the back door:
+   `MANIFEST.json`'s is what `ExternalIdSidecar::deferred_from_manifest` takes as the base
+   locator's **declared length** — so it must be the *snapshot's* entity space, which is what pass
+   3 sized the locator to.
+
+   **`MANIFEST.json`'s field has a second reader, and it is I9's allocator.** `Engine::open` seeds
+   the allocator floor from the *maximum* of the two fields, so a fold writing the lower value here
+   is safe only because the side-manifest carries the live one alongside it. Stated because the
+   safety is a property of the `max` on the other side rather than of this write: a change to
+   either — seeding from `MANIFEST.json` alone, say, on the grounds that only the sidecar reads it
+   — re-issues every entity id above the snapshot bound at the next restart, which is I9's exact
+   failure. A live value there re-opens fidelity F1 by the back door:
    the base locator would claim every post-snapshot entity and answer "this item has no external
    id" for items that have one. It also fails loudly rather than quietly, because the sidecar
    checks the declared length against the file's bytes at first touch — but a design that relies
@@ -723,8 +744,12 @@ That, and the absence of a throttle site (spec §6.1), is what remains open here
 - **Merge or coalesce publishing under the fold**: the fold discards. Suspension makes this rare
   rather than safe.
 - **Two folds**: impossible — at most one in flight, and the trigger is refused while one runs.
-- **Crash mid-fold**: orphaned files under an unreferenced prefix; swept at startup or by the next
-  fold.
+- **Crash mid-fold**: orphaned files under an unreferenced prefix. ⊘ **Nothing sweeps them**: the
+  startup sweep is unbuilt, and a later fold does not take them either — `next_prefix_name` steps
+  *past* an orphan by construction, and the reclamation at a fold's tail takes only the prefix that
+  fold itself superseded. Every discarded fold therefore leaves a bundle-sized tree until an
+  operator removes it, which is what makes the interval floor on a *discarded* fold load-bearing
+  (spec §9).
 - **Crash between `CURRENT` and the swap**: restart opens the new prefix, replay re-seeds from the
   new manifest and resurrects the retired entries harmlessly (spec §5). The state is one some
   restart could have produced, which is the same standard the WAL's discard recovery meets.
@@ -761,9 +786,14 @@ Unlinking an entry a live request still holds is safe — a `FrozenFragment` is 
 POSIX the mapping outlives the directory entry.
 
 **Peak disc is old prefix + new prefix — roughly 2× live bytes — on top of whatever orphans already
-stand.** The fold refuses to start when free space is below its estimated output plus a margin. An
-operation that fills the device takes the write path down with it: a deny's append fails, the
-apply-anyway fold runs behind a 500, and the node goes unready (write-path §1.3).
+stand.** ⊘ **The free-space precondition is not built**: the design is that a fold refuses to start
+when free space is below its estimated output plus a margin, and nothing checks it — `plan_fold`
+has no `statvfs` and no estimate. **What happens instead** is that the fold runs and, if the device
+fills, takes the write path down with it: a deny's append fails, the apply-anyway fold runs behind a
+500, and the node goes unready (write-path §1.3). A fold discarded for any *persistent* reason makes
+that reachable without a large corpus, since each attempt leaves a complete prefix behind and
+compaction §7's startup sweep is unbuilt too — the interval floor is what bounds the rate, and it is
+the only thing that does.
 
 ## 9. Trigger and the operator surface
 
@@ -881,7 +911,7 @@ calibrated values; until then a deployment may switch each route off.
 | `tessera-engine::compact` | ✔ the plan (`plan_fold`, pure, on the executor), the five passes (`execute`, on one dedicated thread), the next-prefix rule and Rule F's `executed` derivation — the shape `flush.rs` / `merge.rs` / `coalesce.rs` already establish, and the fourth caller of the same publication discipline |
 | `tessera-engine::write` | ✔ `dispatch_fold` (its own thread, and the suspension of merge and coalesce), `publish_fold` (spec §4's seven steps in order), the deferred reclamation (spec §8), and the live external-id map's prune, which is the half of Rule F that lives in memory rather than in a file |
 | `tessera-engine::session` | ✔ the seam: `bundle_identity`, the fragment cache and the external-id index onto `Generation`; `GeometryPublication` and its `PrefixRotation`; `publish_rotated_prefix`; the bundle root in place of a captured prefix directory |
-| `tessera-server` | ✔ the schedule's five `[ingest].compaction_*` keys, parsed into the `CompactionSchedule` the executor reads; ⊘ `POST /control/compact`, the dead-bytes and tombstoned-row gauges on `/control/status` (overlay depth and segment count are already published), and the free-space precondition |
+| `tessera-server` | ✔ the schedule's six `[ingest].compaction_*` keys, parsed into the `CompactionSchedule` the executor reads; ⊘ `POST /control/compact`, the dead-bytes and tombstoned-row gauges on `/control/status` (overlay depth and segment count are already published), and the free-space precondition |
 
 `scripts/check-layers.sh` is unaffected: the engine already depends on both store and authz, and
 the fold adds no publisher — it goes through the executor like everything else.
@@ -926,15 +956,21 @@ it.
 
 ## 12. What must be proven
 
-Fifteen obligations, in the shape write-path §14 uses. Numbers 1–4 are the fold's reason for
-existing and none of them can be inferred from the others passing.
+**Sixteen** obligations, in the shape write-path §14 uses — 1, 2, 2b, and 3 through 15; the count
+read "fifteen" for as long as 2b was an addition rather than an entry. Numbers 1–4 are the fold's
+reason for existing and none of them can be inferred from the others passing.
 
-✔ **Thirteen are covered**, in `tessera-engine/tests/fold.rs` against a real fold and in
+✔ **Fourteen are covered**, in `tessera-engine/tests/fold.rs` against a real fold and in
 `compact.rs`'s unit cases for the retirement rule itself. **Two are not, and neither for want of a
 test**: 12 is probe **P1**, which nothing has run, so this design's central memory claim stays
 modelled; and 9 (the fold discards when a merge or coalesce published under it) has the rebase check
 and the suspension but no case that constructs the race, which needs a merge held mid-flight against
-a fold — machinery neither pass has today. Obligation 2b's *end-to-end* case pins the rule over the
+a fold — machinery neither pass has today.
+
+*(Obligation **2** was uncovered while this section claimed thirteen of fifteen, and the arithmetic
+balanced because 2 had fallen out of both the count and the audit — an audit that counts its own
+subject is worth exactly one recount. It is covered now:
+`a_delete_accepted_after_the_snapshot_survives_the_fold`.)* Obligation 2b's *end-to-end* case pins the rule over the
 whole carry-forward set; the per-artefact independence it also claims is only separable in the unit
 fixture, because a flush publishes its segment, tier, run and locator extent together over one
 entity range, and that is recorded at both tests rather than assumed.
@@ -960,8 +996,10 @@ entity range, and that is recorded at both tests rather than assumed.
 5. **Masked counts are identical across the flip**, for a session established before it, up to
    exactly the folded deletions — over several principals including a sparse one.
 6. **Geometry is byte-exact**: every surviving point's Morton code is identical pre- and post-fold,
-   row ids are dense, and the segment is `(morton, tessera_id)`-ordered — the `scale.rs` harness's
-   planted-probe property, run across a fold.
+   row ids are dense, and the segment is `(morton, tessera_id)`-ordered. ✔ Covered, but **not in the
+   form this line first named** — `scale.rs` has no fold case — by `fold_row_space.rs`'s byte-exact
+   multiset property and `fold.rs`'s per-entity identity and density check, which together assert
+   the same three things at both layers.
 7. **Every external id resolves both ways** after the fold; a folded-away entity's key is gone and
    its external id is re-ingestible.
 8. **A flush published during the fold's flight is carried forward** and its items are visible
@@ -1035,10 +1073,10 @@ wants retirement without the flip, and its enabling property — that removing a
 is sufficient for invisibility and the row is only reclamation — is worth keeping written down
 either way, because it is the reason the two modes can differ at all. It also still owes the
 external-id fold, and its safety claim has never been through a review lens. What follows is the
-case, retained as the record:
+case, retained as the record.
 
-
-opens a second mode: **removing an entity's postings is sufficient to make it invisible; removing
+**Decision 0048's subtraction-only postings pass** opens a second mode: **removing an entity's
+postings is sufficient to make it invisible; removing
 its row is only reclamation** (checked across all four composition routes in `compose.rs` — a
 rowed, postingless entity is in no fragment, so it is in no projection, and `verdict` and the
 buffer walk cannot reach it either). A **rows-frozen** fold would therefore rewrite postings, runs
@@ -1111,6 +1149,45 @@ P2 dropped its pre-swap arm: D2 was withdrawn at r3 (spec §13), so there is no 
 compare against and what the probe measures is the post-swap pass alone.
 
 ## Appendix R — Review record
+
+**r10 (2026-08-07) — three adversarial lenses against the *implementation*, and what they found was
+the documentation.** Invariants-and-fail-open, failure-and-concurrency, and fidelity, run against
+the built fold and dispositioned in one pass. **No disclosure**: the invariants lens constructed
+five Rule F interleavings, tried Rule S by every route, and worked through the identity rotation's
+four fragment holders, I2, I4, I9, I10, I11, the sentinel permutation and the schedule's gauges
+without opening one. What it and the others did find:
+
+- **Two pre-flight refusals stated as description and never built** — §3's memory headroom check
+  and §8's free-space check. §3's is the claim that section itself says *"does not OOM"* rests on,
+  and the r9 Status header had just declared §1–§5 description, which promoted both. Marked at the
+  claim, with what happens instead.
+- **The publication outlived its own gate.** `plan_fold` refuses a poisoned WAL; `publish_fold`,
+  hours later, did not re-ask before serialising `tombstones` and `deny` from the live overlay —
+  the apply-anyway entries of write-path §5.5, made permanent on every restore. Re-checked at
+  publication now.
+- **A post-flip failure kept publishing into the superseded prefix**, so the next flush acked rows
+  into a tree no restart reads and the rotation behind it reclaimed their WAL records: acked
+  ingest, lost, with no error. A latch now stops the node publishing at all until it is restarted.
+- **A discarded fold did not move the interval floor**, so a persistent discard cause redispatched
+  every tick and left a corpus-sized orphan each time, against a startup sweep that does not exist.
+  Every terminal outcome stamps it now.
+- **A fold requested while one ran left the flag armed**, which is also a *wake* reason — collapsing
+  the flush cadence to the completion poll for the running fold's remaining hours. Refused now, as
+  §9 always said it was.
+- **The corpus said the fold did not exist** in five documents and about fourteen code comments,
+  including normative write-path §8 and a live operator alarm. The r9 pass had corrected only the
+  paragraphs it touched, and the schedule then landed two commits later and staled its own
+  corrections.
+- **§12 claimed thirteen of fifteen obligations covered, over a list of sixteen** — and obligation 2
+  had no test at all, which is why the arithmetic balanced.
+- **A test's mutation claim was false**, and the cause was general: negative assertions read
+  `folds == 0` immediately after a tick, which cannot have moved yet even when a fold *was*
+  dispatched. Four such assertions now wait.
+
+The fold also did not sync its own output before flipping `CURRENT` — and then deleted the only
+other copy seconds later. Its own files are synced now; ⊘ the wider question, that the segment,
+postings and run writers do not sync for *any* producer, is a ruling about those writers rather
+than about this pass.
 
 **r9 (2026-08-07) — the fold is built, and §1–§5 and §8 become description.** Not a review round.
 The plan, the dedicated thread, all five passes, §4's publication in order, retirement's `executed`

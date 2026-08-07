@@ -62,8 +62,8 @@ broken by a plausible-looking change:
   predicate-change entries, the op being withdrawn (decision 0047: edit is delete + re-ingest,
   and a deleted holder never blocks the re-ingest) — retire *only* at the compaction fold that
   executes them (Rule F). Giving a suppression any other retirement route is fail-open — caught
-  in review twice; do not rediscover it. The fold exists and retires; **nothing schedules one**
-  (compaction §9), so an overlay comes down when something asks for a fold and not before.
+  in review twice; do not rediscover it. The fold exists, retires, and is scheduled — a nightly
+  gated window and two any-hour gauges (compaction §9, decision 0056).
 - **Geometry stamps are advisory, never authorisation** (decision 0041 — pins are deleted). A
   suppression applies to every request the moment it is accepted, whatever stamp was presented.
 

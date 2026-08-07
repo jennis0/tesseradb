@@ -10,10 +10,11 @@
 //! rewritten — a reader who finds it describing per-deny retirement stamps has found the stale
 //! text, not a second mechanism.)*
 //!
-//! **⊘ Nothing retires a deletion yet.** [`Overlay::retire`] is Rule F's route and the publication
-//! seam can carry it, but there is no compaction fold to produce an executed set, so no caller
-//! passes a non-empty one. Rule F's safety is the identity match the seam now builds
-//! (`write-path.md` §5.4, compaction §4), not a stamp ordering.
+//! **A deletion retires at the fold that executes it.** [`Overlay::retire`] is Rule F's only route
+//! out of `deleted`, and its caller is the fold's own publication, which derives the executed set
+//! from what it demonstrably removed (`tessera_engine`'s `compact`, compaction §5). Rule F's safety
+//! is the identity match the publication seam builds (`write-path.md` §5.4, compaction §4), not a
+//! stamp ordering.
 //!
 //! Collapsing the two into a single enum ("last write wins") is fail-open, and has been caught
 //! twice: the sequence `delete → suppress → unsuppress` must not re-expose a deleted item. Two

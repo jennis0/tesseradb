@@ -122,4 +122,9 @@ is a state a fold does not leave behind.
   **assumed**, on the same footing as §9's other two uncalibrated numbers, and probe **P1** is what
   turns them into evidence.
 - `POST /control/compact` (contracts §3.4) is still unbuilt. `Engine::request_fold` is the trigger
-  both it and this schedule call.
+  it will call; **the schedule does not go through it** — `Executor::dispatch_fold` consults the
+  gauges directly, so a request and a schedule are two routes into one dispatch rather than one
+  into the other. A request arriving while a fold runs is refused, not queued.
+- The interval floor is stamped by **every** terminal outcome, not only by a publication. Several
+  discard causes are persistent, and a success-only stamp turns one bad configuration value into a
+  fold that rewrites the corpus at every tick and leaves an unreclaimed prefix behind each time.
