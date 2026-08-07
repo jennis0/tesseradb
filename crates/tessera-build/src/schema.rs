@@ -119,9 +119,6 @@ pub struct Attribute {
     /// The vocabulary this column's values are drawn from, for a category; `None` for a plain
     /// numeric attribute. Names a key in [`Schema::vocabularies`].
     pub vocabulary: Option<String>,
-    /// The slices carrying this column. Empty means every slice — §3.9's expensive default,
-    /// which the plan step warns about.
-    pub render_in: Vec<String>,
 }
 
 /// A named value set: keys, their pinned codes, and per-value presentation.
@@ -235,6 +232,18 @@ impl Schema {
                     decl.name
                 )));
             }
+            if decl.render_in.is_some() {
+                return Err(schema_error(format!(
+                    "attribute '{}': `render_in` is specified and not built \
+                     (per-point-attributes §3.9). A per-slice hot column needs contracts §2.6 to \
+                     enumerate columns per slice, which slices §53 permits and the format does \
+                     not yet carry — `MANIFEST.declared_scalars` is one flat bundle-wide list. \
+                     Accepting it would put the column in every slice anyway, silently, which is \
+                     the opposite of what it asks for. Omit it: every slice is the current \
+                     behaviour and the documented default",
+                    decl.name
+                )));
+            }
             if !placement.render {
                 return Err(schema_error(format!(
                     "attribute '{}': `used_for` must contain \"render\". `filter` and `inspect` \
@@ -262,7 +271,6 @@ impl Schema {
                         name: decl.name.clone(),
                         ty,
                         vocabulary: Some(vocab_name),
-                        render_in: decl.render_in.clone().unwrap_or_default(),
                     }
                 }
                 other => {
@@ -307,7 +315,6 @@ impl Schema {
                         name: decl.name.clone(),
                         ty,
                         vocabulary: None,
-                        render_in: decl.render_in.clone().unwrap_or_default(),
                     }
                 }
             };
@@ -728,22 +735,41 @@ fn check_column_name(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
+    /// Parse `text` as a schema file, through a private temporary directory.
+    ///
+    /// **A fresh `tempdir` per call, not a name derived from the input.** An earlier version named
+    /// the file after the string's heap address (`{:p}`), which the allocator reuses: two cases
+    /// running in parallel could land on one path, and a case could read the file another had
+    /// written. It presented as a *refusal that did not fire* — the parse succeeded against stale
+    /// bytes — which is the most misleading way for a test helper to fail, since the assertion it
+    /// breaks is the one asserting something is refused.
     fn parse_str(text: &str) -> Result<Schema> {
-        let dir = std::env::temp_dir().join(format!("tessera-schema-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("schema-{:p}.toml", text));
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(text.as_bytes()).unwrap();
-        drop(f);
-        let out = Schema::parse(&path, &HashMap::new());
-        let _ = std::fs::remove_file(&path);
-        out
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("schema.toml");
+        std::fs::write(&path, text).expect("write schema");
+        Schema::parse(&path, &HashMap::new())
     }
 
     fn err(text: &str) -> String {
         format!("{}", parse_str(text).expect_err("expected a refusal"))
+    }
+
+    /// `base` with `line` added to its first `[[attribute]]` table.
+    ///
+    /// **Inserted at a structural landmark, not by matching a formatted line.** A case that built
+    /// its input with `str::replace` on `"used_for = [...]"` silently stopped substituting when
+    /// the constant's alignment changed — and a case asserting that something is *refused* then
+    /// passes plain `SEVERITY`, which is accepted, so the no-op presents as the refusal failing to
+    /// fire rather than as a broken fixture. Panics if the landmark is gone, which is the whole
+    /// point: a fixture that cannot build its input must fail loudly, not test nothing.
+    fn with_line(base: &str, line: &str) -> String {
+        const AFTER: &str = "[[attribute]]\n";
+        assert!(
+            base.contains(AFTER),
+            "the fixture no longer contains an [[attribute]] table header"
+        );
+        base.replacen(AFTER, &format!("{AFTER}{line}\n"), 1)
     }
 
     const SEVERITY: &str = r#"
@@ -829,6 +855,26 @@ listing = "public"
 
         let multi = SEVERITY.replace("used_for = [\"render\"]", "used_for = [\"render\"]\nmulti = true");
         assert!(err(&multi).contains("§3.7"), "{}", err(&multi));
+    }
+
+    /// **`render_in` is refused rather than recorded and ignored** (§3.9, decision 0013).
+    ///
+    /// The distinction is the whole point of the case. `MANIFEST.declared_scalars` is one flat
+    /// bundle-wide list, so a build that accepted `render_in = ["a"]` would write the column into
+    /// every slice — the opposite of what was asked for, with no error and nothing downstream able
+    /// to notice. Omitting it still means every slice, which is honest because that is what
+    /// happens.
+    #[test]
+    fn render_in_is_refused_rather_than_silently_ignored() {
+        let text = with_line(SEVERITY, "render_in = [\"docs_2024\"]");
+        let message = err(&text);
+        assert!(message.contains("§3.9"), "{message}");
+        assert!(
+            message.contains("every slice anyway"),
+            "the refusal must say what accepting it would actually do: {message}"
+        );
+        // And the omitted case is unaffected — it is the documented default, not a workaround.
+        assert!(parse_str(SEVERITY).is_ok());
     }
 
     /// §4.3: a non-fixed-width type in the hot column. The capability exists in the storage
@@ -942,16 +988,17 @@ listing = "per_viewer"
         );
         assert!(err(&both).contains("spellings of one thing"), "{}", err(&both));
 
-        let dir = std::env::temp_dir();
+        // A private directory, for `parse_str`'s reason — a fixed name in the shared temp dir is
+        // the same collision one step less likely.
+        let dir = tempfile::tempdir().expect("tempdir");
         let unclaimed: HashMap<String, PathBuf> =
-            [("nobody".to_string(), dir.join("nothing.parquet"))].into();
-        let path = dir.join("tessera-unclaimed-binding.toml");
+            [("nobody".to_string(), dir.path().join("nothing.parquet"))].into();
+        let path = dir.path().join("schema.toml");
         std::fs::write(&path, SEVERITY).unwrap();
         let message = format!(
             "{}",
             Schema::parse(&path, &unclaimed).expect_err("expected a refusal")
         );
-        let _ = std::fs::remove_file(&path);
         assert!(message.contains("no attribute declares"), "{message}");
     }
 

@@ -587,6 +587,35 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
         (2u8, 2_000_000_000_000_000i64, 99.75f32),
         "the flushed row's tail survives being folded into the new base"
     );
+
+    // **And the vocabulary survives the fold.** A code is meaningless without its binding: a fold
+    // that rewrote every row correctly and dropped `MANIFEST.vocabularies` would leave a corpus
+    // whose marks all decode to nothing, and nothing in the row data would be wrong. The fold
+    // writes its manifest by cloning the live one and amending two fields, so bindings are
+    // carried forward rather than re-derived — this is what stops that becoming a restatement
+    // somebody has to keep complete.
+    let folded = open_bundle(&root).expect("the folded bundle opens");
+    let vocabulary = folded
+        .manifest
+        .vocabularies
+        .iter()
+        .find(|v| v.name == "band")
+        .expect("the vocabulary survives the fold");
+    assert_eq!(
+        vocabulary.values.len(),
+        3,
+        "every binding survives, not merely the ones a surviving row happens to use"
+    );
+    assert_eq!(
+        folded
+            .manifest
+            .declared_scalars
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["band", "ingested_at", "score"],
+        "the tail's declared order survives the fold — it is what every reader reads by position"
+    );
 }
 
 /// **A bundle declaring a type this build cannot write refuses to flush, rather than writing a

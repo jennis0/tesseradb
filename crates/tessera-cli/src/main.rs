@@ -522,9 +522,12 @@ fn parse_values_binding(raw: &str) -> Result<(String, PathBuf), String> {
 /// per-attribute table lets each one look affordable on its own. §10.5 prices a hot column at
 /// 0.93 GiB per byte per row per 10⁹ items, which is what the projection below reproduces.
 ///
-/// Warns on the combinations §2.3 names as breaking in practice: a `u8` category is one
-/// reorganisation from exhausting its code space, and `render_in` left at its default puts the
-/// column in every slice.
+/// Warns on what §2.3 names as breaking in practice. Two of its three combinations are currently
+/// unreachable and are therefore not warned about: `discovered` + `u8` needs a discovered
+/// vocabulary, and dense codes under `listing = "per_viewer"` needs a minting path — both refused
+/// at parse. The third, `render_in` left at its default, is now the *only* behaviour (`render_in`
+/// is refused too), so it is stated once rather than per attribute: a note repeated against every
+/// column is a note nobody reads.
 fn report_residency(schema: &tessera_build::schema::Schema, limit: Option<u64>) {
     let columns = schema.attributes.len();
     match schema.row_bytes() {
@@ -545,15 +548,10 @@ fn report_residency(schema: &tessera_build::schema::Schema, limit: Option<u64>) 
         }
         None => eprintln!("schema: {columns} column(s), variable width per row"),
     }
-    for attribute in &schema.attributes {
-        if attribute.render_in.is_empty() {
-            eprintln!(
-                "        note: '{}' declares no `render_in`, so it materialises in EVERY slice \
-                 — including ones whose items carry no value for it (§3.9)",
-                attribute.name
-            );
-        }
-    }
+    eprintln!(
+        "        every column materialises in EVERY slice — including ones whose items carry no \
+         value for it (§3.9). Per-slice columns need contracts §2.6's per-slice enumeration"
+    );
 }
 
 fn main() -> ExitCode {
