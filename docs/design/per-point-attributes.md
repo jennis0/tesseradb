@@ -549,11 +549,15 @@ the rows it colours are both durable or neither is.
 
 ## 6. Amendments
 
-**Read this as a status list, not a work list.** The `render` placement is built (2026-08-07), and
-building it settled several questions this section was written before — so three of these
-amendments would now deliver something that has been decided against, and three have had their
-content changed by an owner ruling. Executing the original list would put per-slice hot columns and
-an attribute dictionary into the contract, neither of which is wanted.
+**Read this as a status list, not a work list.** The `render` placement is built, and discovered
+vocabularies mint at build and at ingest ([#82], 2026-08-07) — so several of these amendments would
+now deliver something that has been decided against, and several have had their content changed by
+an owner ruling. Executing the original list would put per-slice hot columns and an attribute
+dictionary into the contract, neither of which is wanted.
+
+What remains owed is owed for one of two reasons, and the distinction is the whole point of keeping
+the table: an amendment is either **waiting on a decision** or **waiting on the machinery it would
+describe**. Nothing here is waiting on someone to type it out.
 
 | Amendment | Status |
 |---|---|
@@ -561,7 +565,7 @@ an attribute dictionary into the contract, neither of which is wanted.
 | **contracts §2.4** — the attribute dictionary namespace and its postings file, and an attribute `dict_extents` counterpart | **Changed, and mostly not needed.** A *category* needs no attribute dictionary: the vocabulary already enumerates every value and the code is the identifier, so nothing caller-supplied is interned and §3.5's collision hazard — an attribute descriptor byte-equal to a satisfied auth descriptor — cannot arise. What §3.3's visibility wants is a postings file keyed by `(column, code)`, sized at 0.31–1.01× the render column it indexes (`probes/2026-08-07-category-membership/`). A dictionary is for attribute terms that are *not* categories, which nothing declares |
 | **contracts §2.6** — attribute columns and their widths, **per slice** | **Delivered without the per-slice half** (contracts r22). `render_in` is refused at parse: `declared_scalars` is one flat bundle-wide list, and accepting a per-slice declaration would put the column in every slice anyway, silently. Per-slice enumeration belongs with the slices epic, which the roadmap already pairs it with |
 | **contracts §3.2** — `/v1/categories`, its relationship to `/v1/meta`, the empty-operand rule | **Owed, content changed.** The legend is **global and served as metadata**, not per viewport; visibility is membership-derived (§3.3) with authored per-value gates (§3.8) as an override; `listing = "public"` on a discovered vocabulary is permitted with a warning rather than refused (owner, 2026-08-07 — §3.8's rule relaxes). The empty-operand rule is unchanged and still owed |
-| **contracts §3.4** — ingest carries attribute columns; declare-then-use; `/control/categories` | **Owed, blocked on [#82].** Ingest carries category **keys**, not columns of codes — §5's first paragraph is wrong for category columns and its last paragraph assumes the fix. Amending before #82 lands would specify a wire form nothing implements |
+| **contracts §3.4** — ingest carries attribute columns; declare-then-use; `/control/categories` | **Delivered for the wire and the rule** (contracts r24, [#82]): a category column carries `utf8` value keys, an unknown key under `vocabulary = "declared"` is a 422 naming column and key, null is *absent* and the empty string is refused. §5 is amended with it, so its first paragraph no longer claims the scalar-tail validation extends to categories unchanged. `/control/categories` is **still owed** and needs no new decision — runtime vocabulary amendment (§5) has no endpoint |
 | **architecture §5.3** — the hot-column list | **Owed**, and unchanged by anything since |
 | **architecture §8.2** — category filter operands | **Owed**, unchanged, and belongs with [#43] rather than here |
 | **architecture Appendix A** — attribute columns join the sizing tables; a residency *ceiling* is an owner decision | **Owed; the ceiling is ruled — there is none** (owner, 2026-08-07). The figure was modelled and never measured, and a threshold nobody has measured is a number invented to look careful. The plan step reports and cannot refuse, as §2.3 already says. Measured figures now exist to put in the table |
