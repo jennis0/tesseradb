@@ -48,6 +48,11 @@ const PERMUTATION_VERSION: u16 = 1;
 const PERMUTATION_RESERVED: u16 = 0;
 const PERMUTATION_ABSENT: u32 = 0xFFFF_FFFF;
 
+/// The largest satisfiable `permutation.bin` bound: entity ids must fit `u32` in
+/// `bundle_format = 1` (R1), so the highest addressable id is `2^32 - 1` and the bound — one past
+/// it — is `2^32`. A bound above this names no entity that could ever occupy a slot.
+const PERMUTATION_MAX_BOUND: u64 = 1 << 32;
+
 /// Write `columns.arrow` (Arrow IPC file format, one record batch, uncompressed buffers) and
 /// `morton.u32` (raw little-endian `u32` codes, no header) into `dir`.
 ///
@@ -479,7 +484,9 @@ impl ColumnSpool {
             writer,
             offsets,
         } = self;
-        let file = writer.into_inner().map_err(io::IntoInnerError::into_error)?;
+        let file = writer
+            .into_inner()
+            .map_err(io::IntoInnerError::into_error)?;
         // The bytes are about to be read back through a memory map; they must be durable and
         // visible before the map is taken. Same rule as `PostingsSpool::finish`.
         file.sync_all()?;
@@ -523,10 +530,9 @@ impl ColumnSpool {
         let buffer = unsafe { Buffer::from_custom_allocation(ptr, len, arc) };
 
         Ok(match kind {
-            ColumnKind::U64 => Arc::new(UInt64Array::new(
-                typed_column(name, buffer, rows)?,
-                None,
-            )) as ArrayRef,
+            ColumnKind::U64 => {
+                Arc::new(UInt64Array::new(typed_column(name, buffer, rows)?, None)) as ArrayRef
+            }
             ColumnKind::U32 => Arc::new(UInt32Array::new(typed_column(name, buffer, rows)?, None)),
             ColumnKind::F32 => Arc::new(Float32Array::new(typed_column(name, buffer, rows)?, None)),
             ColumnKind::Utf8 => Arc::new(
@@ -612,11 +618,7 @@ pub fn write_morton_codes<I: IntoIterator<Item = u32>>(path: &Path, codes: I) ->
 /// byte-for-byte what [`write_segment`] writes for the same rows and no scalars. Since the
 /// 2026-07-31 rework this function is a thin wrapper over [`write_columns_from_parts`]; there
 /// is one code path.
-pub fn write_columns(
-    path: &Path,
-    tessera_id: Vec<u64>,
-    residual: Vec<u32>,
-) -> io::Result<()> {
+pub fn write_columns(path: &Path, tessera_id: Vec<u64>, residual: Vec<u32>) -> io::Result<()> {
     let rows = tessera_id.len();
     if residual.len() != rows {
         return Err(io::Error::new(
@@ -724,8 +726,10 @@ fn typed_column<T: ArrowNativeType>(
 /// is the entity occupying row `i`; its slot gets `i`. Every other slot (entity IDs never
 /// assigned a row in this segment) reads the row-absent sentinel `0xFFFF_FFFF`.
 ///
-/// Returns an error — never panics — if any entity ID is `>= bound` or `>= 2^32` (entity IDs
-/// are `u64` in general but must fit `u32` in `bundle_format = 1`, R1).
+/// Returns an error — never panics — if `bound` exceeds `2^32` (entity IDs are `u64` in general
+/// but must fit `u32` in `bundle_format = 1`, R1, so no larger bound is satisfiable) or if any
+/// entity ID is `>= bound`. The bound is checked before the slot array is allocated, so an
+/// unsatisfiable bound costs nothing; see [`PermutationWriter::create`].
 pub fn write_permutation(
     path: &Path,
     items_in_row_order: &[EntityId],
@@ -784,7 +788,23 @@ impl PermutationWriter {
     /// is row 0 — a real row belonging to a real entity — so an unfilled slot would serve one
     /// entity's coordinates under every id that never got a row. The sentinel is `0xFFFF_FFFF`, so
     /// this writes `bound × 4` bytes of `0xFF` up front.
+    ///
+    /// **The bound ceiling is checked before the file is opened, and that ordering is the point.**
+    /// The fill above is proportional to `bound`, so validating it afterwards means writing
+    /// `bound × 4` bytes to disk in order to discover the caller asked for something no entity
+    /// could ever occupy — 32 GB for a bound of `2^33`, paid in full before the error is raised.
+    /// A caller deriving a bound from a corrupt `entity_id_high_water` gets a refusal here, not a
+    /// filled volume.
     pub fn create(path: &Path, bound: u64) -> io::Result<Self> {
+        if bound > PERMUTATION_MAX_BOUND {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "write_permutation: bound {bound} exceeds the largest satisfiable bound \
+                     {PERMUTATION_MAX_BOUND} (entity ids must fit u32 in bundle_format = 1)"
+                ),
+            ));
+        }
         let slots_bytes = usize::try_from(bound)
             .ok()
             .and_then(|b| b.checked_mul(4))
@@ -818,6 +838,11 @@ impl PermutationWriter {
 
     /// Record that `entity` occupies `row`. Every check [`write_permutation_iter`] made is made
     /// here, at the same cost — the duplicate test is a slot read the scatter was doing anyway.
+    ///
+    /// **R1's "entity ids fit `u32`" is enforced by the bound, not by a second test here.**
+    /// [`Self::create`] refuses any bound above `2^32`, so `raw < self.bound` already implies
+    /// `raw < 2^32` and a separate u32-fit check could never fire. Reinstating one would read as
+    /// live defence against a case the constructor has already made unreachable.
     pub fn set(&mut self, entity: EntityId, row: u32) -> io::Result<()> {
         let raw = entity.raw();
         if raw >= self.bound {
@@ -826,14 +851,6 @@ impl PermutationWriter {
                 format!(
                     "write_permutation: entity id {raw} is out of bound (bound = {})",
                     self.bound
-                ),
-            ));
-        }
-        if raw >= (1u64 << 32) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "write_permutation: entity id {raw} does not fit in u32 (bundle_format = 1)"
                 ),
             ));
         }

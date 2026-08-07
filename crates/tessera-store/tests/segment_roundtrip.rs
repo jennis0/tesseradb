@@ -14,8 +14,8 @@ use arrow::record_batch::RecordBatch;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use tessera_spatial::tiler::{sort_batch, ScalarType, TilerItem};
 use tessera_spatial::split32;
+use tessera_spatial::tiler::{sort_batch, ScalarType, TilerItem};
 use tessera_store::manifest::Manifest;
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{ColumnsRef, StoreError};
@@ -232,13 +232,27 @@ fn write_permutation_rejects_entity_id_at_or_above_bound() {
     assert!(result.is_err(), "entity id == bound must be rejected");
 }
 
+/// A bound above `2^32` names no entity that could occupy a slot (R1: entity ids fit `u32` in
+/// `bundle_format = 1`), and is refused **before the slot array is allocated**.
+///
+/// **The file assertion is the test.** The bound was always rejected — but by
+/// `PermutationWriter::set`, after `create` had already sized the file at `bound × 4` and filled
+/// it with the row-absent sentinel. A `2^33` bound therefore wrote 32 GB to the temp volume in
+/// order to return an error, and an interrupted run left it there: four such files, 68 GB, were
+/// recovered from `/tmp` on 2026-08-07. Asserting `is_err()` alone cannot tell the two orderings
+/// apart, which is why the earlier version of this test passed for as long as it did.
 #[test]
-fn write_permutation_rejects_entity_id_not_fitting_u32() {
+fn write_permutation_rejects_a_bound_above_the_u32_entity_ceiling() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("permutation.bin");
-    let entities = vec![EntityId::new(1u64 << 32)];
-    let result = write_permutation(&path, &entities, 1u64 << 33);
-    assert!(result.is_err(), "entity id >= 2^32 must be rejected");
+    let entities = vec![EntityId::new(1)];
+    let result = write_permutation(&path, &entities, (1u64 << 32) + 1);
+    assert!(result.is_err(), "a bound above 2^32 must be rejected");
+    assert!(
+        !path.exists(),
+        "an unsatisfiable bound must cost no allocation: {} was created",
+        path.display()
+    );
 }
 
 #[test]
@@ -449,7 +463,9 @@ fn write_columns_from_parts_matches_write_columns_byte_for_byte() {
         let tessera: Vec<u64> = (0..rows as u64)
             .map(|i| synthetic_tessera_id(i).raw())
             .collect();
-        let residual: Vec<u32> = (0..rows).map(|i| (i as u32).wrapping_mul(2_654_435_761)).collect();
+        let residual: Vec<u32> = (0..rows)
+            .map(|i| (i as u32).wrapping_mul(2_654_435_761))
+            .collect();
 
         let via_vecs = dir.path().join(format!("vecs-{rows}.arrow"));
         write_columns(&via_vecs, tessera.clone(), residual.clone()).expect("write_columns");
@@ -510,13 +526,8 @@ fn write_columns_from_parts_rejects_short_and_misaligned_buffers_without_panicki
     let residual = Buffer::from_vec(vec![0u32; 4]);
 
     // Too short: 3 u64s cannot back 4 rows.
-    let err = write_columns_from_parts(
-        &path,
-        Buffer::from_vec(vec![0u64; 3]),
-        residual.clone(),
-        4,
-    )
-    .expect_err("a buffer shorter than `rows` values must be a typed error");
+    let err = write_columns_from_parts(&path, Buffer::from_vec(vec![0u64; 3]), residual.clone(), 4)
+        .expect_err("a buffer shorter than `rows` values must be a typed error");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 
     // Misaligned: slicing a u64 buffer at byte 4 moves it off 8-byte alignment. Arrow's own
@@ -619,7 +630,9 @@ fn a_scattered_duplicate_entity_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("permutation.bin");
     let mut writer = PermutationWriter::create(&path, 16).expect("create");
-    writer.set(EntityId::new(4), 1).expect("the first set lands");
+    writer
+        .set(EntityId::new(4), 1)
+        .expect("the first set lands");
     let err = writer
         .set(EntityId::new(4), 2)
         .expect_err("a second row for one entity must be refused");
