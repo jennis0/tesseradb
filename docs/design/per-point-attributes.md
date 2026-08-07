@@ -33,18 +33,26 @@ principal cannot see.
 > flush, merge and the compaction fold carry it — each taking its writer schema from the manifest
 > rather than from the segment it rewrites. Declared vocabularies work end to end.
 >
-> **⊘ Specified, not implemented.** *Discovered vocabularies:* `vocabulary = "discovered"` is
-> refused at parse. A value minted at ingest needs a scattered code recorded durably against its
-> key — **in the vocabulary table, not in an attribute dictionary**: the vocabulary already
-> enumerates every value and the code is the identifier, so nothing caller-supplied is interned and
-> §3.5's collision hazard does not arise for a category. That is [#82].
-> *Ingest carries codes, not keys*, so a code no key explains is stored unremarked; the same issue
-> moves the wire to keys and adds declare-then-use. *Vocabulary visibility:* `listing` is recorded
-> and enforced by nothing, there being no endpoint that publishes a vocabulary — §3.3's
-> membership-derived rule holds structurally today only because the one channel is a code attached
-> to a point the mask already admitted. *`filter`:* §8.3's postings; *`inspect`:* §10.3's cold
-> sidecar, whose slot's first occupant — the external-ID store — is explicitly transitional; and
-> *multi-valued attributes* (§3.7): each declarable and each **refused at parse**.
+> **Discovered vocabularies are built too** ([#82], 2026-08-07). A value the corpus supplies and no
+> author declared acquires a scattered code — drawn from the declared width's unused space, recorded
+> beside its key and pinned — at the build that reads it or at the commit window that ingests it,
+> through one mint routine so exhaustion is one predicate. The binding is durable in the same fsync
+> as the rows it colours, lives in `MANIFEST.vocabularies` and `SEGMENTS-<n>.json`'s
+> `vocabulary_extensions` between builds, and folds back verbatim. It is recorded **in the
+> vocabulary table, not in an attribute dictionary**: the vocabulary already enumerates every value
+> and the code is the identifier, so nothing caller-supplied is interned and §3.5's collision hazard
+> does not arise for a category. Ingest carries **keys**, so declare-then-use is enforceable and a
+> code no key explains can no longer be stored.
+>
+> **⊘ Specified, not implemented.** *Vocabulary visibility:* `listing` is recorded and enforced by
+> nothing, there being no endpoint that publishes a vocabulary and no membership sets to derive
+> visibility from — §3.3's rule is designed and unbuilt, and holds structurally today only because
+> the one channel is a code attached to a point the mask already admitted. Its two missing pieces
+> are named in §6: the per-value member sets (a postings-shaped artifact keyed by `(column, code)`,
+> measured at 0.31–1.01× the column it indexes) and `/v1/categories` itself. *`filter`:* §8.3's
+> postings; *`inspect`:* §10.3's cold sidecar, whose slot's first occupant — the external-ID store —
+> is explicitly transitional; and *multi-valued attributes* (§3.7): each declarable and each
+> **refused at parse**.
 
 ---
 
@@ -308,13 +316,14 @@ Two independent axes:
 - **`listing = per_viewer | public`** — a disclosure control. Is the *existence* of a value
   sensitive? Governs whether `/v1/categories` is filtered per principal.
 
-All four combinations are coherent except one, and the exception is a rule. **`listing = "public"`
-requires `vocabulary = "declared"`:** a discovered vocabulary's values are inferred from whatever is
-in the corpus, so publishing them discloses data-derived names on nobody's authority — C11 with no
-accountable party. `declared` therefore means *the value set comes from an authored artifact* —
-inline in the schema, or a vocabulary file bound at build — so a 400-value published vocabulary stays
-practical. `declared` + `per_viewer` is the combination that matters: a known schema whose value
-names are themselves sensitive.
+All four combinations are permitted, and one is **warned about rather than refused** (owner ruling,
+2026-08-07). `listing = "public"` with `vocabulary = "discovered"` publishes value names inferred
+from whatever is in the corpus, which discloses data-derived names on nobody's authority — C11 with
+no accountable party. That is a real hazard and the build says so at parse; it is not a refusal,
+because the operator may have an accountable reason and is the party entitled to decide. `declared`
+means *the value set comes from an authored artifact* — inline in the schema, or a vocabulary file
+bound at build — so a 400-value published vocabulary stays practical. `declared` + `per_viewer` is
+the combination that matters: a known schema whose value names are themselves sensitive.
 
 **Where a `per_viewer` gate comes from.** Membership-derivation (§3.3) is the gate everywhere: a
 value inherits its members' labels. A **declared** vocabulary may additionally carry an explicit gate
