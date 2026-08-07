@@ -46,6 +46,7 @@ use tessera_authz::FrozenFragment;
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
+use tessera_store::vocabulary::Vocabularies;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
 use tessera_types::{EntityId, GenerationStamp, TesseraId, API_VERSION};
 
@@ -292,6 +293,13 @@ pub struct EngineMeta {
     pub slices: Vec<(String, String)>,
     pub quantisation: Quantisation,
     pub declared_scalars: Vec<DeclaredScalar>,
+    /// The live category bindings, from the same generation as `declared_scalars`.
+    ///
+    /// **Ingest resolves keys through this, and never mints.** A declared vocabulary is immutable
+    /// between builds, so a handler's snapshot cannot be stale for one; a discovered vocabulary's
+    /// novel keys travel to the write executor as keys, because two handlers racing one novel key
+    /// would draw two codes for it and split its rows between them.
+    pub vocabularies: Arc<Vocabularies>,
     /// The idset (contracts §2.2/§2.6 r6). `GET /v1/meta` reports this
     /// verbatim as `idset`; `POST /v1/items/{tessera_id}` compares an optional
     /// caller-supplied `idset` against it. Never the identity **key** — that never leaves the
@@ -315,6 +323,7 @@ impl Engine {
                 .collect(),
             quantisation: manifest.quantisation,
             declared_scalars: manifest.declared_scalars.clone(),
+            vocabularies: Arc::clone(&generation.vocabularies),
             idset: manifest.identity.idset,
         }
     }

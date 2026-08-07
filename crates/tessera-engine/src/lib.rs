@@ -28,7 +28,6 @@ use arc_swap::ArcSwap;
 
 use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_store::vocabulary::Vocabularies;
 use tessera_store::Bundle;
 
 pub use cancel::CancelToken;
@@ -68,6 +67,13 @@ pub use viewport::{
 // type needs to be nameable from the crate that reads it. `/v1/meta` gets away without naming it
 // only because it reads the two fields straight into JSON.
 pub use tessera_store::manifest::DeclaredScalar;
+// The ingest handler resolves category keys to codes and must name the reserved *absent* code and
+// the binding view to do it. Re-exported for the same layering reason as `DeclaredScalar`.
+pub use tessera_store::manifest::{ManifestVocabulary, ManifestVocabularyValue};
+pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE};
+// `DeclaredScalar::arrow_type`'s type, and `wire_type`'s. The server names it to widen a code to
+// its column's storage width, and reaches it here rather than transcribing the table again.
+pub use tessera_spatial::tiler::ScalarType;
 // `EngineMeta::quantisation`'s type, re-exported for the same layering reason `DeclaredScalar` is:
 // `check-layers.sh` denies a `tessera-server → tessera-store` edge (SA §3), and `/control/ingest`
 // validates an ingested coordinate against this declaration (§6), so the type needs to be nameable

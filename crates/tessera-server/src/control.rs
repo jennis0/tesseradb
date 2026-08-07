@@ -28,7 +28,9 @@ use base64::Engine as _;
 use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
-use tessera_engine::{AcceptError, DeclaredScalar, DENY_WINDOW_MAX_ENTRIES};
+use tessera_engine::{
+    AcceptError, DeclaredScalar, ScalarType, Vocabularies, ABSENT_CODE, DENY_WINDOW_MAX_ENTRIES,
+};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow, WalScalar};
 
 use tessera_types::{EntityId, TermId, TesseraId};
@@ -402,6 +404,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 /// cap is actually enforced and tested.
 const EXTERNAL_ID_MAX_LEN: usize = 64;
 
+#[derive(Debug)]
 struct RawIngestItem {
     /// Optional (contracts §3.4): `None` when the caller supplied no external id. Such an item
     /// gets no sidecar entry and is addressable only by its `tessera_id` (returned per row in
@@ -450,6 +453,59 @@ fn scalar_of(col: &dyn Array, row: usize) -> Option<(WalScalar, &'static str)> {
     }
 }
 
+/// One category cell: its value key resolved to the pinned code, at the column's declared width.
+///
+/// **Resolution, never minting.** A handler that minted would let two requests racing one novel key
+/// draw two codes for it, splitting its rows between them, and whichever binding survived would
+/// recolour the other's. Minting happens once, on the write executor, where windows close serially
+/// (write-path §1.1).
+fn category_code(
+    col: &dyn Array,
+    row: usize,
+    declared: &DeclaredScalar,
+    vocabulary: &str,
+    vocabularies: &Vocabularies,
+) -> Result<WalScalar, ApiError> {
+    use arrow::array::StringArray;
+    let keys = col
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("a category column was validated as utf8 above");
+    if keys.is_null(row) {
+        return Ok(code_at(declared.arrow_type, ABSENT_CODE));
+    }
+    let key = keys.value(row);
+    if key.is_empty() {
+        return Err(ApiError::Contract(format!(
+            "ingest body: column '{}' carries the empty string, which is not a value key. An              item with no value for this column carries null, which is stored as *absent*;              minting a code for the empty string would make a typo a category              (per-point-attributes §3.4)",
+            declared.name
+        )));
+    }
+    let minter = vocabularies.get(vocabulary).ok_or_else(|| {
+        ApiError::Contract(format!(
+            "ingest body: column '{}' names vocabulary '{vocabulary}', which this bundle does not              carry",
+            declared.name
+        ))
+    })?;
+    let code = minter.code_of(key).ok_or_else(|| {
+        ApiError::Contract(format!(
+            "ingest body: column '{}' carries value '{key}', which vocabulary '{vocabulary}' does              not list. Under `vocabulary = \"declared\"` there is no auto-mint: a category carries              properties and, through its postings, a visibility consequence, so a typo must not              create one (per-point-attributes §5)",
+            declared.name
+        ))
+    })?;
+    Ok(code_at(declared.arrow_type, code))
+}
+
+/// A code at its column's declared width. `is_category_width` admits `u8`/`u16`/`u32` only, so the
+/// fallthrough is `u32` — the widest, which cannot truncate a code the other two could hold.
+fn code_at(width: ScalarType, code: u32) -> WalScalar {
+    match width {
+        ScalarType::U8 => WalScalar::U8(code as u8),
+        ScalarType::U16 => WalScalar::U16(code as u16),
+        _ => WalScalar::U32(code),
+    }
+}
+
 /// Parse `/control/ingest`'s body: one Arrow IPC stream, schema
 /// `(external_id: binary, x: float32, y: float32, access: utf8, node_id: utf8?, ...scalars)`
 /// (R5). `node_id` is accepted — so a well-formed client request is never rejected for including
@@ -471,16 +527,32 @@ fn scalar_of(col: &dyn Array, row: usize) -> Option<(WalScalar, &'static str)> {
 /// positional read safe. Silently dropping a column would shorten the vector and shift every later
 /// scalar by one: positional misalignment wearing a success's clothes, acknowledged with a 200.
 ///
-/// **The residual is what a *code* means, not whether one arrives.** A category column is
-/// validated at its declared width, so an unassigned code, a `reserved` code or a typo is an
-/// ordinary `u16` and is stored with no error anywhere — the row then carries a code no key
-/// explains. A code can only be range-checked; the membership check the rule wants needs the
-/// *key*, which is why [#82](https://github.com/jennis0/tessera-index/issues/82) moves category
-/// columns to `utf8` keys on the wire and puts declare-then-use here. Until then this path
-/// enforces shape and type, and not meaning.
+/// # A category arrives as its key, and the key is checked for membership
+///
+/// The expected type is [`DeclaredScalar::wire_type`], not the declared width: a category column
+/// is `utf8` value keys on the wire, whatever width stores its codes. Codes are the server's to
+/// assign (per-point-attributes §3.1, §5), so a caller supplying one would be the minting
+/// authority, and the server could then guarantee neither the scatter nor never-reuse that §3.4
+/// exists for.
+///
+/// **This is what makes a category's value checkable at all.** A code can only be range-checked —
+/// a `u16` column accepted any `u16`, so an unassigned code, a `reserved` code or a typo was stored
+/// with no error anywhere and the row carried a code no key explains. A key can be
+/// membership-checked, and membership is the rule: an unknown key under `vocabulary = "declared"`
+/// is a 422 naming the column and the key, whole batch without effect (declare-then-use, §5,
+/// slices §80).
+///
+/// It also makes a schema/client disagreement visible: a plain `u16` scalar and a `u16` category
+/// are now different types on the wire, so a client that thinks a column is one when the bundle
+/// says the other gets a 422 naming it rather than plausible integers stored as codes.
+///
+/// A **null** key is *absent* — [`ABSENT_CODE`], the reserved sentinel (§3.6). The **empty string**
+/// is not: it is what an unset field and a client bug both produce, so it is refused rather than
+/// folded into absence, which would accept the same defect silently.
 fn parse_ingest_batch(
     body: &[u8],
     declared: &[DeclaredScalar],
+    vocabularies: &Vocabularies,
 ) -> Result<Vec<RawIngestItem>, ApiError> {
     let cursor = std::io::Cursor::new(body);
     let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
@@ -526,7 +598,7 @@ fn parse_ingest_batch(
             };
             // One row's worth is enough to identify the column's type, and a batch with no rows has
             // no scalar to mistype.
-            let expected = d.arrow_type.arrow_type_name();
+            let expected = d.wire_type().arrow_type_name();
             if batch.num_rows() > 0 {
                 match scalar_of(col.as_ref(), 0) {
                     Some((_, actual)) if actual == expected => {}
@@ -558,8 +630,16 @@ fn parse_ingest_batch(
                 let col = batch
                     .column_by_name(&d.name)
                     .expect("every declared column was found by the validation above");
-                let (value, _) = scalar_of(col.as_ref(), i)
-                    .expect("every declared column's type was checked by the validation above");
+                let value = match d.vocabulary.as_deref() {
+                    Some(vocabulary) => {
+                        category_code(col.as_ref(), i, d, vocabulary, vocabularies)?
+                    }
+                    None => {
+                        scalar_of(col.as_ref(), i)
+                            .expect("every declared column's type was checked above")
+                            .0
+                    }
+                };
                 scalars.push(value);
             }
             // Contracts §3.4: `external_id` is optional. Neither a missing column nor a null
@@ -721,7 +801,7 @@ fn run_ingest(
     let meta = state.engine.meta();
     let slice = resolve_slice(slice, &meta.slices)?;
 
-    let items = parse_ingest_batch(body, &meta.declared_scalars)?;
+    let items = parse_ingest_batch(body, &meta.declared_scalars, &meta.vocabularies)?;
 
     // The row cap. 422 per contracts §3.1's "bounds exceeded" row, naming the bound and the
     // batch's own size.
@@ -1855,6 +1935,160 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    mod category_wire {
+        use super::*;
+        use arrow::array::{Float32Array, StringArray, UInt8Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+        use tessera_engine::{DeclaredScalar, Vocabularies};
+
+        const CODE_OPS: u32 = 4711;
+
+        fn declared() -> Vec<DeclaredScalar> {
+            vec![
+                DeclaredScalar {
+                    name: "department".to_string(),
+                    arrow_type: ScalarType::U16,
+                    vocabulary: Some("departments".to_string()),
+                },
+                DeclaredScalar {
+                    name: "score".to_string(),
+                    arrow_type: ScalarType::F32,
+                    vocabulary: None,
+                },
+            ]
+        }
+
+        fn vocabularies() -> Vocabularies {
+            Vocabularies::seed(
+                &[tessera_engine::ManifestVocabulary {
+                    name: "departments".to_string(),
+                    listing: "per_viewer".to_string(),
+                    values: vec![tessera_engine::ManifestVocabularyValue {
+                        key: "ops".to_string(),
+                        code: CODE_OPS,
+                        label: None,
+                    }],
+                    reserved: Vec::new(),
+                }],
+                &declared(),
+                &[],
+            )
+            .expect("the fixture bundle is consistent")
+        }
+
+        /// One batch of the fixed columns plus `department` (as `column`) and `score`.
+        fn body(column: arrow::array::ArrayRef, nullable: bool) -> Vec<u8> {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float32, false),
+                Field::new("y", DataType::Float32, false),
+                Field::new("access", DataType::Utf8, false),
+                Field::new("department", column.data_type().clone(), nullable),
+                Field::new("score", DataType::Float32, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Float32Array::from(vec![0.5])),
+                    Arc::new(Float32Array::from(vec![0.5])),
+                    Arc::new(StringArray::from(vec!["public"])),
+                    column,
+                    Arc::new(Float32Array::from(vec![1.0])),
+                ],
+            )
+            .expect("the fixture batch is well-formed");
+            let mut out = Vec::new();
+            {
+                let mut w = arrow::ipc::writer::StreamWriter::try_new(&mut out, &schema).unwrap();
+                w.write(&batch).unwrap();
+                w.finish().unwrap();
+            }
+            out
+        }
+
+        fn parse(
+            column: arrow::array::ArrayRef,
+            nullable: bool,
+        ) -> Result<Vec<RawIngestItem>, ApiError> {
+            parse_ingest_batch(&body(column, nullable), &declared(), &vocabularies())
+        }
+
+        /// A known key becomes its **pinned** code at the column's declared width. The code is
+        /// never re-derived from the data, so this is the whole of what the wire decides.
+        #[test]
+        fn a_known_key_is_stored_as_its_pinned_code() {
+            let items = parse(Arc::new(StringArray::from(vec!["ops"])), false)
+                .expect("a declared key is accepted");
+            assert_eq!(
+                items[0].scalars[0],
+                WalScalar::U16(CODE_OPS as u16),
+                "the row carries the vocabulary's code, at the declared width"
+            );
+        }
+
+        /// **Declare-then-use** (§5, slices §80): a category carries properties and a visibility
+        /// consequence, so a typo must not create one. The refusal names both the column and the
+        /// key, and the whole batch is without effect.
+        #[test]
+        fn an_unknown_key_is_refused_naming_the_column_and_the_key() {
+            let err = parse(Arc::new(StringArray::from(vec!["k9-unit"])), false)
+                .expect_err("an undeclared key is refused");
+            let ApiError::Contract(detail) = err else {
+                panic!("declare-then-use is a contract violation, not a server error");
+            };
+            assert!(detail.contains("department"), "{detail}");
+            assert!(detail.contains("k9-unit"), "{detail}");
+        }
+
+        /// **The hole this closes.** A code on the wire was accepted by range alone, so an
+        /// unassigned code, a `reserved` code or a typo was stored with no error anywhere. The
+        /// wire type is now `utf8`, so the same batch is a 422 naming the column.
+        #[test]
+        fn a_code_on_the_wire_is_refused_where_it_used_to_be_stored() {
+            let err = parse(Arc::new(UInt8Array::from(vec![9u8])), false)
+                .expect_err("a category is utf8 on the wire, whatever stores its codes");
+            let ApiError::Contract(detail) = err else {
+                panic!("a wrong wire type is a contract violation");
+            };
+            assert!(detail.contains("department"), "{detail}");
+            assert!(detail.contains("utf8"), "{detail}");
+        }
+
+        /// Null means *absent* — the reserved code 0, which is why a `u8` category holds 255
+        /// values and not 256.
+        #[test]
+        fn a_null_key_is_absent() {
+            let items = parse(
+                Arc::new(StringArray::from(vec![None as Option<&str>])),
+                true,
+            )
+            .expect("an item may carry no value for a column");
+            assert_eq!(items[0].scalars[0], WalScalar::U16(ABSENT_CODE as u16));
+        }
+
+        /// The empty string is **not** absence. It is what an unset field and a client bug both
+        /// produce, so folding it into code 0 would accept the same defect silently.
+        #[test]
+        fn the_empty_string_is_refused_rather_than_folded_into_absence() {
+            let err = parse(Arc::new(StringArray::from(vec![""])), false)
+                .expect_err("the empty string is not a value key");
+            let ApiError::Contract(detail) = err else {
+                panic!("an empty key is a contract violation");
+            };
+            assert!(detail.contains("department"), "{detail}");
+        }
+
+        /// A plain scalar of the same width is unchanged and still arrives as an integer — so a
+        /// client that thinks a column is a category when the bundle says otherwise gets a 422
+        /// naming it, rather than plausible integers stored as codes.
+        #[test]
+        fn a_plain_scalar_is_unaffected_by_the_category_rule() {
+            let items = parse(Arc::new(StringArray::from(vec!["ops"])), false).unwrap();
+            assert_eq!(items[0].scalars[1], WalScalar::F32(1.0));
+        }
+    }
 
     /// **The deny lane does not share tokio's blocking pool** — demonstrated rather than argued.
     ///
